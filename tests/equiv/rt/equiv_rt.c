@@ -132,6 +132,7 @@ struct slot_head {
     int32_t fault_signal;
     uint64_t fault_pc;
     uint64_t fault_addr;
+    uint64_t fault_base;         /* load base of fault_object, to read its symbols */
     char fault_object[256];
     struct equiv_ret ret;
 };
@@ -306,6 +307,7 @@ static void child_fault(int sig, siginfo_t *info, void *context)
         Dl_info where;
         if (dladdr((void *)(uintptr_t)slot->fault_pc, &where) && where.dli_fname) {
             strncpy(slot->fault_object, where.dli_fname, sizeof slot->fault_object - 1);
+            slot->fault_base = (uint64_t)(uintptr_t)where.dli_fbase;
         }
     }
     /* SA_RESETHAND restored the default action: returning re-executes the
@@ -571,9 +573,12 @@ static void emit_run(size_t index, const struct run_state *run)
     if (run->outcome == OUT_SIGNAL || run->outcome == OUT_EXIT || run->outcome == OUT_EXIT_RAW)
         fprintf(g_out, ",\"status\":%d", run->status);
     if (run->outcome == OUT_SIGNAL && run->slot->fault_signal) {
-        fprintf(g_out, ",\"fault_pc\":\"0x%llx\",\"fault_addr\":\"0x%llx\",\"fault_object\":",
+        fprintf(g_out,
+                ",\"fault_pc\":\"0x%llx\",\"fault_addr\":\"0x%llx\",\"fault_base\":\"0x%llx\","
+                "\"fault_object\":",
                 (unsigned long long)run->slot->fault_pc,
-                (unsigned long long)run->slot->fault_addr);
+                (unsigned long long)run->slot->fault_addr,
+                (unsigned long long)run->slot->fault_base);
         json_string(g_out, run->slot->fault_object, strlen(run->slot->fault_object));
     }
     if (run->outcome != OUT_SKIPPED && run->outcome != OUT_UNAVAILABLE)

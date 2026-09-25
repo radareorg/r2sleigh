@@ -135,6 +135,31 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
     return builds, strict, skipped
 
 
+RESIDUAL_PREFIX = "r2sleigh_residual_"
+
+
+def residual_helpers(shared_object: Path) -> list[tuple[int, int, str]]:
+    """``(start, end, name)`` of every ``r2sleigh_residual_*`` function the object defines.
+
+    Offsets are from the object's load base (a shared object is linked at 0),
+    read from its own ``.symtab``: an unoptimised build keeps each
+    ``static inline`` helper as a local function of its own.
+    """
+    proc = subprocess.run(["nm", "-S", "--defined-only", str(shared_object)],
+                          capture_output=True, text=True, check=False)
+    found: list[tuple[int, int, str]] = []
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 4 or fields[2] not in "tT" or not fields[3].startswith(RESIDUAL_PREFIX):
+            continue
+        try:
+            start, size = int(fields[0], 16), int(fields[1], 16)
+        except ValueError:
+            continue
+        found.append((start, start + size, fields[3]))
+    return sorted(found)
+
+
 def build_trampoline(cc: str, workdir: Path, address: int) -> Built:
     workdir.mkdir(parents=True, exist_ok=True)
     source = workdir / "identity.S"

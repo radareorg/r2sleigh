@@ -20,7 +20,8 @@ graded through the same path an engine rendering takes:
   one ``differs``;
 * a signed overflow must be ``ub``;
 * a reached residual must be ``residual-trap``, also where the function prints
-  on every vector and traps on some only;
+  on every vector and traps on some only; a trap outside every residual helper
+  must be ``differs`` even when the proof counts a residual;
 * a function that writes to stderr and then faults on its NULL vector must be
   ``equal`` on most of its vectors: a dropped vector's output is not carried
   into the next;
@@ -177,6 +178,12 @@ CASES = [
         "    if (x > 5)\n        return r2sleigh_residual_s32(1);\n    return x;\n}\n",
         "#include <stdint.h>\n#include <stdio.h>\n"),
         links=[("printf", "import")], residual=1),
+    # A trap the rendering wrote itself is not a residual, whatever the proof
+    # counters claim: only a trap inside a residual helper is.
+    Case("trap-outside-a-residual", "st_clamp", "differs", _tu(
+        "int32_t sub_clamp(int32_t x)\n{\n    if (x < 0)\n        __builtin_trap();\n"
+        "    if (x > 100)\n        return 100;\n    return x;\n}\n"), residual=1,
+        expect_field="exit"),
     Case("link-map-gap", "st_bump", "compile-error", _tu(
         "extern int32_t st_counter;\nvoid sub_bump(int32_t by)\n{\n"
         "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n}\n")),

@@ -293,27 +293,40 @@ class ClassifyTests(unittest.TestCase):
                           for (a, b), eq in base.items()]}
 
     def test_outside_the_domain_is_dropped_and_nothing_left_is_untested(self):
-        status, evidence, counts = gate.classify([self.line(0, original="signal")], [], 0, "")
+        status, evidence, counts = gate.classify([self.line(0, original="signal")], [], 0,
+                                                self.NONE)
         self.assertEqual((status, counts["dropped"]), ("untested", 1))
         self.assertIn("survived", evidence["cause"])
 
     def test_an_original_that_disagrees_with_itself_grades_nothing(self):
-        status, _, counts = gate.classify([self.line(0, pairs={(0, 1): False})], [], 0, "")
+        status, _, counts = gate.classify([self.line(0, pairs={(0, 1): False})], [], 0,
+                                       self.NONE)
         self.assertEqual((status, counts["unstable"]), ("untested", 1))
 
-    def test_a_trap_is_a_residual_only_where_one_was_counted(self):
-        trap = {"run": 2, "outcome": "signal", "status": 4, "fault_object": "/x/O0.so"}
-        line = self.line(0, o0=trap, pairs={(0, 2): False})
-        self.assertEqual(gate.classify([line], [], 1, "/x/O0.so")[0], "residual-trap")
-        self.assertEqual(gate.classify([line], [], 0, "/x/O0.so")[0], "differs")
-        self.assertEqual(gate.classify([line], [], 1, "/y/O0.so")[0], "differs")
+    HELPERS = gate.ResidualHelpers("/x/O0.so", [(0x1100, 0x1120, "r2sleigh_residual_s32")])
+    NONE = gate.ResidualHelpers("", [])
+
+    def test_a_trap_is_a_residual_only_inside_a_helper_where_one_was_counted(self):
+        def trap(pc, where="/x/O0.so"):
+            return {"run": 2, "outcome": "signal", "status": 4, "fault_object": where,
+                    "fault_pc": hex(0x7F0000000000 + pc), "fault_base": "0x7f0000000000"}
+
+        def status(o0, residual=1, helpers=self.HELPERS):
+            line = self.line(0, o0=o0, pairs={(0, 2): False})
+            return gate.classify([line], [], residual, helpers)[0]
+
+        self.assertEqual(status(trap(0x1108)), "residual-trap")
+        self.assertEqual(status(trap(0x1108), residual=0), "differs")
+        self.assertEqual(status(trap(0x1108, "/y/O0.so")), "differs")
+        self.assertEqual(status(trap(0x1120)), "differs")  # past the helper's end
+        self.assertEqual(status({**trap(0x1108), "status": 11}), "differs")  # SIGSEGV
 
     def test_the_worst_vector_decides(self):
         lines = [self.line(0), self.line(1, pairs={(0, 2): False}),
                  self.line(2, pairs={(2, 3): False}),
                  self.line(3, ubsan={"run": 5, "outcome": "exit-raw",
                                      "stderr": "x.c:1: runtime error: signed integer overflow"})]
-        status, evidence, counts = gate.classify(lines, [], 0, "")
+        status, evidence, counts = gate.classify(lines, [], 0, self.NONE)
         self.assertEqual(status, "ub")
         self.assertEqual(evidence["vector"], 3)
         self.assertEqual((counts["equal"], counts["differs"], counts["uninit"], counts["ub"]),

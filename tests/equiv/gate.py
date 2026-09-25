@@ -180,8 +180,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         }
         return record
     residual = int(record.proof.get("residual", 0) or 0)
-    status, evidence, counts = classify(vector_lines, vectors, residual,
-                                        str(builds["O0"].path))
+    helpers = ResidualHelpers(str(builds["O0"].path), link.residual_helpers(builds["O0"].path))
+    status, evidence, counts = classify(vector_lines, vectors, residual, helpers)
     record.status = status
     record.evidence = evidence
     record.vectors = counts
@@ -233,8 +233,36 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
     return True, "", lines[:-1]
 
 
+@dataclass
+class ResidualHelpers:
+    """The ``-O0`` build's ``r2sleigh_residual_*`` functions: where a residual traps."""
+
+    object_path: str
+    ranges: list[tuple[int, int, str]] = field(default_factory=list)
+
+    def reached(self, run: dict) -> str | None:
+        """The helper a run died of SIGILL inside, or None.
+
+        A trap is a reached residual only at a program counter inside one of
+        these helpers of this object: a ``__builtin_trap`` anywhere else, or a
+        stray illegal instruction, is the rendering ending differently.
+        """
+        if run.get("outcome") != "signal" or run.get("status") != signal.SIGILL:
+            return None
+        if str(run.get("fault_object", "")) != self.object_path:
+            return None
+        try:
+            offset = int(str(run.get("fault_pc")), 16) - int(str(run.get("fault_base")), 16)
+        except ValueError:
+            return None
+        for start, end, name in self.ranges:
+            if start <= offset < end:
+                return name
+        return None
+
+
 def classify(vector_lines: list[dict], vectors: list, residual: int,
-             o0_object: str) -> tuple[str, dict, dict]:
+             helpers: ResidualHelpers) -> tuple[str, dict, dict]:
     counts = {"total": len(vector_lines), "dropped": 0, "unstable": 0, "graded": 0,
               "equal": 0, "residual-trap": 0, "differs": 0, "uninit": 0, "ub": 0}
     first: dict[str, dict] = {}
@@ -261,13 +289,9 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
         primary = pairs.get((ORIGINAL, O0))
         if primary is not None and not primary.get("equal"):
             o0 = runs[O0] if len(runs) > O0 else {}
-            trapped = (
-                o0.get("outcome") == "signal"
-                and o0.get("status") == signal.SIGILL
-                and str(o0.get("fault_object", "")) == o0_object
-            )
-            if trapped and residual > 0:
-                found["residual-trap"] = {"fault_pc": o0.get("fault_pc")}
+            helper = helpers.reached(o0) if residual > 0 else None
+            if helper is not None:
+                found["residual-trap"] = {"fault_pc": o0.get("fault_pc"), "helper": helper}
             else:
                 found["differs"] = {**_pair_evidence(primary), "original": runs[ORIGINAL],
                                     "rendering": o0}
