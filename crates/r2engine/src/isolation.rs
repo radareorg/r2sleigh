@@ -15,9 +15,12 @@
 //! unread, and a root's panic leaves the session running.
 //!
 //! The boundaries are few and named: the per-function analysis the memo
-//! derives, the sealed type analysis and rendering read from it, and each
-//! callee a root reads. A memo never holds what unwound, because the value is
-//! stored only after the derivation returns.
+//! derives, the sealed type analysis and rendering read from it, each callee
+//! a root reads, and the function listing -- both the lines read off a
+//! standing analysis and the plain walk listed where the analysis was
+//! refused, since that walk is the same lift that may have panicked in the
+//! first place. A memo never holds what unwound, because the value is stored
+//! only after the derivation returns.
 //!
 //! An out-of-memory abort is not a panic and cannot be caught; the only
 //! defence there is never to size an allocation by an unproven count.

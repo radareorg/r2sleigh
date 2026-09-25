@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
+use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
 use crate::query::references::Indexing;
 use crate::query::{
@@ -195,27 +196,49 @@ impl<S: Source> OpenProgram<S> {
     /// **The bytes never depend on the analysis succeeding.** Where the
     /// analysis refuses -- or panics, which is a refusal too -- the listing is
     /// the plain walk and says why, naming each dispatch the walk could not
-    /// follow. Only a body that cannot be walked at all lists nothing.
+    /// follow. Only a body that cannot be walked at all lists nothing, and
+    /// that includes a walk that panics: every step past the tables is inside
+    /// an isolation boundary, so no defect in one function's listing unwinds
+    /// through the caller.
     pub fn function_listing(&mut self, entry: u64) -> Result<FunctionListing, String> {
         self.start_request();
         self.ensure_decodable()?;
         self.ensure_assembled(entry)?;
         let target = self.target(entry)?;
-        let prepared = match self.analysed(&target, entry) {
-            Ok(prepared) => prepared,
-            Err(reason) => return self.walked_listing(&target, entry, reason),
+        let reason = match self.analysed(&target, entry) {
+            // A defect reading what the analysis proved is an analysis defect like any other.
+            Ok(prepared) => match isolated(|| self.proved_listing(&target, &prepared)) {
+                Ok(listing) => return Ok(listing),
+                Err(panicked) => NativeRefusal::from(panicked),
+            },
+            Err(reason) => reason,
         };
+        let refused = reason.to_string();
+        isolated(|| self.walked_listing(&target, entry, reason)).unwrap_or_else(|panicked| {
+            Err(format!(
+                "nothing is listed at {entry:#x}: the plain walk {panicked}, \
+                 after the analysis was refused: {refused}"
+            ))
+        })
+    }
+
+    /// The listing of a function whose analysis stands, each line carrying what it proved.
+    fn proved_listing(
+        &self,
+        target: &crate::native::NativeTarget<'_>,
+        prepared: &Prepared,
+    ) -> FunctionListing {
         let lifted = prepared.lifted();
         let body = WalkedBody::new(&lifted, target.arch);
-        let proved = Proved::new(&prepared);
+        let proved = Proved::new(prepared);
         let answered = Answered {
             body: Some(&body),
             ..self.answered(Some(&proved))
         };
-        Ok(FunctionListing {
+        FunctionListing {
             lines: listed_by_block(&answered, &lifted, self.revision()),
             refused: None,
-        })
+        }
     }
 
     /// The listing of the plain walk of a function whose analysis was refused.

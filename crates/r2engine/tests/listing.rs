@@ -8,7 +8,7 @@ use common::{
     OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
     THUMB_LEAF, TRANSFERRED, TWO, VENEER, handing, opened, table_switch, transferring,
 };
-use r2engine::program::OpenProgram;
+use r2engine::program::{Container, OpenProgram, Source};
 use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
 
 /// The result each line claims, by address.
@@ -706,4 +706,64 @@ fn a_function_whose_analysis_is_refused_is_still_listed_and_says_why() {
     let analysed = program.function_listing(BASE).expect("it lists");
     assert!(analysed.refused.is_none());
     assert!(listed(&analysed.lines.value).contains(&0x100e));
+}
+
+/// The literal program, with one address whose bytes cannot be read without a defect.
+struct Faulting {
+    literal: Literal,
+    at: u64,
+}
+
+impl Source for Faulting {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        assert_ne!(vaddr, self.at, "a defect reading {vaddr:#x}");
+        self.literal.read(vaddr, max)
+    }
+
+    fn container(&self) -> &Container {
+        self.literal.container()
+    }
+
+    fn identity(&self) -> u64 {
+        self.literal.identity()
+    }
+
+    fn byte_revision(&self) -> u64 {
+        self.literal.byte_revision()
+    }
+
+    fn written_since(&self, revision: u64, range: &std::ops::Range<u64>) -> bool {
+        self.literal.written_since(revision, range)
+    }
+}
+
+#[test]
+fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
+    // The analysis was isolated, and the listing it fell back to walked the
+    // body again outside any boundary: the same defect in the walk then
+    // unwound through the caller, and a shell ended with it. Where not even
+    // the plain walk can be read, nothing is listed and the error says where
+    // the defect was raised.
+    let ret = TWO + 5;
+    let mut program = OpenProgram::of(Faulting {
+        literal: Literal::new(),
+        at: ret,
+    });
+    let refused = match program.function_listing(TWO) {
+        Ok(listing) => panic!(
+            "a body read through a defect is listed: {:?}",
+            computes(&listing.lines.value)
+        ),
+        Err(refused) => refused,
+    };
+    assert!(refused.contains("the plain walk panicked at "), "{refused}");
+    assert!(refused.contains("listing.rs"), "{refused}");
+    let defect = format!("a defect reading {ret:#x}");
+    assert!(refused.contains(&defect), "{refused}");
+    // The same defect refused the analysis first, and that is said too.
+    assert!(refused.contains("the analysis panicked at "), "{refused}");
+    // The next function is untouched by it.
+    let one = program.function_listing(ONE).expect("the session goes on");
+    assert!(one.refused.is_none());
+    assert_eq!(one.lines.value.first().map(|line| line.address), Some(ONE));
 }
