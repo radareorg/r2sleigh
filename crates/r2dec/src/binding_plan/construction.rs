@@ -759,11 +759,24 @@ fn read_end_bits_through_merges(
         return Ok(Ok(0));
     }
     let computed = graph.def_inst(value).is_some();
-    let mut read_end_bits = if source.live_out().contains(value) {
-        member_width_bits
-    } else {
-        0
+    // The caller reads a returned value at the width the result states, so a
+    // `double` returned in a vector register is its low eight bytes, and the
+    // merge that carries it is declared at that width rather than the
+    // register's.
+    let mut read_end_bits = match source.live_out().caller_reads(graph, value) {
+        None => 0,
+        Some(bytes) if bytes.is_empty() => 0,
+        Some(bytes) => bytes
+            .highest()
+            .and_then(|highest| highest.checked_add(1)?.checked_mul(8))
+            .map_or(member_width_bits, |end| end.min(member_width_bits)),
     };
+    if read_end_bits != 0 {
+        r2il::refusal_evidence!(
+            "binding-width",
+            "{value:?} is returned to the caller through bit {read_end_bits}"
+        );
+    }
     for site in graph.use_sites(value) {
         // A call's conventional read of a register the certified call does
         // not pass is not a read the text performs.

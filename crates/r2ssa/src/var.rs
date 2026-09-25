@@ -265,6 +265,24 @@ impl SSAVar {
         }
     }
 
+    /// A constant on a spelling the table already holds, for a proof harness
+    /// that cannot run the interner.
+    #[cfg(kani)]
+    pub(crate) const fn constant_interned(
+        name: &'static InternedName,
+        bits: u64,
+        size: u32,
+    ) -> Self {
+        Self {
+            name,
+            constant_bits: bits,
+            version: 0,
+            size,
+            rename_disambiguator: 0,
+            is_constant: true,
+        }
+    }
+
     /// Attach the deterministic source-identity projection selected by SSA
     /// construction while leaving the user-facing name unchanged.
     pub(crate) fn with_rename_disambiguator(mut self, disambiguator: u32) -> Self {

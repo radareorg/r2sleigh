@@ -502,7 +502,12 @@ impl SsaArtifact {
             .map(|slot| slot.storage())
             .collect::<Vec<_>>();
         let live_out =
-            crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
+            crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages)
+                .with_result_demand(
+                    machine_context
+                        .function_interface()
+                        .and_then(crate::deadphi::ResultDemand::of_interface),
+                );
         let mut liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         let graph_built_bytes = r2il::allocation::live_bytes();

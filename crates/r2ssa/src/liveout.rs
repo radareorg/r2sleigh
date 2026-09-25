@@ -31,6 +31,11 @@ pub struct FunctionLiveOut {
     unresolved: BTreeSet<u64>,
     /// The unresolved blocks a call or a supervisor call left holding a value nothing states.
     clobbered: BTreeSet<u64>,
+    /// How much of the result carrier the caller reads, where the interface
+    /// says: a declared `int` in `rax` is read at its low four bytes, and a
+    /// byte only the carrier's upper half holds is not a value the caller
+    /// observes. `None` reads each live-out value whole.
+    result: Option<crate::deadphi::ResultDemand>,
 }
 
 /// Whether a write puts some of the returned bytes in place.
@@ -202,6 +207,35 @@ impl FunctionLiveOut {
             }
         }
         (found, clobbered_any)
+    }
+
+    /// The same values, read by the caller at the width its result states.
+    #[must_use]
+    pub fn with_result_demand(mut self, result: Option<crate::deadphi::ResultDemand>) -> Self {
+        self.result = result;
+        self
+    }
+
+    /// How much of the result carrier the caller reads, where it is stated.
+    pub const fn result_demand(&self) -> Option<crate::deadphi::ResultDemand> {
+        self.result
+    }
+
+    /// The bytes of `value` the caller reads once the function returns:
+    /// `None` for a value it does not read, the bytes the stated result
+    /// covers, and the whole value where no result is stated.
+    pub fn caller_reads(&self, graph: &SsaGraph, value: ValueId) -> Option<crate::deadphi::ByteMask> {
+        if !self.contains(value) {
+            return None;
+        }
+        let graph_value = graph.value(value)?;
+        let whole = crate::deadphi::ByteMask::whole(graph_value.var.size);
+        Some(
+            self.result
+                .zip(graph_value.canonical_storage)
+                .and_then(|(result, storage)| result.bytes_of(storage))
+                .unwrap_or(whole),
+        )
     }
 
     /// Whether the caller reads this value once the function returns.

@@ -55,9 +55,11 @@ fn afi_states_the_signature_pdd_declares() {
         .lines()
         .find_map(|line| line.strip_prefix("signature: "))
         .unwrap_or_else(|| panic!("afi states no signature:\n{info}"));
+    // `uint32_t fnv1a32(const uint8_t *, size_t)`: every return writes the
+    // thirty-two-bit lane, so the result is that lane and not the carrier.
     assert_eq!(
         signature,
-        "uint64_t sym.fnv1a32 (uint64_t arg1, uint64_t arg2);"
+        "uint32_t sym.fnv1a32 (uint64_t arg1, uint64_t arg2);"
     );
     let rendered = r2s("pdd @ 0x401330");
     let header = rendered.lines().next().expect("a header");
@@ -84,6 +86,26 @@ fn pdd_declares_every_formal_the_interface_has_even_unread() {
         assert_eq!(pdd.len(), arity, "{header}");
         assert_eq!(afi, pdd, "{signature}\n{header}");
     }
+}
+
+/// `int32_t sparse_switch(int32_t op, int32_t a, int32_t b)` at clang `-O2`
+/// on arm64: one arm returns `mov w0, #-1`, which the lifter spells as a copy
+/// of an eight-byte constant, and every other arm writes `w0`. A constant
+/// bounds the result by its magnitude and writes no lane, so the result is
+/// the thirty-two-bit lane the other arms write -- where the constant used to
+/// make it the whole of `x0`.
+#[test]
+fn a_constant_on_one_path_does_not_widen_the_result_the_others_write() {
+    let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .args(["-q", "-c", "pdd @ sym._sparse_switch"])
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/manual_limits_O2"))
+        .output()
+        .expect("the shell runs");
+    let rendered = String::from_utf8_lossy(&done.stdout);
+    let header = rendered.lines().next().expect("a header");
+    let (returns, parameters) = header_types(header);
+    assert_eq!(returns, "uint32_t", "{rendered}");
+    assert_eq!(parameters, ["uint32_t"; 3], "{rendered}");
 }
 
 #[test]

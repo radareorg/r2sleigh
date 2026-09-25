@@ -439,16 +439,17 @@ fn observed_entry_read_storages(
             && let Some(root) = is_entry_read(func, &value.var)
         {
             // Every register value is its root, so the width the program
-            // read is the observed low lanes of it, not the register's.
-            // A lane is a power of two bytes wide, so the observed run is
-            // rounded up to the lane that holds it, as a stack parameter's
-            // is: three bytes read through `& 0xffffff` take the four-byte
-            // lane, and six take the whole register. Covering a byte the
-            // program did not read is the side a formal may err on; a lane
-            // no register has would leave the interface unmintable.
+            // read is the lane that covers the bytes it demanded, not the
+            // register's. A lane is a power of two bytes wide, so the
+            // demanded bytes are rounded up to the lane that holds the
+            // highest of them, as a stack parameter's are: three bytes read
+            // through `& 0xffffff` take the four-byte lane, and six take the
+            // whole register. Covering a byte the program did not read is the
+            // side a formal may err on; a lane no register has would leave
+            // the interface unmintable.
             let storage = observations
-                .observed_low_bytes(value.id)
-                .map(u32::next_power_of_two)
+                .observed_bytes(value.id)
+                .and_then(crate::deadphi::ByteMask::cover)
                 .filter(|bytes| *bytes < root.size)
                 .map_or(root, |size| CanonicalStorageId { size, ..root });
             // Which observation this parameter rests on is the whole question
@@ -671,7 +672,7 @@ fn body_proven_result(
         .is_none()
         .then_some(first)
         .filter(|(candidate, live_out)| {
-            recovered_result(graph, facts, live_out, *candidate)
+            recovered_result(graph, facts, live_out, *candidate, slots)
                 .register()
                 .is_some()
         })
@@ -706,7 +707,7 @@ fn returned_result(
         RecoveredFunctionResult::Unproven
     } else {
         // An untouched carrier the caller never filled holds no value: void if no return fills it, unproven if some do.
-        match recovered_result(graph, facts, live_out, slot) {
+        match recovered_result(graph, facts, live_out, slot, slots) {
             RecoveredFunctionResult::Register(_) if untouched => RecoveredFunctionResult::Unproven,
             result => result,
         }
@@ -736,13 +737,26 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
 }
 
 /// The carrier the answered returns fill, void where none does, unproven where one is stated nowhere.
+///
+/// The width is what the returns write, never what the values happen to
+/// hold: the written-lane lattice of [`WrittenLane`] over every returned
+/// value, then cut below the first byte that must carry a register the
+/// convention leaves unspecified. Known-zero bytes never narrow a result: a
+/// C return narrower than the lane the machine wrote drops the zero bytes the
+/// caller reads, so `xor eax, eax; sete al` returns the whole carrier, not a
+/// byte. Below the written lane only a caller's demand could narrow further,
+/// and that is not a fact a body proves.
 fn recovered_result(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
+    slots: &SourceConventionSlots,
 ) -> RecoveredFunctionResult {
-    let mut observed = None;
+    let seeds = unspecified_seeds(graph, slot, slots);
+    let overlaid = overlaid_returns(graph, live_out);
+    let mut lane = WrittenLane::default();
+    let mut returned = Vec::new();
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
             ReturnedByCall::Void => continue,
@@ -755,50 +769,266 @@ fn recovered_result(
         if storage.location() != slot.location() || storage.size == 0 || storage.size > slot.size {
             return RecoveredFunctionResult::Unproven;
         }
-        let observed_size = if storage == slot {
-            narrow_zero_extend_input_size(graph, value).unwrap_or(storage.size)
-        } else {
-            storage.size
-        };
-        let storage = CanonicalStorageId {
+        // A write of a narrower storage is a lane write in its own right:
+        // `mov al, 1` spelled as a copy into `al` writes one byte whatever it
+        // copies. A value a narrower write overlays at the same return is
+        // that write's root.
+        let mut written = WrittenLane::of(graph, value, &seeds, overlaid.contains(&value));
+        if storage.size < slot.size {
+            written.write(storage.size);
+        }
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "returned {value:?} in {storage:?} is defined by {:?} and writes {written:?}",
+            graph
+                .def_inst(value)
+                .and_then(|inst| graph.inst(inst))
+                .map(|inst| &inst.payload)
+        );
+        lane.join(written);
+        returned.push(value);
+    }
+    if returned.is_empty() {
+        return RecoveredFunctionResult::Void;
+    }
+    let written = lane.width(slot.size);
+    // A byte every assignment of the arguments leaves holding the caller's
+    // garbage is not a byte of the source's result; the result ends below
+    // the first one, at a width a C type has.
+    let unspecified = crate::deadphi::UnspecifiedBytes::find(graph, &seeds);
+    let garbage = returned
+        .iter()
+        .filter_map(|value| unspecified.must(*value).lowest())
+        .min();
+    let width = match garbage {
+        Some(0) => return RecoveredFunctionResult::Unproven,
+        Some(first) if first < written => 1 << (31 - first.leading_zeros()),
+        _ => written,
+    };
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "result lane {lane:?} writes {written} bytes, the first byte carrying unspecified \
+         garbage is {garbage:?}: {width} bytes"
+    );
+    RecoveredFunctionResult::Register(RecoveredResult {
+        slot,
+        observed: CanonicalStorageId {
             space: slot.space,
             offset: slot.offset,
-            size: observed_size,
-        };
-        if observed.is_none_or(|current: CanonicalStorageId| storage.size > current.size) {
-            observed = Some(storage);
-        }
-    }
-    observed.map_or(RecoveredFunctionResult::Void, |observed| {
-        RecoveredFunctionResult::Register(RecoveredResult { slot, observed })
+            size: width,
+        },
     })
 }
 
-/// The narrow value a full result definition zero-extends.
-///
-/// Lifters make implicit carrier clearing explicit: returning a value through
-/// `eax`/`w0` is represented by a narrow definition followed by `rax`/`x0 =
-/// zext(...)`. The live-out is consequently the full carrier, while the input
-/// of that exact defining operation is the width the machine observed. Other
-/// full-width definitions remain full width; no register name or architecture
-/// convention is guessed here.
-fn narrow_zero_extend_input_size(graph: &SsaGraph, value: crate::ValueId) -> Option<u32> {
-    let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-    // The lane the carrier's definition widens, or inserts at its low end.
-    let input = match (&definition.payload, definition.inputs.as_slice()) {
-        (crate::graph::InstPayload::Op(crate::SSAOp::IntZExt { .. }), [input]) => *input,
-        (crate::graph::InstPayload::Op(crate::SSAOp::Insert(insert)), [_, input, _])
-            if insert.position.constant_bits() == Some(0) =>
-        {
-            *input
-        }
-        _ => return None,
+/// The returned values a narrower returned value overlays at the same return:
+/// `xor eax, eax; sete al` returns the byte `sete` wrote over the zero, and
+/// the zero is the byte's root.
+fn overlaid_returns(
+    graph: &SsaGraph,
+    live_out: &crate::liveout::FunctionLiveOut,
+) -> BTreeSet<crate::ValueId> {
+    let size = |value: crate::ValueId| {
+        graph
+            .value(value)
+            .and_then(|value| value.canonical_storage)
+            .map_or(0, |storage| storage.size)
     };
-    let input = graph.value(input)?;
-    let output = graph.value(value)?;
-    let input_size = input.var.size;
-    let output_size = output.var.size;
-    (input_size > 0 && input_size < output_size).then_some(input_size)
+    let mut overlaid = BTreeSet::new();
+    for (_, values) in live_out.by_return() {
+        let values = values.collect::<Vec<_>>();
+        let narrowest = values.iter().map(|value| size(*value)).min().unwrap_or(0);
+        overlaid.extend(values.into_iter().filter(|value| size(*value) > narrowest));
+    }
+    overlaid
+}
+
+/// The values holding what the caller left in the result carrier, where the
+/// convention says the caller left nothing there: the carrier is not also an
+/// argument slot. A call's result is the only thing the carrier carries in,
+/// so its entry value is unspecified.
+fn unspecified_seeds(
+    graph: &SsaGraph,
+    slot: CanonicalStorageId,
+    slots: &SourceConventionSlots,
+) -> BTreeSet<crate::ValueId> {
+    let overlaps = |a: CanonicalStorageId, b: CanonicalStorageId| {
+        a.space == b.space
+            && a.offset < b.offset + u64::from(b.size)
+            && b.offset < a.offset + u64::from(a.size)
+    };
+    if slots
+        .argument_slots()
+        .iter()
+        .any(|argument| overlaps(*argument, slot))
+    {
+        return BTreeSet::new();
+    }
+    graph
+        .values
+        .iter()
+        .filter(|value| value.var.version == 0 && graph.def_inst(value.id).is_none())
+        .filter(|value| {
+            value
+                .canonical_storage
+                .is_some_and(|storage| storage.location() == slot.location())
+        })
+        .map(|value| value.id)
+        .collect()
+}
+
+/// The lane of the result carrier a returned value's definitions write.
+///
+/// A register write names the lane it writes, and a constant does not: the
+/// lifter spells `mov eax, 0xffffffff` as a copy of an eight-byte constant,
+/// so a constant carries only a bound on its own magnitude. The lattice is
+/// `{no evidence} < 1 < 2 < 4 < 8` joined by `max`:
+///
+/// - a zero extension writes its source's lane: `mov eax, ...` zeroes above;
+/// - a lane write writes its window, and whatever its root wrote -- a root
+///   the function defined keeps its bytes defined, and a constant root is
+///   the whole carrier, because its lane was erased;
+/// - a copy or a merge writes what its inputs write, a constant input adding
+///   only its magnitude;
+/// - the caller's value of a carrier the convention leaves unspecified writes
+///   nothing;
+/// - any other definition writes its own width.
+///
+/// With no lane evidence at all -- `mov eax, 1; ret` -- nothing narrows the
+/// carrier, so `int f(void) { return 1; }` is never `uint8_t`.
+///
+/// Cost: one walk over copies, merges and lane roots, each value at most
+/// twice (as a value and as a root), O(V + E).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WrittenLane {
+    lane: Option<u32>,
+    magnitude: u32,
+}
+
+impl WrittenLane {
+    /// What `value` writes, read as a root of a lane write where `as_root`.
+    fn of(
+        graph: &SsaGraph,
+        value: crate::ValueId,
+        seeds: &BTreeSet<crate::ValueId>,
+        as_root: bool,
+    ) -> Self {
+        let mut lane = Self::default();
+        let mut pending = vec![(value, as_root)];
+        let mut seen = BTreeSet::new();
+        while let Some((value, as_root)) = pending.pop() {
+            if !seen.insert((value, as_root)) {
+                continue;
+            }
+            let Some(graph_value) = graph.value(value) else {
+                continue;
+            };
+            let size = graph_value.var.size;
+            if let Some(bits) = graph_value.var.constant_bits() {
+                if as_root {
+                    lane.write(size);
+                } else {
+                    lane.magnitude = lane.magnitude.max((64 - bits.leading_zeros()).div_ceil(8));
+                }
+                continue;
+            }
+            let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+                if !seeds.contains(&value) {
+                    lane.write(size);
+                }
+                continue;
+            };
+            match &inst.payload {
+                crate::graph::InstPayload::Phi { .. } => {
+                    pending.extend(inst.inputs.iter().map(|input| (*input, as_root)));
+                }
+                crate::graph::InstPayload::Op(op) => match op {
+                    crate::SSAOp::Copy { .. } => pending.push((inst.inputs[0], as_root)),
+                    crate::SSAOp::IntZExt { src, .. } => lane.write(src.size),
+                    crate::SSAOp::Insert(insert) => match insert.position.constant_bits() {
+                        Some(bits) => {
+                            let end = bits.saturating_add(u64::from(insert.value.size) * 8);
+                            lane.write(u32::try_from(end.div_ceil(8)).unwrap_or(size).min(size));
+                            pending.push((inst.inputs[0], true));
+                        }
+                        None => lane.write(size),
+                    },
+                    _ => lane.write(size),
+                },
+            }
+        }
+        lane
+    }
+
+    fn write(&mut self, bytes: u32) {
+        self.lane = Some(self.lane.map_or(bytes, |lane| lane.max(bytes)));
+    }
+
+    fn join(&mut self, other: Self) {
+        if let Some(bytes) = other.lane {
+            self.write(bytes);
+        }
+        self.magnitude = self.magnitude.max(other.magnitude);
+    }
+
+    /// The width the lattice proves, at most `carrier` bytes: the whole
+    /// carrier where nothing wrote a lane.
+    fn width(self, carrier: u32) -> u32 {
+        match self.lane {
+            None => carrier,
+            Some(lane) => lane
+                .max(self.magnitude)
+                .max(1)
+                .next_power_of_two()
+                .min(carrier),
+        }
+    }
+}
+
+/// Whether the function extends a narrow parameter itself: some read of the
+/// slot's low `bytes` is zero- or sign-extended, as `movsx`/`movzx` do.
+///
+/// A callee that reads fewer than four bytes of an argument register and does
+/// not extend them is reading the low lane of an `int` its caller promoted as
+/// often as a `char`; only an extension of its own says the narrow width is
+/// the type.
+fn extends_parameter(graph: &SsaGraph, slot: CanonicalStorageId, bytes: u32) -> bool {
+    let mut pending = graph
+        .values
+        .iter()
+        .filter(|value| value.var.version == 0 && graph.def_inst(value.id).is_none())
+        .filter(|value| {
+            value
+                .canonical_storage
+                .is_some_and(|storage| storage.location() == slot.location())
+        })
+        .map(|value| value.id)
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        for site in graph.use_sites(value) {
+            let Some(inst) = graph.inst(site.inst) else {
+                continue;
+            };
+            let crate::graph::InstPayload::Op(op) = &inst.payload else {
+                continue;
+            };
+            match op {
+                crate::SSAOp::IntZExt { src, .. } | crate::SSAOp::IntSExt { src, .. }
+                    if src.size == bytes =>
+                {
+                    return true;
+                }
+                crate::SSAOp::Copy { .. } | crate::SSAOp::Subpiece { offset: 0, .. } => {
+                    pending.extend(inst.output);
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Recover what the machine code proves about this function's interface.
@@ -982,7 +1212,7 @@ fn recover_interface_inner(
     if no_tail_boundary && loader_role.is_none() && result == RecoveredFunctionResult::Void {
         let mut proven = body_proven_result(func, &graph, &facts, machine_context, slots);
         if let Some((candidate, candidate_live_out)) = proven.take() {
-            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
+            result = recovered_result(&graph, &facts, &candidate_live_out, candidate, slots);
             live_out = candidate_live_out;
         }
     }
@@ -998,6 +1228,11 @@ fn recover_interface_inner(
             .filter(|obligation| obligation.id.kind.is_positive_observation_root())
             .count()
     );
+    // The caller reads the result at the width it was recovered at, so a
+    // byte only the carrier's upper lanes hold observes nothing.
+    let live_out = live_out.with_result_demand(result.register().map(|result| {
+        crate::deadphi::ResultDemand::low(result.slot(), result.observed().size)
+    }));
     let Some(observations) =
         crate::deadphi::ProvenProgramObservations::find(&graph, &live_out, &facts)
     else {
@@ -1037,6 +1272,18 @@ fn recover_interface_inner(
             .max_by_key(|read| read.size);
         let Some(observed) = observed else {
             break;
+        };
+        // Fewer than four bytes read and never extended by the function is
+        // the low lane of an argument its caller promoted: it is presented at
+        // `int` width, and a narrow type is claimed only where the function
+        // extends the lane itself.
+        let observed = if observed.size < 4
+            && slot.size >= 4
+            && !extends_parameter(&graph, *slot, observed.size)
+        {
+            CanonicalStorageId { size: 4, ..observed }
+        } else {
+            observed
         };
         parameters.push(RecoveredParameter {
             slot: *slot,

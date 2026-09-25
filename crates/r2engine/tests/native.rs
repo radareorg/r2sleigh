@@ -2460,3 +2460,127 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
         "{text}"
     );
 }
+
+/// The rendered signature of one function built from `bytes`, and the whole
+/// rendering.
+fn rendered_signature(bytes: &[u8], name: &'static str) -> (String, String) {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: bytes.to_vec(),
+        name,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text().to_string();
+    assert!(response.render_refusal.is_none(), "{text}");
+    let signature = text
+        .lines()
+        .find(|line| line.contains(&format!("{name}(")))
+        .unwrap_or_else(|| panic!("no signature for {name}:\n{text}"))
+        .trim()
+        .to_owned();
+    (signature, text)
+}
+
+/// `movsx ax, dil; lea edx, [rax * 4]; sub eax, edx; ret`: bytes two and
+/// three of the result are -3 times what the caller left in `rax`.
+const SEXT: &[u8] = &[
+    0x66, 0x40, 0x0f, 0xbe, 0xc7, 0x8d, 0x14, 0x85, 0x00, 0x00, 0x00, 0x00, 0x29, 0xd0, 0xc3,
+];
+
+/// Parameters recovered without a prototype are as wide as the bytes the body
+/// demands of them, and results as wide as the lane every return writes.
+///
+/// Each body is a gcc or clang `-O2` shape from `tests/gold/review.c` or the
+/// equivalence corpus, and each assertion failed before the byte relation:
+/// `lea eax, [rdi + rsi]` read its operands whole, a constant on one path made
+/// `list_len` a 64-bit result, and `xor eax, eax; setg al` returned a byte.
+#[test]
+fn recovered_interfaces_are_as_wide_as_what_the_body_reads_and_writes() {
+    let cases: [(&[u8], &'static str, &str); 9] = [
+        // lea eax, [rdi + rsi]; ret
+        (
+            &[0x8d, 0x04, 0x37, 0xc3],
+            "add",
+            "uint32_t add(uint32_t EDI_0, uint32_t ESI_0)",
+        ),
+        // xor edx, edx; test edi, edi; je 1010; lea eax, [rdi - 1]; add edx, 1;
+        // and edi, eax; jne 1006; mov eax, edx; ret
+        (
+            &[
+                0x31, 0xd2, 0x85, 0xff, 0x74, 0x0a, 0x8d, 0x47, 0xff, 0x83, 0xc2, 0x01, 0x21, 0xc7,
+                0x75, 0xf6, 0x89, 0xd0, 0xc3,
+            ],
+            "bit_count",
+            "uint32_t bit_count(uint32_t EDI_0)",
+        ),
+        // xor eax, eax; test rdi, rdi; je 1014; mov rdi, [rdi + 8]; add eax, 1;
+        // test rdi, rdi; jne 1007; ret; ret -- a pointer walk keeps its
+        // 64-bit parameter, and a zero on one path is no 64-bit lane.
+        (
+            &[
+                0x31, 0xc0, 0x48, 0x85, 0xff, 0x74, 0x0d, 0x48, 0x8b, 0x7f, 0x08, 0x83, 0xc0, 0x01,
+                0x48, 0x85, 0xff, 0x75, 0xf4, 0xc3, 0xc3,
+            ],
+            "list_len",
+            "uint32_t list_len(uint64_t RDI_0)",
+        ),
+        (SEXT, "sext", "uint16_t sext(uint8_t DIL_0)"),
+        // cmp edi, esi; setg al; movzx eax, al; ret
+        (
+            &[0x39, 0xf7, 0x0f, 0x9f, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3],
+            "gt",
+            "uint32_t gt(uint32_t EDI_0, uint32_t ESI_0)",
+        ),
+        // xor eax, eax; cmp edi, esi; setg al; ret -- the zeroed carrier is
+        // written whole; a byte result would drop the zeros the caller reads.
+        (
+            &[0x31, 0xc0, 0x39, 0xf7, 0x0f, 0x9f, 0xc0, 0xc3],
+            "gt_zeroed",
+            "uint64_t gt_zeroed(uint32_t EDI_0, uint32_t ESI_0)",
+        ),
+        // mov al, 1; ret -- the caller's rax is unspecified above the lane.
+        (&[0xb0, 0x01, 0xc3], "one_byte", "uint8_t one_byte(void)"),
+        // mov eax, 1; ret -- a constant writes no lane, so nothing narrows the
+        // carrier to the byte the value fits in.
+        (
+            &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3],
+            "one",
+            "uint64_t one(void)",
+        ),
+        // mov rax, -1; ret
+        (
+            &[0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xc3],
+            "all_ones",
+            "uint64_t all_ones(void)",
+        ),
+    ];
+    for (bytes, name, expected) in cases {
+        let (signature, text) = rendered_signature(bytes, name);
+        assert_eq!(signature, expected, "{text}");
+    }
+}
+
+/// A result narrower than its carrier reads nothing the caller left in the
+/// carrier: the lane write over the caller's `rax` becomes the lane.
+#[test]
+fn a_result_narrower_than_its_carrier_reads_nothing_the_caller_left() {
+    let (_, text) = rendered_signature(SEXT, "sext");
+    assert!(!text.contains("RAX_0"), "{text}");
+    assert!(!text.contains("residual("), "{text}");
+}
+
+/// `xorps xmm0, xmm0` is four lane writes of `lane ^ lane` over the caller's
+/// `xmm0`; together they cover it, so the stored zero reads nothing the
+/// caller left and nothing traps.
+#[test]
+fn a_zeroing_idiom_reads_nothing_of_the_callers_vector() {
+    // xorps xmm0, xmm0; movups [rdi], xmm0; mov eax, 1; ret
+    let (_, text) = rendered_signature(
+        &[
+            0x0f, 0x57, 0xc0, 0x0f, 0x11, 0x07, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+        ],
+        "zero16",
+    );
+    assert!(!text.contains("XMM0_0"), "{text}");
+    assert!(!text.contains("residual("), "{text}");
+}

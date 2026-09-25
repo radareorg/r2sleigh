@@ -3,162 +3,6 @@
 use super::*;
 
 impl SSAFunction {
-    /// Give every lane of a register read as the function was entered with it
-    /// one value: a `Subpiece` of the root's entry value, defined at entry.
-    ///
-    /// A formal declared narrower than its carrier is such a lane whether or
-    /// not the body reads it, so it is minted from the interface; every other
-    /// entry-lane read the renamer produced -- one `Subpiece` per reading
-    /// instruction -- becomes a copy of the one projection. The projection has
-    /// no register storage of its own: it is a temporary the boundary facts
-    /// know by this table (doc/adr-register-identity.md §8, 6).
-    /// Start a scratch register's lane writes from zero rather than from what
-    /// the caller left in it.
-    ///
-    /// A lane written into a register the function never read is not
-    /// preserving anything: `pinsrd xmm3, eax, 0` into a register no earlier
-    /// instruction defined reads bits the caller happened to leave, and no
-    /// compiled program depends on them. The insert still needs a value to
-    /// build on, and C has to spell it, so where the root's entry value is
-    /// read by nothing but the inserts themselves -- and the convention names
-    /// no carrier there, so nobody passed anything in it -- the chain starts
-    /// at zero and the rendering has no uninitialised read.
-    pub(crate) fn zero_scratch_insert_roots(&mut self, abi_carriers: &[CanonicalStorageId]) {
-        // A candidate's bits reach nothing but inserts. A merge passes the
-        // same undefined bits along, so a use as a phi source is followed to
-        // that merge and asked the same question; any other read -- a spill of
-        // a callee-saved register, a return of an untouched argument -- is a
-        // use of what the caller left, and disqualifies it.
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum ScratchUse {
-            InsertSource,
-            Carried,
-            Observed,
-        }
-        let mut uses = BTreeMap::<SSAVar, Vec<(ScratchUse, SSAVar)>>::new();
-        for block in self.blocks.iter() {
-            for phi in &block.phis {
-                for (_, src) in &phi.sources {
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((ScratchUse::Carried, phi.dst.clone()));
-                }
-            }
-            for op in &block.ops {
-                if let SSAOp::Insert(insert) = op {
-                    let (src, value, position) = (&insert.src, &insert.value, &insert.position);
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((ScratchUse::InsertSource, src.clone()));
-                    for other in [value, position] {
-                        uses.entry((*other).clone())
-                            .or_default()
-                            .push((ScratchUse::Observed, (*other).clone()));
-                    }
-                } else {
-                    for src in op.sources() {
-                        uses.entry(src.clone())
-                            .or_default()
-                            .push((ScratchUse::Observed, src.clone()));
-                    }
-                }
-            }
-        }
-        let reaches_inserts_only = |start: &SSAVar| {
-            let mut pending = vec![start.clone()];
-            let mut seen = BTreeSet::new();
-            let mut inserted = false;
-            while let Some(var) = pending.pop() {
-                if !seen.insert(var.clone()) {
-                    continue;
-                }
-                for (kind, next) in uses.get(&var).into_iter().flatten() {
-                    match kind {
-                        ScratchUse::InsertSource => inserted = true,
-                        ScratchUse::Carried => pending.push(next.clone()),
-                        ScratchUse::Observed => return false,
-                    }
-                }
-            }
-            inserted
-        };
-        let scratch = uses
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter(|var| var.version == 0 && reaches_inserts_only(var))
-            .filter_map(|var| {
-                let storage = self.canonical_storage_by_var.get(&var).copied()?;
-                (storage.space == CanonicalStorageSpace::Register
-                    && !abi_carriers.iter().any(|carrier| {
-                        carrier.space == storage.space
-                            && carrier.offset < storage.offset + u64::from(storage.size)
-                            && storage.offset < carrier.offset + u64::from(carrier.size)
-                    }))
-                .then_some(var)
-            })
-            .collect::<BTreeSet<_>>();
-        if scratch.is_empty() {
-            return;
-        }
-        // A vector register is wider than any C constant, so its zero is the
-        // zero-extension of a narrow one -- the same operation the prelude
-        // spells for every other wide value.
-        let mut minted = Vec::new();
-        let zeros = scratch
-            .iter()
-            .map(|var| {
-                let zero = if var.size <= 16 {
-                    SSAVar::constant(0, var.size)
-                } else {
-                    let disambiguator = self
-                        .canonical_storage_by_var
-                        .keys()
-                        .filter(|other| other.name() == var.name())
-                        .map(SSAVar::rename_disambiguator)
-                        .max()
-                        .map_or(1, |max| max + 1);
-                    // Version one: it is a definition, and version zero is
-                    // reserved for the value a block was entered with.
-                    let zero = SSAVar::new(var.name(), 1, var.size)
-                        .with_rename_disambiguator(disambiguator);
-                    minted.push(SSAOp::IntZExt {
-                        dst: zero.clone(),
-                        src: SSAVar::constant(0, 4),
-                    });
-                    if let Some(storage) = self.canonical_storage_by_var.get(var).copied() {
-                        self.canonical_storage_by_var.insert(zero.clone(), storage);
-                    }
-                    zero
-                };
-                (var.clone(), zero)
-            })
-            .collect::<BTreeMap<_, _>>();
-        for block in self.blocks.iter_mut() {
-            for phi in &mut block.phis {
-                for (_, src) in &mut phi.sources {
-                    if let Some(zero) = zeros.get(src) {
-                        *src = zero.clone();
-                    }
-                }
-            }
-            for op in &mut block.ops {
-                if let SSAOp::Insert(insert) = op
-                    && let Some(zero) = zeros.get(&insert.src)
-                {
-                    insert.src = zero.clone();
-                }
-            }
-        }
-        self.insert_ops(
-            self.entry,
-            0,
-            minted.into_iter().map(|op| (op, None)).collect(),
-        );
-        self.decompile_prep_facts = None;
-    }
-
     /// Replace the values a boundary states: the processor specification's
     /// tracked registers on entry, and the direction flag on entry and after
     /// every call, with the zero the convention requires of it.
@@ -240,6 +84,15 @@ impl SSAFunction {
         self.invalidate_query_index();
     }
 
+    /// Give every lane of a register read as the function was entered with it
+    /// one value: a `Subpiece` of the root's entry value, defined at entry.
+    ///
+    /// A formal declared narrower than its carrier is such a lane whether or
+    /// not the body reads it, so it is minted from the interface; every other
+    /// entry-lane read the renamer produced -- one `Subpiece` per reading
+    /// instruction -- becomes a copy of the one projection. The projection has
+    /// no register storage of its own: it is a temporary the boundary facts
+    /// know by this table (doc/adr-register-identity.md §8, 6).
     pub(crate) fn mint_entry_lane_projections(&mut self, machine_context: &SourceMachineContext) {
         let is_root_entry = |var: &SSAVar, storage: Option<CanonicalStorageId>| {
             var.version == 0

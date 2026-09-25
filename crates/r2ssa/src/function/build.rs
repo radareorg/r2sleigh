@@ -552,7 +552,7 @@ impl SSAFunction {
 
         let mut cfg = cfg;
         cfg.release_operations();
-        let mut function = Self {
+        let function = Self {
             call_preserved_carriers: None,
             supervisor_calls: arch
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
@@ -573,7 +573,6 @@ impl SSAFunction {
             decompile_prep_facts: None,
             query_index: RwLock::new(None),
         };
-        function.zero_scratch_insert_roots(abi_carriers);
         // The validator answers with a typed integrity error naming the block
         // and the edge it disagreed about; discarding it left the reader with
         // "malformed SSA source input" and nothing to look at.

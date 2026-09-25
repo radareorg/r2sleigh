@@ -99,6 +99,9 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
     control.poll()?;
     let mut stats = OptimizationStats::default();
     let max_iters = config.max_iterations.max(1);
+    // What the caller reads of the result, which is where a lane write into
+    // the result carrier stops being observed.
+    let returned = crate::deadphi::Returned::of(function_interface);
 
     // Constants and folds feed each other: a fold through a definition can
     // turn a lane read into a constant copy, which is a constant the next
@@ -133,6 +136,14 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
         }
 
         if config.enable_inst_combine && inst_combine(func, &mut stats) {
+            changed = true;
+        }
+
+        // An operand no observed byte depends on stops being read, after the
+        // folds that decide what is read: `x ^ x` is a constant before a lane
+        // write of it can be seen to cover its root, and a lane write over a
+        // root nothing observes becomes its lane for the next round to fold.
+        if crate::deadphi::drop_unobserved_operands(func, returned) {
             changed = true;
         }
 

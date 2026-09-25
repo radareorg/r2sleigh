@@ -79,6 +79,21 @@ fn a_switch_whose_table_the_program_does_not_have_is_no_tail_call() {
     }
 }
 
+/// `double avg(const double *v, int n)`: `movsd` and `addsd` write the low
+/// lane of `xmm0` and zero or keep the high one, and the caller reads the
+/// low eight bytes. No byte above them is observed, so no statement writes
+/// or declares the vector: the merge that returns is a 64-bit value, and the
+/// loop's lane writes are gone. It rendered as a `__uint128_t` rewritten
+/// through `(XMM0 & ~mask) | lane` masks at every instruction.
+#[test]
+fn a_double_returned_in_a_vector_register_is_its_low_lane() {
+    let run = bounded("pdd @ sym.avg");
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.starts_with("double avg("), "{}", run.out);
+    assert!(!run.out.contains("__uint128_t"), "{}", run.out);
+    assert!(!run.out.contains("& ~("), "{}", run.out);
+}
+
 #[test]
 fn an_address_in_read_only_data_is_no_function() {
     // 0x2020 is the third entry of classify's jump table, in the segment

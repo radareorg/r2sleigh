@@ -25,15 +25,26 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use crate::CanonicalStorageId;
 use crate::graph::{InstId, SsaGraph, UseSite, ValueId};
 use crate::liveout::FunctionLiveOut;
 use crate::obligation::{SemanticInstructionState, SemanticObligationInventory};
 use crate::semantic::{PreparedFunctionFacts, SourceBoundaryFacts, SourceCallArgumentValue};
 
+mod dependence;
+mod narrow;
+mod unspecified;
+
+pub(crate) use narrow::{Returned, drop_unobserved_operands};
+
+pub use unspecified::UnspecifiedBytes;
+
 /// Which merges no observation depends on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeadPhis {
     values: BTreeSet<ValueId>,
+    /// The bytes of each observed value some observation reaches.
+    observed_bytes: std::collections::BTreeMap<ValueId, ByteMask>,
     /// Complete pure value domain on which no program observation depends.
     ///
     /// This includes dead merge inputs such as an entry condition-code value,
@@ -105,7 +116,7 @@ impl ByteMask {
     /// are the only bytes an `and` with it lets through.
     ///
     /// A constant carries at most eight bytes of bits and is zero above them.
-    fn nonzero_bytes_of(bits: u64, size_bytes: u32) -> Self {
+    pub(crate) fn nonzero_bytes_of(bits: u64, size_bytes: u32) -> Self {
         let mut mask = 0u64;
         for byte in 0..size_bytes.min(8) {
             if (bits >> (8 * byte)) & 0xff != 0 {
@@ -115,9 +126,88 @@ impl ByteMask {
         Self::Bytes(mask)
     }
 
+    /// Byte `byte` alone; past what one word names, every byte.
+    pub const fn byte(byte: u32) -> Self {
+        if byte < 64 {
+            Self::Bytes(1 << byte)
+        } else {
+            Self::All
+        }
+    }
+
     /// Whether the mask names no byte at all.
     pub const fn is_empty(self) -> bool {
         matches!(self, Self::Bytes(0))
+    }
+
+    /// Whether the mask names byte `byte`.
+    pub const fn contains_byte(self, byte: u32) -> bool {
+        match self {
+            Self::Bytes(mask) => byte < 64 && (mask >> byte) & 1 == 1,
+            Self::All => true,
+        }
+    }
+
+    /// The least significant byte the mask names.
+    pub const fn lowest(self) -> Option<u32> {
+        match self {
+            Self::Bytes(0) => None,
+            Self::Bytes(mask) => Some(mask.trailing_zeros()),
+            Self::All => Some(0),
+        }
+    }
+
+    /// The most significant byte the mask names; `None` for no byte, and for
+    /// a mask saturated past what one word can say.
+    pub const fn highest(self) -> Option<u32> {
+        match self {
+            Self::Bytes(0) | Self::All => None,
+            Self::Bytes(mask) => Some(63 - mask.leading_zeros()),
+        }
+    }
+
+    /// Every byte from the least significant up to the most significant one
+    /// the mask names: what a carry out of a lower byte can reach.
+    #[must_use]
+    pub const fn through_highest(self) -> Self {
+        match self {
+            Self::Bytes(0) => Self::NONE,
+            Self::Bytes(mask) => Self::Bytes(u64::MAX >> mask.leading_zeros()),
+            Self::All => Self::All,
+        }
+    }
+
+    /// Every byte of a value `size_bytes` wide from the least significant one
+    /// the mask names up: what a shift toward the low end can bring down.
+    #[must_use]
+    pub const fn lowest_and_above(self, size_bytes: u32) -> Self {
+        match self.lowest() {
+            None => Self::NONE,
+            Some(lowest) => Self::whole(size_bytes).intersection(Self::whole(lowest).complement()),
+        }
+    }
+
+    /// Every byte the mask does not name, in a value `size_bytes` wide.
+    #[must_use]
+    pub const fn complement_within(self, size_bytes: u32) -> Self {
+        Self::whole(size_bytes).intersection(self.complement())
+    }
+
+    /// Every byte the mask does not name; a saturated mask leaves nothing.
+    const fn complement(self) -> Self {
+        match self {
+            Self::Bytes(mask) => Self::Bytes(!mask),
+            Self::All => Self::NONE,
+        }
+    }
+
+    /// The narrowest power-of-two lane that holds every byte the mask names;
+    /// `None` for no byte, or a mask saturated past one word.
+    pub const fn cover(self) -> Option<u32> {
+        match self.highest() {
+            Some(highest) => Some((highest + 1).next_power_of_two()),
+            None => None,
+        }
     }
 
     /// The bytes in either mask.
@@ -192,64 +282,112 @@ impl std::fmt::Display for ByteMask {
     }
 }
 
-/// What an observation of `observed` bytes of a value asks of each input.
+/// What an observation of `observed` bytes of a value asks of each input:
+/// the one byte-dependence relation, [`dependence::operand_bytes`], read
+/// over a graph instruction.
 ///
-/// A slice, a concatenation, a widening, a copy, a merge and a mask with a
-/// constant each read only some bytes of what feeds them; everything else is
-/// taken to read all of its operands. A byte no observation reaches is not
-/// observed, which is what stops a byte the program overwrote from admitting
-/// the caller's register as a parameter.
-///
-/// Every rule here may name more bytes than an input has; the closure trims
-/// each mask to its value's width, and a value whose width is unknown is
-/// taken whole.
-fn observed_input_bytes(
-    graph: &SsaGraph,
+/// A byte no observation reaches is not observed, which is what stops a byte
+/// the program overwrote from admitting the caller's register as a parameter,
+/// and what lets a lane write whose root contributes no observed byte stop
+/// reading the root.
+pub(crate) fn observed_input_bytes(
     inst: &crate::graph::GraphInst,
     observed: ByteMask,
-) -> Vec<(ValueId, ByteMask)> {
-    use crate::graph::InstPayload;
-    let size_of = |value: ValueId| graph.value(value).map(|value| value.var.size);
-    let constant = |value: ValueId| {
-        graph
-            .value(value)
-            .and_then(|value| value.var.constant_bits())
+) -> impl Iterator<Item = (ValueId, ByteMask)> + '_ {
+    let masks = match &inst.payload {
+        crate::graph::InstPayload::Phi { .. } => vec![observed; inst.inputs.len()],
+        crate::graph::InstPayload::Op(op) => dependence::operand_bytes(op, observed),
     };
-    // Every byte, which the closure trims to the input's own width.
-    let whole = |value: ValueId| (value, ByteMask::All);
-    let inputs = &inst.inputs;
-    match &inst.payload {
-        InstPayload::Phi { .. } => inputs.iter().map(|input| (*input, observed)).collect(),
-        InstPayload::Op(op) => match op {
-            crate::SSAOp::Copy { .. } if inputs.len() == 1 => vec![(inputs[0], observed)],
-            crate::SSAOp::Subpiece { offset, .. } if inputs.len() == 1 => {
-                vec![(inputs[0], observed.shifted_up(*offset))]
-            }
-            crate::SSAOp::Piece { .. } if inputs.len() == 2 => match size_of(inputs[1]) {
-                Some(lo_bytes) => vec![
-                    (inputs[0], observed.shifted_down(lo_bytes)),
-                    (inputs[1], observed.intersection(ByteMask::whole(lo_bytes))),
-                ],
-                None => inputs.iter().map(|input| whole(*input)).collect(),
-            },
-            crate::SSAOp::IntZExt { .. } if inputs.len() == 1 => {
-                let source = size_of(inputs[0]).map_or(ByteMask::All, ByteMask::whole);
-                vec![(inputs[0], observed.intersection(source))]
-            }
-            crate::SSAOp::IntAnd { .. } if inputs.len() == 2 => {
-                let mask_of = |value: ValueId| {
-                    constant(value)
-                        .zip(size_of(value))
-                        .map(|(bits, size)| ByteMask::nonzero_bytes_of(bits, size))
-                };
-                match (mask_of(inputs[0]), mask_of(inputs[1])) {
-                    (None, Some(mask)) => vec![(inputs[0], observed.intersection(mask))],
-                    (Some(mask), None) => vec![(inputs[1], observed.intersection(mask))],
-                    _ => inputs.iter().map(|input| (*input, observed)).collect(),
-                }
-            }
-            _ => inputs.iter().map(|input| whole(*input)).collect(),
-        },
+    inst.inputs.iter().copied().zip(masks)
+}
+
+/// Each value the caller reads once the function returns, with the bytes of
+/// it the caller reads: those the result's logical value covers, where the
+/// interface states one, and the whole value otherwise.
+fn returned_bytes<'a>(
+    graph: &'a SsaGraph,
+    live_out: &'a FunctionLiveOut,
+) -> impl Iterator<Item = (ValueId, ByteMask)> + 'a {
+    live_out.iter().map(move |value| {
+        let bytes = live_out.caller_reads(graph, value).unwrap_or(ByteMask::All);
+        (value, bytes)
+    })
+}
+
+/// What the caller reads of the result carrier: the bytes its logical value
+/// covers, counted from the carrier's own first byte.
+///
+/// The interface owns this fact -- a declared `int` in `rax`, or the width
+/// interface recovery proved -- and every closure seeds the returned values
+/// with it, so a byte only the carrier's upper half holds is not observed by
+/// the return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResultDemand {
+    carrier: CanonicalStorageId,
+    bytes: ByteMask,
+}
+
+impl ResultDemand {
+    /// The low `bytes` of `carrier`.
+    pub const fn low(carrier: CanonicalStorageId, bytes: u32) -> Self {
+        Self {
+            carrier,
+            bytes: ByteMask::whole(bytes),
+        }
+    }
+
+    /// What an interface's result states: its register and the bytes of it
+    /// the logical value covers. A register result with no logical value
+    /// covers the carrier.
+    pub fn of_interface(interface: &r2source::SourceFunctionInterface) -> Option<Self> {
+        let r2source::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
+            return None;
+        };
+        let Some(logical) = interface.return_logical_value() else {
+            return Some(Self::low(storage, storage.size));
+        };
+        let projection = logical.carrier();
+        let (offset, size) = (projection.offset_bits(), projection.size_bits());
+        // A projection that is not whole bytes is read by the bytes holding it.
+        let first = u32::try_from(offset / 8).ok()?;
+        let end = u32::try_from(offset.checked_add(size)?.div_ceil(8)).ok()?;
+        let bytes =
+            ByteMask::whole(end).intersection(ByteMask::whole(first).complement_within(end));
+        Some(Self {
+            carrier: storage,
+            bytes,
+        })
+    }
+
+    /// The carrier the result is in.
+    pub const fn carrier(self) -> CanonicalStorageId {
+        self.carrier
+    }
+
+    /// The bytes of the carrier the caller reads.
+    pub const fn bytes(self) -> ByteMask {
+        self.bytes
+    }
+
+    /// The bytes of a value held in `storage` the caller reads through the
+    /// result, where `storage` overlaps the carrier; `None` where it does not.
+    pub(crate) fn bytes_of(self, storage: CanonicalStorageId) -> Option<ByteMask> {
+        let carrier = self.carrier;
+        let overlaps = storage.space == carrier.space
+            && storage.offset < carrier.offset + u64::from(carrier.size)
+            && carrier.offset < storage.offset + u64::from(storage.size);
+        if !overlaps {
+            return None;
+        }
+        // Rebase the carrier's bytes onto the storage's first byte.
+        let bytes = if storage.offset >= carrier.offset {
+            self.bytes
+                .shifted_down(u32::try_from(storage.offset - carrier.offset).ok()?)
+        } else {
+            self.bytes
+                .shifted_up(u32::try_from(carrier.offset - storage.offset).ok()?)
+        };
+        Some(bytes.intersection(ByteMask::whole(storage.size)))
     }
 }
 
@@ -259,7 +397,10 @@ fn observed_input_bytes(
 /// A mask only grows, by union, and is trimmed to its value's width, so a
 /// value is queued again only when it gains a byte or saturates -- at most 65
 /// times -- and the walk stays linear in the graph's edges.
-fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
+fn dependency_closure(
+    graph: &SsaGraph,
+    roots: impl IntoIterator<Item = (ValueId, ByteMask)>,
+) -> Closure {
     let width = |value: ValueId| {
         graph
             .value(value)
@@ -269,9 +410,15 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
         std::collections::BTreeMap::new();
     let mut parents = std::collections::BTreeMap::new();
     let mut pending = VecDeque::new();
-    for value in roots {
-        let mask = width(value);
-        if !mask.is_empty() && bytes.insert(value, mask).is_none() {
+    for (value, mask) in roots {
+        let mask = mask.intersection(width(value));
+        if mask.is_empty() {
+            continue;
+        }
+        let entry = bytes.entry(value).or_insert(ByteMask::NONE);
+        let before = *entry;
+        *entry = before.union(mask);
+        if *entry != before {
             pending.push_back(value);
         }
     }
@@ -280,7 +427,7 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
-        for (input, mask) in observed_input_bytes(graph, inst, observed) {
+        for (input, mask) in observed_input_bytes(inst, observed) {
             let mask = mask.intersection(width(input));
             if mask.is_empty() {
                 continue;
@@ -303,6 +450,29 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
     }
 }
 
+/// The observed values, with every value an observed definition reads.
+///
+/// A value no observed byte depends on is still rendered when an operation
+/// that is rendered names it, so it cannot be called unobserved: that would
+/// elide a value some statement still reads. The optimizer drops every such
+/// read it can prove idle ([`drop_unobserved_operands`]); what is left here is
+/// read where the structural observations it decided by were wider than these.
+fn read_by_observed(graph: &SsaGraph, observed: BTreeSet<ValueId>) -> BTreeSet<ValueId> {
+    let mut read = observed;
+    let mut pending = read.iter().copied().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            continue;
+        };
+        for input in &inst.inputs {
+            if read.insert(*input) {
+                pending.push(*input);
+            }
+        }
+    }
+    read
+}
+
 impl ProvenProgramObservations {
     /// Close exact live outputs and non-refusal obligations over SSA def-use.
     pub fn find(
@@ -317,6 +487,7 @@ impl ProvenProgramObservations {
         for value in live_out.iter() {
             roots.entry(value).or_insert_with(|| "return".to_string());
         }
+        let mut seeds = returned_bytes(graph, live_out).collect::<Vec<_>>();
         for obligation in facts.obligations.obligations().values() {
             if !obligation.id.kind.is_positive_observation_root() {
                 continue;
@@ -325,9 +496,10 @@ impl ProvenProgramObservations {
                 roots
                     .entry(input)
                     .or_insert_with(|| format!("{:?}", obligation.id));
+                seeds.push((input, ByteMask::All));
             }
         }
-        let closure = dependency_closure(graph, roots.keys().copied());
+        let closure = dependency_closure(graph, seeds);
         Some(Self {
             values: closure.values,
             bytes: closure.bytes,
@@ -343,14 +515,6 @@ impl ProvenProgramObservations {
     /// The bytes of a value some observation reaches.
     pub fn observed_bytes(&self, value: ValueId) -> Option<ByteMask> {
         self.bytes.get(&value).copied()
-    }
-
-    /// How many of a value's least significant bytes some observation
-    /// reaches, when the observed bytes are exactly that low run; `None` for
-    /// a value nothing observes, one observed at a higher lane only, or one
-    /// observed past the bytes a mask can name.
-    pub fn observed_low_bytes(&self, value: ValueId) -> Option<u32> {
-        self.bytes.get(&value)?.low_bytes()
     }
 
     /// The chain of values from the root that observes `value` down to it.
@@ -394,26 +558,34 @@ impl DeadPhis {
         if !obligations.is_complete() {
             return Self::default();
         }
-        let mut roots = BTreeSet::from_iter(live_out.iter());
+        // The caller reads each returned value at the width its result
+        // states; everything else an observation reads, it reads whole.
+        let mut roots = returned_bytes(graph, live_out).collect::<Vec<_>>();
         for obligation in obligations.obligations().values() {
-            roots.extend(obligation.inputs.iter().copied());
+            roots.extend(
+                obligation
+                    .inputs
+                    .iter()
+                    .map(|input| (*input, ByteMask::All)),
+            );
         }
         // Parameters are rendered program variables even when the body does
         // not read them, so their canonical entry values remain in the named
         // domain independently of effect liveness.
         for parameter in boundaries.parameters.values() {
-            roots.insert(parameter.value);
+            roots.push((parameter.value, ByteMask::All));
         }
         for boundary in boundaries.calls.values() {
             for argument in &boundary.arguments {
                 if let SourceCallArgumentValue::Value(value) = argument.value {
-                    roots.insert(value);
+                    roots.push((value, ByteMask::All));
                 }
             }
         }
         // Whatever an observation depends on is observed, transitively. The walk
         // is over the graph's own instruction inputs, so it visits each edge once.
-        let observed = dependency_closure(graph, roots).values;
+        let closure = dependency_closure(graph, roots);
+        let observed = read_by_observed(graph, closure.values);
 
         let unobserved_values = graph
             .values
@@ -431,6 +603,7 @@ impl DeadPhis {
             .collect();
         let mut dead = Self {
             unobserved_values,
+            observed_bytes: closure.bytes,
             ..Self::default()
         };
         for inst in &graph.insts {
@@ -547,6 +720,16 @@ impl DeadPhis {
 
     pub fn contains(&self, value: ValueId) -> bool {
         self.values.contains(&value)
+    }
+
+    /// The bytes of a value some observation reaches; `None` for a value no
+    /// observation reaches.
+    ///
+    /// A value read only at its low bytes -- a vector register returning a
+    /// `double`, a carrier returning a declared `int` -- is observed at that
+    /// low run, which is the width it needs to be declared at.
+    pub fn observed_bytes(&self, value: ValueId) -> Option<ByteMask> {
+        self.observed_bytes.get(&value).copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = ValueId> + '_ {

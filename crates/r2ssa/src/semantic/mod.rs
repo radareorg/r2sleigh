@@ -268,7 +268,12 @@ impl PreparedFunctionFacts {
             .flat_map(|context| context.abi_model().return_registers())
             .map(|slot| slot.storage())
             .collect::<Vec<_>>();
-        let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+        let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages)
+            .with_result_demand(
+                machine_context
+                    .and_then(crate::SourceMachineContext::function_interface)
+                    .and_then(crate::deadphi::ResultDemand::of_interface),
+            );
         let (loops, inductions) = collect_structured_loop_facts(
             Body {
                 function,
