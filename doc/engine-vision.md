@@ -253,8 +253,8 @@ inference in 799 lines, and binary diffing in 366 lines. The ESIL dataflow graph
 is 2219 lines down a dead end.
 
 r2sleigh already has constant propagation, taint, slicing, interprocedural
-facts, indirect-call handling, aggregate access, interface recovery,
-fingerprinting, and constraint-based type inference with a lattice and a solver.
+facts, indirect-call handling, aggregate access, interface recovery, and
+constraint-based type inference with a lattice and a solver.
 
 Neither has strided intervals, a points-to or alias model, loop and induction
 variable analysis, exception-handler recovery, or deobfuscation.
@@ -314,7 +314,8 @@ research risk.
 **Binary diffing at current state of the art**, in two layers: structural
 matching over the call graph and control-flow graphs, propagating outward from
 confident anchors, and feature-vector matching over the decompiled IL for the
-fuzzy case. `fingerprint.rs` is already the seed of the second layer. This is
+fuzzy case. The second layer is to be built on the callee summaries, not on a
+hash of one prepared artifact (an unused `fingerprint.rs` was deleted). This is
 the highest user-visible value per line of code on the list.
 
 **Corpus-scale similarity and library identification.** FLIRT is exact-pattern

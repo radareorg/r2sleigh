@@ -96,11 +96,11 @@ pub struct StackAddressRoot {
 pub struct DecompilePrepFacts {
     /// The canonical root of each value, as an unordered index.
     ///
-    /// Nothing iterates it -- the fingerprint sorts what it takes -- and the
-    /// root propagation asks it three and a half million times for one
-    /// five-hundred-block function, so every question was a walk down an
-    /// ordered tree comparing variable names. Hashing the variable once and
-    /// probing is the same answer for a fraction of the comparisons.
+    /// Nothing iterates it, and the root propagation asks it three and a half
+    /// million times for one five-hundred-block function, so every question
+    /// was a walk down an ordered tree comparing variable names. Hashing the
+    /// variable once and probing is the same answer for a fraction of the
+    /// comparisons.
     pub canonical_value_roots: HashMap<SSAVar, SSAVar>,
     pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
