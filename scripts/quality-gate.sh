@@ -241,15 +241,6 @@ phase "Certification gate contracts"
 # engine printed; they run no binary.
 run python3 scripts/test_certify_render.py
 
-phase "Equivalence gate"
-# Replaces the plugin-driven 54-cell cutover corpus, which could no longer run:
-# every function of tests/corpus and tests/gold, GCC and Clang, O0/O1/O2,
-# rendered from the stripped build and run beside its original. No function
-# may leave `equal`; a new differs, uninit or ub blocks.
-run cargo build -p r2s --features sleigh
-run python3 tests/equiv/run_equiv.py --r2s "${CARGO_TARGET_DIR:-target}/debug/r2s" \
-    --baseline tests/equiv/baseline.json
-
 phase "Differential ESIL against radare2's own lifter"
 # Needs radare2 (the reference) and the r2sleigh CLI, so it is opt-in:
 # R2SLEIGH_ESIL_DIFF_BINARY names an x86-64 binary to step through. Without it
@@ -264,6 +255,17 @@ if [ -n "${R2SLEIGH_ESIL_DIFF_BINARY:-}" ]; then
 else
     printf 'skipped: set R2SLEIGH_ESIL_DIFF_BINARY to run the differential\n'
 fi
+
+phase "Equivalence gate"
+# Replaces the plugin-driven 54-cell cutover corpus, which could no longer run:
+# every function of tests/corpus and tests/gold, GCC and Clang, O0/O1/O2,
+# rendered from the stripped build and run beside its original. No function
+# may leave `equal`; a new differs, uninit or ub blocks. It runs last: until a
+# baseline is blessed it exits 3 by design, and under `set -e` a phase after it
+# would never run.
+run cargo build -p r2s --features sleigh
+run python3 tests/equiv/run_equiv.py --r2s "${CARGO_TARGET_DIR:-target}/debug/r2s" \
+    --baseline tests/equiv/baseline.json
 
 if [ "$dry_run" -eq 1 ]; then
     printf '\nquality gate dry run complete\n'

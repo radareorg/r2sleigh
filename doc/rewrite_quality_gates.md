@@ -39,12 +39,13 @@ The current phases are:
 5. Every Kani harness in every crate that has one, so none can stop compiling unnoticed.
 6. Targeted mutation testing for `crates/r2ssa/src/var.rs`.
 7. The harness contracts (`tests/equiv`, `tests/decbench`, and
-   `tests/test_no_plugin.py`) and the equivalence gate: every corpus and gold
-   function rendered from its stripped build and run beside its original,
-   held to `tests/equiv/baseline.json` (no function leaves `equal`; a new
-   `differs`, `uninit` or `ub` blocks). It replaces the plugin-driven 54-cell
-   cutover corpus, which could no longer run once the plugin was deleted.
+   `tests/test_no_plugin.py`).
 8. Optional ESIL differential testing when `R2SLEIGH_ESIL_DIFF_BINARY` is set.
+9. The equivalence gate, last: every corpus and gold function rendered from
+   its stripped build and run beside its original, held to
+   `tests/equiv/baseline.json` (no function leaves `equal`; a new `differs`,
+   `uninit` or `ub` blocks). It replaces the plugin-driven 54-cell cutover
+   corpus, which could no longer run once the plugin was deleted.
 
 ## Required Tools
 
@@ -111,7 +112,9 @@ expected behavior tightly enough. Add focused tests before accepting the rewrite
 
 The equivalence phase fails without a blessed baseline and never writes one:
 bless it with `--write-baseline` only after reading `records.json`, with a cause
-recorded for every record that is not `equal`.
+recorded for every record that is not `equal`. Until then `run_equiv.py` exits 3
+("no baseline") and the gate stops there, which is why the phase is the last
+one: every other phase has already run and reported.
 
 This gate does not replace the full validation bar in `AGENTS.md`; run the
 crate and plugin checks there when the touched subsystem requires it.
