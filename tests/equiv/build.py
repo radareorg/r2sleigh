@@ -2,7 +2,10 @@
 
 Each source is built non-PIE with ``-g`` (the oracle's copy: its DWARF says how
 to call each function, and it is the image the rendering runs inside), and
-then copied with ``strip --strip-all`` (the only file r2s is ever shown).
+then copied with ``strip --strip-all`` (the only file r2s is ever shown). The
+two live in sibling directories, ``oracle/`` and ``shown/``, under the same
+file name, so nothing that opens the shown copy finds its twin by editing the
+name it was given.
 Non-PIE keeps the link address and the run-time address the same, so an
 address the rendering spells is an address in the running image.
 
@@ -55,8 +58,10 @@ def default_sources() -> list[Path]:
 def build(source: Path, compiler: str, opt: str, out_dir: Path) -> Binary:
     where = out_dir / source.stem / f"{compiler}-{opt}"
     where.mkdir(parents=True, exist_ok=True)
-    unstripped = where / source.stem
-    stripped = where / f"{source.stem}.stripped"
+    unstripped = where / "oracle" / source.stem
+    stripped = where / "shown" / source.stem
+    unstripped.parent.mkdir(parents=True, exist_ok=True)
+    stripped.parent.mkdir(parents=True, exist_ok=True)
     binary = Binary(source, compiler, opt, unstripped, stripped)
     if shutil.which(compiler) is None:
         binary.error = f"{compiler} is not installed"

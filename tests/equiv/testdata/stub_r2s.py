@@ -24,8 +24,9 @@ unknown command. ``STUB_R2S_MODE`` picks the answer:
                 which the gate must never grade ``equal``;
 * ``refuse``    a record whose ``refused`` is set.
 
-The unstripped twin of the binary r2s is shown is the binary path minus
-``.stripped``: only this stand-in, never r2s, looks there.
+The unstripped twin of the binary r2s is shown lives at ``../oracle/<name>``
+beside the ``shown/`` directory (tests/equiv/build.py's layout): only this
+stand-in, never r2s, looks there.
 
 ``STUB_R2S_FAULTS`` is a comma list of ``<kind>@<hex address>`` applied when
 ``pddj`` runs there: ``abort`` (SIGABRT), ``sleep`` (hang for a minute),
@@ -82,12 +83,16 @@ def _c_type(dwarf, offset) -> str:
     return "void *"
 
 
+def _twin(binary: Path) -> Path:
+    """The unstripped build of the binary r2s was shown (build.py's layout)."""
+    return binary.resolve().parent.parent / "oracle" / binary.name
+
+
 def _delegate(binary: Path, address: int) -> dict:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from dwarf import Dwarf  # noqa: PLC0415
 
-    unstripped = Path(str(binary).removesuffix(".stripped"))
-    dwarf = Dwarf.read(unstripped)
+    dwarf = Dwarf.read(_twin(binary))
     sub = next(s for s in dwarf.subprograms() if s.low_pc == address)
     ret = _c_type(dwarf, sub.return_type)
     params = [_c_type(dwarf, p.type_offset) for p in sub.parameters]
@@ -110,7 +115,7 @@ def _fixture(binary: Path, address: int) -> dict:
     import selftest  # noqa: PLC0415
     from dwarf import Dwarf  # noqa: PLC0415
 
-    unstripped = Path(str(binary).removesuffix(".stripped"))
+    unstripped = _twin(binary)
     name = next(s.name for s in Dwarf.read(unstripped).subprograms() if s.low_pc == address)
     case = next((c for c in selftest.CASES
                  if c.function == name and c.expect in ("equal", "residual-trap")), None)

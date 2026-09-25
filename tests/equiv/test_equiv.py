@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -25,6 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import build  # noqa: E402
 import gate  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
@@ -351,6 +353,22 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(evidence["vector"], 3)
         self.assertEqual((counts["equal"], counts["differs"], counts["uninit"], counts["ub"]),
                          (1, 1, 1, 1))
+
+
+@unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
+class BuildTests(unittest.TestCase):
+    def test_the_shown_copy_has_a_directory_of_its_own_with_nothing_else_in_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = build.build(HERE / "selftest" / "fixture.c", "gcc", "O0", Path(tmp))
+            self.assertIsNone(binary.error)
+            self.assertNotEqual(binary.stripped.parent, binary.unstripped.parent)
+            self.assertEqual(binary.stripped.name, binary.unstripped.name)
+            self.assertEqual(sorted(p.name for p in binary.stripped.parent.iterdir()),
+                             [binary.stripped.name])
+            sections = subprocess.run(["readelf", "-SW", str(binary.stripped)],
+                                      capture_output=True, text=True, check=True).stdout
+            self.assertNotIn(".symtab", sections)
+            self.assertNotIn(".debug_", sections)
 
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
