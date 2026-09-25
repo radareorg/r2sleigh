@@ -99,6 +99,12 @@ DECLARATION = re.compile(
     r"^\s*(?!(?:return|goto|else|case|do)\b)(?:const\s+)?"
     r"[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$"
 )
+# A rendering defines each struct it reads through, `struct node { ... };`,
+# and a line inside that definition names a member, not an object: `n->next`
+# reads memory through `n`, and nothing the function declares is called
+# `next`.
+AGGREGATE_OPENS = re.compile(r"^\s*(?:struct|union)\s+\w+\s*\{\s*$")
+AGGREGATE_CLOSES = re.compile(r"^\s*\}\s*;\s*$")
 PROOF_REFUSED = re.compile(r"(\d+) refused")
 # `==`, `!=`, `<=`, `>=` and `!` are comparisons; an assignment is a lone `=`.
 ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
@@ -131,7 +137,14 @@ def undefined_reads(lines):
     the output.
     """
     found = []
+    member = False
     for line in lines:
+        if member:
+            member = not AGGREGATE_CLOSES.match(line)
+            continue
+        if AGGREGATE_OPENS.match(line):
+            member = True
+            continue
         declared = DECLARATION.match(line)
         if not declared:
             continue
