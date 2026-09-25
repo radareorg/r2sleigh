@@ -1109,6 +1109,126 @@ impl CStmt {
         }
     }
 
+    /// Every root expression of this statement and its descendants, for
+    /// rewriting in place, in the order [`Self::visit_exprs`] visits them.
+    pub(crate) fn visit_exprs_mut(&mut self, f: &mut impl FnMut(&mut CExpr)) {
+        match self {
+            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+                stmt.visit_exprs_mut(f);
+            }
+            Self::Decl { init, .. } => {
+                if let Some(init) = init {
+                    f(init);
+                }
+            }
+            Self::Expr(expr) => f(expr),
+            Self::Block(stmts) => stmts.iter_mut().for_each(|stmt| stmt.visit_exprs_mut(f)),
+            Self::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                f(cond);
+                then_body.visit_exprs_mut(f);
+                if let Some(body) = else_body {
+                    body.visit_exprs_mut(f);
+                }
+            }
+            Self::While { cond, body } | Self::DoWhile { body, cond } => {
+                f(cond);
+                body.visit_exprs_mut(f);
+            }
+            Self::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    init.visit_exprs_mut(f);
+                }
+                if let Some(cond) = cond {
+                    f(cond);
+                }
+                if let Some(update) = update {
+                    f(update);
+                }
+                body.visit_exprs_mut(f);
+            }
+            Self::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                f(expr);
+                for case in cases {
+                    f(&mut case.value);
+                    case.body
+                        .iter_mut()
+                        .for_each(|stmt| stmt.visit_exprs_mut(f));
+                }
+                if let Some(default) = default {
+                    default.iter_mut().for_each(|stmt| stmt.visit_exprs_mut(f));
+                }
+            }
+            Self::Return(expr) => {
+                if let Some(expr) = expr {
+                    f(expr);
+                }
+            }
+            Self::Empty
+            | Self::Break
+            | Self::Continue
+            | Self::Goto(_)
+            | Self::Label(_)
+            | Self::Comment(_)
+            | Self::Gap(_) => {}
+        }
+    }
+
+    /// Every statement this one holds, itself first, for rewriting in place.
+    ///
+    /// Observation and region markers are stepped through, so a statement
+    /// replaced here stays under the markers it stood under.
+    pub(crate) fn visit_stmts_mut(&mut self, f: &mut impl FnMut(&mut CStmt)) {
+        if let Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } = self {
+            stmt.visit_stmts_mut(f);
+            return;
+        }
+        f(self);
+        match self {
+            Self::Block(stmts) => stmts.iter_mut().for_each(|stmt| stmt.visit_stmts_mut(f)),
+            Self::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                then_body.visit_stmts_mut(f);
+                if let Some(body) = else_body {
+                    body.visit_stmts_mut(f);
+                }
+            }
+            Self::While { body, .. } | Self::DoWhile { body, .. } => body.visit_stmts_mut(f),
+            Self::For { init, body, .. } => {
+                if let Some(init) = init {
+                    init.visit_stmts_mut(f);
+                }
+                body.visit_stmts_mut(f);
+            }
+            Self::Switch { cases, default, .. } => {
+                for case in cases {
+                    case.body
+                        .iter_mut()
+                        .for_each(|stmt| stmt.visit_stmts_mut(f));
+                }
+                if let Some(default) = default {
+                    default.iter_mut().for_each(|stmt| stmt.visit_stmts_mut(f));
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Every type this statement and its descendants spell, in pre-order.
     pub fn visit_types(&self, f: &mut impl FnMut(&CType)) {
         match self {
@@ -1185,6 +1305,20 @@ impl CStmt {
 }
 
 impl CFunction {
+    /// Every expression node in the body, in pre-order, through markers.
+    pub(crate) fn visit_body_exprs(&self, f: &mut impl FnMut(&CExpr)) {
+        for stmt in &self.body {
+            stmt.visit_exprs(&mut |root| root.visit(f));
+        }
+    }
+
+    /// Every statement in the body, for rewriting one in place.
+    pub(crate) fn visit_body_stmts_mut(&mut self, f: &mut impl FnMut(&mut CStmt)) {
+        for stmt in &mut self.body {
+            stmt.visit_stmts_mut(f);
+        }
+    }
+
     /// Every type this rendering spells, for rewriting one in place.
     pub fn visit_types_mut(&mut self, f: &mut impl FnMut(&mut CType)) {
         f(&mut self.ret_type);
@@ -1475,6 +1609,14 @@ pub struct GapMarker {
 
 impl std::fmt::Display for GapMarker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A gap over no operation marks control the text could not state.
+        if self.ops == 0 {
+            return write!(
+                f,
+                "r2dec gap: {} at {:#x} ({})",
+                self.kind, self.block_addr, self.origin
+            );
+        }
         write!(
             f,
             "r2dec gap: {} at {:#x}:{} covering {} op{} ({})",
@@ -1861,8 +2003,6 @@ pub struct CFunction {
     /// asserts the function takes no arguments; a function whose interface is
     /// unknown must not make that claim.
     pub params_known: bool,
-    /// No return proves what the result carrier holds, so the return type is a marked gap.
-    pub return_unproven: bool,
     /// The functions this one calls, in the order their names sort.
     ///
     /// C requires a declaration before a call, and a decompiled function that
@@ -2006,6 +2146,10 @@ pub struct CExternDecl {
     /// Whether the source says the callee never returns: the block that
     /// calls it has no successor, and the prototype has to say so too.
     pub noreturn: bool,
+    /// Where in the program the name resolves: the entry a direct call
+    /// reaches, which is the stub for an import. `None` for a machine
+    /// operation, which is no place in the program at all.
+    pub address: Option<u64>,
 }
 
 /// A function parameter.
@@ -2044,7 +2188,6 @@ impl CFunction {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: true,
-            return_unproven: false,
             declaration_only: None,
         }
     }

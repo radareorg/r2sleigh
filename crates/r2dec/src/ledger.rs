@@ -456,11 +456,12 @@ impl ObligationLedger {
         }
         let closure = self.close();
         let mut line = format!(
-            "total={} rendered={} elided={} refused={} unaccounted={} conflicts={}",
+            "total={} rendered={} elided={} refused={} residual={} unaccounted={} conflicts={}",
             closure.total,
             closure.rendered,
             closure.elided,
             closure.refused,
+            closure.gapped,
             closure.unattributed,
             closure.conflicts,
         );

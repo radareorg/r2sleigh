@@ -1905,6 +1905,39 @@ impl SealedNativeFunction {
             .expect("every native function retains the source effect domain")
     }
 
+    /// Spell each read of an object nothing assigns as a residual, in the
+    /// sealed tree.
+    pub(crate) fn residualize_unassigned_reads(
+        &mut self,
+        entry_supplied: &std::collections::BTreeMap<
+            crate::symbol::SymbolId,
+            crate::binding_plan::EntrySupply,
+        >,
+    ) -> Vec<crate::UnassignedRead> {
+        self.ready.rewrite_sealed(|function| {
+            crate::residualize_unassigned_reads(function, entry_supplied)
+        })
+    }
+
+    /// The obligations a residual stands in for: each one with an occurrence
+    /// that evaluates a residual.
+    ///
+    /// An effect marker stands on the statement or expression that discharges
+    /// its obligation. A residual beneath it traps before that occurrence
+    /// completes, so the obligation is rendered and not performed, and the
+    /// ledger counts it with the residuals. Asked of the final tree, after
+    /// every rewrite, and before the ledger closes. One walk over the body,
+    /// each marker a lookup.
+    pub(crate) fn obligations_under_residuals(&self) -> BTreeSet<SemanticObligationId> {
+        let Some(locations) = self.ready.observation_locations() else {
+            return BTreeSet::new();
+        };
+        crate::prelude::markers_over_residuals(&self.ready.function().body)
+            .into_iter()
+            .filter_map(|marker| locations.effect(marker))
+            .collect()
+    }
+
     /// Finalize native admission from the exact sealed effect stream.
     ///
     /// The public audit retains the tuple even when admission fails. Refused
@@ -1916,10 +1949,7 @@ impl SealedNativeFunction {
         radare2_variadic_format_counts: usize,
         radare2_prototypes: usize,
         radare2_local_names: usize,
-        entry_supplied: &std::collections::BTreeMap<
-            crate::symbol::SymbolId,
-            crate::binding_plan::EntrySupply,
-        >,
+        unassigned: &[crate::UnassignedRead],
     ) {
         self.ledger = Some(ledger.clone());
         let audit = self.effect_obligation_audit();
@@ -1933,16 +1963,16 @@ impl SealedNativeFunction {
                 crate::residual_function_for_render_boundary(&function_name, &reason),
             );
         }
-        let mut function = self.ready.function().clone();
-        crate::note_unproven_constructs(
-            &mut function,
-            Some(ledger),
-            radare2_variadic_format_counts,
-            radare2_prototypes,
-            radare2_local_names,
-            entry_supplied,
-        );
-        self.ready = prepare_function_for_emission(function);
+        self.ready.rewrite_sealed(|function| {
+            crate::note_unproven_constructs(
+                function,
+                Some(ledger),
+                radare2_variadic_format_counts,
+                radare2_prototypes,
+                radare2_local_names,
+                unassigned,
+            );
+        });
     }
 
     pub(crate) fn effect_obligation_audit(&self) -> crate::EffectObligationAudit {
@@ -1968,6 +1998,59 @@ impl SealedNativeFunction {
 }
 
 impl LegacyObservationJournal {
+    /// The instruction each allocated observation belongs to.
+    ///
+    /// A cell is a value an instruction defines, a use it makes, a write it
+    /// performs or an effect its obligation owes, so each names that one
+    /// instruction. A certified read of a value names the instruction that
+    /// computed the value, which is not the one the reading line accounts for,
+    /// so it names none. One pass over the targets, each a lookup.
+    pub(crate) fn observation_locations(&self) -> crate::codegen::ObservationLocations {
+        let graph = self.source.graph();
+        let obligations = self.source.obligations().obligations();
+        let at = |inst: InstId| graph.instruction_for_inst(inst);
+        let defined_at = |value: ValueId| graph.def_inst(value).and_then(at);
+        let owed_at = |id: SemanticObligationId| {
+            obligations
+                .get(&id)
+                .and_then(|obligation| obligation.source.graph_inst())
+                .and_then(at)
+        };
+        // An effect marker stands on the occurrence that discharges its
+        // obligation, so a residual beneath it is one that occurrence
+        // evaluates, and the obligation traps rather than being performed.
+        let effects = self
+            .targets
+            .iter()
+            .map(|target| match *target {
+                ObservationTarget::Effect(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        crate::codegen::ObservationLocations::new(
+            self.targets
+                .iter()
+                .map(|target| match *target {
+                    ObservationTarget::Value(value)
+                    | ObservationTarget::ObjectAddress { value, .. } => defined_at(value),
+                    ObservationTarget::Use { site, .. } => at(site.inst),
+                    ObservationTarget::Write { inst, .. } => at(inst),
+                    ObservationTarget::StackAccess { access, .. } => at(access.inst),
+                    ObservationTarget::Effect(id) => owed_at(id),
+                    ObservationTarget::Gapped { cell, .. } => match cell {
+                        GapCell::Value(value) => defined_at(value),
+                        GapCell::Use { site, .. } => at(site.inst),
+                        GapCell::Write(inst) => at(inst),
+                        GapCell::Effect(id) => owed_at(id),
+                    },
+                    ObservationTarget::CertifiedValueRead { .. }
+                    | ObservationTarget::CertifiedArrayIndexRead { .. } => None,
+                })
+                .collect(),
+            effects,
+        )
+    }
+
     fn expr_value_observations(&self, expr: &CExpr) -> BTreeSet<ValueId> {
         let mut values = BTreeSet::new();
         expr.visit_render_observations(&mut |id| {

@@ -948,6 +948,7 @@ impl<'a> FoldingContext<'a> {
                     params: Some(inputs.iter().map(|input| word(input.size)).collect()),
                     variadic: false,
                     noreturn: false,
+                    address: None,
                 },
                 from_source_signature: false,
             });
@@ -1416,19 +1417,13 @@ impl<'a> FoldingContext<'a> {
                         {
                             return Err(OpLoweringRefusal::missing_machine_projection());
                         }
-                        // The value a caller may read here is unproven, so a marked gap stands where it would be.
                         if boundary.result_unproven {
-                            let gap = self
-                                .unproven_return_gap(block.addr, op_idx, source_inst)
-                                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-                            stmts.push(FoldedOpStmt {
-                                site: self
-                                    .normalized_site(block.addr, op_idx)
-                                    .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
-                                stmt: gap,
-                            });
+                            let stmt =
+                                self.unproven_return(block.addr, op_idx, source_inst, &mut stmts)?;
+                            (None, stmt)
+                        } else {
+                            (None, CStmt::Return(None))
                         }
-                        (None, CStmt::Return(None))
                     }
                     [_] => {
                         let prepared = self
@@ -2277,13 +2272,25 @@ impl<'a> FoldingContext<'a> {
             SSAOp::IntEqual { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Eq),
             SSAOp::IntNotEqual { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Ne),
             SSAOp::IntCarry { dst, a, b } => {
-                return self.arithmetic_flag_stmt(frame, dst, a, b, "carry");
+                return self.arithmetic_flag_stmt(frame, dst, a, b, crate::prelude::FlagOp::Carry);
             }
             SSAOp::IntSCarry { dst, a, b } => {
-                return self.arithmetic_flag_stmt(frame, dst, a, b, "scarry");
+                return self.arithmetic_flag_stmt(
+                    frame,
+                    dst,
+                    a,
+                    b,
+                    crate::prelude::FlagOp::SignedCarry,
+                );
             }
             SSAOp::IntSBorrow { dst, a, b } => {
-                return self.arithmetic_flag_stmt(frame, dst, a, b, "sborrow");
+                return self.arithmetic_flag_stmt(
+                    frame,
+                    dst,
+                    a,
+                    b,
+                    crate::prelude::FlagOp::SignedBorrow,
+                );
             }
             SSAOp::IntNegate { dst, src } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
@@ -2759,30 +2766,57 @@ impl<'a> FoldingContext<'a> {
         let operand = CType::Float(width);
         let input =
             self.retain_lowering_result(self.required_input(frame, 0, src, Some(&operand)))?;
-        let name = match op {
-            r2ssa::MachineFloatUnaryOp::Negate => {
-                let rhs = CExpr::unary(UnaryOp::Neg, input);
-                return self.assign_typed(lhs, rhs, Some(CValue::Typed(operand)));
-            }
-            r2ssa::MachineFloatUnaryOp::Absolute => "abs",
-            r2ssa::MachineFloatUnaryOp::SquareRoot => "sqrt",
-            r2ssa::MachineFloatUnaryOp::Ceiling => "ceil",
-            r2ssa::MachineFloatUnaryOp::Floor => "floor",
-            r2ssa::MachineFloatUnaryOp::Round => "round",
-            r2ssa::MachineFloatUnaryOp::IsNan => "isnan",
+        let Some(helper) = crate::prelude::FloatOp::of(op) else {
+            let rhs = CExpr::unary(UnaryOp::Neg, input);
+            return self.assign_typed(lhs, rhs, Some(CValue::Typed(operand)));
         };
-        let rhs = CExpr::call(
-            CExpr::External {
-                name: format!("r2sleigh_float_{name}_{width}"),
-                kind: crate::symbol::ExternalKind::Intrinsic,
-            },
-            vec![input],
-        );
+        // The prelude defines each helper at a float's width and at no other.
+        let helper = self.retain_lowering_result(
+            crate::prelude::Helper::float(helper, width)
+                .ok_or_else(OpLoweringRefusal::missing_machine_projection),
+        )?;
+        let rhs = helper.call(vec![input]);
         if op == r2ssa::MachineFloatUnaryOp::IsNan {
             let rhs = self.resolve_predicate_rhs_for_var(dst, rhs);
             return self.assign_typed(lhs, rhs, Some(CValue::Typed(CType::Bool)));
         }
         self.assign_typed(lhs, rhs, Some(CValue::Typed(operand)))
+    }
+
+    /// The return of a function whose result the interface leaves unproven.
+    ///
+    /// A residual of the declared carrier type is what is returned: the
+    /// function still compiles, and running it to this return traps rather
+    /// than handing back a value nothing proved. The gap's cells go on the
+    /// return, which is the one statement standing for them. Where no carrier
+    /// states a type to return, the gap traps where it stands and the return
+    /// says nothing.
+    fn unproven_return(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+        source_inst: r2ssa::InstId,
+        stmts: &mut Vec<FoldedOpStmt>,
+    ) -> OpLoweringResult<CStmt> {
+        let gap = self
+            .unproven_return_gap(block_addr, op_idx, source_inst)
+            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
+        let residual = self
+            .inputs
+            .function_return_type
+            .filter(|ty| !matches!(ty, CType::Void))
+            .and_then(|ty| crate::prelude::residual(ty, crate::prelude::ResidualCause::UnprovenReturn));
+        if let Some(residual) = residual {
+            let (_, observations) = gap.into_semantic_with_observations();
+            return Ok(observations.reapply(CStmt::Return(Some(residual))));
+        }
+        stmts.push(FoldedOpStmt {
+            site: self
+                .normalized_site(block_addr, op_idx)
+                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
+            stmt: gap,
+        });
+        Ok(CStmt::Return(None))
     }
 
     /// A machine integer operation, computed in the unsigned carrier its result has.
@@ -2808,26 +2842,21 @@ impl<'a> FoldingContext<'a> {
         dst: &SSAVar,
         a: &SSAVar,
         b: &SSAVar,
-        operation: &str,
+        operation: crate::prelude::FlagOp,
     ) -> OpLoweringResult<Option<CStmt>> {
         // The prelude defines the flag helpers at every C integer width, and
         // at no other.
         if a.size != b.size || !CType::is_integer_width(a.size.saturating_mul(8)) {
             return Err(OpLoweringRefusal::missing_machine_projection());
         }
+        let helper = crate::prelude::Helper::flag(operation, a.size.saturating_mul(8))
+            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
         let lhs = self.assignment_lhs_expr(dst)?;
         let operand_ty = uint_type_from_size(a.size);
         let left = self.required_input(frame, 0, a, Some(&operand_ty))?;
         let right = self.required_input(frame, 1, b, Some(&operand_ty))?;
-        let helper = format!("r2sleigh_int_{operation}_{}", a.size * 8);
         // The helper returns a `uint8_t`, and the assignment converts that.
-        let rhs = CExpr::call(
-            CExpr::External {
-                name: helper,
-                kind: crate::symbol::ExternalKind::Intrinsic,
-            },
-            vec![left, right],
-        );
+        let rhs = helper.call(vec![left, right]);
         let rhs = self.resolve_predicate_rhs_for_var(dst, rhs);
         Ok(self.assign_typed(lhs, rhs, Some(CValue::Typed(CType::u8()))))
     }

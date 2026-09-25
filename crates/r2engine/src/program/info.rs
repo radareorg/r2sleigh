@@ -23,9 +23,11 @@ pub struct FunctionInfo {
     pub convention: Option<String>,
     pub arguments: Vec<Argument>,
     pub locals: Vec<Local>,
-    /// What it returns, where r2types decided it.
+    /// What a definition of it declares it returns, as r2types states it: the
+    /// decided type, or the result carrier where the value is unproven.
     pub returns: Option<CTypeLike>,
-    /// Whether the boundary proves neither a result nor its absence.
+    /// Whether the boundary proves neither a result nor its absence, so
+    /// `returns` is the carrier a caller reads and not a proven type.
     pub return_unproven: bool,
     /// Whether the whole program proves control never comes back from it.
     pub noreturn: bool,
@@ -92,12 +94,9 @@ impl FunctionInfo {
             convention: facts.type_facts().callconv.clone(),
             arguments: arguments(artifact, sealed, &entities),
             returns: returns(artifact, sealed),
-            return_unproven: matches!(
-                sealed.return_type(),
-                Some(r2types::ReturnTypeFact::Refused(
-                    r2types::ReturnTypeRefusal::UnprovenBoundary
-                ))
-            ),
+            return_unproven: sealed
+                .return_type()
+                .is_some_and(r2types::ReturnTypeFact::is_unproven),
             locals: locals(artifact, &entities),
             noreturn,
         }
@@ -260,7 +259,7 @@ fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> 
         .memory_model()
         .default_address_bits();
     Some(r2types::spellable_c_type_like(
-        sealed.return_type()?.decided()?,
+        sealed.return_type()?.declared()?,
         bits,
     ))
 }

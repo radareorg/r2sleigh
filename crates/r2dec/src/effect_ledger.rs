@@ -491,10 +491,15 @@ fn upstream_zero_occurrence_outcome(
 }
 
 /// Build one closed-domain ledger from exact surviving occurrence counts.
+///
+/// `residual` names the obligations whose statements read a value through a
+/// residual the sealed tree was rewritten with: rendered, and trapping before
+/// they are performed, so they are counted with the gaps.
 pub(crate) fn build_obligation_ledger(
     prepared: &SsaArtifact,
     origins: &NormalizationOrigins,
     effects: &SurvivingEffectObservations,
+    residual: &std::collections::BTreeSet<SemanticObligationId>,
 ) -> ObligationLedger {
     let obligations = prepared.obligations();
     let mut ledger = ObligationLedger::open(obligations);
@@ -505,8 +510,10 @@ pub(crate) fn build_obligation_ledger(
         // Asked before the count. A gapped obligation has no occurrence
         // because the output says it could not be proven, and every rule
         // below reads a zero count as evidence that the obligation was
-        // unnecessary -- which would turn the gap into a silent elision.
-        if effects.gapped_effect(id) {
+        // unnecessary -- which would turn the gap into a silent elision. An
+        // obligation a residual read stands in for has its occurrence, and
+        // reading one as rendered would count a statement that traps.
+        if effects.gapped_effect(id) || residual.contains(&id) {
             if let Some((block_addr, op_idx)) = rendered_site(id) {
                 let _ = ledger.record(id, Outcome::Gapped { block_addr, op_idx });
             }

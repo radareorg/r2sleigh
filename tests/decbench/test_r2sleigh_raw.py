@@ -97,6 +97,45 @@ class SourceNameTests(unittest.TestCase):
         self.assertEqual(r2sleigh_raw._retitle(code, "usage", "usage"), code)
 
 
+class ProofCensusTests(unittest.TestCase):
+    """A rendering is fully proven only when it holds no residual at all."""
+
+    def test_every_residual_is_a_gap_whether_or_not_a_comment_names_it(self):
+        # An unproven return and an unassigned read print no gap comment; a
+        # marked gap does, and it says what it stands for.
+        code = "\n".join(
+            [
+                "uint64_t dispatch(int64_t RDI_0)",
+                "{",
+                "    uint64_t x = *(uint64_t*)(r2sleigh_residual_u64(1) + 40);",
+                "    r2sleigh_residual_void(2); /* r2dec gap: OpaqueUserOp at 0x1000:3 covering 2 ops (lower) */",
+                "    r2sleigh_residual_void(3); /* r2dec gap: UnresolvedBranchCondition at 0x1010 (structure) */",
+                "    return r2sleigh_residual_u64(4);",
+                "}",
+            ]
+        )
+        self.assertEqual(
+            r2sleigh_raw._residuals(code),
+            [
+                {"kind": "residual_u64", "site": "1", "ops": "0"},
+                {"kind": "OpaqueUserOp", "site": "2", "ops": "2"},
+                {"kind": "UnresolvedBranchCondition", "site": "3", "ops": "0"},
+                {"kind": "residual_u64", "site": "4", "ops": "0"},
+            ],
+        )
+        self.assertEqual(r2sleigh_raw._residuals("int f(void)\n{\n    return 0;\n}"), [])
+
+    def test_a_refusal_from_either_renderer_is_declined(self):
+        self.assertEqual(
+            r2sleigh_raw._refusal_cause("/* r2dec refused classify: native render refusal: x */"),
+            "native render refusal: x",
+        )
+        self.assertEqual(
+            r2sleigh_raw._refusal_cause("/* r2sleigh refused f: route */"), "route"
+        )
+        self.assertIsNone(r2sleigh_raw._refusal_cause("int f(void) { return 0; }"))
+
+
 class NativeRouteTests(unittest.TestCase):
     """The native route reads the engine's own listing, not radare2's analysis."""
 

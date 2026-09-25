@@ -2113,9 +2113,13 @@ mod tests {
         let output = audit.output();
 
         assert_eq!(audit.render_refusal(), None, "{output}");
-        // The body never returns, so its result is unproven too and the header says so.
+        // The body never returns, so its result is unproven too: the header
+        // declares the result carrier a caller would read, and claims no more.
+        assert!(output.starts_with("uint64_t gap_between("), "{output}");
+        // The operation that could not be proven traps where it stands, so
+        // the unit compiles and running it cannot go on as if it had.
         assert!(
-            output.starts_with("/* r2dec gap: UnprovenReturn */ gap_between("),
+            output.contains("r2sleigh_residual_void(1); /* r2dec gap: unmodelled-user-operation"),
             "{output}"
         );
         // The gap names the class of what it could not prove: a value of a
@@ -2133,8 +2137,8 @@ mod tests {
             "and so does the statement after it: {output}"
         );
         assert!(
-            output.contains("gapped"),
-            "the proof line reports the gap: {output}"
+            output.contains("1 residual;"),
+            "the proof line reports the obligation the residual stands for: {output}"
         );
     }
 

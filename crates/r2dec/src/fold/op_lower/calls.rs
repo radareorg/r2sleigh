@@ -253,6 +253,7 @@ impl<'a> FoldingContext<'a> {
             params: Some(params),
             variadic,
             noreturn: false,
+            address: cert.direct_target,
         };
         match self
             .callee_declarations
@@ -841,6 +842,7 @@ mod callee_return_tests {
             params: Some(vec![word.clone()]),
             variadic: false,
             noreturn: false,
+            address: None,
         };
         let reads_a_result = declaration(word.clone());
         let reads_none = declaration(CType::Void);
@@ -902,6 +904,7 @@ fn machine_declaration_admitting_both(
             params: Some(first_params.clone()),
             variadic: first.variadic,
             noreturn: first.noreturn,
+            address: first.address.or(second.address),
         });
     }
     let shared = first_params
@@ -922,5 +925,6 @@ fn machine_declaration_admitting_both(
         params: Some(first_params[..shared].to_vec()),
         variadic: true,
         noreturn: first.noreturn,
+        address: first.address.or(second.address),
     })
 }

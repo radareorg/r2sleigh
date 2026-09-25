@@ -21,17 +21,20 @@ BEGIN = re.compile(r"^R2SLEIGH_COV_BEGIN__(?P<name>.+)$")
 # apart from a binary that simply holds fewer.
 ASKED = re.compile(r"^R2SLEIGH_COV_ASKED__(?P<count>\d+)$")
 END = re.compile(r"^R2SLEIGH_COV_END__(?P<name>.+)$")
-FALLBACK = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
+# A refusal is a comment and no definition, whichever renderer wrote it: the
+# plugin era's `r2sleigh refused`, or the engine renderer's `r2dec refused`.
+FALLBACK = re.compile(r"/\* r2(?:sleigh|dec) refused \S+: (?P<cause>.*) \*/")
 # The shell answering with an error instead of a rendering is a refusal too.
 # It was counted as rendered, so a function that stopped before the renderer
 # even ran -- `invalid owned source snapshot` -- raised the score.
 SHELL_ERROR = re.compile(r"^r2s: (?P<cause>.*)$", re.M)
 
-# The proof line a rendering opens with. A marked gap renders, and is not
-# proven: its obligations are counted in the `gapped` column, which is what a
-# function that renders only part of itself reports.
+# The proof line a rendering opens with. A marked gap renders as a residual
+# that traps, and is not proven: its obligations are counted in the proof
+# line's `residual` column, which is what a function that renders only part of
+# itself reports. The baseline keeps calling the count `gapped`.
 PROOF = re.compile(r"/\* r2dec proof: (?P<proof>[^*]*)\*/")
-GAPPED = re.compile(r"(?P<count>\d+) gapped\b")
+GAPPED = re.compile(r"(?P<count>\d+) residual\b")
 # An address names a site in one build; the same cause in another build is at
 # another address.
 ADDRESS = re.compile(r"0x[0-9a-fA-F]+")

@@ -43,6 +43,17 @@ pub struct Rendering {
     pub response: EngineDecompileResponse,
 }
 
+impl Rendering {
+    /// The rendering as one object a tool reads: `pddj`.
+    ///
+    /// `name` is the program's name for the function at `entry`.
+    pub fn answer(&self, name: &str, entry: u64) -> crate::RenderedFunctionJson {
+        let function = self.prepared.artifact().artifact().function();
+        let definition = r2dec::rendered_name_of(function.name.as_deref(), entry);
+        crate::RenderedFunctionJson::of(&self.response, name, entry, definition)
+    }
+}
+
 /// Every function discovery found, and whether each body was walked as Thumb or why it could not be walked.
 pub(super) struct Survey {
     functions: Vec<Discovered>,

@@ -331,6 +331,79 @@ fn a_callee_whose_analysis_panics_is_unread_with_where_and_its_caller_renders() 
     );
 }
 
+/// The emission a response carries: the unit, its lines, its names.
+fn emission(response: &r2engine::EngineDecompileResponse) -> &r2dec::Emission {
+    match &response.output {
+        r2engine::EngineRendering::Function(rendered) => rendered.emission(),
+        r2engine::EngineRendering::Listing(text) => panic!("nothing rendered: {text}"),
+    }
+}
+
+/// The instructions one line of a unit names, by the text on it.
+fn named_by(emission: &r2dec::Emission, needle: &str) -> Vec<u64> {
+    let line = emission
+        .unit()
+        .lines()
+        .position(|line| line.contains(needle))
+        .map(|index| index + 1)
+        .unwrap_or_else(|| panic!("no line holds {needle}:\n{}", emission.unit()));
+    emission
+        .lines()
+        .iter()
+        .find(|entry| entry.line == line)
+        .map(|entry| entry.addrs.clone())
+        .unwrap_or_default()
+}
+
+/// Each line of the unit names the instructions it accounts for, only
+/// instructions the function has, and every name outside the function is
+/// linked to where it resolves.
+///
+/// `call 0x100a; ret`: the call statement is the call instruction's line and
+/// the return is the `ret`'s. The callee is a function of the program at
+/// 0x100a, and that address travels with its name.
+#[test]
+fn each_line_names_its_instructions_and_each_outside_name_its_address() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: CALLER.to_vec(),
+        name: "caller",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let emission = emission(&response);
+    let unit = emission.unit();
+
+    assert!(
+        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+        "{unit}"
+    );
+    assert!(named_by(emission, "return").contains(&0x1005), "{unit}");
+    let lines = unit.lines().count();
+    for line in emission.lines() {
+        assert!((1..=lines).contains(&line.line), "{line:?}\n{unit}");
+        assert!(
+            line.addrs
+                .iter()
+                .all(|addr| [0x1000, 0x1005].contains(addr)),
+            "{line:?} names an instruction the caller does not have:\n{unit}"
+        );
+    }
+
+    let links = emission.links();
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert_eq!(links[0].ident, "fcn_100a");
+    assert_eq!(links[0].kind, r2dec::report::LinkKind::Function);
+    assert_eq!(links[0].addr, Some(0x100a));
+
+    let signature = emission.signature().expect("the unit defines the caller");
+    assert!(signature.contains("caller("), "{signature}");
+    assert!(unit.contains(signature), "{signature}\n{unit}");
+    for variable in emission.variables() {
+        assert!(unit.contains(&variable.name), "{variable:?}\n{unit}");
+    }
+}
+
 #[test]
 fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -647,7 +720,7 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     // table, reading the entry and branching through it are the statement, not
     // operations beside it that a marker has to stand in for.
     assert!(!output.contains("r2dec gap"), "{output}");
-    assert!(!output.contains("gapped"), "{output}");
+    assert!(!output.contains("residual"), "{output}");
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
@@ -956,10 +1029,11 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
     assert!(!output.contains("r2dec gap"), "{output}");
 }
 
-/// Whether a rendering marks its return as unproven, in the header and at the return.
+/// Whether a rendering marks its return as unproven: the header declares the
+/// result carrier a caller reads, and the return hands back a residual of it,
+/// which traps if it is ever reached. Nothing else in the text claims a value.
 fn marks_an_unproven_return(output: &str) -> bool {
-    output.starts_with("/* r2dec gap: UnprovenReturn */")
-        && output.contains("r2dec gap: UnprovenReturn at")
+    output.starts_with("uint64_t ") && output.contains("return r2sleigh_residual_u64(")
 }
 
 #[test]
@@ -1050,16 +1124,23 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
         .lines()
         .find(|line| line.contains("r2dec proof:"))
         .unwrap_or_else(|| panic!("no proof line: {text}"));
-    // rbx is not an argument slot, and the function declares it and never
-    // assigns it: that is what held from entry means, and only that.
-    assert!(proof.contains("; 1 held from entry (RBX_0)"), "{text}");
+    // rbx is not an argument slot, and the function never assigns it: that is
+    // what held from entry means, and only that. C has no spelling for such a
+    // value, so the read is a residual rather than an indeterminate object.
+    assert!(
+        proof.contains("; 1 held from entry, read as residuals (RBX_0)"),
+        "{text}"
+    );
     // rsi is an argument slot with no parameter, so the rendering reads a value
     // its own signature says it was never given. It is not excused as held.
     assert!(
-        proof.contains("; 1 argument slot read with no parameter (RSI_0)"),
+        proof.contains("; 1 argument slot read with no parameter, read as residuals (RSI_0)"),
         "{text}"
     );
-    assert!(text.contains("uint64_t RSI_0;"), "{text}");
+    // Neither is declared as an object nothing assigns: each read traps.
+    assert!(!text.contains("uint64_t RSI_0;"), "{text}");
+    assert!(!text.contains("uint64_t RBX_0;"), "{text}");
+    assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 2, "{text}");
 
     // The first stack argument is an argument slot too: above the return
     // address, where the caller placed it. It was counted as held from entry.
@@ -1069,7 +1150,7 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
         .find(|line| line.contains("r2dec proof:"))
         .unwrap_or_else(|| panic!("no proof line: {text}"));
     assert!(
-        proof.contains("; 1 argument slot read with no parameter (stack_p8)"),
+        proof.contains("; 1 argument slot read with no parameter, read as residuals (stack_p8)"),
         "{text}"
     );
     assert!(!proof.contains("held from entry"), "{text}");
@@ -2262,19 +2343,28 @@ fn a_clear_direction_flag_survives_a_call() {
         let response = decompile(&machine.under(convention), &program, BASE).expect("decompile");
         let text = response.output.text();
         assert!(response.render_refusal.is_none(), "{convention}\n{text}");
-        // The import states no result, so the return is the only gap.
+        // The import states no result, so the return is a residual. The
+        // move's operands are registers the function entered holding, which C
+        // cannot spell, so each read of one is a residual too: four in all.
         assert!(marks_an_unproven_return(text), "{convention}\n{text}");
         assert_eq!(
-            text.matches("r2dec gap:").count(),
-            2,
+            text.matches("r2sleigh_residual_").count(),
+            4,
             "{convention}\n{text}"
         );
         assert!(
-            text.contains("to[transferred] = ((uint64_t*)RBP_0)[transferred];"),
+            text.contains("; 3 held from entry, read as residuals (R12_0, RBP_0, RBX_0)"),
             "{convention}\n{text}"
         );
+        // The copy still walks forward, which is what a clear flag means. The
+        // residuals' site numbers are the emitter's text order, not pinned here.
         assert!(
-            text.contains("while (transferred != R12_0)"),
+            text.contains("to[transferred] = ((uint64_t*)r2sleigh_residual_u64("),
+            "{convention}\n{text}"
+        );
+        assert!(text.contains("transferred++;"), "{convention}\n{text}");
+        assert!(
+            text.contains("while (transferred != r2sleigh_residual_u64("),
             "{convention}\n{text}"
         );
     }
@@ -2366,7 +2456,7 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
         "{effects:?}"
     );
     assert!(
-        text.contains(&format!(", {} gapped;", effects.gapped)),
+        text.contains(&format!(", {} residual;", effects.gapped)),
         "{text}"
     );
 }

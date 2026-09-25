@@ -32,6 +32,10 @@ use serde::{Deserialize, Serialize};
 
 mod json;
 use json::*;
+pub use json::{
+    RenderProofJson, RenderRefusalJson, RenderedFunctionJson, RenderedLineJson, RenderedLinkJson,
+    RenderedResidualJson, RenderedVariableJson,
+};
 pub use r2sleigh_lift::disasm::syntax::number_spans;
 pub use r2sleigh_lift::{NumberSpan, Syntax};
 

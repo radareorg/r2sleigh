@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Unit tests for the certification gate's reading of a rendering.
 
-The gate decides whether a rendering reads a value nothing wrote, and it takes
-the proof line's word for which unassigned reads are values held from entry.
-These pin that reading down on renderings the engine really printed. They are
-pure Python and run no binary.
+The gate decides whether a rendering reads a value nothing wrote. No proof
+line excuses one: the renderer writes a read of a value C cannot name as a
+residual. These pin that reading down on renderings the engine really printed.
+They are pure Python and run no binary.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ uint64_t _hi_qword(void)
 }
 """
 
-# `lea rax, [rbx + rsi]; ret`, as the engine renders it now.
+# `lea rax, [rbx + rsi]; ret`, as the engine rendered it before residuals.
 ENTRY_AND_ARGUMENT = """
 uint64_t _both(void)
 {
@@ -51,6 +51,18 @@ uint64_t _both(void)
         uint64_t RSI_0;
         uint64_t RBX_0;
         return RBX_0 + RSI_0;
+    }
+}
+"""
+
+# `lea rax, [rbx + rsi]; ret`, as the engine renders it now: each read of a
+# value C cannot name is a residual, and nothing is declared for it.
+RESIDUALS = """
+uint64_t _both(void)
+{
+    /* r2dec proof: 2 constructs are marked below; 7 source obligations: 4 rendered, 3 elided, 0 refused; 1 statements rendered; 1 held from entry, read as residuals (RBX_0); 1 argument slot read with no parameter, read as residuals (RSI_0) */
+    {
+        return r2sleigh_residual_u64(1) + r2sleigh_residual_u64(2);
     }
 }
 """
@@ -105,39 +117,18 @@ class ProofAccountingTests(unittest.TestCase):
         report = gate.uncertified_reads(lines(HI_QWORD_COUNTED))
         self.assertIn("reads RDI_0 which nothing assigns", report)
 
-    def test_held_values_are_excused_by_name(self) -> None:
-        self.assertEqual(gate.proof_entry_held(lines(HELD_ONLY)), {"RBX_0"})
-        self.assertEqual(gate.uncertified_reads(lines(HELD_ONLY)), "")
+    def test_a_value_held_from_entry_is_not_excused_by_the_proof_line(self) -> None:
+        # The renderer spells such a read as a residual. A proof line naming
+        # the value does not make a declared, unassigned object readable.
+        self.assertIn("reads RBX_0 which nothing assigns", gate.uncertified_reads(lines(HELD_ONLY)))
 
-    def test_an_unadmitted_argument_is_never_excused(self) -> None:
-        rendering = lines(ENTRY_AND_ARGUMENT)
-        self.assertEqual(gate.proof_entry_held(rendering), {"RBX_0"})
-        self.assertEqual(gate.proof_unadmitted(rendering), {"RSI_0"})
-        report = gate.uncertified_reads(rendering)
-        self.assertIn("reads RSI_0 from an argument slot no parameter admits", report)
-        self.assertNotIn("RBX_0", report)
+    def test_every_unassigned_read_is_reported(self) -> None:
+        report = gate.uncertified_reads(lines(ENTRY_AND_ARGUMENT))
+        self.assertIn("RSI_0", report)
+        self.assertIn("RBX_0", report)
 
-    def test_the_excuse_does_not_depend_on_where_a_name_is_declared(self) -> None:
-        # The held value declared second, after a read nothing excuses. A
-        # positional excuse dropped the first name, which was the wrong one.
-        rendering = lines(
-            """
-    /* r2dec proof: no individual construct is marked; 7 source obligations: 4 rendered, 3 elided, 0 refused; 3 statements rendered; 1 held from entry (RBX_0) */
-    {
-        uint64_t RDI_0;
-        uint64_t RBX_0;
-        return RBX_0 + RDI_0;
-    }
-"""
-        )
-        report = gate.uncertified_reads(rendering)
-        self.assertIn("reads RDI_0 which nothing assigns", report)
-        self.assertNotIn("RBX_0", report)
-
-    def test_a_count_its_names_do_not_match_excuses_nothing(self) -> None:
-        rendering = lines(HELD_ONLY.replace("1 held from entry", "2 held from entry"))
-        self.assertEqual(gate.proof_entry_held(rendering), set())
-        self.assertIn("reads RBX_0", gate.uncertified_reads(rendering))
+    def test_a_residual_is_no_unassigned_read(self) -> None:
+        self.assertEqual(gate.uncertified_reads(lines(RESIDUALS)), "")
 
 
 if __name__ == "__main__":

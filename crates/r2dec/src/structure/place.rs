@@ -505,9 +505,9 @@ impl ControlFlowStructurer<'_, '_> {
         let Some(cond) = cond else {
             // The test has no rendering, so the arms are written where they
             // would go and the certificate says the block's edges are unowned.
-            let mut stmts = vec![CStmt::comment(format!(
-                "r2dec residual: unresolved branch condition at 0x{addr:x}"
-            ))];
+            // Running both arms in a row is not what the machine does, so the
+            // text traps before them.
+            let mut stmts = vec![self.unresolved_control("UnresolvedBranchCondition", addr)];
             stmts.extend(else_body);
             stmts.extend(then_body);
             return Ok(stmts);
@@ -552,9 +552,7 @@ impl ControlFlowStructurer<'_, '_> {
         }
         order.sort_by_key(|target| placement.rpo.get(target).copied());
         let Some(selector) = selector else {
-            let mut stmts = vec![CStmt::comment(format!(
-                "r2dec residual: unresolved switch selector at 0x{addr:x}"
-            ))];
+            let mut stmts = vec![self.unresolved_control("UnresolvedSwitchSelector", addr)];
             for target in order {
                 stmts.extend(self.edge(placement, addr, target)?);
             }
@@ -658,5 +656,28 @@ fn ends_the_arm(body: &[CStmt]) -> bool {
             CStmt::Break | CStmt::Continue | CStmt::Return(_) | CStmt::Goto(_) => return true,
             _ => return false,
         };
+    }
+}
+
+impl ControlFlowStructurer<'_, '_> {
+    /// A branch or dispatch whose test has no rendering: a residual that
+    /// traps, standing before the arms written after it.
+    ///
+    /// It covers no operation's computation, and it does stand in for the
+    /// block's control obligations -- the test and the transfer the `if` or
+    /// `switch` would have discharged -- so it claims them, and the ledger
+    /// counts them as residual rather than finding them nowhere.
+    fn unresolved_control(&self, kind: &str, addr: u64) -> CStmt {
+        let obligations = self.exact_control_obligations(std::iter::once(addr));
+        self.fold_ctx.residual_control(
+            crate::ast::GapMarker {
+                kind: kind.to_owned(),
+                origin: "structure".to_owned(),
+                block_addr: addr,
+                op_idx: 0,
+                ops: 0,
+            },
+            &obligations,
+        )
     }
 }

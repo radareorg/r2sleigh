@@ -105,6 +105,13 @@ pub enum ExternalKind {
     /// An operation on a carrier wider than any C integer, which the
     /// rendering defines above the function it is called from.
     BitVector(crate::bitvector::BitVectorHelper),
+    /// A scalar operation C has no operator for, which the translation unit
+    /// defines in its prelude.
+    Helper(crate::prelude::Helper),
+    /// A residual of this type, standing for a construct unproven for this
+    /// cause. The prelude defines one helper per type, which every residual
+    /// of that type calls.
+    Residual(crate::prelude::ResidualType, crate::prelude::ResidualCause),
 }
 
 impl std::fmt::Display for ExternalKind {
@@ -115,6 +122,8 @@ impl std::fmt::Display for ExternalKind {
             Self::Global => "global",
             Self::Intrinsic => "intrinsic",
             Self::BitVector(_) => "bit-vector helper",
+            Self::Helper(_) => "helper",
+            Self::Residual(..) => "residual",
         })
     }
 }

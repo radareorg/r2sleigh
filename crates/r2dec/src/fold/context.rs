@@ -933,6 +933,44 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// A gap over control the structure could not state, claiming the
+    /// obligations it stands in for.
+    ///
+    /// Each obligation is claimed as an effect cell, as an unproven return
+    /// claims its value's, so the ledger reads it as residual; a claim the
+    /// journal refuses is retained as the first observation error, and the
+    /// seal reports it rather than admitting an unclaimed trap.
+    pub(crate) fn residual_control(
+        &self,
+        marker: crate::ast::GapMarker,
+        obligations: &BTreeSet<r2ssa::SemanticObligationId>,
+    ) -> crate::ast::CStmt {
+        let (Some(journal), Ok(op_idx)) = (
+            self.inputs.observation_journal,
+            u32::try_from(marker.op_idx),
+        ) else {
+            return crate::ast::CStmt::Gap(marker);
+        };
+        let anchor = crate::shadow_report::GapAnchor {
+            block_addr: marker.block_addr,
+            op_idx,
+        };
+        let cells = obligations
+            .iter()
+            .map(|id| crate::observation_journal::GapCell::Effect(*id))
+            .collect::<Vec<_>>();
+        match journal
+            .borrow_mut()
+            .gap_stmt(anchor, marker.clone(), &cells)
+        {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                crate::ast::CStmt::Gap(marker)
+            }
+        }
+    }
+
     #[track_caller]
     pub(super) fn retain_first_observation_error(
         &self,

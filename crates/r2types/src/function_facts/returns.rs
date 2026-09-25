@@ -11,6 +11,18 @@ pub enum ReturnTypeFact {
         ty: CTypeLike,
         by: ReturnTypeEvidence,
     },
+    /// No exit hands back a value, and the boundary does not prove there is
+    /// none.
+    ///
+    /// No type is claimed for what the function returns. A caller still reads
+    /// the convention's result carrier after the call, so a definition declares
+    /// that carrier at its storage word and hands back a residual of it at
+    /// every return: the header states only where the machine leaves a result,
+    /// and the value is marked unproven where it is returned. `None` where no
+    /// convention names a carrier C can declare.
+    Unproven {
+        carrier: Option<CTypeLike>,
+    },
     Refused(ReturnTypeRefusal),
 }
 
@@ -40,8 +52,6 @@ pub enum ReturnTypeRefusal {
     UntypedTailCall,
     /// Two exits hand back different types.
     Disagreement,
-    /// No exit hands back a value, and the boundary does not prove there is none.
-    UnprovenBoundary,
 }
 
 /// What one exit says about the returned type.
@@ -56,8 +66,39 @@ impl ReturnTypeFact {
     pub const fn decided(&self) -> Option<&CTypeLike> {
         match self {
             Self::Decided { ty, .. } => Some(ty),
+            Self::Unproven { .. } | Self::Refused(_) => None,
+        }
+    }
+
+    /// The type a definition declares it returns: the decided type, or where
+    /// the value is unproven, the result carrier a caller reads.
+    ///
+    /// The one answer every view of the function reads -- the rendered header
+    /// and the function's own description -- so they cannot state two types.
+    pub const fn declared(&self) -> Option<&CTypeLike> {
+        match self {
+            Self::Decided { ty, .. } => Some(ty),
+            Self::Unproven { carrier } => carrier.as_ref(),
             Self::Refused(_) => None,
         }
+    }
+
+    /// Whether the boundary leaves what the function returns unproven.
+    pub const fn is_unproven(&self) -> bool {
+        matches!(self, Self::Unproven { .. })
+    }
+
+    /// An unproven result, declared as the carrier a caller reads after the
+    /// call: the convention's result slot where the interface proves nothing,
+    /// at its storage word, where C has an integer that wide.
+    fn unproven(source: &r2ssa::SsaArtifact) -> Self {
+        let carrier = source
+            .machine_context()
+            .return_value_carrier()
+            .map(|storage| storage.size.saturating_mul(8))
+            .filter(|bits| CTypeLike::is_integer_width(*bits))
+            .map(CTypeLike::uint);
+        Self::Unproven { carrier }
     }
 
     /// Decide in order: the declared graph, the declaration, a void boundary, the recovered carrier, what every exit agrees on.
@@ -101,14 +142,14 @@ impl ReturnTypeFact {
             .values()
             .any(|boundary| boundary.result_unproven)
         {
-            return Self::Refused(ReturnTypeRefusal::UnprovenBoundary);
+            return Self::unproven(source);
         }
         if let Some(ty) = graph {
             return Self::decided_by(ty, ReturnTypeEvidence::Carrier);
         }
         match agreed(exits(source, signatures, evidence)) {
             Ok(Some(ty)) => Self::decided_by(ty, ReturnTypeEvidence::Exits),
-            Ok(None) => Self::Refused(ReturnTypeRefusal::UnprovenBoundary),
+            Ok(None) => Self::unproven(source),
             Err(refusal) => Self::Refused(refusal),
         }
     }

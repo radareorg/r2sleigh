@@ -317,33 +317,35 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
                 CExpr::cast(to.clone(), expr)
             };
         }
-        (CType::Float(bits), _) => {
-            let raw = CExpr::call(
-                CExpr::External {
-                    name: format!("r2sleigh_float_to_bits_{bits}"),
-                    kind: crate::symbol::ExternalKind::Intrinsic,
-                },
-                vec![expr],
-            );
+        (CType::Float(bits), _) if crate::prelude::Helper::float_to_bits(*bits).is_some() => {
+            let raw = crate::prelude::Helper::FloatToBits { bits: *bits }.call(vec![expr]);
             return if *to == CType::uint(*bits) {
                 raw
             } else {
                 CExpr::cast(to.clone(), raw)
             };
         }
-        (_, CType::Float(bits)) => {
+        (_, CType::Float(bits)) if crate::prelude::Helper::float_from_bits(*bits).is_some() => {
             let raw = if *from == CType::uint(*bits) {
                 expr
             } else {
                 CExpr::cast(CType::uint(*bits), expr)
             };
-            return CExpr::call(
-                CExpr::External {
-                    name: format!("r2sleigh_float_from_bits_{bits}"),
-                    kind: crate::symbol::ExternalKind::Intrinsic,
-                },
-                vec![raw],
-            );
+            return crate::prelude::Helper::FloatFromBits { bits: *bits }.call(vec![raw]);
+        }
+        // A float no C type holds (x87's 80 bits, a half) has no bits C can
+        // read the other way. The operand is still evaluated, so what it
+        // spells is still written, and the conversion is a residual. The
+        // comma is bracketed: unbracketed, it would split a call's arguments
+        // or end a declaration's initializer.
+        (CType::Float(_), _) | (_, CType::Float(_)) => {
+            return match crate::prelude::residual(
+                to,
+                crate::prelude::ResidualCause::UnrepresentableFloat,
+            ) {
+                Some(residual) => CExpr::Paren(Box::new(CExpr::Comma(vec![expr, residual]))),
+                None => expr,
+            };
         }
         _ => {}
     }
@@ -457,6 +459,33 @@ mod tests {
             CExpr::Cast { ty, expr, role } => Some((ty.clone(), (**expr).clone(), *role)),
             _ => None,
         }
+    }
+
+    /// A float C has no type for converts as the operand, still evaluated,
+    /// then a residual of the target -- one bracketed operand, so a call
+    /// argument or an initializer holding it is not split at the comma.
+    #[test]
+    fn a_float_c_cannot_hold_converts_to_one_bracketed_residual() {
+        let value = name(CType::Float(80));
+        let converted = convert(value.clone(), &typed(CType::Float(80)), &CType::u64(), 64);
+        let CExpr::Paren(inner) = converted else {
+            panic!("an unbracketed conversion: {converted:?}");
+        };
+        let CExpr::Comma(items) = *inner else {
+            panic!("not the operand then a residual: {inner:?}");
+        };
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0], value);
+        assert!(
+            matches!(&items[1], CExpr::Call { func, .. }
+            if crate::prelude::residual_callee(func)
+                == Some((
+                    crate::prelude::ResidualType::Unsigned(64),
+                    crate::prelude::ResidualCause::UnrepresentableFloat,
+                ))),
+            "{:?}",
+            items[1]
+        );
     }
 
     #[test]

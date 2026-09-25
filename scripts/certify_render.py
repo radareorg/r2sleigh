@@ -100,14 +100,6 @@ DECLARATION = re.compile(
     r"[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$"
 )
 PROOF_REFUSED = re.compile(r"(\d+) refused")
-# What the rendering says it could not spell: a value the function entered
-# holding is declared and never assigned because C has no other way to name it.
-# The proof line names each one; a count alone cannot say which of the
-# unassigned reads it excuses, so a count with no names excuses none.
-PROOF_ENTRY_HELD = re.compile(r"(\d+) held from entry \(([^)]*)\)")
-# An argument slot no recovered parameter admits. It is named so a reader can
-# find it, and never excused: the signature says the function was not given it.
-PROOF_UNADMITTED = re.compile(r"(\d+) argument slots? read with no parameter \(([^)]*)\)")
 # `==`, `!=`, `<=`, `>=` and `!` are comparisons; an assignment is a lone `=`.
 ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
 
@@ -157,32 +149,6 @@ def undefined_reads(lines):
     return found
 
 
-def proof_names(lines, pattern):
-    """The names one clause of the proof line lists, or none.
-
-    The clause states its count beside its names. A count the names do not
-    match is an accounting the line cannot stand behind, so it lists nothing.
-    """
-    for line in lines:
-        if "r2dec proof:" in line:
-            found = pattern.search(line)
-            if not found:
-                return set()
-            names = {name.strip() for name in found.group(2).split(",") if name.strip()}
-            return names if len(names) == int(found.group(1)) else set()
-    return set()
-
-
-def proof_entry_held(lines):
-    """The values the proof line says the function entered holding."""
-    return proof_names(lines, PROOF_ENTRY_HELD)
-
-
-def proof_unadmitted(lines):
-    """The argument slots the proof line says no parameter admits."""
-    return proof_names(lines, PROOF_UNADMITTED)
-
-
 def proof_refusals(lines):
     for line in lines:
         if "r2dec proof:" in line:
@@ -218,32 +184,21 @@ def lint(args, binary, found):
 
 
 def uncertified_reads(lines):
-    """What a rendering reads that nothing assigns and the proof does not excuse.
+    """What a rendering reads that nothing assigns.
 
-    A value held from entry is declared and never assigned on purpose, and the
-    proof line names each one. Exactly those names are excused -- by name, not
-    by count, so an excuse can never land on a different read. Everything else
-    is a read of something the program never produced, and an argument slot
-    the proof says no parameter admits is one of them.
+    Nothing is excused. A value the function entered holding, an argument slot
+    no parameter admits, and a result nothing claimed all have no spelling in
+    C, and the renderer writes each read of one as a residual that traps rather
+    than declaring an object it never assigns. So a name declared, never
+    assigned and read is a read of something the program never produced,
+    whatever the proof line says.
     """
-    held = proof_entry_held(lines)
-    unadmitted = proof_unadmitted(lines)
-    undefined = [name for name in undefined_reads(lines) if name not in held]
+    undefined = undefined_reads(lines)
     if not undefined:
         return ""
-    parts = []
-    missing = [name for name in undefined if name in unadmitted]
-    unwritten = [name for name in undefined if name not in unadmitted]
-    if unwritten:
-        parts.append("reads {} which nothing assigns".format(", ".join(unwritten)))
-    if missing:
-        parts.append(
-            "reads {} from an argument slot no parameter admits".format(
-                ", ".join(missing)
-            )
-        )
-    parts.append("proof says {} refused".format(proof_refusals(lines)))
-    return ", ".join(parts)
+    return "reads {} which nothing assigns, proof says {} refused".format(
+        ", ".join(undefined), proof_refusals(lines)
+    )
 
 
 

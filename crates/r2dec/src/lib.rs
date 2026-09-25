@@ -43,6 +43,8 @@ pub(crate) mod normalize;
 mod observation_journal;
 mod placement;
 pub(crate) mod planner;
+pub mod prelude;
+pub mod report;
 mod shadow_report;
 pub(crate) mod single_evaluation;
 pub(crate) mod stage_timing;
@@ -53,6 +55,7 @@ pub(crate) mod unrendered;
 mod variable;
 
 use crate::codegen::{CodeGenerator, EmissionReadyFunction, prepare_function_for_emission};
+pub use crate::codegen::{Emission, ResidualSite, SourceLine};
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
 use crate::observation_journal::{
@@ -299,59 +302,6 @@ pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String 
     planner::artifact_guard_fallback_comment(func_name, reason)
 }
 
-/// Count the residual markers the structurer left in a rendered body.
-///
-/// The structurer already refuses per construct: an unresolved branch, loop,
-/// switch selector or case value becomes a `r2dec residual:` comment where that
-/// construct would have been. Counting them is a reading of the body, not a
-/// second opinion about what was proven.
-fn count_residual_markers(stmts: &[CStmt]) -> usize {
-    fn walk(stmts: &[CStmt], found: &mut usize) {
-        for stmt in stmts {
-            walk_one(stmt, found);
-        }
-    }
-    fn walk_one(stmt: &CStmt, found: &mut usize) {
-        match stmt.unobserved() {
-            CStmt::Comment(text) => {
-                if text.contains("r2dec residual:") {
-                    *found += 1;
-                }
-            }
-            CStmt::Block(body) => walk(body, found),
-            CStmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                walk_one(then_body, found);
-                if let Some(else_body) = else_body {
-                    walk_one(else_body, found);
-                }
-            }
-            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk_one(body, found),
-            CStmt::For { init, body, .. } => {
-                if let Some(init) = init {
-                    walk_one(init, found);
-                }
-                walk_one(body, found);
-            }
-            CStmt::Switch { cases, default, .. } => {
-                for case in cases {
-                    walk(&case.body, found);
-                }
-                if let Some(default) = default {
-                    walk(default, found);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut found = 0;
-    walk(stmts, &mut found);
-    found
-}
-
 /// State what the rendering did and did not show.
 ///
 /// "Nothing was marked" and "everything was shown to be right" are different
@@ -370,10 +320,12 @@ fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
+    unassigned: &[UnassignedRead],
 ) {
     let rendered_nothing = func.body.is_empty();
-    let residuals = count_residual_markers(&func.body);
+    // Each residual is a construct the rendering says it did not prove, and
+    // it traps where it stands: a residual call, or a marked gap.
+    let residuals = crate::prelude::count_residuals(func);
     let detail = if rendered_nothing {
         "rendering produced no statements".to_string()
     } else {
@@ -389,11 +341,11 @@ fn note_unproven_constructs(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
                 closure.total, closure.rendered, closure.elided, closure.refused
             );
-            // A gapped function is rendered, not proven. The count says how
-            // many obligations a marked gap accounts for, so the proof line
-            // never reads as clean when part of the body went unproven.
+            // A function with a residual is rendered, not proven. The count
+            // says how many obligations a residual stands in for, so the proof
+            // line never reads as clean when part of the body went unproven.
             if closure.gapped > 0 {
-                let _ = write!(&mut line, ", {} gapped", closure.gapped);
+                let _ = write!(&mut line, ", {} residual", closure.gapped);
             }
             // The column that used to have no name. Saying nothing here is what let a
             // gutted body report as clean, so it is spelled out whenever it is not zero.
@@ -412,7 +364,7 @@ fn note_unproven_constructs(
         }
         _ => detail,
     };
-    note_entry_supplied_reads(&mut detail, func, entry_supplied);
+    note_unassigned_reads(&mut detail, unassigned);
     let radare_typed_objects =
         func.extern_objects
             .iter()
@@ -489,123 +441,238 @@ fn note_unproven_constructs(
     func.body.insert(0, CStmt::comment(text));
 }
 
-/// Name the objects the body declares, never assigns, and reads because they
-/// hold a value from before the first statement.
-///
-/// C cannot spell a value the function entered holding, so each is declared
-/// and never assigned. The line names exactly those, because a count cannot
-/// say which of the unassigned reads it excuses, and one it counted but the
-/// body never spells excuses a read it should not. An argument slot no
-/// parameter admits is named apart: the signature says the function was not
-/// given that value, so reading it is a gap in the interface, not a value held
-/// from entry.
-fn note_entry_supplied_reads(
-    detail: &mut String,
-    func: &CFunction,
-    entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
-) {
-    let (held, unadmitted) = entry_supplied_reads(func, entry_supplied);
-    if !held.is_empty() {
-        let _ = write!(
-            detail,
-            "; {} held from entry ({})",
-            held.len(),
-            held.join(", ")
-        );
+/// Why a read the rendering spells as a residual has no value C can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum UnassignedCause {
+    /// Held from entry, in storage no convention argument slot delivers.
+    Held,
+    /// Delivered in an argument slot no recovered parameter admits.
+    UnadmittedArgument,
+    /// Declared and never assigned, with no value from entry behind it: a
+    /// result a call left in a register nothing claimed, for one.
+    Unassigned,
+}
+
+impl UnassignedCause {
+    /// The cause each residual standing for such a read carries.
+    const fn residual(self) -> crate::prelude::ResidualCause {
+        match self {
+            Self::Held => crate::prelude::ResidualCause::HeldFromEntry,
+            Self::UnadmittedArgument => crate::prelude::ResidualCause::UnadmittedArgument,
+            Self::Unassigned => crate::prelude::ResidualCause::NeverAssigned,
+        }
     }
-    if !unadmitted.is_empty() {
-        let noun = if unadmitted.len() == 1 {
-            "argument slot"
-        } else {
-            "argument slots"
-        };
+}
+
+/// One object whose every read is now a residual, and why.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct UnassignedRead {
+    pub(crate) cause: UnassignedCause,
+    pub(crate) name: String,
+}
+
+/// Name the objects whose reads became residuals, by why each had no value.
+///
+/// A count cannot say which reads it excuses, so each is named. An argument
+/// slot no parameter admits is named apart: the signature says the function
+/// was not given that value, so reading it is a gap in the interface, not a
+/// value held from entry.
+fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
+    for (cause, one, many) in [
+        (UnassignedCause::Held, "held from entry", "held from entry"),
+        (
+            UnassignedCause::UnadmittedArgument,
+            "argument slot read with no parameter",
+            "argument slots read with no parameter",
+        ),
+        (
+            UnassignedCause::Unassigned,
+            "never assigned",
+            "never assigned",
+        ),
+    ] {
+        let names = unassigned
+            .iter()
+            .filter(|read| read.cause == cause)
+            .map(|read| read.name.as_str())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            continue;
+        }
+        let noun = if names.len() == 1 { one } else { many };
         let _ = write!(
             detail,
-            "; {} {noun} read with no parameter ({})",
-            unadmitted.len(),
-            unadmitted.join(", ")
+            "; {} {noun}, read as residuals ({})",
+            names.len(),
+            names.join(", ")
         );
     }
 }
 
-/// The entry-supplied objects the body declares without a value, never
-/// writes, and reads, spelled and sorted: first those held from entry, then
-/// those an unadmitted argument slot delivers.
+/// Spell every read of an object nothing assigns as a residual.
 ///
-/// Read off the final tree rather than off placement's decisions, because the
-/// tree is what is printed and a later trial can still move a declaration. One
-/// walk over the statements for declarations and one over the expressions for
-/// writes and mentions, so the cost is linear in the body.
-fn entry_supplied_reads(
-    func: &CFunction,
+/// An object declared without a value, that no statement writes and whose
+/// address is never taken, is indeterminate at every read: C has no spelling
+/// for a value the function entered holding, or for one a call left in a
+/// register nothing claimed. A read of it is undefined behaviour that looks
+/// like a value. Each read becomes a residual of the object's type instead,
+/// which traps if it is reached, and the declaration nothing reads any more
+/// goes. The binding plan says which of these hold a value from entry; the
+/// rest were never given one.
+///
+/// Only a scalar: a callee may write an aggregate or an array through its
+/// decayed name, so no statement writing it is not proof that nothing does.
+/// And only an object written nowhere, which makes the answer exact without
+/// dataflow; an object written on some paths and read before that on others
+/// needs the reaching definitions the SSA versions give, and is left as it is.
+///
+/// The residual keeps the markers the read carried, so the line map still
+/// names the instruction that read it, and an obligation whose occurrence
+/// held the read is found under a residual when the ledger is closed.
+///
+/// Read off the final tree, because that is what is printed: one walk for the
+/// declarations, one for the writes and the reads, one to rewrite -- linear in
+/// the body.
+pub(crate) fn residualize_unassigned_reads(
+    func: &mut CFunction,
     entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
-) -> (Vec<String>, Vec<String>) {
+) -> Vec<UnassignedRead> {
+    let declared = unassigned_scalar_reads(func);
+    if declared.is_empty() {
+        return Vec::new();
+    }
+    let cause = |symbol: &SymbolId| match entry_supplied.get(symbol) {
+        Some(binding_plan::EntrySupply::Held) => UnassignedCause::Held,
+        Some(binding_plan::EntrySupply::UnadmittedArgument) => UnassignedCause::UnadmittedArgument,
+        None => UnassignedCause::Unassigned,
+    };
+    let declared = declared
+        .into_iter()
+        .map(|(symbol, ty)| {
+            let cause = cause(&symbol);
+            (symbol, (ty, cause))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for stmt in &mut func.body {
+        stmt.visit_exprs_mut(&mut |root| {
+            let expr = std::mem::replace(root, CExpr::IntLit(0));
+            *root = residualize_reads_in(expr, &declared);
+        });
+    }
+    func.visit_body_stmts_mut(&mut |stmt| {
+        if let CStmt::Decl {
+            name, init: None, ..
+        } = stmt
+            && declared.contains_key(name)
+        {
+            *stmt = CStmt::Empty;
+        }
+    });
+    func.locals
+        .retain(|local| !declared.contains_key(&local.name));
+    let symbols = func.symbols.borrow();
+    let mut objects = declared
+        .iter()
+        .map(|(symbol, (_, cause))| UnassignedRead {
+            cause: *cause,
+            name: symbols.name(*symbol).to_string(),
+        })
+        .collect::<Vec<_>>();
+    objects.sort();
+    objects
+}
+
+/// One expression with each read of a `declared` object replaced by a
+/// residual of its type, under the markers the read carried.
+fn residualize_reads_in(
+    expr: CExpr,
+    declared: &BTreeMap<SymbolId, (CType, UnassignedCause)>,
+) -> CExpr {
+    if let CExpr::Var(symbol) = expr.unobserved()
+        && let Some(residual) = declared
+            .get(symbol)
+            .and_then(|(ty, cause)| crate::prelude::residual(ty, cause.residual()))
+    {
+        let (_, ids) = expr.into_semantic_with_observations();
+        return CExpr::observe_all(ids, residual);
+    }
+    expr.map_children(&mut |child| residualize_reads_in(child, declared))
+}
+
+/// The scalars the function declares without a value, never writes, and
+/// reads, at the types they are declared.
+fn unassigned_scalar_reads(func: &CFunction) -> BTreeMap<SymbolId, CType> {
     let mut declared = func
         .locals
         .iter()
-        .map(|local| local.name)
-        .collect::<BTreeSet<_>>();
-    for stmt in &func.body {
-        uninitialized_declarations(stmt, &mut declared);
-    }
-    declared.retain(|symbol| entry_supplied.contains_key(symbol));
-    if declared.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
+        .map(|local| (local.name, local.ty.clone()))
+        .collect::<BTreeMap<_, _>>();
+    // A declaration with a value writes the object it declares, and one name
+    // declared twice -- once with a value -- is written by that one.
     let mut written = BTreeSet::new();
-    let mut mentioned = BTreeSet::new();
     for stmt in &func.body {
-        stmt.visit_exprs(&mut |expr| {
-            expr.visit(&mut |node| match node {
-                CExpr::Var(symbol) => {
-                    mentioned.insert(*symbol);
-                }
-                CExpr::Binary { op, left, .. } if op.writes_left_operand() => {
-                    written.extend(written_object(left));
-                }
-                CExpr::Unary {
-                    op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
-                    operand,
-                }
-                // Whoever holds the address may write through it.
-                | CExpr::AddrOf(operand) => {
-                    written.extend(written_object(operand));
-                }
-                _ => {}
-            });
-        });
+        declarations(stmt, &mut declared, &mut written);
     }
-    let symbols = func.symbols.borrow();
-    let mut held = Vec::new();
-    let mut unadmitted = Vec::new();
-    for symbol in declared {
-        if written.contains(&symbol) || !mentioned.contains(&symbol) {
-            continue;
-        }
-        let spelling = symbols.name(symbol).to_string();
-        match entry_supplied[&symbol] {
-            binding_plan::EntrySupply::Held => held.push(spelling),
-            binding_plan::EntrySupply::UnadmittedArgument => unadmitted.push(spelling),
-        }
+    if declared.is_empty() {
+        return declared;
     }
-    held.sort();
-    unadmitted.sort();
-    (held, unadmitted)
+    let mut mentioned = BTreeSet::new();
+    func.visit_body_exprs(&mut |node| match node {
+        CExpr::Var(symbol) => {
+            mentioned.insert(*symbol);
+        }
+        CExpr::Binary { op, left, .. } if op.writes_left_operand() => {
+            written.extend(written_object(left));
+        }
+        CExpr::Unary {
+            op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+            operand,
+        }
+        // Whoever holds the address may write through it.
+        | CExpr::AddrOf(operand) => {
+            written.extend(written_object(operand));
+        }
+        _ => {}
+    });
+    declared.retain(|symbol, ty| {
+        mentioned.contains(symbol)
+            && !written.contains(symbol)
+            && !matches!(
+                crate::prelude::ResidualType::of(ty),
+                None | Some(crate::prelude::ResidualType::Void)
+            )
+    });
+    declared
 }
 
-/// Every name a statement and the statements inside it declare with no value.
-fn uninitialized_declarations(stmt: &CStmt, found: &mut BTreeSet<SymbolId>) {
+/// Every name a statement and the statements inside it declare: with no
+/// value, at the type it is declared, into `uninitialized`, and with one into
+/// `initialized`.
+fn declarations(
+    stmt: &CStmt,
+    uninitialized: &mut BTreeMap<SymbolId, CType>,
+    initialized: &mut BTreeSet<SymbolId>,
+) {
     let mut each = |stmts: &[CStmt]| {
         for stmt in stmts {
-            uninitialized_declarations(stmt, found);
+            declarations(stmt, uninitialized, initialized);
         }
     };
     match stmt.unobserved() {
         CStmt::StructuredRegion { stmt, .. } => each(std::slice::from_ref(stmt)),
         CStmt::Decl {
-            name, init: None, ..
+            ty,
+            name,
+            init: None,
         } => {
-            found.insert(*name);
+            uninitialized.insert(*name, ty.clone());
+        }
+        CStmt::Decl {
+            name,
+            init: Some(_),
+            ..
+        } => {
+            initialized.insert(*name);
         }
         CStmt::Block(body) => each(body),
         CStmt::If {
@@ -787,7 +854,7 @@ pub(crate) fn rendered_function_name(func: &SSAFunction) -> String {
 
 /// The C name a rendering gives a function, from what it is called and where
 /// it starts.
-pub(crate) fn rendered_name_of(name: Option<&str>, entry: u64) -> String {
+pub fn rendered_name_of(name: Option<&str>, entry: u64) -> String {
     name.and_then(r2types::sanitize_c_identifier)
         .unwrap_or_else(|| r2source::unnamed_identifier(entry))
 }
@@ -797,10 +864,19 @@ pub(crate) fn rewritten_function_name(func: &r2ssa::RewrittenFunction<'_>) -> St
     rendered_name_of(func.name(), func.entry())
 }
 
+/// A function the renderer refused: the reason, and no definition.
+///
+/// A definition with nothing proven in it would still have to claim a return
+/// type and a parameter list, and a comment in place of both is not C. What is
+/// known is why nothing is defined, so that is what is written.
 fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunction {
-    let mut func = CFunction::new(func_name.to_string(), CType::Unknown).with_unknown_params();
-    func.body = vec![CStmt::comment(sanitize_comment_text(reason))];
-    func
+    CFunction::new(func_name.to_string(), CType::Unknown)
+        .with_unknown_params()
+        .as_declaration_only(format!(
+            "r2dec refused {}: {}",
+            crate::ast::c_identifier(func_name),
+            sanitize_comment_text(reason)
+        ))
 }
 
 pub fn normalize_sig_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
@@ -2522,22 +2598,27 @@ fn rendered_identity_refusal_category(
 /// same function, and the two cannot drift apart.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedFunction {
-    text: String,
+    emission: Emission,
     function: CFunction,
 }
 
 impl RenderedFunction {
-    pub(crate) const fn new(text: String, function: CFunction) -> Self {
-        Self { text, function }
+    pub(crate) const fn new(emission: Emission, function: CFunction) -> Self {
+        Self { emission, function }
     }
 
     /// The C, as the certified emitter wrote it.
     pub fn text(&self) -> &str {
-        &self.text
+        self.emission.definition()
     }
 
     pub fn into_text(self) -> String {
-        self.text
+        self.emission.into_definition()
+    }
+
+    /// The same C as its own translation unit, with where each line came from.
+    pub const fn emission(&self) -> &Emission {
+        &self.emission
     }
 
     /// The tree that C was written from, for a consumer that walks rather than parses.
@@ -2605,14 +2686,14 @@ impl DecompileBindingAudit {
 /// consumes the exact rendered product; dropping it emits the same C without
 /// paying for or consulting the audit.
 pub struct PendingDecompileBindingAudit {
-    output: String,
+    output: Emission,
     product: InternalBuildProduct,
     source: r2types::function_facts::SourceOwnedFunctionFacts,
 }
 
 impl PendingDecompileBindingAudit {
     fn from_product(
-        output: String,
+        output: Emission,
         product: InternalBuildProduct,
         source: r2types::function_facts::SourceOwnedFunctionFacts,
     ) -> Self {
@@ -2624,11 +2705,11 @@ impl PendingDecompileBindingAudit {
     }
 
     pub fn output(&self) -> &str {
-        &self.output
+        self.output.definition()
     }
 
     pub fn into_output(self) -> String {
-        self.output
+        self.output.into_definition()
     }
 
     pub fn finalize(self) -> DecompileBindingAudit {
@@ -2883,7 +2964,7 @@ impl Decompiler {
         render_work.poll()?;
         let output = CodeGenerator::new(self.config.codegen.clone())
             .with_work(control)
-            .generate_function(product.emission());
+            .emit(product.emission(), self.config.ptr_size);
         // This is deliberately the last production work-control decision.
         // Everything below classifies the already sealed observation journal.
         render_work.poll()?;
@@ -3007,7 +3088,7 @@ impl Decompiler {
             // The run has already stopped; this writes the partial the caller
             // keeps, so it is not charged again against a spent budget.
             let output = CodeGenerator::new(self.config.codegen.clone())
-                .generate_function(product.emission());
+                .emit(product.emission(), self.config.ptr_size);
             return Err((
                 stop,
                 Some(PendingDecompileBindingAudit::from_product(
@@ -3020,7 +3101,7 @@ impl Decompiler {
         crate::stage_timing::mark("audit");
         let output = CodeGenerator::new(self.config.codegen.clone())
             .with_work(control)
-            .generate_function(product.emission());
+            .emit(product.emission(), self.config.ptr_size);
         crate::stage_timing::mark("codegen");
         crate::stage_timing::report(&product.emission().function().name);
         if let Err(stop) = render_work.poll() {
@@ -3550,20 +3631,16 @@ impl Decompiler {
                 ));
             }
         };
-        // What the function returns is r2types' one decision; a refused one is spelled as any unknown type is.
+        // What the function returns is r2types' one decision: the decided
+        // type, or where the boundary left the value unproven, the result
+        // carrier a caller reads, which every return hands back a residual of.
+        // A refused type is spelled as any unknown type is.
         let return_type = input
             .source_owned_facts()
             .return_type()
-            .and_then(r2types::ReturnTypeFact::decided)
+            .and_then(r2types::ReturnTypeFact::declared)
             .cloned()
             .unwrap_or(CType::Unknown);
-        // A boundary that proves neither a value nor its absence leaves the return type a gap.
-        let return_unproven = matches!(
-            input.source_owned_facts().return_type(),
-            Some(r2types::ReturnTypeFact::Refused(
-                r2types::ReturnTypeRefusal::UnprovenBoundary
-            ))
-        );
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
@@ -3822,7 +3899,6 @@ impl Decompiler {
             // Parameters here come from the render signature, so an empty list
             // is a recovered empty list rather than an unknown one.
             params_known: true,
-            return_unproven,
         };
         // The fold named every constant address it converted, and declaring
         // the objects is part of naming them.
@@ -3901,10 +3977,15 @@ impl Decompiler {
         crate::stage_timing::mark("seal");
         native.define_declared_aggregates(prepared);
         native.define_declared_typedefs(prepared);
+        // Before the ledger closes, and after the last rewrite: an obligation
+        // whose occurrence evaluates a residual traps there, and the ledger
+        // counts it that way.
+        let unassigned = native.residualize_unassigned_reads(binding_names.entry_supplied());
         let ledger = effect_ledger::build_obligation_ledger(
             prepared,
             &normalization_origins,
             native.effect_observations(),
+            &native.obligations_under_residuals(),
         );
         debug_log_ledger(prepared, &ledger);
         let radare2_variadic_format_counts = self
@@ -3941,7 +4022,7 @@ impl Decompiler {
             radare2_variadic_format_counts,
             radare2_prototypes,
             binding_names.source_named_locals(),
-            binding_names.entry_supplied(),
+            &unassigned,
         );
         Ok(InternalBuildProduct::Native(native))
     }
@@ -4115,6 +4196,7 @@ impl Decompiler {
             params: Some(signature.params.clone()),
             variadic: signature.variadic,
             noreturn: false,
+            address: Some(entry),
         }];
         Some(prepare_function_for_emission(function))
     }
