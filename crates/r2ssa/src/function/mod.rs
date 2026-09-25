@@ -46,7 +46,7 @@ use crate::semantic::{
     StructuredDataflowFacts,
 };
 use crate::span::StorageSpans;
-use crate::var::{SSAVar, SSAVarNameKind};
+use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 
 /// Query-only CFG risk summary for decompilation preflight.
@@ -94,14 +94,13 @@ pub struct StackAddressRoot {
 /// Decompiler-prep analysis facts derived from SSA.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
-    /// The canonical root of each value, as an unordered index.
+    /// Which values carry the same bits, and each value's representative.
     ///
-    /// Nothing iterates it -- the fingerprint sorts what it takes -- and the
-    /// root propagation asks it three and a half million times for one
-    /// five-hundred-block function, so every question was a walk down an
-    /// ordered tree comparing variable names. Hashing the variable once and
-    /// probing is the same answer for a fraction of the comparisons.
-    pub canonical_value_roots: HashMap<SSAVar, SSAVar>,
+    /// The one identity fact every stage builds on (`crate::view`): a value
+    /// shares identity with another only where their bits are equal at full
+    /// width, so an extension or a lane at a non-zero offset is never the
+    /// value it was read from.
+    pub views: crate::view::ValueViews,
     pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
     /// dataflow. Unlike `stack_address_roots`, these roots are never rebased
@@ -2327,41 +2326,6 @@ impl TrustedSsaArtifact {
     }
 }
 
-/// The end of the canonical-root chain from `var`.
-///
-/// One walker for both phases: the map is mutable while the facts are being
-/// built and frozen afterwards, but the relation is the same one, so there is
-/// one place that follows it. `insert_canonical_root` establishes acyclicity by
-/// canonicalising the root it is given before storing it; the visited set here
-/// is what makes a violation of that invariant visible instead of a hang, and
-/// it says so rather than returning whichever node the walk stopped at as if it
-/// were the root.
-pub(crate) fn canonical_root_in<'a>(
-    roots: &'a HashMap<SSAVar, SSAVar>,
-    var: &'a SSAVar,
-) -> &'a SSAVar {
-    let mut current = var;
-    // A walk that visits more entries than the map holds has been somewhere
-    // twice, which is the only way it can fail to terminate. Counting says so
-    // for the cost of an integer; the set of visited variables that said so
-    // before allocated an ordered-set node on every call, and this is the
-    // most-called function of a whole analysis.
-    for _ in 0..=roots.len() {
-        let Some(next) = roots.get(current) else {
-            return current;
-        };
-        if next == current {
-            return current;
-        }
-        current = next;
-    }
-    r2il::refusal_evidence!(
-        "canonical-root-cycle",
-        "the canonical-root map cycles at {current:?} on the walk from {var:?}"
-    );
-    current
-}
-
 /// The value the canonical root names, or `value_id` where the root is not a
 /// value of this graph.
 pub(crate) fn canonical_root_value_id(
@@ -2389,21 +2353,31 @@ impl Deref for SsaArtifact {
 }
 
 impl DecompilePrepFacts {
+    /// The representative of `var`'s bit-identity class, where it is not `var`.
     pub fn canonical_root_of(&self, var: &SSAVar) -> Option<&SSAVar> {
-        self.canonical_value_roots.get(var)
+        self.views.representative_of(var)
     }
 
-    /// The canonical root of `var`: the fixed point of `canonical_root_of`.
-    ///
-    /// The walk terminates because every step moves to a var it has not seen
-    /// and the map is finite, so it runs at most once per var and ends at the
-    /// fixed point. The visited set makes the map's acyclicity -- which
-    /// `insert_canonical_root` establishes by canonicalising before it stores
-    /// -- a checked property rather than an assumed one. Stopping short of the
-    /// fixed point would hand back a value that is not the root, and identity
-    /// is what every later stage builds on.
+    /// The variable every value with `var`'s bits at `var`'s width is named
+    /// by: an `O(1)` lookup into the view (`crate::view`).
     pub fn canonical_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        canonical_root_in(&self.canonical_value_roots, var)
+        self.views.representative(var)
+    }
+
+    /// The bits `var` is read from, stated relative to their root.
+    pub fn view(&self, var: &SSAVar) -> crate::view::ValueView {
+        self.views.view(var)
+    }
+
+    /// Whether `a` and `b` are the same bits at the same width.
+    pub fn same_bits(&self, a: &SSAVar, b: &SSAVar) -> bool {
+        self.views.same_bits(a, b)
+    }
+
+    /// The value `var` equals as an unsigned integer: the root of its chain of
+    /// copies and zero extensions, or `var` itself.
+    pub fn same_integer_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
+        self.views.same_integer_root(var)
     }
 
     pub fn indexed_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
@@ -3471,8 +3445,8 @@ impl SSAFunction {
                 if entry_stack_address_size != Some(dst.size) {
                     continue;
                 }
-                let a_root = canonical_root_in(&facts.canonical_value_roots, a);
-                let b_root = canonical_root_in(&facts.canonical_value_roots, b);
+                let a_root = facts.views.representative(a);
+                let b_root = facts.views.representative(b);
                 if !aligns_stack_pointer(a, a_root, b, b_root, &facts.stack_address_roots)
                     && !aligns_stack_pointer(b, b_root, a, a_root, &facts.stack_address_roots)
                 {
@@ -3529,9 +3503,7 @@ impl SSAFunction {
                     } else {
                         &facts.stack_address_roots
                     };
-                    if common_stack_root(&phi.sources, &facts.canonical_value_roots, roots)
-                        != Some(*root)
-                    {
+                    if common_stack_root(&phi.sources, &facts.views, roots) != Some(*root) {
                         failed.push(phi.dst.clone());
                     }
                 }
@@ -3937,66 +3909,6 @@ impl RegisterFamilyInfo {
     }
 }
 
-fn adapt_root_width(root: &SSAVar, width: u32) -> Option<SSAVar> {
-    if root.size == width {
-        return (!root.name_kind().is_constant() || root.constant_bits().is_some())
-            .then(|| root.clone());
-    }
-    if let Some(value) = root.constant_bits() {
-        return Some(SSAVar::constant(mask_const_to_width(value, width), width));
-    }
-    if root.size > width && can_width_adapt_root(root) {
-        return Some(root.with_size(width));
-    }
-    None
-}
-
-fn can_width_adapt_root(root: &SSAVar) -> bool {
-    !root.is_const()
-        && !root.is_temp()
-        && !matches!(
-            root.name_kind(),
-            SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace | SSAVarNameKind::Frame
-        )
-}
-
-fn mask_const_to_width(value: u64, width: u32) -> u64 {
-    let bits = width.saturating_mul(8);
-    if bits >= 64 {
-        value
-    } else if bits == 0 {
-        0
-    } else {
-        value & ((1u64 << bits) - 1)
-    }
-}
-
-fn canonicalize_value_root(root: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> SSAVar {
-    canonical_root_in(roots, root).clone()
-}
-
-fn ensure_value_root_identity(roots: &mut HashMap<SSAVar, SSAVar>, var: SSAVar) -> bool {
-    if roots.contains_key(&var) {
-        return false;
-    }
-    roots.insert(var.clone(), var);
-    true
-}
-
-fn insert_canonical_root(roots: &mut HashMap<SSAVar, SSAVar>, dst: SSAVar, root: SSAVar) -> bool {
-    let root = canonicalize_value_root(&root, roots);
-    let changed = !matches!(roots.get(&dst), Some(existing) if *existing == root);
-    roots.insert(dst, root.clone());
-    roots.entry(root.clone()).or_insert(root);
-    changed
-}
-
-/// The one root every incoming edge already resolved to, if they agree.
-fn common_root_of<'a>(roots: &[&'a SSAVar]) -> Option<&'a SSAVar> {
-    let first = *roots.first()?;
-    roots.iter().all(|root| *root == first).then_some(first)
-}
-
 /// The one stack root every incoming edge names, given their resolved roots.
 fn common_stack_root_of(
     sources: &[(u64, SSAVar)],
@@ -4018,7 +3930,7 @@ fn common_stack_root_of(
 
 fn resolve_stack_root(
     var: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    views: &crate::view::ValueViews,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     // The variable's own answer first. Resolving its canonical root before
@@ -4029,18 +3941,18 @@ fn resolve_stack_root(
     if let Some(root) = stack_roots.get(var).copied() {
         return Some(root);
     }
-    stack_roots.get(canonical_root_in(roots, var)).copied()
+    stack_roots.get(views.representative(var)).copied()
 }
 
 fn common_stack_root(
     sources: &[(u64, SSAVar)],
-    roots: &HashMap<SSAVar, SSAVar>,
+    views: &crate::view::ValueViews,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     let mut iter = sources.iter();
     let (_, first_src) = iter.next()?;
-    let first = resolve_stack_root(first_src, roots, stack_roots)?;
-    if iter.all(|(_, src)| resolve_stack_root(src, roots, stack_roots) == Some(first)) {
+    let first = resolve_stack_root(first_src, views, stack_roots)?;
+    if iter.all(|(_, src)| resolve_stack_root(src, views, stack_roots) == Some(first)) {
         Some(first)
     } else {
         None

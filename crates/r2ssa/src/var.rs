@@ -325,13 +325,6 @@ impl SSAVar {
         self.rename_disambiguator
     }
 
-    pub(crate) fn with_size(&self, size: u32) -> Self {
-        Self {
-            size,
-            ..self.clone()
-        }
-    }
-
     /// Create the initial (version 0) variable.
     pub fn initial(name: impl AsRef<str>, size: u32) -> Self {
         Self::new(name, 0, size)

@@ -63,6 +63,7 @@ pub mod taint;
 pub(crate) mod testing;
 mod values;
 pub(crate) mod var;
+pub mod view;
 
 pub use abi::AbiProfile;
 pub use address::{
@@ -188,3 +189,4 @@ pub use strided::StridedInterval;
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
+pub use view::{ValueView, ValueViews, ViewExtension, ViewRelation};

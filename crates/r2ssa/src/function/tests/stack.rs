@@ -100,28 +100,15 @@ fn stack_root_follows_a_displacement_materialised_into_a_temp() {
             offset: -0x70,
         },
     );
-    let mut roots = HashMap::new();
     assert_eq!(
-        stack_address_root_from_add(
-            &sp,
-            canonical_root_in(&roots, &sp),
-            &displacement,
-            canonical_root_in(&roots, &displacement),
-            &stack_roots,
-        ),
+        stack_address_root_from_add(&sp, &sp, &displacement, &displacement, &stack_roots),
         None,
         "with nothing linking the temp to the constant there is no delta to add"
     );
 
-    roots.insert(displacement.clone(), literal);
+    // The temp's representative is the literal it copies.
     assert_eq!(
-        stack_address_root_from_add(
-            &sp,
-            canonical_root_in(&roots, &sp),
-            &displacement,
-            canonical_root_in(&roots, &displacement),
-            &stack_roots,
-        ),
+        stack_address_root_from_add(&sp, &sp, &displacement, &literal, &stack_roots),
         Some(StackAddressRoot {
             base: StackAddressBase::StackPointer,
             offset: -0x10,

@@ -1119,8 +1119,8 @@ fn hash_decompile_prep_facts(
     };
     writer.tag(1);
     let mut canonical_roots = facts
-        .canonical_value_roots
-        .iter()
+        .views
+        .representatives()
         .filter_map(|(value, root)| {
             Some((
                 canonical_value_for_var(artifact, value_ids, value)?,
