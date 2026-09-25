@@ -128,6 +128,18 @@ pub struct RenderedLineJson {
     pub addrs: Vec<u64>,
 }
 
+/// One name outside the function the code refers to.
+///
+/// Where the contract and the rendering part, the link map says what the
+/// rendering does rather than what the contract hoped for:
+/// - `addr` is `null` for `machine`: an operation the specification names is
+///   held at no program address.
+/// - A function the code takes the address of rather than calls is spelled as
+///   a data object (`extern char main[];`), and linked as the `object` it is
+///   spelled as, at the function's address.
+/// - A machine operation the code calls without declaring it (the atomic and
+///   guarded-access intrinsics) is not linked, and a unit that calls one does
+///   not compile with implicit declarations refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RenderedLinkJson {
     pub ident: String,
@@ -193,7 +205,11 @@ impl RenderedFunctionJson {
                     definition,
                     signature: String::new(),
                     refused: Some(RenderRefusalJson {
-                        reason: comment_body(text),
+                        reason: Some(comment_body(text))
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or_else(|| {
+                                "the engine rendered nothing and stated no reason".to_owned()
+                            }),
                     }),
                     code: text.clone(),
                     proof,

@@ -217,7 +217,13 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
             // comment where a type should be.
             assert!(!signature.starts_with("/*"), "{label}: {signature}");
         }
-        refused => assert!(refused["reason"].is_string(), "{label}: {refused}"),
+        // A refusal always says why, whichever layer refused.
+        refused => assert!(
+            refused["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.trim().is_empty()),
+            "{label}: {refused}"
+        ),
     }
     if let Some(cc) = cc {
         compile(cc, code, &label);
