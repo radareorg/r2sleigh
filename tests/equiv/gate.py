@@ -20,8 +20,10 @@ status is one of:
                           unknown command, broken contract), with the cause
 ``unsupported``           the thunk cannot call this signature (aggregate by
                           value, variadic definition, ...); the reason is kept
-``untested``              no vector survived the original (all dropped) or the
-                          harness could not reproduce the original
+``untested``              too few vectors survived the original to rest an
+                          ``equal`` on (fewer than a quarter of them, see
+                          :meth:`Config.floor`), or the harness could not
+                          reproduce the original
 ``harness-error``         the runtime itself failed, or r2s was never asked
 ========================  ====================================================
 
@@ -32,7 +34,10 @@ vector the original does not return or exit from is dropped as outside its
 domain. A vector on which the original, called twice (directly and through a
 trampoline in a loaded object), does not agree with itself is ``unstable`` and
 dropped too, so nondeterminism in the program can never read as a defect of
-the rendering.
+the rendering. A vector counts as graded only when every comparison it needs
+was made; one a rendering run could not be made on (a failed fork, a failed
+capture reset) leaves the record ``harness-error`` unless another vector
+already found a defect.
 """
 
 from __future__ import annotations
@@ -71,6 +76,16 @@ class Config:
     vectors: int = 48
     timeout_ms: int = 1000
     keep: bool = False
+    min_graded: int | None = None
+
+    def floor(self) -> int:
+        """How many graded vectors an ``equal`` or ``residual-trap`` must rest on.
+
+        A quarter of the vectors: every function of the default population
+        grades at least 13 of 48 (an index past a pointer table is outside the
+        original's domain), and a verdict on one or two survivors says nothing.
+        """
+        return self.min_graded if self.min_graded is not None else max(1, self.vectors // 4)
 
 
 @dataclass
@@ -182,7 +197,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         return record
     residual = int(record.proof.get("residual", 0) or 0)
     helpers = ResidualHelpers(str(builds["O0"].path), link.residual_helpers(builds["O0"].path))
-    status, evidence, counts = classify(vector_lines, vectors, residual, helpers)
+    status, evidence, counts = classify(vector_lines, vectors, residual, helpers,
+                                        config.floor())
     record.status = status
     record.evidence = evidence
     record.vectors = counts
@@ -263,11 +279,12 @@ class ResidualHelpers:
 
 
 def classify(vector_lines: list[dict], vectors: list, residual: int,
-             helpers: ResidualHelpers) -> tuple[str, dict, dict]:
-    counts = {"total": len(vector_lines), "dropped": 0, "unstable": 0, "graded": 0,
-              "equal": 0, "residual-trap": 0, "differs": 0, "uninit": 0, "ub": 0}
+             helpers: ResidualHelpers, min_graded: int = 1) -> tuple[str, dict, dict]:
+    counts = {"total": len(vector_lines), "dropped": 0, "unstable": 0, "incomplete": 0,
+              "graded": 0, "equal": 0, "residual-trap": 0, "differs": 0, "uninit": 0, "ub": 0}
     first: dict[str, dict] = {}
     unstable_example: dict | None = None
+    incomplete_example: dict | None = None
     for line in vector_lines:
         index = int(line.get("vector", -1))
         runs = line.get("runs", [])
@@ -281,6 +298,17 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
             counts["unstable"] += 1
             if unstable_example is None:
                 unstable_example = {"vector": index, "inputs": shown, **_pair_evidence(identity)}
+            continue
+        missing = [pair for pair in PAIRS[1:] if pair not in pairs]
+        if missing:
+            # A rendering run that could not be made: nothing was compared.
+            counts["incomplete"] += 1
+            if incomplete_example is None:
+                incomplete_example = {
+                    "vector": index, "inputs": shown,
+                    "not_compared": [f"{RUN_LABELS[a]}-{RUN_LABELS[b]}" for a, b in missing],
+                    "runs": [run for run in runs if run.get("outcome") == "unavailable"],
+                }
             continue
         counts["graded"] += 1
         found: dict[str, dict] = {}
@@ -307,15 +335,28 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
         counts[status] += 1
         if status != "equal" and status not in first:
             first[status] = {"vector": index, "inputs": shown, **found[status]}
-    if counts["graded"] == 0:
-        cause = "no vector survived the original" if counts["dropped"] else "no vectors"
-        if counts["unstable"]:
-            cause = "the original does not agree with itself on any surviving vector"
+    status = next((s for s in _VECTOR_SEVERITY if counts[s]), "equal")
+    if status in BLOCKING:
+        # A defect one vector showed stands however few vectors were graded.
+        evidence = dict(first[status])
+        if unstable_example is not None:
+            evidence["unstable_example"] = unstable_example
+        return status, evidence, counts
+    if incomplete_example is not None:
+        return "harness-error", {"cause": "a rendering run could not be made",
+                                 **incomplete_example}, counts
+    if counts["graded"] < min_graded:
+        if counts["graded"] == 0:
+            cause = "no vector survived the original" if counts["dropped"] else "no vectors"
+            if counts["unstable"]:
+                cause = "the original does not agree with itself on any surviving vector"
+        else:
+            cause = (f"only {counts['graded']} of {counts['total']} vectors survived the "
+                     f"original; an {status} verdict needs {min_graded}")
         evidence = {"cause": cause}
         if unstable_example:
             evidence["unstable"] = unstable_example
         return "untested", evidence, counts
-    status = next((s for s in _VECTOR_SEVERITY if counts[s]), "equal")
     evidence = dict(first.get(status, {}))
     if unstable_example is not None:
         evidence["unstable_example"] = unstable_example

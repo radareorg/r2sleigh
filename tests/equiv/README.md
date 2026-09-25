@@ -85,7 +85,7 @@ One record per function, always, in `artifacts/records.json`, sorted by key
 | `refused` | engine | r2s refused the function, with its reason, in a `pddj` that keeps the contract |
 | `no-record` | engine | r2s printed no usable `pddj` (crash, deadline, failed statement, broken contract), with the cause |
 | `unsupported` | harness | the thunk cannot call the signature (aggregate by value, variadic definition, a compiler clone) |
-| `untested` | harness | no vector survived the original |
+| `untested` | harness | fewer than a quarter of the vectors survived the original, too few to rest an `equal` on |
 | `harness-error` | harness | the gate itself failed, or never asked r2s |
 
 Each record carries the first vector that shows its status (inputs, the field,
@@ -140,5 +140,9 @@ Limits, stated
   was built is outside the domain and dropped, never a false `differs`.
 - Aggregates passed or returned by value, `long double`, and variadic
   definitions are `unsupported`, with the reason.
-- Equal on the vectors is evidence, not proof. The vector counts are in every
-  record so a thinly tested `equal` stays visible.
+- Equal on the vectors is evidence, not proof. An `equal` or `residual-trap`
+  rests on at least a quarter of the vectors graded (`Config.floor`; every
+  function of the default population grades 13 or more of 48), fewer is
+  `untested`, and the counts are in every record. A defect one vector shows
+  stands however few were graded. A vector a rendering run could not be made
+  on is not graded, and leaves the record `harness-error`.

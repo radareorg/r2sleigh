@@ -321,6 +321,26 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(status(trap(0x1120)), "differs")  # past the helper's end
         self.assertEqual(status({**trap(0x1108), "status": 11}), "differs")  # SIGSEGV
 
+    def test_an_equal_needs_its_floor_of_graded_vectors_and_a_defect_does_not(self):
+        lines = [self.line(0), self.line(1, original="signal"), self.line(2, original="signal")]
+        status, evidence, counts = gate.classify(lines, [], 0, self.NONE, min_graded=2)
+        self.assertEqual((status, counts["graded"]), ("untested", 1))
+        self.assertIn("only 1 of 3 vectors", evidence["cause"])
+        self.assertEqual(gate.classify(lines, [], 0, self.NONE, min_graded=1)[0], "equal")
+        lines[0] = self.line(0, pairs={(0, 2): False})
+        self.assertEqual(gate.classify(lines, [], 0, self.NONE, min_graded=2)[0], "differs")
+
+    def test_a_vector_whose_rendering_run_was_not_made_grades_nothing(self):
+        line = self.line(0)
+        line["runs"][2] = {"run": 2, "outcome": "unavailable", "error": "fork: EAGAIN"}
+        line["pairs"] = [p for p in line["pairs"] if p["b"] != 2 and p["a"] != 2]
+        status, evidence, counts = gate.classify([line, self.line(1)], [], 0, self.NONE)
+        self.assertEqual((status, counts["incomplete"], counts["graded"]),
+                         ("harness-error", 1, 1))
+        self.assertEqual(evidence["not_compared"], ["original-O0", "O0-pattern", "O0-O2"])
+        found = self.line(1, pairs={(0, 2): False})
+        self.assertEqual(gate.classify([line, found], [], 0, self.NONE)[0], "differs")
+
     def test_the_worst_vector_decides(self):
         lines = [self.line(0), self.line(1, pairs={(0, 2): False}),
                  self.line(2, pairs={(2, 3): False}),
