@@ -321,7 +321,6 @@ impl Image {
 
         let arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
         let format = map_format(file.format());
-        let base_address = file.relative_address_base();
 
         // A relocatable object states no addresses: every section says zero, so
         // each is placed at its own file offset above one base, which is the
@@ -375,19 +374,37 @@ impl Image {
             segments.sort_by_key(|segment| segment.vaddr);
         }
 
+        let base_address = base_address(&file, &segments);
         let located = roles::Located::of(&file);
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
                 let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                let vaddr = placed(&section);
+                let loaded = section_is_loaded(&section);
+                let stated = section_statement(&file, &section);
                 Section {
+                    index: section.index().0,
                     name: section.name().unwrap_or_default().to_owned(),
-                    vaddr: placed(&section),
+                    segment: section.segment_name().ok().flatten().map(str::to_owned),
+                    permissions: match (loaded, stated) {
+                        (false, _) => Permissions::default(),
+                        (true, SectionStatement::MachO { .. } | SectionStatement::Unstated) => {
+                            segments
+                                .iter()
+                                .find(|segment| segment.contains(vaddr))
+                                .map(|segment| segment.permissions)
+                                .unwrap_or_default()
+                        }
+                        (true, _) => section_permissions(section.flags()),
+                    },
+                    stated,
+                    vaddr,
                     vsize: section.size(),
                     file_offset,
                     file_size,
                     role: located.role(&section, states_instructions(&section)),
-                    loaded: section_is_loaded(&section),
+                    loaded,
                 }
             })
             .collect();
@@ -937,6 +954,59 @@ fn map_format(format: object::BinaryFormat) -> Format {
         object::BinaryFormat::Wasm => Format::Wasm,
         object::BinaryFormat::Xcoff => Format::Xcoff,
         _ => Format::Other,
+    }
+}
+
+/// The address the image's first file byte is mapped at, which radare2 presents as `baddr`.
+///
+/// The lowest segment the file backs maps its file offset at its address, so
+/// the first byte is that address less that offset: the `PT_LOAD` at offset
+/// zero where there is one, Mach-O's `__TEXT`, and an object file's base above
+/// which its sections are placed. PE states its own image base. Presentation
+/// only: no value the loader writes is relative to it.
+fn base_address(file: &object::File<'_>, segments: &[Segment]) -> u64 {
+    if matches!(
+        file.format(),
+        object::BinaryFormat::Pe | object::BinaryFormat::Coff
+    ) {
+        return file.relative_address_base();
+    }
+    segments
+        .iter()
+        .filter(|segment| segment.file_size > 0)
+        .min_by_key(|segment| segment.file_offset)
+        .map_or(0, |segment| segment.vaddr.wrapping_sub(segment.file_offset))
+}
+
+/// A section's type and flags as its format numbers them.
+fn section_statement(
+    file: &object::File<'_>,
+    section: &object::read::Section<'_, '_>,
+) -> SectionStatement {
+    use object::read::elf::SectionHeader as _;
+    let elf_type = |index: object::SectionIndex| match file {
+        object::File::Elf32(elf) => elf
+            .elf_section_table()
+            .section(index)
+            .ok()
+            .map(|header| header.sh_type(elf.endian())),
+        object::File::Elf64(elf) => elf
+            .elf_section_table()
+            .section(index)
+            .ok()
+            .map(|header| header.sh_type(elf.endian())),
+        _ => None,
+    };
+    match section.flags() {
+        object::SectionFlags::Elf { sh_flags } => SectionStatement::Elf {
+            sh_type: elf_type(section.index()).unwrap_or_default(),
+            sh_flags,
+        },
+        object::SectionFlags::MachO { flags } => SectionStatement::MachO { flags },
+        object::SectionFlags::Coff { characteristics } => {
+            SectionStatement::Coff { characteristics }
+        }
+        _ => SectionStatement::Unstated,
     }
 }
 

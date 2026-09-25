@@ -443,29 +443,120 @@ fn flags(session: &mut Session) -> Result<String, String> {
     Ok(out)
 }
 
+/// `iS`: every section the container states, with its own permissions, flags and type, as radare2 lays them out.
+///
+/// radare2 numbers ELF sections by their header index and Mach-O ones from
+/// zero; a Mach-O section is named with its segment, which is half its
+/// identity. An unloaded section permits nothing, whatever its address says.
 fn sections(session: &Session) -> Result<String, String> {
-    let mut out = String::from("nth paddr           size vaddr          vsize perm name\n");
-    out.push_str(&"-".repeat(70));
-    for (index, section) in session.image().sections().iter().enumerate() {
-        let permissions = session
-            .image()
-            .segment_at(section.vaddr)
-            .map(|segment| segment.permissions)
-            .unwrap_or_default();
+    let mut out =
+        String::from("nth paddr        size vaddr       vsize perm flags type        name\n");
+    out.push_str(&"-".repeat(67));
+    for section in session.image().sections() {
+        let permissions = section.permissions;
+        let (nth, flags, kind, name) = match section.stated {
+            r2image::SectionStatement::Elf { sh_type, sh_flags } => (
+                section.index,
+                sh_flags,
+                elf_section_type(sh_type),
+                section.name.clone(),
+            ),
+            r2image::SectionStatement::MachO { flags } => (
+                section.index.saturating_sub(1),
+                u64::from(flags & !0xff),
+                macho_section_type(flags & 0xff),
+                match &section.segment {
+                    Some(segment) => format!("{segment}.{}", section.name),
+                    None => section.name.clone(),
+                },
+            ),
+            r2image::SectionStatement::Coff { characteristics } => (
+                section.index,
+                u64::from(characteristics),
+                String::new(),
+                section.name.clone(),
+            ),
+            r2image::SectionStatement::Unstated => {
+                (section.index, 0, String::new(), section.name.clone())
+            }
+        };
         out.push_str(&format!(
-            "\n{:<3} {:#010x} {:>10x} {:#010x} {:>10x} -{}{}{} {}",
-            index,
+            "\n{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
             section.file_offset,
-            section.file_size,
+            format!("{:#x}", section.file_size),
             section.vaddr,
-            section.vsize,
+            format!("{:#x}", section.vsize),
             if permissions.read { 'r' } else { '-' },
             if permissions.write { 'w' } else { '-' },
             if permissions.execute { 'x' } else { '-' },
-            section.name
+            format!("{flags:#x}"),
         ));
     }
     Ok(out)
+}
+
+/// An ELF section type, as radare2 spells it.
+fn elf_section_type(sh_type: u32) -> String {
+    match sh_type {
+        0 => "NULL",
+        1 => "PROGBITS",
+        2 => "SYMTAB",
+        3 => "STRTAB",
+        4 => "RELA",
+        5 => "HASH",
+        6 => "DYNAMIC",
+        7 => "NOTE",
+        8 => "NOBITS",
+        9 => "REL",
+        10 => "SHLIB",
+        11 => "DYNSYM",
+        14 => "INIT_ARRAY",
+        15 => "FINI_ARRAY",
+        16 => "PREINIT_ARRAY",
+        17 => "GROUP",
+        18 => "SYMTAB_SHNDX",
+        19 => "RELR",
+        0x6fff_fff5 => "GNU_ATTRIBUTES",
+        0x6fff_fff6 => "GNU_HASH",
+        0x6fff_fff7 => "GNU_LIBLIST",
+        0x6fff_fffd => "GNU_VERDEF",
+        0x6fff_fffe => "GNU_VERNEED",
+        0x6fff_ffff => "GNU_VERSYM",
+        other => return format!("{other:#x}"),
+    }
+    .to_owned()
+}
+
+/// A Mach-O section type, as radare2 spells it.
+fn macho_section_type(kind: u32) -> String {
+    const NAMES: [&str; 23] = [
+        "REGULAR",
+        "ZEROFILL",
+        "CSTRINGS",
+        "4BYTE_LITERALS",
+        "8BYTE_LITERALS",
+        "LITERAL_POINTERS",
+        "NONLAZY_POINTERS",
+        "LAZY_POINTERS",
+        "SYMBOL_STUBS",
+        "MOD_INIT_FUNC_POINTERS",
+        "MOD_TERM_FUNC_POINTERS",
+        "COALESCED",
+        "GB_ZEROFILL",
+        "INTERPOSING",
+        "16BYTE_LITERALS",
+        "DTRACE_DOF",
+        "LAZY_DYLIB_SYMBOL_POINTERS",
+        "THREAD_LOCAL_REGULAR",
+        "THREAD_LOCAL_ZEROFILL",
+        "THREAD_LOCAL_VARIABLES",
+        "THREAD_LOCAL_VARIABLE_POINTERS",
+        "THREAD_LOCAL_INIT_FUNCTION_POINTERS",
+        "INIT_FUNC_OFFSETS",
+    ];
+    NAMES
+        .get(kind as usize)
+        .map_or_else(|| format!("{kind:#x}"), |name| (*name).to_owned())
 }
 
 fn symbols(session: &Session) -> Result<String, String> {

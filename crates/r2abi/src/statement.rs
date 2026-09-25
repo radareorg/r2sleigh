@@ -230,7 +230,20 @@ impl Segment {
 /// One named range the format declares, finer-grained than a segment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Section {
+    /// The format's own number for it: ELF's section header index, which a
+    /// symbol's `st_shndx` names, or Mach-O's section ordinal, which `n_sect`
+    /// names, counting from one.
+    pub index: usize,
     pub name: String,
+    /// The segment a Mach-O section belongs to, which is half its identity:
+    /// two sections of one name in different segments are two sections.
+    pub segment: Option<String>,
+    /// What the section permits once loaded, as the format states it: an ELF
+    /// section's own flags, a Mach-O section's segment's initial protection.
+    /// Nothing, where the loader does not map it.
+    pub permissions: Permissions,
+    /// The type and flags the format states, as it numbers them.
+    pub stated: SectionStatement,
     pub vaddr: u64,
     pub vsize: u64,
     pub file_offset: u64,
@@ -274,6 +287,24 @@ impl Section {
     pub const fn range(&self) -> (u64, u64) {
         (self.vaddr, self.vaddr.saturating_add(self.vsize))
     }
+}
+
+/// A section's type and flags, as the format itself numbers them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SectionStatement {
+    Elf {
+        sh_type: u32,
+        sh_flags: u64,
+    },
+    /// The section's `flags` word: its type in the low byte, its attributes above.
+    MachO {
+        flags: u32,
+    },
+    Coff {
+        characteristics: u32,
+    },
+    #[default]
+    Unstated,
 }
 
 /// What a section holds, as the container states it: its type and flags,

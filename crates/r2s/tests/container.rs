@@ -77,6 +77,45 @@ fn ir_never_lists_a_mach_o_stub() {
 }
 
 #[test]
+fn baddr_is_where_the_first_file_byte_is_mapped() {
+    // radare2: 0x100000000 for a Mach-O executable, whose `__TEXT` maps the
+    // header; 0x400000 for a non-PIE ELF; zero for a PIE linked at zero. The
+    // RVA base `object` reports is zero for both of the first two.
+    for (fixture, baddr) in [
+        ("code_pointer_table_O0", "0x100000000"),
+        ("manual_limits_O2", "0x100000000"),
+        ("hashes_gcc_x64_O2_stripped", "0x00400000"),
+        ("rv_O0g", "0x00000000"),
+    ] {
+        let out = run(fixture, "i~baddr");
+        assert_eq!(
+            out.split_whitespace().nth(1),
+            Some(baddr),
+            "{fixture}: {out}"
+        );
+    }
+}
+
+#[test]
+fn is_states_each_sections_own_permissions_flags_and_identity() {
+    // `.comment` is not loaded, so it permits nothing, whatever the segment at
+    // its reported address zero permits; a Mach-O section is named with its
+    // segment, as `otool` does.
+    let elf = run("rv_O0g", "iS~.comment");
+    assert!(
+        elf.trim_end()
+            .ends_with("0x2d ---- 0x30  PROGBITS    .comment"),
+        "{elf}"
+    );
+    let macho = run("manual_limits_O2", "iS");
+    assert!(
+        macho.contains("-rw- 0x0   REGULAR     __DATA_CONST.__const"),
+        "{macho}"
+    );
+    assert!(macho.contains("CSTRINGS    __TEXT.__cstring"), "{macho}");
+}
+
+#[test]
 fn iz_lists_the_programs_strings_and_none_of_the_loaders_tables() {
     // `.interp`'s path, the build note, `.dynstr`'s names and runs of the
     // unwind tables all read as text; none of them is a string of the
