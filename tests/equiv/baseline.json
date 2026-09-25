@@ -1084,12 +1084,10 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::shape_mutual_even": {
-   "cause": "[P1 reads (SSA construction soundness)] The walked body follows the tail jumps even->odd->even, so the function entry 0x401710 is also a loop header: its single CFG predecessor is odd's step block 0x401745. SSA places no phi at the entry block. Both the frontier computation and phi placement count only blocks with two or more CFG predecessors, and neither models the implicit edge from the caller. So `test rdi,rdi` in the header always reads the entry value RDI_0. odd's step (RSI = RAX*17 + RDI*4; RDI--) computes values that are then unobserved and elided. The rendered loop never executes odd's step, never updates RSI, and decreme...",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_mutual_odd": {
-   "cause": "[P1 reads (SSA construction soundness)] Mirror of shape_mutual_even. The entry 0x401740 is a loop header reached by even's tail jump. With no phi at the entry, the header reads the entry RDI_0/RSI_0, and even's step (RSI = RSI*31 + RDI; RDI--) is unobserved and dropped. The loop never alternates.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_pointer_to_pointer": {
    "cause": "[P4 memory] `rows[0] = &zero`, and `zero` sits at the stack pointer itself, so the compiler stores the raw RSP as data (`mov rax,rsp; mov [rsp+0x20],rax`; the copy is forwarded, so the Store reads the RSP SSA value directly). CORRECTED MECHANISM: the engine already knows this value is `&zero`. The lowering's write projection spells it `AddrOf(Var(<frame object>))`. What fails is disposition. Because the carrier's own value is a data operand, r2ssa's stack-geometry certificate (semantic/certificates/stack.rs:903-955) evicts it, and the eviction cascades back through the carrier chain (RSP_1, RSP_0). r2d...",
@@ -1189,12 +1187,10 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::shape_mutual_even": {
-   "cause": "[P1 reads] Same as clang-O1. Mutual tail recursion makes the entry a loop header with one CFG predecessor. No phi is placed at the entry, the header reads the entry values, and the partner's step block is elided as unobserved.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_mutual_odd": {
-   "cause": "[P1 reads] Same as clang-O1 shape_mutual_odd. The entry block is a loop header and gets no phi, so even's step is dropped.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_pointer_to_pointer": {
    "cause": "[P4 memory] A frame array whose address escapes is split into scalars. uint64_t *rows[4] becomes four independent locals: int64_t* stack_m72 and uint64_t stack_m64, stack_m56 and stack_m48 (rendering.c:14-17). Only &stack_m72 is passed to indirect_load and indirect_store (fcn_401a10/fcn_401a20), which read rows[index] for index 0..3, i.e. past the 8-byte object. -O2 deletes the stores to stack_m64/56/48 as dead, so the callee dereferences garbage. Secondary P1 defect: the entry RSP is rendered as an uninitialised local (`int64_t* RSP_0; RSP_0 = (int64_t*)((uint64_t)RSP_0 - 8);` four times, then RSP_0 =...",
@@ -1510,12 +1506,10 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_mutual_even": {
-   "cause": "[P1 reads] gcc's layout puts odd at 0x401a80 (`jmp 401ab0`) and even at 0x401ab0 (`jmp 401a80`). The entry 0x401ab0 has the single predecessor 0x401a98 (odd's step) and gets no phi, so the while-loop tests and updates only the entry values, and odd's step is lost.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_mutual_odd": {
-   "cause": "[P1 reads] Same as gcc-O2 shape_mutual_even. The entry 0x401a80 is the target of even's tail jmp (its single predecessor is 0x401ac8). No phi is placed, and even's step is dropped.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_pointer_to_pointer": {
    "cause": "[P4 memory] Same defect as NEW-3. The raw RSP (&zero) becomes data through `movq xmm0,rsp` (IntZExt XMM0_1 <- RSP_1), which builds rows[0..1] with punpcklqdq. The RSP carrier is bound as a program value and spelled. The loop-call CallRestore RSP_4 = RSP_2 is recorded both as a coalesced copy and as a rendered write, giving ConflictingWrite(InstId(172)).",
