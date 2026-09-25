@@ -2460,3 +2460,128 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
         "{text}"
     );
 }
+
+/// gcc -O0 `long mul_div(long a, long b) { return b ? a * 7 / b + a % b : 0; }`,
+/// both parameters spilled to their homes and read back for each division:
+///
+/// ```text
+///   1000  endbr64
+///   1004  push rbp ; mov rbp, rsp
+///   1008  mov [rbp-8], rdi ; mov [rbp-0x10], rsi
+///   1010  cmp qword [rbp-0x10], 0 ; jne 0x101e
+///   1017  mov eax, 0 ; jmp 0x1045
+///   101e  mov rdx, [rbp-8] ; mov rax, rdx ; shl rax, 3 ; sub rax, rdx
+///   102c  cqo ; idiv qword [rbp-0x10] ; mov rcx, rax
+///   1035  mov rax, [rbp-8] ; cqo ; idiv qword [rbp-0x10]
+///   103f  mov rax, rdx ; add rax, rcx
+///   1045  pop rbp ; ret
+/// ```
+const MUL_DIV_O0: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0x55, // 1004 push rbp
+    0x48, 0x89, 0xe5, // 1005 mov rbp, rsp
+    0x48, 0x89, 0x7d, 0xf8, // 1008 mov [rbp-8], rdi
+    0x48, 0x89, 0x75, 0xf0, // 100c mov [rbp-0x10], rsi
+    0x48, 0x83, 0x7d, 0xf0, 0x00, // 1010 cmp qword [rbp-0x10], 0
+    0x75, 0x07, // 1015 jne 0x101e
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 1017 mov eax, 0
+    0xeb, 0x27, // 101c jmp 0x1045
+    0x48, 0x8b, 0x55, 0xf8, // 101e mov rdx, [rbp-8]
+    0x48, 0x89, 0xd0, // 1022 mov rax, rdx
+    0x48, 0xc1, 0xe0, 0x03, // 1025 shl rax, 3
+    0x48, 0x29, 0xd0, // 1029 sub rax, rdx
+    0x48, 0x99, // 102c cqo
+    0x48, 0xf7, 0x7d, 0xf0, // 102e idiv qword [rbp-0x10]
+    0x48, 0x89, 0xc1, // 1032 mov rcx, rax
+    0x48, 0x8b, 0x45, 0xf8, // 1035 mov rax, [rbp-8]
+    0x48, 0x99, // 1039 cqo
+    0x48, 0xf7, 0x7d, 0xf0, // 103b idiv qword [rbp-0x10]
+    0x48, 0x89, 0xd0, // 103f mov rax, rdx
+    0x48, 0x01, 0xc8, // 1042 add rax, rcx
+    0x5d, // 1045 pop rbp
+    0xc3, // 1046 ret
+];
+
+/// `cqo` writes the sign word of a reload of `a` into RDX: the high half of
+/// its sign extension, the same width as `a`'s home and computed from what
+/// the home holds, but not what it holds. Certifying it as a reload of the
+/// home made it a member of the parameter's binding, and the rendering then
+/// assigned the sign word to `a` before the division read `a` again.
+///
+/// The value view says what a reload's copies are: only a value with the
+/// reload's bits at its width is the slot's, so no lane at a non-zero offset
+/// -- a sign word -- is ever certified as a home's contents, and the
+/// rendering writes neither parameter.
+#[test]
+fn the_sign_word_a_division_extends_into_is_not_the_parameter_it_extends() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: MUL_DIV_O0.to_vec(),
+        name: "mul_div",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    let is_high_lane = |value: r2ssa::ValueId| {
+        graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .is_some_and(|inst| {
+                matches!(
+                    inst.payload,
+                    InstPayload::Op(SSAOp::Subpiece { offset, .. }) if offset > 0
+                )
+            })
+    };
+    let high_lanes = graph
+        .values
+        .iter()
+        .filter(|value| value.var.size == 8 && is_high_lane(value.id))
+        .map(|value| value.id)
+        .collect::<Vec<_>>();
+    assert!(
+        high_lanes.len() >= 2,
+        "each cqo leaves the high half of a sign extension in RDX: {high_lanes:?}"
+    );
+    let homes = &artifact.certificates().stack_slots;
+    assert!(
+        homes.values().any(|slot| !slot.reload_values.is_empty()),
+        "the homes are read back: {homes:#?}"
+    );
+    for slot in homes.values() {
+        for lane in &high_lanes {
+            assert!(
+                !slot.reload_values.contains(lane),
+                "{lane:?} is a sign word, not the contents of the slot at {}",
+                slot.offset
+            );
+        }
+    }
+
+    // The rendering never writes a parameter: both are read, only.
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(response.render_refusal.is_none(), "{text}");
+    let signature = text
+        .lines()
+        .find(|line| line.contains("mul_div("))
+        .expect("the signature");
+    let parameters = signature
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(inside, _)| inside)
+        .expect("a parameter list")
+        .split(',')
+        .filter_map(|parameter| parameter.split_whitespace().last())
+        .map(|name| name.trim_start_matches('*').to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(parameters.len(), 2, "{signature}");
+    for parameter in &parameters {
+        let assigned = text.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix(parameter.as_str())
+                .is_some_and(|rest| rest.trim_start().starts_with("= "))
+        });
+        assert!(!assigned, "{parameter} is assigned:\n{text}");
+    }
+}

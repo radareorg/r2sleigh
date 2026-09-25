@@ -1,6 +1,7 @@
 //! What the frame proves: its geometry, its round trips, its reloads.
 
 use super::super::*;
+use crate::view::ViewRelation;
 
 /// Upstream decision for declaring one indexed stack object as an array.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1185,6 +1186,7 @@ pub(crate) fn collect_stack_reload_source_certificates(
         }
         let cert = StackReloadSourceCertificate {
             value,
+            relation: ViewRelation::Identity,
             reload: value,
             source: source.value,
             canonical_source: source.canonical_source,
@@ -1204,6 +1206,19 @@ pub(crate) fn collect_stack_reload_source_certificates(
         insert_stack_reload_source_certificate(&mut certificates, &mut ready, cert);
     }
 
+    // Whether a value computed from the reload is the reload's bits is the
+    // view's answer; no operation is assumed to preserve them.
+    let views = function.decompile_prep_facts().map(|facts| &facts.views);
+    let relation_to_reload = |output: ValueId, reload: ValueId| {
+        let (Some(output), Some(reload)) = (graph.value(output), graph.value(reload)) else {
+            return ViewRelation::Derived;
+        };
+        match views {
+            Some(views) => views.relation(&output.var, &reload.var),
+            None if output.var == reload.var => ViewRelation::Identity,
+            None => ViewRelation::Derived,
+        }
+    };
     while let Some(value) = ready.pop_front() {
         let Some(cert) = certificates.get(&value).cloned() else {
             continue;
@@ -1227,6 +1242,7 @@ pub(crate) fn collect_stack_reload_source_certificates(
                 &mut ready,
                 StackReloadSourceCertificate {
                     value: output,
+                    relation: relation_to_reload(output, cert.reload),
                     value_width,
                     ..cert.clone()
                 },

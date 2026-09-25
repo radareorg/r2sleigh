@@ -238,7 +238,9 @@ fn refine_parameter_signedness(
                     .stack_reloads
                     .values()
                     .filter_map(|reload| {
-                        if reload.value_width != reload.memory_width {
+                        if reload.relation != r2ssa::ViewRelation::Identity
+                            || reload.value_width != reload.memory_width
+                        {
                             return None;
                         }
                         Some((
