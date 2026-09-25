@@ -215,9 +215,9 @@ fn chance_run_length(runs: &[(u64, Vec<u8>)]) -> usize {
 /// relocation calls `_printf` is `printf` -- the same decoration the prototype
 /// table already accounts for, and the spelling radare2 writes. ELF carries no
 /// such decoration, so nothing is stripped there.
-pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, String>) {
+pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Stub>) {
     let decorated = format == Format::MachO;
-    for (stub, symbol) in imports {
+    for (stub, Stub { symbol, size }) in imports {
         let undecorated = match decorated {
             true => symbol.strip_prefix('_').unwrap_or(symbol),
             false => symbol.as_str(),
@@ -227,7 +227,7 @@ pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Str
             Name {
                 text: undecorated.to_owned(),
                 namespace: Namespace::Import,
-                size: 0,
+                size: *size,
             },
         );
     }
@@ -243,7 +243,8 @@ pub fn name_slots(
     db: &mut NameDb,
     format: Format,
     slots: &BTreeMap<u64, String>,
-    stubs: &BTreeMap<u64, String>,
+    stubs: &BTreeMap<u64, Stub>,
+    writes: &[super::source::LoaderWrite],
 ) {
     let decorated = format == Format::MachO;
     for (slot, symbol) in slots {
@@ -261,35 +262,57 @@ pub fn name_slots(
         if undecorated.is_empty() {
             continue;
         }
+        // As wide as the word the loader writes there.
+        let size = r2abi::statement::write_at(writes, *slot)
+            .filter(|write| write.place == *slot)
+            .map_or(0, |write| write.width);
         db.insert(
             *slot,
             Name {
                 text: undecorated.to_owned(),
                 namespace: Namespace::Reloc,
-                size: 0,
+                size,
             },
         );
     }
 }
 
-/// Which stub stands for which import, by its own name.
+/// One linkage stub: the import it stands for, and the bytes it occupies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stub {
+    pub symbol: String,
+    pub size: u64,
+}
+
+/// Which stub stands for which import, by its own name, and how large each is.
 ///
 /// A call to an import reaches a stub, and the stub reads the slot the loader
 /// fills. Following that read back to the relocation names the stub, which is
 /// the address the call names. Reading the stubs rather than assuming an entry
 /// size is what keeps this exact across formats and architectures.
+///
+/// Which sections hold stubs is decided by what they hold, never by what
+/// they are called: a Mach-O section of type `S_SYMBOL_STUBS` says so itself,
+/// and any other section the container states holds code is read as stubs
+/// only while every instruction in it is part of one -- see `section_stubs`.
 pub fn imports(
     source: &impl Source,
     decoder: &Disassembler,
     alignment: u32,
-) -> BTreeMap<u64, String> {
+) -> BTreeMap<u64, Stub> {
     let image = source.container();
     // The format's own statement first: a Mach-O section of stubs says which
-    // import each of its stubs stands for, with nothing to decode.
-    let mut named: BTreeMap<u64, String> = image
+    // import each of its stubs stands for, and how large each is, with nothing to decode.
+    let mut named: BTreeMap<u64, Stub> = image
         .import_stubs
         .iter()
-        .map(|stub| (stub.vaddr, stub.symbol.clone()))
+        .map(|stub| {
+            let stated = Stub {
+                symbol: stub.symbol.clone(),
+                size: stub.size,
+            };
+            (stub.vaddr, stated)
+        })
         .collect();
     let slots: BTreeMap<u64, &str> = image.import_slots().collect();
     if slots.is_empty() {
@@ -302,11 +325,12 @@ pub fn imports(
     let decoded: Vec<&Section> = image
         .sections
         .iter()
-        .filter(|section| stubs(&section.name) && !declared(section))
+        .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
+        .filter(|section| !declared(section))
         .collect();
     for section in decoded {
-        for (start, symbol) in section_stubs(source, decoder, section, &slots, alignment) {
-            named.entry(start).or_insert(symbol);
+        for (start, stub) in section_stubs(source, decoder, section, &slots, alignment) {
+            named.entry(start).or_insert(stub);
         }
     }
 
@@ -321,13 +345,23 @@ pub fn imports(
 /// landing pad at a stub's head inside the stub: nothing has to decide whether
 /// an instruction that writes nothing is padding before a stub or the first
 /// instruction of one.
+///
+/// A section is a section of stubs only while every run in it is one: a run
+/// of instructions that makes no call and does not return, ending in a jump
+/// through a word the loader writes -- an import's slot, or a word the psABI
+/// reserves for the lazy resolver -- or in a direct jump that stays in the
+/// section, as a lazy entry's jump to the resolver's does. The first
+/// instruction that is none of those ends the question: the section holds
+/// the program's own code, and none of it is a stub. That costs the program's
+/// code sections one run each.
 fn section_stubs(
     source: &impl Source,
     decoder: &Disassembler,
     section: &Section,
     slots: &BTreeMap<u64, &str>,
     alignment: u32,
-) -> Vec<(u64, String)> {
+) -> Vec<(u64, Stub)> {
+    let container = source.container();
     // Where each stub reads the slot the loader fills. A stub is a run of
     // instructions ending in its transfer, and which slot that transfer reads
     // is one question with one answer: the reaching-origin pass the engine
@@ -366,10 +400,32 @@ fn section_stubs(
                 continue;
             }
         };
+        let end_of_section = end;
+        let stays = |target: &r2il::Varnode| {
+            target.space == r2il::SpaceId::Ram
+                && target.offset >= section.vaddr
+                && target.offset < end_of_section
+        };
+        // A stub makes no call, does not return and takes no branch of its own choosing.
+        let own_code = lifted.ops.iter().any(|op| match op {
+            R2ILOp::Call { .. }
+            | R2ILOp::CallInd { .. }
+            | R2ILOp::Return { .. }
+            | R2ILOp::CBranch { .. } => true,
+            R2ILOp::Branch { target } => !stays(target),
+            _ => false,
+        });
+        if own_code {
+            return Vec::new();
+        }
         let leaves = lifted
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
+        let indirect = lifted
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::BranchInd { .. }));
         starts.push((pc, run.ops.len()));
         run.ops.extend(lifted.ops);
         run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
@@ -379,10 +435,16 @@ fn section_stubs(
             continue;
         }
         let terminal = run.ops.len().saturating_sub(1);
-        if let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
-            && let Some(found) = slots.get(&slot.offset)
-        {
-            readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
+        if indirect {
+            // An indirect jump is a stub's only through a word the loader writes.
+            let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
+                .filter(|slot| container.loader_write_at(slot.offset).is_some())
+            else {
+                return Vec::new();
+            };
+            if let Some(found) = slots.get(&slot.offset) {
+                readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
+            }
         }
         run = fresh_run(pc);
         starts.clear();
@@ -395,8 +457,14 @@ fn section_stubs(
     // twenty-byte header alike.
     let stride = match readers.as_slice() {
         [first, second, ..] => second.0.saturating_sub(first.0),
-        // One stub has no neighbour to measure against, so its cell is what its transfer needs.
-        [(_, start, symbol)] => return vec![(*start, symbol.clone())],
+        // One stub has no neighbour to measure against: its cell runs from where it starts to the section's end, which anchors every cell.
+        [(_, start, symbol)] => {
+            let stub = Stub {
+                symbol: symbol.clone(),
+                size: end.saturating_sub(*start),
+            };
+            return vec![(*start, stub)];
+        }
         [] => return Vec::new(),
     };
     if stride == 0 {
@@ -408,7 +476,11 @@ fn section_stubs(
         .enumerate()
         .filter_map(|(index, (_, _, symbol))| {
             let from_end = count.checked_sub(index as u64)?.checked_mul(stride)?;
-            Some((end.checked_sub(from_end)?, symbol))
+            let stub = Stub {
+                symbol,
+                size: stride,
+            };
+            Some((end.checked_sub(from_end)?, stub))
         })
         .collect()
 }
@@ -473,16 +545,6 @@ fn fresh_run(addr: u64) -> r2il::R2ILBlock {
     }
 }
 
-/// The sections a format puts import stubs in.
-fn stubs(name: &str) -> bool {
-    // `__auth_stubs` is where arm64e puts them, and every Mach-O built for
-    // Apple silicon has that section and no `__stubs`. Missing it left the
-    // import table empty on those binaries, which is not a cosmetic gap: the
-    // table decides which addresses are entries, and that is what bounds a
-    // body walk.
-    name.starts_with(".plt") || matches!(name, "__stubs" | "__auth_stubs" | "__symbol_stub")
-}
-
 /// Whether a symbol names a place in the program.
 ///
 /// An undefined symbol names an import and lives at no address; a symbol at
@@ -514,7 +576,13 @@ mod tests {
         name_imports(
             &mut db,
             Format::Elf,
-            &BTreeMap::from([(0x1030, "printf".to_owned())]),
+            &BTreeMap::from([(
+                0x1030,
+                Stub {
+                    symbol: "printf".to_owned(),
+                    size: 16,
+                },
+            )]),
         );
         db
     }

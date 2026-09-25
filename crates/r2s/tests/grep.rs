@@ -176,7 +176,7 @@ const GRAMMAR: &[(&str, &[&str])] = &[
     (
         "is~FUNC[5]~$:3",
         &[
-            "0", "0", "0", "0", "0", "0", "0", "0", "5", "38", "43", "51", "52", "54", "54", "67",
+            "0", "0", "0", "0", "0", "0", "0", "5", "16", "38", "43", "51", "52", "54", "54", "67",
             "76", "80", "118", "142", "170", "196", "347", "493", "608",
         ],
     ),
@@ -260,7 +260,7 @@ fn the_rows_count_the_lines_the_grep_kept() {
         // says `i~:-2` is the second to last line. radare2: nothing.
         (
             "is~FUNC:-1",
-            &["3   0x00001040 0x00401040 GLOBAL FUNC   0        imp.__printf_chk"],
+            &["3   0x00001040 0x00401040 GLOBAL FUNC   16       imp.__printf_chk"],
         ),
         // radare2 clears the count's window after the first line it shows
         // (grep.c:918, 967-969). radare2: `1`.

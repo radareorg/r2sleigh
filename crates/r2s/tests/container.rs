@@ -77,6 +77,15 @@ fn ir_never_lists_a_mach_o_stub() {
 }
 
 #[test]
+fn a_stub_flag_is_as_large_as_its_cell_and_a_slot_flag_as_the_word_the_loader_writes() {
+    // `.plt.sec` holds four 16-byte cells; each GOT slot is an 8-byte word.
+    let stub = run("rv_O0g", "f~sym.imp.printf");
+    assert!(stub.contains("    16 sym.imp.printf"), "{stub}");
+    let slot = run("rv_O0g", "f~reloc.printf");
+    assert!(slot.contains("     8 reloc.printf"), "{slot}");
+}
+
+#[test]
 fn baddr_is_where_the_first_file_byte_is_mapped() {
     // radare2: 0x100000000 for a Mach-O executable, whose `__TEXT` maps the
     // header; 0x400000 for a non-PIE ELF; zero for a PIE linked at zero. The
@@ -119,12 +128,14 @@ fn is_states_each_sections_own_permissions_flags_and_identity() {
 fn is_lists_every_symbol_with_its_binding_and_every_import_at_its_stub() {
     // radare2's `is` on rv_O0g: `completed.0` is a local object in `.bss`,
     // which the file holds no byte of; the imports are the dynamic table's,
-    // each at the stub a call to it lands on.
+    // each at the stub a call to it lands on and as large as that stub's
+    // cell. radare2 gives `__gmon_start__` sixteen bytes too, which no stub
+    // of it occupies.
     let out = run("rv_O0g", "is");
     for row in [
         "7   ---------- 0x00004020 LOCAL  OBJ    1        completed.0",
         "48  0x00001549 0x00001549 GLOBAL FUNC   640      main",
-        "5   0x000010a0 0x000010a0 GLOBAL FUNC   0        imp.printf",
+        "5   0x000010a0 0x000010a0 GLOBAL FUNC   16       imp.printf",
         "6   ---------- ---------- WEAK   NOTYPE 0        imp.__gmon_start__",
     ] {
         assert!(out.lines().any(|line| line == row), "{row} missing:\n{out}");
@@ -134,7 +145,7 @@ fn is_lists_every_symbol_with_its_binding_and_every_import_at_its_stub() {
     assert!(
         stripped
             .lines()
-            .any(|line| line == "3   0x00001040 0x00401040 GLOBAL FUNC   0        imp.__printf_chk"),
+            .any(|line| line == "3   0x00001040 0x00401040 GLOBAL FUNC   16       imp.__printf_chk"),
         "{stripped}"
     );
 }

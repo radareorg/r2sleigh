@@ -46,8 +46,8 @@ pub struct OpenProgram<S: Source> {
     source: S,
     /// What this binary calls each address it names.
     names: NameDb,
-    /// Which stub stands for which import, by the import's own name.
-    imports: BTreeMap<u64, String>,
+    /// Which stub stands for which import, by the import's own name, and how large each is.
+    imports: BTreeMap<u64, naming::Stub>,
     /// Which import each slot the loader fills stands for. A stub's tail
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
@@ -226,7 +226,13 @@ impl<S: Source> OpenProgram<S> {
         // The import stubs can only be read once there is a decoder.
         let imports = naming::imports(&self.source, &machine.disasm, machine.arch.alignment);
         naming::name_imports(&mut names, format, &imports);
-        naming::name_slots(&mut names, format, &self.slots, &imports);
+        naming::name_slots(
+            &mut names,
+            format,
+            &self.slots,
+            &imports,
+            &self.source.container().loader_writes,
+        );
         // A patch that renamed nothing and moved no stub leaves everything
         // derived from those still good, so the counters move only on a
         // difference rather than on every write; the first derivation is no
@@ -293,7 +299,7 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Which stub stands for which import, as of the last `ensure_current`.
-    pub const fn imports(&self) -> &BTreeMap<u64, String> {
+    pub const fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
         &self.imports
     }
 
@@ -622,6 +628,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.imports
             .get(&vaddr)
+            .map(|stub| &stub.symbol)
             .or_else(|| self.slots.get(&vaddr))
             .cloned()
     }

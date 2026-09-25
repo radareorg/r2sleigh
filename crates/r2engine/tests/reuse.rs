@@ -140,7 +140,10 @@ fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
     let mut program = OpenProgram::of(Literal::new().importing("puts"));
     program.prepared(ONE).expect("it prepares");
     assert_eq!(
-        program.imports().get(&STUB).map(String::as_str),
+        program
+            .imports()
+            .get(&STUB)
+            .map(|stub| stub.symbol.as_str()),
         Some("puts")
     );
     let before = program.revision().entries;

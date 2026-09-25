@@ -731,18 +731,17 @@ fn symbols(session: &mut Session) -> Result<String, String> {
     imports.sort_by_key(|symbol| index(symbol));
     let stubs = session.program.imports();
     for symbol in imports {
-        let stub = stubs
-            .iter()
-            .find(|(_, name)| **name == symbol.name)
-            .map(|(stub, _)| *stub);
+        let stub = stubs.iter().find(|(_, stub)| stub.symbol == symbol.name);
+        let at = stub.map(|(at, _)| *at);
         out.push_str(&format!(
             "\n{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
             index(symbol).unwrap_or_default(),
-            spelled(stub.and_then(|stub| file_offset_of(session, stub))),
-            spelled(stub),
+            spelled(at.and_then(|at| file_offset_of(session, at))),
+            spelled(at),
             binding(symbol.binding),
             symbol_type(symbol.kind),
-            symbol.size,
+            // An import's size is the stub's, which is what a call to it reaches.
+            stub.map_or(symbol.size, |(_, stub)| stub.size),
             symbol.name
         ));
     }

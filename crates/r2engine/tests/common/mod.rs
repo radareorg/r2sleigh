@@ -488,10 +488,17 @@ impl Literal {
         ];
         program.container.symbols.clear();
         program.container.relocations = vec![import_slot(PLT_SLOT, "_Exit")];
-        program
-            .container
-            .loader_writes
-            .push(import_write(PLT_SLOT, 8, "_Exit"));
+        // The two words before the slot are the ones the x86-64 psABI reserves
+        // for the lazy resolver, which the loader writes with no relocation
+        // naming them, and which the first entry reads.
+        program.container.loader_writes = vec![
+            LoaderWrite {
+                place: PLT_SLOT - 0x10,
+                width: 0x10,
+                kind: WriteKind::Unknown,
+            },
+            import_write(PLT_SLOT, 8, "_Exit"),
+        ];
         program
     }
 
@@ -653,6 +660,12 @@ impl Literal {
     /// The same program, stating that the loader makes this range read-only once it is done.
     pub fn sealed(mut self, range: Range<u64>) -> Self {
         self.container.sealed.push(range);
+        self
+    }
+
+    /// The same program, with the container naming its `index`th section `name`.
+    pub fn renamed(mut self, index: usize, name: &str) -> Self {
+        name.clone_into(&mut self.container.sections[index].name);
         self
     }
 
