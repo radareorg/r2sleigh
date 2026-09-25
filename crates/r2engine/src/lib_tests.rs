@@ -520,7 +520,7 @@ fn analyze_request_builders_own_semantic_mode_selection() {
         ptr_bits: 64,
         semantic_metadata_enabled: false,
         reg_type_hints: HashMap::new(),
-        parsed_context: r2types::parse_external_context_json("{}", 64),
+        parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: true,
     };
 
@@ -553,7 +553,7 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
         ptr_bits: None,
         semantic_metadata_enabled: true,
         reg_type_hints: HashMap::new(),
-        parsed_context: r2types::parse_external_context_json("{}", 32),
+        parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: true,
     };
 
@@ -587,7 +587,7 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
             },
             ptr_bits: Some(32),
             reg_type_hints: HashMap::new(),
-            parsed_context: r2types::parse_external_context_json("{}", 32),
+            parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
     assert_eq!(grouped.function_name, "sym.grouped");
@@ -658,7 +658,7 @@ fn analyze_function_request_collects_register_hints_inside_engine() {
         },
         ptr_bits: Some(64),
         reg_type_hints: HashMap::new(),
-        parsed_context: r2types::parse_external_context_json("{}", 64),
+        parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: false,
     };
 
@@ -2063,7 +2063,7 @@ fn type_function_refuses_large_name_only_summary_preprobe() {
     for idx in 0..210 {
         blocks.push(R2ILBlock::new(0x5600 + idx, 1));
     }
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.type_function(EngineTypeAnalysisRequest {
@@ -2124,7 +2124,7 @@ fn function_analysis_artifact_request_builder_owns_analysis_policy() {
 #[test]
 fn decompile_function_uses_engine_summary_preprobe_without_plugin_policy() {
     let blocks = const_return_blocks(0x401000, 0);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
@@ -2159,7 +2159,7 @@ fn decompile_function_uses_engine_summary_preprobe_without_plugin_policy() {
 #[test]
 fn decompile_function_from_input_refuses_incomplete_lifted_function() {
     let blocks = const_return_blocks(0x401000, 0);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function_from_input(EngineFunctionDecompileRequestInput {
@@ -2232,7 +2232,7 @@ fn decompile_function_from_input_refuses_incomplete_lifted_function() {
 #[test]
 fn decompile_function_from_input_refuses_inconsistent_lift_quality() {
     let blocks = const_return_blocks(0x401000, 0);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function_from_input(EngineFunctionDecompileRequestInput {
@@ -2287,7 +2287,7 @@ fn decompile_function_from_input_refuses_inconsistent_lift_quality() {
 
 #[test]
 fn decompile_function_from_input_refuses_zero_lifted_function() {
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function_from_input(EngineFunctionDecompileRequestInput {
@@ -2350,7 +2350,7 @@ fn decompile_function_from_input_refuses_zero_lifted_function() {
 
 #[test]
 fn decompile_function_from_input_refuses_zero_expected_blocks() {
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function_from_input(EngineFunctionDecompileRequestInput {
@@ -2406,7 +2406,7 @@ fn decompile_function_from_input_refuses_zero_expected_blocks() {
 #[test]
 fn decompile_function_from_input_attaches_complete_input_quality() {
     let blocks = const_return_blocks(0x401000, 0);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function_from_input(EngineFunctionDecompileRequestInput {
@@ -2442,7 +2442,7 @@ fn decompile_function_from_input_attaches_complete_input_quality() {
 #[test]
 fn decompile_function_refuses_incomplete_optional_input_quality() {
     let blocks = const_return_blocks(0x401000, 0);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
@@ -2500,7 +2500,7 @@ fn decompile_function_refuses_incomplete_optional_input_quality() {
 #[test]
 fn decompile_function_uses_canonical_display_identity_without_raw_payloads() {
     let blocks = const_return_blocks(0x401000, 0);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
@@ -2544,7 +2544,7 @@ fn decompile_function_uses_canonical_display_identity_without_raw_payloads() {
 #[test]
 fn decompile_function_does_not_invent_raw_payload_callee_names() {
     let blocks = direct_call_return_blocks(0x401000, 0x5000);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
@@ -2586,7 +2586,7 @@ fn decompile_function_does_not_invent_raw_payload_callee_names() {
 #[test]
 fn decompile_function_does_not_invent_raw_payload_strings() {
     let blocks = const_return_blocks(0x401000, 0x6000);
-    let parsed_context = r2types::parse_external_context_json("{}", 64);
+    let parsed_context = r2types::ParsedExternalContext::default();
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {

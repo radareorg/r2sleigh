@@ -527,27 +527,52 @@ fn local_generated_struct_replaces_stale_generated_external_layout() {
     );
 }
 
+/// A context whose stated signature is `int32_t (DemoStruct *param)`.
+fn demo_struct_pointer_context(param: &str) -> crate::ParsedExternalContext {
+    let signature = crate::FunctionSignatureSpec {
+        ret_type: Some(CTypeLike::Int {
+            bits: 32,
+            signedness: crate::Signedness::Signed,
+        }),
+        params: vec![crate::FunctionParamSpec {
+            name: param.to_string(),
+            ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::typedef(
+                "DemoStruct",
+            )))),
+        }],
+    };
+    crate::ParsedExternalContext {
+        current_signature: Some(signature.clone()),
+        merged_signature: Some(signature),
+        ..crate::ParsedExternalContext::default()
+    }
+}
+
 #[test]
 fn debug_typedef_alias_beats_generated_local_struct_override() {
-    let parsed_context = crate::parse_external_context_json(
-        r#"{
-            "signature":{
-                "ret":"int32_t",
-                "params":[{"name":"arr","type":"DemoStruct *"}]
-            },
-            "base_types":[
-                {
-                    "kind":"struct",
-                    "name":"type_0x261",
-                    "members":[
-                        {"name":"third","type":"int","offset":8},
-                        {"name":"fourteenth","type":"int","offset":52}
-                    ]
-                },
-                {"kind":"typedef","name":"DemoStruct","type":"type_0x261"}
-            ]
-        }"#,
-        64,
+    // The debug information states `typedef struct type_0x261 DemoStruct`,
+    // with `int third` at 8 and `int fourteenth` at 52.
+    let mut parsed_context = demo_struct_pointer_context("arr");
+    let field = |name: &str, offset| crate::ExternalField {
+        name: name.to_string(),
+        offset,
+        ty: Some("int".to_string()),
+    };
+    let layout = |name: &str| ExternalStruct {
+        name: name.to_string(),
+        fields: BTreeMap::from([(8, field("third", 8)), (52, field("fourteenth", 52))]),
+    };
+    let db = &mut parsed_context.external_type_db;
+    db.structs
+        .insert("type_0x261".to_string(), layout("type_0x261"));
+    db.structs
+        .insert("demostruct".to_string(), layout("DemoStruct"));
+    db.typedefs.insert(
+        "demostruct".to_string(),
+        crate::external::ExternalTypedef {
+            name: "DemoStruct".to_string(),
+            target: "type_0x261".to_string(),
+        },
     );
     let local_structs = LocalStructArtifacts {
         struct_decls: vec![StructDeclCandidate {
@@ -673,15 +698,7 @@ fn debug_typedef_alias_beats_generated_local_struct_override() {
 
 #[test]
 fn unresolved_named_pointer_materializes_local_struct_layout() {
-    let mut parsed_context = crate::parse_external_context_json(
-        r#"{
-            "signature":{
-                "ret":"int32_t",
-                "params":[{"name":"obj","type":"DemoStruct *"}]
-            }
-        }"#,
-        64,
-    );
+    let mut parsed_context = demo_struct_pointer_context("obj");
     parsed_context.external_type_db.structs.insert(
         "demostruct".to_string(),
         ExternalStruct {
