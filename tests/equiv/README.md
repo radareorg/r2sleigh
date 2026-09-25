@@ -54,6 +54,20 @@ machine ABI rather than the prototype it declares. Each child records how it
 ended, its return registers, the arena, the program's writable segments, and
 fd 1 and fd 2.
 
+**The rendering replaces the function.** In a rendering's child every byte of
+the original function's code (its symbol's extent) becomes `int3` before the
+call. When the program enters the function's entry -- a caller, a function
+pointer, a mutual recursion through another function -- the entry is
+redirected to the rendering, so the rendering is graded at every depth the
+program reaches it, not only at the top. When control reaches the original's
+entry from the rendering's own code (or a tail call from it), the rendering has
+handed its work back to the original: the run ends there and the record is
+`differs` with `guard: delegated`. Entering the original's body anywhere else
+ends the run the same way (`guard: body`). A rendering reaches itself through
+its own definition; a `function` link to the graded function's entry is bound
+to that definition, and a link to any other address inside the function is
+refused as `compile-error`.
+
 **Comparison** (`gate.py`):
 
 | pair | meaning when different |
@@ -103,10 +117,22 @@ as 64 bits must be `differs`; an uninitialised read `uninit`; a signed
 overflow `ub`; a write to the wrong global and a wrong byte through a pointer
 `differs` (memory, arena); swapped printf arguments `differs` (stdout); a
 reached residual `residual-trap`, also in a function that prints on every
-vector and traps on some; a function that writes to stderr and faults on its
-NULL vector `equal` on the vectors after it; an identifier missing from the
-link map `compile-error`. Every gate run runs them first and grades nothing
-(exit 2) if one misses. There is no flag to skip them.
+vector and traps on some, but a trap outside every residual helper `differs`;
+a function that writes to stderr and faults on its NULL vector `equal` on the
+vectors after it; a libm call `equal` (the rendering links against the
+original's `DT_NEEDED`); a recursion through a link to the function's own
+entry, and one through a program function that calls it back, `equal`; a
+rendering wrong only where the program calls it back `differs`; a rendering
+that calls the original's own entry `differs` (delegated); a link into the
+original's body, and an identifier missing from the link map,
+`compile-error`; a refusal `refused`. Every gate run runs them first and
+grades nothing (exit 2) if one misses. There is no flag to skip them.
+
+`test_equiv.py` then runs the whole pipeline over the fixture (built, stripped,
+asked through the batch runner with `testdata/stub_r2s.py` standing in for
+r2s): the known renderings keep their verdicts end to end, and the stub's
+`delegate` renderings, which call the original by its address, are `differs`
+for every function.
 
 The ratchet
 -----------

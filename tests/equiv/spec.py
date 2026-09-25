@@ -52,6 +52,13 @@ class CallSpec:
     ret_spelling: str
     unsupported: str | None = None
     constants: list[int] = field(default_factory=list)
+    # Bytes of the function's code at ``address`` (its symbol's size; 0 when
+    # unknown). A rendering's run replaces exactly this range in the image.
+    extent: int = 0
+
+    def guard(self) -> tuple[int, int]:
+        """``[start, end)`` of the original code a rendering replaces."""
+        return self.address, self.address + max(self.extent, 1)
 
     def describe(self) -> str:
         args = ", ".join(f"{p.spelling or p.kind} {p.name}@{p.register}" for p in self.params)

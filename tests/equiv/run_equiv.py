@@ -148,6 +148,7 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
                 "prototype is not the source's"
             )
         spec.constants = code_constants(binary.unstripped, sub.low_pc, size)
+        spec.extent = size
         workdir = args.out / "work" / binary.source.stem / binary.config / re.sub(
             r"[^A-Za-z0-9_.@-]", "_", sub.name + ("" if names_used[sub.name] == 1
                                                   else f"@{sub.low_pc:x}"))

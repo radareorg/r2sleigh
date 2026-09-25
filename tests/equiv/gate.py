@@ -8,7 +8,10 @@ status is one of:
 ``residual-trap``         agreed wherever it ran; on some vectors execution
                           reached a counted ``r2sleigh_residual_*`` trap
 ``differs``               some vector returned, wrote, printed or ended
-                          differently; the evidence names the vector and field
+                          differently; the evidence names the vector and field.
+                          A rendering that passes control to the original's
+                          own code (delegation) ends differently by
+                          construction, and the evidence says so
 ``uninit``                the ``=zero`` and ``=pattern`` builds disagree: the
                           rendering read a local nothing wrote
 ``ub``                    UBSan reported, or the ``-O0`` and ``-O2`` builds
@@ -152,9 +155,15 @@ def grade(key: str, workdir: Path, binary: Path, dwarf: Dwarf, spec: CallSpec,
 def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: CallSpec,
                code: str, definition: str, links: list[dict], config: Config) -> Record:
     workdir.mkdir(parents=True, exist_ok=True)
+    inside = link.links_into_body(links, spec.guard())
+    if inside:
+        record.status = "compile-error"
+        record.evidence = {"variant": "link", "diagnostics": "\n".join(inside)}
+        return record
     identity = link.build_trampoline(config.cc, workdir, spec.address)
     builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition,
-                                                   link.needed_libraries(str(binary)))
+                                                   link.needed_libraries(str(binary)),
+                                                   spec.address)
     record.strict = strict
     if not identity.ok:
         record.status = "harness-error"
@@ -174,7 +183,7 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     runs = [
         Run("original", address=spec.address),
         Run("identity", so_path=str(identity.path), symbol="equiv_identity"),
-        *(Run(variant, so_path=str(builds[variant].path), symbol=definition)
+        *(Run(variant, so_path=str(builds[variant].path), symbol=definition, replaces=True)
           for variant in ("O0", "pattern", "O2", "ubsan")),
     ]
     vectors = build_vectors(spec, dwarf, config.vectors, record.key)
@@ -324,6 +333,15 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
             else:
                 found["differs"] = {**_pair_evidence(primary), "original": runs[ORIGINAL],
                                     "rendering": o0}
+                if o0.get("guard") == "delegated":
+                    found["differs"]["guard"] = "delegated"
+                    found["differs"]["cause"] = (
+                        "the rendering passed control to the original function's own entry "
+                        "instead of computing the result itself")
+                elif o0.get("guard") == "body":
+                    found["differs"]["guard"] = "body"
+                    found["differs"]["cause"] = (
+                        f"control reached the original function's body at {o0.get('fault_pc')}")
         uninit = pairs.get((O0, PATTERN))
         if uninit is not None and not uninit.get("equal"):
             found["uninit"] = {"detector": "auto-var-init zero vs pattern",

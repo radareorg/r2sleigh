@@ -100,6 +100,19 @@ NOINL int st_first(const char *p)
     return p[0];
 }
 
+/* Recursive: a rendering reaches itself through its own definition, or
+ * through a link to its own entry, and never through the original. */
+NOINL int st_rsum(const struct st_node *n)
+{
+    return n ? (int)((unsigned)n->key + (unsigned)st_rsum(n->next)) : 0;
+}
+
+/* Mutually recursive: a rendering of st_ping calls the original st_pong, which
+ * calls st_ping's entry -- the rendering, which replaced it in the image. */
+NOINL int st_pong(const struct st_node *n);
+NOINL int st_ping(const struct st_node *n) { return n ? 1 + 2 * st_pong(n->next) : 0; }
+NOINL int st_pong(const struct st_node *n) { return n ? 3 + 5 * st_ping(n->next) : 0; }
+
 /* Calls into libm, which only the original's DT_NEEDED brings in. */
 NOINL double st_cosine(double x) { return cos(x) * 2.0; }
 
@@ -113,5 +126,5 @@ int main(void)
     return st_add(1, 2) + (int)st_mix(3, 4) + st_clamp(5) + (int)st_scale(d, 2) + st_print(1, 2)
         + (int)st_len("x") + st_sum_list(&a) + buf[0] + (int)st_many(1, 2, 3, 4, 5, 6, 7, 8)
         + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + st_say(3) + st_first("x")
-        + (int)st_cosine(0.5);
+        + (int)st_cosine(0.5) + st_rsum(&a) + st_ping(&a);
 }

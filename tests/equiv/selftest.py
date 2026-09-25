@@ -25,6 +25,12 @@ graded through the same path an engine rendering takes:
 * a function that writes to stderr and then faults on its NULL vector must be
   ``equal`` on most of its vectors: a dropped vector's output is not carried
   into the next;
+* a recursion through a link to the function's own entry, and one through a
+  program function that calls it back, must be ``equal``: the rendering
+  replaced the function in the image;
+* a rendering that calls the original function's own entry must be
+  ``differs``, delegation named; a link into the original's body must be
+  ``compile-error``;
 * an identifier missing from the link map must be ``compile-error``;
 * a refusal must be ``refused``.
 """
@@ -56,10 +62,13 @@ class Case:
     function: str
     expect: str
     code: str
-    links: list[tuple[str, str]] = field(default_factory=list)
+    # (ident, kind), or (ident, kind, offset) for an address that many bytes
+    # past the graded function's entry.
+    links: list[tuple] = field(default_factory=list)
     expect_field: str | None = None
     residual: int = 0
     refused: str | None = None
+    expect_guard: str | None = None
 
 
 def _tu(body: str, headers: str = "#include <stdint.h>\n#include <stddef.h>\n") -> str:
@@ -188,6 +197,40 @@ CASES = [
         "int32_t sub_clamp(int32_t x)\n{\n    if (x < 0)\n        __builtin_trap();\n"
         "    if (x > 100)\n        return 100;\n    return x;\n}\n"), residual=1,
         expect_field="exit"),
+    # The function being graded is the rendering. Recursion spelled through a
+    # link to its own entry reaches the rendering; a program function that
+    # calls it back reaches the rendering; a rendering that hands its work to
+    # the original's own code is never equal, and a link into the original's
+    # body is refused.
+    Case("recursion-through-its-own-link", "st_rsum", "equal", _tu(
+        _NODE + "extern int32_t st_rsum(const struct st_node *);\n"
+        "int32_t sub_rsum(const struct st_node *n)\n{\n"
+        "    return n ? (int32_t)((uint32_t)n->key + (uint32_t)st_rsum(n->next)) : 0;\n}\n"),
+        links=[("st_rsum", "function")]),
+    Case("recursion-through-the-program", "st_ping", "equal", _tu(
+        _NODE + "extern int32_t st_pong(const struct st_node *);\n"
+        "int32_t sub_ping(const struct st_node *n)\n{\n"
+        "    return n ? (int32_t)(1u + 2u * (uint32_t)st_pong(n->next)) : 0;\n}\n"),
+        links=[("st_pong", "function")]),
+    # Wrong only where the program calls it back (depth > 1): only a gate
+    # whose rendering replaced the function in the image can see it.
+    Case("wrong-only-when-called-back", "st_ping", "differs", _tu(
+        _NODE + "extern int32_t st_pong(const struct st_node *);\n"
+        "static int32_t depth;\n"
+        "int32_t sub_ping(const struct st_node *n)\n{\n    int32_t r;\n    depth++;\n"
+        "    if (!n)\n        r = depth > 1 ? 1000 : 0;\n    else\n"
+        "        r = (int32_t)(1u + 2u * (uint32_t)st_pong(n->next));\n"
+        "    depth--;\n    return r;\n}\n"),
+        links=[("st_pong", "function")], expect_field="return"),
+    Case("delegation-to-the-original", "st_add", "differs", _tu(
+        "typedef int32_t (*st_add_fn)(int32_t, int32_t);\n"
+        "int32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    return ((st_add_fn){entry})(a, b);\n}\n"), expect_field="exit",
+        expect_guard="delegated"),
+    Case("link-into-its-own-body", "st_clamp", "compile-error", _tu(
+        "extern int32_t st_clamp_tail(int32_t);\n"
+        "int32_t sub_clamp(int32_t x)\n{\n    return st_clamp_tail(x);\n}\n"),
+        links=[("st_clamp_tail", "function", 1)]),
     Case("link-map-gap", "st_bump", "compile-error", _tu(
         "extern int32_t st_counter;\nvoid sub_bump(int32_t by)\n{\n"
         "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n}\n")),
@@ -210,16 +253,16 @@ def build_fixture(cc: str, out_dir: Path) -> Path:
 def synthetic_pddj(case: Case, address: int, symbols: dict[str, int]) -> dict:
     definition = "sub_" + case.function[len("st_"):]
     links = []
-    for ident, kind in case.links:
-        entry = {"ident": ident, "kind": kind, "addr": symbols.get(ident, 0), "size": None}
-        links.append(entry)
+    for ident, kind, *offset in case.links:
+        where = address + offset[0] if offset else symbols.get(ident, 0)
+        links.append({"ident": ident, "kind": kind, "addr": where, "size": None})
     return {
         "name": case.function,
         "addr": address,
         "definition": definition,
         "signature": "",
         "refused": {"reason": case.refused} if case.refused else None,
-        "code": case.code,
+        "code": case.code.replace("{entry}", f"0x{address:x}"),
         "proof": {"rendered": 1, "elided": 0, "refused": 0, "residual": case.residual,
                   "split": 0, "compiler_inserted": 0, "assumed": 0},
         "variables": [],
@@ -250,7 +293,8 @@ def run_self_tests(config: gate.Config, workdir: Path,
             continue
         sub = by_name[case.function]
         spec = call_spec(dwarf, sub, functions)
-        spec.constants = code_constants(binary, sub.low_pc, extents.get(sub.low_pc, ([], 0))[1])
+        spec.extent = extents.get(sub.low_pc, ([], 0))[1]
+        spec.constants = code_constants(binary, sub.low_pc, spec.extent)
         record = synthetic_pddj(case, sub.low_pc, symbols)
         if case.refused:
             answer = Answer(sub.low_pc, "decline", record=record, cause=f"refused: {case.refused}",
@@ -265,6 +309,10 @@ def run_self_tests(config: gate.Config, workdir: Path,
             got_field = graded.evidence.get("field")
             ok = got_field == case.expect_field
             why = f"expected field {case.expect_field}, got {got_field}"
+        if ok and case.expect_guard:
+            got_guard = graded.evidence.get("guard")
+            ok = got_guard == case.expect_guard
+            why = f"expected guard {case.expect_guard}, got {got_guard}"
         if ok and case.expect == "equal" and graded.vectors.get("graded", 0) < config.vectors // 2:
             ok = False
             why = f"only {graded.vectors.get('graded')} of {config.vectors} vectors were graded"

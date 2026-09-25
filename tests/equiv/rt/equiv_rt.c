@@ -12,6 +12,13 @@
  *     loaded from its shared object), one child is forked from that same
  *     parent state and calls its function through the register-level thunk
  *     (call_x86_64.S) with the vector's machine entry state;
+ *     in a rendering's child the rendering first REPLACES the graded function
+ *     in the image: every byte of the original's code becomes int3, a call
+ *     into its entry from the program (a caller of the function, a function
+ *     pointer, a mutual recursion) is redirected to the rendering, and control
+ *     that reaches the original's code from the rendering itself (delegation)
+ *     or anywhere inside its body ends the run, so a rendering is only ever
+ *     graded on what its own code does;
  *     each child records how it ended, its return registers, the arena, the
  *     program's writable PT_LOAD bytes, and what it wrote to fd 1 and fd 2;
  *     the parent compares the requested pairs of runs and writes one JSON
@@ -69,7 +76,7 @@ struct equiv_ret {
 
 extern void equiv_call(void *fn, const struct equiv_regs *in, struct equiv_ret *out);
 
-#define JOB_MAGIC "EQVJOB01"
+#define JOB_MAGIC "EQVJOB02"
 
 enum ret_kind { RET_VOID = 0, RET_INT = 1, RET_F32 = 2, RET_F64 = 3, RET_INT128 = 4 };
 
@@ -77,6 +84,8 @@ struct job_header {
     char magic[8];
     uint64_t arena_base;
     uint64_t arena_size;
+    uint64_t guard_start;     /* the graded function's code in the image: */
+    uint64_t guard_length;    /* [guard_start, guard_start + guard_length) */
     uint32_t n_runs;
     uint32_t n_vectors;
     uint32_t n_pairs;
@@ -89,6 +98,8 @@ struct job_header {
 
 struct job_run {
     uint64_t address;         /* called directly when so_path is empty */
+    uint32_t replaces;        /* 1: this run's function replaces the graded one */
+    uint32_t reserved;
     char so_path[512];
     char symbol[256];
     char label[32];
@@ -134,8 +145,14 @@ struct slot_head {
     uint64_t fault_addr;
     uint64_t fault_base;         /* load base of fault_object, to read its symbols */
     char fault_object[256];
+    int32_t guard;               /* GUARD_*: how control reached the original's code */
+    int32_t guard_error;         /* errno of a guard that could not be installed */
+    uint64_t guard_caller;       /* return address at a delegated entry */
     struct equiv_ret ret;
 };
+
+enum guard_hit { GUARD_NONE = 0, GUARD_DELEGATED = 1, GUARD_BODY = 2 };
+static const char *guard_name[] = { "none", "delegated", "body" };
 
 struct segment {
     uint64_t start;
@@ -171,6 +188,11 @@ static uint8_t *g_arena;
 /* Child-side state for the exit hook and the fault handler. */
 static struct slot_head *g_child_slot;
 static volatile int g_in_call;
+/* Child-side state for the guard: where a redirected entry goes, and the
+ * objects whose code may not enter the original (the rendering, this runtime). */
+static void *g_guard_target;
+static uintptr_t g_guard_own_base;
+static uintptr_t g_guard_rt_base;
 
 static FILE *g_out;
 
@@ -315,6 +337,85 @@ static void child_fault(int sig, siginfo_t *info, void *context)
      * same signal, which is what the parent reads. */
 }
 
+static uintptr_t object_base(const void *address)
+{
+    Dl_info where;
+    if (dladdr(address, &where) && where.dli_fbase)
+        return (uintptr_t)where.dli_fbase;
+    return 0;
+}
+
+/* SIGTRAP in a rendering's child: an int3 of the guarded original. */
+static void child_guard(int sig, siginfo_t *info, void *context)
+{
+    ucontext_t *uc = context;
+    uint64_t pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP] - 1; /* int3 reports the next byte */
+    uint64_t start = g_head.guard_start, end = start + g_head.guard_length;
+    struct slot_head *slot = g_child_slot;
+    if (pc < start || pc >= end || !slot) {
+        /* Not the guard: a trap of the rendering's own, handled as any fault. */
+        child_fault(sig, info, context);
+        signal(SIGTRAP, SIG_DFL);
+        raise(SIGTRAP);
+        return;
+    }
+    int hit = GUARD_BODY;
+    uint64_t caller = 0;
+    if (pc == start) {
+        caller = *(const uint64_t *)(uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+        uintptr_t base = object_base((const void *)(uintptr_t)caller);
+        if (base != g_guard_own_base && base != g_guard_rt_base) {
+            /* The program called the function: it is the rendering now. The
+             * registers and the stack are the caller's, exactly as a jump. */
+            uc->uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)g_guard_target;
+            return;
+        }
+        hit = GUARD_DELEGATED;
+    }
+    if (slot->fault_signal == 0) {
+        slot->guard = hit;
+        slot->guard_caller = caller;
+        slot->fault_signal = sig;
+        slot->fault_pc = pc;
+        slot->fault_addr = pc;
+        Dl_info where;
+        if (dladdr((void *)(uintptr_t)pc, &where) && where.dli_fname) {
+            strncpy(slot->fault_object, where.dli_fname, sizeof slot->fault_object - 1);
+            slot->fault_base = (uint64_t)(uintptr_t)where.dli_fbase;
+        }
+    }
+    /* Die of this SIGTRAP as soon as the handler returns. */
+    signal(SIGTRAP, SIG_DFL);
+    raise(SIGTRAP);
+}
+
+/* Make the rendering the graded function: int3 over every byte of the
+ * original's code (a private copy of the page, this child's alone), and
+ * SIGTRAP routed to child_guard. */
+static int guard_install(struct run_state *run)
+{
+    if (g_head.guard_length == 0)
+        return 0;
+    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t start = (uintptr_t)g_head.guard_start, end = start + g_head.guard_length;
+    uintptr_t low = start & ~(page - 1), high = (end + page - 1) & ~(page - 1);
+    if (mprotect((void *)low, high - low, PROT_READ | PROT_WRITE) != 0)
+        return errno;
+    memset((void *)start, 0xcc, g_head.guard_length);
+    if (mprotect((void *)low, high - low, PROT_READ | PROT_EXEC) != 0)
+        return errno;
+    g_guard_target = run->fn;
+    g_guard_own_base = object_base(run->fn);
+    g_guard_rt_base = object_base((const void *)guard_install);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = child_guard;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTRAP, &sa, NULL);
+    return 0;
+}
+
 static void child_run(struct run_state *run, const struct job_vector *vec, int timeout_ms)
 {
     dup2(run->out_fd, 1);
@@ -337,6 +438,13 @@ static void child_run(struct run_state *run, const struct job_vector *vec, int t
 
     g_child_slot = run->slot;
     atexit(child_exit_hook);
+    if (run->spec->replaces) {
+        int error = guard_install(run);
+        if (error) {
+            run->slot->guard_error = error;
+            _exit(0);
+        }
+    }
 
     struct itimerval timer;
     memset(&timer, 0, sizeof timer);
@@ -408,6 +516,13 @@ static void run_one(struct run_state *run, const struct job_vector *vec, int tim
     clock_gettime(CLOCK_MONOTONIC, &t1);
     run->elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000L;
 
+    if (run->slot->guard_error) {
+        run->outcome = OUT_UNAVAILABLE;
+        snprintf(run->load_error, sizeof run->load_error,
+                 "cannot put the rendering in place of the original: %s",
+                 strerror(run->slot->guard_error));
+        return;
+    }
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
         run->outcome = sig == SIGALRM ? OUT_TIMEOUT : OUT_SIGNAL;
@@ -580,6 +695,17 @@ static void emit_run(size_t index, const struct run_state *run)
                 (unsigned long long)run->slot->fault_addr,
                 (unsigned long long)run->slot->fault_base);
         json_string(g_out, run->slot->fault_object, strlen(run->slot->fault_object));
+        if (run->slot->guard) {
+            fprintf(g_out, ",\"guard\":\"%s\"", guard_name[run->slot->guard]);
+            Dl_info where;
+            if (run->slot->guard_caller
+                && dladdr((void *)(uintptr_t)run->slot->guard_caller, &where) && where.dli_fname) {
+                fprintf(g_out, ",\"guard_caller_offset\":\"0x%llx\",\"guard_caller_object\":",
+                        (unsigned long long)(run->slot->guard_caller
+                                             - (uint64_t)(uintptr_t)where.dli_fbase));
+                json_string(g_out, where.dli_fname, strlen(where.dli_fname));
+            }
+        }
     }
     if (run->outcome != OUT_SKIPPED && run->outcome != OUT_UNAVAILABLE)
         fprintf(g_out, ",\"elapsed_us\":%ld", run->elapsed_us);

@@ -13,6 +13,12 @@ rather than a re-created copy of it:
 * an ``import`` is left undefined and binds to the C library, which is also
   what the original's PLT reaches.
 
+The function being graded is the rendering itself. A ``function`` link to its
+entry address (a recursion the rendering spells by the function's name) is a
+jump to the rendering's own definition, never to the original; a link to any
+other address inside the function's code is refused (:func:`links_into_body`):
+it names part of the original, which a rendering may not delegate to.
+
 ``-Wl,-Bsymbolic`` makes a recursive rendering call itself, and
 ``-Wl,--no-undefined`` turns an identifier the link map forgot into a link
 error that names it. The rendering links against every library the original
@@ -61,8 +67,26 @@ class Built:
     diagnostics: str
 
 
-def shim_source(links: list[dict], definition: str) -> tuple[str, list[str]]:
-    """Assembly defining every linked function and object; and what it skipped."""
+def links_into_body(links: list[dict], guard: tuple[int, int]) -> list[str]:
+    """Every link naming an address inside the graded function other than its entry."""
+    start, end = guard
+    found = []
+    for entry in links:
+        address = entry.get("addr")
+        if (entry.get("kind") in ("function", "object") and isinstance(address, int)
+                and start < address < end):
+            found.append(f"link `{entry.get('ident')}` ({entry.get('kind')}) is 0x{address:x}, "
+                         f"inside the function being graded (0x{start:x}..0x{end:x})")
+    return found
+
+
+def shim_source(links: list[dict], definition: str,
+                entry: int | None = None) -> tuple[str, list[str]]:
+    """Assembly defining every linked function and object; and what it skipped.
+
+    ``entry`` is the graded function's address: a function link there jumps to
+    ``definition``.
+    """
     lines = ["    .text"]
     skipped: list[str] = []
     seen: set[str] = set()
@@ -81,7 +105,14 @@ def shim_source(links: list[dict], definition: str) -> tuple[str, list[str]]:
         if not isinstance(address, int) or address <= 0:
             skipped.append(f"{ident}: no address")
             continue
-        if kind == "function":
+        if kind == "function" and address == entry:
+            lines += [
+                f"    .globl {ident}",
+                f"    .type {ident}, @function",
+                f"{ident}:",
+                f"    jmp {definition}",
+            ]
+        elif kind == "function":
             lines += [
                 f"    .globl {ident}",
                 f"    .type {ident}, @function",
@@ -140,7 +171,7 @@ def needed_libraries(binary: str) -> tuple[str, ...]:
 
 
 def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
-                    definition: str, needed: tuple[str, ...] = ()
+                    definition: str, needed: tuple[str, ...] = (), entry: int | None = None
                     ) -> tuple[dict[str, Built], str, list[str]]:
     """Compile a rendering four ways; returns the builds, the strict verdict, and skipped links.
 
@@ -149,7 +180,7 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
     workdir.mkdir(parents=True, exist_ok=True)
     source = workdir / "rendering.c"
     source.write_text(code, encoding="utf-8")
-    shim, skipped = shim_source(links, definition)
+    shim, skipped = shim_source(links, definition, entry)
     shim_path = workdir / "shim.S"
     shim_path.write_text(shim, encoding="utf-8")
     builds: dict[str, Built] = {}

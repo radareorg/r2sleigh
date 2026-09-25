@@ -7,8 +7,8 @@ The self-test suite is the gate's precondition and runs here too; the rest pins
 the parts a gate run cannot check on itself: that r2s's every failure mode ends
 as exactly one typed answer per address, that the ratchet blocks what it must,
 and that the whole pipeline -- build, strip, capture, compile, run, compare --
-grades a rendering that *is* the original as ``equal`` for every function of a
-real program at every level.
+keeps every known rendering's verdict at every level, and never grades a
+rendering that hands its work back to the original as ``equal``.
 """
 
 from __future__ import annotations
@@ -387,7 +387,15 @@ class SelfTestSuite(unittest.TestCase):
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
 class PipelineTests(unittest.TestCase):
-    """The whole gate, with r2s replaced by a stub whose renderings are the original."""
+    """The whole gate over the self-test fixture, with r2s replaced by the stub.
+
+    Built with GCC at -O0 and -O2 and stripped, asked through the batch runner,
+    compiled, linked, run and compared: the self-test renderings keep their
+    known verdicts end to end, and a rendering that hands its work back to the
+    original is never equal.
+    """
+
+    FUNCTIONS = 18  # seventeen functions and main, per level
 
     def run_gate(self, tmp: Path, *extra: str, **env: str) -> tuple[int, dict]:
         # --out is given relative to the working directory, as a person types
@@ -406,33 +414,52 @@ class PipelineTests(unittest.TestCase):
         records = json.loads((tmp / "out" / "records.json").read_text())["records"]
         return code, {r["key"]: r for r in records}
 
-    def test_a_rendering_that_is_the_original_is_equal_everywhere(self):
+    @staticmethod
+    def known(function: str) -> str:
+        case = next((c for c in selftest.CASES
+                     if c.function == function and c.expect in ("equal", "residual-trap")), None)
+        return case.expect if case else "refused"
+
+    def test_known_renderings_keep_their_verdicts_through_the_whole_pipeline(self):
         with tempfile.TemporaryDirectory() as tmp:
-            code, records = self.run_gate(Path(tmp), STUB_R2S_MODE="delegate",
+            code, records = self.run_gate(Path(tmp), STUB_R2S_MODE="fixture",
                                           STUB_R2S_FAULTS="")
         self.assertEqual(code, run_equiv.EXIT_OK)
-        self.assertEqual({r["status"] for r in records.values()}, {"equal"})
-        self.assertEqual(len(records), 2 * 15)  # fourteen functions and main, at two levels
+        self.assertEqual(len(records), 2 * self.FUNCTIONS)
+        got = {k: r["status"] for k, r in records.items()}
+        want = {k: self.known(k.rsplit("::", 1)[1]) for k in records}
+        self.assertEqual(got, want)
+        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 15)
+
+    def test_a_rendering_that_delegates_to_the_original_is_never_equal(self):
+        # The stub's delegate calls the original's entry by its address, a
+        # rendering equal to the original by construction if the original
+        # still ran: every function, main included, must come out differs.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, records = self.run_gate(Path(tmp), STUB_R2S_MODE="delegate", STUB_R2S_FAULTS="")
+        self.assertEqual(len(records), 2 * self.FUNCTIONS)
+        self.assertEqual({r["status"] for r in records.values()}, {"differs"})
+        self.assertEqual({r["evidence"].get("guard") for r in records.values()}, {"delegated"})
 
     def test_a_crash_is_one_record_and_the_ratchet_sees_it(self):
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
-            code, records = self.run_gate(tmp / "first", STUB_R2S_MODE="delegate",
-                                          STUB_R2S_FAULTS="")
-            clamp = next(r for k, r in records.items() if k.endswith("gcc-O2::st_clamp"))
+            code, first = self.run_gate(tmp / "first", "--opts", "O2", STUB_R2S_MODE="fixture",
+                                        STUB_R2S_FAULTS="")
+            clamp = next(r for k, r in first.items() if k.endswith("gcc-O2::st_clamp"))
             baseline = tmp / "baseline.json"
-            baseline.write_text(json.dumps(
-                {"schema": 1, "records": {k: {"status": "equal"} for k in records}}))
-            # Only -O2 is asked again: the address names one function of one build.
+            baseline.write_text(json.dumps({"schema": 1, "records": {
+                k: {"status": r["status"], "cause": "known" if r["status"] != "equal" else None}
+                for k, r in first.items()}}))
             code, records = self.run_gate(
                 tmp / "second", "--opts", "O2", "--baseline", str(baseline),
-                STUB_R2S_MODE="delegate", STUB_R2S_FAULTS=f"abort@{clamp['address'][2:]}")
+                STUB_R2S_MODE="fixture", STUB_R2S_FAULTS=f"abort@{clamp['address'][2:]}")
         self.assertEqual(code, run_equiv.EXIT_RATCHET)
         crashed = records[clamp["key"]]
         self.assertEqual(crashed["status"], "no-record")
         self.assertIn("SIGABRT", crashed["evidence"]["cause"])
-        others = {r["status"] for k, r in records.items() if k != clamp["key"]}
-        self.assertEqual(others, {"equal"})
+        self.assertEqual({k: r["status"] for k, r in records.items() if k != clamp["key"]},
+                         {k: r["status"] for k, r in first.items() if k != clamp["key"]})
 
 
 if __name__ == "__main__":

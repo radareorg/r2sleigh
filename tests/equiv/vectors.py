@@ -44,7 +44,7 @@ POINTER_TABLE = 64
 MASK64 = (1 << 64) - 1
 
 RET_KINDS = {"void": 0, "int": 1, "f32": 2, "f64": 3, "int128": 4}
-JOB_MAGIC = b"EQVJOB01"
+JOB_MAGIC = b"EQVJOB02"
 
 
 def int_pool(size: int, signed: bool, constants: tuple[int, ...] | list[int] = ()) -> list[int]:
@@ -303,17 +303,22 @@ class Run:
     address: int = 0
     so_path: str = ""
     symbol: str = ""
+    # The run's function replaces the graded one in the image for the call.
+    replaces: bool = False
 
 
 def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
                vectors: list[Vector], timeout_ms: int, out_cap: int = 65536) -> bytes:
     """The binary job ``rt/equiv_rt.c`` reads (``struct job_header`` and after)."""
     out = bytearray()
+    guard_start, guard_end = spec.guard()
     out += struct.pack(
-        "<8sQQ8I",
+        "<8sQQQQ8I",
         JOB_MAGIC,
         ARENA_BASE,
         ARENA_SIZE,
+        guard_start,
+        guard_end - guard_start,
         len(runs),
         len(vectors),
         len(pairs),
@@ -329,7 +334,8 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
         label = run.label.encode()
         if len(so) >= 512 or len(symbol) >= 256 or len(label) >= 32:
             raise ValueError(f"run {run.label}: a path or name is too long for the job")
-        out += struct.pack("<Q512s256s32s", run.address, so, symbol, label)
+        out += struct.pack("<QII512s256s32s", run.address, int(run.replaces), 0, so, symbol,
+                           label)
     for a, b in pairs:
         out += struct.pack("<II", a, b)
     for vector in vectors:

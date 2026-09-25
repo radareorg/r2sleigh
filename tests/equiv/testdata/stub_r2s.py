@@ -14,10 +14,18 @@ to survive. It is never a rendering source for a real measurement.
 unknown command. ``STUB_R2S_MODE`` picks the answer:
 
 * ``minimal``   a valid record with an empty body (the default);
+* ``fixture``   for a function of the gate's own fixture
+                (``selftest/fixture.c``), the self-test rendering whose verdict
+                is known (its first ``equal`` or ``residual-trap`` case); a
+                refusal for any other function;
 * ``delegate``  a rendering that calls the original function through its
-                address, spelled from the unstripped twin's DWARF (the binary
-                path minus ``.stripped``): equal to the original by construction;
+                address, spelled from the unstripped twin's DWARF: what a
+                rendering that hands its work back to the original looks like,
+                which the gate must never grade ``equal``;
 * ``refuse``    a record whose ``refused`` is set.
+
+The unstripped twin of the binary r2s is shown is the binary path minus
+``.stripped``: only this stand-in, never r2s, looks there.
 
 ``STUB_R2S_FAULTS`` is a comma list of ``<kind>@<hex address>`` applied when
 ``pddj`` runs there: ``abort`` (SIGABRT), ``sleep`` (hang for a minute),
@@ -96,6 +104,21 @@ def _delegate(binary: Path, address: int) -> dict:
     return _record(address, name, code)
 
 
+def _fixture(binary: Path, address: int) -> dict:
+    here = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(here))
+    import selftest  # noqa: PLC0415
+    from dwarf import Dwarf  # noqa: PLC0415
+
+    unstripped = Path(str(binary).removesuffix(".stripped"))
+    name = next(s.name for s in Dwarf.read(unstripped).subprograms() if s.low_pc == address)
+    case = next((c for c in selftest.CASES
+                 if c.function == name and c.expect in ("equal", "residual-trap")), None)
+    if case is None:
+        return _record(address, name, "", refused="no known rendering in the fixture")
+    return selftest.synthetic_pddj(case, address, selftest._all_symbols(unstripped))
+
+
 def _record(address: int, name: str, code: str, refused: str | None = None) -> dict:
     lines = [{"line": n + 1, "addrs": [address]} for n, text in enumerate(code.splitlines())
              if "return" in text]
@@ -163,6 +186,8 @@ class Shell:
                 return
             if self.mode == "delegate":
                 record = _delegate(self.binary, address)
+            elif self.mode == "fixture":
+                record = _fixture(self.binary, address)
             elif self.mode == "refuse":
                 record = _record(address, f"fcn_{address:08x}", "", refused="stub refuses")
             else:
