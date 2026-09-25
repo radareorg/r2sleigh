@@ -151,7 +151,7 @@ impl<S: Source> OpenProgram<S> {
                 let code = container
                     .sections
                     .iter()
-                    .filter(|section| section.loaded && section.is_code && section.vsize > 0)
+                    .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
                     .map(Section::range)
                     .collect::<Vec<_>>();
                 (!code.is_empty()).then(|| r2types::ProgramExtents::new(code))
@@ -266,7 +266,7 @@ impl<S: Source> OpenProgram<S> {
                 container
                     .sections
                     .iter()
-                    .find(|section| section.is_code && section.vsize > 0)
+                    .find(|section| section.is_code() && section.vsize > 0)
                     .map(|section| section.vaddr)
             })
     }

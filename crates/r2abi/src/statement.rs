@@ -235,14 +235,8 @@ pub struct Section {
     pub vsize: u64,
     pub file_offset: u64,
     pub file_size: u64,
-    /// Whether the container states this section holds instructions.
-    ///
-    /// Stated, not inferred from a name: ELF says it with `SHF_EXECINSTR`,
-    /// COFF with `IMAGE_SCN_CNT_CODE` or `IMAGE_SCN_MEM_EXECUTE`, and Mach-O
-    /// with the `S_ATTR_PURE_INSTRUCTIONS` or `S_ATTR_SOME_INSTRUCTIONS`
-    /// attribute. Mach-O's `__stubs` and `__auth_stubs` state it too, so the
-    /// stub a call lands on is never data a string can be read out of.
-    pub is_code: bool,
+    /// What the container states the section holds.
+    pub role: SectionRole,
     /// Whether the loader maps this section, so `vaddr` is an address at all.
     ///
     /// A section the loader ignores -- `.shstrtab`, `.symtab`, the debug
@@ -254,8 +248,13 @@ pub struct Section {
 }
 
 impl Section {
-    /// Whether static data can live here: a section the loader maps that the
-    /// container does not state holds instructions.
+    /// Whether the container states this section holds instructions.
+    pub fn is_code(&self) -> bool {
+        self.role == SectionRole::Code
+    }
+
+    /// Whether the program's static data can live here: a section the loader
+    /// maps that the container states holds the program's own data.
     ///
     /// The one answer to where static data can be, which the name table, a
     /// listing's text and the decompiler's literals all read. What makes a
@@ -264,14 +263,62 @@ impl Section {
     /// does. A structure offset of eighty was rendered as the string at
     /// address eighty, which is two bytes of the ELF header and in no section
     /// at all; the stub a Mach-O call lands on read as the string `"1"` while
-    /// the container stated it held instructions.
-    pub const fn holds_static_data(&self) -> bool {
-        self.loaded && !self.is_code && self.vsize > 0
+    /// the container stated it held instructions; and the loader's own tables
+    /// -- the interpreter's path, a build note, the dynamic string table, the
+    /// unwind tables -- were listed as the program's strings.
+    pub fn holds_static_data(&self) -> bool {
+        self.loaded && self.vsize > 0 && self.role.is_program_data()
     }
 
     /// The half-open range of addresses the section occupies.
     pub const fn range(&self) -> (u64, u64) {
         (self.vaddr, self.vaddr.saturating_add(self.vsize))
+    }
+}
+
+/// What a section holds, as the container states it: its type and flags,
+/// and the program headers that name it, never its name.
+///
+/// ELF states it with `sh_type` and `sh_flags` -- `SHT_NOBITS`,
+/// `SHF_MERGE|SHF_STRINGS`, the loader's own table types -- and with the
+/// program headers that locate the interpreter's path (`PT_INTERP`) and the
+/// unwind tables (`PT_GNU_EH_FRAME`, whose `eh_frame_ptr` names `.eh_frame`).
+/// Mach-O states it with the section type (`S_ZEROFILL`,
+/// `S_CSTRING_LITERALS`) and its attributes; its unwind sections are the ones
+/// the runtime finds by their segment and section name, which is how the
+/// format identifies them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SectionRole {
+    /// Instructions: `SHF_EXECINSTR`, `IMAGE_SCN_CNT_CODE`, or a Mach-O
+    /// instructions attribute. Mach-O's `__stubs` and `__auth_stubs` state it
+    /// too, so the stub a call lands on is never data a string is read from.
+    Code,
+    /// The program's data, which it may write once it runs.
+    Data,
+    /// The program's data, which nothing writes once the loader is done.
+    ReadOnlyData,
+    /// C strings, as the container states: `SHF_STRINGS`, `S_CSTRING_LITERALS`.
+    Strings,
+    /// The program's data, which the loader fills with zeros.
+    ZeroFill,
+    /// The loader's own tables: symbols, strings, relocations, hashes,
+    /// versions, notes, the dynamic table and the interpreter's path.
+    LoaderMetadata,
+    /// The unwinder's tables.
+    Unwind,
+    /// A kind the container states that no role here names.
+    #[default]
+    Other,
+}
+
+impl SectionRole {
+    /// Whether this holds data of the program's own, where a string or an
+    /// object can be.
+    pub const fn is_program_data(self) -> bool {
+        matches!(
+            self,
+            Self::Data | Self::ReadOnlyData | Self::Strings | Self::ZeroFill
+        )
     }
 }
 

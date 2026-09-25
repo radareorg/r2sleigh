@@ -11,8 +11,8 @@ use std::ops::Range;
 
 use r2engine::program::{
     Applies, Arch, Container, Endian, Entry, EntryKind, Format, LoaderWrite, Mapping, OpenProgram,
-    Permissions, Relocation, RelocationSymbol, Section, Segment, Source, Symbol, SymbolKind,
-    WriteKind,
+    Permissions, Relocation, RelocationSymbol, Section, SectionRole, Segment, Source, Symbol,
+    SymbolKind, WriteKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -388,7 +388,7 @@ impl Literal {
                     name: ".text".to_owned(),
                     vaddr: BASE,
                     vsize: STUB - BASE,
-                    is_code: true,
+                    role: SectionRole::Code,
                     loaded: true,
                     ..Section::default()
                 }],
@@ -470,7 +470,7 @@ impl Literal {
                 name: ".plt".to_owned(),
                 vaddr: BASE,
                 vsize: 0x20,
-                is_code: true,
+                role: SectionRole::Code,
                 loaded: true,
                 ..Section::default()
             },
@@ -478,7 +478,7 @@ impl Literal {
                 name: ".text".to_owned(),
                 vaddr: PLT_CALLER,
                 vsize: 6,
-                is_code: true,
+                role: SectionRole::Code,
                 loaded: true,
                 ..Section::default()
             },
@@ -550,7 +550,11 @@ impl Literal {
             name: name.to_owned(),
             vaddr,
             vsize,
-            is_code,
+            role: if is_code {
+                SectionRole::Code
+            } else {
+                SectionRole::Data
+            },
             loaded: true,
             ..Section::default()
         };
@@ -575,7 +579,7 @@ impl Literal {
             name: ".data".to_owned(),
             vaddr: TEXT,
             vsize: 8,
-            is_code: false,
+            role: SectionRole::Data,
             loaded: true,
             ..Section::default()
         });
@@ -601,7 +605,11 @@ impl Literal {
             name: name.to_owned(),
             vaddr: end,
             vsize: stop - end,
-            is_code,
+            role: if is_code {
+                SectionRole::Code
+            } else {
+                SectionRole::Data
+            },
             loaded: true,
             ..Section::default()
         });

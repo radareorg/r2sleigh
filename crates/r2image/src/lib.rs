@@ -9,6 +9,7 @@
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 pub mod debug;
 mod loader;
+mod roles;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -374,6 +375,7 @@ impl Image {
             segments.sort_by_key(|segment| segment.vaddr);
         }
 
+        let located = roles::Located::of(&file);
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
@@ -384,7 +386,7 @@ impl Image {
                     vsize: section.size(),
                     file_offset,
                     file_size,
-                    is_code: states_instructions(&section),
+                    role: located.role(&section, states_instructions(&section)),
                     loaded: section_is_loaded(&section),
                 }
             })
@@ -394,7 +396,7 @@ impl Image {
         // puts __cstring and __const inside __TEXT, and the header itself starts it.
         let code_ranges: Vec<(u64, u64)> = sections
             .iter()
-            .filter(|section| section.is_code && section.vsize > 0)
+            .filter(|section| section.is_code() && section.vsize > 0)
             .map(|section| (section.vaddr, section.vsize))
             .collect();
         let executable = |vaddr: u64| {

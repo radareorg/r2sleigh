@@ -3,7 +3,7 @@
 mod common;
 
 use common::{BASE, CALLER, Literal, STUB, TEXT, TWO};
-use r2engine::program::{EntryKind, OpenProgram, Section};
+use r2engine::program::{EntryKind, OpenProgram, Section, SectionRole};
 
 #[test]
 fn a_session_starts_at_the_declared_entry_then_any_entry_then_the_code() {
@@ -24,7 +24,11 @@ fn a_session_starts_at_the_declared_entry_then_any_entry_then_the_code() {
             name: ".first".to_owned(),
             vaddr: TEXT,
             vsize,
-            is_code,
+            role: if is_code {
+                SectionRole::Code
+            } else {
+                SectionRole::Data
+            },
             loaded: true,
             ..Section::default()
         };

@@ -281,21 +281,17 @@ fn the_engine_and_the_listing_read_one_entry() {
 #[test]
 fn a_string_is_listed_as_itself_and_flagged_as_an_identifier() {
     // One row answers both: the text a reader wants and the name a listing
-    // can write. They cannot drift because they are the same entry.
-    let listed = r2s("iz");
+    // can write. They cannot drift because they are the same entry. The
+    // interpreter's path this once listed is the loader's, in `.interp`,
+    // which the container states is no data of the program's.
+    let review = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let listed = on(review.clone(), "iz");
     assert!(listed.ok, "{}", listed.out);
-    assert!(
-        listed.out.contains("/lib64/ld-linux-x86-64.so.2"),
-        "{}",
-        listed.out
-    );
-    let flagged = r2s("f~str._lib64");
+    assert!(listed.out.contains("hello global"), "{}", listed.out);
+    assert!(!listed.out.contains("/lib64/ld-linux"), "{}", listed.out);
+    let flagged = on(review, "f~str.hello");
     assert!(flagged.ok, "{}", flagged.out);
-    assert!(
-        flagged.out.contains("str._lib64_ld_linux_x86_64_so_2"),
-        "{}",
-        flagged.out
-    );
+    assert!(flagged.out.contains("str.hello_global"), "{}", flagged.out);
 }
 
 #[test]

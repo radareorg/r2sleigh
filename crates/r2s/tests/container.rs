@@ -77,6 +77,20 @@ fn ir_never_lists_a_mach_o_stub() {
 }
 
 #[test]
+fn iz_lists_the_programs_strings_and_none_of_the_loaders_tables() {
+    // `.interp`'s path, the build note, `.dynstr`'s names and runs of the
+    // unwind tables all read as text; none of them is a string of the
+    // program's, and the container states which sections are its data.
+    let out = run("rv_O0g", "iz");
+    let addresses: Vec<&str> = rows(&out)
+        .iter()
+        .filter(|row| row.starts_with("0x"))
+        .map(|row| &row[..10])
+        .collect();
+    assert_eq!(addresses, ["0x00002008", "0x00002038"], "{out}");
+}
+
+#[test]
 fn axt_lists_a_pointer_in_data_by_the_address_the_loader_writes_there() {
     // 0x4018 is `g_msg`, which the loader fills through R_X86_64_RELATIVE
     // with 0x2008, the string it points at; no instruction names 0x2008.

@@ -6,7 +6,7 @@ use std::ops::Range;
 use r2engine::discovery::Confidence;
 use r2engine::program::{
     Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Section,
-    Segment, Source, Symbol, SymbolKind,
+    SectionRole, Segment, Source, Symbol, SymbolKind,
 };
 use r2engine::query::{AnnotationKind, Listing, Stop};
 
@@ -118,7 +118,7 @@ fn arm_only(code: &'static [u8], endian: Endian) -> Mixed {
                 name: ".text".to_owned(),
                 vaddr: ARM,
                 vsize: code.len() as u64,
-                is_code: true,
+                role: SectionRole::Code,
                 loaded: true,
                 ..Section::default()
             }],

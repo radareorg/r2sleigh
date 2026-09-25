@@ -102,31 +102,51 @@ pub fn of(source: &impl Source) -> NameDb {
     db
 }
 
-/// Name every string the data sections hold.
+/// Name every string the program's data holds.
 ///
 /// radare2 names a run of printable bytes however it ends, which turns four
 /// bytes of a hash table into `str._E7_`. A string this names is terminated,
 /// because that is what makes it a string a program could pass to anything,
-/// and it is long enough that finding one by chance is not expected.
+/// and it is long enough that finding one by chance is not expected. Only
+/// the program's own data is scanned, as the container states it, and only
+/// the bytes the loader leaves alone: a word it writes holds no text the file
+/// does.
 pub fn name_strings(db: &mut NameDb, source: &impl Source) {
     let image = source.container();
-    let scanned: u64 = image
+    // Section by section, and split at every word the loader writes, so no
+    // string runs across the end of a section or into a relocated pointer.
+    let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
+    for section in image
         .sections
         .iter()
         .filter(|section| section.holds_static_data())
-        .map(|section| section.vsize)
-        .sum();
-    // One bar for the whole listing, because that is what a reader reads: a
-    // short section must not get a lower bar than the binary it is part of.
-    let floor = chance_run_length(scanned);
-    for section in &image.sections {
-        // Section by section, so no string runs across the end of one.
-        if !section.holds_static_data() {
-            continue;
-        }
+    {
         let Some(bytes) = source.read(section.vaddr, section.vsize as usize) else {
             continue;
         };
+        let end = section.vaddr + bytes.len() as u64;
+        let mut from = section.vaddr;
+        let first = image
+            .loader_writes
+            .partition_point(|write| write.end() <= section.vaddr);
+        for write in image.loader_writes[first..]
+            .iter()
+            .take_while(|write| write.place < end)
+        {
+            if write.place > from {
+                let piece = (from - section.vaddr) as usize..(write.place - section.vaddr) as usize;
+                runs.push((from, bytes[piece].to_vec()));
+            }
+            from = from.max(write.end());
+        }
+        if from < end {
+            runs.push((from, bytes[(from - section.vaddr) as usize..].to_vec()));
+        }
+    }
+    // One bar for the whole listing, because that is what a reader reads: a
+    // short section must not get a lower bar than the binary it is part of.
+    let floor = chance_run_length(&runs);
+    for (start, bytes) in runs {
         let mut at = 0usize;
         while at < bytes.len() {
             let Some(text) = crate::names::text_in(&bytes[at..]) else {
@@ -136,7 +156,7 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
             let run = text.len();
             if run >= floor {
                 db.insert(
-                    section.vaddr + at as u64,
+                    start + at as u64,
                     Name {
                         text: text.to_owned(),
                         namespace: Namespace::String,
@@ -151,21 +171,35 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
     }
 }
 
-/// The shortest run this binary is not expected to contain by chance.
+/// The shortest run the scanned bytes are not expected to contain by chance.
 ///
-/// A printable byte is one of ninety-five values in two hundred and fifty-six,
-/// so a run of `n` of them followed by a terminator has probability
-/// `(95/256)^n / 256` at any offset. Over `size` offsets the expected number of
-/// such runs is `size` times that, and this returns the smallest `n` that puts
-/// it at or below one. The bound is derived from the bytes being scanned
-/// rather than picked, so a larger binary asks for a longer run by itself.
-fn chance_run_length(size: u64) -> usize {
-    const PRINTABLE: f64 = 95.0 / 256.0;
-    let expected = (size.max(1) as f64) / 256.0;
+/// A run of `n` printable bytes followed by a terminator has probability
+/// `p^n · q` at any offset, where `p` is how often a scanned byte is
+/// printable and `q` how often it is zero. Both are measured over the bytes
+/// scanned, not assumed: a program's data is mostly words of small integers
+/// padded with zeros, where one printable byte before a zero is common, and
+/// assuming uniform bytes named every such word a one-character string. Over
+/// `N` offsets the expected number of chance runs is `N · p^n · q`, and this
+/// returns the smallest `n` that puts it at or below one.
+fn chance_run_length(runs: &[(u64, Vec<u8>)]) -> usize {
+    let (mut total, mut printable, mut zero) = (0u64, 0u64, 0u64);
+    for byte in runs.iter().flat_map(|(_, bytes)| bytes) {
+        total += 1;
+        match *byte {
+            0 => zero += 1,
+            b'\t' | b'\n' | b' '..=b'~' => printable += 1,
+            _ => {}
+        }
+    }
+    if printable == 0 || zero == 0 || printable == total {
+        return 1;
+    }
+    let (p, q) = (printable as f64 / total as f64, zero as f64 / total as f64);
+    let expected = total as f64 * q;
     if expected <= 1.0 {
         return 1;
     }
-    (expected.ln() / -PRINTABLE.ln()).ceil() as usize
+    ((expected.ln() / -p.ln()).ceil() as usize).max(1)
 }
 
 /// Give each import stub the name of the import it stands for.
