@@ -78,9 +78,7 @@ pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,
     SsaWorkControl, SsaWorkMeter,
 };
-pub use defuse::{
-    BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
-};
+pub use defuse::{DefUseInfo, def_use};
 pub use function::{
     CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
     GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,

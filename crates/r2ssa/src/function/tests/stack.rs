@@ -304,21 +304,13 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
     );
 
     let entry = prepared.get_block(0x1100).expect("entry block");
-    let load_ref = SliceOpRef::Op {
-        block_addr: 0x1100,
-        op_idx: 1,
-    };
-    let store_ref = SliceOpRef::Op {
-        block_addr: 0x1100,
-        op_idx: 2,
-    };
     let load_inst = prepared
         .graph()
-        .inst_id_for_op_site(load_ref.block_addr(), 1)
+        .inst_id_for_op_site(0x1100, 1)
         .expect("load inst");
     let store_inst = prepared
         .graph()
-        .inst_id_for_op_site(store_ref.block_addr(), 2)
+        .inst_id_for_op_site(0x1100, 2)
         .expect("store inst");
     assert!(
         prepared.memory().uses_by_inst.contains_key(&load_inst),

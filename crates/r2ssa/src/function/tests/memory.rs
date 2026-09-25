@@ -333,13 +333,9 @@ fn prepared_function_ssa_builds_memory_phis_per_object() {
     assert_eq!(phis.len(), 1);
     assert_eq!(phis[0].inputs.len(), 2);
 
-    let load_ref = SliceOpRef::Op {
-        block_addr: 0x130c,
-        op_idx: 0,
-    };
     let load_inst = prepared
         .graph()
-        .inst_id_for_op_site(load_ref.block_addr(), 0)
+        .inst_id_for_op_site(0x130c, 0)
         .expect("load inst");
     let load_use = prepared
         .memory()

@@ -72,7 +72,6 @@ Machine code bytes
    ESIL string                            SSAFunction { cfg, blocks, phis }
    (radare2 compat)                            │
                                                ├───── optimize_function()
-                                               ├───── backward_slice_from_var()
                                                │
                                                ▼
                                           [r2dec]
