@@ -725,7 +725,7 @@ fn a_named_constant_keeps_every_observation_it_collapsed() {
 fn radare_typed_global_renders_as_its_type_and_direct_value() {
     let strings = BTreeMap::new();
     let symbols = BTreeMap::from([(0x7000, "obj.global_counter".to_string())]);
-    let object_types = r2types::ProgramDataObjectTypeFacts::from_radare2(
+    let object_types = r2types::ProgramDataObjectTypeFacts::from_source(
         [(0x7000, Some("int32_t"))],
         64,
         &r2types::ExternalTypeDb::default(),
@@ -781,7 +781,7 @@ fn radare_typed_global_renders_as_its_type_and_direct_value() {
 #[test]
 fn unplaceable_global_type_keeps_the_honest_byte_declaration() {
     let symbols = BTreeMap::from([(0x7000, "obj.global_counter".to_string())]);
-    let object_types = r2types::ProgramDataObjectTypeFacts::from_radare2(
+    let object_types = r2types::ProgramDataObjectTypeFacts::from_source(
         [(0x7000, Some("looks_specific_t"))],
         64,
         &r2types::ExternalTypeDb::default(),

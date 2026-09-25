@@ -1459,7 +1459,7 @@ fn trusted_parsed_context(
     let signature = trusted_source_signature(trusted, ptr_bits);
     let external_type_db = trusted_external_type_db(trusted);
     // What this function's own capture states: an object's type is the program's, so no other request can add to it.
-    let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_radare2(
+    let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_source(
         trusted
             .source()
             .image()

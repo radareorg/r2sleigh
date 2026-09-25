@@ -69,6 +69,20 @@ fn a_declared_array_and_a_declared_struct_are_one_object_each() {
     assert!(!out.contains("stack_m196"), "{out}");
 }
 
+/// The review fixture's globals are typed by their DWARF: they rendered as
+/// `extern char name[]` under "2 data object types refused".
+#[test]
+fn a_global_is_declared_with_the_type_its_debug_information_states() {
+    let out = run("rv_O0g", "pdd @ sym.fill");
+    assert!(out.contains("extern int32_t g_counter;"), "{out}");
+    assert!(out.contains("extern int32_t g_table[16];"), "{out}");
+    assert!(!out.contains("data object types refused"), "{out}");
+    assert!(
+        out.contains("2 data object types supplied by the source"),
+        "{out}"
+    );
+}
+
 /// Two units each define a `static helper`. Keyed by name, the second
 /// replaced the first, and its frame and types were applied to the other
 /// body; keyed by address, each body renders its own unit's declaration.

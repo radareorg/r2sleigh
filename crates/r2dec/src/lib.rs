@@ -365,12 +365,12 @@ fn note_unproven_constructs(
         _ => detail,
     };
     note_unassigned_reads(&mut detail, unassigned);
-    let radare_typed_objects =
+    let source_typed_objects =
         func.extern_objects
             .iter()
             .filter(|object| {
                 object.type_fact.as_ref().is_some_and(|fact| {
-                    fact.provenance == r2types::DataObjectTypeProvenance::Radare2
+                    fact.provenance == r2types::DataObjectTypeProvenance::Source
                 })
             })
             .count();
@@ -379,15 +379,15 @@ fn note_unproven_constructs(
         .iter()
         .filter(|object| object.type_fact.is_none() && object.type_refusal.is_some())
         .count();
-    if radare_typed_objects > 0 {
-        let noun = if radare_typed_objects == 1 {
+    if source_typed_objects > 0 {
+        let noun = if source_typed_objects == 1 {
             "data object type"
         } else {
             "data object types"
         };
         let _ = write!(
             &mut detail,
-            "; {radare_typed_objects} {noun} supplied by the source"
+            "; {source_typed_objects} {noun} supplied by the source"
         );
     }
     if refused_object_types > 0 {

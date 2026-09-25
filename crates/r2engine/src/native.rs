@@ -1617,14 +1617,22 @@ impl Native<'_> {
             .collect()
     }
 
-    /// The named program data this body points at.
+    /// The named program data this body points at, each with the type the
+    /// binary's debug information declares at its address.
     fn data_symbols(&self, body: &r2ssa::body::Body) -> Vec<SourceDataObject> {
+        let declarations = self.target.declarations;
         referenced(body)
             .into_iter()
             .filter(|address| !body.calls.contains(address))
             .filter_map(|address| {
                 let name = self.program.name_at(address)?;
-                Some(SourceDataObject::new(address, name, None::<String>))
+                // What the type is, rather than what it is called: a name
+                // the rendering has no declaration of spells nothing.
+                let spelling = declarations
+                    .object_at(address)
+                    .and_then(|object| declarations.graph().spelled(object.ty))
+                    .map(|spelled| spelled.as_type().to_owned());
+                Some(SourceDataObject::new(address, name, spelling))
             })
             .collect()
     }

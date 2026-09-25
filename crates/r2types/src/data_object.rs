@@ -10,7 +10,9 @@ use crate::{CTypeLike, ExternalAggregateKind, ExternalTypeDb, parse_c_type_like}
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub enum DataObjectTypeProvenance {
-    Radare2,
+    /// The capture's own statement of the object's type: the binary's debug
+    /// information, read at the object's address.
+    Source,
 }
 
 /// One accepted type, keyed outside this value by the object's address.
@@ -23,7 +25,7 @@ pub struct DataObjectTypeFact {
 /// Why a source observation did not become a renderer type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum DataObjectTypeRefusal {
-    /// radare2 named the object but had no address-linked type for it.
+    /// The source named the object but stated no type at its address.
     MissingSourceType,
     /// The parser could not turn the spelling into a type declared by the
     /// current source type context.
@@ -41,9 +43,9 @@ pub struct ProgramDataObjectTypeFacts {
 }
 
 impl ProgramDataObjectTypeFacts {
-    /// Parse one function snapshot's radare2 observations without minting
+    /// Parse one function snapshot's source observations without minting
     /// typedefs that its type database cannot place.
-    pub fn from_radare2<'a>(
+    pub fn from_source<'a>(
         observations: impl IntoIterator<Item = (u64, Option<&'a str>)>,
         ptr_bits: u32,
         type_db: &ExternalTypeDb,
@@ -124,7 +126,7 @@ impl ProgramDataObjectTypeFacts {
                     address,
                     DataObjectTypeFact {
                         ty,
-                        provenance: DataObjectTypeProvenance::Radare2,
+                        provenance: DataObjectTypeProvenance::Source,
                     },
                 );
             }
@@ -195,7 +197,7 @@ mod tests {
 
     #[test]
     fn a_builtin_radare_type_is_accepted_and_marked() {
-        let facts = ProgramDataObjectTypeFacts::from_radare2(
+        let facts = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, Some("int32_t"))],
             64,
             &ExternalTypeDb::default(),
@@ -206,13 +208,13 @@ mod tests {
         );
         assert_eq!(
             facts.get(0x7000).map(|fact| fact.provenance),
-            Some(DataObjectTypeProvenance::Radare2)
+            Some(DataObjectTypeProvenance::Source)
         );
     }
 
     #[test]
     fn an_undeclared_typedef_spelling_is_refused() {
-        let facts = ProgramDataObjectTypeFacts::from_radare2(
+        let facts = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, Some("looks_specific_t"))],
             64,
             &ExternalTypeDb::default(),
@@ -228,7 +230,7 @@ mod tests {
 
     #[test]
     fn no_radare_type_is_a_refusal_not_a_default_type() {
-        let facts = ProgramDataObjectTypeFacts::from_radare2(
+        let facts = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, None)],
             64,
             &ExternalTypeDb::default(),
@@ -242,12 +244,12 @@ mod tests {
 
     #[test]
     fn accepted_program_fact_survives_a_later_missing_observation() {
-        let mut accepted = ProgramDataObjectTypeFacts::from_radare2(
+        let mut accepted = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, Some("int32_t"))],
             64,
             &ExternalTypeDb::default(),
         );
-        let missing = ProgramDataObjectTypeFacts::from_radare2(
+        let missing = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, None)],
             64,
             &ExternalTypeDb::default(),
@@ -261,12 +263,12 @@ mod tests {
 
     #[test]
     fn conflicting_program_types_refuse_independent_of_order() {
-        let signed = ProgramDataObjectTypeFacts::from_radare2(
+        let signed = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, Some("int32_t"))],
             64,
             &ExternalTypeDb::default(),
         );
-        let unsigned = ProgramDataObjectTypeFacts::from_radare2(
+        let unsigned = ProgramDataObjectTypeFacts::from_source(
             [(0x7000, Some("uint32_t"))],
             64,
             &ExternalTypeDb::default(),
