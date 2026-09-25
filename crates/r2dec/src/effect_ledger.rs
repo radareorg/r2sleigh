@@ -152,9 +152,10 @@ fn certified_instruction_elision(
     }) {
         return Some(ElisionReason::CallerSuppliedEntryValue);
     }
-    // A register a call clobbered that no result certificate claims: the
-    // declaration is its definition, because there is nothing in this function
-    // to assign it from, so the operation that mints it owes no statement.
+    // What a call left in a register no result certificate claims, that no
+    // rendered statement reads. A read of it would have been a residual and
+    // counted with the residuals before this is asked, so reaching here means
+    // nothing reads it: the content the callee left behind is unobserved.
     if source_inst.is_some_and(|inst| {
         graph.inst(inst).is_some_and(|inst| {
             matches!(
@@ -165,7 +166,7 @@ fn certified_instruction_elision(
                 .is_some_and(|output| !prepared.certificates().call_results.contains_key(&output))
         })
     }) {
-        return Some(ElisionReason::CallClobberedDeclaration);
+        return Some(ElisionReason::UnclaimedCallClobber);
     }
     // The push that records a call's return address. The call statement is the
     // transfer, and no C statement writes the machine's return address.

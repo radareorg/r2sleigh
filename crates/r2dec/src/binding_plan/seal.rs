@@ -587,46 +587,20 @@ impl BindingPlan {
                         &component.members,
                         &component.sources,
                     );
-                    // Re-derived here too rather than trusting the plan: a
-                    // call clobber nothing claims is supplied from outside.
-                    let mut expected_call_clobbered = false;
-                    let mut clobber_set_agrees = true;
-                    for value in component.members.iter() {
-                        let expected = graph.def_inst(*value).is_some_and(|inst| {
-                            graph.inst(inst).is_some_and(|inst| {
-                                matches!(
-                                    inst.payload,
-                                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
-                                )
-                            })
-                        }) && !source_owned
-                            .source()
-                            .facts()
-                            .certificates
-                            .call_results
-                            .contains_key(value);
-                        expected_call_clobbered |= expected;
-                        clobber_set_agrees &= self.value_is_call_clobber(*value) == expected;
-                    }
                     if actual != &component.members
                         || binding.certificate.sources.as_ref() != expected_sources.as_slice()
                         || binding.caller_supplied != expected_caller_supplied
-                        || binding.call_clobbered != expected_call_clobbered
-                        || !clobber_set_agrees
                     {
-                        // Which of the five terms disagreed is which layer to
+                        // Which of the three terms disagreed is which layer to
                         // look at; the refusal alone names only the binding.
                         r2il::refusal_evidence!(
                             "seal-certificate-membership",
-                            "{binding_id:?}: members {actual:?} vs {:?}; sources {:?} vs {:?}; caller_supplied={}/{} call_clobbered={}/{} clobber_set={}",
+                            "{binding_id:?}: members {actual:?} vs {:?}; sources {:?} vs {:?}; caller_supplied={}/{}",
                             component.members,
                             binding.certificate.sources,
                             expected_sources,
                             binding.caller_supplied,
-                            expected_caller_supplied,
-                            binding.call_clobbered,
-                            expected_call_clobbered,
-                            clobber_set_agrees
+                            expected_caller_supplied
                         );
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::CertificateMembership {
@@ -1346,6 +1320,36 @@ impl BindingPlan {
                     expected: binding_index,
                     actual: self.bindings.len(),
                 },
+            ));
+        }
+        // Which reads are residuals is derived again from the dispositions the
+        // seal has just checked and the parameters it has just re-derived,
+        // rather than trusting the plan's own map: a value the plan names that
+        // this does not, or the reverse, is the first one in value order.
+        let parameter_bindings = self
+            .parameters
+            .iter()
+            .filter_map(|parameter| match parameter {
+                Some(ParameterDisposition::Bound { binding, .. }) => Some(*binding),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_unspecified = super::construction::unspecified_reads(
+            source_owned,
+            &self.dispositions,
+            &parameter_bindings,
+        );
+        if expected_unspecified != self.unspecified {
+            let value = expected_unspecified
+                .iter()
+                .chain(self.unspecified.iter())
+                .find(|(value, read)| {
+                    expected_unspecified.get(value) != self.unspecified.get(value)
+                        || expected_unspecified.get(value) != Some(read)
+                })
+                .map_or(ValueId(0), |(value, _)| *value);
+            return Err(BindingPlanBuildError::Seal(
+                BindingPlanSourceMismatch::UnexpectedValueDisposition { value },
             ));
         }
         Ok(())

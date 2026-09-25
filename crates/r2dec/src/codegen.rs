@@ -86,6 +86,8 @@ pub(crate) struct ObservationLocations {
     /// The obligation each effect marker discharges where it stands. Any other
     /// marker discharges none.
     effects: Box<[Option<r2ssa::SemanticObligationId>]>,
+    /// The SSA version each read marker stands for. Any other marker reads none.
+    reads: Box<[Option<r2ssa::ValueId>]>,
 }
 
 impl ObservationLocations {
@@ -93,12 +95,20 @@ impl ObservationLocations {
     pub(crate) fn new(
         at: Vec<Option<u64>>,
         effects: Vec<Option<r2ssa::SemanticObligationId>>,
+        reads: Vec<Option<r2ssa::ValueId>>,
     ) -> Self {
         debug_assert_eq!(at.len(), effects.len());
+        debug_assert_eq!(at.len(), reads.len());
         Self {
             at: at.into_boxed_slice(),
             effects: effects.into_boxed_slice(),
+            reads: reads.into_boxed_slice(),
         }
+    }
+
+    /// The SSA version this marker's read stands for, where it marks a read.
+    pub(crate) fn read(&self, id: RenderObservationId) -> Option<r2ssa::ValueId> {
+        self.reads.get(id.index() as usize).copied().flatten()
     }
 
     fn at(&self, id: RenderObservationId) -> Option<u64> {

@@ -509,77 +509,386 @@ fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
     }
 }
 
-/// Spell every read of an object nothing assigns as a residual.
+/// What the residual rewrite of the sealed tree did.
+#[derive(Debug, Default)]
+pub(crate) struct Residualized {
+    /// The objects some of whose reads became residuals, each with why.
+    pub(crate) reads: Vec<UnassignedRead>,
+    /// The SSA versions a residual now stands for wherever they were read.
+    pub(crate) values: BTreeSet<r2ssa::ValueId>,
+}
+
+/// Spell every read the rendering has no value for as a residual.
 ///
-/// An object declared without a value, that no statement writes and whose
-/// address is never taken, is indeterminate at every read: C has no spelling
-/// for a value the function entered holding, or for one a call left in a
-/// register nothing claimed. A read of it is undefined behaviour that looks
-/// like a value. Each read becomes a residual of the object's type instead,
-/// which traps if it is reached, and the declaration nothing reads any more
-/// goes. The binding plan says which of these hold a value from entry; the
-/// rest were never given one.
+/// Two kinds, each keyed on what it is a read of.
 ///
-/// Only a scalar: a callee may write an aggregate or an array through its
-/// decayed name, so no statement writing it is not proof that nothing does.
-/// And only an object written nowhere, which makes the answer exact without
-/// dataflow; an object written on some paths and read before that on others
-/// needs the reaching definitions the SSA versions give, and is left as it is.
+/// A read of a register value is keyed on the SSA version it stands for, which
+/// the read's marker names. Version 0 outside every parameter and what a call
+/// left that nothing claims have no C spelling (`BindingPlan::unspecified_read`),
+/// so each read of one becomes a residual of its object's type wherever it
+/// stands -- whether or not that object is assigned elsewhere, because an
+/// assignment on some other path, or later on this one, says nothing about the
+/// version this read names. A compound assignment or an increment that reads
+/// such a version becomes a plain assignment of a residual, so the object it
+/// writes stays an lvalue.
 ///
-/// The residual keeps the markers the read carried, so the line map still
-/// names the instruction that read it, and an obligation whose occurrence
-/// held the read is found under a residual when the ledger is closed.
+/// A read of frame storage the function never writes is keyed on the object:
+/// only a scalar, since a callee may write an aggregate through its decayed
+/// name, and only one no statement writes and whose address is never taken,
+/// which makes the answer exact without dataflow. The binding plan says which
+/// of those the caller supplies from entry; the rest were never given a value.
 ///
-/// Read off the final tree, because that is what is printed: one walk for the
-/// declarations, one for the writes and the reads, one to rewrite -- linear in
-/// the body.
-pub(crate) fn residualize_unassigned_reads(
+/// A declaration no statement mentions once its reads are gone goes too. Every
+/// residual keeps the markers its read carried, so the line map still names
+/// the instruction that read it, and an obligation whose occurrence held the
+/// read is found under a residual when the ledger is closed.
+///
+/// Read off the final tree, because that is what is printed: one walk to
+/// rewrite versions, one for the declarations, one for the writes and the
+/// reads of storage, one to rewrite it -- linear in the body.
+pub(crate) fn residualize_unspecified_reads(
     func: &mut CFunction,
+    read_of: &dyn Fn(crate::ast::RenderObservationId) -> Option<r2ssa::ValueId>,
+    through: &dyn Fn(r2ssa::ValueId) -> Option<(SymbolId, Option<binding_plan::UnspecifiedRead>)>,
     entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
-) -> Vec<UnassignedRead> {
-    let declared = unassigned_scalar_reads(func);
-    if declared.is_empty() {
-        return Vec::new();
+) -> Residualized {
+    let mut rewrite = VersionResidualizer {
+        read_of,
+        through,
+        symbols: std::rc::Rc::clone(&func.symbols),
+        read: BTreeSet::new(),
+        values: BTreeSet::new(),
+    };
+    for stmt in &mut func.body {
+        stmt.visit_exprs_mut(&mut |root| {
+            let expr = std::mem::replace(root, CExpr::IntLit(0));
+            *root = rewrite.expr(expr, &mut Vec::new());
+        });
     }
+    let VersionResidualizer {
+        read: mut touched,
+        values,
+        ..
+    } = rewrite;
+
+    let storage = unassigned_storage_reads(func);
     let cause = |symbol: &SymbolId| match entry_supplied.get(symbol) {
         Some(binding_plan::EntrySupply::Held) => UnassignedCause::Held,
         Some(binding_plan::EntrySupply::UnadmittedArgument) => UnassignedCause::UnadmittedArgument,
         None => UnassignedCause::Unassigned,
     };
-    let declared = declared
+    let storage = storage
         .into_iter()
         .map(|(symbol, ty)| {
             let cause = cause(&symbol);
             (symbol, (ty, cause))
         })
         .collect::<BTreeMap<_, _>>();
-    for stmt in &mut func.body {
-        stmt.visit_exprs_mut(&mut |root| {
-            let expr = std::mem::replace(root, CExpr::IntLit(0));
-            *root = residualize_reads_in(expr, &declared);
-        });
+    if !storage.is_empty() {
+        for stmt in &mut func.body {
+            stmt.visit_exprs_mut(&mut |root| {
+                let expr = std::mem::replace(root, CExpr::IntLit(0));
+                *root = residualize_reads_in(expr, &storage);
+            });
+        }
     }
+    touched.extend(storage.iter().map(|(symbol, (_, cause))| (*symbol, *cause)));
+    if touched.is_empty() {
+        return Residualized::default();
+    }
+
+    // A declaration nothing mentions any more declares nothing the text uses.
+    let mut mentioned = BTreeSet::new();
+    func.visit_body_exprs(&mut |node| {
+        if let CExpr::Var(symbol) = node {
+            mentioned.insert(*symbol);
+        }
+    });
+    let unused = touched
+        .iter()
+        .map(|(symbol, _)| *symbol)
+        .filter(|symbol| !mentioned.contains(symbol))
+        .collect::<BTreeSet<_>>();
     func.visit_body_stmts_mut(&mut |stmt| {
         if let CStmt::Decl {
             name, init: None, ..
         } = stmt
-            && declared.contains_key(name)
+            && unused.contains(name)
         {
             *stmt = CStmt::Empty;
         }
     });
-    func.locals
-        .retain(|local| !declared.contains_key(&local.name));
+    func.locals.retain(|local| !unused.contains(&local.name));
+
     let symbols = func.symbols.borrow();
-    let mut objects = declared
+    let mut reads = touched
         .iter()
-        .map(|(symbol, (_, cause))| UnassignedRead {
+        .map(|(symbol, cause)| UnassignedRead {
             cause: *cause,
             name: symbols.name(*symbol).to_string(),
         })
         .collect::<Vec<_>>();
-    objects.sort();
-    objects
+    reads.sort();
+    reads.dedup();
+    Residualized { reads, values }
+}
+
+/// The obligations of the instructions that define `values`.
+///
+/// One pass over the obligation inventory, each a set lookup: O(obligations
+/// log values).
+fn obligations_defining(
+    prepared: &r2ssa::SsaArtifact,
+    values: &BTreeSet<r2ssa::ValueId>,
+) -> BTreeSet<r2ssa::SemanticObligationId> {
+    if values.is_empty() {
+        return BTreeSet::new();
+    }
+    let graph = prepared.graph();
+    let definitions = values
+        .iter()
+        .filter_map(|value| graph.def_inst(*value))
+        .collect::<BTreeSet<_>>();
+    prepared
+        .obligations()
+        .obligations()
+        .iter()
+        .filter(|(_, obligation)| {
+            obligation
+                .source
+                .graph_inst()
+                .is_some_and(|inst| definitions.contains(&inst))
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// The version-keyed half of [`residualize_unspecified_reads`].
+struct VersionResidualizer<'a> {
+    read_of: &'a dyn Fn(crate::ast::RenderObservationId) -> Option<r2ssa::ValueId>,
+    /// The object a read of this version goes through, and why it has no
+    /// value where it has none.
+    through:
+        &'a dyn Fn(r2ssa::ValueId) -> Option<(SymbolId, Option<binding_plan::UnspecifiedRead>)>,
+    symbols: std::rc::Rc<std::cell::RefCell<crate::symbol::SymbolTable>>,
+    /// Each object a read of which became a residual, with why.
+    read: BTreeSet<(SymbolId, UnassignedCause)>,
+    values: BTreeSet<r2ssa::ValueId>,
+}
+
+/// The reads an enclosing occurrence's markers name, pending until the walk
+/// reaches the variable they are read through.
+///
+/// A lowering that folds an operand into the expression reading it puts the
+/// read's marker on that expression -- `*(FS_OFFSET_0 + 40)` marks the sum,
+/// not the variable -- so the version a variable stands for is named by the
+/// nearest marker above it that names a read through it.
+type PendingReads = Vec<(
+    SymbolId,
+    r2ssa::ValueId,
+    Option<binding_plan::UnspecifiedRead>,
+)>;
+
+impl VersionResidualizer<'_> {
+    /// Every read these markers name, with the object it is read through and
+    /// why it has no value where it has none.
+    fn reads_named(&self, ids: &[crate::ast::RenderObservationId], into: &mut PendingReads) {
+        for id in ids {
+            let Some(value) = (self.read_of)(*id) else {
+                continue;
+            };
+            if let Some((symbol, read)) = (self.through)(value) {
+                into.push((symbol, value, read));
+            }
+        }
+    }
+
+    /// The version a read of `symbol` stands for where no marker of its own
+    /// names one: the innermost enclosing marker's.
+    fn pending_read_of(
+        pending: &PendingReads,
+        symbol: SymbolId,
+    ) -> Option<(r2ssa::ValueId, Option<binding_plan::UnspecifiedRead>)> {
+        pending
+            .iter()
+            .rev()
+            .find(|(through, _, _)| *through == symbol)
+            .map(|(_, value, read)| (*value, *read))
+    }
+
+    /// Why the read of `symbol` these markers, or the enclosing ones, name
+    /// has no value -- `None` where it has one or names none.
+    fn unspecified_read_of(
+        &self,
+        symbol: SymbolId,
+        ids: &[crate::ast::RenderObservationId],
+        pending: &PendingReads,
+    ) -> Option<(r2ssa::ValueId, binding_plan::UnspecifiedRead)> {
+        let mut own = Vec::new();
+        self.reads_named(ids, &mut own);
+        let (value, read) = Self::pending_read_of(&own, symbol)
+            .or_else(|| Self::pending_read_of(pending, symbol))?;
+        Some((value, read?))
+    }
+
+    /// A residual of `symbol`'s type standing for the read of `value`.
+    fn residual(
+        &mut self,
+        symbol: SymbolId,
+        (value, read): (r2ssa::ValueId, binding_plan::UnspecifiedRead),
+    ) -> Option<CExpr> {
+        let ty = self.symbols.borrow().ty(symbol).clone();
+        let residual = crate::prelude::residual(&ty, read.residual_cause())?;
+        self.values.insert(value);
+        self.read.insert((symbol, UnassignedCause::from(read)));
+        Some(residual)
+    }
+
+    fn expr(&mut self, expr: CExpr, pending: &mut PendingReads) -> CExpr {
+        match expr.unobserved() {
+            CExpr::Var(symbol) => {
+                let symbol = *symbol;
+                let (semantic, ids) = expr.into_semantic_with_observations();
+                match self
+                    .unspecified_read_of(symbol, &ids, pending)
+                    .and_then(|read| self.residual(symbol, read))
+                {
+                    Some(residual) => CExpr::observe_all(ids, residual),
+                    None => CExpr::observe_all(ids, semantic),
+                }
+            }
+            // The left operand of a compound assignment is read and then
+            // written. Where the read names a version with no value, the write
+            // stays and the read becomes the residual: `x op= e` is
+            // `x = residual op e`, which traps exactly where the read would
+            // have happened.
+            CExpr::Binary { op, .. } if op.writes_left_operand() => {
+                let (semantic, ids) = expr.into_semantic_with_observations();
+                let CExpr::Binary { op, left, right } = semantic else {
+                    unreachable!("the match above saw an assignment");
+                };
+                let depth = pending.len();
+                self.reads_named(&ids, pending);
+                let right = self.expr(*right, pending);
+                let rewritten = match compound_operator(op) {
+                    Some(base) => match self.read_before_write(*left, pending) {
+                        (target, Some(residual)) => {
+                            CExpr::assign(target, CExpr::binary(base, residual, right))
+                        }
+                        (target, None) => CExpr::binary(op, target, right),
+                    },
+                    // A plain assignment writes its left operand and reads
+                    // nothing of it but the addresses inside it.
+                    None => CExpr::binary(op, self.lvalue(*left, pending), right),
+                };
+                pending.truncate(depth);
+                CExpr::observe_all(ids, rewritten)
+            }
+            CExpr::Unary {
+                op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+                ..
+            } => {
+                let (semantic, ids) = expr.into_semantic_with_observations();
+                let CExpr::Unary { op, operand } = semantic else {
+                    unreachable!("the match above saw an increment");
+                };
+                let depth = pending.len();
+                self.reads_named(&ids, pending);
+                let base = if matches!(op, UnaryOp::PreInc | UnaryOp::PostInc) {
+                    BinaryOp::Add
+                } else {
+                    BinaryOp::Sub
+                };
+                let rewritten = match self.read_before_write(*operand, pending) {
+                    (target, Some(residual)) => {
+                        CExpr::assign(target, CExpr::binary(base, residual, CExpr::IntLit(1)))
+                    }
+                    (target, None) => CExpr::Unary {
+                        op,
+                        operand: Box::new(target),
+                    },
+                };
+                pending.truncate(depth);
+                CExpr::observe_all(ids, rewritten)
+            }
+            // Any other occurrence: the reads its markers name are pending
+            // for the variables beneath it.
+            _ => {
+                let (semantic, ids) = expr.into_semantic_with_observations();
+                let depth = pending.len();
+                self.reads_named(&ids, pending);
+                let rewritten = semantic.map_children(&mut |child| self.expr(child, pending));
+                pending.truncate(depth);
+                CExpr::observe_all(ids, rewritten)
+            }
+        }
+    }
+
+    /// The object a read-modify-write writes, and the residual its read
+    /// becomes where the target is a variable whose version here has no
+    /// value: the markers the read carried go onto the residual. Anything
+    /// else is handed back as the object written, reads inside it rewritten.
+    fn read_before_write(
+        &mut self,
+        target: CExpr,
+        pending: &mut PendingReads,
+    ) -> (CExpr, Option<CExpr>) {
+        let CExpr::Var(symbol) = target.unobserved() else {
+            return (self.lvalue(target, pending), None);
+        };
+        let symbol = *symbol;
+        let (semantic, ids) = target.into_semantic_with_observations();
+        match self
+            .unspecified_read_of(symbol, &ids, pending)
+            .and_then(|read| self.residual(symbol, read))
+        {
+            Some(residual) => (semantic, Some(CExpr::observe_all(ids, residual))),
+            None => (CExpr::observe_all(ids, semantic), None),
+        }
+    }
+
+    /// An expression written to: its own variable is the object, not a read,
+    /// and every read inside it -- an index, a base pointer -- is rewritten.
+    fn lvalue(&mut self, expr: CExpr, pending: &mut PendingReads) -> CExpr {
+        match expr.unobserved() {
+            CExpr::Var(_) => expr,
+            _ => {
+                let (semantic, ids) = expr.into_semantic_with_observations();
+                let depth = pending.len();
+                self.reads_named(&ids, pending);
+                let rewritten = semantic.map_children(&mut |child| self.expr(child, pending));
+                pending.truncate(depth);
+                CExpr::observe_all(ids, rewritten)
+            }
+        }
+    }
+}
+
+/// The operator a compound assignment applies before it writes.
+const fn compound_operator(op: BinaryOp) -> Option<BinaryOp> {
+    Some(match op {
+        BinaryOp::AddAssign => BinaryOp::Add,
+        BinaryOp::SubAssign => BinaryOp::Sub,
+        BinaryOp::MulAssign => BinaryOp::Mul,
+        BinaryOp::DivAssign => BinaryOp::Div,
+        BinaryOp::ModAssign => BinaryOp::Mod,
+        BinaryOp::BitAndAssign => BinaryOp::BitAnd,
+        BinaryOp::BitOrAssign => BinaryOp::BitOr,
+        BinaryOp::BitXorAssign => BinaryOp::BitXor,
+        BinaryOp::ShlAssign => BinaryOp::Shl,
+        BinaryOp::ShrAssign => BinaryOp::Shr,
+        _ => return None,
+    })
+}
+
+impl From<binding_plan::UnspecifiedRead> for UnassignedCause {
+    fn from(read: binding_plan::UnspecifiedRead) -> Self {
+        match read {
+            binding_plan::UnspecifiedRead::HeldFromEntry => Self::Held,
+            binding_plan::UnspecifiedRead::UnadmittedArgument => Self::UnadmittedArgument,
+            binding_plan::UnspecifiedRead::LeftByCall => Self::Unassigned,
+        }
+    }
 }
 
 /// One expression with each read of a `declared` object replaced by a
@@ -599,9 +908,13 @@ fn residualize_reads_in(
     expr.map_children(&mut |child| residualize_reads_in(child, declared))
 }
 
-/// The scalars the function declares without a value, never writes, and
-/// reads, at the types they are declared.
-fn unassigned_scalar_reads(func: &CFunction) -> BTreeMap<SymbolId, CType> {
+/// The frame scalars the function declares without a value, never writes,
+/// and reads, at the types they are declared.
+///
+/// Storage only: a register binding's reads are answered version by version
+/// above, and "written nowhere" is a fact about an object, which is what a
+/// frame slot is and a register value is not.
+fn unassigned_storage_reads(func: &CFunction) -> BTreeMap<SymbolId, CType> {
     let mut declared = func
         .locals
         .iter()
@@ -612,6 +925,15 @@ fn unassigned_scalar_reads(func: &CFunction) -> BTreeMap<SymbolId, CType> {
     let mut written = BTreeSet::new();
     for stmt in &func.body {
         declarations(stmt, &mut declared, &mut written);
+    }
+    {
+        let symbols = func.symbols.borrow();
+        declared.retain(|symbol, _| {
+            matches!(
+                symbols.get(*symbol).role,
+                crate::symbol::SymbolRole::StackLocal(_)
+            )
+        });
     }
     if declared.is_empty() {
         return declared;
@@ -3980,12 +4302,17 @@ impl Decompiler {
         // Before the ledger closes, and after the last rewrite: an obligation
         // whose occurrence evaluates a residual traps there, and the ledger
         // counts it that way.
-        let unassigned = native.residualize_unassigned_reads(binding_names.entry_supplied());
+        let residualized = native.residualize_unspecified_reads(&binding_names);
+        // A residual standing for a version stands in for what defined it,
+        // too: a call's unclaimed result is produced by no statement, and the
+        // obligation to produce it is answered by the residual its reads are.
+        let mut residual = native.obligations_under_residuals();
+        residual.extend(obligations_defining(prepared, &residualized.values));
         let ledger = effect_ledger::build_obligation_ledger(
             prepared,
             &normalization_origins,
             native.effect_observations(),
-            &native.obligations_under_residuals(),
+            &residual,
         );
         debug_log_ledger(prepared, &ledger);
         let radare2_variadic_format_counts = self
@@ -4022,7 +4349,7 @@ impl Decompiler {
             radare2_variadic_format_counts,
             radare2_prototypes,
             binding_names.source_named_locals(),
-            &unassigned,
+            &residualized.reads,
         );
         Ok(InternalBuildProduct::Native(native))
     }

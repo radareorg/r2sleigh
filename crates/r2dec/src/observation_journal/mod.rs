@@ -1905,17 +1905,36 @@ impl SealedNativeFunction {
             .expect("every native function retains the source effect domain")
     }
 
-    /// Spell each read of an object nothing assigns as a residual, in the
-    /// sealed tree.
-    pub(crate) fn residualize_unassigned_reads(
+    /// Spell each read the rendering has no value for as a residual, in the
+    /// sealed tree: a read of a version C cannot spell, and a read of frame
+    /// storage nothing assigns.
+    pub(crate) fn residualize_unspecified_reads(
         &mut self,
-        entry_supplied: &std::collections::BTreeMap<
-            crate::symbol::SymbolId,
-            crate::binding_plan::EntrySupply,
-        >,
-    ) -> Vec<crate::UnassignedRead> {
+        names: &crate::binding_plan::BindingNameResolution,
+    ) -> crate::Residualized {
+        let locations = self.ready.observation_locations().cloned();
+        let read_of = |id: crate::ast::RenderObservationId| {
+            locations.as_ref().and_then(|locations| locations.read(id))
+        };
+        let plan = names.plan();
+        let through = |value: ValueId| {
+            let crate::binding_plan::ValueDisposition::Bound { binding } =
+                plan.disposition(value)?
+            else {
+                return None;
+            };
+            Some((
+                names.symbol_for_binding(*binding)?,
+                plan.unspecified_read(value),
+            ))
+        };
         self.ready.rewrite_sealed(|function| {
-            crate::residualize_unassigned_reads(function, entry_supplied)
+            crate::residualize_unspecified_reads(
+                function,
+                &read_of,
+                &through,
+                names.entry_supplied(),
+            )
         })
     }
 
@@ -2027,6 +2046,20 @@ impl LegacyObservationJournal {
                 _ => None,
             })
             .collect();
+        // The SSA version each read marker stands for, so a rewrite of the
+        // sealed tree can ask what a read names without the journal.
+        let reads = self
+            .targets
+            .iter()
+            .map(|target| match *target {
+                ObservationTarget::Use { site, .. } => graph
+                    .inst(site.inst)
+                    .and_then(|inst| inst.inputs.get(site.input_idx).copied()),
+                ObservationTarget::CertifiedValueRead { value, .. }
+                | ObservationTarget::CertifiedArrayIndexRead { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
         crate::codegen::ObservationLocations::new(
             self.targets
                 .iter()
@@ -2048,6 +2081,7 @@ impl LegacyObservationJournal {
                 })
                 .collect(),
             effects,
+            reads,
         )
     }
 

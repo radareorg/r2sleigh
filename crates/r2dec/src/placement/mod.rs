@@ -46,6 +46,14 @@ enum FinalObservationScope {
         /// the same statement here, so a read can be recognised as naming a
         /// value its own statement defines.
         statement: u64,
+        /// The simple statement -- an expression, a return, a declaration --
+        /// the observation stands in, however deep in its expression.
+        ///
+        /// An operand group inside the expression is ordered on its own, so
+        /// `statement` names the group; this names what the text calls one
+        /// statement, which is what a value it both defines and reads is
+        /// defined by.
+        top: u64,
         /// Whether the statement carrying this observation spells it.
         spelled: bool,
     },
@@ -76,11 +84,18 @@ pub(crate) struct FinalBindingRead {
     pub(crate) value: Option<r2ssa::ValueId>,
     /// The rendered statement this read belongs to.
     pub(crate) statement: u64,
+    /// The simple statement this read stands in (`FinalObservationScope`).
+    pub(crate) top: u64,
     pub(crate) region: RegionId,
     pub(crate) block: u64,
     pub(crate) order: FinalOccurrenceOrder,
     /// Whether the rendered text spells this read where it is ordered.
     pub(crate) spelled: bool,
+    /// Whether the version this read names has no value C could hold
+    /// (`BindingPlan::unspecified_read`): once the tree is sealed the read is
+    /// a residual, so it needs a declaration in scope until then and no
+    /// assignment before it, ever.
+    pub(crate) unspecified: bool,
 }
 
 /// One binding write that survived all AST rewriting.
@@ -92,6 +107,8 @@ pub(crate) struct FinalBindingWrite {
     pub(crate) defines: Option<r2ssa::ValueId>,
     /// The rendered statement this write belongs to.
     pub(crate) statement: u64,
+    /// The simple statement this write stands in (`FinalObservationScope`).
+    pub(crate) top: u64,
     pub(crate) region: RegionId,
     pub(crate) block: u64,
     pub(crate) order: FinalOccurrenceOrder,
@@ -446,6 +463,7 @@ pub(crate) fn collect_final_placement_occurrences(
             region,
             order,
             statement,
+            top,
             spelled,
         }) = scoped[index]
         else {
@@ -476,11 +494,13 @@ pub(crate) fn collect_final_placement_occurrences(
                         binding,
                         value: Some(value),
                         statement,
+                        top,
                         source: PlacementRead::Use(site),
                         region,
                         block,
                         order,
                         spelled,
+                        unspecified: false,
                     });
                 }
             }
@@ -503,11 +523,13 @@ pub(crate) fn collect_final_placement_occurrences(
                         binding,
                         value: Some(value),
                         statement,
+                        top,
                         source: PlacementRead::CertifiedValue { value, at },
                         region,
                         block,
                         order,
                         spelled,
+                        unspecified: false,
                     });
                 }
             }
@@ -539,11 +561,13 @@ pub(crate) fn collect_final_placement_occurrences(
                         binding,
                         value: Some(value),
                         statement,
+                        top,
                         source: PlacementRead::ArrayIndex { access, value },
                         region,
                         block,
                         order,
                         spelled,
+                        unspecified: false,
                     });
                 }
             }
@@ -564,6 +588,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         inst: inst_id,
                         defines: Some(value),
                         statement,
+                        top,
                         region,
                         block,
                         order,
@@ -624,6 +649,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         inst: access.inst,
                         defines: None,
                         statement,
+                        top,
                         region,
                         block,
                         order,
@@ -646,6 +672,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         binding,
                         value: None,
                         statement,
+                        top,
                         source: if indexed {
                             PlacementRead::IndexedStackAccess(access)
                         } else {
@@ -655,6 +682,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         block,
                         order,
                         spelled,
+                        unspecified: false,
                     });
                 }
             }
@@ -669,11 +697,13 @@ pub(crate) fn collect_final_placement_occurrences(
                     binding,
                     value: Some(value),
                     statement,
+                    top,
                     source: PlacementRead::ObjectAddress { value },
                     region,
                     block,
                     order,
                     spelled,
+                    unspecified: false,
                 });
             }
             PlacementObservationTarget::Other => {}
@@ -681,6 +711,12 @@ pub(crate) fn collect_final_placement_occurrences(
     }
 
     audit_plan_symbols(function, source, names, &targets)?;
+    // Which reads name a version C has no value for, asked once of the plan.
+    for read in &mut reads {
+        read.unspecified = read
+            .value
+            .is_some_and(|value| names.plan().unspecified_read(value).is_some());
+    }
     reads.sort_by_key(|read| (read.order, read.binding, read.source));
     writes.sort_by_key(|write| (write.order, write.binding, write.inst));
     Ok(FinalPlacementOccurrences {
@@ -1292,6 +1328,7 @@ fn record_observation_group(
                 region,
                 order: current,
                 statement,
+                top: statement,
                 spelled: position == GroupPosition::Spelled,
             },
         });
@@ -1457,6 +1494,31 @@ fn direct_stack_assignment_observations(
     let mut writes = Vec::new();
     (collect(expr, targets, &mut reads, &mut writes) && !writes.is_empty())
         .then_some((reads, writes))
+}
+
+/// Name the one simple statement every observation of it stands in.
+///
+/// Its operand groups were ordered one by one and each took its own statement
+/// identity from its order; they are still one statement of the text, and a
+/// value it both defines and reads is defined by it. One walk over the
+/// statement's markers.
+fn stand_in_one_statement(
+    leading: &[RenderObservationId],
+    expr: Option<&CExpr>,
+    top: u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    let mut mark = |id: RenderObservationId| {
+        if let Some(Some(FinalObservationScope::Exact { top: stands_in, .. })) =
+            scoped.get_mut(id.index() as usize)
+        {
+            *stands_in = top;
+        }
+    };
+    leading.iter().copied().for_each(&mut mark);
+    if let Some(expr) = expr {
+        visit_expr_observations(expr, &mut mark);
+    }
 }
 
 fn record_completion_observations(
@@ -1736,6 +1798,7 @@ fn collect_stmt_observation_scopes(
             collect_stmt_observation_scopes(semantic, current, regions, targets, order, scoped);
         }
         CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
+            let top = *order;
             collect_expr_observation_scopes(expr, current, targets, order, scoped);
             record_completion_observations(
                 leading,
@@ -1745,8 +1808,10 @@ fn collect_stmt_observation_scopes(
                 order,
                 scoped,
             );
+            stand_in_one_statement(leading, Some(expr), top, scoped);
         }
         CStmt::Decl { init, .. } => {
+            let top = *order;
             if let Some(init) = init {
                 collect_expr_observation_scopes(init, current, targets, order, scoped);
             }
@@ -1758,6 +1823,7 @@ fn collect_stmt_observation_scopes(
                 order,
                 scoped,
             );
+            stand_in_one_statement(leading, init.as_ref(), top, scoped);
         }
         CStmt::If {
             cond,
@@ -4108,29 +4174,34 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
         })?;
     }
 
-    // Which value each occurrence group defines, so a read of one of them can
-    // be recognised as naming what its own statement produced.
-    let defined_in_group = writes
+    // Which value each simple statement defines, and in which of its groups,
+    // so a read of one of them -- in any operand group of that statement -- is
+    // recognised as naming what its own statement produced, and is ordered
+    // after the write that produced it rather than before the statement.
+    let defined_in_statement = writes
         .iter()
         .filter_map(|write| {
             write
                 .defines
-                .map(|value| (write.statement, write.block, value))
+                .map(|value| ((write.top, write.block, value), write.statement))
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<BTreeMap<_, _>>();
     let mut occurrences = vec![Vec::<Occurrence>::new(); binding_count];
     for read in reads {
-        let self_defined = read
-            .value
-            .is_some_and(|value| defined_in_group.contains(&(read.statement, read.block, value)));
+        let defining = read.value.and_then(|value| {
+            defined_in_statement
+                .get(&(read.top, read.block, value))
+                .copied()
+        });
         occurrences[read.binding.index()].push(Occurrence {
             region: read.region,
             block: read.block,
             order: read.order,
             kind: OccurrenceKind::Read(read.source),
-            self_defined,
-            statement: read.statement,
+            self_defined: defining.is_some(),
+            statement: defining.unwrap_or(read.statement),
             spelled: read.spelled,
+            unspecified: read.unspecified,
         });
     }
     for write in writes {
@@ -4145,6 +4216,7 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
             self_defined: false,
             statement: write.statement,
             spelled: true,
+            unspecified: false,
         });
     }
     for binding_occurrences in &mut occurrences {
@@ -4195,11 +4267,13 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
         }
         // Storage read at offsets the machine computes is defined by its own
         // declaration, as an array is; no element write has to precede it.
+        // And a read of a version no statement could have assigned becomes a
+        // residual, which no definition answers either.
         let only_indexed_reads = binding_occurrences.iter().all(|occurrence| {
             matches!(
                 occurrence.kind,
                 OccurrenceKind::Read(PlacementRead::IndexedStackAccess(_))
-            )
+            ) || occurrence.unspecified
         });
         if writes_for_binding.is_empty()
             && !entry_declared.contains(&binding)
@@ -4461,6 +4535,9 @@ struct Occurrence {
     /// store, but the marker names nothing and stands at its anchor rather than
     /// where the covered operation ran, so its order proves nothing.
     spelled: bool,
+    /// Whether this read names a version with no value C could hold, and so
+    /// becomes a residual once the tree is sealed (`FinalBindingRead`).
+    unspecified: bool,
 }
 
 impl Occurrence {
@@ -4599,6 +4676,12 @@ fn first_read_before_assignment(
                 OccurrenceKind::Read(PlacementRead::IndexedStackAccess(_)) => {}
                 // Nothing in the text reads it here, so nothing can read it early.
                 OccurrenceKind::Read(_) if !occurrence.spelled => {}
+                // Definite assignment is a question about a version, not about
+                // the object: a read of one no statement could have assigned
+                // -- a register's version 0 outside every parameter, what a
+                // call left that nothing claims -- becomes a residual, which
+                // reads nothing, and no assignment could have answered it.
+                OccurrenceKind::Read(_) if occurrence.unspecified => {}
                 OccurrenceKind::Read(read) if !assigned => {
                     r2il::refusal_evidence!(
                         "read-before-assignment",

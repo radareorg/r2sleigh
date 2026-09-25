@@ -2673,13 +2673,14 @@ pub(crate) fn certificate_elided_cells(
             )?;
         }
     }
-    // A register a call clobbered and no result certificate claims is declared
-    // and not assigned: the object holds whatever the callee left, and there is
-    // nothing in this function to assign it from. The `CallDefine` that mints
-    // it therefore has no statement, exactly as a caller-supplied entry value
-    // has none, and its write cell is answered here rather than left
-    // unaccounted at the seal -- which planned a gap over six operations and
-    // took with it the definition of the value the return certificate names.
+    // A register a call left changed and no result certificate claims: the
+    // call statement is what changed it, and this function has nothing to
+    // assign it from, so the `CallDefine` minting it renders no statement of
+    // its own, exactly as the `CallUse` above renders none. Its write cell is
+    // answered here rather than left unaccounted at the seal -- which planned
+    // a gap over six operations and took with it the definition of the value
+    // the return certificate names. A read of the value is a residual, keyed
+    // on the version (`BindingPlan::unspecified_read`).
     for inst in &graph.insts {
         if !matches!(
             inst.payload,
@@ -2693,11 +2694,7 @@ pub(crate) fn certificate_elided_cells(
         if certificates.call_results.contains_key(&output) {
             continue;
         }
-        insert_elided_write(
-            &mut writes,
-            inst.id,
-            ElisionReason::CallClobberedDeclaration,
-        )?;
+        insert_elided_write(&mut writes, inst.id, ElisionReason::CallBoundaryCarrier)?;
     }
     // A lane of an entry register is defined by the formal's declaration: the
     // `Subpiece` minting it from the root's entry value has no statement, and

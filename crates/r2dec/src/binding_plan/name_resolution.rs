@@ -209,24 +209,26 @@ pub(crate) struct BindingNameResolution {
     entry_supplied: BTreeMap<SymbolId, EntrySupply>,
 }
 
-/// How an object comes to hold a value before any statement in the function
-/// writes it.
+/// How a frame object comes to hold a value before any statement in the
+/// function writes it.
 ///
-/// C has no spelling for a value the function entered holding, so such an
-/// object is declared and never assigned. The proof line has to say which
-/// objects those are, by name, or a reader cannot tell one of them from a
-/// read of a value nothing wrote.
+/// Only storage: a register's entry value is a version, and every read of one
+/// is a residual keyed on that version (`BindingPlan::unspecified_read`). A
+/// stack slot above the entry stack pointer is the caller's memory, and C has
+/// no spelling for what it held, so an object there that no statement writes
+/// is read as residuals too; the proof line says which objects those are, by
+/// name, or a reader cannot tell one of them from a read of a value nothing
+/// wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum EntrySupply {
-    /// Held from entry, in storage no convention argument slot delivers: a
-    /// preserved or scratch register, or the slot a call pushed the return
-    /// address into.
+    /// Caller storage no argument area covers, held from entry: the slot a
+    /// call pushed the return address into, or any caller slot while the
+    /// argument area's place is unproven.
     Held,
-    /// Delivered where the convention passes an argument -- an argument
-    /// register, or the caller's outgoing argument area above the return
-    /// address -- and parameter recovery did not admit it. The signature does
-    /// not name it, so the rendering reads a value its own interface says the
-    /// function was never given.
+    /// The caller's outgoing argument area above the return address, which
+    /// parameter recovery did not admit. The signature does not name it, so the
+    /// rendering reads a value its own interface says the function was never
+    /// given.
     UnadmittedArgument,
 }
 
@@ -234,24 +236,16 @@ impl EntrySupply {
     /// How a binding in `role` comes by a value before any statement writes
     /// it, or `None` when a statement or the signature gives it one.
     ///
-    /// `in_argument_slot` says some member occupies a register the convention
-    /// passes an argument in. `in_argument_area` says a caller-supplied stack
-    /// object lies in the outgoing argument area the convention states, which
-    /// is everything at or above the entry stack pointer but the return
-    /// address, once the return address's place is proven.
-    const fn of(
-        role: BindingRole,
-        caller_supplied: bool,
-        in_argument_slot: bool,
-        in_argument_area: bool,
-    ) -> Option<Self> {
+    /// `in_argument_area` says a caller-supplied stack object lies in the
+    /// outgoing argument area the convention states, which is everything at or
+    /// above the entry stack pointer but the return address, once the return
+    /// address's place is proven.
+    const fn of(role: BindingRole, caller_supplied: bool, in_argument_area: bool) -> Option<Self> {
         match role {
-            BindingRole::EntryValue if in_argument_slot => Some(Self::UnadmittedArgument),
-            BindingRole::EntryValue => Some(Self::Held),
             BindingRole::StackObject { .. } if !caller_supplied => None,
             BindingRole::StackObject { .. } if in_argument_area => Some(Self::UnadmittedArgument),
             BindingRole::StackObject { .. } => Some(Self::Held),
-            BindingRole::Parameter { .. } | BindingRole::Local | BindingRole::CallClobbered => None,
+            BindingRole::Parameter { .. } | BindingRole::Local | BindingRole::EntryValue => None,
         }
     }
 }
@@ -269,10 +263,6 @@ impl BindingNameResolution {
         let mut by_binding = Vec::with_capacity(plan.binding_count());
         let mut source_named_locals = 0usize;
         let mut entry_supplied = BTreeMap::new();
-        // One pass, not one per binding: whether a binding occupies a slot the
-        // convention passes an argument in. An entry value there is a
-        // parameter this recovery missed, and excusing it as held from entry
-        // would hide that.
         let machine = source_owned.source().machine_context();
         let convention_slots = machine.convention_slots();
         // Where the argument area begins is known only where the return
@@ -282,24 +272,6 @@ impl BindingNameResolution {
         let argument_area_placed = convention_slots
             .is_some_and(|slots| slots.stack_arguments().is_some())
             && (machine.return_mechanism().is_some() || !machine.call_moves_stack_pointer());
-        let argument_slot_bindings = {
-            let slots = convention_slots
-                .map(|slots| slots.argument_slots().to_vec())
-                .unwrap_or_default();
-            let mut found = std::collections::BTreeSet::new();
-            for value in &source.graph().values {
-                let Some(ValueDisposition::Bound { binding }) = plan.disposition(value.id) else {
-                    continue;
-                };
-                if value
-                    .canonical_storage
-                    .is_some_and(|storage| slots.contains(&storage))
-                {
-                    found.insert(*binding);
-                }
-            }
-            found
-        };
         for (binding_id, binding) in plan.bindings() {
             let mut stack_object = None;
             let role = plan.binding_role(binding_id);
@@ -317,14 +289,8 @@ impl BindingNameResolution {
                         if source.caller_stack_object(object)
                             && !plan.return_address_objects().contains(&object)
                 );
-            let supply = role.and_then(|role| {
-                EntrySupply::of(
-                    role,
-                    binding.caller_supplied,
-                    argument_slot_bindings.contains(&binding_id),
-                    in_argument_area,
-                )
-            });
+            let supply = role
+                .and_then(|role| EntrySupply::of(role, binding.caller_supplied, in_argument_area));
             if role.is_none() {
                 let members = source
                     .graph()
@@ -367,9 +333,7 @@ impl BindingNameResolution {
                 // An incoming machine value renders as an ordinary object; the
                 // role only says the declaration comes from entry rather than
                 // from a statement.
-                Some(BindingRole::EntryValue | BindingRole::Local | BindingRole::CallClobbered) => {
-                    SymbolRole::Carrier
-                }
+                Some(BindingRole::EntryValue | BindingRole::Local) => SymbolRole::Carrier,
                 None => {
                     return Err(BindingNameResolutionError::ConflictingCertifiedRoles(
                         binding_id,

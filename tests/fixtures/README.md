@@ -12,6 +12,7 @@ answer.
 | `manual_limits_O2` | `tests/gold/manual_limits.c` | the same source through the optimizer |
 | `hashes_gcc_x64_O2_stripped` | `tests/corpus/hashes.c` | discovery with no symbol table, which has to reach `main` through `__libc_start_main` |
 | `rv_O0g` | `tests/gold/review.c` | the review fixture: x86-64 PIE, GCC 13.3.0 `-O0 -g`; `classify`'s jump table is read through a spilled index nothing bounds |
+| `rv_O2` | `tests/gold/review.c` | the same source, x86-64 PIE, GCC 13.3.0 `-O2`, no debug information; `sext` reads the entry value of `rax` it only partly overwrites, and `main` reads `avg`'s float result after a call nothing claims it from |
 
 `tests/coverage/pinned/` carries the whole-binary coverage cells, which are the
 same idea for a different question: those are gated as a population, these are

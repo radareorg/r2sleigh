@@ -614,11 +614,14 @@ impl LegacyObservationJournal {
         // possible occurrence is a read; where every read elided, none exists.
         for index in 0..self.values.len() {
             let value = ValueId(index as u32);
-            // A call clobber is supplied from outside this function too, by the
-            // callee rather than the caller, and the plan is what says so.
+            // What a call left in a register nothing claims is supplied from
+            // outside this function too, by the callee rather than the caller,
+            // and the plan's one account of unspecified reads is what says so.
             let supplied_from_outside = if graph.caller_supplied(value) {
                 crate::ledger::ElisionReason::CallerSuppliedEntryValue
-            } else if self.plan.value_is_call_clobber(value) {
+            } else if self.plan.unspecified_read(value)
+                == Some(crate::binding_plan::UnspecifiedRead::LeftByCall)
+            {
                 crate::ledger::ElisionReason::UnclaimedCallClobber
             } else {
                 continue;

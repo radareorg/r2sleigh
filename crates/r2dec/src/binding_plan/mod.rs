@@ -69,20 +69,38 @@ pub(crate) enum BindingRole {
     /// ecx` reads `ecx` even though its result does not depend on it -- and so
     /// does any incoming register outside the convention's argument slots.
     ///
-    /// The object therefore exists from function entry holding an indeterminate
-    /// value, exactly as the machine does. Treating it as a local and demanding
-    /// an assignment before its first read asks for a definition that cannot
-    /// exist, which refused the whole function for saying what the program
-    /// actually does.
+    /// C has no spelling for what such a value holds, so every read of it is a
+    /// residual (`BindingPlan::unspecified_read`), and the object is an
+    /// ordinary one: whatever else it holds is assigned before it is read.
     EntryValue,
-    /// A convention-clobbered register a call left changed, that no result
-    /// certificate claims and no callee body proves preserved.
-    ///
-    /// The program reads whatever the callee happened to leave there. That is
-    /// indeterminate for the same reason an entry value is, and it is spelled
-    /// apart from one because it becomes indeterminate at a call rather than at
-    /// entry, which is what a reader needs to know to judge the read.
-    CallClobbered,
+}
+
+/// Why a rendered read of a value can say nothing about what it holds.
+///
+/// Keyed on the SSA version the read stands for, never on the object holding
+/// it: whether an object is assigned somewhere else in the function says
+/// nothing about whether the version a read names was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum UnspecifiedRead {
+    /// A version-0 value in storage no argument slot delivers: a preserved or
+    /// system-reserved register, or a scratch register the convention leaves
+    /// unspecified at entry. The machine holds something; C cannot name it.
+    HeldFromEntry,
+    /// A version-0 value in an argument slot no recovered parameter admits.
+    UnadmittedArgument,
+    /// What a call left in a register no result certificate claims.
+    LeftByCall,
+}
+
+impl UnspecifiedRead {
+    /// The residual a read of such a value is spelled as.
+    pub(crate) const fn residual_cause(self) -> crate::prelude::ResidualCause {
+        match self {
+            Self::HeldFromEntry => crate::prelude::ResidualCause::HeldFromEntry,
+            Self::UnadmittedArgument => crate::prelude::ResidualCause::UnadmittedArgument,
+            Self::LeftByCall => crate::prelude::ResidualCause::NeverAssigned,
+        }
+    }
 }
 
 /// One rendered C object. The name hint is presentation only, never identity.
@@ -97,8 +115,6 @@ pub(crate) struct Binding {
     /// re-derived independently by the sealing oracle, never from a name or a
     /// register spelling.
     caller_supplied: bool,
-    /// Whether some member is a call clobber no result certificate claims.
-    call_clobbered: bool,
 }
 
 impl Binding {
@@ -1411,11 +1427,12 @@ pub(crate) struct BindingPlan {
     dispositions: Box<[ValueDisposition]>,
     parameters: Box<[Option<ParameterDisposition>]>,
     stack_objects: BTreeMap<r2ssa::ObjectId, StackObjectDisposition>,
-    /// The values a call left indeterminate and no result certificate claims.
+    /// The bound values no rendered read may name, each with why.
     ///
-    /// Derived once here from the graph and the boundary certificates, so no
-    /// consumer re-derives "supplied from outside this function" for itself.
-    call_clobbers: BTreeSet<ValueId>,
+    /// Derived once here from the graph, the parameters and the boundary
+    /// certificates, so placement, the residual rewrite and the seal read one
+    /// answer rather than each re-deriving "supplied from outside".
+    unspecified: BTreeMap<ValueId, UnspecifiedRead>,
     /// The slots the caller pushed the return address into. Caller storage
     /// like a stack argument, but not an argument: nothing in the program
     /// assigns one, so a rendering declaring it as a local reads a name it
@@ -1575,9 +1592,9 @@ impl BindingPlan {
         self.dispositions.len()
     }
 
-    /// Whether a call put this value there and nothing says what it holds.
-    pub(crate) fn value_is_call_clobber(&self, value: ValueId) -> bool {
-        self.call_clobbers.contains(&value)
+    /// Why a read of this value can say nothing about what it holds, if so.
+    pub(crate) fn unspecified_read(&self, value: ValueId) -> Option<UnspecifiedRead> {
+        self.unspecified.get(&value).copied()
     }
 
     /// Resolve one exact ABI slot in O(1). The table is dense-indexed but may
@@ -1614,8 +1631,6 @@ impl BindingPlan {
         let Some(role) = roles.next() else {
             return Some(if binding.caller_supplied {
                 BindingRole::EntryValue
-            } else if binding.call_clobbered {
-                BindingRole::CallClobbered
             } else {
                 BindingRole::Local
             });
@@ -1630,19 +1645,15 @@ impl BindingPlan {
             .map(|role| matches!(role, BindingRole::Parameter { .. }))
     }
 
-    /// Whether the caller supplies this object's value without the signature
-    /// naming it.
+    /// Whether this object holds a value before any statement of the
+    /// function writes it, so its first read need not follow an assignment.
     ///
-    /// The body still declares it, because no parameter does, but it holds a
-    /// value on entry and therefore cannot be required to be assigned before
-    /// its first read.
+    /// Only storage answers yes. A register's version 0 and what a call left
+    /// in one are values, not objects: every read of one is a residual keyed
+    /// on the version it names (`unspecified_read`), so the object holding it
+    /// is assigned before any read that remains, like any other.
     pub(crate) fn binding_is_entry_declared(&self, binding: BindingId) -> Option<bool> {
         let role = self.binding_role(binding)?;
-        // Neither can be required to be assigned before its first read: one
-        // holds a value from entry, the other from whatever a call left.
-        if matches!(role, BindingRole::EntryValue | BindingRole::CallClobbered) {
-            return Some(true);
-        }
         // An aggregate's declaration is its definition. C requires no
         // assignment of a whole array before an element of it is read, and no
         // single element write ever assigns the object, so demanding one

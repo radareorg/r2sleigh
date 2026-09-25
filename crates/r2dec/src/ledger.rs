@@ -157,23 +157,16 @@ pub enum ElisionReason {
     /// certificate claims it, so no statement here assigns it; where every read
     /// of it is itself elided there is no occurrence to render.
     UnclaimedCallClobber,
-    /// The register content a call left changed, that the program then reads.
-    ///
-    /// The convention lets the call clobber the carrier and no result
-    /// certificate claims it, so the object holds whatever the callee happened
-    /// to leave and no statement in this function assigns it -- there is
-    /// nothing to assign it from. It is declared and not assigned, exactly as a
-    /// value the caller supplied is, and the declaration is where a reader sees
-    /// that the read is indeterminate. This differs from `UnclaimedCallClobber`
-    /// in that something does read it, so the object is real and visible.
-    CallClobberedDeclaration,
-    /// A carrier read by a call boundary rather than by a statement.
+    /// A carrier a call boundary reads or leaves changed, rather than a
+    /// statement.
     ///
     /// `SSAOp::CallUse` states what a call consumes so that liveness can see
     /// it. It is a fact about the boundary and renders nothing of its own: an
     /// argument the call really passes is spelled inside the call expression,
     /// and a convention carrier the callee does not take is spelled nowhere.
-    /// Either way the read has no statement, and this is where it is answered.
+    /// `SSAOp::CallDefine` states what the call may leave changed, and the call
+    /// statement is the operation that changes it. Either way the cell has no
+    /// statement, and this is where it is answered.
     CallBoundaryCarrier,
     /// Which way a block operation walks, which its loop's form already says.
     ///
@@ -225,7 +218,6 @@ impl std::fmt::Display for ElisionReason {
             Self::UnreadEffectfulValue => "unread-effectful-value",
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
-            Self::CallClobberedDeclaration => "call-clobbered-declaration",
             Self::BlockTransferDirection => "block-transfer-direction",
             Self::BlockAnswerPart => "block-answer-part",
             Self::RedundantPhiEdge => "redundant-phi-edge",

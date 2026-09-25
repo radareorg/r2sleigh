@@ -168,32 +168,80 @@ pub(super) fn slot_members_agree(
 }
 
 /// The binding a stack object takes, sharing one with the values its reloads
-/// Whether a call left this register changed and nothing says what is in it.
+/// The bound values a rendered read can say nothing about, and why.
 ///
-/// The convention says a call may clobber the carrier, and no result
-/// certificate claims the callee returned a value there, so the program reads
-/// whatever the callee happened to leave.
-fn value_is_unclaimed_call_clobber(
+/// A value is keyed here by its SSA version alone. Version 0 of a register is
+/// what the function entered holding: a parameter's is the argument the
+/// signature names, and any other's has no C spelling -- a preserved register
+/// holds the caller's value, a system-reserved one the platform's, a scratch
+/// one whatever it held, and an argument register no parameter admits an
+/// argument the interface says was never passed. A `CallDefine` no result
+/// certificate claims is whatever the callee left. None of these is a value a
+/// C object could have been assigned, so a read of one is a residual wherever
+/// it stands, whatever else the object holding it is assigned.
+///
+/// One pass over the values, each an O(1) lookup, plus one over the
+/// argument-slot set: O(values + slots).
+pub(super) fn unspecified_reads(
     source_owned: &SourceOwnedFunctionFacts,
-    graph: &r2ssa::SsaGraph,
-    value: ValueId,
-) -> bool {
-    let Some(inst) = graph.def_inst(value) else {
-        return false;
-    };
-    let defined_by_call = graph.inst(inst).is_some_and(|inst| {
-        matches!(
-            inst.payload,
-            r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
-        )
-    });
-    defined_by_call
-        && !source_owned
-            .source()
-            .facts()
-            .certificates
-            .call_results
-            .contains_key(&value)
+    dispositions: &[ValueDisposition],
+    parameter_bindings: &BTreeSet<BindingId>,
+) -> BTreeMap<ValueId, UnspecifiedRead> {
+    let source = source_owned.source();
+    let graph = source.graph();
+    let argument_slots = source
+        .machine_context()
+        .convention_slots()
+        .map(|slots| {
+            slots
+                .argument_slots()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let call_results = &source.facts().certificates.call_results;
+    let mut unspecified = BTreeMap::new();
+    for value in &graph.values {
+        let Some(ValueDisposition::Bound { binding }) = dispositions.get(value.id.0 as usize)
+        else {
+            continue;
+        };
+        let read = if graph.caller_supplied(value.id) {
+            if parameter_bindings.contains(binding) {
+                continue;
+            }
+            // A lane minted from an entry register stands where its lane is,
+            // which is what decides whether the convention passes an argument
+            // there.
+            let storage = graph
+                .formal_projection_storage(value.id)
+                .or(value.canonical_storage);
+            if storage.is_some_and(|storage| {
+                argument_slots
+                    .iter()
+                    .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+            }) {
+                UnspecifiedRead::UnadmittedArgument
+            } else {
+                UnspecifiedRead::HeldFromEntry
+            }
+        } else if graph.def_inst(value.id).is_some_and(|inst| {
+            graph.inst(inst).is_some_and(|inst| {
+                matches!(
+                    inst.payload,
+                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
+                )
+            })
+        }) && !call_results.contains_key(&value.id)
+        {
+            UnspecifiedRead::LeftByCall
+        } else {
+            continue;
+        };
+        unspecified.insert(value.id, read);
+    }
+    unspecified
 }
 
 /// certify as its contents where there is one.
@@ -226,7 +274,6 @@ fn bind_stack_object(
         },
         presentation_name_hint,
         caller_supplied,
-        call_clobbered: false,
     });
     Ok(binding)
 }
@@ -1144,7 +1191,6 @@ impl BindingPlan {
         let mut bindings = Vec::with_capacity(components.len());
         let floating_views = super::rules::floating_views(&machine_projection);
 
-        let mut call_clobbers = BTreeSet::new();
         for mut component in components {
             // A member already answered for -- folded into its reader, or
             // elided -- keeps that answer; the object is the members that
@@ -1190,13 +1236,6 @@ impl BindingPlan {
                 &component.members,
                 &component.sources,
             );
-            let mut call_clobbered = false;
-            for value in &component.members {
-                if value_is_unclaimed_call_clobber(source_owned, graph, *value) {
-                    call_clobbers.insert(*value);
-                    call_clobbered = true;
-                }
-            }
             bindings.push(Binding {
                 declaration_type: super::rules::declaration_type_for_binding(
                     source_owned,
@@ -1227,7 +1266,6 @@ impl BindingPlan {
                     },
                 ),
                 caller_supplied,
-                call_clobbered,
             });
         }
 
@@ -1303,7 +1341,6 @@ impl BindingPlan {
                         },
                         presentation_name_hint: None,
                         caller_supplied: false,
-                        call_clobbered: false,
                     });
                     binding
                 }
@@ -1711,6 +1748,14 @@ impl BindingPlan {
             .copied()
             .filter(|object| source_owned.source().return_address_stack_object(*object))
             .collect();
+        let parameter_bindings = parameters
+            .iter()
+            .filter_map(|parameter| match parameter {
+                Some(ParameterDisposition::Bound { binding, .. }) => Some(*binding),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let unspecified = unspecified_reads(source_owned, &dispositions, &parameter_bindings);
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,
@@ -1719,7 +1764,7 @@ impl BindingPlan {
             dispositions: dispositions.into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),
             stack_objects,
-            call_clobbers,
+            unspecified,
             escaped_frame_objects,
             callee_reached_frame_objects,
             return_address_objects,
