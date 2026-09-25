@@ -10,9 +10,11 @@ prepended:
 
     tests/decbench/compile_census.py <binary> [...] [--r2s target/release/r2s]
 
-* ``builds``: ``-std=gnu11 -c`` with every warning off except
-  ``implicit-function-declaration``, which stays an error -- a call to a helper
-  the rendering does not define means the unit is not self-contained;
+* ``builds``: ``-std=gnu11 -c`` with warnings left on and non-fatal except
+  ``implicit-function-declaration``, which is an error -- a call to a helper
+  the rendering does not define means the unit is not self-contained. (``-w``
+  would silence that error too under GCC: GCC 13 accepts an undeclared call
+  with ``-w -Werror=implicit-function-declaration``.)
 * ``strict``: ``-std=c11 -O2 -Wall -Wextra -Werror -c``, the bar the plan sets
   for every rendering.
 
@@ -37,7 +39,7 @@ sys.path.insert(0, str(HERE))
 
 from renderings import DEFAULT_R2S, render_binary  # noqa: E402
 
-BUILDS = ("-std=gnu11", "-O0", "-w", "-Werror=implicit-function-declaration", "-c")
+BUILDS = ("-std=gnu11", "-O0", "-Werror=implicit-function-declaration", "-c")
 STRICT = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-c")
 
 
