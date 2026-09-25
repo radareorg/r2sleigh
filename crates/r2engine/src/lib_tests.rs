@@ -2800,3 +2800,29 @@ fn phase_timing_survives_a_refusal_so_refusing_can_be_compared_with_rendering() 
     );
     assert!(comment.contains("lift_normalize=refused"), "{comment}");
 }
+
+#[test]
+fn a_panic_caught_at_rendering_refuses_from_its_own_phase_and_claims_none_before() {
+    // The response used to say every phase from the snapshot on was refused,
+    // which named the snapshot as where a rendering defect stopped the work.
+    let panicked = isolation::Panicked {
+        location: None,
+        message: "a defect in the renderer".to_owned(),
+    };
+    let response = panicked_decompile_response("f", &panicked, EnginePhase::Structuring);
+    let status = |phase| {
+        let mut timings = response.metrics.phase_timings.iter();
+        timings
+            .find(|timing| timing.phase == phase)
+            .map(|timing| timing.status)
+    };
+    for phase in [EnginePhase::SnapshotContext, EnginePhase::Types] {
+        let status = status(phase);
+        assert_eq!(status, Some(EnginePhaseStatus::NotExecuted), "{phase:?}");
+    }
+    for phase in [EnginePhase::Structuring, EnginePhase::Rendering] {
+        assert_eq!(status(phase), Some(EnginePhaseStatus::Refused), "{phase:?}");
+    }
+    let text = response.output.text();
+    assert!(text.contains("a defect in the renderer"), "{text}");
+}

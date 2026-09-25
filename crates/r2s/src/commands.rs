@@ -570,7 +570,22 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr, RenderTier::C)?;
-    Ok(rendering.response.output.into_text())
+    let mut out = rendering.response.output.into_text();
+    // A callee whose analysis panicked is a defect in the engine, not a fact
+    // about the program, so it is printed with the rendering it degraded
+    // rather than only in the ledger `pddo` prints.
+    let panicked = rendering
+        .prepared
+        .unread()
+        .iter()
+        .filter(|callee| callee.panicked());
+    for callee in panicked {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("/* callee not read: {callee} */\n"));
+    }
+    Ok(out)
 }
 
 /// `pddo`: what became of every obligation the function's source imposes.

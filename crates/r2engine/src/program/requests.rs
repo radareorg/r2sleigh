@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
+use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
 use crate::query::references::Indexing;
 use crate::query::{
@@ -16,6 +17,25 @@ use crate::query::{
     Stop, Unread, WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
+
+/// One function listed block by block, and why the analysis its lines would
+/// carry was refused, where it was.
+pub struct FunctionListing {
+    pub lines: Answer<Vec<Line>>,
+    /// Where this is `Some`, the lines are the plain walk's: every block the
+    /// walk reaches without the analysis, claiming only what each line and
+    /// the walked def-use show.
+    pub refused: Option<AnalysisRefused>,
+}
+
+/// Why a function's listing carries no analysis, and what the plain walk could not follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisRefused {
+    pub reason: NativeRefusal,
+    /// Each indirect transfer the plain walk stopped at. The analysis is what
+    /// reads a dispatch's table, so what these reach is not listed.
+    pub unresolved: Vec<u64>,
+}
 
 /// A function rendered at one tier, and the analysis it was rendered from.
 pub struct Rendering {
@@ -83,6 +103,11 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Read one prepared function's sealed type analysis; a refusal may be this request's stop, so it is not held.
+    ///
+    /// Sealing and reading are isolation boundaries: a panic in either is this
+    /// function's refusal, saying where it was raised, and a sealing that
+    /// unwound is never held. The refusal names the phase its boundary begins
+    /// at: sealing is the type analysis on, reading is everything after it.
     fn read_sealed<R>(
         &self,
         entry: u64,
@@ -90,8 +115,23 @@ impl<S: Source> OpenProgram<S> {
         read: impl FnOnce(&SealedFunctionAnalysis) -> R,
     ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
         let target = self.target(entry)?;
-        let seal = || crate::native::sealed(&target, entry, prepared, &self.control);
-        Ok(self.memo.read_sealed(prepared, seal, read))
+        let refused = |phase| {
+            move |panicked: crate::isolation::Panicked| {
+                let name = prepared.name();
+                Box::new(crate::panicked_decompile_response(name, &panicked, phase))
+            }
+        };
+        let seal = || {
+            isolated(|| crate::native::sealed(&target, entry, prepared, &self.control))
+                .unwrap_or_else(|panicked| Err(refused(crate::EnginePhase::Types)(panicked)))
+        };
+        let read = |sealed: &SealedFunctionAnalysis| {
+            isolated(|| read(sealed)).map_err(refused(crate::EnginePhase::Structuring))
+        };
+        Ok(self
+            .memo
+            .read_sealed(prepared, seal, read)
+            .and_then(|read| read))
     }
 
     /// One function rendered at one tier.
@@ -151,18 +191,86 @@ impl<S: Source> OpenProgram<S> {
     /// highest ran through whatever lay between -- another function's bytes,
     /// or the whole gap to a cold partition placed far away. The blocks and the
     /// def-use are the walked body's, which is what the reference index reads.
-    pub fn function_listing(&mut self, entry: u64) -> Result<Answer<Vec<Line>>, String> {
+    ///
+    /// **The bytes never depend on the analysis succeeding.** Where the
+    /// analysis refuses -- or panics, which is a refusal too -- the listing is
+    /// the plain walk and says why, naming each dispatch the walk could not
+    /// follow. Only a body that cannot be walked at all lists nothing, and
+    /// that includes a walk that panics: every step past the tables is inside
+    /// an isolation boundary, so no defect in one function's listing unwinds
+    /// through the caller.
+    pub fn function_listing(&mut self, entry: u64) -> Result<FunctionListing, String> {
         self.start_request();
-        let prepared = self.prepare(entry)?;
+        self.ensure_decodable()?;
+        self.ensure_assembled(entry)?;
         let target = self.target(entry)?;
+        let reason = match self.analysed(&target, entry) {
+            // A defect reading what the analysis proved is an analysis defect like any other.
+            Ok(prepared) => match isolated(|| self.proved_listing(&target, &prepared)) {
+                Ok(listing) => return Ok(listing),
+                Err(panicked) => NativeRefusal::from(panicked),
+            },
+            Err(reason) => reason,
+        };
+        let refused = reason.to_string();
+        isolated(|| self.walked_listing(&target, entry, reason)).unwrap_or_else(|panicked| {
+            Err(format!(
+                "nothing is listed at {entry:#x}: the plain walk {panicked}, \
+                 after the analysis was refused: {refused}"
+            ))
+        })
+    }
+
+    /// The listing of a function whose analysis stands, each line carrying what it proved.
+    fn proved_listing(
+        &self,
+        target: &crate::native::NativeTarget<'_>,
+        prepared: &Prepared,
+    ) -> FunctionListing {
         let lifted = prepared.lifted();
         let body = WalkedBody::new(&lifted, target.arch);
-        let proved = Proved::new(&prepared);
+        let proved = Proved::new(prepared);
         let answered = Answered {
             body: Some(&body),
             ..self.answered(Some(&proved))
         };
-        Ok(listed_by_block(&answered, &lifted, self.revision()))
+        FunctionListing {
+            lines: listed_by_block(&answered, &lifted, self.revision()),
+            refused: None,
+        }
+    }
+
+    /// The listing of the plain walk of a function whose analysis was refused.
+    ///
+    /// O(body): one more walk, on the failure path only.
+    fn walked_listing(
+        &self,
+        target: &crate::native::NativeTarget<'_>,
+        entry: u64,
+        reason: NativeRefusal,
+    ) -> Result<FunctionListing, String> {
+        let body = r2ssa::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
+            .map_err(|error| NativeRefusal::Body(error).to_string())?;
+        let unresolved = body
+            .unresolved
+            .iter()
+            .filter(|stop| stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch)
+            .map(|stop| stop.addr)
+            .collect();
+        let lifted = body
+            .blocks
+            .into_iter()
+            .map(|block| block.lifted)
+            .collect::<Vec<_>>();
+        let walked = WalkedBody::new(&lifted, target.arch);
+        let answered = Answered {
+            body: Some(&walked),
+            ..self.answered(None)
+        };
+        Ok(FunctionListing {
+            lines: listed_by_block(&answered, &lifted, self.revision()),
+            refused: Some(AnalysisRefused { reason, unresolved }),
+        })
     }
 
     /// Every function the program has, from what the container states and

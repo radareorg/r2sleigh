@@ -8,7 +8,7 @@ use common::{
     OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
     THUMB_LEAF, TRANSFERRED, TWO, VENEER, handing, opened, table_switch, transferring,
 };
-use r2engine::program::OpenProgram;
+use r2engine::program::{Container, OpenProgram, Source};
 use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
 
 /// The result each line claims, by address.
@@ -39,7 +39,13 @@ fn pd(entry: u64, count: usize) -> Vec<(u64, Option<u64>)> {
 }
 
 fn pdf(entry: u64) -> Vec<(u64, Option<u64>)> {
-    computes(&opened().function_listing(entry).expect("it lists").value)
+    computes(
+        &opened()
+            .function_listing(entry)
+            .expect("it lists")
+            .lines
+            .value,
+    )
 }
 
 #[test]
@@ -102,6 +108,7 @@ fn every_claim_the_run_makes_the_function_listing_makes_on_the_same_line() {
         let whole = program.function_listing(entry);
         let whole = whole
             .unwrap_or_else(|refused| panic!("{entry:#x} lists: {refused}"))
+            .lines
             .value;
         let stop = Stop::After(whole.len());
         let run = program.listing(Listing { start: entry, stop });
@@ -138,7 +145,11 @@ fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() 
     };
     let run = program.listing(listing).expect("it lists").value;
     assert_eq!(supported(&run[0]), [(read.clone(), Support::Decoded)]);
-    let whole = program.function_listing(STUB).expect("it lists").value;
+    let whole = program
+        .function_listing(STUB)
+        .expect("it lists")
+        .lines
+        .value;
     // The jump is a tail call through the slot, and nothing declares or proves what it hands on.
     let call = AnnotationKind::Call {
         callee: Some(SLOT),
@@ -155,7 +166,7 @@ fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() 
 fn a_function_listing_reads_through_an_address_until_a_byte_of_its_register_is_written() {
     let literal = Literal::of_code(OVERWRITTEN, &[("f", BASE, 0x10)]);
     let lines = OpenProgram::of(literal).function_listing(BASE);
-    let lines = lines.expect("it lists").value;
+    let lines = lines.expect("it lists").lines.value;
     let reads = |at: u64| {
         let line = lines.iter().find(|line| line.address == at);
         let annotations = line.into_iter().flat_map(|line| &line.annotations);
@@ -175,7 +186,7 @@ fn a_function_listing_reads_through_an_address_until_a_byte_of_its_register_is_w
 fn a_movw_and_movt_pair_is_one_address_the_load_after_them_reads() {
     let listed = |program: &mut OpenProgram<Literal>, whole: bool| {
         let lines = match whole {
-            true => program.function_listing(BASE),
+            true => program.function_listing(BASE).map(|listing| listing.lines),
             false => program.listing(Listing {
                 start: BASE,
                 stop: Stop::After(4),
@@ -232,7 +243,11 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
         size: 8,
     };
     // lea rax, [one]; add rax, 8; ret -- the ret ends the straight line, so only the def-use settles the sum.
-    let stepped = opened().function_listing(STEPPED).expect("it lists").value;
+    let stepped = opened()
+        .function_listing(STEPPED)
+        .expect("it lists")
+        .lines
+        .value;
     let sum = ONE + 8;
     assert_eq!(
         supported(&stepped[1]),
@@ -259,18 +274,30 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
         })
         .expect("it lists");
     assert_eq!(supported(&plain.value[0]), computes);
-    let whole = opened().function_listing(PASSES).expect("it lists").value;
+    let whole = opened()
+        .function_listing(PASSES)
+        .expect("it lists")
+        .lines
+        .value;
     assert_eq!(supported(&whole[0]), computes);
     // mov eax, 1 fixes its value, and a number that stays put is no address, so the line claims nothing.
-    let one = opened().function_listing(ONE).expect("it lists").value;
+    let one = opened()
+        .function_listing(ONE)
+        .expect("it lists")
+        .lines
+        .value;
     assert_eq!(supported(&one[0]), []);
     // The lea's range would only restate the address its operand fixes, so FORKED's first line claims no range.
-    let forked = opened().function_listing(FORKED).expect("it lists").value;
+    let forked = opened()
+        .function_listing(FORKED)
+        .expect("it lists")
+        .lines
+        .value;
     assert!(bounds(&forked[..1]).is_empty(), "{:?}", forked[0]);
     // A constant copied in a later block is exact through the def-use, which the block's own run cannot see.
     let mut program = opened();
     program.source_mut().write(TWO, &CARRIED);
-    let carried = program.function_listing(TWO).expect("it lists").value;
+    let carried = program.function_listing(TWO).expect("it lists").lines.value;
     let copy = carried.iter().find(|line| line.address == TWO + 0xa);
     let rcx = r2ssa::CanonicalStorageId { offset: 8, ..rax };
     let bound = AnnotationKind::Bounds {
@@ -455,7 +482,11 @@ fn a_transfer_target_holds_no_text_and_a_value_does() {
     );
     assert_eq!(texts(&lea), [(t, "1".to_owned())]);
     // The function listing reads the same rule: the call line names t and no text.
-    let whole = program.function_listing(BASE).expect("it lists").value;
+    let whole = program
+        .function_listing(BASE)
+        .expect("it lists")
+        .lines
+        .value;
     let call = whole.iter().find(|line| line.address == BASE);
     let call = call.expect("the call is listed");
     let target = AnnotationKind::Target {
@@ -496,7 +527,7 @@ fn bounds(lines: &[Line]) -> Vec<(u64, u64, u64)> {
 fn a_function_listing_says_what_was_proved_about_each_value() {
     let mut program = opened();
     program.source_mut().write(TWO, &MASKED);
-    let function = program.function_listing(TWO).expect("it lists");
+    let function = program.function_listing(TWO).expect("it lists").lines;
     let proved = bounds(&function.value);
     assert!(proved.contains(&(TWO + 2, 0, 7)), "{proved:?}");
     // The mask is the and's own bound, which evaluating the instruction alone establishes.
@@ -556,7 +587,11 @@ fn register(offset: u64) -> r2ssa::CanonicalStorageId {
 fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so() {
     let (rax, rdi) = (register(0), register(0x38));
     let mut program = OpenProgram::of(handing());
-    let hands = program.function_listing(HANDS).expect("it lists").value;
+    let hands = program
+        .function_listing(HANDS)
+        .expect("it lists")
+        .lines
+        .value;
     let call = HANDS + 7;
     let argument = CallArgument {
         index: 0,
@@ -585,20 +620,26 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
             (call + 5, returns.clone(), Support::Certified),
         ]
     );
-    let ident = program.function_listing(BASE).expect("it lists").value;
+    let ident = program
+        .function_listing(BASE)
+        .expect("it lists")
+        .lines
+        .value;
     assert_eq!(certified(&ident), [(BASE + 3, returns, Support::Certified)]);
 }
 
 #[test]
 fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
     let lines = OpenProgram::of(table_switch()).function_listing(BASE);
-    let lines = lines.expect("it lists").value;
+    let lines = lines.expect("it lists").lines.value;
     let dispatch = BASE + 7;
     let arms = [(0, 0x100e), (1, 0x1014), (2, 0x101a), (3, 0x1026)];
+    // The table lies in the code, which nothing writes once the program runs.
     let table = r2engine::native::DispatchTable {
         address: BASE + 0x30,
         entry_size: 8,
         entries: 4,
+        stated: r2engine::native::TableBytes::ReadOnly,
     };
     let case = |value: u64| AnnotationKind::Case {
         values: vec![value],
@@ -631,4 +672,122 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
         .iter()
         .any(|(_, kind, _)| *kind == AnnotationKind::Unresolved);
     assert!(!unresolved, "{said:?}");
+}
+
+#[test]
+fn a_table_the_program_may_write_is_read_as_the_file_holds_it_and_says_so() {
+    // Nothing the container states is yet asked whether it seals a writable
+    // table after load -- a RELRO range, a read-only segment -- so the table
+    // is read as the file holds it, and it carries that it was unsealed for
+    // the check that asks to consume rather than recompute.
+    let program = table_switch().writable_data_after(BASE + 0x30);
+    let lines = OpenProgram::of(program).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    let tables = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .filter_map(|annotation| match &annotation.kind {
+            AnnotationKind::Switch { table, .. } => *table,
+            _ => None,
+        })
+        .map(|table| (table.address, table.entries, table.stated))
+        .collect::<Vec<_>>();
+    let unsealed = r2engine::native::TableBytes::Unsealed;
+    assert_eq!(tables, [(BASE + 0x30, 4, unsealed)]);
+}
+
+#[test]
+fn a_function_whose_analysis_is_refused_is_still_listed_and_says_why() {
+    // `pdf` used to begin by preparing the function, so a refusal -- or a
+    // panic, or running out of memory -- took the disassembly with it. The
+    // bytes never depend on the analysis: the plain walk is listed, and the
+    // dispatch it could not follow is named rather than guessed at.
+    let mut program = OpenProgram::of(table_switch());
+    let cancellation = r2engine::EngineCancellationToken::default();
+    program.begin_request(r2engine::EngineExecutionControl::with_cancellation(
+        cancellation.clone(),
+    ));
+    cancellation.cancel();
+    let listing = program
+        .function_listing(BASE)
+        .expect("the refusal is the analysis's, not the listing's");
+    let listed = |lines: &[Line]| lines.iter().map(|line| line.address).collect::<Vec<_>>();
+    let refused = listing.refused.expect("it says the analysis was refused");
+    assert!(
+        matches!(refused.reason, r2engine::native::NativeRefusal::Prepare(_)),
+        "{:?}",
+        refused.reason
+    );
+    let dispatch = BASE + 7;
+    assert_eq!(refused.unresolved, vec![dispatch]);
+    // The guard, the dispatch and the default the guard reaches, its move and
+    // its return; no arm, since reading the table is the analysis's.
+    assert_eq!(
+        listed(&listing.lines.value),
+        vec![BASE, BASE + 3, BASE + 5, dispatch, BASE + 0x20, BASE + 0x25]
+    );
+    // Asked again with nothing stopping it, the arms are there and nothing is refused.
+    let analysed = program.function_listing(BASE).expect("it lists");
+    assert!(analysed.refused.is_none());
+    assert!(listed(&analysed.lines.value).contains(&0x100e));
+}
+
+/// The literal program, with one address whose bytes cannot be read without a defect.
+struct Faulting {
+    literal: Literal,
+    at: u64,
+}
+
+impl Source for Faulting {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        assert_ne!(vaddr, self.at, "a defect reading {vaddr:#x}");
+        self.literal.read(vaddr, max)
+    }
+
+    fn container(&self) -> &Container {
+        self.literal.container()
+    }
+
+    fn identity(&self) -> u64 {
+        self.literal.identity()
+    }
+
+    fn byte_revision(&self) -> u64 {
+        self.literal.byte_revision()
+    }
+
+    fn written_since(&self, revision: u64, range: &std::ops::Range<u64>) -> bool {
+        self.literal.written_since(revision, range)
+    }
+}
+
+#[test]
+fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
+    // The analysis was isolated, and the listing it fell back to walked the
+    // body again outside any boundary: the same defect in the walk then
+    // unwound through the caller, and a shell ended with it. Where not even
+    // the plain walk can be read, nothing is listed and the error says where
+    // the defect was raised.
+    let ret = TWO + 5;
+    let mut program = OpenProgram::of(Faulting {
+        literal: Literal::new(),
+        at: ret,
+    });
+    let refused = match program.function_listing(TWO) {
+        Ok(listing) => panic!(
+            "a body read through a defect is listed: {:?}",
+            computes(&listing.lines.value)
+        ),
+        Err(refused) => refused,
+    };
+    assert!(refused.contains("the plain walk panicked at "), "{refused}");
+    assert!(refused.contains("listing.rs"), "{refused}");
+    let defect = format!("a defect reading {ret:#x}");
+    assert!(refused.contains(&defect), "{refused}");
+    // The same defect refused the analysis first, and that is said too.
+    assert!(refused.contains("the analysis panicked at "), "{refused}");
+    // The next function is untouched by it.
+    let one = program.function_listing(ONE).expect("the session goes on");
+    assert!(one.refused.is_none());
+    assert_eq!(one.lines.value.first().map(|line| line.address), Some(ONE));
 }

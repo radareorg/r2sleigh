@@ -26,8 +26,11 @@ fi
 # The function list goes to a temporary file rather than beside the binary.
 # Writing `$binary.functions` works for a corpus binary this harness compiled
 # into its own artifact directory and fails for anything under a system path,
-# which is exactly the input the harness most needs to sweep.
-functions=$(mktemp -t r2sleigh-coverage-functions)
+# which is exactly the input the harness most needs to sweep. The template is
+# spelled out whole: BSD `mktemp -t` appends the random part itself and GNU
+# `mktemp -t` refuses a template without one, so the pinned cells -- which gate
+# on any machine -- could not be swept on Linux at all.
+functions=$(mktemp "${TMPDIR:-/tmp}/r2sleigh-coverage-functions.XXXXXX")
 trap 'rm -f "$functions"' EXIT
 
 # `afl` is read from the same build that renders, so the function set and the

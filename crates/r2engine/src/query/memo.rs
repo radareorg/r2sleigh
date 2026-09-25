@@ -99,6 +99,10 @@ impl<T, S> Default for Memo<T, S> {
 
 impl<T, S> Memo<T, S> {
     /// The held answer where nothing it consulted has moved, else what `derive` answers, held with what that derivation consulted.
+    ///
+    /// The derivation is an isolation boundary: a panic in it is this
+    /// function's `NativeRefusal::Panicked`, and nothing is held, because the
+    /// answer is stored only once `derive` has returned one.
     pub fn analysed_since(
         &self,
         revision: Revision,
@@ -109,7 +113,7 @@ impl<T, S> Memo<T, S> {
         if let Some(held) = self.lookup_against(revision, entry, moved) {
             return Ok(held);
         }
-        let (analysis, mut consulted) = derive()?;
+        let (analysis, mut consulted) = crate::isolation::isolated(derive)??;
         consulted.read = coalesced(consulted.read);
         consulted.returns.sort_unstable();
         consulted.returns.dedup();
@@ -397,6 +401,28 @@ mod tests {
         });
         assert_eq!(refused.unwrap_err(), NativeRefusal::NoStackPointer);
         assert_eq!(*derived(&memo, at(0), 99), 99);
+    }
+
+    #[test]
+    fn a_derivation_that_unwinds_is_this_functions_refusal_and_nothing_is_held() {
+        // A defect in one function's analysis is that function's refusal,
+        // saying where it was raised, and never an answer a later request
+        // is served: the next ask derives again.
+        let memo = memo();
+        let line = line!() + 2;
+        let refused = memo.analysed_since(at(0), 0x1000, &UNTOUCHED, || {
+            panic!("a defect in the analysis")
+        });
+        let Err(NativeRefusal::Panicked { location, message }) = refused else {
+            panic!("the panic is this function's refusal: {refused:?}");
+        };
+        assert_eq!(message, "a defect in the analysis");
+        let location = location.expect("the hook saw where");
+        assert!(location.file.ends_with("memo.rs"), "{location}");
+        assert_eq!(location.line, line);
+        assert_eq!(*derived(&memo, at(0), 99), 99);
+        let stats = memo.stats();
+        assert_eq!((stats.hits, stats.misses), (0, 2));
     }
 
     #[test]

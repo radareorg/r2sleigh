@@ -34,6 +34,8 @@ pub trait Source {
 pub struct Container {
     pub format: Format,
     pub arch: Arch,
+    /// Where the loader maps the program and what it permits there, sorted by address and disjoint.
+    pub segments: Vec<Segment>,
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
     pub relocations: Vec<Relocation>,
@@ -45,6 +47,15 @@ pub struct Container {
 }
 
 impl Container {
+    /// The segment holding `vaddr`: one search over the sorted, disjoint segments.
+    pub fn segment_at(&self, vaddr: u64) -> Option<&Segment> {
+        let after = self
+            .segments
+            .partition_point(|segment| segment.vaddr <= vaddr);
+        let segment = self.segments.get(after.checked_sub(1)?)?;
+        segment.contains(vaddr).then_some(segment)
+    }
+
     /// Whether the loader writes any byte of this range: one search over the sorted, disjoint writes.
     pub fn loader_writes_any(&self, range: &Range<u64>) -> bool {
         let first = self
@@ -78,6 +89,50 @@ pub struct Arch {
     /// How a word in memory reads, which on ARM BE8 is not how an instruction
     /// does.
     pub endian: r2il::Endianness,
+}
+
+/// One run of addresses the loader maps, and what the program may do there.
+///
+/// The loader's statement, not the linker's: a section says what the bytes
+/// were for, and a segment says whether an instruction there can run at all
+/// and whether the program can write the bytes once it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    pub vaddr: u64,
+    pub vsize: u64,
+    /// How many of its bytes, from its start, the file holds. The loader
+    /// fills the rest of `vsize` with zeros.
+    pub file_size: u64,
+    pub permissions: Permissions,
+}
+
+impl Segment {
+    pub const fn contains(&self, vaddr: u64) -> bool {
+        vaddr >= self.vaddr && vaddr - self.vaddr < self.vsize
+    }
+
+    /// The half-open range of addresses the segment occupies.
+    pub const fn range(&self) -> (u64, u64) {
+        (self.vaddr, self.vaddr.saturating_add(self.vsize))
+    }
+
+    /// The address after the last byte the file holds; never past the segment's end.
+    pub const fn file_end(&self) -> u64 {
+        let held = if self.file_size < self.vsize {
+            self.file_size
+        } else {
+            self.vsize
+        };
+        self.vaddr.saturating_add(held)
+    }
+}
+
+/// What a segment permits, as the container states it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Permissions {
+    pub read: bool,
+    pub write: bool,
+    pub execute: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

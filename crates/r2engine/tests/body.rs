@@ -17,6 +17,7 @@ fn listed_after_branch(mut program: OpenProgram<Literal>) -> Vec<u64> {
     program
         .function_listing(TWO)
         .expect("it lists")
+        .lines
         .value
         .iter()
         .map(|line| line.address - TWO)
@@ -56,6 +57,7 @@ fn listed_after_tail_jump(mut program: OpenProgram<Literal>, rel32: i32) -> Vec<
     program
         .function_listing(CALLER)
         .expect("it lists")
+        .lines
         .value
         .iter()
         .map(|line| line.address - CALLER)

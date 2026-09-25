@@ -110,6 +110,18 @@ impl Machine {
     }
 }
 
+/// `len` bytes of code mapped at `BASE`, as one region an instruction can run in.
+fn code_region(len: usize, vaddr: u64) -> Option<r2ssa::body::Region> {
+    let end = BASE + len as u64;
+    (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
+        start: BASE,
+        end,
+        file_end: end,
+        execute: true,
+        write: false,
+    })
+}
+
 /// One run of bytes mapped at `BASE`, under one name.
 ///
 /// Owned, so a test can generate the program it decompiles rather than only
@@ -124,6 +136,10 @@ impl r2ssa::body::Program for Fixture {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        code_region(self.bytes.len(), vaddr)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
@@ -238,6 +254,83 @@ fn a_call_is_rendered_from_the_callee_body() {
     );
 }
 
+/// `CALLER`, whose callee's bytes cannot be read without the program panicking:
+/// a defect reached only by reading the callee.
+struct PanickingCallee;
+
+impl r2ssa::body::Program for PanickingCallee {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        assert!(vaddr < 0x100a, "a defect reading the callee at {vaddr:#x}");
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = CALLER.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        code_region(CALLER.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x100a)
+    }
+}
+
+impl Program for PanickingCallee {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == BASE).then(|| "caller".to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+#[test]
+fn a_callee_whose_analysis_panics_is_unread_with_where_and_its_caller_renders() {
+    // A panic reading one callee used to unwind through the caller and end
+    // the session. It is a defect, so it is named -- where it was raised and
+    // what it said -- and it stays with the callee.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let prepared =
+        r2engine::native::analysed(&target, &PanickingCallee, BASE).expect("the caller prepares");
+    let [unread] = prepared.unread() else {
+        panic!("one callee unread: {:?}", prepared.unread());
+    };
+    assert_eq!(unread.address, 0x100a);
+    let r2engine::native::Unreadable::Panicked(panicked) = &unread.reason else {
+        panic!("the callee panicked: {unread}");
+    };
+    assert_eq!(panicked.message, "a defect reading the callee at 0x100a");
+    let location = panicked.location.as_ref().expect("the hook saw where");
+    assert!(location.file.ends_with("native.rs"), "{location}");
+    assert!(
+        unread.to_string().starts_with(&format!(
+            "0x100a: its analysis panicked at {location}: a defect reading"
+        )),
+        "{unread}"
+    );
+    let response = decompile(&target, &PanickingCallee, BASE).expect("the caller renders");
+    assert!(
+        response.output.text().contains("fcn_100a("),
+        "{}",
+        response.output
+    );
+}
+
 #[test]
 fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -301,6 +394,10 @@ impl r2ssa::body::Program for Importing {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = CALLER.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        code_region(CALLER.len(), vaddr)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
@@ -564,6 +661,187 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
         labels.windows(2).all(|pair| pair[0] < pair[1]),
         "the arms are written in label order: {output}"
     );
+}
+
+/// gcc -O0's `classify` without its spill: a relative jump table at `TABLE`
+/// read through a 32-bit index nothing bounds, so the read reaches 2^32
+/// entries -- 16 GiB -- of which the program maps sixteen bytes.
+///
+/// ```text
+///   1000  mov  eax, edi              ; the index, zero-extended into rax
+///   1002  lea  rdx, [rax*4]
+///   100a  lea  rax, [rip + 0xfef]    ; TABLE
+///   1011  mov  eax, [rdx + rax]      ; one entry
+///   1014  cdqe
+///   1016  lea  rdx, [rip + 0xfe3]    ; TABLE again, the base the entry is relative to
+///   101d  add  rax, rdx
+///   1020  jmp  rax
+/// ```
+const UNBOUNDED_TABLE: &[u8] = &[
+    0x89, 0xf8, // 1000 mov eax, edi
+    0x48, 0x8d, 0x14, 0x85, 0x00, 0x00, 0x00, 0x00, // 1002 lea rdx, [rax*4]
+    0x48, 0x8d, 0x05, 0xef, 0x0f, 0x00, 0x00, // 100a lea rax, [rip + 0xfef]
+    0x8b, 0x04, 0x02, // 1011 mov eax, [rdx + rax]
+    0x48, 0x98, // 1014 cdqe
+    0x48, 0x8d, 0x15, 0xe3, 0x0f, 0x00, 0x00, // 1016 lea rdx, [rip + 0xfe3]
+    0x48, 0x01, 0xd0, // 101d add rax, rdx
+    0xff, 0xe0, // 1020 jmp rax
+];
+/// Where that table lies: sixteen bytes of read-only data.
+const TABLE: u64 = 0x2000;
+const TABLE_BYTES: [u8; 16] = [0; 16];
+
+/// `UNBOUNDED_TABLE` as code and `TABLE` as data, and every read anyone made of either.
+#[derive(Default)]
+struct Unbounded {
+    reads: std::cell::RefCell<Vec<std::ops::Range<u64>>>,
+    /// How far past the sixteen bytes the file holds the container says the
+    /// table's segment runs, all of it zeros the loader fills.
+    zero_filled: u64,
+}
+
+impl Unbounded {
+    /// Every read that asked for a byte of the table's segment.
+    fn table_reads(&self) -> Vec<std::ops::Range<u64>> {
+        let end = TABLE + 16 + self.zero_filled;
+        let reads = self.reads.borrow();
+        let touched = reads
+            .iter()
+            .filter(|read| read.start < end && TABLE < read.end);
+        touched.cloned().collect()
+    }
+}
+
+impl r2ssa::body::Program for Unbounded {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => UNBOUNDED_TABLE,
+            false => &TABLE_BYTES,
+        };
+        // What was asked for is recorded, whatever is answered. Past what the
+        // file holds this answers nothing rather than allocating the zeros,
+        // so the old read runs out of bytes here and not out of memory.
+        self.reads
+            .borrow_mut()
+            .push(vaddr..vaddr.saturating_add(max as u64));
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let code = code_region(UNBOUNDED_TABLE.len(), vaddr);
+        let end = TABLE + 16 + self.zero_filled;
+        let table = (TABLE..end)
+            .contains(&vaddr)
+            .then_some(r2ssa::body::Region {
+                start: TABLE,
+                end,
+                file_end: TABLE + 16,
+                execute: false,
+                write: false,
+            });
+        code.or(table)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE
+    }
+}
+
+impl Program for Unbounded {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == BASE).then(|| "classify".to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+#[test]
+fn a_table_longer_than_the_region_it_starts_in_is_refused_before_a_byte_of_it_is_read() {
+    // The read is sound -- the index does reach every 32-bit value -- and
+    // what refuses it is that the program has sixteen bytes there, not 16
+    // GiB. The old read built a label per entry first and ran out of memory.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Unbounded::default();
+    let prepared = r2engine::native::analysed(&target, &program, BASE).expect("analysed");
+    let reads =
+        r2ssa::indirect::dispatch_table_reads(prepared.artifact().shared_artifact().as_ref());
+    assert_eq!(
+        reads
+            .iter()
+            .map(|read| (read.address, read.count, read.span()))
+            .collect::<Vec<_>>(),
+        vec![(TABLE, 1 << 32, Some(1 << 34))],
+        "the value analysis states the whole reach"
+    );
+    let touched = program.table_reads();
+    assert!(touched.is_empty(), "the table was read: {touched:?}");
+    unresolved_at_the_dispatch(&prepared);
+}
+
+/// Refused, so the dispatch is where the walk stops rather than a guess.
+fn unresolved_at_the_dispatch(prepared: &r2engine::native::Prepared) {
+    assert!(prepared.table_at(0x1020).is_none());
+    assert_eq!(
+        prepared
+            .body()
+            .unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1020, r2ssa::body::UnresolvedReason::IndirectBranch)]
+    );
+}
+
+#[test]
+fn a_table_running_into_bytes_the_loader_zero_fills_is_refused_before_a_byte_of_it_is_read() {
+    // A container may state a segment far longer than the file holds -- a
+    // large `.bss` after `.data`, or a header that simply claims it -- and
+    // reading there answers zeros the image allocates. Bounded by the
+    // segment alone, the same spilled index asked for 16 GiB of them. Zeros
+    // the loader fills are bytes it writes, so the file states none of the
+    // table and nothing past its sixteen bytes is asked for.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Unbounded {
+        zero_filled: 1 << 40,
+        ..Unbounded::default()
+    };
+    let prepared = r2engine::native::analysed(&target, &program, BASE).expect("analysed");
+    let touched = program.table_reads();
+    assert!(touched.is_empty(), "the table was read: {touched:?}");
+    unresolved_at_the_dispatch(&prepared);
+}
+
+#[test]
+fn an_indirect_branch_the_walk_could_not_follow_is_no_tail_call() {
+    // The dispatch is where the walk stopped, so the block names no successor
+    // because none is known. Read as "control leaves here", it rendered as
+    // `return ((int32_t(*)(void))*(...))();` with nothing refused: a tail
+    // call the program never makes, in place of the switch it does.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let response = decompile(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.render_refusal.is_some(), "{output}");
+    assert!(!output.contains(")()"), "{output}");
+    assert!(!output.contains("return (("), "{output}");
 }
 
 #[test]
@@ -1656,6 +1934,10 @@ impl r2ssa::body::Program for ImportCaller {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        code_region(self.bytes.len(), vaddr)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {

@@ -44,6 +44,18 @@ impl r2ssa::body::Program for Fixture {
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
+    /// The bytes are one run of code.
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let end = BASE + self.bytes.len() as u64;
+        (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
+            start: BASE,
+            end,
+            file_end: end,
+            execute: true,
+            write: false,
+        })
+    }
+
     fn is_entry(&self, vaddr: u64) -> bool {
         self.entries.contains(&vaddr)
     }
@@ -133,6 +145,22 @@ fn an_indirect_branch_is_refused_not_guessed() {
     );
 }
 
+#[test]
+fn a_dispatch_told_it_goes_nowhere_is_still_unresolved() {
+    // A table of no entries resolves nothing. Read as resolved, the branch
+    // had no successor and no stop, which claims control ends there.
+    let dispatched = BTreeMap::from([(BASE, Vec::new())]);
+    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT), &dispatched).expect("body");
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1000, UnresolvedReason::IndirectBranch)]
+    );
+    assert!(body.blocks[0].successors.is_empty());
+}
+
 /// A backward branch to the function's own entry: the walk terminates.
 /// dec rdi; jne -5
 const LOOP: &[u8] = &[
@@ -152,6 +180,60 @@ fn an_unmapped_entry_refuses() {
     let error =
         lift_body(0x9000, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect_err("unmapped");
     assert_eq!(error.to_string(), "nothing mapped at 0x9000");
+}
+
+/// `jmp 0x1002` into bytes the program maps as data, which decode as `ret`.
+const INTO_DATA: &[u8] = &[
+    0xeb, 0x00, // 0x1000 jmp 0x1002
+    0xc3, // 0x1002 data
+];
+
+/// `INTO_DATA` with its code ending at 0x1002 and the rest mapped where nothing runs.
+struct DataAfterCode;
+
+impl r2ssa::body::Program for DataAfterCode {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        r2ssa::body::Program::read(&reader(INTO_DATA), vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let region = |start, end, execute| r2ssa::body::Region {
+            start,
+            end,
+            file_end: end,
+            execute,
+            write: false,
+        };
+        [region(BASE, 0x1002, true), region(0x1002, 0x1003, false)]
+            .into_iter()
+            .find(|region| region.holds(vaddr, vaddr + 1))
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+}
+
+#[test]
+fn no_instruction_is_lifted_where_the_program_maps_data() {
+    // Data decodes as readily as code: 0xc3 is a `ret`. Only the mapping says
+    // control cannot run there, so the walk stops and an entry there begins
+    // no function.
+    let body = lift_body(BASE, &x86_64(), &DataAfterCode, &BTreeMap::new()).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000]);
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1002, UnresolvedReason::NotExecutable)]
+    );
+    let error = lift_body(0x1002, &x86_64(), &DataAfterCode, &BTreeMap::new())
+        .expect_err("data is no entry");
+    assert_eq!(
+        error.to_string(),
+        "no instruction can run at 0x1002: the program maps it without execute permission"
+    );
 }
 
 /// jmp 0x1010, where another function begins.

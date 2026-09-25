@@ -5,10 +5,14 @@
 //! function graph and lifted a block at a time; here the walk is the lift's,
 //! from an entry address and a reader over the program's bytes.
 //!
-//! Only direct transfers are followed. An indirect branch is recorded and its
-//! targets are not guessed, which is the same rule the rest of the engine
-//! keeps: a body with an unresolved transfer is an honest partial body, and
-//! resolving one needs a value domain that does not exist yet.
+//! Direct transfers are followed, and an indirect branch only to the arms a
+//! previous pass proved it reads (`dispatched`). Otherwise it is recorded and
+//! its targets are not guessed, which is the same rule the rest of the engine
+//! keeps: a body with an unresolved transfer is an honest partial body.
+//!
+//! No instruction is lifted where the program maps no execute permission.
+//! Data decodes as readily as code on most machines, so the bytes cannot
+//! say which one an address holds; the mapping can.
 //!
 //! A direct branch to another function's entry is a tail call and ends the
 //! body. Without that question the walk has no boundary at all: `frame_dummy`
@@ -35,6 +39,14 @@ pub trait Program {
     /// nothing is mapped.
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>>;
 
+    /// The one run of addresses the program maps with one set of permissions
+    /// that holds `vaddr`, or `None` where nothing is mapped.
+    ///
+    /// Whether an instruction can run at an address is the program's
+    /// statement and not the bytes': data decodes as well as code does on
+    /// most machines, and only the mapping says which one control can reach.
+    fn region(&self, vaddr: u64) -> Option<Region>;
+
     /// Whether another function begins here.
     ///
     /// This is what bounds a body. The walk can see that control transfers; it
@@ -58,6 +70,31 @@ pub trait Program {
     /// in, where the machine has more than one: Sleigh's `ISAModeSwitch`.
     fn mode_register(&self) -> Option<r2il::Varnode> {
         None
+    }
+}
+
+/// One run of addresses a program maps, and what it permits there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    /// The first address of the run.
+    pub start: u64,
+    /// The address after the last one.
+    pub end: u64,
+    /// The address after the last byte the file holds, at most `end`: from
+    /// here to `end` the loader fills zeros, so no byte there is one the file
+    /// states. A container may say a run is far longer than the file, and
+    /// only this bounds what reading it can cost.
+    pub file_end: u64,
+    /// Whether an instruction there can run.
+    pub execute: bool,
+    /// Whether the program may write there once it runs.
+    pub write: bool,
+}
+
+impl Region {
+    /// Whether every address of `start..end` lies in this run.
+    pub const fn holds(&self, start: u64, end: u64) -> bool {
+        self.start <= start && start <= end && end <= self.end
     }
 }
 
@@ -106,6 +143,10 @@ pub enum UnresolvedReason {
     IndirectBranch,
     /// Control reaches an address the image does not map.
     Unmapped,
+    /// Control reaches an address the program maps where no instruction can
+    /// run: data decodes as readily as code, and the mapping is what says
+    /// which one it is.
+    NotExecutable,
     /// The bytes there do not decode.
     Undecodable,
     /// The instruction needs more bytes than the image maps at that address.
@@ -117,6 +158,8 @@ pub enum UnresolvedReason {
 pub enum BodyError {
     /// Nothing is mapped at the entry address.
     EntryUnmapped(u64),
+    /// The entry is mapped where no instruction can run, so it begins no function.
+    EntryNotExecutable(u64),
     /// The entry address does not decode, so there is no first instruction.
     EntryUndecodable(u64),
 }
@@ -125,6 +168,10 @@ impl std::fmt::Display for BodyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EntryUnmapped(addr) => write!(f, "nothing mapped at {addr:#x}"),
+            Self::EntryNotExecutable(addr) => write!(
+                f,
+                "no instruction can run at {addr:#x}: the program maps it without execute permission"
+            ),
             Self::EntryUndecodable(addr) => write!(f, "no instruction decodes at {addr:#x}"),
         }
     }
@@ -294,6 +341,7 @@ impl Walk {
         let Some(first) = walk.decode(entry, disasm, program) else {
             return Err(match walk.unresolved.last().map(|stop| stop.reason) {
                 Some(UnresolvedReason::Unmapped) => BodyError::EntryUnmapped(entry),
+                Some(UnresolvedReason::NotExecutable) => BodyError::EntryNotExecutable(entry),
                 _ => BodyError::EntryUndecodable(entry),
             });
         };
@@ -331,6 +379,9 @@ impl Walk {
         let Some(window) = program.read(addr, WINDOW) else {
             return self.stop(addr, UnresolvedReason::Unmapped);
         };
+        if !program.region(addr).is_some_and(|region| region.execute) {
+            return self.stop(addr, UnresolvedReason::NotExecutable);
+        }
         let available = window.len();
         // Sleigh fetches a whole window whatever the instruction needs, so a
         // short one is padded and the decoded size checked against what is real.
@@ -510,7 +561,14 @@ impl Walk {
         if self.returns_after(addr, next) {
             return self.continues(Some(next), successors, program);
         }
-        let Some(arms) = self.dispatched.get(&addr).cloned() else {
+        // No arm is no resolution: a dispatch read as going nowhere would be a
+        // block with no successor, and that is a claim control stops there.
+        let Some(arms) = self
+            .dispatched
+            .get(&addr)
+            .filter(|arms| !arms.is_empty())
+            .cloned()
+        else {
             self.stop(addr, UnresolvedReason::IndirectBranch);
             return;
         };

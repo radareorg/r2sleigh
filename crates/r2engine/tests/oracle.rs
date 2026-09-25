@@ -289,7 +289,11 @@ enum Injected {
 /// Run one function's lift from every entry state, and say which claims failed or went unexamined.
 fn judged(literal: Literal, entry: u64, injected: &[(u64, Injected)]) -> Vec<Failure> {
     let mut program = OpenProgram::of(literal);
-    let pdf = program.function_listing(entry).expect("it lists").value;
+    let pdf = program
+        .function_listing(entry)
+        .expect("it lists")
+        .lines
+        .value;
     let stop = Stop::After(pdf.len());
     let pd = program
         .listing(Listing { start: entry, stop })

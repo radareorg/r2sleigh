@@ -6,8 +6,8 @@
 //! defined where -- is the engine's.
 
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Relocation, Section, Source,
-    Symbol, SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Relocation,
+    Section, Segment, Source, Symbol, SymbolKind,
 };
 use r2image::Image;
 
@@ -79,6 +79,26 @@ impl Source for Opened {
     }
 }
 
+/// Where the loader maps the program and what it permits there, sorted and
+/// disjoint as the image keeps them: the load segments, or an object's placed
+/// sections.
+fn segments_of(image: &Image) -> Vec<Segment> {
+    image
+        .segments()
+        .iter()
+        .map(|segment| Segment {
+            vaddr: segment.vaddr,
+            vsize: segment.vsize,
+            file_size: segment.file_size,
+            permissions: Permissions {
+                read: segment.permissions.read,
+                write: segment.permissions.write,
+                execute: segment.permissions.execute,
+            },
+        })
+        .collect()
+}
+
 /// What the container states, in the engine's words.
 fn container_of(image: &Image) -> Container {
     let arch = image.arch();
@@ -96,6 +116,7 @@ fn container_of(image: &Image) -> Container {
                 r2image::Endian::Big => r2il::Endianness::Big,
             },
         },
+        segments: segments_of(image),
         sections: image
             .sections()
             .iter()

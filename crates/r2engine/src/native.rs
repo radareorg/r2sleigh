@@ -117,6 +117,21 @@ pub enum NativeRefusal {
     Capture(r2source::SnapshotValidationError),
     Lift(String),
     Prepare(String),
+    /// The analysis panicked: a defect, kept to this function and reported
+    /// with where it was raised rather than taking the session with it.
+    Panicked {
+        location: Option<crate::isolation::PanicLocation>,
+        message: String,
+    },
+}
+
+impl From<crate::isolation::Panicked> for NativeRefusal {
+    fn from(panicked: crate::isolation::Panicked) -> Self {
+        Self::Panicked {
+            location: panicked.location,
+            message: panicked.message,
+        }
+    }
 }
 
 impl std::fmt::Display for NativeRefusal {
@@ -128,6 +143,13 @@ impl std::fmt::Display for NativeRefusal {
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),
+            Self::Panicked { location, message } => {
+                let panicked = crate::isolation::Panicked {
+                    location: location.clone(),
+                    message: message.clone(),
+                };
+                write!(f, "the analysis {panicked}")
+            }
         }
     }
 }
@@ -263,6 +285,8 @@ pub struct DispatchTable {
     pub address: u64,
     pub entry_size: u32,
     pub entries: usize,
+    /// What the container states about whether the bytes the fetch read are the ones the dispatch reads when it runs.
+    pub stated: TableBytes,
 }
 
 impl DispatchTable {
@@ -272,6 +296,7 @@ impl DispatchTable {
             address: fetched.table.address(),
             entry_size: fetched.table.entry_size(),
             entries: fetched.targets.len(),
+            stated: fetched.stated,
         };
         (fetched.instruction, table)
     }
@@ -290,6 +315,11 @@ impl Prepared {
 
     pub fn artifact(&self) -> &std::sync::Arc<TrustedSsaArtifact> {
         &self.artifact
+    }
+
+    /// What the program calls the function this analysis is of.
+    pub fn name(&self) -> &str {
+        &self.root.name
     }
 
     /// The lift of each block of the body this analysis read, dispatches followed.
@@ -319,14 +349,14 @@ impl Prepared {
 }
 
 /// A callee whose contribution to this analysis is missing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unread {
     pub address: u64,
     pub reason: Unreadable,
 }
 
 /// How far reading a callee got before it stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unreadable {
     /// The body could not be walked, so nothing about its boundary is known.
     NotWalked,
@@ -335,14 +365,27 @@ pub enum Unreadable {
     /// It was prepared and proved nothing about its boundary that a caller
     /// could use.
     NothingProved,
+    /// Reading it panicked: a defect in the analysis, kept to this callee.
+    Panicked(crate::isolation::Panicked),
+}
+
+impl Unread {
+    /// Whether reading this callee panicked: a defect in the engine, not a
+    /// fact about the program, which a reader has to be shown.
+    pub const fn panicked(&self) -> bool {
+        matches!(self.reason, Unreadable::Panicked(_))
+    }
 }
 
 impl std::fmt::Display for Unread {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let reason = match self.reason {
+        let reason = match &self.reason {
             Unreadable::NotWalked => "its body could not be walked",
             Unreadable::NotPrepared => "its body could not be prepared",
             Unreadable::NothingProved => "it proved nothing about its boundary",
+            Unreadable::Panicked(panicked) => {
+                return write!(f, "{:#x}: its analysis {panicked}", self.address);
+            }
         };
         write!(f, "{:#x}: {reason}", self.address)
     }
@@ -567,7 +610,20 @@ fn declare_imports(
 ///
 /// This is what a caller learns about a callee -- its interface, and what its
 /// own body does through each parameter -- so every caller learns it the same way.
+///
+/// An isolation boundary: a panic preparing the callee is this callee's
+/// `Unreadable::Panicked`, and its caller goes on without it.
 fn prepared_callee(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+    ptr_bits: u32,
+) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
+    crate::isolation::isolated(|| prepare_callee(native, target, address, ptr_bits))
+        .unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))
+}
+
+fn prepare_callee(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
     address: u64,
@@ -680,12 +736,24 @@ fn read_callees(
         {
             callees.interfaces.insert(*address, interface.clone());
         }
-        let Some(derived) = CalleeFacts::derive(&artifact, ptr_bits) else {
-            unread.push(Unread {
-                address: *address,
-                reason: Unreadable::NothingProved,
-            });
-            continue;
+        // What the callee proves is read under the same boundary as its preparation.
+        let derived = crate::isolation::isolated(|| CalleeFacts::derive(&artifact, ptr_bits));
+        let derived = match derived {
+            Ok(Some(derived)) => derived,
+            Ok(None) => {
+                unread.push(Unread {
+                    address: *address,
+                    reason: Unreadable::NothingProved,
+                });
+                continue;
+            }
+            Err(panicked) => {
+                unread.push(Unread {
+                    address: *address,
+                    reason: Unreadable::Panicked(panicked),
+                });
+                continue;
+            }
         };
         callees.record(*address, &derived);
         facts.push(derived);
@@ -1637,6 +1705,71 @@ impl Callees {
     }
 }
 
+/// What the container states about whether a table's bytes, as the file holds
+/// them, are what the dispatch reads when it runs.
+///
+/// The seam immutability arrives through. A writable region is `Unsealed`:
+/// the container has not yet been asked whether anything seals it after load
+/// (a RELRO range, a read-only Mach-O segment), and that statement is what
+/// turns it into one the program cannot change or refuses it. Until then the
+/// table is read as before, the refusal evidence says it was read unsealed,
+/// and every table carries this statement -- on `DispatchTable` and so on the
+/// listing's `Switch` -- for that check to consume rather than recompute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableBytes {
+    /// No write permission: the bytes are the program's for its whole run.
+    ReadOnly,
+    /// Writable, and nothing the container states seals it after load.
+    Unsealed,
+    /// The loader writes some of them -- a relocation, an import's slot, or
+    /// the zeros it fills past what the file holds -- so the file's bytes are
+    /// not what runs.
+    LoaderWritten,
+}
+
+impl TableBytes {
+    /// O(log n) in the loader's writes: one search, and one comparison against the file's extent.
+    fn of(
+        program: &dyn Program,
+        region: &r2ssa::body::Region,
+        range: std::ops::Range<u64>,
+    ) -> Self {
+        let written = range.end > region.file_end || program.loader_writes(&range);
+        match (written, region.write) {
+            (true, _) => Self::LoaderWritten,
+            (false, false) => Self::ReadOnly,
+            (false, true) => Self::Unsealed,
+        }
+    }
+
+    /// Whether the file's bytes of the table at `at` may be read as the
+    /// run's, saying why wherever the answer is not a plain yes.
+    ///
+    /// Unsealed is not a refusal yet: the statement that would seal it is not
+    /// asked for until the immutability check lands, so it is said here and
+    /// carried on the table.
+    fn read_as_run(self, at: u64) -> bool {
+        match self {
+            Self::LoaderWritten => {
+                r2il::refusal_evidence!(
+                    "dispatch-table",
+                    "{at:#x}: {self:?}: the file's bytes are not what the dispatch reads"
+                );
+                false
+            }
+            Self::Unsealed => {
+                r2il::refusal_evidence!(
+                    "dispatch-table",
+                    "{at:#x}: {self:?}: read from memory the program may write, which \
+                     nothing the container states seals after load"
+                );
+                true
+            }
+            Self::ReadOnly => true,
+        }
+    }
+}
+
 /// One function walked out of the program.
 struct Walked {
     name: String,
@@ -1649,6 +1782,8 @@ struct Walked {
 /// One dispatch's table, read, and where the dispatch that reads it stands.
 struct NativePointerTable {
     instruction: u64,
+    /// What the container states about whether the bytes read are the run's.
+    stated: TableBytes,
     targets: Vec<u64>,
     /// What the selector is on each arm, and where that arm goes.
     cases: Vec<(u64, u64)>,
@@ -1732,53 +1867,99 @@ impl Native<'_> {
         tables
     }
 
+    /// One dispatch's table, read and validated, or why it is not one.
+    ///
+    /// **Nothing is read until the program is known to have the bytes.** The
+    /// value analysis proves how many entries the selector reaches, soundly
+    /// and however many; what it cannot prove is that a table that long
+    /// exists. The span is computed with checked arithmetic and must lie
+    /// inside the one region holding its first entry, which is an O(1)
+    /// question of the container's statement: a spilled 32-bit index reaching
+    /// 16 GiB of table is refused here with no byte read, never allocated.
+    /// It must lie in what the file holds of that region, too: past it the
+    /// loader fills zeros, and a container can state a region as long as it
+    /// likes. So every allocation below is bounded by the file's own size.
+    ///
+    /// A resolved dispatch has at least one target and every entry decodes
+    /// where an instruction can run: a table of no entries would resolve the
+    /// branch to nowhere, which the walk would read as a block with no
+    /// successor rather than as a stop. Each distinct target is decoded once,
+    /// since a table repeats its default arm for every hole in the case values.
     fn pointer_table(
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
     ) -> Option<NativePointerTable> {
-        let entry = usize::try_from(read.entry_size).ok()?;
-        let span = read.entries.checked_mul(entry)?;
-        let bytes = self.program.read(read.address, span).unwrap_or_default();
+        let at = read.address;
+        let refused = |why: std::fmt::Arguments<'_>| {
+            r2il::refusal_evidence!("dispatch-table", "{at:#x}: {why}");
+        };
+        if read.count == 0 {
+            refused(format_args!("a table of no entries sends control nowhere"));
+            return None;
+        }
+        let (Some(span), Ok(count), Ok(stride), Ok(size)) = (
+            read.span().and_then(|span| usize::try_from(span).ok()),
+            usize::try_from(read.count),
+            usize::try_from(read.stride),
+            usize::try_from(read.size),
+        ) else {
+            refused(format_args!(
+                "{} entries of {} bytes by {} span more than this machine addresses",
+                read.count, read.size, read.stride
+            ));
+            return None;
+        };
+        let Some(region) = self.program.region(at) else {
+            refused(format_args!("nothing is mapped there"));
+            return None;
+        };
+        let end = at
+            .checked_add(span as u64)
+            .filter(|end| region.holds(at, *end));
+        let Some(end) = end else {
+            refused(format_args!(
+                "{} entries by {} span {span} bytes, past the region ending at {:#x}",
+                read.count, read.stride, region.end
+            ));
+            return None;
+        };
+        let stated = TableBytes::of(self.program, &region, at..end);
+        if !stated.read_as_run(at) {
+            return None;
+        }
+        let bytes = self.program.read(at, span).unwrap_or_default();
         if bytes.len() < span {
-            r2il::refusal_evidence!(
-                "dispatch-table",
-                "{:#x}: {} of {span} bytes are mapped",
-                read.address,
-                bytes.len()
-            );
+            refused(format_args!("{} of {span} bytes are mapped", bytes.len()));
             return None;
         }
-        let targets = bytes
-            .chunks_exact(entry)
-            .map(|slot| match self.machine.endianness {
-                SourceEndianness::Little => {
-                    slot.iter().rev().fold(0u64, |v, b| (v << 8) | *b as u64)
-                }
-                SourceEndianness::Big => slot.iter().fold(0u64, |v, b| (v << 8) | *b as u64),
-            })
-            .map(|slot| read.transform.target(slot, read.entry_size))
+        let word = |slot: &[u8]| match self.machine.endianness {
+            SourceEndianness::Little => slot.iter().rev().fold(0u64, |v, b| (v << 8) | *b as u64),
+            SourceEndianness::Big => slot.iter().fold(0u64, |v, b| (v << 8) | *b as u64),
+        };
+        // Every entry lies inside `bytes`: the last ends at `(count - 1) * stride + size`, which is `span`.
+        let targets = (0..count)
+            .map(|k| word(&bytes[k * stride..k * stride + size]))
+            .map(|entry| read.transform.target(entry, read.size))
             .collect::<Vec<_>>();
-        if !targets.iter().all(|target| self.decodes(*target)) {
-            r2il::refusal_evidence!(
-                "dispatch-table",
-                "{:#x} x{} of {} bytes: an entry is not an instruction",
-                read.address,
-                read.entries,
-                read.entry_size
-            );
+        let distinct = targets.iter().copied().collect::<BTreeSet<_>>();
+        if let Some(target) = distinct.iter().find(|target| !self.decodes(**target)) {
+            refused(format_args!(
+                "{} entries of {} bytes: entry target {target:#x} is not an instruction",
+                read.count, read.size
+            ));
             return None;
         }
+        let cases = (0..read.count)
+            .zip(&targets)
+            .map(|(k, target)| Some((read.case(k)?, *target)))
+            .collect::<Option<Vec<_>>>()?;
         Some(NativePointerTable {
             instruction: read.instruction?,
-            cases: read
-                .cases
-                .iter()
-                .copied()
-                .zip(targets.iter().copied())
-                .collect(),
+            stated,
+            cases,
             table: r2source::SourceCodePointerTable::new(
-                read.address,
-                read.entry_size,
+                at,
+                read.size,
                 targets.clone(),
                 targets
                     .iter()
@@ -1970,6 +2151,11 @@ impl Native<'_> {
                         instruction: table.instruction,
                         cases: table.cases.clone(),
                     }),
+                unresolved: walked.body.unresolved.iter().any(|stop| {
+                    stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch
+                        && (block.lifted.addr..block.lifted.addr + u64::from(block.lifted.size))
+                            .contains(&stop.addr)
+                }),
             })
             .collect::<Vec<_>>();
         // The capture keeps an interface only where it is about the revision
@@ -2217,8 +2403,15 @@ pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
     crate::names::text_in(&bytes).map(str::to_owned)
 }
 
-/// Whether an instruction decodes at an address.
+/// Whether an instruction decodes at an address, in a region where one can run.
+///
+/// Data decodes as well as code on most machines, so the bytes alone cannot
+/// say an address is a place control goes; the region the program maps it in
+/// can.
 pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> bool {
+    if !program.region(at).is_some_and(|region| region.execute) {
+        return false;
+    }
     let Some(mut fetch) = program.read(at, WINDOW) else {
         return false;
     };
