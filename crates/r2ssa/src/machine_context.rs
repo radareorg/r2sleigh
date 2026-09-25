@@ -2116,8 +2116,16 @@ fn collect_raw_call_site_identities(
                         // The jump goes through a register and the source says
                         // this block has no successor, so control leaves the
                         // function here: it is a tail call through whatever the
-                        // register holds. Nothing else can be true of a
-                        // terminal transfer the block graph does not continue.
+                        // register holds. This rests wholly on the source's
+                        // statement. A block whose transfer the source could
+                        // not follow is not terminal (`transfer_unresolved`
+                        // keeps it out of `terminal_blocks`), and the native
+                        // capture marks every register jump its walk did not
+                        // resolve, so no native capture reaches this arm: it
+                        // serves only a source that states it followed the
+                        // transfer out of the function. The arity of such a
+                        // call is still unproven until tail transfers are
+                        // proved from machine state.
                         None if terminal_blocks.contains(&block.addr) => {
                             let identity = SourceCallSiteIdentity::new(
                                 instruction,
