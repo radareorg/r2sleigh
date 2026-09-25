@@ -46,11 +46,24 @@ RADARE2_ORACLES = {
     "differential without radare2",
 }
 
+# What follows the program's name when it is run: a flag, a quoted or
+# expanded argument, a redirect, a path, or (in a command string) the
+# placeholder or the end of the literal it is concatenated to.
+_ARGUMENT = r"(?:-|[\"'$<{]|\.{0,2}/|~)"
 RADARE2_RUN = re.compile(
-    r"(?:^|[\s;|&(`$])(?:r2|radare2)\s+-[A-Za-z]"  # a shell command with flags
-    r"|[\[(,]\s*[\"'](?:r2|radare2)[\"']"  # a Python argv list or tuple
-    r"|shutil\.which\(\s*[\"'](?:r2|radare2)[\"']"
-    r"|\b(?:which|command -v)\s+(?:r2|radare2)\b",
+    # A shell command: the name in command position (after a line start, a
+    # separator, a substitution, exec/sudo/then/do, and any VAR=value
+    # assignments), with any argument -- flagless ones such as `r2 "$bin"`
+    # included.
+    r"(?:^|[;|&(`]|\$\(|\bexec\b|\bthen\b|\bdo\b|\bsudo\b)[ \t]*"
+    r"(?:[A-Za-z_]\w*=\S*[ \t]+)*(?:r2|radare2)[ \t]+" + _ARGUMENT +
+    # A command string: a literal that starts with the name and an argument,
+    # as in `"r2 " + path` or f"r2 -q {binary}".
+    r"|[\"'](?:r2|radare2)[ \t]+" + _ARGUMENT +
+    # An argv element, or a lookup of the program.
+    r"|[\[(,][ \t]*[\"'](?:r2|radare2)[\"']"
+    r"|shutil\.which\([ \t]*[\"'](?:r2|radare2)[\"']"
+    r"|\b(?:which|command -v|type)[ \t]+(?:r2|radare2)\b",
     re.MULTILINE,
 )
 
@@ -108,11 +121,25 @@ class NoPluginTests(unittest.TestCase):
             self.assertTrue((REPO / relative).is_file(), relative)
 
     def test_the_patterns_catch_what_they_are_for(self):
-        self.assertIsNotNone(RADARE2_RUN.search("r2 -q -c 'aaa; afl' bin"))
-        self.assertIsNotNone(RADARE2_RUN.search('subprocess.run(["r2", "-q", path])'))
-        self.assertIsNotNone(RADARE2_RUN.search("found = shutil.which('radare2')"))
-        self.assertIsNone(RADARE2_RUN.search("r2s -q -c pdd bin"))
-        self.assertIsNone(RADARE2_RUN.search("the r2 differential"))
+        runs = (
+            "r2 -q -c 'aaa; afl' bin",
+            'subprocess.run(["r2", "-q", path])',
+            "found = shutil.which('radare2')",
+            # Flagless and bare invocations.
+            'r2 "$bin"',
+            "  radare2 ./a.out",
+            "out=$(r2 $bin <<< afl)",
+            "R2_NOPLUGINS=1 r2 -A bin",
+            "exec radare2 ~/bin/ls",
+            'os.system("r2 " + path)',
+            'command = f"r2 {binary}"',
+            "if command -v r2 >/dev/null; then",
+        )
+        for text in runs:
+            self.assertIsNotNone(RADARE2_RUN.search(text), text)
+        for text in ("r2s -q -c pdd bin", "the r2 differential", "r2 is the oracle",
+                     "echo radare2 installed", "r2sleigh -q", "sr2 -q"):
+            self.assertIsNone(RADARE2_RUN.search(text), text)
 
 
 if __name__ == "__main__":
