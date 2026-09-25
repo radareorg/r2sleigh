@@ -994,6 +994,10 @@ fn escaped_pointee_reach(
                 }
                 return Some(EscapeReach::Frame);
             };
+            // A range below the address handed over is no span from it.
+            if range.span_from_base().is_none() {
+                return Some(EscapeReach::Frame);
+            }
             end = Some(end.map_or(range.offset_hi, |end| end.max(range.offset_hi)));
         }
         let proven = end

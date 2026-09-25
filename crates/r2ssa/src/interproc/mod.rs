@@ -145,6 +145,25 @@ pub struct SummaryMemoryRange {
     pub scaled_by: Option<SummaryScaledOffset>,
 }
 
+impl SummaryMemoryRange {
+    /// How many bytes from the argument's own address this range covers, as
+    /// a span that starts at that address.
+    ///
+    /// A reach is how far up from the pointer it was handed a callee touches,
+    /// and a caller places the span at the address it passed. A range that
+    /// starts below that address -- `container_of`, `p[-1]` -- is not such a
+    /// span at any length: the bytes below belong to whatever object the
+    /// address sits inside, which nothing here states. It answers `None`,
+    /// which every reader takes as unbounded, rather than `offset_hi + 1`,
+    /// which for `[-8, -1]` claimed the callee touched nothing.
+    pub fn span_from_base(&self) -> Option<u64> {
+        if self.offset_lo < 0 {
+            return None;
+        }
+        u64::try_from(self.offset_hi.checked_add(1)?).ok()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SummaryMemoryLocation {
     pub region: SummaryMemoryRegion,
@@ -1372,6 +1391,12 @@ impl PreparedCalleeSummary {
                 unbounded.insert(index);
                 continue;
             };
+            // Below the address the argument was handed as, whether stated
+            // or scaled from a base below it.
+            if range.offset_lo < 0 {
+                unbounded.insert(index);
+                continue;
+            }
             if let Some(term) = range.scaled_by {
                 // Stated per index; the caller multiplies it out.
                 scaled.insert(
@@ -1386,11 +1411,7 @@ impl PreparedCalleeSummary {
                 );
                 continue;
             }
-            let Some(end) = range
-                .offset_hi
-                .checked_add(1)
-                .and_then(|end| u64::try_from(end).ok())
-            else {
+            let Some(end) = range.span_from_base() else {
                 unbounded.insert(index);
                 continue;
             };

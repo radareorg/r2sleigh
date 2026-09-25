@@ -2953,6 +2953,53 @@ fn a_formal_stored_in_a_struct_a_direct_callee_is_handed_is_unbounded() {
     assert!(!reach.contains_key(&0), "{reach:?}");
 }
 
+/// clang -O2 of `void wcont(long *x) { container_of(x, struct holder, x)->p[12] = 6; }`
+/// and `void fcont(char *buf) { struct holder h; h.p = buf; h.x = 3; buf[0] = 1; wcont(&h.x); }`:
+///
+/// ```text
+///   1000  sub rsp, 0x18
+///   1004  mov [rsp+8], rdi          ; h.p = buf
+///   1009  lea rax, [rsp+0x10]       ; &h.x
+///   100e  mov qword [rsp+0x10], 3   ; h.x = 3
+///   1017  mov byte [rdi], 1         ; buf[0] = 1
+///   101a  mov rdi, rax
+///   101d  call 0x1030               ; wcont(&h.x)
+///   1022  add rsp, 0x18
+///   1026  ret
+///   1030  mov rax, [rdi-8]          ; wcont: h->p, eight bytes below x
+///   1034  mov byte [rax+0xc], 6     ;        h->p[12] = 6
+///   1038  ret
+/// ```
+const HANDS_A_DIRECT_CALLEE_THE_MEMBER_ABOVE_ITS_ARGUMENT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x48, 0x89, 0x7c, 0x24, 0x08, // 1004 mov [rsp+8], rdi
+    0x48, 0x8d, 0x44, 0x24, 0x10, // 1009 lea rax, [rsp+0x10]
+    0x48, 0xc7, 0x44, 0x24, 0x10, 0x03, 0x00, 0x00, 0x00, // 100e mov qword [rsp+0x10], 3
+    0xc6, 0x07, 0x01, // 1017 mov byte [rdi], 1
+    0x48, 0x89, 0xc7, // 101a mov rdi, rax
+    0xe8, 0x0e, 0x00, 0x00, 0x00, // 101d call 0x1030
+    0x48, 0x83, 0xc4, 0x18, // 1022 add rsp, 0x18
+    0xc3, // 1026 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1027
+    0x48, 0x8b, 0x47, 0xf8, // 1030 mov rax, [rdi-8]
+    0xc6, 0x40, 0x0c, 0x06, // 1034 mov byte [rax+0xc], 6
+    0xc3, // 1038 ret
+];
+
+/// The callee's own reach: it reads eight bytes *below* the pointer it is
+/// handed. A reach is a span upward from that pointer, and `[-8, -1]` is no
+/// such span; taking its end alone stated `Bytes(0)`, that it touches none of
+/// what it was handed.
+#[test]
+fn a_read_below_the_pointer_a_callee_is_handed_is_no_span_from_it() {
+    let reach = touch_reach_at(
+        HANDS_A_DIRECT_CALLEE_THE_MEMBER_ABOVE_ITS_ARGUMENT,
+        "wcont",
+        BASE + 0x30,
+    );
+    assert!(!reach.contains_key(&0), "{reach:?}");
+}
+
 /// `long mn(long a, long b) { long sa = a, sb = b; long r = sa < sb ? sa : sb; return r + sa; }`
 /// at clang -O0: the merge's two inputs are reloads of two other variables.
 ///
