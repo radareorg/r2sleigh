@@ -100,9 +100,11 @@ operator, an off-by-one, swapped stack arguments and a 32-bit parameter read
 as 64 bits must be `differs`; an uninitialised read `uninit`; a signed
 overflow `ub`; a write to the wrong global and a wrong byte through a pointer
 `differs` (memory, arena); swapped printf arguments `differs` (stdout); a
-reached residual `residual-trap`; an identifier missing from the link map
-`compile-error`. Every gate run runs them first and grades nothing (exit 2)
-if one misses. There is no flag to skip them.
+reached residual `residual-trap`, also in a function that prints on every
+vector and traps on some; a function that writes to stderr and faults on its
+NULL vector `equal` on the vectors after it; an identifier missing from the
+link map `compile-error`. Every gate run runs them first and grades nothing
+(exit 2) if one misses. There is no flag to skip them.
 
 The ratchet
 -----------

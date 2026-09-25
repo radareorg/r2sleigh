@@ -80,6 +80,25 @@ NOINL double st_many_fp(double a, double b, double c, double d, double e, double
     return a - b + c - d + e - f + g - h + 2.0 * i;
 }
 
+/* Prints on every vector, so each run's capture is only as right as its reset
+ * between vectors: a run that wrote less on an earlier vector must still line
+ * up with the original on the next one. */
+NOINL int st_say(int x)
+{
+    printf("%d\n", x);
+    if (x > 5)
+        return 100;
+    return x;
+}
+
+/* Writes to stderr and then reads through its argument, so the NULL vector
+ * writes and faults: it is dropped, and must not skew the vectors after it. */
+NOINL int st_first(const char *p)
+{
+    fputs("first\n", stderr);
+    return p[0];
+}
+
 int main(void)
 {
     struct st_node b = { 2, 0 }, a = { 1, &b };
@@ -89,5 +108,5 @@ int main(void)
     st_fill(buf, sizeof buf, 1);
     return st_add(1, 2) + (int)st_mix(3, 4) + st_clamp(5) + (int)st_scale(d, 2) + st_print(1, 2)
         + (int)st_len("x") + st_sum_list(&a) + buf[0] + (int)st_many(1, 2, 3, 4, 5, 6, 7, 8)
-        + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9);
+        + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + st_say(3) + st_first("x");
 }

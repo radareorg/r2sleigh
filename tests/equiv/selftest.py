@@ -19,7 +19,11 @@ graded through the same path an engine rendering takes:
 * swapped arguments of a printf must be ``differs`` (stdout), and a dropped
   one ``differs``;
 * a signed overflow must be ``ub``;
-* a reached residual must be ``residual-trap``;
+* a reached residual must be ``residual-trap``, also where the function prints
+  on every vector and traps on some only;
+* a function that writes to stderr and then faults on its NULL vector must be
+  ``equal`` on most of its vectors: a dropped vector's output is not carried
+  into the next;
 * an identifier missing from the link map must be ``compile-error``;
 * a refusal must be ``refused``.
 """
@@ -102,6 +106,13 @@ CASES = [
         "    return (int64_t)((uint64_t)a + 3u * (uint64_t)b + 5u * (uint64_t)c\n"
         "        + 7u * (uint64_t)d + 11u * (uint64_t)e + 13u * (uint64_t)f\n"
         "        + 17u * (uint64_t)(int64_t)g + 19u * (uint64_t)h);\n}\n")),
+    # stderr is written before the NULL vector faults: the dropped vector must
+    # not shift what the original's later vectors are compared on.
+    Case("identity-stderr-then-fault", "st_first", "equal", _tu(
+        "int32_t sub_first(const char *p)\n{\n    fputs(\"first\\n\", stderr);\n"
+        "    return (int32_t)(int8_t)p[0];\n}\n",
+        "#include <stdint.h>\n#include <stdio.h>\n"),
+        links=[("fputs", "import"), ("stderr", "import")]),
     Case("identity-stack-floats", "st_many_fp", "equal", _tu(
         "double sub_many_fp(double a, double b, double c, double d, double e, double f,\n"
         "                   double g, double h, double i)\n{\n"
@@ -159,6 +170,13 @@ CASES = [
         _RESIDUAL_S32 + "int32_t sub_clamp(int32_t x)\n{\n    if (x < 0)\n"
         "        return r2sleigh_residual_s32(1);\n    if (x > 100)\n        return 100;\n"
         "    return x;\n}\n"), residual=1),
+    # Prints on every vector and traps on some: a vector the rendering trapped
+    # on (its buffered output lost) must not skew the stdout of the next.
+    Case("residual-reached-after-printing", "st_say", "residual-trap", _tu(
+        _RESIDUAL_S32 + "int32_t sub_say(int32_t x)\n{\n    printf(\"%d\\n\", x);\n"
+        "    if (x > 5)\n        return r2sleigh_residual_s32(1);\n    return x;\n}\n",
+        "#include <stdint.h>\n#include <stdio.h>\n"),
+        links=[("printf", "import")], residual=1),
     Case("link-map-gap", "st_bump", "compile-error", _tu(
         "extern int32_t st_counter;\nvoid sub_bump(int32_t by)\n{\n"
         "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n}\n")),

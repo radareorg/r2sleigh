@@ -270,7 +270,7 @@ class PipelineTests(unittest.TestCase):
                                           STUB_R2S_FAULTS="")
         self.assertEqual(code, run_equiv.EXIT_OK)
         self.assertEqual({r["status"] for r in records.values()}, {"equal"})
-        self.assertEqual(len(records), 2 * 12)  # eleven functions and main, at two levels
+        self.assertEqual(len(records), 2 * 14)  # thirteen functions and main, at two levels
 
     def test_a_crash_is_one_record_and_the_ratchet_sees_it(self):
         with tempfile.TemporaryDirectory() as tmp_text:

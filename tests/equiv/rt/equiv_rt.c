@@ -378,9 +378,15 @@ static size_t read_capture(int fd, char *buffer, size_t cap, size_t *total)
 static void run_one(struct run_state *run, const struct job_vector *vec, int timeout_ms)
 {
     memset(run->slot, 0, sizeof *run->slot);
-    if (ftruncate(run->out_fd, 0) != 0 || ftruncate(run->err_fd, 0) != 0) {
+    /* Empty both captures and rewind them. The offset belongs to the open file
+     * description every child shares through dup2, so without the rewind a
+     * run's bytes would land after everything it wrote on earlier vectors, and
+     * two runs that once wrote different amounts would never line up again. */
+    if (ftruncate(run->out_fd, 0) != 0 || ftruncate(run->err_fd, 0) != 0
+        || lseek(run->out_fd, 0, SEEK_SET) != 0 || lseek(run->err_fd, 0, SEEK_SET) != 0) {
         run->outcome = OUT_UNAVAILABLE;
-        snprintf(run->load_error, sizeof run->load_error, "ftruncate: %s", strerror(errno));
+        snprintf(run->load_error, sizeof run->load_error, "resetting the captures: %s",
+                 strerror(errno));
         return;
     }
     fflush(NULL);
