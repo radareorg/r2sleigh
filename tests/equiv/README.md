@@ -25,11 +25,13 @@ with `-g`. The function set is what that build's DWARF names in the source's
 own compile unit.
 
 **Capture.** `r2s` is shown only the `strip --strip-all` copy. One streaming
-process per binary answers `s <low_pc>; pddj` for every function, with stderr
-merged so an `r2s:` message lands inside the markers of the statement that
-printed it. A crash or a per-function deadline costs that one function (its
-record is `no-record` with the ending and the last lines printed) and the
-batch restarts at the next address (`r2s_batch.py`, shared with the DecBench
+process per binary answers `s <low_pc>; pddj` for every function, one stdin
+line each, so a binary of any size is one process, with stderr merged so an
+`r2s:` message lands inside the markers of the statement that printed it. A
+crash or a per-function deadline costs that one function (its record is
+`no-record` with the ending and the last lines printed) and the batch restarts
+at the next address; opening the binary has a budget of its own
+(`--startup-timeout`), charged once (`r2s_batch.py`, shared with the DecBench
 adapter).
 
 **Oracle.** The unstripped build's DWARF says how to call each function

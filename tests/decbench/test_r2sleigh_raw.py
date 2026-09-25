@@ -182,6 +182,18 @@ class Backend(unittest.TestCase):
         self.assertEqual(len(saved.functions), 5)
         self.assertEqual(result.decompiler.extra["processes"], 2)
 
+    def test_thousands_of_targets_are_one_process_and_every_one_is_filed(self):
+        # The sailr set's large binaries have thousands of functions. As one -c
+        # script that many addresses passed Linux's 128 KiB argv cap, Popen
+        # raised, and the whole binary was lost with nothing filed.
+        targets = {0x400000 + 16 * n for n in range(2500)}
+        result = self.decompile(function_names=targets)
+        extra = result.decompiler.extra
+        self.assertEqual((extra["requested"], extra["rendered"], extra["declined"]),
+                         (2500, 2500, 0))
+        self.assertEqual({f.address for f in result.functions.values()}, targets)
+        self.assertEqual(extra["processes"], 1)
+
     def test_a_refusal_is_declined_with_its_reason(self):
         os.environ["STUB_R2S_MODE"] = "refuse"
         result = self.decompile(function_names={TARGETS[0]})

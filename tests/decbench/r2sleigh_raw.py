@@ -3,9 +3,10 @@
 r2sleigh (https://github.com/radareorg/r2sleigh) is a refusal-first
 decompiler: Ghidra Sleigh lift, its own IL, SSA, a sealed binding plan, C. It
 renders a function it can account for and refuses one it cannot, with the
-reason. ``r2s`` is its shell; this backend asks it one question per function,
+reason. ``r2s`` is its shell; this backend starts ``r2s -q <stripped binary>``
+once and asks it one question per function, one stdin line each,
 
-    r2s -q -c '?e BEGIN i; s <addr>; pddj; ?e END i; ...' <stripped binary>
+    ?e BEGIN i; s <addr>; pddj; ?e END i
 
 and reads the structured answer ``pddj`` prints: the C translation unit, the
 identifier the function is defined as, its variables, which instruction
@@ -41,7 +42,9 @@ and the DWARF ``low_pc`` of every source function:
 * ``variables`` and ``line_mappings`` come from ``pddj``, never from parsing C.
 
 Locate the shell with ``$R2SLEIGH_R2S_BIN`` or ``r2s`` on ``$PATH``.
-Per-function deadline: ``$R2SLEIGH_FUNCTION_TIMEOUT`` seconds (default 300).
+Per-function deadline: ``$R2SLEIGH_FUNCTION_TIMEOUT`` seconds (default 300),
+from the moment r2s starts on the function; opening the binary has its own,
+``$R2SLEIGH_STARTUP_TIMEOUT`` (default 600).
 """
 
 from __future__ import annotations
@@ -278,6 +281,7 @@ class R2sDecompiler(Decompiler):
         binary_path = Path(binary_path)
         executable = r2s_bin()
         timeout = float(os.environ.get("R2SLEIGH_FUNCTION_TIMEOUT", "300"))
+        startup = float(os.environ.get("R2SLEIGH_STARTUP_TIMEOUT", "600"))
 
         # What was asked, by address, with the caller's name when it gave one.
         requested: dict[int, str | None] = {}
@@ -357,7 +361,7 @@ class R2sDecompiler(Decompiler):
 
         report = r2s_batch.run_batch(
             executable, binary_path, list(requested), function_timeout=timeout,
-            on_answer=file_answer,
+            startup_timeout=startup, on_answer=file_answer,
         )
         extra["processes"] = report.processes
         extra["process_endings"] = report.endings

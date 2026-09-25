@@ -7,6 +7,7 @@ engine, and in particular to make r2s fail in each of the ways a harness has
 to survive. It is never a rendering source for a real measurement.
 
     stub_r2s.py -q -c '<statements>' <binary>
+    stub_r2s.py -q <binary>          # one script per stdin line, like r2s
 
 ``?e`` prints its text, ``s`` seeks, ``pddj`` answers for the current address,
 ``afl`` lists ``$STUB_R2S_AFL`` (``0x1000 main,0x2000 -``), anything else is an
@@ -21,10 +22,14 @@ unknown command. ``STUB_R2S_MODE`` picks the answer:
 ``STUB_R2S_FAULTS`` is a comma list of ``<kind>@<hex address>`` applied when
 ``pddj`` runs there: ``abort`` (SIGABRT), ``sleep`` (hang for a minute),
 ``error`` (a ``r2s: ...`` line to stderr and a failed statement), ``garbage``
-(text that is not JSON), ``breach`` (JSON missing contract fields). A fault
-named ``once-<kind>`` fires only in the first process that reaches it (tracked
-in ``$STUB_R2S_STATE``), so a restart can be told from a retry. ``die-at-start``
-as the whole mode makes the process abort before it runs any statement.
+(text that is not JSON), ``breach`` (JSON missing contract fields),
+``unterminated`` (the answer without its trailing newline), ``elsewhere`` (an
+answer about another address). A fault named ``once-<kind>`` fires only in the
+first process that reaches it (tracked in ``$STUB_R2S_STATE``), so a restart
+can be told from a retry. As the whole mode, ``die-at-start`` makes the
+process abort before it runs any statement and ``cannot-open`` makes it say
+``r2s: ...`` and exit 1 the way r2s does on a file it cannot open.
+``STUB_R2S_STARTUP_DELAY`` seconds pass before the first statement.
 """
 
 from __future__ import annotations
@@ -111,28 +116,34 @@ def _record(address: int, name: str, code: str, refused: str | None = None) -> d
     }
 
 
-def main() -> int:
-    argv = sys.argv[1:]
-    script = argv[argv.index("-c") + 1]
-    binary = Path(argv[-1])
-    mode = os.environ.get("STUB_R2S_MODE", "minimal")
-    if mode == "die-at-start":
-        os.abort()
-    faults = _faults()
-    address = 0
-    failed = False
-    for statement in (s.strip() for s in script.split(";")):
+class Shell:
+    """One stub process: the current address, and whether a statement failed."""
+
+    def __init__(self, binary: Path, mode: str):
+        self.binary = binary
+        self.mode = mode
+        self.faults = _faults()
+        self.address = 0
+        self.failed = False
+
+    def run(self, script: str) -> None:
+        for statement in (s.strip() for s in script.split(";")):
+            if statement:
+                self.statement(statement)
+
+    def statement(self, statement: str) -> None:
+        address = self.address
         if statement.startswith("?e "):
             print(statement[3:], flush=True)
         elif statement.startswith("s "):
-            address = int(statement[2:], 0)
+            self.address = int(statement[2:], 0)
         elif statement == "afl":
             # radare2's headerless layout: addr nbbs size name.
             for item in filter(None, os.environ.get("STUB_R2S_AFL", "").split(",")):
                 where, _, name = item.partition(" ")
                 print(f"{where} 1 16 {name or '-'}", flush=True)
         elif statement == "pddj":
-            fault = faults.get(address, "")
+            fault = self.faults.get(address, "")
             if fault.startswith("once-"):
                 fault = "" if _fired(fault, address) else fault[len("once-"):]
             if fault == "abort":
@@ -142,26 +153,50 @@ def main() -> int:
                 time.sleep(60)
             if fault == "error":
                 print(f"r2s: nothing mapped at 0x{address:x}", file=sys.stderr, flush=True)
-                failed = True
-                continue
+                self.failed = True
+                return
             if fault == "garbage":
                 print("uint64_t fcn(void) { not json }", flush=True)
-                continue
+                return
             if fault == "breach":
                 print(json.dumps({"name": "x", "addr": address}), flush=True)
-                continue
-            if mode == "delegate":
-                record = _delegate(binary, address)
-            elif mode == "refuse":
+                return
+            if self.mode == "delegate":
+                record = _delegate(self.binary, address)
+            elif self.mode == "refuse":
                 record = _record(address, f"fcn_{address:08x}", "", refused="stub refuses")
             else:
                 record = _record(address, f"fcn_{address:08x}",
                                  f"#include <stdint.h>\n\nvoid fcn_{address:08x}(void)\n{{\n}}\n")
-            print(json.dumps(record), flush=True)
+            if fault == "elsewhere":
+                record["addr"] = address + 16
+            # ``unterminated``: the answer has no newline of its own, so the
+            # END marker after it lands on the same line.
+            print(json.dumps(record), end="" if fault == "unterminated" else "\n", flush=True)
         else:
             print(f"r2s: unknown command '{statement}'", file=sys.stderr, flush=True)
-            failed = True
-    return 1 if failed else 0
+            self.failed = True
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    binary = Path(argv[-1])
+    mode = os.environ.get("STUB_R2S_MODE", "minimal")
+    if mode == "die-at-start":
+        os.abort()
+    if mode == "cannot-open":
+        print(f"r2s: {binary}: not an executable the stub reads", file=sys.stderr, flush=True)
+        return 1
+    time.sleep(float(os.environ.get("STUB_R2S_STARTUP_DELAY", "0")))
+    shell = Shell(binary, mode)
+    if "-c" in argv:
+        shell.run(argv[argv.index("-c") + 1])
+        return 1 if shell.failed else 0
+    # Like r2s: each stdin line is a script of its own, and the end of input
+    # ends the session with status 0.
+    for line in sys.stdin:
+        shell.run(line.rstrip("\n"))
+    return 0
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -62,11 +63,13 @@ class BatchTests(unittest.TestCase):
 
     ADDRESSES = [0x1000, 0x2000, 0x3000, 0x4000]
 
-    def ask(self, timeout: float = 30.0, **env: str):
+    def ask(self, timeout: float = 30.0, addresses: list[int] | None = None,
+            startup: float | None = None, **env: str):
         with _StubEnv(**env), tempfile.TemporaryDirectory() as state:
             os.environ["STUB_R2S_STATE"] = state
             try:
-                return run_batch(STUB, "/bin/true", self.ADDRESSES, function_timeout=timeout)
+                return run_batch(STUB, "/bin/true", addresses or self.ADDRESSES,
+                                 function_timeout=timeout, startup_timeout=startup)
             finally:
                 os.environ.pop("STUB_R2S_STATE", None)
 
@@ -77,8 +80,8 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(report.processes, 1)
 
     def test_a_failed_statement_is_a_typed_decline_not_a_crash(self):
-        # r2s exits 1 when any statement failed; with every marker present that
-        # is a completed batch, and the message lands inside its own markers.
+        # Each stdin line is a script of its own, so a failed statement costs
+        # its own address only, and its message lands inside its own markers.
         report = self.ask(STUB_R2S_MODE="minimal", STUB_R2S_FAULTS="error@2000")
         kinds = [a.kind for a in report.answers]
         self.assertEqual(kinds, ["output", "decline", "output", "output"])
@@ -105,6 +108,48 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(all(a.kind == "crash" for a in report.answers))
         self.assertEqual(len({a.cause for a in report.answers}), 1)
         self.assertEqual(report.processes, 1)
+
+    def test_a_batch_of_any_size_is_one_process(self):
+        # 3,000 addresses: as one -c script this was about 200 KiB of argv, past
+        # Linux's 128 KiB cap on one argument, and Popen raised before r2s ran.
+        addresses = [0x400000 + 16 * n for n in range(3000)]
+        report = self.ask(addresses=addresses, STUB_R2S_MODE="minimal", STUB_R2S_FAULTS="")
+        self.assertEqual([a.address for a in report.answers], addresses)
+        self.assertTrue(all(a.kind == "output" for a in report.answers))
+        self.assertEqual(report.processes, 1)
+
+    def test_opening_the_binary_is_not_charged_to_the_first_function(self):
+        # The open takes longer than a function may, and less than startup may.
+        report = self.ask(timeout=1.0, startup=20.0, STUB_R2S_MODE="minimal",
+                          STUB_R2S_FAULTS="", STUB_R2S_STARTUP_DELAY="1.5")
+        self.assertEqual([a.kind for a in report.answers], ["output"] * 4)
+        self.assertEqual(report.processes, 1)
+
+    def test_a_slow_open_is_one_cause_for_every_address_once(self):
+        started = time.monotonic()
+        report = self.ask(timeout=30.0, startup=1.0, STUB_R2S_MODE="minimal",
+                          STUB_R2S_FAULTS="", STUB_R2S_STARTUP_DELAY="20")
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual(len(report.answers), len(self.ADDRESSES))
+        self.assertTrue(all(a.kind == "crash" for a in report.answers))
+        self.assertEqual({a.cause for a in report.answers},
+                         {"harness: r2s did not open the binary: timed out after 1s"})
+        self.assertEqual(report.processes, 1)
+
+    def test_a_file_r2s_will_not_open_is_its_own_decline(self):
+        report = self.ask(STUB_R2S_MODE="cannot-open", STUB_R2S_FAULTS="")
+        self.assertTrue(all(a.kind == "decline" for a in report.answers))
+        self.assertEqual({a.cause for a in report.answers},
+                         {"r2s: /bin/true: not an executable the stub reads"})
+        self.assertEqual(report.processes, 1)
+
+    def test_an_answer_without_its_newline_is_read_at_once(self):
+        started = time.monotonic()
+        report = self.ask(timeout=20.0, STUB_R2S_MODE="minimal",
+                          STUB_R2S_FAULTS="unterminated@2000")
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual([a.kind for a in report.answers], ["output"] * 4)
+        self.assertEqual(report.answers[1].record["addr"], 0x2000)
 
     def test_output_that_is_not_the_contract_is_a_harness_decline(self):
         report = self.ask(STUB_R2S_MODE="minimal",

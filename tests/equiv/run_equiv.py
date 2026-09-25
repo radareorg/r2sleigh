@@ -70,6 +70,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="the original's budget per call; a rendering gets four times it")
     parser.add_argument("--function-timeout", type=float, default=300.0,
                         help="seconds r2s may spend on one function before it is restarted")
+    parser.add_argument("--startup-timeout", type=float, default=600.0,
+                        help="seconds r2s may spend opening a binary before its first function")
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--baseline", type=Path, default=None)
     parser.add_argument("--write-baseline", type=Path, default=None)
@@ -133,7 +135,8 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
         return []
     addresses = [sub.low_pc for _, sub in wanted]
     report = run_batch(args.r2s, binary.stripped, addresses,
-                       function_timeout=args.function_timeout)
+                       function_timeout=args.function_timeout,
+                       startup_timeout=args.startup_timeout)
     answers = report.by_address()
     futures = []
     for key, sub in wanted:

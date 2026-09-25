@@ -53,8 +53,12 @@ The backend
 -----------
 
 `r2sleigh_raw.py` registers one backend, `r2sleigh_native`, which asks `r2s`
-one `pddj` per function through the streaming runner it shares with the
-equivalence gate (`tests/equiv/r2s_batch.py`). It guarantees:
+one `pddj` per function, one stdin line each to a single `r2s -q <binary>`,
+through the streaming runner it shares with the equivalence gate
+(`tests/equiv/r2s_batch.py`). A binary of any size is one process; opening it
+has its own deadline (`R2SLEIGH_STARTUP_TIMEOUT`, default 600 s) and each
+function its own from the moment r2s starts on it
+(`R2SLEIGH_FUNCTION_TIMEOUT`, default 300 s). It guarantees:
 
 * **Exactly the targets.** It renders the addresses the driver gave it, with no
   symbol lookup; with no targets it renders what `afl` finds, through
