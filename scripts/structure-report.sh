@@ -46,9 +46,17 @@ done
 # the counts repeat exactly.
 export CARGO_TARGET_DIR="$root/target/structure"
 
-findings=$(cargo clippy --workspace --all-targets --all-features \
-    --message-format=short -- "${flags[@]}" 2>&1 |
-    grep -E '^[^ ]+\.rs:[0-9]+' || true)
+# Clippy's own exit status is kept apart from the grep. The lints are only
+# warnings here, so clippy fails only when the tree does not build. Swallowing
+# that with the grep's `|| true` made every count read as fallen and the
+# script pass on code that does not compile.
+if ! output=$(cargo clippy --workspace --all-targets --all-features \
+    --message-format=short -- "${flags[@]}" 2>&1); then
+    printf '%s\n' "$output" | tail -n 20 >&2
+    echo "clippy did not complete; no structure counts were taken" >&2
+    exit 2
+fi
+findings=$(grep -E '^[^ ]+\.rs:[0-9]+' <<<"$output" || true)
 
 # The message each lint prints. Naming the lint itself takes the long output
 # format, and running them one at a time would be nine builds.
