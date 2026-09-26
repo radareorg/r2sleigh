@@ -345,29 +345,37 @@ impl ExternalTypeDb {
     }
 
     fn resolve_typedef_aggregate(&self, name: &str) -> Option<(ExternalAggregateKind, String)> {
-        let mut keys = aggregate_lookup_keys(name);
-        let mut seen = BTreeSet::new();
-        for _ in 0..16 {
-            for key in &keys {
-                if self.structs.contains_key(key) {
-                    return Some((ExternalAggregateKind::Struct, key.clone()));
+        self.typedef_chain_keys(name).find_map(|keys| {
+            keys.into_iter().find_map(|key| {
+                if self.structs.contains_key(&key) {
+                    Some((ExternalAggregateKind::Struct, key))
+                } else if self.unions.contains_key(&key) {
+                    Some((ExternalAggregateKind::Union, key))
+                } else if self.enums.contains_key(&key) {
+                    Some((ExternalAggregateKind::Enum, key))
+                } else {
+                    None
                 }
-                if self.unions.contains_key(key) {
-                    return Some((ExternalAggregateKind::Union, key.clone()));
-                }
-                if self.enums.contains_key(key) {
-                    return Some((ExternalAggregateKind::Enum, key.clone()));
-                }
-            }
+            })
+        })
+    }
 
-            let typedef = keys.iter().find_map(|key| self.typedefs.get(key))?;
-            let typedef_key = typedef.name.to_ascii_lowercase();
-            if !seen.insert(typedef_key) {
-                return None;
-            }
-            keys = aggregate_lookup_keys(&typedef.target);
-        }
-        None
+    /// The lookup keys of `name`, then of each target along its typedef chain.
+    ///
+    /// Each step follows the typedef entry the current keys name, and only an
+    /// entry this walk has not followed before, so the chain is read to its
+    /// end whatever its length and stops where a cycle closes: at most
+    /// `typedefs.len() + 1` key sets, each built once.
+    pub(crate) fn typedef_chain_keys(&self, name: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+        let mut followed = BTreeSet::new();
+        std::iter::successors(Some(aggregate_lookup_keys(name)), move |keys| {
+            let (key, typedef) = keys
+                .iter()
+                .find_map(|key| self.typedefs.get_key_value(key))?;
+            followed
+                .insert(key.clone())
+                .then(|| aggregate_lookup_keys(&typedef.target))
+        })
     }
 
     pub fn materialize_typedef_aggregate_aliases(&mut self) {
@@ -884,5 +892,57 @@ mod tests {
             alias.fields.get(&8).map(|field| field.name.as_str()),
             Some("third")
         );
+    }
+
+    /// A struct reached through `links` typedefs, and a cycle of two beside it.
+    fn typedef_chain_db(links: usize) -> ExternalTypeDb {
+        let mut db = ExternalTypeDb::default();
+        db.structs.insert(
+            "payload".to_string(),
+            ExternalStruct {
+                name: "payload".to_string(),
+                fields: BTreeMap::from([(
+                    0,
+                    ExternalField {
+                        name: "first".to_string(),
+                        offset: 0,
+                        ty: Some("int".to_string()),
+                    },
+                )]),
+            },
+        );
+        for link in 0..links {
+            let target = if link + 1 == links {
+                "payload".to_string()
+            } else {
+                format!("Link{}", link + 1)
+            };
+            db.insert_typedef(format!("Link{link}"), target);
+        }
+        db.insert_typedef("Ping", "Pong");
+        db.insert_typedef("Pong", "Ping");
+        db
+    }
+
+    #[test]
+    fn a_typedef_chain_resolves_to_its_aggregate_at_any_length() {
+        for links in [1, 40] {
+            let db = typedef_chain_db(links);
+            assert_eq!(
+                db.resolve_aggregate_kind("Link0"),
+                Some(ExternalAggregateKind::Struct),
+                "a chain of {links} typedefs ends at a struct"
+            );
+            assert!(db.is_aggregate_typedef("Link0"));
+            assert!(
+                crate::analysis::external_named_aggregate_has_real_layout(&db, "Link0"),
+                "a chain of {links} typedefs ends at a struct with members"
+            );
+            // A cycle is a typedef naming no aggregate, and the walk ends there.
+            assert_eq!(db.resolve_aggregate_kind("Ping"), None);
+            assert!(!crate::analysis::external_named_aggregate_has_real_layout(
+                &db, "Ping"
+            ));
+        }
     }
 }

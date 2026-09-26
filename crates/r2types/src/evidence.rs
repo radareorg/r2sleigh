@@ -21,7 +21,7 @@ use crate::facts::FunctionType;
 use crate::model::{Signedness, Type, TypeArena, TypeId};
 
 use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
-use crate::solver::{SolvedTypes, SolverConfig, TypeSolver};
+use crate::solver::{SolvedTypes, solve_constraints};
 
 /// A node of the recovered type graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,13 +83,14 @@ pub fn solve_evidence_types(
     // Refinement rounds: a type learned in one round decides which operand of an
     // address computation is the pointer, which is new evidence about the width
     // it points at, which is a constraint the next round solves with. Rounds
-    // stop as soon as one adds nothing.
-    const MAX_REFINEMENT_ROUNDS: usize = 4;
+    // stop as soon as one adds nothing, and that is the whole termination
+    // argument: a round continues only by inserting a pair into `asserted`,
+    // and the pairs it can insert are (an operand of a certified access's
+    // address sum, the pointee of that access's width) -- at most two per
+    // certified memory access. So there are at most 2A + 1 solves for A
+    // accesses, and the loop stops at its fixpoint rather than at a count.
     let mut solved = builder.solve();
-    for _ in 0..MAX_REFINEMENT_ROUNDS {
-        if !builder.gather_indexed_pointer_bases(&solved) {
-            break;
-        }
+    while builder.gather_indexed_pointer_bases(&solved) {
         solved = builder.solve();
     }
     builder.read_back(&solved)
@@ -670,8 +671,7 @@ impl<'a> EvidenceBuilder<'a> {
     }
 
     fn solve(&self) -> SolvedTypes<EvidenceNode> {
-        let solver = TypeSolver::new(SolverConfig::default());
-        solver.solve(self.arena.clone(), &self.constraints)
+        solve_constraints(self.arena.clone(), &self.constraints)
     }
 
     fn read_back(&mut self, solved: &SolvedTypes<EvidenceNode>) -> EvidenceTypes {
@@ -992,7 +992,7 @@ mod tests {
                 source: ConstraintSource::SignatureRegistry,
             })
             .collect::<Vec<_>>();
-        let solved = TypeSolver::new(SolverConfig::default()).solve(arena, &constraints);
+        let solved = solve_constraints(arena, &constraints);
         let solved_ty = solved.var_types.get(&node).copied().expect("node visited");
         assert!(type_is_unresolved(&solved.arena, solved_ty));
     }
@@ -1015,8 +1015,7 @@ mod tests {
                     source: ConstraintSource::SignatureRegistry,
                 })
                 .collect::<Vec<_>>();
-            let solved =
-                TypeSolver::new(SolverConfig::default()).solve(arena.clone(), &constraints);
+            let solved = solve_constraints(arena.clone(), &constraints);
             let solved_ty = solved.var_types.get(&node).copied().expect("node typed");
             assert_eq!(
                 structural_type_like(&solved.arena, solved_ty),

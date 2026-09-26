@@ -2426,30 +2426,29 @@ pub(crate) fn loop_condition(
         .map(|predicate| predicate.id)
 }
 
-pub(crate) fn value_depends_on(graph: &SsaGraph, value: ValueId, needle: ValueId) -> bool {
-    if value == needle {
-        return true;
-    }
-    let mut visited = BTreeSet::new();
-    let mut stack = vec![(value, 0usize)];
-    while let Some((current, depth)) = stack.pop() {
-        if current == needle {
-            return true;
-        }
-        if depth >= 16 || !visited.insert(current) {
-            continue;
-        }
-        let Some(def_inst) = graph.def_inst(current) else {
-            continue;
-        };
-        let Some(inst) = graph.inst(def_inst) else {
+/// Every value `value` is computed from, `value` included.
+///
+/// The backward closure of the def-use graph through the inputs of every
+/// definition, phis included, so a value read round a loop is in the cone of
+/// whatever reads it. Each value enters the set once and its definition's
+/// inputs are read once, so the walk is O((V+E) log V) over the part of the
+/// function it reaches, and a cycle ends where it closes. Nothing stops it
+/// early: a value missing from the cone is a proof that `value` does not
+/// depend on it, which is the direction the callers rely on.
+pub(crate) fn dependence_cone(graph: &SsaGraph, value: ValueId) -> BTreeSet<ValueId> {
+    let mut cone = BTreeSet::from([value]);
+    let mut pending = vec![value];
+    while let Some(current) = pending.pop() {
+        let Some(inst) = graph.def_inst(current).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
         for input in &inst.inputs {
-            stack.push((*input, depth + 1));
+            if cone.insert(*input) {
+                pending.push(*input);
+            }
         }
     }
-    false
+    cone
 }
 
 pub(crate) fn raw_memory_subeffect_provenance(

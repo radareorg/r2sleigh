@@ -35,14 +35,14 @@ pub use callee::{
     CalleeTargetIdentityRequest, CalleeTargetResolutionRequest, CallsiteKey, ResolvedCalleeTarget,
     normalize_callee_name,
 };
-pub use constraint::{Constraint, ConstraintSource, MemoryCapability, SolverNode};
+pub use constraint::{Constraint, ConstraintSource, SolverNode};
 pub(crate) use register_identity::RegisterIdentity;
 pub(crate) use signature::SignatureRegistry;
 pub(crate) use signature_infer::{
     format_signature_prototype, infer_signature_from_prepared_ssa,
     inferred_signature_from_signature_spec, render_signature_type,
 };
-pub use solver::{SolvedTypes, SolverConfig, SolverDiagnostics, TypeSolver};
+pub use solver::{SolvedTypes, solve_constraints};
 
 pub use context::{
     ExternalStackBase, ExternalStackSlotRole, ExternalStackSlotSpec, ParsedExternalContext,

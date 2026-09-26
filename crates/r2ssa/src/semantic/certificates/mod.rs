@@ -606,11 +606,16 @@ pub(crate) fn counted_for_loop_certificate(
         .get(&loop_fact.condition?)?
         .comparison
         .as_ref()?;
-    // The clause variable is the first induction exactly one side of the condition reads.
+    // The clause variable is the first induction exactly one side of the
+    // condition reads. The two cones are complete closures, taken once per
+    // loop rather than once per carrier, so "this side does not read it" is
+    // proven, never the verdict of a walk that stopped.
+    let lhs_reads = dependence_cone(graph, comparison.lhs);
+    let rhs_reads = dependence_cone(graph, comparison.rhs);
     let (carrier, induction) = loop_fact.carriers.iter().find_map(|carrier| {
         let induction = structured.inductions.get(&carrier.phi)?;
-        let reads = |side: ValueId| value_depends_on(graph, side, carrier.phi);
-        (reads(comparison.lhs) != reads(comparison.rhs)).then_some((carrier, induction))
+        (lhs_reads.contains(&carrier.phi) != rhs_reads.contains(&carrier.phi))
+            .then_some((carrier, induction))
     })?;
     let phi = induction.phi;
     if induction.loop_id != loop_fact.id

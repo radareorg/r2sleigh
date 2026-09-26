@@ -535,6 +535,93 @@ fn unrelated_condition_value_has_no_for_certificate() {
     assert!(for_certificate(&artifact).is_none());
 }
 
+/// `for (i = 0; i < f(i); i++)` where `f` is a chain of `links` operations.
+///
+/// The condition reads the counter on both sides, so no side is the clause
+/// variable's alone; how far back the right side reaches it is irrelevant.
+fn counter_compared_with_its_own_chain(links: usize) -> SsaArtifact {
+    let counter = Varnode::register(40, 8);
+    let invariant = Varnode::register(48, 8);
+    let condition = Varnode::unique(0x7200, 1);
+
+    let mut entry = R2ILBlock::new(0x7100, 4);
+    entry.push(R2ILOp::Copy {
+        dst: counter.clone(),
+        src: Varnode::constant(0, 8),
+    });
+    entry.push(R2ILOp::Branch {
+        target: Varnode::ram(0x7110, 8),
+    });
+
+    let mut header = R2ILBlock::new(0x7110, 4);
+    let mut previous = counter.clone();
+    for link in 0..links {
+        let next = Varnode::unique(0x7300 + 8 * link as u64, 8);
+        header.push(R2ILOp::IntMult {
+            dst: next.clone(),
+            a: previous,
+            b: invariant.clone(),
+        });
+        previous = next;
+    }
+    header.push(R2ILOp::IntLess {
+        dst: condition.clone(),
+        a: counter.clone(),
+        b: previous,
+    });
+    header.push(R2ILOp::CBranch {
+        target: Varnode::ram(0x7140, 8),
+        cond: condition,
+    });
+
+    let mut body = R2ILBlock::new(0x7114, 4);
+    body.push(R2ILOp::Branch {
+        target: Varnode::ram(0x7120, 8),
+    });
+
+    let mut latch = R2ILBlock::new(0x7120, 4);
+    latch.push(R2ILOp::IntAdd {
+        dst: counter.clone(),
+        a: counter.clone(),
+        b: Varnode::constant(1, 8),
+    });
+    latch.push(R2ILOp::Branch {
+        target: Varnode::ram(0x7110, 8),
+    });
+
+    let mut exit = R2ILBlock::new(0x7140, 4);
+    exit.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: Varnode::constant(0x9000, 8),
+        val: counter,
+    });
+    exit.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+
+    SsaArtifact::for_decompile(
+        &[entry, header, body, latch, exit],
+        Some(&return_boundary_arch()),
+    )
+    .expect("counter compared with its own chain")
+}
+
+#[test]
+fn a_counter_both_sides_read_is_no_clause_variable_however_deep_the_read() {
+    for links in [1, 20] {
+        let artifact = counter_compared_with_its_own_chain(links);
+        assert!(
+            !artifact.facts().structured.inductions.is_empty(),
+            "the fixture with {links} links must still contain an induction"
+        );
+        assert!(
+            for_certificate(&artifact).is_none(),
+            "a condition that reads the counter on both sides, one of them \
+             {links} operations back, licensed a `for` clause"
+        );
+    }
+}
+
 #[test]
 fn distinct_value_identities_never_merge_for_certificate_by_name() {
     let artifact = counted_loop_artifact(false);
@@ -552,16 +639,12 @@ fn distinct_value_identities_never_merge_for_certificate_by_name() {
         .get(&loop_fact.condition.expect("loop condition"))
         .and_then(|predicate| predicate.comparison.as_ref())
         .expect("loop comparison");
-    assert!(!super::super::value_depends_on(
-        artifact.graph(),
-        comparison.lhs,
-        induction.phi
-    ));
-    assert!(!super::super::value_depends_on(
-        artifact.graph(),
-        comparison.rhs,
-        induction.phi
-    ));
+    assert!(
+        !super::super::dependence_cone(artifact.graph(), comparison.lhs).contains(&induction.phi)
+    );
+    assert!(
+        !super::super::dependence_cone(artifact.graph(), comparison.rhs).contains(&induction.phi)
+    );
     assert!(for_certificate(&artifact).is_none());
 }
 

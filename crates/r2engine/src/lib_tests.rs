@@ -2671,3 +2671,53 @@ fn a_panic_caught_at_rendering_refuses_from_its_own_phase_and_claims_none_before
     let text = response.output.text();
     assert!(text.contains("a defect in the renderer"), "{text}");
 }
+
+/// Each scalar of an aggregate is named by the dotted path that reaches it,
+/// however deeply the source nests the structs on the way.
+#[test]
+fn every_scalar_of_a_nested_aggregate_is_named_at_any_depth() {
+    // `struct level0 { struct level1 { ... struct levelN { int32_t leaf; } } }`,
+    // each level one member wide.
+    const LEVELS: u32 = 9;
+    let mut types = vec![r2ssa::SourceType::new(
+        0,
+        r2ssa::SourceTypeKind::SignedInteger,
+        32,
+        32,
+    )];
+    let mut aggregates = Vec::new();
+    for level in 0..LEVELS {
+        types.push(r2ssa::SourceType::new(
+            level + 1,
+            r2ssa::SourceTypeKind::Struct {
+                aggregate_id: level,
+            },
+            32,
+            32,
+        ));
+        let (member, name) = if level + 1 == LEVELS {
+            (0, "leaf")
+        } else {
+            (level + 2, "inner")
+        };
+        aggregates.push(r2ssa::SourceAggregateLayout::new(
+            level,
+            level + 1,
+            32,
+            32,
+            format!("level{level}"),
+            [r2ssa::SourceAggregateMember::new(0, member, 0, 32, name)],
+        ));
+    }
+    let graph = r2ssa::SourceTypeGraph::new(types, aggregates).expect("nested graph");
+
+    let fields = external_struct_fields(&graph, &graph.aggregates()[0]);
+
+    let expected = format!("{}leaf", "inner.".repeat(LEVELS as usize - 1));
+    assert_eq!(
+        fields.get(&0).map(|field| field.name.as_str()),
+        Some(expected.as_str()),
+        "the scalar {} structs down lost its name",
+        LEVELS
+    );
+}

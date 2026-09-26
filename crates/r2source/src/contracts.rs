@@ -476,6 +476,80 @@ fn source_align_up(value: u64, alignment: u64) -> Option<u64> {
     value.checked_add(mask).map(|aligned| aligned & !mask)
 }
 
+/// Whether no struct or union contains itself by value.
+///
+/// C gives every member a complete type, and an aggregate is incomplete inside
+/// its own definition, so "an object of type A holds an object of type B" --
+/// as a member, or as the element of an array member -- is a well-founded
+/// relation; a pointer member refers to an object and holds none. Every walk
+/// into members relies on it to end: flattening a struct into the scalars it
+/// holds recurses once per level of containment, and a graph that stated a
+/// containment cycle would send it round forever. The layout checks cannot
+/// exclude one alone, since a struct whose only member is itself has a
+/// consistent size.
+///
+/// Called only on types and aggregates already validated, so every edge names
+/// an existing node. A three-colour depth-first search with an explicit stack:
+/// O(types + members + array edges), and no recursion for a deep graph to
+/// exhaust.
+fn value_containment_is_well_founded(
+    types: &[SourceType],
+    aggregates: &[SourceAggregateLayout],
+) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Colour {
+        Unvisited,
+        OnPath,
+        Done,
+    }
+    let held = |type_id: usize| -> Vec<usize> {
+        match types[type_id].kind {
+            SourceTypeKind::Struct { aggregate_id } | SourceTypeKind::Union { aggregate_id } => {
+                aggregates[aggregate_id as usize]
+                    .members
+                    .iter()
+                    .map(|member| member.type_id as usize)
+                    .collect()
+            }
+            SourceTypeKind::Array {
+                element_type_id, ..
+            } => vec![element_type_id as usize],
+            SourceTypeKind::SignedInteger
+            | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Float
+            | SourceTypeKind::Pointer { .. }
+            | SourceTypeKind::Void
+            | SourceTypeKind::Code => Vec::new(),
+        }
+    };
+    let mut colour = vec![Colour::Unvisited; types.len()];
+    for root in 0..types.len() {
+        if colour[root] != Colour::Unvisited {
+            continue;
+        }
+        colour[root] = Colour::OnPath;
+        let mut path = vec![(root, held(root).into_iter())];
+        while let Some((node, children)) = path.last_mut() {
+            let node = *node;
+            match children.next() {
+                Some(child) => match colour[child] {
+                    Colour::OnPath => return false,
+                    Colour::Done => {}
+                    Colour::Unvisited => {
+                        colour[child] = Colour::OnPath;
+                        path.push((child, held(child).into_iter()));
+                    }
+                },
+                None => {
+                    colour[node] = Colour::Done;
+                    path.pop();
+                }
+            }
+        }
+    }
+    true
+}
+
 impl SourceTypeGraph {
     /// A graph that carries no source names for its types.
     pub fn new(
@@ -707,6 +781,15 @@ impl SourceTypeGraph {
             .count()
             != aggregates.len()
         {
+            return Err(SourceTypeGraphError::InvalidAggregate);
+        }
+        if !value_containment_is_well_founded(&types, &aggregates) {
+            r2il::refusal_evidence!(
+                "type-graph",
+                "a struct or union contains itself by value among {} types and {} aggregates",
+                types.len(),
+                aggregates.len()
+            );
             return Err(SourceTypeGraphError::InvalidAggregate);
         }
         // A name binds one of this graph's types and binds it once. A name
@@ -3706,6 +3789,87 @@ mod tests {
                 .map(|effect| (effect.clobbered().len(), effect.preserved().len())),
             Ok((1, 1))
         );
+    }
+
+    /// A struct of one member whose type is `inner`, at offset zero.
+    fn wrapper(id: u32, type_id: u32, inner: u32) -> SourceAggregateLayout {
+        SourceAggregateLayout::new(
+            id,
+            type_id,
+            32,
+            32,
+            format!("wrapper{id}"),
+            [SourceAggregateMember::new(0, inner, 0, 32, "inner")],
+        )
+    }
+
+    /// C gives a member a complete type, and a struct is incomplete inside its
+    /// own definition, so no object contains itself. A graph that states one
+    /// would send every walk into its members round forever.
+    #[test]
+    fn a_type_graph_in_which_an_aggregate_contains_itself_is_refused() {
+        let int = SourceType::new(0, SourceTypeKind::SignedInteger, 32, 32);
+        let direct = SourceTypeGraph::new(
+            [
+                int.clone(),
+                SourceType::new(1, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
+            ],
+            [wrapper(0, 1, 1)],
+        );
+        assert_eq!(direct, Err(SourceTypeGraphError::InvalidAggregate));
+
+        let mutual = SourceTypeGraph::new(
+            [
+                int.clone(),
+                SourceType::new(1, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
+                SourceType::new(2, SourceTypeKind::Struct { aggregate_id: 1 }, 32, 32),
+            ],
+            [wrapper(0, 1, 2), wrapper(1, 2, 1)],
+        );
+        assert_eq!(mutual, Err(SourceTypeGraphError::InvalidAggregate));
+
+        let through_an_array = SourceTypeGraph::new(
+            [
+                int.clone(),
+                SourceType::new(1, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Array {
+                        element_type_id: 1,
+                        count: 1,
+                    },
+                    32,
+                    32,
+                ),
+            ],
+            [wrapper(0, 1, 2)],
+        );
+        assert_eq!(
+            through_an_array,
+            Err(SourceTypeGraphError::InvalidAggregate)
+        );
+
+        // Containment through a pointer is a reference, not an object inside
+        // an object, and a chain that ends at a scalar is well founded.
+        let linked = SourceTypeGraph::new(
+            [
+                int.clone(),
+                SourceType::new(1, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
+                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 1 }, 32, 32),
+                SourceType::new(3, SourceTypeKind::Struct { aggregate_id: 1 }, 32, 32),
+            ],
+            [wrapper(0, 1, 2), wrapper(1, 3, 1)],
+        );
+        assert!(linked.is_ok(), "{linked:?}");
+        let nested = SourceTypeGraph::new(
+            [
+                int,
+                SourceType::new(1, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
+                SourceType::new(2, SourceTypeKind::Struct { aggregate_id: 1 }, 32, 32),
+            ],
+            [wrapper(0, 1, 0), wrapper(1, 2, 1)],
+        );
+        assert!(nested.is_ok(), "{nested:?}");
     }
 }
 

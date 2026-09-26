@@ -563,43 +563,22 @@ pub(crate) fn external_named_aggregate_has_real_layout(
     type_db: &ExternalTypeDb,
     name: &str,
 ) -> bool {
-    let mut keys = aggregate_lookup_keys(name);
-    let mut seen = BTreeSet::new();
-    for _ in 0..16 {
-        for key in &keys {
-            if type_db
+    type_db.typedef_chain_keys(name).any(|keys| {
+        keys.iter().any(|key| {
+            type_db
                 .structs
                 .get(key)
                 .is_some_and(|st| !st.fields.is_empty())
-            {
-                return true;
-            }
-            if type_db
-                .unions
-                .get(key)
-                .is_some_and(|un| !un.fields.is_empty())
-            {
-                return true;
-            }
-            if type_db
-                .enums
-                .get(key)
-                .is_some_and(|en| !en.variants.is_empty())
-            {
-                return true;
-            }
-        }
-
-        let Some(typedef) = keys.iter().find_map(|key| type_db.typedefs.get(key)) else {
-            return false;
-        };
-        let typedef_key = typedef.name.to_ascii_lowercase();
-        if !seen.insert(typedef_key) {
-            return false;
-        }
-        keys = aggregate_lookup_keys(&typedef.target);
-    }
-    false
+                || type_db
+                    .unions
+                    .get(key)
+                    .is_some_and(|un| !un.fields.is_empty())
+                || type_db
+                    .enums
+                    .get(key)
+                    .is_some_and(|en| !en.variants.is_empty())
+        })
+    })
 }
 
 pub(crate) fn signature_param_blocks_generated_local_struct_override(
