@@ -58,6 +58,7 @@ mod strided;
 pub(crate) mod testing;
 mod values;
 pub(crate) mod var;
+pub mod view;
 
 pub use abi::AbiProfile;
 pub use address::{
@@ -174,3 +175,4 @@ pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed
 pub use strided::StridedInterval;
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
+pub use view::{ValueView, ValueViews, ViewExtension, ViewRelation};

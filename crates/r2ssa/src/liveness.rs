@@ -12,12 +12,23 @@
 //! that read sits past the last ordinal of the predecessor, and a value the
 //! caller reads is read past the last ordinal of every returning block that
 //! hands it back. Both are [`BLOCK_END`].
+//!
+//! Two values live at once may still share an object when they are one
+//! content: the narrower one's bits are the wider one's low bits, so the
+//! object holding the wider one holds the narrower one too. [`ValueContent`]
+//! answers that from the value view -- the one fact of which bits equal which
+//! -- and from the places the lifter and the memory facts say hold one
+//! content. It is sound because the text never elides a write that changes
+//! the bits: a copy is dropped only when it is whole and its two sides are one
+//! binding, and an extension or a narrowing keeps its statement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::graph::{BlockId, InstId, InstPayload, SsaGraph, UseSite, ValueId};
 use crate::liveout::FunctionLiveOut;
-use crate::op::SSAOp;
+use crate::machine_context::SourceMachineContext;
+use crate::var::{CanonicalStorageId, CanonicalStorageSpace};
+use crate::view::{ValueViews, ViewExtension};
 
 /// Past every instruction of a block: an edge read, or leaving the function.
 pub const BLOCK_END: u32 = u32::MAX;
@@ -51,11 +62,303 @@ pub struct ValueLiveness {
     offsets: Vec<u32>,
     /// Sorted by block within each value.
     segments: Vec<LiveSegment>,
-    /// Union-find parent over values that re-express one content at another
-    /// width: a copy, a zero extension, a sign extension.
-    content: Vec<u32>,
+    /// Which values hold one content.
+    content: ValueContent,
     /// Merges nothing reads, directly or through other such merges.
     unread_phi: Vec<bool>,
+}
+
+/// Which values hold one content: where the narrower of two values is the
+/// wider one's low bits, so one object holds both.
+///
+/// Each value is its view -- the low `prefix` bits of a root value, and what is
+/// above them -- and the roots are joined where something beside the
+/// operations says two of them share their low bits: the merges one block
+/// makes over one register at several widths, and the values a function is
+/// entered with at several widths, where the lifter maps them onto one bit of
+/// one carrier; and two reads of the same bytes that the same memory reaches.
+/// A join records how many low bits the two share, and a path of joins shares
+/// the fewest of its steps', so an answer is never more than the evidence
+/// says.
+///
+/// The lanes are placed by the lifter's lane-to-byte mapping, not by storage
+/// offset: on a big-endian register file the lane at a register's own offset
+/// is its high end. Where the lifter states no mapping, two storages are
+/// joined only when they are the same bytes at the same width. Renaming
+/// already reads and writes a register family's lanes as a `SUBPIECE` or
+/// `INSERT` of its root at the lane's significance, which the view reads; the
+/// joins are for merges and entry values built at several widths.
+///
+/// `same_content(a, b)` holds when `a` and `b` reach one root and the narrower
+/// of the two is the other's low bits: both carry the root's bits at least as
+/// far as the narrower's width, or both carry the same prefix of it with the
+/// same stated extension above. A lane at a non-zero offset, an extension
+/// against the value it extends where their bits differ, and a sign-extended
+/// against a zero-extended copy are never one content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueContent {
+    /// Per value, its view with the root as a value.
+    views: Vec<ContentView>,
+    /// Per root, the root it is joined to and how many low bits they share;
+    /// a root joined to nothing is its own, sharing every bit.
+    links: Vec<(u32, u32)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContentView {
+    root: u32,
+    prefix: u32,
+    extension: ViewExtension,
+    width: u32,
+}
+
+/// The bit of a carrier a value's least significant bit is, as the lifter
+/// maps the value's storage onto its carrier. Two values at one anchor share
+/// their low bits, whichever the register file's byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LaneAnchor {
+    space: CanonicalStorageSpace,
+    carrier_offset: u64,
+    carrier_size: u32,
+    lsb: u64,
+}
+
+/// Where the lifter maps `storage`: its carrier and the bit its low bit sits
+/// at. A storage the lifter states no mapping for is anchored to itself alone.
+fn lane_anchor(
+    storage: CanonicalStorageId,
+    lanes: Option<&SourceMachineContext>,
+) -> Option<LaneAnchor> {
+    if storage.is_unknown() {
+        return None;
+    }
+    if let Some(projection) = lanes.and_then(|context| context.register_projection(storage))
+        && let r2il::RegisterProjectionDisposition::Bound { carrier, slice } =
+            projection.disposition
+    {
+        return Some(LaneAnchor {
+            space: storage.space,
+            carrier_offset: carrier.offset,
+            carrier_size: carrier.size,
+            lsb: slice.lsb_bit_offset,
+        });
+    }
+    Some(LaneAnchor {
+        space: storage.space,
+        carrier_offset: storage.offset,
+        carrier_size: storage.size,
+        lsb: 0,
+    })
+}
+
+impl ValueContent {
+    /// The content of every value of `graph`: its view, with the merges and
+    /// entry values the lifter maps onto one carrier bit joined.
+    ///
+    /// `O(V + E)` for the view and `O(V log V)` to group the lanes.
+    pub fn of(graph: &SsaGraph, lanes: Option<&SourceMachineContext>) -> Self {
+        let views = ValueViews::of_graph(graph);
+        let width = |var: &crate::var::SSAVar| var.size.saturating_mul(8);
+        let mut content = Self {
+            views: graph
+                .values
+                .iter()
+                .map(|value| {
+                    let own = ContentView {
+                        root: value.id.0,
+                        prefix: width(&value.var),
+                        extension: ViewExtension::Exact,
+                        width: width(&value.var),
+                    };
+                    views
+                        .derived_view(&value.var)
+                        .and_then(|view| {
+                            Some(ContentView {
+                                root: graph.value_id_for_var(&view.root)?.0,
+                                prefix: view.prefix_bits,
+                                extension: view.extension,
+                                width: own.width,
+                            })
+                        })
+                        .unwrap_or(own)
+                })
+                .collect(),
+            links: (0..graph.values.len() as u32)
+                .map(|value| (value, u32::MAX))
+                .collect(),
+        };
+        let anchor_of = |value: ValueId| {
+            graph
+                .value(value)
+                .and_then(|value| value.canonical_storage)
+                .and_then(|storage| lane_anchor(storage, lanes))
+        };
+        // The merges one block makes over one carrier bit are that lane's one
+        // state there, at several widths; the values a function is entered
+        // with are its state at entry.
+        let mut lanes_at = BTreeMap::<(Option<BlockId>, LaneAnchor), Vec<ValueId>>::new();
+        for inst in &graph.insts {
+            if let (InstPayload::Phi { .. }, Some(output)) = (&inst.payload, inst.output)
+                && let Some(anchor) = anchor_of(output)
+            {
+                lanes_at
+                    .entry((Some(inst.block), anchor))
+                    .or_default()
+                    .push(output);
+            }
+        }
+        for value in &graph.values {
+            if graph.def_inst(value.id).is_some() || value.var.is_const() {
+                continue;
+            }
+            if let Some(anchor) = anchor_of(value.id) {
+                lanes_at.entry((None, anchor)).or_default().push(value.id);
+            }
+        }
+        for members in lanes_at.values() {
+            // Each is the widest one's low bits.
+            let Some(widest) = members
+                .iter()
+                .copied()
+                .max_by_key(|member| (content.width(*member), std::cmp::Reverse(member.0)))
+            else {
+                continue;
+            };
+            for member in members {
+                if *member != widest {
+                    let shared = content.width(*member).min(content.width(widest));
+                    content.join(widest, *member, shared);
+                }
+            }
+        }
+        content.flatten();
+        content
+    }
+
+    /// State that each pair's two values hold one content at their full width,
+    /// on evidence the graph does not carry: two reads of the same bytes that
+    /// the same memory reaches.
+    pub fn declare_same_content(&mut self, pairs: &[(ValueId, ValueId)]) {
+        for (left, right) in pairs {
+            let shared = self.width(*left).min(self.width(*right));
+            self.join(*left, *right, shared);
+        }
+        self.flatten();
+    }
+
+    /// Whether the two values hold one content, so that both may occupy one
+    /// object however their live ranges overlap.
+    pub fn same_content(&self, left: ValueId, right: ValueId) -> bool {
+        if left == right {
+            return true;
+        }
+        let (
+            Some((left_root, left_prefix, left_extension)),
+            Some((right_root, right_prefix, right_extension)),
+        ) = (self.anchor(left), self.anchor(right))
+        else {
+            return false;
+        };
+        if left_root != right_root {
+            return false;
+        }
+        let narrower = self.width(left).min(self.width(right));
+        left_prefix.min(right_prefix) >= narrower
+            || (left_prefix == right_prefix
+                && left_extension == right_extension
+                && matches!(left_extension, ViewExtension::Zero | ViewExtension::Sign))
+    }
+
+    fn width(&self, value: ValueId) -> u32 {
+        self.views
+            .get(value.0 as usize)
+            .map_or(0, |view| view.width)
+    }
+
+    /// A value's root after the joins, how many of its low bits are that
+    /// root's, and what is above them. Joins are flat once built, so this is
+    /// one step.
+    fn anchor(&self, value: ValueId) -> Option<(u32, u32, ViewExtension)> {
+        let view = self.views.get(value.0 as usize)?;
+        let (mut root, mut shared) = (view.root, u32::MAX);
+        while let Some(&(parent, bits)) = self.links.get(root as usize)
+            && parent != root
+        {
+            shared = shared.min(bits);
+            root = parent;
+        }
+        let prefix = view.prefix.min(shared);
+        // A join that shares fewer bits than the view leaves the rest of the
+        // view's prefix unstated relative to the joined root.
+        let extension = if prefix < view.prefix {
+            ViewExtension::Unknown
+        } else {
+            view.extension
+        };
+        Some((root, prefix, extension))
+    }
+
+    /// The root `node` is joined to, and the fewest low bits a step on the way
+    /// shares; halves the path as it goes.
+    fn find_mut(&mut self, mut node: u32) -> (u32, u32) {
+        let mut shared = u32::MAX;
+        loop {
+            let (parent, bits) = self.links[node as usize];
+            if parent == node {
+                return (node, shared);
+            }
+            let (grandparent, above) = self.links[parent as usize];
+            let step = if grandparent == parent {
+                bits
+            } else {
+                bits.min(above)
+            };
+            self.links[node as usize] = (grandparent, step);
+            shared = shared.min(step);
+            node = grandparent;
+        }
+    }
+
+    /// Record that the low `shared` bits of two values are equal.
+    fn join(&mut self, left: ValueId, right: ValueId, shared: u32) {
+        let (Some(left), Some(right)) = (
+            self.views.get(left.0 as usize).copied(),
+            self.views.get(right.0 as usize).copied(),
+        ) else {
+            return;
+        };
+        let (left_root, left_bits) = self.find_mut(left.root);
+        let (right_root, right_bits) = self.find_mut(right.root);
+        if left_root == right_root {
+            return;
+        }
+        let bits = shared
+            .min(left.prefix.min(left_bits))
+            .min(right.prefix.min(right_bits));
+        if bits == 0 {
+            return;
+        }
+        // The wider root stays the root. A lane joined under its register
+        // leaves every other lane's path at its own width; the other way
+        // round, every lane would share only the narrowest one's bits.
+        let rank = |root: u32| (std::cmp::Reverse(self.width(ValueId(root))), root);
+        let (parent, child) = if rank(left_root) <= rank(right_root) {
+            (left_root, right_root)
+        } else {
+            (right_root, left_root)
+        };
+        self.links[child as usize] = (parent, bits);
+    }
+
+    /// Point every root straight at the root it is joined to.
+    fn flatten(&mut self) {
+        for node in 0..self.links.len() as u32 {
+            let (root, shared) = self.find_mut(node);
+            if root != node {
+                self.links[node as usize] = (root, shared);
+            }
+        }
+    }
 }
 
 /// Per-value scratch for one block, stamped so nothing is cleared between values.
@@ -71,16 +374,13 @@ struct BlockScratch {
 }
 
 impl ValueLiveness {
-    pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
-        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), &[], &BTreeSet::new())
+    pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut, content: ValueContent) -> Self {
+        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), content, &BTreeSet::new())
     }
 
-    /// State that two values hold one content, on evidence the graph alone
-    /// does not carry: two reads of one memory object with no write between.
-    pub fn declare_same_content(&mut self, left: ValueId, right: ValueId) {
-        if (left.0 as usize) < self.content.len() && (right.0 as usize) < self.content.len() {
-            content_union(&mut self.content, left.0, right.0);
-        }
+    /// Which values hold one content, as this liveness judges it.
+    pub const fn content(&self) -> &ValueContent {
+        &self.content
     }
 
     /// Liveness as the text will have it once some definitions are folded
@@ -95,7 +395,7 @@ impl ValueLiveness {
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         relocations: &BTreeMap<InstId, InstId>,
-        same_content: &[(ValueId, ValueId)],
+        content: ValueContent,
         ignored_reads: &BTreeSet<UseSite>,
     ) -> Self {
         let relocate = |mut inst: InstId| {
@@ -111,74 +411,6 @@ impl ValueLiveness {
         };
         let value_count = graph.values.len();
         let block_count = graph.blocks.len();
-        // Which values are one content seen more than once. A copy or a
-        // widening re-expresses what it read; a lane is part of it; the merges
-        // one block makes over one location are that location's single state
-        // at that point, seen at several widths, and so are the values a
-        // function is entered with. None of these can hold two contents at
-        // once, whatever their live ranges do.
-        let mut content = (0..value_count as u32).collect::<Vec<u32>>();
-        let location_of = |value: ValueId| {
-            graph
-                .value(value)
-                .and_then(|value| value.canonical_storage)
-                .filter(|storage| !storage.is_unknown())
-                .map(|storage| storage.location())
-        };
-        let mut first_phi_by_location = std::collections::HashMap::new();
-        for inst in &graph.insts {
-            let Some(output) = inst.output else {
-                continue;
-            };
-            match &inst.payload {
-                InstPayload::Phi { .. } => {
-                    if let Some(location) = location_of(output) {
-                        match first_phi_by_location.entry((inst.block, location)) {
-                            std::collections::hash_map::Entry::Vacant(slot) => {
-                                slot.insert(output);
-                            }
-                            std::collections::hash_map::Entry::Occupied(slot) => {
-                                content_union(&mut content, slot.get().0, output.0);
-                            }
-                        }
-                    }
-                }
-                InstPayload::Op(op) => {
-                    let views_input = match op {
-                        SSAOp::Copy { .. } | SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. } => {
-                            match (
-                                graph.value(output),
-                                inst.inputs.first().and_then(|input| graph.value(*input)),
-                            ) {
-                                (Some(out), Some(inp)) => out.var.size >= inp.var.size,
-                                _ => false,
-                            }
-                        }
-                        SSAOp::Subpiece { .. } => true,
-                        _ => false,
-                    };
-                    if views_input && let Some(input) = inst.inputs.first() {
-                        content_union(&mut content, output.0, input.0);
-                    }
-                }
-            }
-        }
-        let mut first_entry_by_location = std::collections::HashMap::new();
-        for value in &graph.values {
-            if graph.def_inst(value.id).is_some() || value.var.is_const() {
-                continue;
-            }
-            if let Some(location) = location_of(value.id) {
-                match first_entry_by_location.entry(location) {
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert(value.id);
-                    }
-                    std::collections::hash_map::Entry::Occupied(slot) => {
-                        content_union(&mut content, slot.get().0, value.id.0);
-                    }
-                }
-            }
-        }
 
         // The caller's reads, indexed by value rather than scanned per block.
         let returned = returned_blocks_by_value(graph, live_out, value_count);
@@ -335,16 +567,12 @@ impl ValueLiveness {
         }
         offsets.push(segments.len() as u32);
 
-        let mut liveness = Self {
+        Self {
             offsets,
             segments,
             content,
             unread_phi: dead_phi,
-        };
-        for (left, right) in same_content {
-            liveness.declare_same_content(*left, *right);
         }
-        liveness
     }
 
     /// Whether this merge is read by nothing, so it merges nothing the text
@@ -375,7 +603,7 @@ impl ValueLiveness {
     /// Whether the two values hold one content, so that both may occupy one
     /// object however their live ranges overlap.
     pub fn same_content(&self, left: ValueId, right: ValueId) -> bool {
-        content_find(&self.content, left.0) == content_find(&self.content, right.0)
+        self.content.same_content(left, right)
     }
 
     /// Whether the two values cannot share an object.
@@ -398,21 +626,6 @@ impl ValueLiveness {
             }
         }
         false
-    }
-}
-
-fn content_find(parent: &[u32], mut value: u32) -> u32 {
-    while parent[value as usize] != value {
-        value = parent[value as usize];
-    }
-    value
-}
-
-fn content_union(parent: &mut [u32], left: u32, right: u32) {
-    let left = content_find(parent, left);
-    let right = content_find(parent, right);
-    if left != right {
-        parent[left.max(right) as usize] = left.min(right);
     }
 }
 
@@ -515,30 +728,45 @@ fn order_touched_blocks(touched: &mut Vec<BlockId>, scratch: &[BlockScratch], st
 ///
 /// Built up by union: two components are asked whether they interfere, then
 /// the smaller is absorbed into the larger, so a run of a thousand versions
-/// costs a thousand small merges rather than a thousand rescans.
+/// costs a thousand small merges rather than a thousand rescans. Within a
+/// block the segments are kept in the order they start, so the question is
+/// one sweep over the two components' segments in that block rather than every
+/// pair of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComponentLiveness {
+    /// Per block, the segments sorted by where they start.
     by_block: BTreeMap<BlockId, Vec<(LiveSegment, ValueId)>>,
     members: usize,
+    segments: usize,
 }
 
 impl ComponentLiveness {
     pub fn of(liveness: &ValueLiveness, value: ValueId) -> Self {
         let mut by_block = BTreeMap::<BlockId, Vec<(LiveSegment, ValueId)>>::new();
-        for segment in liveness.segments(value) {
+        let segments = liveness.segments(value);
+        for segment in segments {
             by_block
                 .entry(segment.block)
                 .or_default()
                 .push((*segment, value));
         }
+        for block in by_block.values_mut() {
+            block.sort_by_key(|(segment, _)| segment.start);
+        }
         Self {
             by_block,
             members: 1,
+            segments: segments.len(),
         }
     }
 
     pub const fn members(&self) -> usize {
         self.members
+    }
+
+    /// How many live segments the component holds.
+    pub const fn segment_count(&self) -> usize {
+        self.segments
     }
 
     /// Whether any value of one component is live where a value of the other
@@ -550,6 +778,13 @@ impl ComponentLiveness {
     /// The first pair of values, one from each component, that are both live
     /// at one point and are not one content; which pair it is names the
     /// reason a union was declined.
+    ///
+    /// For each block both components are live in, one sweep in start order:
+    /// a segment is compared only with the other component's segments that
+    /// began no later and have not ended where it begins, which are exactly
+    /// the ones it can overlap from that side. `O(m + n)` per shared block
+    /// plus the overlapping pairs, where the nested scan it replaces was
+    /// `O(m * n)`.
     pub fn first_interference(
         &self,
         other: &Self,
@@ -561,14 +796,10 @@ impl ComponentLiveness {
             (other, self)
         };
         small.by_block.iter().find_map(|(block, mine)| {
-            large.by_block.get(block).and_then(|theirs| {
-                mine.iter().find_map(|(segment, value)| {
-                    theirs.iter().find_map(|(candidate, member)| {
-                        (segment.overlaps(*candidate) && !liveness.same_content(*value, *member))
-                            .then_some((*value, *member))
-                    })
-                })
-            })
+            large
+                .by_block
+                .get(block)
+                .and_then(|theirs| first_overlap(mine, theirs, liveness))
         })
     }
 
@@ -579,9 +810,54 @@ impl ComponentLiveness {
             return self.absorb(mine);
         }
         for (block, segments) in other.by_block {
-            self.by_block.entry(block).or_default().extend(segments);
+            let held = self.by_block.entry(block).or_default();
+            held.extend(segments);
+            // Two sorted runs: the stable sort merges them in linear time.
+            held.sort_by_key(|(segment, _)| segment.start);
         }
         self.members += other.members;
+        self.segments += other.segments;
+    }
+}
+
+/// The first overlapping pair of one block's segments, one from each side,
+/// that are not one content. Both sides are sorted by start.
+fn first_overlap(
+    mine: &[(LiveSegment, ValueId)],
+    theirs: &[(LiveSegment, ValueId)],
+    liveness: &ValueLiveness,
+) -> Option<(ValueId, ValueId)> {
+    let (mut next_mine, mut next_theirs) = (0, 0);
+    let mut open_mine = Vec::<(LiveSegment, ValueId)>::new();
+    let mut open_theirs = Vec::<(LiveSegment, ValueId)>::new();
+    loop {
+        let take_mine = match (mine.get(next_mine), theirs.get(next_theirs)) {
+            (Some((left, _)), Some((right, _))) => left.start <= right.start,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        let (segment, value, open_other, open_same) = if take_mine {
+            let (segment, value) = mine[next_mine];
+            next_mine += 1;
+            (segment, value, &mut open_theirs, &mut open_mine)
+        } else {
+            let (segment, value) = theirs[next_theirs];
+            next_theirs += 1;
+            (segment, value, &mut open_mine, &mut open_theirs)
+        };
+        // What ended where this begins overlaps nothing that begins later.
+        open_other.retain(|(open, _)| open.end > segment.start);
+        for (open, member) in open_other.iter() {
+            if segment.overlaps(*open) && !liveness.same_content(value, *member) {
+                return Some(if take_mine {
+                    (value, *member)
+                } else {
+                    (*member, value)
+                });
+            }
+        }
+        open_same.push((segment, value));
     }
 }
 
@@ -589,7 +865,10 @@ impl ComponentLiveness {
 mod tests {
     use super::*;
     use crate::function::SSAFunction;
-    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+    use r2il::{
+        ArchSpec, R2ILBlock, R2ILOp, RegisterDef, RegisterProjection,
+        RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
+    };
 
     fn reg(offset: u64, size: u32) -> Varnode {
         Varnode::new(SpaceId::Register, offset, size)
@@ -793,7 +1072,11 @@ mod tests {
     #[test]
     fn a_loop_carrier_dies_into_its_update_and_is_reborn_at_the_merge() {
         let (_func, graph) = loop_with_exit_read();
-        let liveness = ValueLiveness::compute(&graph, &FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &FunctionLiveOut::default(),
+            ValueContent::of(&graph, None),
+        );
         let merged = value_named(&graph, "RAX", 2);
         let updated = defined_at(&graph, 0x1008, 1);
         let carried = defined_at(&graph, 0x100c, 0);
@@ -862,7 +1145,11 @@ mod tests {
         let func = SSAFunction::from_blocks_with_arch(&[entry, header, latch, exit], Some(&arch()))
             .expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let liveness = ValueLiveness::compute(&graph, &FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &FunctionLiveOut::default(),
+            ValueContent::of(&graph, None),
+        );
         let merged = value_named(&graph, "RAX", 2);
         let next = defined_at(&graph, 0x1008, 0);
         let written_back = defined_at(&graph, 0x1008, 1);
@@ -902,7 +1189,7 @@ mod tests {
             size: 8,
         };
         let live_out = FunctionLiveOut::compute(&func, &graph, &[rax]);
-        let liveness = ValueLiveness::compute(&graph, &live_out);
+        let liveness = ValueLiveness::compute(&graph, &live_out, ValueContent::of(&graph, None));
         let returned = defined_at(&graph, 0x1000, 0);
         let scratch = defined_at(&graph, 0x1000, 1);
         let block = block_at(&graph, 0x1000);
@@ -919,7 +1206,11 @@ mod tests {
     #[test]
     fn components_merge_small_into_large_and_keep_every_segment() {
         let (_func, graph) = loop_with_exit_read();
-        let liveness = ValueLiveness::compute(&graph, &FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &FunctionLiveOut::default(),
+            ValueContent::of(&graph, None),
+        );
         let merged = value_named(&graph, "RAX", 2);
         let updated = defined_at(&graph, 0x1008, 1);
         let copy = defined_at(&graph, 0x1008, 0);
@@ -933,5 +1224,237 @@ mod tests {
         // it is dead, so nothing else interferes with it either.
         let other = ComponentLiveness::of(&liveness, copy);
         assert!(!run.interferes(&other, &liveness));
+    }
+
+    #[test]
+    fn a_value_is_one_content_only_with_the_values_whose_low_bits_it_is() {
+        // t = RCX; signed = SEXT(t); high = SUBPIECE(signed, 8);
+        // zero = ZEXT(t); low = SUBPIECE(zero, 0).
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntSExt {
+            dst: Varnode::unique(0x100, 16),
+            src: reg(8, 8),
+        });
+        block.push(R2ILOp::Subpiece {
+            dst: reg(16, 8),
+            src: Varnode::unique(0x100, 16),
+            offset: 8,
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: Varnode::unique(0x200, 16),
+            src: reg(8, 8),
+        });
+        block.push(R2ILOp::Subpiece {
+            dst: reg(0, 8),
+            src: Varnode::unique(0x200, 16),
+            offset: 0,
+        });
+        block.push(R2ILOp::Return {
+            target: reg(0x288, 8),
+        });
+        let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
+        let graph = SsaGraph::from_function(&func);
+        let content = ValueContent::of(&graph, None);
+        let t = value_named(&graph, "RCX", 0);
+        let signed = defined_at(&graph, 0x1000, 0);
+        let high = defined_at(&graph, 0x1000, 1);
+        let zero = defined_at(&graph, 0x1000, 2);
+        let low = defined_at(&graph, 0x1000, 3);
+        // The sign word a division extends into is not the dividend: one
+        // object cannot hold both while both are needed.
+        assert!(!content.same_content(t, high));
+        assert!(!content.same_content(signed, high));
+        // The two extensions agree only below the value's width.
+        assert!(!content.same_content(signed, zero));
+        // The value is the low bits of each extension, and the low lane of its
+        // zero extension is the value itself.
+        assert!(content.same_content(t, signed));
+        assert!(content.same_content(t, zero));
+        assert!(content.same_content(t, low));
+        assert!(content.same_content(zero, low));
+        let liveness = ValueLiveness::compute(&graph, &FunctionLiveOut::default(), content);
+        assert!(!liveness.same_content(t, high));
+    }
+
+    #[test]
+    fn a_register_lane_is_one_content_with_its_root_where_the_lifter_puts_its_low_bits() {
+        // A big-endian register file: `w0`, the low word of `r0`, is its
+        // higher-addressed half, and `hw0` at `r0`'s own offset is its high
+        // word. Both are read on entry.
+        let storage = |offset, size| RegisterStorage { offset, size };
+        let lane = |written: RegisterStorage, lsb_bit_offset, size_bits| RegisterProjection {
+            written,
+            disposition: RegisterProjectionDisposition::Bound {
+                carrier: storage(0, 8),
+                slice: r2il::RegisterBitSlice {
+                    lsb_bit_offset,
+                    size_bits,
+                },
+            },
+        };
+        let mut arch = ArchSpec::new("big-endian-lanes");
+        arch.addr_size = 8;
+        arch.set_instruction_endianness(r2il::Endianness::Big);
+        arch.set_memory_endianness(r2il::Endianness::Big);
+        arch.add_register(RegisterDef::new("r0", 0, 8));
+        arch.add_register(RegisterDef::new("hw0", 0, 4));
+        arch.add_register(RegisterDef::new("w0", 4, 4));
+        arch.add_register(RegisterDef::new("pc", 0x100, 8));
+        arch.register_projections = vec![
+            lane(storage(0, 4), 32, 32),
+            lane(storage(0, 8), 0, 64),
+            lane(storage(4, 4), 0, 32),
+        ];
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x18, 4),
+            src: Varnode::new(SpaceId::Register, 0, 4),
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x20, 4),
+            src: Varnode::new(SpaceId::Register, 4, 4),
+        });
+        block.push(R2ILOp::Return {
+            target: reg(0x100, 8),
+        });
+        let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
+        let graph = SsaGraph::from_function(&func);
+        let content = ValueContent::of(&graph, None);
+        let whole = value_named(&graph, "r0", 0);
+        let copied = |offset| {
+            graph
+                .values
+                .iter()
+                .find(|value| {
+                    value.var.size == 4
+                        && value.canonical_storage.is_some_and(|storage| {
+                            storage.space == crate::CanonicalStorageSpace::Unique
+                                && storage.offset == offset
+                        })
+                })
+                .map(|value| value.id)
+                .expect("copied lane")
+        };
+        let (high, low) = (copied(0x18), copied(0x20));
+        assert!(content.same_content(whole, low), "w0 is r0's low word");
+        assert!(
+            !content.same_content(whole, high),
+            "hw0 shares r0's offset, not its low bits"
+        );
+        assert!(!content.same_content(high, low));
+    }
+
+    #[test]
+    fn merged_lanes_are_joined_where_the_lifter_puts_their_low_bits() {
+        // Values a function is entered with at three widths of one register,
+        // built as separate variables (renaming would have made them lanes of
+        // the root). On this big-endian file the word at the register's own
+        // offset is its high half and the word four bytes in its low half.
+        let storage = |offset, size| crate::CanonicalStorageId {
+            space: crate::CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let entries = [("r0", 0, 8), ("hw0", 0, 4), ("w0", 4, 4)]
+            .map(|(name, offset, size)| (crate::SSAVar::new(name, 0, size), storage(offset, size)));
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("ssa");
+        func.get_block_mut(0x1000).expect("block").ops = entries
+            .iter()
+            .enumerate()
+            .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
+                dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
+                src: entry.clone(),
+            })
+            .collect();
+        let mut graph = SsaGraph::from_function(&func);
+        for value in &mut graph.values {
+            if let Some((_, at)) = entries.iter().find(|(entry, _)| *entry == value.var) {
+                value.canonical_storage = Some(*at);
+            }
+        }
+        let lane = |written: RegisterStorage, lsb_bit_offset, size_bits| RegisterProjection {
+            written,
+            disposition: RegisterProjectionDisposition::Bound {
+                carrier: RegisterStorage { offset: 0, size: 8 },
+                slice: r2il::RegisterBitSlice {
+                    lsb_bit_offset,
+                    size_bits,
+                },
+            },
+        };
+        let mut arch = ArchSpec::new("big-endian-lanes");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("r0", 0, 8));
+        arch.add_register(RegisterDef::new("hw0", 0, 4));
+        arch.add_register(RegisterDef::new("w0", 4, 4));
+        arch.register_projections = vec![
+            lane(RegisterStorage { offset: 0, size: 4 }, 32, 32),
+            lane(RegisterStorage { offset: 0, size: 8 }, 0, 64),
+            lane(RegisterStorage { offset: 4, size: 4 }, 0, 32),
+        ];
+        let context = crate::SourceMachineContext::from_blocks(&[], Some(&arch));
+        let content = ValueContent::of(&graph, Some(&context));
+        let [whole, high, low] = ["r0", "hw0", "w0"].map(|name| value_named(&graph, name, 0));
+        assert!(content.same_content(whole, low), "w0 is r0's low word");
+        assert!(
+            !content.same_content(whole, high),
+            "hw0 shares r0's offset, not its low bits"
+        );
+        assert!(!content.same_content(high, low));
+        // Where the lifter states no mapping, nothing is joined by offset.
+        let unmapped = ValueContent::of(&graph, None);
+        assert!(!unmapped.same_content(whole, high));
+        assert!(!unmapped.same_content(whole, low));
+    }
+
+    #[test]
+    fn the_sweep_finds_an_interference_exactly_where_a_pair_interferes() {
+        let (_func, graph) = loop_with_exit_read();
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &FunctionLiveOut::default(),
+            ValueContent::of(&graph, None),
+        );
+        let values = graph
+            .values
+            .iter()
+            .map(|value| value.id)
+            .collect::<Vec<_>>();
+        for left in &values {
+            for right in &values {
+                let one = ComponentLiveness::of(&liveness, *left);
+                let other = ComponentLiveness::of(&liveness, *right);
+                assert_eq!(
+                    one.interferes(&other, &liveness),
+                    left != right && liveness.interferes(*left, *right),
+                    "{left:?} against {right:?}"
+                );
+            }
+        }
+        // A component of several values interferes with a value exactly when
+        // one of its members does.
+        for (index, first) in values.iter().enumerate() {
+            for second in &values[index + 1..] {
+                if liveness.interferes(*first, *second) {
+                    continue;
+                }
+                let mut run = ComponentLiveness::of(&liveness, *first);
+                run.absorb(ComponentLiveness::of(&liveness, *second));
+                for other in &values {
+                    if other == first || other == second {
+                        continue;
+                    }
+                    assert_eq!(
+                        run.interferes(&ComponentLiveness::of(&liveness, *other), &liveness),
+                        liveness.interferes(*first, *other) || liveness.interferes(*second, *other),
+                        "{first:?}+{second:?} against {other:?}"
+                    );
+                }
+            }
+        }
     }
 }

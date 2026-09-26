@@ -145,7 +145,13 @@ struct PendingReplacementExpr {
 enum ReplacementSource {
     RenderedValue,
     PlannedInline,
-    CanonicalAccess(r2ssa::StructuredAccessId),
+    /// The access term, rendered whole or around operands the renderer
+    /// spelled through their own plans. An operand's own replacement answers
+    /// for what it renders, so the access answers only for what lies above.
+    CanonicalAccess {
+        access: r2ssa::StructuredAccessId,
+        operands: [Option<ValueId>; 2],
+    },
 }
 
 impl PendingReplacementExpr {
@@ -166,10 +172,22 @@ impl PendingReplacementExpr {
     }
 
     fn canonical_access(fact: &r2types::MemoryAccessRenderFact, expr: CExpr) -> Self {
+        Self::canonical_access_over(fact, expr, [None, None])
+    }
+
+    /// The access spelled around operands each rendered by its own plan.
+    fn canonical_access_over(
+        fact: &r2types::MemoryAccessRenderFact,
+        expr: CExpr,
+        operands: [Option<ValueId>; 2],
+    ) -> Self {
         Self {
             expr,
             value: fact.address,
-            source: ReplacementSource::CanonicalAccess(fact.access),
+            source: ReplacementSource::CanonicalAccess {
+                access: fact.access,
+                operands,
+            },
         }
     }
 }

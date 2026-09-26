@@ -165,11 +165,13 @@ impl SSAFunction {
         // Which frame slots behave like variables. Asked of the lifted text,
         // before construction, because construction is what decides which
         // value each read of a variable sees.
+        // A home is proven by the entry value it spills, not by which
+        // carriers the convention names: the result register among them
+        // made `call f; mov [rbp-4], eax` a parameter's home.
         let promoted = crate::promote::promote_private_stack_slots(
             blocks,
             stack_pointer_carrier,
             questions.interface,
-            &abi_carriers,
             stack_pointer_restored_by_callee.is_some(),
         )
         .unwrap_or_default();

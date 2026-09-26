@@ -1682,19 +1682,29 @@ fn projected_peer_loop_artifact(
         target: SSAVar::new("ram:1b30", 0, 8),
         cond: SSAVar::constant(1, 1),
     }];
+    // A coherent run writes the register once and reads its narrower widths
+    // back from what it wrote: `mov eax, eax`, then `eax` and `ax` are that
+    // result's low bits. Each width's update is then the others' low bits,
+    // which is what lets the three be one object. The latch also reads `ax`
+    // before the write, so every width is carried.
     function.get_block_mut(0x1b20).expect("loop latch").ops = if coherent_storage_run {
         vec![
+            SSAOp::Copy {
+                dst: SSAVar::new(format!("{name_prefix}:read:2"), 1, 2),
+                src: phis[2].clone(),
+            },
             SSAOp::IntZExt {
                 dst: updates[0].clone(),
                 src: phis[1].clone(),
             },
-            SSAOp::IntZExt {
+            SSAOp::Subpiece {
                 dst: updates[1].clone(),
-                src: phis[2].clone(),
+                src: updates[0].clone(),
+                offset: 0,
             },
             SSAOp::Subpiece {
                 dst: updates[2].clone(),
-                src: phis[0].clone(),
+                src: updates[0].clone(),
                 offset: 0,
             },
             SSAOp::Branch {
@@ -2197,20 +2207,6 @@ fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
         flag == SSAVar::constant(1, 1) || flag == SSAVar::constant(0x41, 1),
         "{:?}",
         block.ops
-    );
-}
-
-#[test]
-fn test_constant_display_names_do_not_supply_bits() {
-    let named_constant = SSAVar::new("const:0x1234", 0, 8);
-    assert_eq!(named_constant.constant_bits(), None);
-    assert_eq!(adapt_root_width(&named_constant, 4), None);
-
-    let canonical_constant = SSAVar::constant(0x1234, 8).renamed("not-a-constant");
-    assert_eq!(canonical_constant.constant_bits(), Some(0x1234));
-    assert_eq!(
-        adapt_root_width(&canonical_constant, 4),
-        Some(SSAVar::constant(0x1234, 4))
     );
 }
 

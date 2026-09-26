@@ -1771,8 +1771,16 @@ fn field_certificates_populate_direct_member_render_facts() {
     assert_eq!(render.memory_value_type(member.access), Some(&expected));
 }
 
+/// A pointer a loop carries -- `p = phi(arg0, p->next)` -- is parameter 0
+/// only on the loop's first iteration. Naming its accesses from parameter 0's
+/// field certificates rested on reading the merge as parameter 0 by skipping
+/// the input nothing could place, which is the identity claim the value view
+/// refuses: a merge is based where every input is. What types the carrier is
+/// its declared pointee, which a certificate keyed by parameter does not
+/// state, so the accesses through it get no parameter member name and the
+/// carrier no type borrowed from one.
 #[test]
-fn field_certificates_follow_loop_carried_parameter_phi() {
+fn field_certificates_do_not_follow_a_loop_carried_pointer_as_the_parameter() {
     let mut entry = R2ILBlock::new(0x400ff0, 0x10);
     entry.push(R2ILOp::Branch {
         target: Varnode::constant(0x401000, 8),
@@ -1861,22 +1869,23 @@ fn field_certificates_follow_loop_carried_parameter_phi() {
     );
     facts.populate_certified_loop_carrier_types();
 
-    assert!(facts.render().is_some_and(|render| {
+    let render = facts.render().expect("prepared render facts");
+    assert!(
         render
             .member_access_for_op(0x401000, 1, false, "value", 8, Some(8))
-            .is_some()
-            && render
-                .member_access_for_op(0x401010, 1, false, "next", 0x10, Some(8))
-                .is_some()
-    }));
-    let expected = CTypeLike::Pointer(Box::new(CTypeLike::Struct("Node".to_string())));
-    assert!(facts.render().is_some_and(|render| {
-        render.loop_carriers().any(|carrier| {
-            matches!(
-                carrier,
-                CertifiedEntity::LoopCarrier { ty: Some(ty), .. } if *ty == expected
-            )
-        })
+            .is_none()
+    );
+    assert!(
+        render
+            .member_access_for_op(0x401010, 1, false, "next", 0x10, Some(8))
+            .is_none()
+    );
+    let borrowed = CTypeLike::Pointer(Box::new(CTypeLike::Struct("Node".to_string())));
+    assert!(!render.loop_carriers().any(|carrier| {
+        matches!(
+            carrier,
+            CertifiedEntity::LoopCarrier { ty: Some(ty), .. } if *ty == borrowed
+        )
     }));
 }
 

@@ -3,12 +3,29 @@
 //! This pass owns affine pointer identity for prepared SSA. It propagates
 //! parameter bases through arithmetic and proven stack spills so object,
 //! memory-SSA, summary, symbolic, type, and render consumers share one fact.
+//!
+//! Which values are the same address is not decided here: it is the value
+//! view's (`crate::view`), projected. A value is the address its
+//! same-integer root is -- the end of its chain of copies, same-width casts
+//! and zero extensions of a full-width root -- and nothing else is: a lane, a
+//! truncation, a sign extension, a `New` or a cast of another width is a
+//! different value, whatever it was read from.
+//!
+//! The affine scalar an address is displaced by is a form modulo `2^w` over
+//! the unsigned values of its terms, `w` the width of the value it describes.
+//! Addition, subtraction, negation and multiplication or shifting by a
+//! constant keep the width, so they combine their operands' forms. A
+//! zero-extended root is its root's unsigned value, one term, whatever form
+//! the root had at its narrower width -- `(uint64_t)(uint32_t)(i + 1)` is not
+//! `i + 1` where the addition wrapped. A sign extension and a truncation are
+//! terms of their own.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
 
+use crate::view::ValueViews;
 use crate::{
     CanonicalStorageId, SSAFunction, SSAOp, SSAVar, SourceMachineContext, SsaGraph,
     StackAddressRoot, ValueId,
@@ -162,10 +179,14 @@ struct AffineScalar {
     constant: i128,
 }
 
+/// A spill slot: where it is, and how wide the value stored there is. A
+/// read of the same place at another width is a lane of the stored value, or
+/// more than it, and never the address it held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SpillSlotKey {
     root: StackAddressRoot,
     space: SpaceId,
+    width: u32,
 }
 
 fn memory_space_order(space: SpaceId) -> (u8, u32) {
@@ -183,6 +204,7 @@ impl Ord for SpillSlotKey {
         self.root
             .cmp(&other.root)
             .then_with(|| memory_space_order(self.space).cmp(&memory_space_order(other.space)))
+            .then_with(|| self.width.cmp(&other.width))
     }
 }
 
@@ -233,6 +255,9 @@ impl AffineScalar {
 struct AddressCollector<'a> {
     function: &'a SSAFunction,
     graph: &'a SsaGraph,
+    /// Which values carry the same bits; absent only where no preparation
+    /// ran, and then there is no formal to propagate either.
+    views: Option<&'a ValueViews>,
     definitions: HashMap<SSAVar, SSAOp>,
     expressions: BTreeMap<ValueId, AddressExpression>,
     scalar_memo: HashMap<ValueId, Option<AffineScalar>>,
@@ -301,6 +326,7 @@ impl<'a> AddressCollector<'a> {
         Self {
             function,
             graph,
+            views: function.decompile_prep_facts().map(|prep| &prep.views),
             definitions,
             expressions,
             scalar_memo: HashMap::new(),
@@ -431,14 +457,16 @@ impl<'a> AddressCollector<'a> {
                     space, addr, val, ..
                 } => {
                     if let Some(root) = self.stack_root(addr) {
-                        let slot = SpillSlotKey {
-                            root,
-                            space: *space,
-                        };
+                        // A store replaces whatever any read of the place
+                        // would have found, at every width.
+                        stack.retain(|slot, _| slot.root != root || slot.space != *space);
                         if let Some(expression) = self.expression_for_var(val) {
+                            let slot = SpillSlotKey {
+                                root,
+                                space: *space,
+                                width: val.size,
+                            };
                             stack.insert(slot, expression);
-                        } else {
-                            stack.remove(&slot);
                         }
                     }
                 }
@@ -454,6 +482,7 @@ impl<'a> AddressCollector<'a> {
                             .get(&SpillSlotKey {
                                 root,
                                 space: *space,
+                                width: dst.size,
                             })
                             .cloned()
                     }) {
@@ -483,22 +512,6 @@ impl<'a> AddressCollector<'a> {
         op: &'b SSAOp,
     ) -> Option<(&'b SSAVar, AddressExpression)> {
         match op {
-            SSAOp::Copy { dst, src }
-            | SSAOp::Cast { dst, src }
-            | SSAOp::New { dst, src }
-            | SSAOp::IntZExt { dst, src }
-            | SSAOp::IntSExt { dst, src } => self
-                .expression_for_var(src)
-                .map(|expression| (dst, expression)),
-            // A narrowed address is not the address: the low lane of a
-            // pointer parameter is a scalar the body computes with.
-            SSAOp::Subpiece {
-                dst,
-                src,
-                offset: 0,
-            } if dst.size == src.size => self
-                .expression_for_var(src)
-                .map(|expression| (dst, expression)),
             SSAOp::IntAdd { dst, a, b } => self
                 .derive_additive_expression(a, b, 1, 1)
                 .map(|expression| (dst, expression)),
@@ -521,7 +534,29 @@ impl<'a> AddressCollector<'a> {
             } => self
                 .derive_additive_expression(base, index, -1, i128::from(*element_size))
                 .map(|expression| (dst, expression)),
-            _ => None,
+            // Any other definition is its same-integer root's address, where
+            // the view says it has one: a copy, a same-width cast or a zero
+            // extension of a full-width root. A narrowed, sign-extended or
+            // otherwise converted pointer is a scalar the body computes with.
+            op => {
+                let dst = op.dst()?;
+                let root = self.same_integer_root(dst);
+                (root != dst)
+                    .then(|| self.expression_for_var(root))
+                    .flatten()
+                    .map(|expression| (dst, expression))
+            }
+        }
+    }
+
+    /// The value `var` equals as an unsigned integer, by the view.
+    fn same_integer_root<'v>(&self, var: &'v SSAVar) -> &'v SSAVar
+    where
+        'a: 'v,
+    {
+        match self.views {
+            Some(views) => views.same_integer_root(var),
+            None => var,
         }
     }
 
@@ -601,16 +636,23 @@ impl<'a> AddressCollector<'a> {
         if let Some(constant) = signed_constant(&var) {
             return Some(AffineScalar::constant(constant));
         }
+        // The same integer as its root: the root's form where the widths
+        // agree, and where the root was widened, its unsigned value as one
+        // term -- the root's form holds only modulo its own width.
+        let root = self.same_integer_root(&var).clone();
+        if root != var {
+            if root.size == var.size {
+                return self.scalar_for_var(&root);
+            }
+            return Some(match self.graph.value_id_for_var(&root) {
+                Some(root) => AffineScalar::term(root),
+                None => AffineScalar::term(value),
+            });
+        }
         let Some(op) = self.definitions.get(&var).cloned() else {
             return Some(AffineScalar::term(value));
         };
         match op {
-            SSAOp::Copy { src, .. }
-            | SSAOp::Cast { src, .. }
-            | SSAOp::New { src, .. }
-            | SSAOp::IntZExt { src, .. }
-            | SSAOp::IntSExt { src, .. }
-            | SSAOp::Subpiece { src, offset: 0, .. } => self.scalar_for_var(&src),
             SSAOp::IntNegate { src, .. } => self.scalar_for_var(&src)?.scale(-1),
             SSAOp::IntAdd { a, b, .. } => self
                 .scalar_for_var(&a)?
@@ -979,6 +1021,78 @@ mod tests {
         );
     }
 
+    /// A slot a pointer was spilled to, read back at half its width, holds
+    /// the pointer's low word, which is not the pointer.
+    #[test]
+    fn a_narrower_reload_of_a_spilled_parameter_is_not_the_parameter() {
+        let arch = aarch64_two_arg_arch();
+        let register_storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let stack_pointer_storage = register_storage(16);
+        let interface = SourceFunctionInterface::new_exact(
+            b"narrow-spill-reload".to_vec(),
+            "aarch64-test",
+            [SourceAbiParameterSpec::new(0, register_storage(0))],
+            SourceFunctionReturn::Void,
+            [SourceStackSlotSpec::new_local(
+                StackAddressBase::StackPointer,
+                stack_pointer_storage,
+                -8,
+                8,
+            )],
+        )
+        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer_storage))
+        .expect("exact source interface");
+        let mut block = R2ILBlock::new(0x1100, 4);
+        block.push(R2ILOp::IntSub {
+            dst: Varnode::unique(0x10, 8),
+            a: Varnode::register(16, 8),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+            val: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x20, 4),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x28, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+            .expect("decompile artifact");
+        let loaded = |name: &str| {
+            artifact
+                .graph()
+                .values
+                .iter()
+                .find(|value| value.var.name().starts_with(name))
+                .map(|value| value.id)
+                .expect(name)
+        };
+        assert!(
+            artifact
+                .addresses()
+                .parameter_expression(loaded("tmp:20"))
+                .is_none()
+        );
+        assert_eq!(
+            artifact
+                .addresses()
+                .parameter_expression(loaded("tmp:28"))
+                .map(|expression| expression.parameter),
+            Some(0)
+        );
+    }
+
     #[test]
     fn narrow_scalar_formal_is_not_a_parameter_address_base() {
         let arch = aarch64_two_arg_arch();
@@ -1006,6 +1120,164 @@ mod tests {
                 .addresses()
                 .parameter_expression(scalar.id)
                 .is_none()
+        );
+    }
+
+    /// The id of the one value the lift names `name`.
+    fn value_named(artifact: &SsaArtifact, name: &str) -> crate::ValueId {
+        artifact
+            .graph()
+            .values
+            .iter()
+            .find(|value| value.var.name() == name)
+            .map(|value| value.id)
+            .unwrap_or_else(|| panic!("no value {name}"))
+    }
+
+    /// A 32-bit parameter in `w1`, zero-extended, is the parameter's unsigned
+    /// value and so its address; sign-extended it is another integer wherever
+    /// its top bit is set, and so no address of the parameter at all.
+    #[test]
+    fn a_sign_extended_parameter_is_not_the_parameter_it_extends() {
+        let arch = aarch64_two_arg_arch();
+        let register = |offset, size| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"sign-extended-parameter".to_vec(),
+            "aarch64-test",
+            [
+                SourceAbiParameterSpec::new(0, register(0, 8)),
+                SourceAbiParameterSpec::new(1, register(8, 4)),
+            ],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .expect("valid exact parameter interface");
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntSExt {
+            dst: Varnode::unique(0x10, 8),
+            src: Varnode::register(8, 4),
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: Varnode::unique(0x18, 8),
+            src: Varnode::register(8, 4),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x20, 1),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x28, 1),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x18, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+            .expect("artifact");
+        let expression = |name| {
+            artifact
+                .addresses()
+                .parameter_expression(value_named(&artifact, name))
+                .map(|expression| (expression.parameter, expression.offset))
+        };
+        assert_eq!(expression("tmp:10"), None);
+        assert_eq!(expression("tmp:18"), Some((1, 0)));
+    }
+
+    /// `x0 + 4 * (uint64_t)(uint32_t)(w1 + 1)` is not `x0 + 4 * w1 + 4`: the
+    /// addition wraps at 32 bits, so the widened sum is one term.
+    #[test]
+    fn a_widened_narrow_sum_is_one_term_of_the_address() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x10, 4),
+            a: Varnode::register(8, 4),
+            b: Varnode::constant(1, 4),
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: Varnode::unique(0x18, 8),
+            src: Varnode::unique(0x10, 4),
+        });
+        block.push(R2ILOp::IntMult {
+            dst: Varnode::unique(0x20, 8),
+            a: Varnode::unique(0x18, 8),
+            b: Varnode::constant(4, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x28, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::unique(0x20, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x30, 4),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x28, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&arch),
+            exact_parameter_interface(b"widened-sum", 2),
+        )
+        .expect("artifact");
+        let address = artifact
+            .addresses()
+            .parameter_expression(value_named(&artifact, "tmp:28"))
+            .expect("x0 plus an index");
+        assert_eq!(address.parameter, 0);
+        assert_eq!(address.offset, 0, "{address:?}");
+        assert_eq!(
+            address.terms,
+            vec![crate::AffineAddressTerm {
+                value: value_named(&artifact, "tmp:10"),
+                coefficient: 4,
+            }]
+        );
+    }
+
+    /// `x0 + (uint64_t)(uint32_t)x1` adds the low word of `x1`, not `x1`.
+    #[test]
+    fn a_truncated_index_is_its_own_term() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Subpiece {
+            dst: Varnode::unique(0x10, 4),
+            src: Varnode::register(8, 8),
+            offset: 0,
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: Varnode::unique(0x18, 8),
+            src: Varnode::unique(0x10, 4),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x20, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::unique(0x18, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x28, 1),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x20, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&arch),
+            exact_parameter_interface(b"truncated-index", 2),
+        )
+        .expect("artifact");
+        let address = artifact
+            .addresses()
+            .parameter_expression(value_named(&artifact, "tmp:20"))
+            .expect("x0 plus an index");
+        assert_eq!(
+            address.terms,
+            vec![crate::AffineAddressTerm {
+                value: value_named(&artifact, "tmp:18"),
+                coefficient: 1,
+            }]
         );
     }
 

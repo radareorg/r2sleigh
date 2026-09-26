@@ -860,6 +860,7 @@ fn recover_interface_inner(
         let liveness = crate::liveness::ValueLiveness::compute(
             &graph,
             &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(&graph, Some(machine_context)),
         );
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         crate::semantic::PreparedFunctionFacts::collect_with_context(

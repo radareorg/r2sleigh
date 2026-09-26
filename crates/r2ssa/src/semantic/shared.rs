@@ -1591,7 +1591,6 @@ pub(crate) fn callee_write_spans(
                         // element reaches exactly that far.
                         values
                             .upper_bound(value)
-                            .or_else(|| values.upper_bound(crate::constant::root_of(graph, value)))
                             .or_else(|| crate::constant::folded_value(graph, value))
                     };
                     let Some(end) = proven
@@ -2664,6 +2663,9 @@ pub(crate) fn resolve_graph_literal_value(
     var: &SSAVar,
 ) -> Option<u64> {
     let root = canonical_value_root(facts, var);
+    if let Some(bits) = root.constant_bits() {
+        return Some(bits);
+    }
     let value = graph
         .value_id_for_var(root)
         .or_else(|| graph.value_id_for_var(var))

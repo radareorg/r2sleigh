@@ -5,6 +5,7 @@
 //! fixpoint over direct-call reachable functions without introducing a second
 //! whole-program SSA graph.
 
+mod dependence;
 #[cfg(test)]
 mod tests;
 
@@ -76,6 +77,8 @@ pub enum SummaryArgumentReach {
         stride: i64,
         base: i64,
         width: u32,
+        /// The index's sign-extended width, as `SummaryScaledOffset` states it.
+        sign_bits: Option<u32>,
     },
 }
 
@@ -89,12 +92,24 @@ impl SummaryArgumentReach {
                 stride,
                 base,
                 width,
+                sign_bits,
             } => {
+                let bound = bound(argument)?;
+                // A sign-extended index is the bound's value only where the
+                // bound leaves its sign bit clear; past that it may be
+                // negative, and nothing bounds the reach below the base.
+                if let Some(bits) = sign_bits
+                    && 1u64
+                        .checked_shl(bits.checked_sub(1)?)
+                        .is_none_or(|sign| bound >= sign)
+                {
+                    return None;
+                }
                 // The last index reaches `stride * bound`, and the element
                 // there occupies `width` bytes, so that is where the object
                 // ends. Counting `bound + 1` elements and adding the width on
                 // top of them measures one element too many.
-                let last = stride.checked_mul(i64::try_from(bound(argument)?).ok()?)?;
+                let last = stride.checked_mul(i64::try_from(bound).ok()?)?;
                 u64::try_from(base.checked_add(last)?.checked_add(i64::from(width))?).ok()
             }
         }
@@ -114,6 +129,11 @@ pub struct SummaryScaledOffset {
     /// Which of the callee's arguments the offset scales with.
     pub argument: usize,
     pub stride: i64,
+    /// How the index is widened to the address: its unsigned value where
+    /// this is `None`, or its low `bits` sign-extended. A sign-extended index
+    /// the caller cannot prove below `2^(bits-1)` may be negative, and reaches
+    /// below the base the stride is counted up from.
+    pub sign_bits: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -123,6 +143,25 @@ pub struct SummaryMemoryRange {
     pub width: Option<u32>,
     /// Set when the offset is not constant but affine in an argument.
     pub scaled_by: Option<SummaryScaledOffset>,
+}
+
+impl SummaryMemoryRange {
+    /// How many bytes from the argument's own address this range covers, as
+    /// a span that starts at that address.
+    ///
+    /// A reach is how far up from the pointer it was handed a callee touches,
+    /// and a caller places the span at the address it passed. A range that
+    /// starts below that address -- `container_of`, `p[-1]` -- is not such a
+    /// span at any length: the bytes below belong to whatever object the
+    /// address sits inside, which nothing here states. It answers `None`,
+    /// which every reader takes as unbounded, rather than `offset_hi + 1`,
+    /// which for `[-8, -1]` claimed the callee touched nothing.
+    pub fn span_from_base(&self) -> Option<u64> {
+        if self.offset_lo < 0 {
+            return None;
+        }
+        u64::try_from(self.offset_hi.checked_add(1)?).ok()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -801,6 +840,11 @@ struct LocalSummaryFacts {
     /// The arguments the body itself loads or stores through: proof, where
     /// `arg_effects` also holds what an unknown call is assumed to do.
     dereferenced_args: BTreeSet<usize>,
+    /// The formals something the summary cannot place could reach through,
+    /// as `dependence` bits: an access at no stated place, a call, a formal
+    /// stored into memory. Their reach is unbounded; every other formal's is
+    /// what the accesses through it state.
+    unplaced_reach: u64,
 }
 
 #[derive(Debug)]
@@ -1332,9 +1376,6 @@ impl PreparedCalleeSummary {
         let mut scaled = BTreeMap::<usize, SummaryArgumentReach>::new();
         let mut reach = BTreeMap::<usize, u64>::new();
         let mut unbounded = BTreeSet::<usize>::new();
-        if self.local.has_unknown_calls {
-            return BTreeMap::new();
-        }
         for effect in &self.local.memory_effects {
             let SummaryMemoryRegion::Arg { index } = effect.location.region else {
                 continue;
@@ -1350,6 +1391,12 @@ impl PreparedCalleeSummary {
                 unbounded.insert(index);
                 continue;
             };
+            // Below the address the argument was handed as, whether stated
+            // or scaled from a base below it.
+            if range.offset_lo < 0 {
+                unbounded.insert(index);
+                continue;
+            }
             if let Some(term) = range.scaled_by {
                 // Stated per index; the caller multiplies it out.
                 scaled.insert(
@@ -1359,15 +1406,12 @@ impl PreparedCalleeSummary {
                         stride: term.stride,
                         base: range.offset_lo,
                         width: range.width.unwrap_or(0),
+                        sign_bits: term.sign_bits,
                     },
                 );
                 continue;
             }
-            let Some(end) = range
-                .offset_hi
-                .checked_add(1)
-                .and_then(|end| u64::try_from(end).ok())
-            else {
+            let Some(end) = range.span_from_base() else {
                 unbounded.insert(index);
                 continue;
             };
@@ -1394,8 +1438,17 @@ impl PreparedCalleeSummary {
                 }
             }
         }
-        reach.retain(|index, _| !unbounded.contains(index));
-        scaled.retain(|index, _| !unbounded.contains(index));
+        // An access or a call nothing places could reach through exactly the
+        // formals its address or its arguments are computed from, and no
+        // others: an unknown call handed only an index leaves a pointer's
+        // reach alone, and an indexed read of a table at a constant address
+        // poisons no pointer at all.
+        let unplaced = self.local.unplaced_reach;
+        let bounded = |index: &usize| {
+            !unbounded.contains(index) && !dependence::names_formal(unplaced, *index)
+        };
+        reach.retain(|index, _| bounded(index));
+        scaled.retain(|index, _| bounded(index));
         let mut proven = scaled;
         for (index, bytes) in reach {
             // A constant span and a scaled one through the same argument both
@@ -1404,7 +1457,7 @@ impl PreparedCalleeSummary {
         }
         r2il::refusal_evidence!(
             "argument-reach",
-            "{:#x}: reach={proven:?} unbounded={unbounded:?} unknown_calls={} effects={:?}",
+            "{:#x}: reach={proven:?} unbounded={unbounded:?} unplaced={unplaced:#x} unknown_calls={} effects={:?}",
             self.id.0,
             self.local.has_unknown_calls,
             self.local
@@ -2285,6 +2338,32 @@ fn collect_local_summary_facts_with_obligation_authority(
         call_observations: BTreeMap::new(),
         call_carriers_converged: call_argument_state.converged,
         dereferenced_args: BTreeSet::new(),
+        unplaced_reach: 0,
+    };
+    // Which formals each value is computed from, and so which formals an
+    // access or a call this summary cannot place could reach through.
+    let dependence = dependence::FormalDependence::of(prepared, abi);
+    out.unplaced_reach |= dependence.passed_to_calls();
+    if source_requires_unknown_effects {
+        out.unplaced_reach = u64::MAX;
+    }
+    let bits_of_var = |var: &SSAVar| {
+        prepared
+            .graph()
+            .value_id_for_var(var)
+            .map_or(0, |value| dependence.bits_of(value))
+    };
+    // A formal stored into the frame has escaped wherever a frame address
+    // does: anything the address reached can read it back and write through
+    // it. A frame no address leaves is read only by this body's own loads,
+    // which carry the formal on in the dependence.
+    out.unplaced_reach |= dependence.exposed_formals();
+    // An access that names no argument region at a stated place could touch
+    // any formal's object its address is computed from.
+    let unplaced = |location: &SummaryMemoryLocation, addr: &SSAVar| match location.region {
+        SummaryMemoryRegion::Unknown => bits_of_var(addr),
+        SummaryMemoryRegion::Arg { .. } if location.range.is_none() => bits_of_var(addr),
+        _ => 0,
     };
 
     if source_requires_unknown_effects {
@@ -2347,6 +2426,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, dst.size);
+                    out.unplaced_reach |= unplaced(&location, addr);
                     mark_location_access(&mut out, location, true, false);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2367,6 +2447,8 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, space, expected.size);
+                    out.unplaced_reach |=
+                        unplaced(&location, addr) | bits_of_var(&swap.replacement);
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2394,6 +2476,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2429,6 +2512,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
+                    // A formal's pointer stored where this function does not
+                    // own the memory has escaped: whatever reads it later can
+                    // reach its object.
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
                     mark_location_access(&mut out, location, false, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Write,
@@ -2446,6 +2533,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                 }
                 SSAOp::CallOther { inputs, .. } => {
                     has_volatile_or_unknown_effects = true;
+                    out.unplaced_reach |= inputs
+                        .iter()
+                        .map(&bits_of_var)
+                        .fold(0, |left, right| left | right);
                     let args = inputs
                         .iter()
                         .map(|input| classify_var_operand(prepared, input))
@@ -2459,6 +2550,9 @@ fn collect_local_summary_facts_with_obligation_authority(
                 }
                 op if has_volatile_or_unknown_effect(op) => {
                     has_volatile_or_unknown_effects = true;
+                    // An operation whose effect nothing describes could read
+                    // or write through any register.
+                    out.unplaced_reach = u64::MAX;
                     mark_unknown_call_effects(
                         &mut out.has_unknown_calls,
                         &mut out.arg_effects,
@@ -2554,49 +2648,95 @@ fn classify_memory_access_location(
     let Some(value_id) = prepared.graph().value_id_for_var(addr) else {
         return unknown_location();
     };
-    classify_memory_access_location_value(prepared, abi, value_id, space, width, 0)
+    classify_memory_access_location_value(prepared, abi, value_id, space, width)
 }
 
-/// Which of the callee's own arguments a scaling value is, if it is one.
+/// Which of the callee's own arguments a scaling value is, if it is one, and
+/// how it was widened to the address: the argument's unsigned value (or its
+/// low bits, which are no more), or its low bits sign-extended.
 ///
 /// The value is usually not the argument as it arrived: at `-O0` the index is
 /// spilled to its home slot in the prologue and the indexing reads it back, so
 /// the question is answered from the formal-identity fact rather than from the
-/// value's storage, which is the slot's.
-fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<usize> {
+/// value's storage, which is the slot's. An `int` index is sign-extended
+/// before it scales, which the address facts keep as a term of its own; the
+/// value view says whose bits it extends, and how.
+fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
     let var = prepared.value_var(value)?;
-    prepared
-        .function()
-        .decompile_prep_facts()?
-        .formal_parameter_of(var)
+    let facts = prepared.function().decompile_prep_facts()?;
+    if let Some(index) = facts.formal_parameter_of(var) {
+        return Some((index, None));
+    }
+    let view = facts.view(var);
+    let index = facts.formal_parameter_of(&view.root)?;
+    match view.extension {
+        crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
+        crate::view::ViewExtension::Sign => Some((index, Some(view.prefix_bits))),
+        crate::view::ViewExtension::Unknown => None,
+    }
 }
 
+/// Where an access through `value_id` lands, as a summary region.
+///
+/// The address is read the way the value view reads it: a copy or a zero
+/// extension is the same address (the representative and the same-integer
+/// root are both asked), while a lane at an offset, a truncation or a sign
+/// extension is a different value and no address the walk follows. A constant
+/// displacement is followed back to its base, one step per definition --
+/// definitions are acyclic outside phis, and no phi is stepped through -- so
+/// the walk needs no depth bound.
 fn classify_memory_access_location_value(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
     value_id: ValueId,
     space: SpaceId,
     width: u32,
-    depth: u32,
 ) -> SummaryMemoryLocation {
-    if depth > 8 {
-        return unknown_location();
+    let mut value = value_id;
+    let mut delta = 0i64;
+    loop {
+        if let Some(location) = classify_address_root(prepared, abi, value, space, width) {
+            let mut location = location;
+            if delta != 0 {
+                location.range = shifted_range(location.range, delta, width);
+            }
+            return location;
+        }
+        match displacement_step(prepared, value) {
+            Some(Displacement::Base { base, offset }) => {
+                let Some(next) = delta.checked_add(offset) else {
+                    return unknown_location();
+                };
+                value = base;
+                delta = next;
+            }
+            // A table at a constant address read at an index: the index is
+            // scaled or widened from a narrower integer, which no pointer is,
+            // so the constant is the object and the index a place inside it.
+            Some(Displacement::IndexedGlobal { address }) => {
+                return global_location(address.wrapping_add(delta as u64), None, None);
+            }
+            None => return unknown_location(),
+        }
     }
+}
 
-    let rooted = canonical_root_value(prepared, value_id);
-    let mut candidates = vec![value_id];
-    if rooted != value_id {
-        candidates.push(rooted);
-    }
-
-    for candidate in &candidates {
-        if let Some(expression) = prepared.addresses().parameter_expression(*candidate) {
+/// What a value names on its own: an argument's object, a global, the heap.
+fn classify_address_root(
+    prepared: &SsaArtifact,
+    abi: &AbiProfile,
+    value_id: ValueId,
+    space: SpaceId,
+    width: u32,
+) -> Option<SummaryMemoryLocation> {
+    for candidate in address_candidates(prepared, value_id) {
+        if let Some(expression) = prepared.addresses().parameter_expression(candidate) {
             let parameter = match expression
                 .parameter_storage
                 .and_then(|storage| abi.exact_argument_index_for_storage(storage))
             {
                 Some(parameter) => parameter,
-                None if abi.is_source_owned() => return unknown_location(),
+                None if abi.is_source_owned() => return Some(unknown_location()),
                 None => expression.parameter,
             };
             r2il::refusal_evidence!(
@@ -2606,178 +2746,154 @@ fn classify_memory_access_location_value(
                 expression.terms
             );
             if expression.terms.is_empty() {
-                return arg_location(parameter, Some(expression.offset), Some(width));
+                return Some(arg_location(
+                    parameter,
+                    Some(expression.offset),
+                    Some(width),
+                ));
             }
             // One term scaled by another argument is an indexed read of what
             // this one points at, and the stride is the fact the caller needs:
             // it knows what it passed for the index and so how far the read
             // goes. Discarding it left the reach merely "through argument n".
             if let [term] = expression.terms.as_slice()
-                && let Some(index) = scaled_argument_index(prepared, term.value)
+                && let Some((index, sign_bits)) = scaled_argument_index(prepared, term.value)
             {
-                return scaled_arg_location(
+                return Some(scaled_arg_location(
                     parameter,
                     SummaryScaledOffset {
                         argument: index,
                         stride: term.coefficient,
+                        sign_bits,
                     },
                     expression.offset,
                     Some(width),
-                );
+                ));
             }
-            return arg_location(parameter, None, None);
+            return Some(arg_location(parameter, None, None));
         }
-        if let Some(address) = crate::constant::value_of(prepared.graph(), *candidate) {
-            return global_location(address, Some(0), Some(width));
+        if let Some(address) = crate::constant::value_of(prepared.graph(), candidate) {
+            return Some(global_location(address, Some(0), Some(width)));
         }
+        let Some(object) = prepared
+            .objects()
+            .object_for_value(candidate, space)
+            .and_then(|object| prepared.objects().object(object))
+        else {
+            continue;
+        };
+        match object.kind {
+            ObjectKind::Parameter { index, .. } => {
+                if abi.is_source_owned() {
+                    return Some(unknown_location());
+                }
+                return Some(arg_location(index, None, None));
+            }
+            ObjectKind::Global { address, .. } => {
+                return Some(global_location(address, Some(0), Some(width)));
+            }
+            ObjectKind::HeapAlloc { .. } => {
+                return Some(SummaryMemoryLocation {
+                    region: SummaryMemoryRegion::HeapReturn,
+                    range: exact_range(0, width),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
-        if let Some(object_id) = prepared.objects().object_for_value(*candidate, space)
-            && let Some(object) = prepared.objects().object(object_id)
-        {
-            match object.kind {
-                ObjectKind::Parameter { index, .. } => {
-                    if abi.is_source_owned() {
-                        return unknown_location();
-                    }
-                    return arg_location(index, None, None);
-                }
-                ObjectKind::Global { address, .. } => {
-                    return global_location(address, Some(0), Some(width));
-                }
-                ObjectKind::HeapAlloc { .. } => {
-                    return SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::HeapReturn,
-                        range: exact_range(0, width),
-                    };
-                }
-                ObjectKind::EscapedUnknown { .. } => {}
-                _ => {}
+/// The values that are `value_id`'s address: itself, its same-bits
+/// representative, and the value it zero-extends.
+fn address_candidates(prepared: &SsaArtifact, value_id: ValueId) -> Vec<ValueId> {
+    let mut candidates = vec![value_id];
+    let graph = prepared.graph();
+    if let (Some(facts), Some(var)) = (
+        prepared.function().decompile_prep_facts(),
+        prepared.value_var(value_id),
+    ) {
+        for root in [facts.canonical_root(var), facts.same_integer_root(var)] {
+            if let Some(root) = graph.value_id_for_var(root)
+                && !candidates.contains(&root)
+            {
+                candidates.push(root);
             }
         }
     }
+    candidates
+}
 
-    let Some((op_value_id, def_inst)) = candidates.iter().find_map(|candidate| {
-        prepared
-            .graph()
-            .def_inst(*candidate)
-            .map(|inst| (*candidate, inst))
-    }) else {
-        return unknown_location();
+/// One constant displacement an address is formed by.
+enum Displacement {
+    /// `base + offset`.
+    Base { base: ValueId, offset: i64 },
+    /// A constant address plus an index that is no pointer.
+    IndexedGlobal { address: u64 },
+}
+
+fn displacement_step(prepared: &SsaArtifact, value_id: ValueId) -> Option<Displacement> {
+    let graph = prepared.graph();
+    let (inst, op) = address_candidates(prepared, value_id)
+        .into_iter()
+        .find_map(|candidate| {
+            let inst = graph.inst(graph.def_inst(candidate)?)?;
+            match &inst.payload {
+                InstPayload::Op(op) => Some((inst, op)),
+                InstPayload::Phi { .. } => None,
+            }
+        })?;
+    let (sign, scale) = match op {
+        SSAOp::IntAdd { .. } => (1i64, 1i64),
+        SSAOp::IntSub { .. } => (-1, 1),
+        SSAOp::PtrAdd { element_size, .. } => (1, i64::from(*element_size)),
+        SSAOp::PtrSub { element_size, .. } => (-1, i64::from(*element_size)),
+        _ => return None,
     };
-    let Some(inst) = prepared.graph().inst(def_inst) else {
-        return unknown_location();
+    let (&left, &right) = (inst.inputs.first()?, inst.inputs.get(1)?);
+    let constant = |value| summary_const_value(prepared, value);
+    let offset = |k: u64| (k as i64).checked_mul(scale)?.checked_mul(sign);
+    match (constant(left), constant(right)) {
+        (_, Some(k)) if constant(left).is_none() => Some(Displacement::Base {
+            base: left,
+            offset: offset(k)?,
+        }),
+        (Some(k), None) if sign > 0 && scale == 1 && is_an_index(prepared, right) => {
+            Some(Displacement::IndexedGlobal { address: k })
+        }
+        (Some(k), None) if sign > 0 => Some(Displacement::Base {
+            base: right,
+            offset: offset(k)?,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a value is an integer index rather than an address: scaled by a
+/// constant other than one, or widened from an integer narrower than itself.
+/// A pointer is neither on any machine this lifts.
+fn is_an_index(prepared: &SsaArtifact, value_id: ValueId) -> bool {
+    let graph = prepared.graph();
+    let Some(inst) = graph.def_inst(value_id).and_then(|inst| graph.inst(inst)) else {
+        return false;
     };
     let InstPayload::Op(op) = &inst.payload else {
-        return unknown_location();
+        return false;
     };
-
+    let constant = |index: usize| {
+        inst.inputs
+            .get(index)
+            .and_then(|value| summary_const_value(prepared, *value))
+    };
     match op {
-        SSAOp::Copy { .. }
-        | SSAOp::IntZExt { .. }
-        | SSAOp::IntSExt { .. }
-        | SSAOp::Subpiece { .. } => inst
-            .inputs
-            .first()
-            .copied()
-            .map(|src| {
-                classify_memory_access_location_value(prepared, abi, src, space, width, depth + 1)
-            })
-            .unwrap_or_else(unknown_location),
-        SSAOp::IntAdd { .. } | SSAOp::PtrAdd { .. } => {
-            let Some(&left_id) = inst.inputs.first() else {
-                return unknown_location();
-            };
-            let Some(&right_id) = inst.inputs.get(1) else {
-                return unknown_location();
-            };
-            classify_memory_additive_location(
-                prepared,
-                abi,
-                left_id,
-                right_id,
-                AdditiveLocationCtx::new(space, width, depth + 1, 1, op),
-            )
-        }
-        SSAOp::IntSub { .. } | SSAOp::PtrSub { .. } => {
-            let Some(&left_id) = inst.inputs.first() else {
-                return unknown_location();
-            };
-            let Some(&right_id) = inst.inputs.get(1) else {
-                return unknown_location();
-            };
-            classify_memory_additive_location(
-                prepared,
-                abi,
-                left_id,
-                right_id,
-                AdditiveLocationCtx::new(space, width, depth + 1, -1, op),
-            )
-        }
-        _ if op_value_id != value_id => {
-            classify_memory_access_location_value(prepared, abi, value_id, space, width, depth + 1)
-        }
-        _ => unknown_location(),
+        SSAOp::IntMult { .. } => [constant(0), constant(1)]
+            .into_iter()
+            .flatten()
+            .any(|factor| factor > 1),
+        SSAOp::IntLeft { .. } => constant(1).is_some_and(|places| places > 0),
+        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => src.size < dst.size,
+        _ => false,
     }
-}
-
-#[derive(Clone, Copy)]
-struct AdditiveLocationCtx {
-    space: SpaceId,
-    width: u32,
-    depth: u32,
-    sign: i64,
-    element_scale: i64,
-}
-
-impl AdditiveLocationCtx {
-    fn new(space: SpaceId, width: u32, depth: u32, sign: i64, op: &SSAOp) -> Self {
-        let element_scale = match op {
-            SSAOp::PtrAdd { element_size, .. } | SSAOp::PtrSub { element_size, .. } => {
-                *element_size as i64
-            }
-            _ => 1,
-        };
-        Self {
-            space,
-            width,
-            depth,
-            sign,
-            element_scale,
-        }
-    }
-}
-
-fn classify_memory_additive_location(
-    prepared: &SsaArtifact,
-    abi: &AbiProfile,
-    left_id: ValueId,
-    right_id: ValueId,
-    ctx: AdditiveLocationCtx,
-) -> SummaryMemoryLocation {
-    let left_const = summary_const_value(prepared, left_id);
-    let right_const = summary_const_value(prepared, right_id);
-
-    if let Some(k) = right_const {
-        let mut base = classify_memory_access_location_value(
-            prepared, abi, left_id, ctx.space, ctx.width, ctx.depth,
-        );
-        let delta = (k as i64)
-            .saturating_mul(ctx.element_scale)
-            .saturating_mul(ctx.sign);
-        base.range = shifted_range(base.range, delta, ctx.width);
-        return base;
-    }
-    if ctx.sign > 0
-        && let Some(k) = left_const
-    {
-        let mut base = classify_memory_access_location_value(
-            prepared, abi, right_id, ctx.space, ctx.width, ctx.depth,
-        );
-        let delta = (k as i64).saturating_mul(ctx.element_scale);
-        base.range = shifted_range(base.range, delta, ctx.width);
-        return base;
-    }
-    unknown_location()
 }
 
 fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64> {
@@ -3256,10 +3372,10 @@ fn return_call_site_for_value(
 ///
 /// Both questions are already answered once during preparation. A constant is
 /// what the value folds to. An argument is what the address facts propagated:
-/// they carry a parameter through copies, widenings, same-width lane
-/// projections, spill slots and affine arithmetic, which is exactly the
-/// derivation this used to re-walk here with its own depth limit and its own
-/// op set.
+/// they carry a parameter through what the value view calls the same integer
+/// (copies, same-width casts and lanes, zero extensions), same-width spill
+/// slots and affine arithmetic, which is exactly the derivation this used to
+/// re-walk here with its own depth limit and its own op set.
 fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar) -> SummaryOperand {
     let Some(value_id) = prepared.graph().value_id_for_var(var) else {
         return SummaryOperand::Unknown;

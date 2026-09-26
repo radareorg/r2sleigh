@@ -45,7 +45,7 @@ use crate::semantic::{
     StructuredDataflowFacts,
 };
 use crate::span::StorageSpans;
-use crate::var::{SSAVar, SSAVarNameKind};
+use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 
 /// Query-only CFG risk summary for decompilation preflight.
@@ -93,14 +93,13 @@ pub struct StackAddressRoot {
 /// Decompiler-prep analysis facts derived from SSA.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
-    /// The canonical root of each value, as an unordered index.
+    /// Which values carry the same bits, and each value's representative.
     ///
-    /// Nothing iterates it, and the root propagation asks it three and a half
-    /// million times for one five-hundred-block function, so every question
-    /// was a walk down an ordered tree comparing variable names. Hashing the
-    /// variable once and probing is the same answer for a fraction of the
-    /// comparisons.
-    pub canonical_value_roots: HashMap<SSAVar, SSAVar>,
+    /// The one identity fact every stage builds on (`crate::view`): a value
+    /// shares identity with another only where their bits are equal at full
+    /// width, so an extension or a lane at a non-zero offset is never the
+    /// value it was read from.
+    pub views: crate::view::ValueViews,
     pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
     /// dataflow. Unlike `stack_address_roots`, these roots are never rebased
@@ -216,10 +215,6 @@ pub struct ArtifactLiveness {
     storage_spans: StorageSpans,
     live_out: crate::liveout::FunctionLiveOut,
     values: crate::liveness::ValueLiveness,
-    /// Pairs of values the memory facts prove hold one content -- reads of one
-    /// object with no write between -- for anyone who recomputes the liveness
-    /// with reads relocated.
-    same_content_pairs: Vec<(crate::graph::ValueId, crate::graph::ValueId)>,
     /// Reads the text never performs: a call's conventional read of a register
     /// the certified call does not pass.
     ignored_reads: std::collections::BTreeSet<crate::graph::UseSite>,
@@ -237,10 +232,6 @@ impl ArtifactLiveness {
     /// Where every value is live, the fact every coalescing decision is made from.
     pub const fn values(&self) -> &crate::liveness::ValueLiveness {
         &self.values
-    }
-
-    pub fn same_content_pairs(&self) -> &[(crate::graph::ValueId, crate::graph::ValueId)] {
-        &self.same_content_pairs
     }
 
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
@@ -264,7 +255,7 @@ impl ArtifactLiveness {
             graph,
             &self.live_out,
             relocations,
-            &self.same_content_pairs,
+            self.values.content().clone(),
             &self.ignored_reads,
         )
     }
@@ -502,7 +493,9 @@ impl SsaArtifact {
             .collect::<Vec<_>>();
         let live_out =
             crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
-        let mut liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
+        let mut content = crate::liveness::ValueContent::of(&graph, Some(&machine_context));
+        let mut liveness =
+            crate::liveness::ValueLiveness::compute(&graph, &live_out, content.clone());
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         let graph_built_bytes = r2il::allocation::live_bytes();
         let facts = PreparedFunctionFacts::collect_with_context_and_control(
@@ -527,10 +520,10 @@ impl SsaArtifact {
             graph_built_bytes.saturating_sub(prepare_entry_bytes),
             r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
         );
-        // Two reads of one object with no write to it between are one
+        // Two reads of the same bytes that the same memory reaches are one
         // content, which the graph cannot see and the memory facts can. The
         // spans above were judged without this and are at worst finer.
-        let same_content_pairs = same_content_reads(&facts.structured);
+        content.declare_same_content(&same_content_reads(&facts.structured, &facts.memory));
         // A call's conventional read of a register the certified call does
         // not pass is not a read the text performs, and held values live
         // across every call that the machine merely might have read. The
@@ -540,7 +533,7 @@ impl SsaArtifact {
             &graph,
             &live_out,
             &std::collections::BTreeMap::new(),
-            &same_content_pairs,
+            content,
             &ignored_reads,
         );
         function.install_formal_parameter_identity(&graph, &facts.addresses);
@@ -561,7 +554,6 @@ impl SsaArtifact {
                 storage_spans,
                 live_out,
                 values: liveness,
-                same_content_pairs,
                 ignored_reads,
             },
             unobserved_merges,
@@ -1064,11 +1056,6 @@ impl SsaArtifact {
         self.liveness.values()
     }
 
-    /// Pairs of values the memory facts prove hold one content.
-    pub fn same_content_pairs(&self) -> &[(crate::graph::ValueId, crate::graph::ValueId)] {
-        self.liveness.same_content_pairs()
-    }
-
     /// Reads the text never performs, which hold nothing live.
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         self.liveness.ignored_reads()
@@ -1195,6 +1182,12 @@ impl SsaArtifact {
 
     pub fn memory(&self) -> &MemorySSAFacts {
         &self.facts.memory
+    }
+
+    /// Whether nothing outside the function can reach a frame object: no
+    /// address naming it leaves the body.
+    pub fn stack_object_is_private(&self, object: ObjectId) -> bool {
+        self.facts.private_stack_objects.contains(&object)
     }
 
     pub fn predicates(&self) -> &PredicateFacts {
@@ -2326,41 +2319,6 @@ impl TrustedSsaArtifact {
     }
 }
 
-/// The end of the canonical-root chain from `var`.
-///
-/// One walker for both phases: the map is mutable while the facts are being
-/// built and frozen afterwards, but the relation is the same one, so there is
-/// one place that follows it. `insert_canonical_root` establishes acyclicity by
-/// canonicalising the root it is given before storing it; the visited set here
-/// is what makes a violation of that invariant visible instead of a hang, and
-/// it says so rather than returning whichever node the walk stopped at as if it
-/// were the root.
-pub(crate) fn canonical_root_in<'a>(
-    roots: &'a HashMap<SSAVar, SSAVar>,
-    var: &'a SSAVar,
-) -> &'a SSAVar {
-    let mut current = var;
-    // A walk that visits more entries than the map holds has been somewhere
-    // twice, which is the only way it can fail to terminate. Counting says so
-    // for the cost of an integer; the set of visited variables that said so
-    // before allocated an ordered-set node on every call, and this is the
-    // most-called function of a whole analysis.
-    for _ in 0..=roots.len() {
-        let Some(next) = roots.get(current) else {
-            return current;
-        };
-        if next == current {
-            return current;
-        }
-        current = next;
-    }
-    r2il::refusal_evidence!(
-        "canonical-root-cycle",
-        "the canonical-root map cycles at {current:?} on the walk from {var:?}"
-    );
-    current
-}
-
 /// The value the canonical root names, or `value_id` where the root is not a
 /// value of this graph.
 pub(crate) fn canonical_root_value_id(
@@ -2388,21 +2346,31 @@ impl Deref for SsaArtifact {
 }
 
 impl DecompilePrepFacts {
+    /// The representative of `var`'s bit-identity class, where it is not `var`.
     pub fn canonical_root_of(&self, var: &SSAVar) -> Option<&SSAVar> {
-        self.canonical_value_roots.get(var)
+        self.views.representative_of(var)
     }
 
-    /// The canonical root of `var`: the fixed point of `canonical_root_of`.
-    ///
-    /// The walk terminates because every step moves to a var it has not seen
-    /// and the map is finite, so it runs at most once per var and ends at the
-    /// fixed point. The visited set makes the map's acyclicity -- which
-    /// `insert_canonical_root` establishes by canonicalising before it stores
-    /// -- a checked property rather than an assumed one. Stopping short of the
-    /// fixed point would hand back a value that is not the root, and identity
-    /// is what every later stage builds on.
+    /// The variable every value with `var`'s bits at `var`'s width is named
+    /// by: an `O(1)` lookup into the view (`crate::view`).
     pub fn canonical_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        canonical_root_in(&self.canonical_value_roots, var)
+        self.views.representative(var)
+    }
+
+    /// The bits `var` is read from, stated relative to their root.
+    pub fn view(&self, var: &SSAVar) -> crate::view::ValueView {
+        self.views.view(var)
+    }
+
+    /// Whether `a` and `b` are the same bits at the same width.
+    pub fn same_bits(&self, a: &SSAVar, b: &SSAVar) -> bool {
+        self.views.same_bits(a, b)
+    }
+
+    /// The value `var` equals as an unsigned integer: the root of its chain of
+    /// copies and zero extensions, or `var` itself.
+    pub fn same_integer_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
+        self.views.same_integer_root(var)
     }
 
     pub fn indexed_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
@@ -2509,37 +2477,63 @@ struct SsaQueryIndex {
     uses: Vec<(u32, UseLocation)>,
 }
 
-/// One block of a reverse-postorder vector, by address.
-/// Reads of one memory object that see the same content: consecutive reads
-/// in one block with no write to that object between them.
+/// Reads that see one content: loads of the same bytes of one object -- the
+/// same object, an exact offset in it, the same width -- that the same memory
+/// versions reach, in whatever block.
+///
+/// A memory version is one write, one merge of writes, or the object's content
+/// at entry, and every write that may reach the bytes -- a call included, for
+/// whatever has escaped -- makes a new one. Two reads the same set of versions
+/// reaches therefore read the same bytes as last written by the same writes.
+/// A read with no exact offset, or annotated by more than one location, says
+/// nothing. `O(A log A)` in the reads.
 fn same_content_reads(
     structured: &crate::semantic::StructuredDataflowFacts,
+    memory: &crate::semantic::MemorySSAFacts,
 ) -> Vec<(crate::graph::ValueId, crate::graph::ValueId)> {
-    let mut by_block_object =
-        BTreeMap::<(u64, crate::ObjectId), Vec<&crate::semantic::StructuredMemoryAccessFact>>::new(
-        );
-    for access in structured.memory_accesses.values() {
-        by_block_object
-            .entry((access.block_addr, access.object))
-            .or_default()
-            .push(access);
-    }
+    type ReadKey = (
+        crate::ObjectId,
+        i64,
+        u32,
+        Vec<crate::semantic::MemoryVersion>,
+    );
+    let mut first_read = BTreeMap::<ReadKey, crate::graph::ValueId>::new();
     let mut pairs = Vec::new();
-    for accesses in by_block_object.values_mut() {
-        accesses.sort_by_key(|access| access.op_index);
-        let mut last_read = None;
-        for access in accesses.iter() {
-            if access.is_write {
-                last_read = None;
-                continue;
+    for access in structured.memory_accesses.values() {
+        if access.is_write || !access.provenance_complete {
+            continue;
+        }
+        let (Some(value), Some(offset)) = (access.value, access.object_offset) else {
+            continue;
+        };
+        let versions = memory
+            .uses_by_inst
+            .get(&access.id.inst)
+            .into_iter()
+            .flatten()
+            .filter(|reached| {
+                reached.location.object == access.object
+                    && reached.location.size == access.width
+                    && reached.location.address.exact_offset() == Some(offset)
+            })
+            .map(|reached| reached.version)
+            .collect::<std::collections::BTreeSet<_>>();
+        if versions.is_empty() {
+            continue;
+        }
+        let key = (
+            access.object,
+            offset,
+            access.width,
+            versions.into_iter().collect(),
+        );
+        match first_read.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(value);
             }
-            let Some(value) = access.value else {
-                continue;
-            };
-            if let Some(previous) = last_read {
-                pairs.push((previous, value));
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                pairs.push((*slot.get(), value));
             }
-            last_read = Some(value);
         }
     }
     pairs
@@ -3449,8 +3443,8 @@ impl SSAFunction {
                 if entry_stack_address_size != Some(dst.size) {
                     continue;
                 }
-                let a_root = canonical_root_in(&facts.canonical_value_roots, a);
-                let b_root = canonical_root_in(&facts.canonical_value_roots, b);
+                let a_root = facts.views.representative(a);
+                let b_root = facts.views.representative(b);
                 if !aligns_stack_pointer(a, a_root, b, b_root, &facts.stack_address_roots)
                     && !aligns_stack_pointer(b, b_root, a, a_root, &facts.stack_address_roots)
                 {
@@ -3507,9 +3501,7 @@ impl SSAFunction {
                     } else {
                         &facts.stack_address_roots
                     };
-                    if common_stack_root(&phi.sources, &facts.canonical_value_roots, roots)
-                        != Some(*root)
-                    {
+                    if common_stack_root(&phi.sources, &facts.views, roots) != Some(*root) {
                         failed.push(phi.dst.clone());
                     }
                 }
@@ -3915,66 +3907,6 @@ impl RegisterFamilyInfo {
     }
 }
 
-fn adapt_root_width(root: &SSAVar, width: u32) -> Option<SSAVar> {
-    if root.size == width {
-        return (!root.name_kind().is_constant() || root.constant_bits().is_some())
-            .then(|| root.clone());
-    }
-    if let Some(value) = root.constant_bits() {
-        return Some(SSAVar::constant(mask_const_to_width(value, width), width));
-    }
-    if root.size > width && can_width_adapt_root(root) {
-        return Some(root.with_size(width));
-    }
-    None
-}
-
-fn can_width_adapt_root(root: &SSAVar) -> bool {
-    !root.is_const()
-        && !root.is_temp()
-        && !matches!(
-            root.name_kind(),
-            SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace | SSAVarNameKind::Frame
-        )
-}
-
-fn mask_const_to_width(value: u64, width: u32) -> u64 {
-    let bits = width.saturating_mul(8);
-    if bits >= 64 {
-        value
-    } else if bits == 0 {
-        0
-    } else {
-        value & ((1u64 << bits) - 1)
-    }
-}
-
-fn canonicalize_value_root(root: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> SSAVar {
-    canonical_root_in(roots, root).clone()
-}
-
-fn ensure_value_root_identity(roots: &mut HashMap<SSAVar, SSAVar>, var: SSAVar) -> bool {
-    if roots.contains_key(&var) {
-        return false;
-    }
-    roots.insert(var.clone(), var);
-    true
-}
-
-fn insert_canonical_root(roots: &mut HashMap<SSAVar, SSAVar>, dst: SSAVar, root: SSAVar) -> bool {
-    let root = canonicalize_value_root(&root, roots);
-    let changed = !matches!(roots.get(&dst), Some(existing) if *existing == root);
-    roots.insert(dst, root.clone());
-    roots.entry(root.clone()).or_insert(root);
-    changed
-}
-
-/// The one root every incoming edge already resolved to, if they agree.
-fn common_root_of<'a>(roots: &[&'a SSAVar]) -> Option<&'a SSAVar> {
-    let first = *roots.first()?;
-    roots.iter().all(|root| *root == first).then_some(first)
-}
-
 /// The one stack root every incoming edge names, given their resolved roots.
 fn common_stack_root_of(
     sources: &[(u64, SSAVar)],
@@ -3996,7 +3928,7 @@ fn common_stack_root_of(
 
 fn resolve_stack_root(
     var: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    views: &crate::view::ValueViews,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     // The variable's own answer first. Resolving its canonical root before
@@ -4007,18 +3939,18 @@ fn resolve_stack_root(
     if let Some(root) = stack_roots.get(var).copied() {
         return Some(root);
     }
-    stack_roots.get(canonical_root_in(roots, var)).copied()
+    stack_roots.get(views.representative(var)).copied()
 }
 
 fn common_stack_root(
     sources: &[(u64, SSAVar)],
-    roots: &HashMap<SSAVar, SSAVar>,
+    views: &crate::view::ValueViews,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     let mut iter = sources.iter();
     let (_, first_src) = iter.next()?;
-    let first = resolve_stack_root(first_src, roots, stack_roots)?;
-    if iter.all(|(_, src)| resolve_stack_root(src, roots, stack_roots) == Some(first)) {
+    let first = resolve_stack_root(first_src, views, stack_roots)?;
+    if iter.all(|(_, src)| resolve_stack_root(src, views, stack_roots) == Some(first)) {
         Some(first)
     } else {
         None

@@ -33,12 +33,12 @@ use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
 use crate::indirect::exact_input;
 use crate::op::SSAOp;
 
-/// Whether an operation delivers its operand's value unchanged.
+/// Whether an operation delivers its first operand's unsigned value
+/// unchanged: a copy or a zero extension, as the one identity fact states
+/// them (`crate::view`). A truncation, a lane at an offset and a sign
+/// extension each change the number.
 fn is_value_preserving(op: &SSAOp) -> bool {
-    matches!(
-        op,
-        SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. }
-    )
+    crate::view::preserves_integer(op)
 }
 
 /// The literal a value states about itself, at its own width.

@@ -170,7 +170,14 @@ fn solve_counted(
     predicates: &crate::semantic::PredicateFacts,
 ) -> (ValueRanges, usize) {
     let (mut by_value, transfers) = ascend(graph, &widening_set(function));
-    narrow_where_defined(graph, function, predicates, &mut by_value);
+    // What a branch proves about a value it compares holds of every value
+    // with the same bits: the narrowing is keyed by copy class, so a copy or
+    // a lane read of the compared value read further on is narrowed too.
+    let class = crate::view::class_values(
+        graph,
+        function.decompile_prep_facts().map(|facts| &facts.views),
+    );
+    narrow_where_defined(graph, function, predicates, &class, &mut by_value);
     (ValueRanges { by_value }, transfers)
 }
 
@@ -467,7 +474,7 @@ fn assumptions_by_block(
     function: &crate::SSAFunction,
     graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
-    state: &[StridedInterval],
+    solved: Solved<'_>,
 ) -> BTreeMap<u64, BTreeMap<ValueId, StridedInterval>> {
     if predicates.block_assumptions.is_empty() {
         return BTreeMap::new();
@@ -502,7 +509,7 @@ fn assumptions_by_block(
             else {
                 continue;
             };
-            assume(&mut held, graph, state, compare, assumption.truth);
+            assume(&mut held, graph, solved, compare, assumption.truth);
         }
         if !held.is_empty() {
             by_block.insert(addr, held);
@@ -524,20 +531,42 @@ pub(crate) fn edge_dominates(function: &crate::SSAFunction, predecessor: u64, bl
             .all(|other| function.dominates(block, other))
 }
 
+/// The ranges solved so far, and the copy class (the view's) each value is
+/// held under: what a comparison proves of one side it proves of every value
+/// with that side's bits.
+#[derive(Clone, Copy)]
+struct Solved<'a> {
+    class: &'a [ValueId],
+    state: &'a [StridedInterval],
+}
+
+impl Solved<'_> {
+    fn class_of(self, value: ValueId) -> ValueId {
+        class_of(self.class, value)
+    }
+}
+
+/// The copy class a value belongs to, where the table knows it.
+fn class_of(class: &[ValueId], value: ValueId) -> ValueId {
+    class.get(value.0 as usize).copied().unwrap_or(value)
+}
+
 /// Narrow what a block holds by one comparison, taken the way `truth` says.
+///
+/// `held` is keyed by copy class.
 fn assume(
     held: &mut BTreeMap<ValueId, StridedInterval>,
     graph: &SsaGraph,
-    state: &[StridedInterval],
+    solved: Solved<'_>,
     compare: &crate::semantic::CompareProvenance,
     truth: bool,
 ) {
     for side in [compare.lhs, compare.rhs] {
         let now = (!wide(graph, side))
-            .then(|| narrowed_side(held, state, compare, truth, side))
+            .then(|| narrowed_side(held, solved, compare, truth, side))
             .flatten();
         if let Some(now) = now {
-            held.insert(side, now);
+            held.insert(solved.class_of(side), now);
         }
     }
 }
@@ -576,15 +605,15 @@ fn selected_arm(
 /// exactly as it was, so the caller inserts only what it has learned.
 fn narrowed_side(
     held: &std::collections::BTreeMap<ValueId, StridedInterval>,
-    state: &[StridedInterval],
+    solved: Solved<'_>,
     compare: &crate::semantic::CompareProvenance,
     truth: bool,
     side: ValueId,
 ) -> Option<StridedInterval> {
     let known = |value: ValueId| {
-        held.get(&value)
+        held.get(&solved.class_of(value))
             .copied()
-            .or_else(|| state.get(value.0 as usize).copied())
+            .or_else(|| solved.state.get(value.0 as usize).copied())
     };
     let was = known(side)?;
     let now = narrow(&known, was, compare, truth, side);
@@ -712,9 +741,18 @@ fn narrow_where_defined(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
     predicates: &crate::semantic::PredicateFacts,
+    class: &[ValueId],
     state: &mut [StridedInterval],
 ) {
-    let assumed = assumptions_by_block(function, graph, predicates, state);
+    let assumed = assumptions_by_block(
+        function,
+        graph,
+        predicates,
+        Solved {
+            class,
+            state: &*state,
+        },
+    );
     if assumed.is_empty() {
         return;
     }
@@ -751,7 +789,7 @@ fn narrow_where_defined(
                 .get(value.0 as usize)
                 .copied()
                 .unwrap_or_else(|| StridedInterval::top(64));
-            match held.and_then(|held| held.get(&value)) {
+            match held.and_then(|held| held.get(&class_of(class, value))) {
                 Some(narrowed) => range.meet(narrowed),
                 None => range,
             }
@@ -1177,6 +1215,86 @@ mod tests {
         let scaled = range_of(&ranges, &graph, &offset);
         assert_eq!(scaled.bounds(), Some((0, 28)), "{scaled:?}");
         assert_eq!(scaled.stride(), Some(4), "{scaled:?}");
+    }
+
+    /// `cmp eax, 7; ja default; mov eax, eax; ... [rax*8]` with EAX loaded:
+    /// the comparison reads one lane read of the register and the index
+    /// another. Both are the loaded value's bits, so what the branch proves of
+    /// one it proves of the other; keyed by the value the comparison happened
+    /// to read, the index read further on stayed the whole of its width.
+    #[test]
+    fn a_branch_narrows_every_read_of_the_bits_it_compares() {
+        let (entry, body, exit) = (0x1000, 0x1010, 0x1020);
+        let loaded = var("tmp:load", 1, 4);
+        let wide = var("rax", 1, 8);
+        let compared = var("eax", 1, 4);
+        let guard = var("guard", 1, 1);
+        let indexed = var("eax", 2, 4);
+        let index = var("rax", 2, 8);
+        let offset = var("offset", 1, 8);
+
+        let mut head = SSABlock::new(entry, 16);
+        head.ops.push(crate::op::SSAOp::Load {
+            dst: loaded.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: var("rdi", 0, 8),
+        });
+        head.ops.push(crate::op::SSAOp::IntZExt {
+            dst: wide.clone(),
+            src: loaded,
+        });
+        head.ops.push(crate::op::SSAOp::Subpiece {
+            dst: compared.clone(),
+            src: wide.clone(),
+            offset: 0,
+        });
+        head.ops.push(crate::op::SSAOp::IntLess {
+            dst: guard.clone(),
+            a: compared,
+            b: constant(8, 4),
+        });
+        head.ops.push(crate::op::SSAOp::CBranch {
+            target: constant(body, 8),
+            cond: guard,
+        });
+        let mut body_block = SSABlock::new(body, 16);
+        body_block.ops.push(crate::op::SSAOp::Subpiece {
+            dst: indexed.clone(),
+            src: wide,
+            offset: 0,
+        });
+        body_block.ops.push(crate::op::SSAOp::IntZExt {
+            dst: index.clone(),
+            src: indexed,
+        });
+        body_block.ops.push(crate::op::SSAOp::IntMult {
+            dst: offset.clone(),
+            a: index.clone(),
+            b: constant(8, 8),
+        });
+        let exit_block = SSABlock::new(exit, 16);
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: body,
+                        false_target: exit,
+                    },
+                ),
+                (body, BlockTerminator::Return),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let mut function =
+            SSAFunction::from_exact_test_blocks(&[head, body_block, exit_block], cfg);
+        function.refresh_decompile_prep_facts();
+        let graph = SsaGraph::from_function(&function);
+        let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
+        let ranges = solve_value_ranges(&graph, &function, &predicates);
+        assert_eq!(range_of(&ranges, &graph, &index).bounds(), Some((0, 7)));
+        assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
     }
 
     /// Every consumer of the solution reads an operation its inputs fix as that one value, whatever the operand holds.

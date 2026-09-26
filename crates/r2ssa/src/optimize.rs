@@ -954,17 +954,10 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         .collect::<HashMap<_, _>>();
     let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
     // The value a copy chain carries: a promoted slot's reload is a copy of
-    // the store, and the store a copy of the register.
-    let root = |var: &SSAVar| {
-        let mut var = var.clone();
-        for _ in 0..16 {
-            match define(&var) {
-                Some(SSAOp::Copy { src, .. }) => var = src.clone(),
-                _ => break,
-            }
-        }
-        var
-    };
+    // the store, and the store a copy of the register. The value view's copy
+    // root, which dominates the copy, so the fused switch may branch on it.
+    let views = crate::view::ValueViews::compute(func);
+    let root = |var: &SSAVar| views.copy_root(var).clone();
     // `x == c`, or the zero flag of `x - c` where the difference also lands in
     // a register and so was left as the flag fold found it.
     let against_constant = |a: &SSAVar, b: &SSAVar| {
@@ -981,15 +974,22 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         }
         Some((root(selector), value))
     };
+    // The test a condition is, through its copies and negations. Each step
+    // reads an operand of the operation before it, and `define` names no
+    // phi, so the walk runs down one acyclic definition chain; the visited
+    // set states that bound instead of a count.
     let equality = |var: &SSAVar| {
-        let mut op = define(var)?;
+        let mut current = root(var);
         let mut negated = false;
-        for _ in 0..16 {
-            match op {
-                SSAOp::Copy { src, .. } => op = define(src)?,
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(VarKey::from_var(&current)) {
+                return None;
+            }
+            match define(&current)? {
                 SSAOp::BoolNot { src, .. } => {
                     negated = !negated;
-                    op = define(src)?;
+                    current = root(src);
                 }
                 SSAOp::IntEqual { a, b, .. } => {
                     let (selector, value) = against_constant(a, b)?;
@@ -1002,7 +1002,6 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                 _ => return None,
             }
         }
-        None
     };
     let test_of = |addr: u64| {
         let block = func.get_block(addr)?;
@@ -1108,7 +1107,10 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                         );
                         break;
                     };
-                    if test.selector != head.selector
+                    // One selector is one value's bits, whichever copy of
+                    // them a test reads: the copies of an extension share
+                    // its view, not a root any of them can be named by.
+                    if !views.same_bits(&test.selector, &head.selector)
                         || cases.iter().any(|(value, _)| *value == test.value)
                     {
                         r2il::refusal_evidence!(
@@ -1325,13 +1327,17 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
         }
         combined.extend(grown);
     }
+    // Which values are copies of which, as the value view states it once for
+    // the whole function. The folds below rewrite comparisons, never a copy,
+    // so the view stays true while they run.
+    let views = crate::view::ValueViews::compute(func);
     let mut changed = false;
     for addr in func.block_addrs().to_vec() {
         let Some(block) = func.get_block_mut(addr) else {
             continue;
         };
         for op in &mut block.ops {
-            let Some(folded) = fold_condition_codes(op, &defs, &kept, &combined) else {
+            let Some(folded) = fold_condition_codes(op, &defs, &views, &kept, &combined) else {
                 continue;
             };
             if &folded == op {
@@ -1362,6 +1368,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
 fn fold_condition_codes(
     op: &SSAOp,
     defs: &HashMap<VarKey, SSAOp>,
+    views: &crate::view::ValueViews,
     kept: &HashSet<VarKey>,
     combined: &HashSet<VarKey>,
 ) -> Option<SSAOp> {
@@ -1374,19 +1381,9 @@ fn fold_condition_codes(
         _ => None,
     };
     // A flag read through the copies the machine makes of it: arm64 tests
-    // `ZR`, which is a copy of the `tmpZR` the subtraction wrote.
-    let define_through_copies = |var: &SSAVar| {
-        let mut op = define(var)?;
-        let mut hops = 0;
-        while let SSAOp::Copy { src, .. } = op {
-            hops += 1;
-            if hops > 8 {
-                return None;
-            }
-            op = define(src)?;
-        }
-        Some(op)
-    };
+    // `ZR`, which is a copy of the `tmpZR` the subtraction wrote. The value
+    // view's copy root is the end of that chain, however long.
+    let define_through_copies = |var: &SSAVar| define(views.copy_root(var));
     // The sign flag: `(a - b) <s 0`.
     let sign_flag = |var: &SSAVar| match define_through_copies(var)? {
         SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
@@ -3153,6 +3150,88 @@ mod signed_flag_tests {
             condition_op(&compare(false)),
             SSAOp::IntSLessEqual { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
         ));
+    }
+
+    /// A flag copied any number of times is still the flag: the fold reads
+    /// the view's copy root, not a chain it gives up on after eight hops.
+    #[test]
+    fn a_flag_copied_many_times_folds_as_the_flag() {
+        let x = r(0, 8);
+        let mut ops = vec![
+            R2ILOp::IntAnd {
+                dst: x.clone(),
+                a: r(8, 8),
+                b: c(3, 8),
+            },
+            R2ILOp::IntSBorrow {
+                dst: r(0x40, 1),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::IntSub {
+                dst: r(0x50, 8),
+                a: x,
+                b: c(1, 8),
+            },
+            R2ILOp::IntSLess {
+                dst: r(0x41, 1),
+                a: r(0x50, 8),
+                b: c(0, 8),
+            },
+        ];
+        // Twelve registers, each a copy of the one before.
+        let mut sign = r(0x41, 1);
+        for hop in 0..12 {
+            let next = r(0x90 + hop, 1);
+            ops.push(R2ILOp::Copy {
+                dst: next.clone(),
+                src: sign,
+            });
+            sign = next;
+        }
+        ops.push(R2ILOp::IntEqual {
+            dst: r(0x70, 1),
+            a: sign,
+            b: r(0x40, 1),
+        });
+        ops.push(R2ILOp::CBranch {
+            target: c(0x1010, 8),
+            cond: r(0x70, 1),
+        });
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops,
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return { target: r(0x80, 8) }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1010,
+                size: 4,
+                ops: vec![R2ILOp::Return { target: r(0x80, 8) }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        optimize_function(&mut func, &OptimizationConfig::default());
+        let condition = condition_op(&func);
+        assert!(
+            matches!(
+                &condition,
+                SSAOp::IntSLessEqual { a, b, .. } if const_value(a) == Some(1) && b.display_name().starts_with("reg")
+            ),
+            "{condition:?}"
+        );
     }
 
     #[test]

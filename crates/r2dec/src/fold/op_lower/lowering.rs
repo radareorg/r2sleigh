@@ -4,6 +4,20 @@ use super::projection::project_machine_write;
 use super::*;
 use r2rewrite::CValue;
 
+/// The instruction a canonical rewrite names by its site, where it names one.
+fn canonical_site_inst(
+    prepared: &r2ssa::SsaArtifact,
+    id: &r2ssa::CanonicalInstructionId,
+) -> Option<r2ssa::InstId> {
+    match id.site {
+        r2ssa::CanonicalInstructionSite::Op(ordinal) => usize::try_from(ordinal)
+            .ok()
+            .and_then(|op_idx| prepared.graph().inst_id_for_op_site(id.block_addr, op_idx)),
+        r2ssa::CanonicalInstructionSite::Phi(_)
+        | r2ssa::CanonicalInstructionSite::NativeSpan { .. } => None,
+    }
+}
+
 /// Every definition the sealed inline plan would have nested under `value`.
 ///
 /// Ordinary inline lowering records these through nested replacement
@@ -85,7 +99,7 @@ impl<'a> FoldingContext<'a> {
                 }
                 replaced.into_iter().collect()
             }
-            ReplacementSource::CanonicalAccess(access) => {
+            ReplacementSource::CanonicalAccess { access, operands } => {
                 let Some(names) = self.inputs.binding_names else {
                     self.retain_first_observation_error(invalid());
                     return expr;
@@ -94,23 +108,43 @@ impl<'a> FoldingContext<'a> {
                     self.retain_first_observation_error(invalid());
                     return expr;
                 };
-                let replaced = rewrite
+                let mut replaced = rewrite
                     .discharges
                     .iter()
-                    .filter_map(|id| match id.site {
-                        r2ssa::CanonicalInstructionSite::Op(ordinal) => {
-                            usize::try_from(ordinal).ok().and_then(|op_idx| {
-                                prepared.graph().inst_id_for_op_site(id.block_addr, op_idx)
-                            })
-                        }
-                        r2ssa::CanonicalInstructionSite::Phi(_)
-                        | r2ssa::CanonicalInstructionSite::NativeSpan { .. } => None,
-                    })
+                    .filter_map(|id| canonical_site_inst(prepared, id))
                     .collect::<Vec<_>>();
                 if replaced.len() != rewrite.discharges.len() {
                     self.retain_first_observation_error(invalid());
                     return expr;
                 }
+                // An operand inlined through its own plan answers for its
+                // definition and everything its term absorbed; the access
+                // answers for the rest of its term, which lies above it.
+                let below = operands
+                    .into_iter()
+                    .flatten()
+                    .filter(|operand| {
+                        matches!(
+                            names.require_value(*operand),
+                            Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
+                        )
+                    })
+                    .flat_map(|operand| {
+                        let absorbed = names
+                            .plan()
+                            .canonical()
+                            .value(operand)
+                            .into_iter()
+                            .flat_map(|rewrite| rewrite.discharges.iter())
+                            .filter_map(|id| canonical_site_inst(prepared, id));
+                        prepared
+                            .graph()
+                            .def_inst(operand)
+                            .into_iter()
+                            .chain(absorbed)
+                    })
+                    .collect::<BTreeSet<_>>();
+                replaced.retain(|inst| !below.contains(inst));
                 replaced
             }
         };

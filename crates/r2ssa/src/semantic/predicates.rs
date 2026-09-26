@@ -96,7 +96,10 @@ pub(crate) struct CompareDefinitions {
 pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> CompareDefinitions {
     let mut normalized = BTreeMap::<SSAVar, CompareProvenance>::new();
     let mut evaluated = BTreeMap::<SSAVar, CompareProvenance>::new();
-    let copy_sources = collect_compare_copy_sources(function);
+    // A compared operand is named by its copy class: the values with its bits
+    // at its width, as the one identity fact states them.
+    let views = function.decompile_prep_facts().map(|facts| &facts.views);
+    let operand = |var: &SSAVar| crate::view::class_value(graph, views, var);
     let mut sub_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
     let mut signed_overflow_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
     let mut signed_sign_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
@@ -104,10 +107,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     for block in function.blocks() {
         for op in &block.ops {
             if let SSAOp::IntSub { dst, a, b } = op
-                && let (Some(lhs), Some(rhs)) = (
-                    canonical_compare_operand(graph, &copy_sources, a),
-                    canonical_compare_operand(graph, &copy_sources, b),
-                )
+                && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
             {
                 sub_sources.insert(dst.clone(), (lhs, rhs));
             }
@@ -117,10 +117,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     for block in function.blocks() {
         for op in &block.ops {
             if let SSAOp::IntSBorrow { dst, a, b } = op
-                && let (Some(lhs), Some(rhs)) = (
-                    canonical_compare_operand(graph, &copy_sources, a),
-                    canonical_compare_operand(graph, &copy_sources, b),
-                )
+                && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
             {
                 signed_overflow_sources.insert(dst.clone(), (lhs, rhs));
             }
@@ -150,10 +147,10 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
                 }
                 continue;
             };
-            let Some(lhs_id) = canonical_compare_operand(graph, &copy_sources, lhs) else {
+            let Some(lhs_id) = operand(lhs) else {
                 continue;
             };
-            let Some(rhs_id) = canonical_compare_operand(graph, &copy_sources, rhs) else {
+            let Some(rhs_id) = operand(rhs) else {
                 continue;
             };
             evaluated.insert(
@@ -249,36 +246,6 @@ pub(crate) fn propagate_compare_definitions(
             break;
         }
     }
-}
-
-pub(crate) fn collect_compare_copy_sources(function: &SSAFunction) -> BTreeMap<SSAVar, SSAVar> {
-    let mut sources = BTreeMap::new();
-    for block in function.blocks() {
-        for op in &block.ops {
-            if let SSAOp::Copy { dst, src } = op {
-                sources.insert(dst.clone(), src.clone());
-            }
-        }
-    }
-    sources
-}
-
-pub(crate) fn canonical_compare_operand(
-    graph: &SsaGraph,
-    copy_sources: &BTreeMap<SSAVar, SSAVar>,
-    var: &SSAVar,
-) -> Option<ValueId> {
-    // The visited set is the whole termination argument: each step moves to a
-    // var it has not seen and the map is finite.
-    let mut current = var;
-    let mut visited = BTreeSet::new();
-    while visited.insert(current) {
-        let Some(source) = copy_sources.get(current) else {
-            return graph.value_id_for_var(current);
-        };
-        current = source;
-    }
-    None
 }
 
 pub(crate) fn propagate_compare_source_aliases(
