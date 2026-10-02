@@ -2189,6 +2189,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_frame_saves(source.image().frame_saves());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.

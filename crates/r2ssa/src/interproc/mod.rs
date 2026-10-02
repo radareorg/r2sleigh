@@ -128,9 +128,25 @@ impl SummaryArgumentReach {
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ArgumentReach {
     terms: BTreeSet<SummaryArgumentReach>,
+    /// The body touches memory through this argument at a place it cannot
+    /// state, or hands it to something that may: no caller bound sizes it.
+    unbounded: bool,
 }
 
 impl ArgumentReach {
+    /// A reach nothing bounds.
+    pub fn unbounded() -> Self {
+        Self {
+            terms: BTreeSet::new(),
+            unbounded: true,
+        }
+    }
+
+    /// Whether nothing the caller knows can bound this reach.
+    pub const fn is_unbounded(&self) -> bool {
+        self.unbounded
+    }
+
     pub fn terms(&self) -> impl Iterator<Item = SummaryArgumentReach> + '_ {
         self.terms.iter().copied()
     }
@@ -142,6 +158,9 @@ impl ArgumentReach {
     /// The bytes every term reaches, with `bound` the caller's greatest value
     /// for a scaling argument. `None` when any term is unbounded at the call.
     pub fn bytes(&self, mut bound: impl FnMut(usize) -> Option<u64>) -> Option<u64> {
+        if self.unbounded {
+            return None;
+        }
         self.terms
             .iter()
             .try_fold(0u64, |reach, term| Some(reach.max(term.bytes(&mut bound)?)))
@@ -152,6 +171,7 @@ impl<const N: usize> From<[SummaryArgumentReach; N]> for ArgumentReach {
     fn from(terms: [SummaryArgumentReach; N]) -> Self {
         Self {
             terms: terms.into_iter().collect(),
+            unbounded: false,
         }
     }
 }
@@ -1407,7 +1427,8 @@ impl PreparedCalleeSummary {
     /// pointer, so a position inside them is a member of what it was given
     /// rather than a neighbouring local. An argument the body hands on to
     /// something the summary cannot see, or accesses at a place it cannot
-    /// state, has no entry -- an unbounded reach is not a span.
+    /// state, has an unbounded entry; an argument with no entry is one the
+    /// body touches nothing through.
     /// `argument_bounds` is the greatest value the caller passes for each
     /// argument, where it knows one. An offset that scales with an argument
     /// reaches `stride * (bound + 1)`, and is unbounded without a bound, which
@@ -1484,9 +1505,19 @@ impl PreparedCalleeSummary {
         // reach alone, and an indexed read of a table at a constant address
         // poisons no pointer at all.
         let unplaced = self.local.unplaced_reach;
-        proven.retain(|index, _| {
-            !unbounded.contains(index) && !dependence::names_formal(unplaced, *index)
-        });
+        for (index, reach) in &mut proven {
+            if unbounded.contains(index) || dependence::names_formal(unplaced, *index) {
+                *reach = ArgumentReach::unbounded();
+            }
+        }
+        // Every formal something unplaced may reach through is unbounded,
+        // whether or not the body states an access through it: an absent
+        // entry says the body touches nothing through that argument.
+        let named =
+            (0..u64::BITS as usize).filter(|index| dependence::names_formal(unplaced, *index));
+        for index in unbounded.iter().copied().chain(named) {
+            proven.insert(index, ArgumentReach::unbounded());
+        }
         r2il::refusal_evidence!(
             "argument-reach",
             "{:#x}: reach={proven:?} unbounded={unbounded:?} unplaced={unplaced:#x} unknown_calls={} effects={:?}",

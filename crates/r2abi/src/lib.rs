@@ -11,6 +11,7 @@
 //! a convention is spelled `cc.<name>.<what>`.
 
 pub mod compiler_spec;
+pub mod frames;
 pub mod prototypes;
 
 pub use compiler_spec::CompilerSpec;

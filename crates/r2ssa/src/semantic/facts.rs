@@ -1483,9 +1483,10 @@ impl<'a> ObjectModelBuilder<'a> {
     ) -> ObjectModel {
         self.values = values;
         if let Some(facts) = self.facts {
-            for (start, end) in
-                callee_write_spans(facts, function, graph, self.machine_context, values)
-            {
+            let callee_spans =
+                callee_write_spans(facts, function, graph, self.machine_context, values);
+            let boundaries = FrameBoundaries::of(facts, function, graph, self.machine_context);
+            for (start, end) in callee_spans.spans {
                 self.callee_write_spans
                     .entry(start)
                     .and_modify(|known| *known = (*known).max(end))
@@ -1499,6 +1500,8 @@ impl<'a> ObjectModelBuilder<'a> {
                 self.stack_pointer_carrier,
                 values,
                 &self.callee_write_spans,
+                &callee_spans.unbounded,
+                &boundaries,
             );
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;

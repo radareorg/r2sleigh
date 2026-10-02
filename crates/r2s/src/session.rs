@@ -176,5 +176,6 @@ fn container_of(image: &Image) -> Container {
             })
             .collect(),
         declared: image.debug_prototypes().prototypes().collect(),
+        unwind: image.unwind_frames().clone(),
     }
 }

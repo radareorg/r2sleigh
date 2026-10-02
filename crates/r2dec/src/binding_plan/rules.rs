@@ -759,64 +759,37 @@ pub(super) fn frame_objects_with_escaped_address(
             continue;
         }
         escaped.insert(object);
-        // A callee handed `&value` may reach every object from `value` to
-        // the end of what it is proven to touch: the declared aggregate, the
-        // bytes its body is proven to read or write, and, where it touches
-        // memory the summary cannot bound, everything above the address in
-        // this frame.
-        let Some(reach) = escaped_pointee_reach(source_owned, value.id) else {
+        // A callee handed the address reaches the object it is in, and r2ssa's
+        // frame objects already end where what the callee reaches ends: its
+        // stated reach, or the nearest save slot when nothing bounds it. So
+        // the object itself is what a callee reaches here, and nothing beside it.
+        if is_call_argument(source_owned, value.id) {
+            reached_by_callee.insert(object);
+        }
+    }
+    // A place inside an object handed to a callee -- `&buf[2]`, `&s.field` --
+    // escapes that object as surely as its base does.
+    let objects = source.objects();
+    for value in &graph.values {
+        if objects.interior_offset(value.id).is_none() && !objects.address_is_indexed(value.id) {
             continue;
-        };
-        reached_by_callee.insert(object);
-        let objects = source.objects();
-        let Some(root) = objects
-            .stack_objects
-            .iter()
-            .find(|(_, other)| **other == object)
-            .map(|(key, _)| key.root)
+        }
+        let Some(object) = objects
+            .object_for_value(value.id, r2il::SpaceId::Ram)
+            .filter(|object| {
+                objects.object(*object).is_some_and(|fact| {
+                    matches!(
+                        fact.kind,
+                        r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. }
+                    )
+                }) && source.declarable_stack_object(*object)
+            })
         else {
             continue;
         };
-        let end = match reach {
-            EscapeReach::Bytes(size) => {
-                let Some(end) = i64::try_from(size)
-                    .ok()
-                    .and_then(|size| root.offset.checked_add(size))
-                else {
-                    continue;
-                };
-                Some(end)
-            }
-            EscapeReach::Frame => None,
-        };
-        // Upward through the frame in address order. An unbounded reach
-        // stops at the first object that is not this function's own local:
-        // a saved register the epilogue restores. The callee was handed a
-        // local and what it may touch is the allocation, not the frame's
-        // bookkeeping above it.
-        let mut above = objects
-            .stack_objects
-            .iter()
-            .filter(|(key, _)| key.root.base == root.base && key.root.offset > root.offset)
-            .collect::<Vec<_>>();
-        above.sort_by_key(|(key, _)| key.root.offset);
-        let round_trips = &source.certificates().stack_frame_round_trips;
-        for (key, other) in above {
-            if let Some(end) = end
-                && key.root.offset >= end
-            {
-                break;
-            }
-            if end.is_none() && round_trips.contains_key(other) {
-                break;
-            }
-            r2il::refusal_evidence!(
-                "escape-reaches",
-                "{object:?} at {root:?} escapes {reach:?} and covers {other:?} at {:?}",
-                key.root
-            );
-            escaped.insert(*other);
-            reached_by_callee.insert(*other);
+        if is_call_argument(source_owned, value.id) {
+            escaped.insert(object);
+            reached_by_callee.insert(object);
         }
     }
     EscapedFrameObjects {
@@ -825,190 +798,24 @@ pub(super) fn frame_objects_with_escaped_address(
     }
 }
 
-/// How far a callee may reach through a frame address it is handed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EscapeReach {
-    /// This many bytes from the address.
-    Bytes(u64),
-    /// Anything above the address in this frame: the callee touches memory
-    /// the summary cannot bound.
-    Frame,
-}
-
-/// How far the callee an address is passed to may reach through it: the
-/// size of the declared aggregate, else what its body is proven to touch.
-fn escaped_pointee_reach(
-    source_owned: &SourceOwnedFunctionFacts,
-    value: ValueId,
-) -> Option<EscapeReach> {
+/// Whether this value, or a value with its bits, is an argument of a call.
+fn is_call_argument(source_owned: &SourceOwnedFunctionFacts, value: ValueId) -> bool {
     let source = source_owned.source();
-    let ptr_bits = source
-        .machine_context()
-        .memory_model()
-        .default_address_bits();
-    let type_graph = source
-        .machine_context()
-        .function_interface()
-        .and_then(r2ssa::SourceFunctionInterface::type_graph);
-    let callsites = source_owned.report().callsites()?;
     let graph = source.graph();
     let identity = source.function().decompile_prep_facts();
-    // The argument is the address, or a value with its bits: a register's
-    // copy of it, as the value view says, however many copies away.
-    let is_the_address = |argument: ValueId| {
-        argument == value
-            || identity
-                .zip(graph.value(argument))
-                .zip(graph.value(value))
-                .is_some_and(|((identity, argument), address)| {
-                    identity.same_bits(&argument.var, &address.var)
-                })
+    let Some(callsites) = source_owned.report().callsites() else {
+        return false;
     };
-    callsites.by_callsite.values().find_map(|facts| {
-        let argument = facts
-            .argument_values
-            .iter()
-            .find(|argument| is_the_address(argument.value))?;
-        r2il::refusal_evidence!(
-            "escape-callee",
-            "{value:?} is argument {} at {:?}: signature={:?}",
-            argument.index,
-            facts.callsite,
-            facts
-                .callee_signature
-                .as_ref()
-                .map(|signature| &signature.params)
-        );
-        // The declared pointee, where the signature is a source's. radare2's
-        // inferred `uint64_t` is evidence and says nothing about a pointee.
-        let declared = facts
-            .callee_signature
-            .as_ref()
-            .filter(|_| facts.callee_signature_from_source_types)
-            .and_then(|signature| match signature.params.get(argument.index)? {
-                r2types::CTypeLike::Pointer(pointee) => Some(pointee.as_ref().clone()),
-                _ => None,
-            });
-        // An aggregate pointee bounds the write: the callee stays inside the
-        // object it was declared to take.
-        if let Some(r2types::CTypeLike::Struct(name) | r2types::CTypeLike::Union(name)) = &declared
-        {
-            return type_graph?
-                .aggregates()
-                .iter()
-                .find(|aggregate| aggregate.name() == name)
-                .map(|aggregate| EscapeReach::Bytes(aggregate.size_bits().div_ceil(8)));
-        }
-        // A scalar pointee is an element, not an extent: `char *s` is as often
-        // an array as one byte. It is the floor under what the callee's own
-        // body proves it writes.
-        let scalar_floor = declared
-            .as_ref()
-            .and_then(|scalar| {
-                r2types::declaration_type_width_bits(scalar, ptr_bits)
-                    .map(|bits| u64::from(bits).div_ceil(8))
-            })
-            .map(EscapeReach::Bytes);
-        // The callee's own body: the bytes it is proven to write through this
-        // argument, and nothing if it hands the pointer on to something the
-        // summary does not see.
-        let Some(summary) = source_owned
-            .report()
-            .interproc_summary_set()
-            .and_then(|set| {
-                set.summaries
-                    .get(&r2ssa::InterprocFunctionId(facts.direct_target?))
-            })
-        else {
-            r2il::refusal_evidence!(
-                "escape-callee",
-                "no summary for {:?} (set present: {})",
-                facts.direct_target,
-                source_owned.report().interproc_summary_set().is_some()
-            );
-            // A callee nothing describes may reach anything the address leads to.
-            return Some(EscapeReach::Frame);
-        };
-        r2il::refusal_evidence!(
-            "escape-callee",
-            "summary for {:#x}: unknown_calls={} unknown_memory={} effects={:?}",
-            facts.direct_target?,
-            summary.has_unknown_calls,
-            summary.touches_unknown_memory,
-            summary.memory_effects
-        );
-        if summary.has_unknown_calls || summary.touches_unknown_memory {
-            return Some(EscapeReach::Frame);
-        }
-        // A bounded transfer into the argument writes at most its length,
-        // where the length is a constant at this call: the literal the value
-        // view names the argument's bits by, through any copies and the zero
-        // extension a 32-bit register write makes.
-        let constant_argument = |index: usize| {
-            let value = facts
-                .argument_values
-                .iter()
-                .find(|argument| argument.index == index)?
-                .value;
-            let var = &graph.value(value)?.var;
-            var.constant_bits()
-                .or_else(|| identity?.canonical_root(var).constant_bits())
-        };
-        let mut end = None::<i64>;
-        for transfer in &summary.transfer_effects {
-            let r2ssa::SummaryMemoryRegion::Arg { index } = transfer.dst.region else {
-                continue;
-            };
-            if index != argument.index {
-                continue;
-            }
-            let length = match transfer.len {
-                r2ssa::SummaryTransferLength::Const(length) => Some(length),
-                r2ssa::SummaryTransferLength::Arg(length) => constant_argument(length),
-                r2ssa::SummaryTransferLength::Unknown => None,
-            };
-            let length = length.and_then(|length| i64::try_from(length).ok())?;
-            end = Some(end.map_or(length - 1, |end| end.max(length - 1)));
-        }
-        let has_transfer = end.is_some();
-        for effect in &summary.memory_effects {
-            let r2ssa::SummaryMemoryRegion::Arg { index } = effect.location.region else {
-                continue;
-            };
-            if index != argument.index {
-                continue;
-            }
-            // A read is a reach as much as a write: the object it lands on
-            // is observed, and a store into it is not dead. An address the
-            // callee keeps or frees may be followed anywhere.
-            match effect.kind {
-                r2ssa::SummaryMemoryEffectKind::Write | r2ssa::SummaryMemoryEffectKind::Read => {}
-                r2ssa::SummaryMemoryEffectKind::Escape | r2ssa::SummaryMemoryEffectKind::Free => {
-                    return Some(EscapeReach::Frame);
-                }
-            }
-            // An access the transfer already bounds carries no range of its own.
-            let Some(range) = effect.location.range else {
-                if has_transfer {
-                    continue;
-                }
-                return Some(EscapeReach::Frame);
-            };
-            // A range below the address handed over is no span from it.
-            if range.span_from_base().is_none() {
-                return Some(EscapeReach::Frame);
-            }
-            end = Some(end.map_or(range.offset_hi, |end| end.max(range.offset_hi)));
-        }
-        let proven = end
-            .and_then(|end| u64::try_from(end.checked_add(1)?).ok())
-            .map(EscapeReach::Bytes);
-        match (proven, scalar_floor) {
-            (Some(EscapeReach::Bytes(proven)), Some(EscapeReach::Bytes(floor))) => {
-                Some(EscapeReach::Bytes(proven.max(floor)))
-            }
-            (proven, floor) => proven.or(floor),
-        }
+    callsites.by_callsite.values().any(|facts| {
+        facts.argument_values.iter().any(|argument| {
+            argument.value == value
+                || identity
+                    .zip(graph.value(argument.value))
+                    .zip(graph.value(value))
+                    .is_some_and(|((identity, argument), address)| {
+                        identity.same_bits(&argument.var, &address.var)
+                    })
+        })
     })
 }
 

@@ -2779,8 +2779,18 @@ fn an_unknown_call_leaves_the_reach_through_an_argument_it_is_not_handed() {
     // and so is the third: it is still in its register at the call, and a
     // callee no interface states the arity of may read every argument
     // register.
-    assert!(!reach.contains_key(&1), "{reach:?}");
-    assert!(!reach.contains_key(&2), "{reach:?}");
+    assert!(
+        reach
+            .get(&1)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
+    assert!(
+        reach
+            .get(&2)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
 }
 
 /// `long f(char *buf, void (*cb)(char **)) { char *local = buf; cb(&local); return *buf; }`:
@@ -2828,7 +2838,12 @@ fn a_formal_laundered_through_a_frame_object_a_call_is_handed_is_unbounded() {
     let summary = r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(BASE), &shared)
         .expect("a summary");
     let reach = summary.argument_touch_reach();
-    assert!(!reach.contains_key(&0), "{reach:?}");
+    assert!(
+        reach
+            .get(&0)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
 }
 
 /// `long g(char *buf, long c, void (*cb)(char *)) { long x = buf[0]; if (c) buf += 1; cb(buf); return x; }`
@@ -2872,7 +2887,12 @@ fn a_frame_load_two_stores_reach_carries_the_formal_they_stored() {
     let summary = r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(BASE), &shared)
         .expect("a summary");
     let reach = summary.argument_touch_reach();
-    assert!(!reach.contains_key(&0), "{reach:?}");
+    assert!(
+        reach
+            .get(&0)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
 }
 
 /// What the summary of the function at `entry` says it reaches through each
@@ -2938,7 +2958,12 @@ fn a_formal_stored_in_a_struct_a_direct_callee_is_handed_is_unbounded() {
         "fstruct",
         BASE,
     );
-    assert!(!reach.contains_key(&0), "{reach:?}");
+    assert!(
+        reach
+            .get(&0)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
 }
 
 /// clang -O2 of `void wcont(long *x) { container_of(x, struct holder, x)->p[12] = 6; }`
@@ -2985,7 +3010,12 @@ fn a_formal_stored_below_the_frame_address_a_direct_callee_is_handed_is_unbounde
         "fcont",
         BASE,
     );
-    assert!(!reach.contains_key(&0), "{reach:?}");
+    assert!(
+        reach
+            .get(&0)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
 }
 
 /// The callee's own reach: it reads eight bytes *below* the pointer it is
@@ -2999,7 +3029,12 @@ fn a_read_below_the_pointer_a_callee_is_handed_is_no_span_from_it() {
         "wcont",
         BASE + 0x30,
     );
-    assert!(!reach.contains_key(&0), "{reach:?}");
+    assert!(
+        reach
+            .get(&0)
+            .is_some_and(r2ssa::ArgumentReach::is_unbounded),
+        "{reach:?}"
+    );
 }
 
 /// `long mn(long a, long b) { long sa = a, sb = b; long r = sa < sb ? sa : sb; return r + sa; }`
@@ -3077,4 +3112,65 @@ fn a_merge_of_two_variables_is_one_assignment_of_a_conditional() {
         .find(|line| line.trim_start().starts_with("return"))
         .unwrap_or_else(|| panic!("no return:\n{text}"));
     assert!(returned.contains(merge), "{returned}\n{text}");
+}
+
+/// ```text
+///   1000  push rbx                     ; a save: the frame's, not a local's
+///   1001  sub rsp, 0x20
+///   1005  mov dword [rsp+0x10], 1
+///   100d  mov dword [rsp+0x18], 2
+///   1015  lea rdi, [rsp+0x10]
+///   101a  call rsi                     ; nothing describes this callee
+///   101c  mov eax, [rsp+0x18]
+///   1020  add rsp, 0x20
+///   1024  pop rbx
+///   1025  ret
+/// ```
+const HANDS_A_BUFFER_TO_AN_UNKNOWN_CALL: &[u8] = &[
+    0x53, // 1000 push rbx
+    0x48, 0x83, 0xec, 0x20, // 1001 sub rsp, 0x20
+    0xc7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00, // 1005 mov dword [rsp+0x10], 1
+    0xc7, 0x44, 0x24, 0x18, 0x02, 0x00, 0x00, 0x00, // 100d mov dword [rsp+0x18], 2
+    0x48, 0x8d, 0x7c, 0x24, 0x10, // 1015 lea rdi, [rsp+0x10]
+    0xff, 0xd6, // 101a call rsi
+    0x8b, 0x44, 0x24, 0x18, // 101c mov eax, [rsp+0x18]
+    0x48, 0x83, 0xc4, 0x20, // 1020 add rsp, 0x20
+    0x5b, // 1024 pop rbx
+    0xc3, // 1025 ret
+];
+
+/// A callee nothing describes, handed `&buf`, may reach anywhere in the object
+/// `buf` is, and nothing states where that object ends: under the UB-free
+/// premise it ends at the nearest slot no local extends across, here the
+/// `rbx` save. So the word at +8 is a member of what the call was handed, not
+/// a neighbour the call cannot touch. Splitting them let a rendering keep the
+/// constant 2 across the call, which the callee may have overwritten.
+#[test]
+fn a_buffer_an_unknown_call_is_handed_runs_to_the_nearest_save_slot() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: HANDS_A_BUFFER_TO_AN_UNKNOWN_CALL.to_vec(),
+        name: "hands_a_buffer",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact = prepared.shared_artifact();
+    let graph = artifact.graph();
+    let objects = artifact.objects();
+    let object_stored_at = |instruction: u64| {
+        graph
+            .insts_for_instruction(instruction)
+            .iter()
+            .find_map(|inst| match &graph.inst(*inst)?.payload {
+                InstPayload::Op(SSAOp::Store { addr, space, .. }) => {
+                    objects.object_for_var(graph, addr, *space)
+                }
+                _ => None,
+            })
+            .expect("the instruction stores to an object")
+    };
+    let first = object_stored_at(BASE + 0x05);
+    let second = object_stored_at(BASE + 0x0d);
+    let save = object_stored_at(BASE);
+    assert_eq!(first, second, "{:#?}", objects.stack_objects);
+    assert_ne!(first, save, "{:#?}", objects.stack_objects);
 }

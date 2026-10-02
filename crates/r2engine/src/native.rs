@@ -76,6 +76,12 @@ pub trait Program: r2ssa::body::Program {
     fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {
         None
     }
+
+    /// The register saves the container's call-frame information states for
+    /// the function starting at `entry`. Empty where it states none.
+    fn frame_saves(&self, _entry: u64) -> Vec<r2source::SourceFrameSave> {
+        Vec::new()
+    }
 }
 
 /// Everything about the machine that does not change between functions.
@@ -1698,10 +1704,10 @@ impl Callees {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
             .insert(address, facts.preserved_carriers().clone());
-        let reach = facts.argument_touch_reach();
-        if !reach.is_empty() {
-            self.reach.insert(address, reach);
-        }
+        // Recorded even when empty: a body that touches nothing through its
+        // arguments is described, and a callee with no entry is one nothing
+        // describes.
+        self.reach.insert(address, facts.argument_touch_reach());
     }
 }
 
@@ -2200,6 +2206,7 @@ impl Native<'_> {
             signature,
             interface,
             loader_role: None,
+            frame_saves: self.program.frame_saves(walked.body.entry),
         };
 
         let snapshot =

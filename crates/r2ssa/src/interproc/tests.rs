@@ -2422,7 +2422,7 @@ fn an_access_at_no_stated_place_leaves_the_formal_its_address_depends_on_unbound
         exact_untyped_artifact(&blocks, &arch, b"merged-walk", "sysv64", &[8, 32], 16, 24);
     let reach = touch_reach(&prepared);
     assert!(
-        !reach.contains_key(&0),
+        reach.get(&0).is_some_and(ArgumentReach::is_unbounded),
         "a read through v or v + 8 reaches past v's first word: {reach:?}"
     );
 }

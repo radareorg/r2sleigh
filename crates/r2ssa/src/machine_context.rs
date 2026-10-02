@@ -581,6 +581,8 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The register saves the container's call-frame information states.
+    frame_saves: Vec<r2source::SourceFrameSave>,
     /// The function each captured code pointer table entry names, by the
     /// address of the entry. A slot a relocation fills holds no address the
     /// file states, so what it becomes is a fact about the program rather
@@ -1019,6 +1021,7 @@ impl SourceMachineContext {
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            frame_saves: Vec::new(),
             code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
@@ -1316,6 +1319,16 @@ impl SourceMachineContext {
         callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     ) {
         self.callee_argument_reach = callee_argument_reach;
+    }
+
+    pub(crate) fn set_frame_saves(&mut self, saves: &[r2source::SourceFrameSave]) {
+        self.frame_saves = saves.to_vec();
+    }
+
+    /// Where the call-frame information says the function saves each register
+    /// it preserves, from the stack pointer on entry; sorted by offset.
+    pub fn frame_saves(&self) -> &[r2source::SourceFrameSave] {
+        &self.frame_saves
     }
 
     pub(crate) fn set_code_pointer_entries(&mut self, entries: BTreeMap<u64, u64>) {

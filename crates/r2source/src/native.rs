@@ -117,6 +117,9 @@ pub struct NativeFunction {
     /// `size_t` or a parameter's own name survives.
     pub signature: Option<SourceSignaturePresentation>,
     pub loader_role: Option<SourceLoaderRole>,
+    /// The register saves the container's call-frame information states for
+    /// this function.
+    pub frame_saves: Vec<crate::SourceFrameSave>,
 }
 
 /// Mint a snapshot from a capture the engine made itself.
@@ -228,6 +231,11 @@ pub fn capture(
             string_literals: function.string_literals.into_boxed_slice(),
             data_symbols: function.data_symbols.into_boxed_slice(),
             code_pointer_tables: function.code_pointer_tables.into_boxed_slice(),
+            frame_saves: {
+                let mut saves = function.frame_saves;
+                saves.sort_unstable_by_key(|save| (save.entry_offset, save.register));
+                saves.into_boxed_slice()
+            },
             total_source_bytes,
         },
         advisory_calls.into_boxed_slice(),
@@ -353,6 +361,7 @@ mod tests {
             stack_slot_names: Vec::new(),
             signature: None,
             loader_role: None,
+            frame_saves: Vec::new(),
         }
     }
 

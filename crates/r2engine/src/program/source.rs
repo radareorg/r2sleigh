@@ -44,6 +44,8 @@ pub struct Container {
     pub entries: Vec<Entry>,
     /// Prototypes the program's own debug information declares.
     pub declared: Vec<r2abi::Prototype>,
+    /// The frames the call-frame information states, which survive strip.
+    pub unwind: r2abi::frames::UnwindFrames,
 }
 
 impl Container {

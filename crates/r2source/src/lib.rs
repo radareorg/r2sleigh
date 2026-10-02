@@ -379,7 +379,23 @@ pub struct OwnedFunctionImage {
     /// contains, never which entry a given call reaches. That follows from the
     /// range a caller can prove for the index.
     code_pointer_tables: Box<[SourceCodePointerTable]>,
+    /// Where the function saves each register it preserves, as the
+    /// container's call-frame information states it: a fact about the frame
+    /// the code builds, read from the binary rather than from the code.
+    frame_saves: Box<[SourceFrameSave]>,
     total_source_bytes: usize,
+}
+
+/// One register save the call-frame information states.
+///
+/// The slot sits at `entry_offset` from the stack pointer on entry and is one
+/// address wide. `register` is the DWARF register number the CFI names it by.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct SourceFrameSave {
+    pub register: u16,
+    pub entry_offset: i64,
 }
 
 /// One program data object referenced by a captured function.
@@ -478,6 +494,12 @@ impl OwnedFunctionImage {
 
     pub fn code_pointer_tables(&self) -> &[SourceCodePointerTable] {
         &self.code_pointer_tables
+    }
+
+    /// The register saves the call-frame information states, sorted by
+    /// offset. Empty where the container states none.
+    pub fn frame_saves(&self) -> &[SourceFrameSave] {
+        &self.frame_saves
     }
 
     pub const fn blocks(&self) -> &[OwnedFunctionBlock] {
@@ -1181,6 +1203,7 @@ mod tests {
                 string_literals: Box::new([]),
                 data_symbols: Box::new([]),
                 code_pointer_tables: Box::new([]),
+                frame_saves: Box::new([]),
                 entry_address: 0x1000,
                 blocks: vec![OwnedFunctionBlock {
                     address: 0x1000,

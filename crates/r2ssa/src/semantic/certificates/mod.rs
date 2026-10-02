@@ -4,6 +4,7 @@ mod call_results;
 mod expressions;
 mod returns;
 mod shared;
+pub(crate) use shared::exact_copy_chain_to_entry_storage;
 mod stack;
 
 pub use call_results::*;

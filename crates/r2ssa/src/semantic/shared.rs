@@ -1522,23 +1522,37 @@ pub(crate) fn callee_write_spans(
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
     values: &crate::values::ValueRanges,
-) -> Vec<(StackAddressRoot, i64)> {
+) -> CalleeSpans {
     let Some(machine_context) = machine_context else {
-        return Vec::new();
+        return CalleeSpans::default();
     };
-    let registers = machine_context.abi_model().argument_registers();
+    // What a call is handed in each argument position is what the convention
+    // puts there, whatever this function itself takes: a caller of one
+    // parameter hands `buf` to `f(x, buf)` in the second slot all the same.
+    let registers = machine_context
+        .convention_slots()
+        .map(r2source::SourceConventionSlots::argument_slots)
+        .unwrap_or_default();
     let mut reaching =
         BTreeMap::<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>::new();
     let mut spans = Vec::new();
+    let mut unbounded = BTreeSet::new();
     for block in function.blocks() {
         for (op_idx, op) in block.ops.iter().enumerate() {
-            let SSAOp::Call {
-                target,
-                instruction: Some(instruction),
-            } = op
-            else {
-                continue;
+            let (target, instruction) = match op {
+                SSAOp::Call {
+                    target,
+                    instruction: Some(instruction),
+                } => (Some(target), *instruction),
+                // An indirect call names no callee here: nothing describes
+                // what it reaches through the frame addresses it is handed.
+                SSAOp::CallInd {
+                    instruction: Some(instruction),
+                    ..
+                } => (None, *instruction),
+                _ => continue,
             };
+            let instruction = &instruction;
             // The callee's name is only the key of an import's modelled
             // effects below; what a body the capture read reaches is a fact
             // about that body, whatever the symbol table calls it.
@@ -1546,17 +1560,14 @@ pub(crate) fn callee_write_spans(
                 .raw_call_site_at(*instruction)
                 .and_then(|identity| machine_context.callee_name(identity))
                 .unwrap_or("");
-            let id = crate::interproc::InterprocFunctionId(
-                resolve_graph_literal_value(graph, Some(facts), target).unwrap_or(0),
-            );
+            let target =
+                target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), target));
+            let id = crate::interproc::InterprocFunctionId(target.unwrap_or(0));
             let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
                 continue;
             };
             let mut argument = |index: usize| -> Option<&SSAVar> {
-                let storage = registers
-                    .iter()
-                    .find(|slot| slot.index() as usize == index)?
-                    .storage();
+                let storage = *registers.get(index)?;
                 let states = reaching
                     .entry(storage)
                     .or_insert_with(|| reaching_storage_states_before(function, graph, storage));
@@ -1572,9 +1583,28 @@ pub(crate) fn callee_write_spans(
             // whatever this body reads of them afterwards, and the fact is
             // available here because the callee's body was read before this
             // one was prepared.
-            if let Some(target) = resolve_graph_literal_value(graph, Some(facts), target)
-                && let Some(reach) = machine_context.callee_argument_reach(target)
-            {
+            let reach = target.and_then(|target| machine_context.callee_argument_reach(target));
+            let seed = (!name.is_empty())
+                .then(|| crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name))
+                .flatten();
+            // A callee nothing describes -- no body was read, no import is
+            // modelled, or the call is indirect -- may reach anything through a
+            // frame address it is handed, so the object that address is in has
+            // no extent this call bounds.
+            if reach.is_none() && seed.is_none() {
+                for index in 0..registers.len() {
+                    if let Some(root) =
+                        argument(index).and_then(|var| resolve_stack_root(Some(facts), var))
+                    {
+                        r2il::refusal_evidence!(
+                            "callee-write-span",
+                            "{name} at {instruction:#x} is handed {root:?} as argument {index} and nothing describes it"
+                        );
+                        unbounded.insert(root);
+                    }
+                }
+            }
+            if let Some(reach) = reach {
                 for (index, proven) in reach {
                     let Some(root) =
                         argument(*index).and_then(|var| resolve_stack_root(Some(facts), var))
@@ -1603,6 +1633,7 @@ pub(crate) fn callee_write_spans(
                             "callee-write-span",
                             "{name} at {instruction:#x} reaches argument {index} at {root:?} by {proven:?}, unbounded here"
                         );
+                        unbounded.insert(root);
                         continue;
                     };
                     r2il::refusal_evidence!(
@@ -1612,10 +1643,7 @@ pub(crate) fn callee_write_spans(
                     spans.push((root, end));
                 }
             }
-            let Some(seed) = (!name.is_empty())
-                .then(|| crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name))
-                .flatten()
-            else {
+            let Some(seed) = seed else {
                 continue;
             };
             for transfer in &seed.transfer_effects {
@@ -1638,6 +1666,7 @@ pub(crate) fn callee_write_spans(
                     .and_then(|length| i64::try_from(length).ok())
                     .and_then(|length| root.offset.checked_add(length))
                 else {
+                    unbounded.insert(root);
                     continue;
                 };
                 r2il::refusal_evidence!(
@@ -1648,7 +1677,157 @@ pub(crate) fn callee_write_spans(
             }
         }
     }
-    spans
+    CalleeSpans { spans, unbounded }
+}
+
+/// What the calls in a body reach through the frame addresses they are
+/// handed: a span from the address where the callee states one, and the
+/// addresses a callee reaches through without a bound.
+#[derive(Debug, Default)]
+pub(crate) struct CalleeSpans {
+    pub(crate) spans: Vec<(StackAddressRoot, i64)>,
+    pub(crate) unbounded: BTreeSet<StackAddressRoot>,
+}
+
+/// The frame positions no object may extend across: the slots the function
+/// saves a preserved register in, and the return address.
+///
+/// A local is the program's; a save slot is the frame's bookkeeping. Under the
+/// UB-free premise a pointer to a local never reaches a save slot, so an
+/// object whose extent nothing else bounds ends at the nearest one. Two
+/// sources state them, and both are kept:
+/// - the call-frame information, in entry coordinates: a statement the
+///   container makes, which survives strip;
+/// - the stores themselves: a frame store of a preserved register's value on
+///   entry is a save, whatever else the function does, because no local holds
+///   the caller's register.
+///
+/// Each boundary is placed in every coordinate base an address in this body is
+/// measured from, through the offset between that base and the entry stack
+/// pointer that the body's own addresses prove.
+#[derive(Debug, Default)]
+pub(crate) struct FrameBoundaries {
+    /// Per base, the `[lo, hi)` byte ranges of the slots, sorted.
+    slots: BTreeMap<StackAddressBase, BTreeSet<(i64, i64)>>,
+    /// Per base, where the stack pointer on entry is.
+    entry: BTreeMap<StackAddressBase, i64>,
+}
+
+impl FrameBoundaries {
+    pub(crate) fn of(
+        facts: &DecompilePrepFacts,
+        function: &SSAFunction,
+        graph: &SsaGraph,
+        machine_context: Option<&SourceMachineContext>,
+    ) -> Self {
+        let mut boundaries = Self::default();
+        // How far each base sits from the entry stack pointer, where every
+        // address measured in both says the same.
+        let mut deltas = BTreeMap::<StackAddressBase, BTreeSet<i64>>::new();
+        for (var, root) in &facts.stack_address_roots {
+            let Some(entry) = facts.entry_stack_address_root_of(var) else {
+                continue;
+            };
+            if entry.base != StackAddressBase::StackPointer {
+                continue;
+            }
+            if let Some(delta) = entry.offset.checked_sub(root.offset) {
+                deltas.entry(root.base).or_default().insert(delta);
+            }
+        }
+        deltas
+            .entry(StackAddressBase::StackPointer)
+            .or_default()
+            .insert(0);
+        for (base, delta) in &deltas {
+            if let [delta] = delta.iter().copied().collect::<Vec<_>>().as_slice() {
+                boundaries.entry.insert(*base, -*delta);
+            }
+        }
+        let Some(machine_context) = machine_context else {
+            return boundaries;
+        };
+        let width = i64::from(machine_context.memory_model().default_address_bits() / 8);
+        for save in machine_context.frame_saves() {
+            boundaries.insert_entry(save.entry_offset, width);
+        }
+        let Some(effect) = machine_context.call_effect() else {
+            return boundaries;
+        };
+        let stack_pointer = machine_context.stack_pointer_carrier();
+        for block in function.blocks() {
+            for op in &block.ops {
+                let SSAOp::Store {
+                    space: SpaceId::Ram,
+                    addr,
+                    val,
+                } = op
+                else {
+                    continue;
+                };
+                let Some(root) = resolve_stack_root(Some(facts), addr) else {
+                    continue;
+                };
+                let Some((storage, ..)) = graph.value_id_for_var(val).and_then(|value| {
+                    super::certificates::exact_copy_chain_to_entry_storage(graph, value, val.size)
+                }) else {
+                    continue;
+                };
+                if Some(storage) == stack_pointer || !effect.preserves(storage) {
+                    continue;
+                }
+                r2il::refusal_evidence!(
+                    "frame-boundary",
+                    "{root:?} saves {storage:?}, preserved across calls"
+                );
+                let Some(hi) = root.offset.checked_add(i64::from(val.size)) else {
+                    continue;
+                };
+                boundaries
+                    .slots
+                    .entry(root.base)
+                    .or_default()
+                    .insert((root.offset, hi));
+                // The same slot in every other base this body proves.
+                if let Some(entry) = boundaries.entry.get(&root.base).copied() {
+                    boundaries.insert_entry(root.offset - entry, i64::from(val.size));
+                }
+            }
+        }
+        boundaries
+    }
+
+    /// Place a slot stated in entry coordinates in every base.
+    fn insert_entry(&mut self, entry_offset: i64, width: i64) {
+        for (base, entry) in &self.entry {
+            let Some(lo) = entry.checked_add(entry_offset) else {
+                continue;
+            };
+            let Some(hi) = lo.checked_add(width) else {
+                continue;
+            };
+            self.slots.entry(*base).or_default().insert((lo, hi));
+        }
+    }
+
+    /// Where an object starting at `root` must end at the latest: the first
+    /// save slot above it, else the entry stack pointer. `None` when neither
+    /// is known in this base.
+    pub(crate) fn ceiling(&self, root: StackAddressRoot) -> Option<i64> {
+        let slot = self
+            .slots
+            .get(&root.base)
+            .and_then(|slots| slots.iter().map(|(lo, _)| *lo).find(|lo| *lo > root.offset));
+        let entry = self
+            .entry
+            .get(&root.base)
+            .copied()
+            .filter(|entry| *entry > root.offset);
+        match (slot, entry) {
+            (Some(slot), Some(entry)) => Some(slot.min(entry)),
+            (slot, entry) => slot.or(entry),
+        }
+    }
 }
 
 pub(crate) fn evidenced_stack_roots(
@@ -1659,6 +1838,8 @@ pub(crate) fn evidenced_stack_roots(
     stack_pointer_carrier: Option<CanonicalStorageId>,
     values: &crate::values::ValueRanges,
     callee_write_spans: &BTreeMap<StackAddressRoot, i64>,
+    unbounded_escapes: &BTreeSet<StackAddressRoot>,
+    boundaries: &FrameBoundaries,
 ) -> EvidencedStackRoots {
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
@@ -1845,6 +2026,26 @@ pub(crate) fn evidenced_stack_roots(
             .and_modify(|known| *known = (*known).max(*end))
             .or_insert(*end);
     }
+    // A callee that reaches through a frame address without a bound reaches
+    // the object the address is in, and nothing states where that object
+    // ends: it runs to the nearest position no local extends across.
+    for root in unbounded_escapes {
+        let Some(ceiling) = boundaries.ceiling(*root) else {
+            r2il::refusal_evidence!(
+                "frame-unbounded-escape",
+                "{root:?} escapes without a bound and no boundary above it is known"
+            );
+            continue;
+        };
+        r2il::refusal_evidence!(
+            "frame-unbounded-escape",
+            "{root:?} escapes without a bound, so its object runs to {ceiling}"
+        );
+        spans
+            .entry(*root)
+            .and_modify(|known| *known = (*known).max(ceiling))
+            .or_insert(ceiling);
+    }
     roots.retain(|root| {
         let inside = spans.iter().any(|(base, end)| {
             base.base == root.base && base.offset < root.offset && root.offset < *end
@@ -1876,7 +2077,14 @@ pub(crate) fn evidenced_stack_roots(
                 })
         });
         if escapes {
-            roots.insert(*root);
+            // An address inside a span is a place in that object: handing it
+            // out is the object escaping, not another object starting there.
+            let inside = spans.iter().any(|(base, end)| {
+                base.base == root.base && base.offset < root.offset && root.offset < *end
+            });
+            if !inside {
+                roots.insert(*root);
+            }
             escaping.insert(*root);
         }
     }

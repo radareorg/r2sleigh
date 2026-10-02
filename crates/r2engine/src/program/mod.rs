@@ -593,6 +593,24 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
         self.source.container().loader_writes_any(range)
     }
 
+    fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
+        self.source
+            .container()
+            .unwind
+            .at(entry)
+            .map(|frame| {
+                frame
+                    .saves
+                    .iter()
+                    .map(|(register, entry_offset)| r2source::SourceFrameSave {
+                        register: *register,
+                        entry_offset: *entry_offset,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn extents(&self) -> &r2types::ProgramExtents {
         &self.extents
     }
@@ -676,6 +694,10 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.program.target_at(vaddr)
+    }
+
+    fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
+        crate::native::Program::frame_saves(self.program, entry)
     }
 }
 
