@@ -75,6 +75,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "ir" => relocations(session),
         "px" => hexdump(session, argument),
         "V" => crate::visual::open(session),
+        "agf" => crate::visual::agf(session, argument),
         "pd" => crate::listing::disassemble(session, argument),
         "pdf" => crate::listing::disassemble_function(session, argument),
         "pdd" => decompile(session, argument),

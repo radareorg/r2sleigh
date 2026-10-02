@@ -30,6 +30,56 @@ pub struct Entry {
     pub text: String,
 }
 
+/// One function's control-flow graph, as the engine walked it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Graph {
+    /// The function's entry, which names the graph.
+    pub entry: u64,
+    /// In address order.
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    /// Why the graph is the plain walk's, where it is: then no dispatch is followed.
+    pub note: Option<String>,
+}
+
+/// One basic block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNode {
+    pub address: u64,
+    pub size: u64,
+    /// The block's disassembly, one string per instruction, as `pd` spells it.
+    pub lines: Vec<String>,
+}
+
+/// Control leaving one block for another, by index into [`Graph::nodes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphEdge {
+    pub from: usize,
+    pub to: usize,
+    pub kind: EdgeKind,
+}
+
+/// How control reaches an edge's target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EdgeKind {
+    Jump,
+    Fall,
+    Taken,
+    NotTaken,
+    Case,
+    Default,
+}
+
+impl Graph {
+    /// The block holding this address.
+    pub fn node_at(&self, address: u64) -> Option<usize> {
+        let after = self.nodes.partition_point(|node| node.address <= address);
+        let at = after.checked_sub(1)?;
+        let node = &self.nodes[at];
+        (address - node.address < node.size.max(1)).then_some(at)
+    }
+}
+
 /// The lists the visual mode shows, each the shell's command of that name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListKind {
@@ -94,6 +144,9 @@ pub trait Host {
 
     /// The decompiled function that contains `address`.
     fn decompile(&mut self, address: u64) -> Result<Vec<DecompiledLine>, String>;
+
+    /// The control-flow graph of the function at `address`, as `agf` draws it.
+    fn graph(&mut self, address: u64) -> Result<Graph, String>;
 
     /// One of the lists, as its command lists it.
     fn list(&mut self, kind: ListKind) -> Vec<Entry>;

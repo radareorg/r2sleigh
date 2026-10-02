@@ -1,7 +1,8 @@
 //! Drawing: the title bar, the pane in front, and the status and prompt lines.
 
-use crate::app::{App, Message, Prompt, View, matches_filter};
-use crate::host::{Host, ListKind};
+use crate::app::{App, GraphPane, Message, Prompt, View, matches_filter};
+use crate::graph::{Canvas, Ink};
+use crate::host::{EdgeKind, Host, ListKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -38,6 +39,7 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host) {
         View::Disassembly => disassembly(app, frame, host, main),
         View::Decompiler => decompiler(app, frame, host, main),
         View::Hex => hex(app, frame, host, main),
+        View::Graph => graph(app, frame, host, main),
         View::List(kind) => list(app, frame, host, main, kind),
     }
 
@@ -76,6 +78,9 @@ fn help(view: View) -> &'static str {
         }
         View::Decompiler => "j/k move (seeks)  u back  g goto  p/P pane  : cmd  q quit",
         View::Hex => "arrows move  i edit (esc ends)  g goto  p/P pane  : cmd  q quit",
+        View::Graph => {
+            "hjkl pan  tab block  t/f true/false  . centre  -/+ zoom  enter disasm  u back  q quit"
+        }
         View::List(_) => "j/k move  enter seek  / filter  l next list  p/P pane  : cmd  q quit",
     }
 }
@@ -256,5 +261,124 @@ fn inset(area: Rect, x: u16, y: u16) -> Rect {
         y: area.y + y.min(area.height / 2),
         width: area.width.saturating_sub(2 * x),
         height: area.height.saturating_sub(2 * y),
+    }
+}
+
+/// The graph pane: the function holding the seek, laid out once and painted
+/// through the window.
+fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+    let seek = host.seek();
+    let held = app.graph.as_ref().map(|pane| match &pane.drawn {
+        Ok((graph, _)) => graph.node_at(seek),
+        Err(_) if pane.at == seek => Some(0),
+        Err(_) => None,
+    });
+    match held {
+        Some(Some(node)) => {
+            if let Some(pane) = &mut app.graph
+                && pane.selected != node
+                && pane.drawn.is_ok()
+            {
+                pane.selected = node;
+                pane.recentre = true;
+            }
+        }
+        _ => {
+            let drawn = host.graph(seek).map(|graph| {
+                let layout = crate::graph::lay_out(&graph, false);
+                (graph, layout)
+            });
+            let selected = match &drawn {
+                Ok((graph, _)) => graph
+                    .node_at(seek)
+                    .or_else(|| graph.node_at(graph.entry))
+                    .unwrap_or(0),
+                Err(_) => 0,
+            };
+            app.graph = Some(GraphPane {
+                at: seek,
+                drawn,
+                selected,
+                scroll: (0, 0),
+                mini: false,
+                recentre: true,
+            });
+        }
+    }
+    let Some(pane) = &mut app.graph else {
+        return;
+    };
+    let block = pane_title(pane);
+    let inner = block.inner(area);
+    let (graph, layout) = match &pane.drawn {
+        Ok(drawn) => drawn,
+        Err(error) => {
+            frame.render_widget(
+                Paragraph::new(Line::styled(error.clone(), ERROR)).block(block),
+                area,
+            );
+            return;
+        }
+    };
+    if pane.recentre && !layout.boxes.is_empty() {
+        let placed = layout.boxes[pane.selected.min(layout.boxes.len() - 1)];
+        let centre = i64::from(placed.x) + i64::from(placed.width) / 2;
+        pane.scroll.0 = (centre - i64::from(inner.width) / 2).max(0);
+        pane.scroll.1 = (i64::from(placed.y) - 2).max(0);
+        pane.recentre = false;
+    }
+    frame.render_widget(block, area);
+    let mut canvas = Canvas::new(
+        pane.scroll.0,
+        pane.scroll.1,
+        usize::from(inner.width),
+        usize::from(inner.height),
+    );
+    crate::graph::paint(graph, layout, &mut canvas, Some(pane.selected), pane.mini);
+    let buffer = frame.buffer_mut();
+    for row in 0..canvas.height {
+        for column in 0..canvas.width {
+            let (glyph, ink) = canvas.cell(column, row);
+            if glyph == ' ' {
+                continue;
+            }
+            let cell = &mut buffer[(inner.x + column as u16, inner.y + row as u16)];
+            cell.set_char(glyph);
+            cell.set_style(ink_style(ink));
+        }
+    }
+}
+
+fn pane_title(held: &GraphPane) -> Block<'static> {
+    let title = match &held.drawn {
+        Ok((graph, _)) => {
+            let note = graph
+                .note
+                .as_deref()
+                .map_or(String::new(), |note| format!(" -- {note}"));
+            format!(
+                " graph {:#x}  {} blocks  {} edges{} ",
+                graph.entry,
+                graph.nodes.len(),
+                graph.edges.len(),
+                note
+            )
+        }
+        Err(_) => " graph ".to_owned(),
+    };
+    pane(title)
+}
+
+/// radare2's edge colours: true green, false red, unconditional blue.
+fn ink_style(ink: Ink) -> Style {
+    match ink {
+        Ink::Edge(EdgeKind::Taken) => Style::new().fg(Color::Green),
+        Ink::Edge(EdgeKind::NotTaken) => Style::new().fg(Color::Red),
+        Ink::Edge(EdgeKind::Jump | EdgeKind::Fall) => Style::new().fg(Color::Blue),
+        Ink::Edge(EdgeKind::Case) => Style::new().fg(Color::Magenta),
+        Ink::Edge(EdgeKind::Default) => Style::new().fg(Color::Yellow),
+        Ink::Selected => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Ink::Header => ADDRESS,
+        Ink::Border | Ink::Text | Ink::Blank => Style::new(),
     }
 }

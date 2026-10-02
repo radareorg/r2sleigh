@@ -2,7 +2,10 @@
 //! in memory, drawn into a test terminal.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use r2s_tui::{App, DecompiledLine, Entry, Host, ListKind, ListedLine, View};
+use r2s_tui::{
+    App, DecompiledLine, EdgeKind, Entry, Graph, GraphEdge, GraphNode, Host, ListKind, ListedLine,
+    View,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::collections::BTreeMap;
@@ -85,6 +88,32 @@ impl Host for Program {
             },
         ])
     }
+    fn graph(&mut self, address: u64) -> Result<Graph, String> {
+        if !(0x1000..0x1018).contains(&address) {
+            return Err(format!("no function at {address:#x}"));
+        }
+        // A branch at 0x1004 over the block at 0x1008, both reaching 0x1010.
+        let node = |address, lines: &[&str]| GraphNode {
+            address,
+            size: 8,
+            lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+        };
+        let edge = |from, to, kind| GraphEdge { from, to, kind };
+        Ok(Graph {
+            entry: 0x1000,
+            nodes: vec![
+                node(0x1000, &["call fcn.00002000", "je 0x1010"]),
+                node(0x1008, &["nop", "jmp 0x1010"]),
+                node(0x1010, &["nop", "ret"]),
+            ],
+            edges: vec![
+                edge(0, 2, EdgeKind::Taken),
+                edge(0, 1, EdgeKind::NotTaken),
+                edge(1, 2, EdgeKind::Jump),
+            ],
+            note: None,
+        })
+    }
     fn list(&mut self, kind: ListKind) -> Vec<Entry> {
         match kind {
             ListKind::Functions => vec![
@@ -119,6 +148,7 @@ fn press(app: &mut App, host: &mut Program, keys: &str) -> bool {
         let code = match c {
             '\n' => KeyCode::Enter,
             '\x1b' => KeyCode::Esc,
+            '\t' => KeyCode::Tab,
             c => KeyCode::Char(c),
         };
         if !app.handle_key(host, KeyEvent::new(code, KeyModifiers::NONE)) {
@@ -238,4 +268,43 @@ fn q_leaves() {
     let mut host = Program::new();
     let mut app = App::new(&host);
     assert!(!press(&mut app, &mut host, "q"));
+}
+
+#[test]
+fn the_graph_follows_edges_and_blocks_and_keeps_the_seek_in_step() {
+    let mut host = Program::new();
+    let mut app = App::new(&host);
+    press(&mut app, &mut host, "V");
+    assert_eq!(app.view(), View::Graph);
+    let shown = screen(&mut app, &mut host);
+    assert!(shown.contains("graph 0x1000  3 blocks  3 edges"), "{shown}");
+    assert!(
+        shown.contains("[0x1000]") && shown.contains("call fcn.00002000"),
+        "{shown}"
+    );
+    // `f` follows the false edge, `t` from there the only (unconditional) one.
+    press(&mut app, &mut host, "f");
+    assert_eq!(host.seek, 0x1008);
+    press(&mut app, &mut host, "t");
+    assert_eq!(host.seek, 0x1010);
+    // The window follows the selection.
+    let shown = screen(&mut app, &mut host);
+    assert!(shown.contains("[0x1010]"), "{shown}");
+    // Nothing leaves the exit.
+    press(&mut app, &mut host, "t");
+    assert_eq!(host.seek, 0x1010);
+    assert!(screen(&mut app, &mut host).contains("no such edge"));
+    // `u` walks back along what was followed, and the selection follows the seek.
+    press(&mut app, &mut host, "uu");
+    assert_eq!(host.seek, 0x1000);
+    screen(&mut app, &mut host);
+    press(&mut app, &mut host, "\t");
+    assert_eq!(host.seek, 0x1008);
+    press(&mut app, &mut host, "\n");
+    assert_eq!(app.view(), View::Disassembly);
+    assert_eq!(host.seek, 0x1008);
+    // Outside any function the pane says so, and pans nothing.
+    press(&mut app, &mut host, "g2000\nV");
+    let shown = screen(&mut app, &mut host);
+    assert!(shown.contains("no function at 0x2000"), "{shown}");
 }

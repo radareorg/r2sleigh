@@ -11,11 +11,14 @@
 //! crate free of the engine: it depends on nothing but the terminal.
 
 mod app;
+pub mod graph;
 mod host;
 mod view;
 
 pub use app::{App, View};
-pub use host::{DecompiledLine, Entry, Host, ListKind, ListedLine};
+pub use host::{
+    DecompiledLine, EdgeKind, Entry, Graph, GraphEdge, GraphNode, Host, ListKind, ListedLine,
+};
 
 use crossterm::event::{self, Event};
 use crossterm::execute;

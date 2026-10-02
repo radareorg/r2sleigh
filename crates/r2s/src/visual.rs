@@ -6,13 +6,77 @@
 
 use crate::session::Session;
 use r2engine::RenderTier;
+use r2engine::program::EdgeKind as Edge;
 use r2engine::query::{AnnotationKind, Listing, Stop};
-use r2s_tui::{DecompiledLine, Entry, Host, ListKind, ListedLine};
+use r2s_tui::{
+    DecompiledLine, EdgeKind, Entry, Graph, GraphEdge, GraphNode, Host, ListKind, ListedLine,
+};
 
 /// `V`: the visual mode, from the prompt, returning to it on `q`.
 pub(crate) fn open(session: &mut Session) -> Result<String, String> {
     r2s_tui::run(&mut Visual { session }).map_err(|error| format!("visual mode: {error}"))?;
     Ok(String::new())
+}
+
+/// `agf`: the control-flow graph of the function at the address, drawn as text.
+pub(crate) fn agf(session: &mut Session, argument: &str) -> Result<String, String> {
+    let entry = crate::commands::parse_number(session, argument)?;
+    let graph = graph_of(session, entry)?;
+    Ok(r2s_tui::graph::text(&graph).trim_end().to_owned())
+}
+
+/// The engine's graph of the function at `entry`, each block's lines spelled as `pd` spells them.
+fn graph_of(session: &mut Session, entry: u64) -> Result<Graph, String> {
+    let answer = session.program.function_graph(entry)?;
+    if answer.blocks.is_empty() {
+        return Err(format!("no blocks at {entry:#x}"));
+    }
+    let index = |address: u64| {
+        answer
+            .blocks
+            .binary_search_by_key(&address, |block| block.address)
+            .ok()
+    };
+    let mut edges = Vec::new();
+    for (from, block) in answer.blocks.iter().enumerate() {
+        for edge in &block.edges {
+            if let Some(to) = index(edge.target) {
+                let kind = match edge.kind {
+                    Edge::Jump => EdgeKind::Jump,
+                    Edge::Fall => EdgeKind::Fall,
+                    Edge::Taken => EdgeKind::Taken,
+                    Edge::NotTaken => EdgeKind::NotTaken,
+                    Edge::Case => EdgeKind::Case,
+                    Edge::Default => EdgeKind::Default,
+                };
+                edges.push(GraphEdge { from, to, kind });
+            }
+        }
+    }
+    let nodes = answer
+        .blocks
+        .iter()
+        .map(|block| GraphNode {
+            address: block.address,
+            size: block.size,
+            lines: block
+                .lines
+                .iter()
+                .map(|line| {
+                    let text = crate::listing::instruction_text(session, line);
+                    format!("{:#x}  {text}", line.address)
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(Graph {
+        entry,
+        nodes,
+        edges,
+        note: answer
+            .refused
+            .map(|refused| format!("analysis refused: {}", refused.reason)),
+    })
 }
 
 /// The shell and the line reader a command typed in the visual mode runs with.
@@ -111,6 +175,26 @@ impl Host for Visual<'_> {
                 addresses,
             })
             .collect())
+    }
+
+    fn graph(&mut self, address: u64) -> Result<Graph, String> {
+        // The function the address is in: an entry is its own; inside a body,
+        // the nearest entry below whose graph holds it.
+        let entries = self
+            .session
+            .program
+            .functions()?
+            .into_iter()
+            .map(|function| function.address)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !entries.contains(&address)
+            && let Some(&below) = entries.range(..address).next_back()
+            && let Ok(graph) = graph_of(self.session, below)
+            && graph.node_at(address).is_some()
+        {
+            return Ok(graph);
+        }
+        graph_of(self.session, address)
     }
 
     fn list(&mut self, kind: ListKind) -> Vec<Entry> {
@@ -219,6 +303,15 @@ mod tests {
         assert_eq!(app.view(), View::Decompiler);
         let decompiled = screen(&mut app, &mut host);
         assert!(decompiled.contains("return"), "{decompiled}");
+        // The graph of the function holding an address inside its body is
+        // that function's: `sum_array`'s loop body is not a function.
+        let graph = host.graph(0x11e5).expect("sum_array graphs");
+        assert_eq!(graph.entry, 0x11c1);
+        assert_eq!(
+            graph.node_at(0x11e5).map(|node| graph.nodes[node].address),
+            Some(0x11e0)
+        );
+        assert_eq!(graph.nodes.len(), 4, "{graph:?}");
         let functions = host.list(r2s_tui::ListKind::Functions);
         assert!(
             functions.iter().any(|entry| entry.address == 0x1549),

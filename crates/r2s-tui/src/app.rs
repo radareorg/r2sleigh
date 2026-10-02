@@ -6,7 +6,8 @@
 //! the references to the cursor, `:` for a command, `u` to go back, `q` to
 //! leave.
 
-use crate::host::{DecompiledLine, Entry, Host, ListKind, ListedLine};
+use crate::graph::Layout;
+use crate::host::{DecompiledLine, EdgeKind, Entry, Graph, Host, ListKind, ListedLine};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 
@@ -16,15 +17,18 @@ pub enum View {
     Disassembly,
     Decompiler,
     Hex,
+    /// `VV`: the function's control-flow graph.
+    Graph,
     List(ListKind),
 }
 
 impl View {
     /// The order `p` steps through, as radare2's print modes cycle.
-    const CYCLE: [View; 4] = [
+    const CYCLE: [View; 5] = [
         View::Disassembly,
         View::Decompiler,
         View::Hex,
+        View::Graph,
         View::List(ListKind::Functions),
     ];
 
@@ -45,6 +49,7 @@ impl View {
             View::Disassembly => "disassembly".to_owned(),
             View::Decompiler => "decompiler".to_owned(),
             View::Hex => "hex".to_owned(),
+            View::Graph => "graph".to_owned(),
             View::List(kind) => kind.title().to_owned(),
         }
     }
@@ -72,6 +77,20 @@ pub(crate) enum Message {
     Output(String),
 }
 
+/// The graph in front: one function's, laid out once, and the window onto it.
+pub(crate) struct GraphPane {
+    /// The address it was asked for at, which names a failure.
+    pub(crate) at: u64,
+    pub(crate) drawn: Result<(Graph, Layout), String>,
+    pub(crate) selected: usize,
+    /// The window's top-left cell in the layout.
+    pub(crate) scroll: (i64, i64),
+    /// Headers only: the whole shape of a large function at once.
+    pub(crate) mini: bool,
+    /// The next draw brings the selected block into the window.
+    pub(crate) recentre: bool,
+}
+
 pub struct App {
     pub(crate) view: View,
     /// The address the disassembly and hex panes start at.
@@ -90,6 +109,7 @@ pub struct App {
     pub(crate) filter: String,
     /// The hex pane's pending high nibble while editing.
     pub(crate) editing: Option<Option<u8>>,
+    pub(crate) graph: Option<GraphPane>,
     /// How many rows the main pane had at the last draw.
     pub(crate) rows: usize,
 }
@@ -108,6 +128,7 @@ impl App {
             entries: None,
             filter: String::new(),
             editing: None,
+            graph: None,
             rows: 24,
         }
     }
@@ -158,11 +179,15 @@ impl App {
             self.edit_key(host, key);
             return true;
         }
+        if self.view == View::Graph && self.graph_key(host, key) {
+            return true;
+        }
         match key.code {
             KeyCode::Char('q') => return false,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
             KeyCode::Char('p') => self.switch(self.view.next(1)),
             KeyCode::Char('P') => self.switch(self.view.next(-1)),
+            KeyCode::Char('V') => self.switch(View::Graph),
             KeyCode::Char(':') => self.prompt = Prompt::Command(String::new()),
             KeyCode::Char('g') => self.prompt = Prompt::Goto(String::new()),
             KeyCode::Char('u') => {
@@ -257,6 +282,7 @@ impl App {
                 let len = self.visible_entries().len();
                 self.cursor = clamp_add(self.cursor, delta, len);
             }
+            View::Graph => {}
         }
     }
 
@@ -307,7 +333,7 @@ impl App {
                     self.switch(View::Disassembly);
                 }
             }
-            View::Decompiler | View::Hex => {}
+            View::Decompiler | View::Hex | View::Graph => {}
         }
     }
 
@@ -464,4 +490,90 @@ pub(crate) fn matches_filter(text: &str, filter: &str) -> bool {
         }
     }
     wanted.peek().is_none()
+}
+
+impl App {
+    /// The graph pane's own keys; `false` for a key the other panes share.
+    ///
+    /// radare2's: `hjkl` pan (`HJKL` by a page), `Tab` selects the next block,
+    /// `t`/`f` follow the true/false edge, `.` brings the selection back,
+    /// `-`/`+` zoom out to headers and back. `Enter` opens the block's
+    /// disassembly.
+    fn graph_key(&mut self, host: &mut dyn Host, key: KeyEvent) -> bool {
+        let page = self.rows.max(2) as i64;
+        let Some(pane) = &mut self.graph else {
+            return false;
+        };
+        let pan = |pane: &mut GraphPane, dx: i64, dy: i64| {
+            pane.scroll.0 = (pane.scroll.0 + dx).max(0);
+            pane.scroll.1 = (pane.scroll.1 + dy).max(0);
+        };
+        match key.code {
+            KeyCode::Char('h') | KeyCode::Left => pan(pane, -4, 0),
+            KeyCode::Char('l') | KeyCode::Right => pan(pane, 4, 0),
+            KeyCode::Char('k') | KeyCode::Up => pan(pane, 0, -2),
+            KeyCode::Char('j') | KeyCode::Down => pan(pane, 0, 2),
+            KeyCode::Char('H') => pan(pane, -4 * page, 0),
+            KeyCode::Char('L') => pan(pane, 4 * page, 0),
+            KeyCode::Char('K') | KeyCode::PageUp => pan(pane, 0, -page),
+            KeyCode::Char('J') | KeyCode::PageDown => pan(pane, 0, page),
+            KeyCode::Char('.') => pane.recentre = true,
+            KeyCode::Char('-') | KeyCode::Char('+') => {
+                let mini = key.code == KeyCode::Char('-');
+                if let Ok((graph, layout)) = &mut pane.drawn
+                    && pane.mini != mini
+                {
+                    *layout = crate::graph::lay_out(graph, mini);
+                    pane.mini = mini;
+                    pane.recentre = true;
+                }
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                let Ok((graph, _)) = &pane.drawn else {
+                    return true;
+                };
+                let len = graph.nodes.len();
+                let step = if key.code == KeyCode::Tab { 1 } else { len - 1 };
+                pane.selected = (pane.selected + step) % len;
+                pane.recentre = true;
+                host.set_seek(graph.nodes[pane.selected].address);
+            }
+            KeyCode::Char('t') | KeyCode::Char('f') => {
+                let Ok((graph, _)) = &pane.drawn else {
+                    return true;
+                };
+                let wanted: &[EdgeKind] = if key.code == KeyCode::Char('t') {
+                    &[EdgeKind::Taken, EdgeKind::Jump, EdgeKind::Case]
+                } else {
+                    &[EdgeKind::NotTaken, EdgeKind::Fall, EdgeKind::Default]
+                };
+                let from = pane.selected;
+                let edge = wanted.iter().find_map(|kind| {
+                    graph
+                        .edges
+                        .iter()
+                        .find(|edge| edge.from == from && edge.kind == *kind)
+                });
+                match edge {
+                    Some(edge) => {
+                        let address = graph.nodes[edge.to].address;
+                        pane.selected = edge.to;
+                        pane.recentre = true;
+                        self.history.push(host.seek());
+                        host.set_seek(address);
+                    }
+                    None => self.message = Message::Info("no such edge from this block".to_owned()),
+                }
+            }
+            KeyCode::Enter => {
+                if let Ok((graph, _)) = &pane.drawn {
+                    let address = graph.nodes[pane.selected].address;
+                    self.go(host, address);
+                    self.switch(View::Disassembly);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
 }

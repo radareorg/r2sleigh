@@ -853,3 +853,42 @@ fn entry0_is_the_declared_entry_where_the_format_names_it_main() {
     assert!(run.ok, "{}", run.out);
     assert_eq!(run.out.lines().collect::<Vec<_>>(), ["0x100000344"; 2]);
 }
+
+/// `agf` draws the function's blocks with every edge between them: FNV-1a's
+/// guard branches to the early return and to the loop, the loop's block
+/// latches onto itself, and an address nothing maps is refused.
+#[test]
+fn a_function_graph_is_drawn_with_its_branches_and_its_loop() {
+    let run = r2s(&format!("agf @ {FNV1A32}"));
+    assert!(run.ok, "{}", run.out);
+    for block in [
+        "[0x401330]",
+        "[0x401339]",
+        "[0x401348]",
+        "[0x40135c]",
+        "[0x401360]",
+    ] {
+        assert!(run.out.contains(block), "{block}\n{}", run.out);
+    }
+    // Five edges into tops (two from the guard, the loop's entry, its exit,
+    // and its latch), each ending in an arrow outside a box.
+    let arrows = run
+        .out
+        .lines()
+        .map(|row| {
+            let row = row.chars().collect::<Vec<_>>();
+            (0..row.len())
+                .filter(|&at| {
+                    let letter = |c: Option<&char>| c.is_some_and(|c| c.is_alphanumeric());
+                    row[at] == 'v'
+                        && !letter(row.get(at.wrapping_sub(1)))
+                        && !letter(row.get(at + 1))
+                })
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(arrows, 5, "{}", run.out);
+    let refused = r2s("agf @ 0x999999");
+    assert!(!refused.ok, "{}", refused.out);
+    assert!(refused.out.contains("nothing mapped"), "{}", refused.out);
+}
