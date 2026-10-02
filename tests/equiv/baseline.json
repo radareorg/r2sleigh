@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal.",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -1556,8 +1556,8 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::vfold": {
-   "cause": "[P5 values (branch-edge narrowing of the index) + P4 memory (MAY-evidence extent must be clipped at the frame barrier, never Proven); underlying P7 variadic] The engine refuses before the gate's variadic check runs: gate.py:138 grades a refusal before spec.unsupported at gate.py:148. So this is the vfold gate limitation plus an engine defect. VERIFIED: the loop reads va_arg as `mov edx,esi; add rdx,r8; add rax,[rdx]`, with r8 = &reg_save_area = entry SP-56 (`lea rax,[rsp+0x20]` after `sub rsp,0x58`). esi is the loop-carried gp_offset, guarded by `cmp esi,0x2f; jbe 401580`. That guard is not used to narrow the zero-extended index on the jbe edge, so values.upper_bound is 0xffffffff, the type width. r2ssa semantic/certificates/mod.rs:551-593 (stac...",
-   "status": "refused"
+   "status": "unsupported",
+   "cause": "[P7 variadic] The engine now renders vfold (4 counted residuals; the signature drops `count`), and the gate does not grade a variadic definition: the count of its trailing arguments is unknown. Refused before p1-identity."
   },
   "tests/corpus/shapes.c::gcc-O2::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine keeps RAX only. The engine must lift first (P7), then the gate.",
@@ -1583,8 +1583,7 @@
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O0::value_div_pow2": {
-   "cause": "[P1 identity] This is the mul_div miscompile again. For `wide / 2` and the other divisions, clang -O0 emits `mov rax,[wide]; cqo; idiv`. The sign word RDX = SUBPIECE(SEXT(reload of wide), 8) is certified as a reload of wide's home and coalesced into the reload binding tmp_11f80_1. The rendering first does `tmp_11f80_1 = (uint64_t)(tmp_3d800_1 >> 64);`, which overwrites wide with its sign word. It then builds the dividend as `(tmp_11f80_1 << 64) | tmp_11f80_1`, so the low half is the sign word instead of wide. The same pattern repeats for %2, /8, %8, /1024 and %1024.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/values.c::clang-O0::value_mul_high": {
    "status": "equal"
@@ -1719,8 +1718,7 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O0::value_mul_high": {
-   "cause": "[P1 identity] gcc -O0 emits the signed 128-bit multiply `(__int128)(int64_t)a * (__int128)(int64_t)b` as `mov rax,[b]; cqo; ...`. RDX_4 = SUBPIECE(SEXT(reload of b), 8) is certified as a reload of b's home and coalesced into b's reload binding tmp_11f80_2. The rendering writes `tmp_11f80_2 = (int64_t)(tmp_3d800_1 >> 64);`, which clobbers b with its sign word, and then uses tmp_11f80_2 as b's low half in `tmp_53c00_2 = (__uint128_t)(uint64_t)tmp_11f80_2`. The signed product is wrong whenever b's sign word differs from b, for example a=-1, b=64.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/values.c::gcc-O0::value_narrow_wrap": {
    "status": "equal"
@@ -2165,8 +2163,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O0::classify": {
-   "cause": "[P4 memory (slot promotion) + P5 dispatch] VERIFIED. The -O0 switch guard does not reach the reload. clang emits `mov eax,[rbp-8]; mov [rbp-0x10],rax; sub rax,7; ja default; mov rax,[rbp-0x10]; mov rax,[rax*8+0x402010]; jmp rax`. The bound (<=7) holds on the register copy, but the table read uses a second load from the private spill slot [rbp-0x10], which has no range. dispatch_table_read gets top and reports 'it steps by 1 and reads 8 bytes' (indirect.rs:343-378 at HEAD), then refuses. The BranchInd stays an IndirectBranch with no successors, place.rs:409-417 emits only a comment, the target use (inst 35) has no rendered occurrence...",
-   "status": "refused"
+   "status": "equal"
   },
   "tests/gold/review.c::clang-O0::copy_name": {
    "status": "equal"
@@ -2188,12 +2185,11 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O0::main": {
-   "cause": "[P4 memory] struct node a, b and c (24 bytes each: key, next, tag) are split into independent C scalars: a is stack_m112 (uint32 key), stack_m104 (next) and stack_m96 (tag); b is stack_m88/m80/m72; c is stack_m64/m56/m48. list_len(&a) renders as `fcn_401250((uint64_t)&stack_m112)`. The original list_len reads n->next at +8 of a 4-byte C object, follows a garbage pointer and faults at 0x401277. The same split affects v[4] and d[3], which are passed by address. The same function has other defects: the printf tail is dropped, and avg's XMM0 result is a counted residual.",
-   "status": "differs"
+   "status": "ub",
+   "cause": "[P4 memory] (was differs before p1-identity; the split frame objects now fail differently) [P4 memory] struct node a, b and c (24 bytes each: key, next, tag) are split into independent C scalars: a is stack_m112 (uint32 key), stack_m104 (next) and stack_m96 (tag); b is stack_m88/m80/m72; c is stack_m64/m56/m48. list_len(&a) renders as `fcn_401250((uint64_t)&stack_m112)`. The original list_len reads n->next at +8 of a 4-byte C object, follows a garbage pointer and faults at 0x401277. The same split affects v[4] and d[3], which are passed by address. The same function has other defects: the printf tail is dropped, and avg's XMM0 result is a counted residual."
   },
   "tests/gold/review.c::clang-O0::mul_div": {
-   "cause": "[P1 identity] This is the reference mul_div miscompile. For `a % b`, `mov rax,[a]; cqo; idiv` gives RDX = SUBPIECE(SEXT(reload of a), 8), which is certified as a reload of a's home and coalesced into tmp_11f80_2. The rendering does `tmp_11f80_2 = (uint64_t)(tmp_3d800_2 >> 64);` and then uses tmp_11f80_2 as both halves of the dividend, so the remainder is computed from the sign word instead of a.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::clang-O0::rotl": {
    "status": "equal"
@@ -2238,8 +2234,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::main": {
-   "cause": "[P4 memory] The struct node objects a, b and c are split into scalars: stack_m136 (a.key, uint32_t), stack_m128 (a.next), and so on. list_len(&stack_m136) reads a.next at +8, outside the 4-byte object. With zero-initialised locals (O0 build) the neighbour reads as NULL, so list_len returns and the run reaches the residual trap for avg's double result (XMM0_5 read as r2sleigh_residual_u64(1); P7 F14). With pattern-initialised locals (pattern build) and in the O2 build, list_len follows garbage and faults. Also present: printf(\"%d %s\\n\") with r and buf dropped (P7 F1).",
-   "status": "ub"
+   "status": "differs",
+   "cause": "[P4 memory] (was ub before p1-identity; the split frame objects now fail differently) [P4 memory] The struct node objects a, b and c are split into scalars: stack_m136 (a.key, uint32_t), stack_m128 (a.next), and so on. list_len(&stack_m136) reads a.next at +8, outside the 4-byte object. With zero-initialised locals (O0 build) the neighbour reads as NULL, so list_len returns and the run reaches the residual trap for avg's double result (XMM0_5 read as r2sleigh_residual_u64(1); P7 F14). With pattern-initialised locals (pattern build) and in the O2 build, list_len follows garbage and faults. Also present: printf(\"%d %s\\n\") with r and buf dropped (P7 F1)."
   },
   "tests/gold/review.c::clang-O1::mul_div": {
    "status": "equal"
@@ -2290,8 +2286,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::main": {
-   "cause": "[P4 memory] The same as clang-O1 main: struct node a/b/c are split into scalars, so list_len(&stack_m136) walks off a 4-byte object. The O0 build survives list_len thanks to zero-init and traps at avg's residual double result; the pattern and O2 builds fault in list_len. Also: printf's r and buf are dropped, and avg's double result is a residual (XMM0_6).",
-   "status": "ub"
+   "status": "differs",
+   "cause": "[P4 memory] (was ub before p1-identity; the split frame objects now fail differently) [P4 memory] The same as clang-O1 main: struct node a/b/c are split into scalars, so list_len(&stack_m136) walks off a 4-byte object. The O0 build survives list_len thanks to zero-init and traps at avg's residual double result; the pattern and O2 builds fault in list_len. Also: printf's r and buf are dropped, and avg's double result is a residual (XMM0_6)."
   },
   "tests/gold/review.c::clang-O2::mul_div": {
    "status": "equal"
@@ -2344,8 +2340,7 @@
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O0::mul_div": {
-   "cause": "[P1 identity] This is the reference mul_div miscompile. For `a % b`, `mov rax,[a]; cqo; idiv` gives the sign word RDX, which is certified as a reload of a's home and coalesced into tmp_11f80_2. The rendering overwrites the reload with the sign word (`tmp_11f80_2 = (uint64_t)(tmp_3d800_2 >> 64);`) and then uses it as the dividend's low half.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::rotl": {
    "cause": "[P10 lowering] gcc -O0 emits `rol edx,cl` (0x401438), rendered as `tmp_11f00_2 << t | tmp_11f00_2 >> (uint8_t)(32 - t)` (rendering.c:14), which is UB at t==0.",
