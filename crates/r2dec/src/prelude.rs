@@ -192,6 +192,12 @@ pub enum Helper {
     FloatToBits { bits: u32 },
     /// A construct the rendering could not prove: it traps if executed.
     Residual(ResidualType),
+    /// A read of a scalar of this type from memory whose declared type is not
+    /// it -- the bytes of a frame object the partition merged. C defines the
+    /// read only through a byte copy, so it is one.
+    Load(ResidualType),
+    /// The matching write.
+    Store(ResidualType),
 }
 
 impl Helper {
@@ -223,6 +229,8 @@ impl Helper {
             Self::FloatFromBits { bits } => format!("r2sleigh_float_from_bits_{bits}"),
             Self::FloatToBits { bits } => format!("r2sleigh_float_to_bits_{bits}"),
             Self::Residual(ty) => format!("r2sleigh_residual_{}", ty.tag()),
+            Self::Load(ty) => format!("r2sleigh_load_{}", ty.tag()),
+            Self::Store(ty) => format!("r2sleigh_store_{}", ty.tag()),
         }
     }
 
@@ -275,6 +283,26 @@ impl Helper {
                  }}\n",
                 ty.spelled()
             ),
+            Self::Load(ty) => {
+                let ty = ty.spelled();
+                format!(
+                    "static inline {ty} {name}(const void *at)\n\
+                     {{\n\
+                     \x20   {ty} value;\n\
+                     \x20   __builtin_memcpy(&value, at, sizeof value);\n\
+                     \x20   return value;\n\
+                     }}\n"
+                )
+            }
+            Self::Store(ty) => {
+                let ty = ty.spelled();
+                format!(
+                    "static inline void {name}(void *at, {ty} value)\n\
+                     {{\n\
+                     \x20   __builtin_memcpy(at, &value, sizeof value);\n\
+                     }}\n"
+                )
+            }
         }
     }
 }

@@ -490,6 +490,15 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Whether a name is an object declared as bytes, `uint8_t[N]`: what the
+    /// partition declares a merged frame object as.
+    pub(super) fn declared_as_bytes(&self, name: &CExpr) -> bool {
+        matches!(
+            self.declared_type_of_name(name),
+            Some(CValue::Typed(CType::Array(element, _))) if *element == CType::uint(8)
+        )
+    }
+
     fn render_certified_linear_byte_address(&self, address: &CExpr) -> Option<CExpr> {
         let CertifiedLinearAddress {
             base,
@@ -1143,5 +1152,97 @@ impl<'a> FoldingContext<'a> {
                 .map(|member| (member.access, member_expr(member), member.source))
                 .collect(),
         })
+    }
+}
+
+/// Whether `address` points into an object declared as bytes: the
+/// `(uint8_t *)` view the plan's byte spellings start from, or the name of an
+/// object declared `uint8_t[N]` (`is_byte_object`), displaced by any offset.
+fn is_byte_address(address: &CExpr, is_byte_object: &dyn Fn(&CExpr) -> bool) -> bool {
+    match address {
+        CExpr::Observed { expr, .. } => is_byte_address(expr, is_byte_object),
+        CExpr::Cast { ty, expr, .. } => {
+            *ty == CType::ptr(CType::uint(8)) || is_byte_address(expr, is_byte_object)
+        }
+        CExpr::Binary {
+            op: BinaryOp::Add | BinaryOp::Sub,
+            left,
+            ..
+        } => is_byte_address(left, is_byte_object),
+        CExpr::Var(_) => is_byte_object(address),
+        _ => false,
+    }
+}
+
+/// A typed access to an object declared as bytes -- `*(T *)((uint8_t *)slot +
+/// n)`, `*(T *)slot`, `((T *)slot)[i]` -- rewritten into `rewrite(T, address)`;
+/// `Err` with the expression unchanged where it is not one.
+///
+/// The plan spells an access this way only where its width is not the
+/// declared type's -- the bytes of an object the partition merged, read at
+/// some other type -- and C defines no such access through a cast: the object
+/// has its declared type, and reading it as another is undefined. A byte copy
+/// is defined, so the access is one. A byte-wide access is a `uint8_t` read of
+/// `uint8_t` bytes and needs none.
+pub(super) fn through_byte_copy(
+    expr: CExpr,
+    is_byte_object: &dyn Fn(&CExpr) -> bool,
+    rewrite: impl FnOnce(crate::prelude::ResidualType, CExpr) -> CExpr,
+) -> Result<CExpr, CExpr> {
+    let scalar_of = |pointee: &CType| {
+        (*pointee != CType::uint(8))
+            .then(|| crate::prelude::ResidualType::of(pointee))
+            .flatten()
+    };
+    match expr {
+        CExpr::Observed { ids, expr } => match through_byte_copy(*expr, is_byte_object, rewrite) {
+            Ok(rewritten) => Ok(CExpr::Observed {
+                ids,
+                expr: Box::new(rewritten),
+            }),
+            Err(original) => Err(CExpr::Observed {
+                ids,
+                expr: Box::new(original),
+            }),
+        },
+        CExpr::Deref(inner) => {
+            let scalar = match inner.as_ref() {
+                CExpr::Cast {
+                    ty: CType::Pointer(pointee),
+                    expr: address,
+                    ..
+                } if is_byte_address(address, is_byte_object) => scalar_of(pointee),
+                _ => None,
+            };
+            match (scalar, *inner) {
+                (Some(scalar), CExpr::Cast { expr: address, .. }) => Ok(rewrite(scalar, *address)),
+                (_, other) => Err(CExpr::Deref(Box::new(other))),
+            }
+        }
+        CExpr::Subscript { base, index } => {
+            let scalar = match base.as_ref() {
+                CExpr::Cast {
+                    ty: CType::Pointer(pointee),
+                    expr: address,
+                    ..
+                } if is_byte_address(address, is_byte_object) => {
+                    scalar_of(pointee).map(|scalar| (scalar, pointee.as_ref().clone()))
+                }
+                _ => None,
+            };
+            match (scalar, *base) {
+                (Some((scalar, pointee)), CExpr::Cast { expr: address, .. }) => {
+                    // `((T *)p)[i]` is the bytes at `p + i * sizeof(T)`.
+                    let offset = CExpr::binary(BinaryOp::Mul, *index, CExpr::SizeofType(pointee));
+                    let bytes = CExpr::cast(CType::ptr(CType::uint(8)), *address);
+                    Ok(rewrite(scalar, CExpr::binary(BinaryOp::Add, bytes, offset)))
+                }
+                (_, base) => Err(CExpr::Subscript {
+                    base: Box::new(base),
+                    index,
+                }),
+            }
+        }
+        other => Err(other),
     }
 }

@@ -2027,6 +2027,11 @@ impl<'a> FoldingContext<'a> {
                     .unwrap_or_else(|| uint_type_from_size(dst.size));
                 let rhs = self.render_certified_load_access_expr(dst, addr, elem_ty.clone())?;
                 let rhs = self.observed_memory_input(frame, 0, rhs);
+                let is_byte_object = |name: &CExpr| self.declared_as_bytes(name);
+                let rhs = memory_renderer::through_byte_copy(rhs, &is_byte_object, |scalar, address| {
+                    crate::prelude::Helper::Load(scalar).call(vec![address])
+                })
+                .unwrap_or_else(|unchanged| unchanged);
                 match lhs {
                     Some(lhs) => self.assign_typed(lhs, rhs, Some(CValue::Typed(elem_ty))),
                     // Cast away: the read is the statement, and C warns on a
@@ -2097,7 +2102,13 @@ impl<'a> FoldingContext<'a> {
                     .stored_object_declaration_type(stored_access)
                     .unwrap_or(elem_ty);
                 let rhs = self.convert_from(rhs, rhs_type.as_ref(), &written);
-                self.assign_stmt(lhs, rhs)
+                let is_byte_object = |name: &CExpr| self.declared_as_bytes(name);
+                match memory_renderer::through_byte_copy(lhs, &is_byte_object, |scalar, address| {
+                    crate::prelude::Helper::Store(scalar).call(vec![address, rhs.clone()])
+                }) {
+                    Ok(store) => Some(CStmt::Expr(store)),
+                    Err(lhs) => self.assign_stmt(lhs, rhs),
+                }
             }
             SSAOp::Fence { ordering } => Some(CStmt::Expr(CExpr::call(
                 CExpr::External {
