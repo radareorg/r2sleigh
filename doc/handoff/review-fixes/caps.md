@@ -137,9 +137,6 @@ typed refusal. They meet the rule; the W1 lint should accept them.
 |---|---|---|---|
 | r2il `eval.rs:242` (field `:96`) | set by the caller; only `r2engine/tests/oracle.rs:71` sets one (`1 << 14`) | concrete emulation, per operation and per string element | `Err(Stop::Exhausted)`. Whether a run halts is undecidable, so this is the model budget (track E) |
 | core-lift branch, `internal_control/unroll.rs` (not merged here) | 16384 steps | unrolling instruction-local P-code loops decided by constants | refuses when exceeded |
-| r2engine `route.rs:366`, `:373`, `:380` | loops > 8 or back edges > 16; other block/switch thresholds | `cfg_guard_reason_from_summary`: forces the bounded type plan | a typed refusal from `type_function_checked` (`lib.rs:2374-2381`) unless the `:406` exemption applies |
-| r2engine `route.rs:394-398`, `:406` | blocks ≥ 200, or ≥ 96 with loops, back edges or a switch ≥ 32; exemption at ≤ 96 blocks | `type_cfg_prefers_bounded_plan`, `type_cfg_allows_semantic_plan` | same refusal |
-| r2engine `route.rs:262`, `lib.rs:2071`, `lib.rs:3622` | blocks > 4 or ops > 96; `max_iters ≤ 1`; a caller's limit | `should_guard_program_orchestrator_decompile`, `type_analysis_interproc_prefers_bounded_plan`, `block_guard_fallback_comment` | no caller in the workspace: dead, for H to delete |
 | r2sleigh-lift `esil.rs:626` (`MAX_FORWARDED_TOKENS`), `:683` | 4096 bytes of ESIL text | expression forwarding in `op_esil_with` | falls back to reading the register (same value); for unique storage the operation is dropped and the ESIL is marked partial (`:1159-1185`). An output-size policy, not an analysis cap |
 | engine and SSA deadlines (`r2engine/src/lib.rs:681`, `r2ssa/src/control.rs:146`) | supplied by the caller, no default | request wall clock | a typed error |
 

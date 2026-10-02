@@ -648,10 +648,9 @@ impl LegacyObservationJournal {
 
     /// Seal only the source-effect occurrence stream.
     ///
-    /// Binding shadow recording is diagnostic and may already have failed by
-    /// this point. Effect markers have an independent source domain, so that
-    /// failure must not erase the exact effect occurrences that reached the
-    /// final emission tree.
+    /// Effect markers have a source domain of their own, so sealing them
+    /// alone keeps the exact effect occurrences that reached the final
+    /// emission tree.
     #[cfg(test)]
     pub(crate) fn seal_effects_only(
         self,

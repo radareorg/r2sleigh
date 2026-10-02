@@ -3862,7 +3862,6 @@ fn engine_r2dec_fallback_comment_ownership_expr(cx: &LateContext<'_>, expr: &Exp
         return false;
     };
     if ![
-        "block_guard_fallback_comment",
         "artifact_guard_fallback_comment",
         "semantic_fallback_comment",
     ]
@@ -6305,40 +6304,12 @@ fn ui() {
 }
 
 #[test]
-fn r2engine_render_semantic_route_has_no_route_side_channel() {
+fn r2engine_decompile_route_output_has_no_side_channel() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .join("crates/r2engine/src/lib.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-    let marker = "pub fn render_semantic_route";
-    let start = source
-        .find(marker)
-        .unwrap_or_else(|| panic!("missing {marker} in {}", path.display()));
-    let rest = &source[start..];
-    let end = rest
-        .find("\nfn current_interproc_summary")
-        .unwrap_or_else(|| panic!("missing semantic route end marker in {}", path.display()));
-    let body = &rest[..end];
-
-    assert!(
-        !body.contains("route: &EngineSemanticRoutePlan"),
-        "render_semantic_route must derive route/refusal from FunctionFacts::decompile_route, not a sibling EngineSemanticRoutePlan argument"
-    );
-    assert!(
-        body.contains("decompile_route_output_from_function_facts"),
-        "render_semantic_route must delegate route/refusal output to the FunctionFacts route-output helper"
-    );
-    for forbidden in [
-        "summary-only decompile route lacks certified native FunctionFacts render proof",
-        "artifact_guard_fallback_comment(",
-    ] {
-        assert!(
-            !body.contains(forbidden),
-            "render_semantic_route must not synthesize route/refusal output outside FunctionFacts: {forbidden:?}"
-        );
-    }
-
     let marker = "fn decompile_route_output_from_function_facts";
     let start = source
         .find(marker)
