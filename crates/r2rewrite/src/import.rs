@@ -242,6 +242,19 @@ pub fn interior_stack_object_address(
     value: ValueId,
 ) -> Option<(ObjectId, i64)> {
     let objects = artifact.objects();
+    // A copy of the address -- the argument register it is handed in -- has
+    // the address's bits, and the value view names the value they are.
+    let value = if objects.interior_offset(value).is_some() {
+        value
+    } else {
+        let graph = artifact.graph();
+        let var = &graph.value(value)?.var;
+        let root = artifact
+            .function()
+            .decompile_prep_facts()?
+            .canonical_root(var);
+        graph.value_id_for_var(root)?
+    };
     let offset = objects.interior_offset(value)?;
     if objects.address_is_indexed(value) || offset < 0 {
         return None;
