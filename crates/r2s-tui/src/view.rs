@@ -171,7 +171,7 @@ fn decompiler(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: R
     );
 }
 
-fn hex(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+fn hex(app: &App, frame: &mut Frame<'_>, host: &dyn Host, area: Rect) {
     let bytes = host.read(app.top, app.rows * 16);
     let mut lines = Vec::with_capacity(app.rows);
     for row in 0..app.rows {

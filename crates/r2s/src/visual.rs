@@ -145,14 +145,10 @@ impl Host for Visual<'_> {
     fn run(&mut self, command: &str) -> Result<String, String> {
         let mut reader = crate::line::Reader::default();
         let mut out = String::new();
-        for line in reader.script(command) {
-            for statement in line {
-                let statement = statement?;
-                let text = crate::commands::run(self.session, &statement)?;
-                out.push_str(&text);
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
-                }
+        for statement in reader.script(command).into_iter().flatten() {
+            out.push_str(&crate::commands::run(self.session, &statement?)?);
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
             }
         }
         Ok(out)

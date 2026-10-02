@@ -1592,17 +1592,13 @@ pub(crate) fn callee_write_spans(
             // frame address it is handed, so the object that address is in has
             // no extent this call bounds.
             if reach.is_none() && seed.is_none() {
-                for index in 0..registers.len() {
-                    if let Some(root) =
-                        argument(index).and_then(|var| resolve_stack_root(Some(facts), var))
-                    {
-                        r2il::refusal_evidence!(
-                            "callee-write-span",
-                            "{name} at {instruction:#x} is handed {root:?} as argument {index} and nothing describes it"
-                        );
-                        unbounded.insert(root);
-                    }
-                }
+                r2il::refusal_evidence!(
+                    "callee-write-span",
+                    "{name} at {instruction:#x}: nothing describes the callee"
+                );
+                unbounded.extend((0..registers.len()).filter_map(|index| {
+                    argument(index).and_then(|var| resolve_stack_root(Some(facts), var))
+                }));
             }
             if let Some(reach) = reach {
                 for (index, proven) in reach {
@@ -1755,43 +1751,24 @@ impl FrameBoundaries {
             return boundaries;
         };
         let stack_pointer = machine_context.stack_pointer_carrier();
-        for block in function.blocks() {
-            for op in &block.ops {
-                let SSAOp::Store {
-                    space: SpaceId::Ram,
-                    addr,
-                    val,
-                } = op
-                else {
-                    continue;
-                };
-                let Some(root) = resolve_stack_root(Some(facts), addr) else {
-                    continue;
-                };
-                let Some((storage, ..)) = graph.value_id_for_var(val).and_then(|value| {
-                    super::certificates::exact_copy_chain_to_entry_storage(graph, value, val.size)
-                }) else {
-                    continue;
-                };
-                if Some(storage) == stack_pointer || !effect.preserves(storage) {
-                    continue;
-                }
-                r2il::refusal_evidence!(
-                    "frame-boundary",
-                    "{root:?} saves {storage:?}, preserved across calls"
-                );
-                let Some(hi) = root.offset.checked_add(i64::from(val.size)) else {
-                    continue;
-                };
-                boundaries
-                    .slots
-                    .entry(root.base)
-                    .or_default()
-                    .insert((root.offset, hi));
-                // The same slot in every other base this body proves.
-                if let Some(entry) = boundaries.entry.get(&root.base).copied() {
-                    boundaries.insert_entry(root.offset - entry, i64::from(val.size));
-                }
+        let saves = function
+            .blocks()
+            .iter()
+            .flat_map(|block| &block.ops)
+            .filter_map(|op| {
+                structural_save(facts, graph, op, |storage| {
+                    Some(storage) != stack_pointer && effect.preserves(storage)
+                })
+            });
+        for (root, width) in saves {
+            boundaries
+                .slots
+                .entry(root.base)
+                .or_default()
+                .insert((root.offset, root.offset.saturating_add(width)));
+            // The same slot in every other base this body proves.
+            if let Some(entry) = boundaries.entry.get(&root.base).copied() {
+                boundaries.insert_entry(root.offset - entry, width);
             }
         }
         boundaries
@@ -1828,6 +1805,37 @@ impl FrameBoundaries {
             (slot, entry) => slot.or(entry),
         }
     }
+}
+
+/// A frame store of a preserved register's value on entry: the slot it
+/// saves to and its width. No local holds the caller's register, so such a
+/// store is the frame's bookkeeping.
+fn structural_save(
+    facts: &DecompilePrepFacts,
+    graph: &SsaGraph,
+    op: &SSAOp,
+    preserved: impl Fn(CanonicalStorageId) -> bool,
+) -> Option<(StackAddressRoot, i64)> {
+    let SSAOp::Store {
+        space: SpaceId::Ram,
+        addr,
+        val,
+    } = op
+    else {
+        return None;
+    };
+    let root = resolve_stack_root(Some(facts), addr)?;
+    let (storage, ..) = graph.value_id_for_var(val).and_then(|value| {
+        super::certificates::exact_copy_chain_to_entry_storage(graph, value, val.size)
+    })?;
+    if !preserved(storage) {
+        return None;
+    }
+    r2il::refusal_evidence!(
+        "frame-boundary",
+        "{root:?} saves {storage:?}, preserved across calls"
+    );
+    Some((root, i64::from(val.size)))
 }
 
 pub(crate) fn evidenced_stack_roots(

@@ -223,27 +223,7 @@ impl App {
     /// Move the cursor `delta` rows (bytes, in hex), scrolling the pane.
     fn step(&mut self, host: &mut dyn Host, delta: isize) {
         match self.view {
-            View::Disassembly => {
-                let target = self.cursor as isize + delta;
-                if target < 0 {
-                    for _ in 0..target.unsigned_abs() {
-                        self.top = line_before(host, self.top);
-                    }
-                    self.cursor = 0;
-                } else if target as usize >= self.rows.max(1) {
-                    let lines = host.disassemble(self.top, target as usize + 1);
-                    let shift = target as usize + 1 - self.rows.max(1);
-                    if let Some(line) = lines.get(shift) {
-                        self.top = line.address;
-                    }
-                    self.cursor = self.rows.max(1) - 1;
-                } else {
-                    self.cursor = target as usize;
-                }
-                if let Some(line) = host.disassemble(self.top, self.cursor + 1).last() {
-                    host.set_seek(line.address);
-                }
-            }
+            View::Disassembly => self.step_lines(host, delta),
             View::Hex => {
                 // The cursor is a byte; the pane scrolls by whole rows.
                 let page = self.rows.max(1) as isize * 16;
@@ -277,6 +257,30 @@ impl App {
                 let len = self.visible_entries().len();
                 self.cursor = clamp_add(self.cursor, delta, len);
             }
+        }
+    }
+
+    /// Move the disassembly cursor `delta` lines, scrolling by whole lines and
+    /// seeking the line it lands on.
+    fn step_lines(&mut self, host: &mut dyn Host, delta: isize) {
+        let rows = self.rows.max(1);
+        let target = self.cursor as isize + delta;
+        if target < 0 {
+            for _ in 0..target.unsigned_abs() {
+                self.top = line_before(host, self.top);
+            }
+            self.cursor = 0;
+        } else if target as usize >= rows {
+            let lines = host.disassemble(self.top, target as usize + 1);
+            if let Some(line) = lines.get(target as usize + 1 - rows) {
+                self.top = line.address;
+            }
+            self.cursor = rows - 1;
+        } else {
+            self.cursor = target as usize;
+        }
+        if let Some(line) = host.disassemble(self.top, self.cursor + 1).last() {
+            host.set_seek(line.address);
         }
     }
 
@@ -332,27 +336,31 @@ impl App {
                 let prompt = std::mem::replace(&mut self.prompt, Prompt::None);
                 match prompt {
                     Prompt::Command(command) if !command.trim().is_empty() => {
-                        let before = host.seek();
-                        self.message = match host.run(&command) {
-                            Ok(output) if output.trim().is_empty() => Message::None,
-                            Ok(output) => Message::Output(output),
-                            Err(error) => Message::Error(error),
-                        };
-                        // A command may have written or sought: show what is
-                        // there now.
-                        self.decompiled = None;
-                        self.entries = None;
-                        if host.seek() != before {
-                            self.history.push(before);
-                            self.top = host.seek();
-                            self.cursor = 0;
-                        }
+                        self.run_command(host, &command);
                     }
                     Prompt::Goto(target) => self.goto(host, &target),
                     _ => {}
                 }
             }
             _ => {}
+        }
+    }
+
+    /// `:`: run a shell command and show what it printed.
+    fn run_command(&mut self, host: &mut dyn Host, command: &str) {
+        let before = host.seek();
+        self.message = match host.run(command) {
+            Ok(output) if output.trim().is_empty() => Message::None,
+            Ok(output) => Message::Output(output),
+            Err(error) => Message::Error(error),
+        };
+        // A command may have written or sought: show what is there now.
+        self.decompiled = None;
+        self.entries = None;
+        if host.seek() != before {
+            self.history.push(before);
+            self.top = host.seek();
+            self.cursor = 0;
         }
     }
 
@@ -381,24 +389,7 @@ impl App {
         match key.code {
             KeyCode::Esc => self.editing = None,
             KeyCode::Char(c) if c.is_ascii_hexdigit() => {
-                let nibble = c.to_digit(16).unwrap_or(0) as u8;
-                match self.editing {
-                    Some(None) => self.editing = Some(Some(nibble)),
-                    Some(Some(high)) => {
-                        let address = self.top + self.cursor as u64;
-                        match host.write(address, &[high << 4 | nibble]) {
-                            Ok(()) => {
-                                self.editing = Some(None);
-                                self.step(host, 1);
-                            }
-                            Err(error) => {
-                                self.editing = None;
-                                self.message = Message::Error(error);
-                            }
-                        }
-                    }
-                    None => {}
-                }
+                self.edit_nibble(host, c.to_digit(16).unwrap_or(0) as u8);
             }
             KeyCode::Right => self.step(host, 1),
             KeyCode::Left => self.step(host, -1),
@@ -429,6 +420,31 @@ fn line_before(host: &mut dyn Host, top: u64) -> u64 {
         }
     }
     top.saturating_sub(1)
+}
+
+impl App {
+    /// One hex digit typed in edit mode: the first is held, the second writes
+    /// the byte and moves on.
+    fn edit_nibble(&mut self, host: &mut dyn Host, nibble: u8) {
+        let Some(pending) = self.editing else {
+            return;
+        };
+        let Some(high) = pending else {
+            self.editing = Some(Some(nibble));
+            return;
+        };
+        let address = self.top + self.cursor as u64;
+        match host.write(address, &[high << 4 | nibble]) {
+            Ok(()) => {
+                self.editing = Some(None);
+                self.step(host, 1);
+            }
+            Err(error) => {
+                self.editing = None;
+                self.message = Message::Error(error);
+            }
+        }
+    }
 }
 
 fn clamp_add(cursor: usize, delta: isize, len: usize) -> usize {
