@@ -74,8 +74,11 @@ pub enum EdgeKind {
 
 /// Each block's extent and successors, as the walk that the lines came from
 /// left them, and each instruction whose dispatch the analysis read a table for.
+/// A block's start, size, and where control goes from it.
+type ShapeBlock = (u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>);
+
 struct Shape {
-    blocks: Vec<(u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>)>,
+    blocks: Vec<ShapeBlock>,
     dispatches: std::collections::BTreeSet<u64>,
 }
 
