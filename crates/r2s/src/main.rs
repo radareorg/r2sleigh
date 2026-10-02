@@ -6,6 +6,7 @@ mod grep;
 mod line;
 mod listing;
 mod session;
+mod visual;
 
 use clap::Parser;
 use std::io::{BufRead, Write};
@@ -26,6 +27,10 @@ struct Cli {
     /// Print no banner and no prompt
     #[arg(short = 'q', long)]
     quiet: bool,
+
+    /// Open the visual mode, as radare2's `V`
+    #[arg(short = 'V', long)]
+    visual: bool,
 }
 
 fn main() {
@@ -39,6 +44,15 @@ fn main() {
     };
 
     let mut reader = line::Reader::default();
+    if cli.visual {
+        if let Err(error) = r2s_tui::run(&mut visual::Visual {
+            session: &mut session,
+        }) {
+            eprintln!("r2s: visual mode: {error}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
     if let Some(script) = cli.command {
         let failed = run_script(&mut session, &mut reader, &script);
         std::process::exit(if failed { 1 } else { 0 });

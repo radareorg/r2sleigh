@@ -26,6 +26,17 @@ pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<Strin
     Ok(out.trim_end().to_owned())
 }
 
+/// What a line says, past its address and bytes: the instruction as `pd`
+/// spells it and what it was proven to hold. The visual mode lays this out in
+/// its own columns, so a pane says what `pd` says.
+pub(crate) fn instruction_text(session: &Session, line: &r2engine::query::Line) -> String {
+    let text = match line.decoded() {
+        false => "invalid".to_owned(),
+        true => spelled(line, session.program.names()),
+    };
+    format!("{text}{}", held(session, line))
+}
+
 /// One listing line, in the columns radare2 writes them in.
 fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     let mut hex: String = line.bytes.iter().map(|b| format!("{:02x}", b)).collect();

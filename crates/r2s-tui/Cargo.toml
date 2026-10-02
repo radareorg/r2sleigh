@@ -1,0 +1,16 @@
+[package]
+name = "r2s-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The visual mode of r2s: disassembly, decompiler, hex, graph and lists over a host the shell implements"
+
+[dependencies]
+ratatui.workspace = true
+crossterm.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

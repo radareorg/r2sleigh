@@ -13,11 +13,14 @@ path = "src/main.rs"
 r2engine = { path = "../r2engine" }
 r2il = { path = "../r2il" }
 r2image = { path = "../r2image" }
+r2s-tui = { path = "../r2s-tui" }
 clap.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 
 [features]
 default = []
