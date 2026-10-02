@@ -300,6 +300,10 @@ pub struct ObjectModel {
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
     /// Stack objects whose address leaves this body as a value.
     pub escaping_addresses: BTreeSet<ObjectId>,
+    /// Stack objects a call is handed an address into, so the callee may
+    /// write any of their bytes: the object's own contents are then defined
+    /// by the call as much as by any store this body makes.
+    pub callee_reached: BTreeSet<ObjectId>,
 }
 
 impl ObjectModel {
@@ -1390,6 +1394,8 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) escaping_roots: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     pub(crate) callee_write_spans: BTreeMap<StackAddressRoot, i64>,
+    /// Every frame address a call is handed, bounded or not.
+    pub(crate) callee_handed_roots: BTreeSet<StackAddressRoot>,
     /// What every value can be, for an index's lower bound.
     pub(crate) values: &'a crate::values::ValueRanges,
     /// Addresses whose displaced parent is being resolved, against a cycle.
@@ -1453,6 +1459,7 @@ impl<'a> ObjectModelBuilder<'a> {
             evidenced_spans: BTreeMap::new(),
             escaping_roots: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
+            callee_handed_roots: BTreeSet::new(),
             values: empty_value_ranges(),
             resolving: BTreeSet::new(),
             stack_pointer_carrier: machine_context
@@ -1485,6 +1492,12 @@ impl<'a> ObjectModelBuilder<'a> {
         if let Some(facts) = self.facts {
             let callee_spans =
                 callee_write_spans(facts, function, graph, self.machine_context, values);
+            self.callee_handed_roots = callee_spans
+                .spans
+                .iter()
+                .map(|(start, _)| *start)
+                .chain(callee_spans.unbounded.iter().copied())
+                .collect();
             let boundaries = FrameBoundaries::of(facts, function, graph, self.machine_context);
             for (start, end) in callee_spans.spans {
                 self.callee_write_spans
@@ -1580,9 +1593,26 @@ impl<'a> ObjectModelBuilder<'a> {
             .filter(|(key, _)| self.escaping_roots.contains(&key.root))
             .map(|(_, object)| *object)
             .collect();
+        // The object an address a call is handed lies in: the nearest object
+        // that starts at or below it in the same base, since objects start at
+        // their roots and do not overlap.
+        let callee_reached = self
+            .callee_handed_roots
+            .iter()
+            .filter_map(|handed| {
+                self.stack_objects
+                    .iter()
+                    .filter(|(key, _)| {
+                        key.root.base == handed.base && key.root.offset <= handed.offset
+                    })
+                    .max_by_key(|(key, _)| key.root.offset)
+                    .map(|(_, object)| *object)
+            })
+            .collect();
         ObjectModel {
             callee_write_reach,
             escaping_addresses,
+            callee_reached,
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,

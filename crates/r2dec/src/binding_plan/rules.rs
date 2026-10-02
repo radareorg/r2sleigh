@@ -792,6 +792,16 @@ pub(super) fn frame_objects_with_escaped_address(
             reached_by_callee.insert(object);
         }
     }
+    // What r2ssa states a call reaches, which is the owner of the fact; the
+    // walk above only adds what a callsite's arguments show directly.
+    for object in objects
+        .callee_reached
+        .iter()
+        .filter(|object| source.declarable_stack_object(**object))
+    {
+        escaped.insert(*object);
+        reached_by_callee.insert(*object);
+    }
     EscapedFrameObjects {
         escaped,
         reached_by_callee,
