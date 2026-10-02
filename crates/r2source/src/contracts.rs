@@ -1533,6 +1533,15 @@ pub struct SourceFunctionInterface {
     /// string, for callers whose prototype for it names none. A property of
     /// the function, unlike the per-callsite count rule a literal decides.
     body_proven_format_parameter: Option<u32>,
+    /// Whether the declaration says arguments continue past the fixed ones.
+    ///
+    /// A fact of the callee's contract: a caller of a variadic function hands
+    /// it a tail the fixed parameters do not describe, and only a proven count
+    /// (a literal format string's conversions) says how long that tail is.
+    variadic: bool,
+    /// Which fixed parameter the declaration names as the format string, for
+    /// a variadic function whose tail that format counts.
+    declared_format_parameter: Option<u32>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
@@ -1937,6 +1946,8 @@ impl SourceFunctionInterface {
             type_graph,
             stack_slot_roles_complete: require_exact_stack_slot_roles,
             body_proven_format_parameter: None,
+            variadic: false,
+            declared_format_parameter: None,
             body_proven_return_address: false,
             prototype_from_source_types: false,
         })
@@ -2048,6 +2059,34 @@ impl SourceFunctionInterface {
 
     pub const fn body_proven_format_parameter(&self) -> Option<u32> {
         self.body_proven_format_parameter
+    }
+
+    /// Record that the declaration is variadic, and which fixed parameter it
+    /// names as the format string where it names one.
+    pub fn with_declared_variadic(
+        mut self,
+        format_parameter: Option<u32>,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if let Some(index) = format_parameter
+            && usize::try_from(index)
+                .ok()
+                .is_none_or(|index| index >= self.parameters.len())
+        {
+            return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.variadic = true;
+        self.declared_format_parameter = format_parameter;
+        Ok(self)
+    }
+
+    /// Whether the declaration says arguments continue past the fixed ones.
+    pub const fn is_variadic(&self) -> bool {
+        self.variadic
+    }
+
+    /// The fixed parameter the declaration names as the format string.
+    pub const fn declared_format_parameter(&self) -> Option<u32> {
+        self.declared_format_parameter
     }
 
     /// Record that the body hands its caller back the return address it was

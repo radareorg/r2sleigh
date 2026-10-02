@@ -1511,18 +1511,24 @@ pub fn mint_recovered_call_site_interface(
             return None;
         }
     };
-    SourceCallSiteInterface::new(
+    let interface = SourceCallSiteInterface::new(
         revision_identity.to_vec(),
         identity,
         true,
         callee.calling_convention(),
         arguments,
-        false,
+        callee.is_variadic(),
         false,
         result,
     )
     .and_then(|interface| interface.with_exact_callee_interface(callee.clone()))
-    .ok()
+    .ok()?;
+    // The format the declaration names counts the tail at each call; without
+    // one, a variadic call's tail is unproven and residualized, never dropped.
+    match callee.declared_format_parameter() {
+        Some(index) => interface.with_radare2_format_parameter(index).ok(),
+        None => Some(interface),
+    }
 }
 
 #[cfg(test)]

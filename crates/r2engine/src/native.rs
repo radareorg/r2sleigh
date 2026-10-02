@@ -1356,6 +1356,31 @@ fn declared_interface(
         ),
     };
 
+    // A variadic declaration says the call carries a tail past the fixed
+    // parameters. Which parameter is the format that counts it is the one the
+    // declaration names so: a `char *` called `format` or `fmt`, which is the
+    // table's statement and not an inference from the callee's name.
+    let interface = interface.and_then(|interface| {
+        if !prototype.variadic {
+            return Ok(interface);
+        }
+        let format = prototype
+            .parameters
+            .iter()
+            .position(|parameter| {
+                parameter.name.as_deref().is_some_and(|name| {
+                    matches!(
+                        name.trim_start_matches('_'),
+                        "format" | "fmt" | "format_string" | "fmtstr"
+                    )
+                }) && {
+                    let spelling = parameter.spelling.as_type();
+                    spelling.contains("char") && spelling.contains('*')
+                }
+            })
+            .and_then(|index| u32::try_from(index).ok());
+        interface.with_declared_variadic(format)
+    });
     let interface = match interface {
         Ok(interface) => interface,
         Err(error) => {
