@@ -28,6 +28,96 @@ pub struct FunctionListing {
     pub refused: Option<AnalysisRefused>,
 }
 
+/// One function as its control-flow graph: each block with its lines, and
+/// where control leaves it. `agf`, and the visual mode's graph, draw this.
+pub struct FunctionGraph {
+    pub entry: u64,
+    /// In address order; the entry block is the one starting at `entry`.
+    pub blocks: Vec<GraphBlock>,
+    /// As for [`FunctionListing`]: present where the blocks are the plain
+    /// walk's, which follows no dispatch.
+    pub refused: Option<AnalysisRefused>,
+}
+
+/// One basic block of a [`FunctionGraph`].
+pub struct GraphBlock {
+    pub address: u64,
+    pub size: u64,
+    pub lines: Vec<Line>,
+    /// In the order the walk found them. Only edges to a block of this body:
+    /// a branch to another function's entry is that function's, not an edge.
+    pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphEdge {
+    pub target: u64,
+    pub kind: EdgeKind,
+}
+
+/// How control reaches an edge's target, read off the walk's successor kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EdgeKind {
+    /// The only way out: an unconditional branch.
+    Jump,
+    /// Into the next block, with no transfer.
+    Fall,
+    /// A conditional branch's target.
+    Taken,
+    /// A conditional branch's fall-through.
+    NotTaken,
+    /// One case of a dispatch the analysis read.
+    Case,
+    /// A dispatch's default.
+    Default,
+}
+
+/// Each block's extent and successors, as the walk that the lines came from left them.
+type Shape = Vec<(u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>)>;
+
+fn shape_of(blocks: &[r2ssa::body::BodyBlock]) -> Shape {
+    blocks
+        .iter()
+        .map(|block| {
+            let lifted = &block.lifted;
+            (
+                lifted.addr,
+                u64::from(lifted.size),
+                block.successors.clone(),
+            )
+        })
+        .collect()
+}
+
+/// The edges of one block. A direct successor beside a fall-through is a
+/// conditional branch; either alone is a jump or a fall.
+fn edges_of(
+    successors: &[(r2source::AdvisorySuccessorKind, u64)],
+    inside: impl Fn(u64) -> bool,
+) -> Vec<GraphEdge> {
+    use r2source::AdvisorySuccessorKind as Kind;
+    let conditional = successors.iter().any(|(kind, _)| *kind == Kind::Direct)
+        && successors
+            .iter()
+            .any(|(kind, _)| *kind == Kind::Fallthrough);
+    let mut edges = Vec::with_capacity(successors.len());
+    for &(kind, target) in successors {
+        let kind = match (kind, conditional) {
+            (Kind::Direct, false) => EdgeKind::Jump,
+            (Kind::Direct, true) => EdgeKind::Taken,
+            (Kind::Fallthrough, false) => EdgeKind::Fall,
+            (Kind::Fallthrough, true) => EdgeKind::NotTaken,
+            (Kind::SwitchCase, _) => EdgeKind::Case,
+            (Kind::SwitchDefault, _) => EdgeKind::Default,
+        };
+        let edge = GraphEdge { target, kind };
+        if inside(target) && !edges.contains(&edge) {
+            edges.push(edge);
+        }
+    }
+    edges
+}
+
 /// Why a function's listing carries no analysis, and what the plain walk could not follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisRefused {
@@ -212,13 +302,55 @@ impl<S: Source> OpenProgram<S> {
     /// through the caller.
     pub fn function_listing(&mut self, entry: u64) -> Result<FunctionListing, String> {
         self.start_request();
+        Ok(self.listed_body(entry)?.0)
+    }
+
+    /// One function's control-flow graph: the listing's blocks, each with its
+    /// lines and its typed edges. It stands where the analysis refuses, as the
+    /// listing does, and then follows no dispatch.
+    ///
+    /// O(body + lines): one walk, which the listing already makes.
+    pub fn function_graph(&mut self, entry: u64) -> Result<FunctionGraph, String> {
+        self.start_request();
+        let (listing, shape) = self.listed_body(entry)?;
+        let starts = shape
+            .iter()
+            .map(|(address, _, _)| *address)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut lines = listing.lines.value.into_iter().peekable();
+        let mut blocks = Vec::with_capacity(shape.len());
+        // Both are in address order, so each line is placed once.
+        let mut shape = shape;
+        shape.sort_by_key(|(address, _, _)| *address);
+        for (address, size, successors) in shape {
+            while lines.next_if(|line| line.address < address).is_some() {}
+            let mut held = Vec::new();
+            while let Some(line) = lines.next_if(|line| line.address < address + size) {
+                held.push(line);
+            }
+            blocks.push(GraphBlock {
+                address,
+                size,
+                lines: held,
+                edges: edges_of(&successors, |target| starts.contains(&target)),
+            });
+        }
+        Ok(FunctionGraph {
+            entry,
+            blocks,
+            refused: listing.refused,
+        })
+    }
+
+    /// The listing and the shape of the body it lists, within a request already started.
+    fn listed_body(&mut self, entry: u64) -> Result<(FunctionListing, Shape), String> {
         self.ensure_decodable()?;
         self.ensure_assembled(entry)?;
         let target = self.target(entry)?;
         let reason = match self.analysed(&target, entry) {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, &prepared)) {
-                Ok(listing) => return Ok(listing),
+                Ok(listing) => return Ok((listing, shape_of(&prepared.body().blocks))),
                 Err(panicked) => NativeRefusal::from(panicked),
             },
             Err(reason) => reason,
@@ -259,7 +391,7 @@ impl<S: Source> OpenProgram<S> {
         target: &crate::native::NativeTarget<'_>,
         entry: u64,
         reason: NativeRefusal,
-    ) -> Result<FunctionListing, String> {
+    ) -> Result<(FunctionListing, Shape), String> {
         let body = r2ssa::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
             .map_err(|error| NativeRefusal::Body(error).to_string())?;
         let unresolved = body
@@ -268,6 +400,7 @@ impl<S: Source> OpenProgram<S> {
             .filter(|stop| stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
+        let shape = shape_of(&body.blocks);
         let lifted = body
             .blocks
             .into_iter()
@@ -278,10 +411,11 @@ impl<S: Source> OpenProgram<S> {
             body: Some(&walked),
             ..self.answered(None)
         };
-        Ok(FunctionListing {
+        let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted, self.revision()),
             refused: Some(AnalysisRefused { reason, unresolved }),
-        })
+        };
+        Ok((listing, shape))
     }
 
     /// Every function the program has, from what the container states and
