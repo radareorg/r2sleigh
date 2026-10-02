@@ -314,6 +314,11 @@ impl Prepared {
         self.tables.get(&instruction)
     }
 
+    /// Every instruction whose dispatch the walk read a table for, in address order.
+    pub fn dispatches(&self) -> impl Iterator<Item = u64> + '_ {
+        self.tables.keys().copied()
+    }
+
     /// The walked body's blocks, dispatches followed, and where the walk could not follow.
     pub fn body(&self) -> &r2ssa::body::Body {
         &self.root.body

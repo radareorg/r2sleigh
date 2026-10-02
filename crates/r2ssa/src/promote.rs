@@ -29,10 +29,10 @@ fn unplaced(place: Option<i64>, block: &R2ILBlock, at: usize) -> Option<i64> {
     place
 }
 
-/// Whether a prologue store spills a value the function was entered with --
-/// a parameter, or a register the function saves for its caller: the slot is
-/// that value's home, proven by dataflow and never by the register's name or
-/// offset.
+/// The register whose entry value a prologue store spills, where it spills
+/// one -- a parameter, or a register the function saves for its caller: the
+/// slot is that value's home, proven by dataflow and never by the register's
+/// name or offset.
 ///
 /// The walk runs back from the store through the entry block. A copy that
 /// wrote the bytes being stored hands them on from its source, byte for byte
@@ -42,11 +42,15 @@ fn unplaced(place: Option<i64>, block: &R2ILBlock, at: usize) -> Option<i64> {
 /// it is not what the function was entered with: `call f; mov [rbp-4], eax`
 /// spills `f`'s result. What the walk reaches at the top of the block is a
 /// register's entry value.
-fn spills_an_incoming_value(entry: &R2ILBlock, at: usize, val: &r2il::Varnode) -> bool {
+fn spills_an_incoming_value(
+    entry: &R2ILBlock,
+    at: usize,
+    val: &r2il::Varnode,
+) -> Option<r2il::Varnode> {
     let mut root = val.clone();
     for earlier in entry.ops[..at].iter().rev() {
         if matches!(earlier, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }) {
-            return false;
+            return None;
         }
         let Some(dst) = earlier.output() else {
             continue;
@@ -70,10 +74,10 @@ fn spills_an_incoming_value(entry: &R2ILBlock, at: usize, val: &r2il::Varnode) -
                     meta: None,
                 };
             }
-            _ => return false,
+            _ => return None,
         }
     }
-    root.space == r2il::SpaceId::Register
+    (root.space == r2il::SpaceId::Register).then_some(root)
 }
 
 fn resolved_stack_address(
@@ -278,6 +282,7 @@ pub(crate) fn promote_private_stack_slots(
     blocks: &[R2ILBlock],
     stack_pointer: Option<CanonicalStorageId>,
     interface: Option<&SourceFunctionInterface>,
+    call_effect: Option<&crate::SourceCallEffect>,
     calls_refund_stack: bool,
 ) -> Option<crate::phi::PromotedStackSlots> {
     r2il::refusal_evidence!("promote-stack-slot", "asked over {} blocks", blocks.len());
@@ -429,11 +434,24 @@ pub(crate) fn promote_private_stack_slots(
     // store, or a call. Whatever they point at, and everything above it, may
     // be reached from outside, so those places stay in memory.
     let mut escaped = BTreeSet::<i64>::new();
-    // A slot the prologue fills from an argument register is that parameter's
-    // home, and the parameter entity already owns it: promoting it leaves the
-    // parameter's binding with nothing but copies of itself and no write at
-    // all, which placement reads as an object assigned nowhere.
-    let mut parameter_homes = BTreeSet::<i64>::new();
+    // A slot the prologue fills with the entry value of a register the
+    // convention preserves is that register's save: the function hands the
+    // value back through it, and the frame round-trip certificate reads the
+    // store and the reload, so it stays in memory. A slot filled with any
+    // other entry value -- a parameter's home -- is a variable like any other
+    // and is promoted, so a guard on the home and a read of it are one value.
+    // With no convention, nothing says which registers are preserved, and
+    // every home is kept.
+    let mut saves = BTreeSet::<i64>::new();
+    let is_save = |root: &r2il::Varnode| {
+        call_effect.is_none_or(|effect| {
+            effect.preserves(CanonicalStorageId {
+                space: CanonicalStorageSpace::Register,
+                offset: root.offset,
+                size: root.size,
+            })
+        })
+    };
     let fp_offset = frame_pointer.as_ref().map(|(_, _, offset)| *offset);
     for (index, block) in blocks.iter().enumerate() {
         let block_leaves = leaves(block);
@@ -661,8 +679,11 @@ pub(crate) fn promote_private_stack_slots(
                             return None;
                         };
                         widths.entry(displacement).or_default().insert(val.size);
-                        if index == 0 && spills_an_incoming_value(block, at, val) {
-                            parameter_homes.insert(displacement);
+                        if index == 0
+                            && spills_an_incoming_value(block, at, val)
+                                .is_some_and(|root| is_save(&root))
+                        {
+                            saves.insert(displacement);
                         }
                         accesses.push(SlotAccess {
                             block: index,
@@ -839,14 +860,14 @@ pub(crate) fn promote_private_stack_slots(
     };
     let mut promotable = BTreeSet::<PromotedSlot>::new();
     for (displacement, sizes) in &widths {
-        let is_home = parameter_homes.contains(displacement) && read_back(*displacement);
+        let is_save = saves.contains(displacement) && read_back(*displacement);
         let reachable = escaped.range(..=*displacement).next_back();
         let widest = *sizes.iter().next_back().expect("one width");
         let is_declared = declared_covers(*displacement, widest);
-        if sizes.len() != 1 || is_declared || is_home || reachable.is_some() {
+        if sizes.len() != 1 || is_declared || is_save || reachable.is_some() {
             r2il::refusal_evidence!(
                 "promote-stack-slot",
-                "slot at {displacement} stays in memory: widths {sizes:?}, declared {is_declared}, parameter home {is_home}, escaped base {reachable:?}"
+                "slot at {displacement} stays in memory: widths {sizes:?}, declared {is_declared}, save {is_save}, escaped base {reachable:?}"
             );
             continue;
         }
@@ -937,8 +958,17 @@ mod tests {
     }
 
     /// `sp -= 32; [sp + 8] = val; load [sp + 8]` with `before_the_spill`
-    /// ahead of the store: how many of the slot's accesses are promoted.
+    /// ahead of the store: how many of the slot's accesses are promoted, with
+    /// no convention to say which registers are preserved.
     fn promoted_accesses(before_the_spill: Vec<R2ILOp>, val: Varnode) -> usize {
+        promoted_under(before_the_spill, val, None)
+    }
+
+    fn promoted_under(
+        before_the_spill: Vec<R2ILOp>,
+        val: Varnode,
+        effect: Option<crate::SourceCallEffect>,
+    ) -> usize {
         let sp = reg(0, 8);
         let width = val.size;
         let mut block = R2ILBlock::new(0x4000, 4);
@@ -976,7 +1006,7 @@ mod tests {
             offset,
             size: 8,
         };
-        promote_private_stack_slots(&[block], Some(storage(0)), None, true)
+        promote_private_stack_slots(&[block], Some(storage(0)), None, effect.as_ref(), true)
             .map_or(0, |promoted| promoted.len())
     }
 
@@ -1009,5 +1039,24 @@ mod tests {
             b: Varnode::constant(1, 8),
         };
         assert_eq!(promoted_accesses(vec![computed], reg(24, 8)), 2);
+    }
+
+    /// Of the homes, a preserved register's save stays in memory, where the
+    /// frame round trip reads it; a parameter's home is a variable, so the
+    /// guard on it and the read after it are one value.
+    #[test]
+    fn a_save_stays_in_memory_and_a_parameters_home_is_promoted() {
+        let storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let preserving_r3 = || crate::testing::call_effect([storage(24)], [storage(32)]);
+        // r2 is not preserved: its entry value is a parameter.
+        assert_eq!(promoted_under(Vec::new(), reg(24, 8), preserving_r3()), 2);
+        // r3 is: the slot is its save.
+        assert_eq!(promoted_under(Vec::new(), reg(32, 8), preserving_r3()), 0);
+        // The parameter's low lane is still the parameter's.
+        assert_eq!(promoted_under(Vec::new(), reg(24, 4), preserving_r3()), 2);
     }
 }

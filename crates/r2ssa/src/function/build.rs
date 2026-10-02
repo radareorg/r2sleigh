@@ -172,6 +172,7 @@ impl SSAFunction {
             blocks,
             stack_pointer_carrier,
             questions.interface,
+            machine_context.call_effect(),
             stack_pointer_restored_by_callee.is_some(),
         )
         .unwrap_or_default();

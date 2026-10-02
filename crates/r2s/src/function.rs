@@ -115,3 +115,39 @@ fn spell_local(local: &Local) -> String {
     };
     format!("var {ty} stack_{side}{magnitude} @ {base}{sign}{magnitude:#x}")
 }
+
+/// `afb`: the function's basic blocks, one per line in address order, as
+/// radare2 lists them: start, end, size, then where control goes -- `j` the
+/// jump (or the only way on), `f` the fall-through of a conditional branch,
+/// `s` each target of a dispatch. radare2's trace column has nothing behind it
+/// statically and is left out.
+pub fn blocks(session: &mut Session, argument: &str) -> Result<String, String> {
+    use r2engine::program::EdgeKind;
+    let entry = parse_number(session, argument)?;
+    let graph = session.program.function_graph(entry)?;
+    if graph.blocks.is_empty() {
+        return Err(format!("no blocks at {entry:#x}"));
+    }
+    let mut out = String::new();
+    for block in &graph.blocks {
+        out.push_str(&format!(
+            "{:#010x} {:#010x} {}",
+            block.address,
+            block.address + block.size,
+            block.size
+        ));
+        // radare2 writes the jump before the fall-through, whatever order the walk found them in.
+        let mut edges = block.edges.clone();
+        edges.sort_by_key(|edge| matches!(edge.kind, EdgeKind::NotTaken));
+        for edge in edges {
+            let tag = match edge.kind {
+                EdgeKind::Jump | EdgeKind::Fall | EdgeKind::Taken => 'j',
+                EdgeKind::NotTaken => 'f',
+                EdgeKind::Case | EdgeKind::Default => 's',
+            };
+            out.push_str(&format!(" {tag} {:#010x}", edge.target));
+        }
+        out.push('\n');
+    }
+    Ok(out.trim_end().to_owned())
+}

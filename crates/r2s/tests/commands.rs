@@ -892,3 +892,27 @@ fn a_function_graph_is_drawn_with_its_branches_and_its_loop() {
     assert!(!refused.ok, "{}", refused.out);
     assert!(refused.out.contains("nothing mapped"), "{}", refused.out);
 }
+
+/// `afb` lists gcc -O0's `classify` block by block as radare2 does: the guard
+/// jumps to the default and falls into the dispatch, and the dispatch -- whose
+/// index is reloaded from the parameter's home the guard compared -- reaches
+/// each of its eight arms.
+#[test]
+fn the_blocks_of_a_switch_on_a_spilled_parameter_reach_every_arm() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let run = on(fixture, "afb @ 0x120a");
+    assert!(run.ok, "{}", run.out);
+    let lines = run.out.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines[0],
+        "0x0000120a 0x0000121b 17 j 0x00001270 f 0x0000121b"
+    );
+    let arms = lines[1].matches(" s ").count();
+    assert!(
+        lines[1].starts_with("0x0000121b 0x0000123f 36 "),
+        "{}",
+        run.out
+    );
+    assert_eq!(arms, 8, "{}", run.out);
+    assert_eq!(lines.len(), 11, "{}", run.out);
+}

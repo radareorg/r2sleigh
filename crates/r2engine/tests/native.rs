@@ -736,6 +736,59 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     );
 }
 
+/// `TABLE_SWITCH` as gcc -O0 compiles it: the index is spilled to its home
+/// on entry, the guard compares the home, and the dispatch reloads it.
+///
+/// ```text
+///   1000  push rbp ; mov rbp, rsp
+///   1004  mov  [rbp - 4], edi          ; the parameter's home
+///   1007  cmp  dword [rbp - 4], 3      ; the guard reads the home
+///   100b  ja   0x1033
+///   100d  mov  eax, [rbp - 4]          ; and so does the dispatch
+///   1010  jmp  [rax*8 + 0x1040]
+///   1017  case 0 .. 102c case 3, 1033 default: mov eax, k ; pop rbp ; ret
+///   1040  the four entries
+/// ```
+const SPILLED_TABLE_SWITCH: &[u8] = &[
+    0x55, 0x48, 0x89, 0xe5, // 1000 push rbp; mov rbp, rsp
+    0x89, 0x7d, 0xfc, // 1004 mov [rbp-4], edi
+    0x83, 0x7d, 0xfc, 0x03, // 1007 cmp dword [rbp-4], 3
+    0x77, 0x26, // 100b ja 0x1033
+    0x8b, 0x45, 0xfc, // 100d mov eax, [rbp-4]
+    0xff, 0x24, 0xc5, 0x40, 0x10, 0x00, 0x00, // 1010 jmp [rax*8 + 0x1040]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0x5d, 0xc3, // 1017 case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0x5d, 0xc3, // 101e case 1
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0x5d, 0xc3, // 1025 case 2
+    0xb8, 0x28, 0x00, 0x00, 0x00, 0x5d, 0xc3, // 102c case 3
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0x5d, 0xc3, // 1033 default
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 103a padding
+    0x17, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 -> 0x1017
+    0x1e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x101e
+    0x25, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 -> 0x1025
+    0x2c, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1058 -> 0x102c
+];
+
+/// The guard bounds the home and the dispatch reads the home, so the bound
+/// reaches the index only if the home is one value: the parameter's home is
+/// promoted, while the saved frame pointer beside it stays a save.
+#[test]
+fn a_guard_on_a_parameters_home_bounds_the_dispatch_that_reloads_it() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: SPILLED_TABLE_SWITCH.to_vec(),
+        name: "pick",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("switch ("), "{output}");
+    for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
+        assert!(output.contains(&format!("case {case}:")), "{output}");
+        assert!(output.contains(&format!("{returns};")), "{output}");
+    }
+    assert!(!output.contains("residual"), "{output}");
+}
+
 /// gcc -O0's `classify` without its spill: a relative jump table at `TABLE`
 /// read through a 32-bit index nothing bounds, so the read reaches 2^32
 /// entries -- 16 GiB -- of which the program maps sixteen bytes.

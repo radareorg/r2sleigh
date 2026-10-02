@@ -72,11 +72,15 @@ pub enum EdgeKind {
     Default,
 }
 
-/// Each block's extent and successors, as the walk that the lines came from left them.
-type Shape = Vec<(u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>)>;
+/// Each block's extent and successors, as the walk that the lines came from
+/// left them, and each instruction whose dispatch the analysis read a table for.
+struct Shape {
+    blocks: Vec<(u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>)>,
+    dispatches: std::collections::BTreeSet<u64>,
+}
 
-fn shape_of(blocks: &[r2ssa::body::BodyBlock]) -> Shape {
-    blocks
+fn shape_of(blocks: &[r2ssa::body::BodyBlock], dispatches: impl Iterator<Item = u64>) -> Shape {
+    let blocks = blocks
         .iter()
         .map(|block| {
             let lifted = &block.lifted;
@@ -86,13 +90,19 @@ fn shape_of(blocks: &[r2ssa::body::BodyBlock]) -> Shape {
                 block.successors.clone(),
             )
         })
-        .collect()
+        .collect();
+    Shape {
+        blocks,
+        dispatches: dispatches.collect(),
+    }
 }
 
 /// The edges of one block. A direct successor beside a fall-through is a
-/// conditional branch; either alone is a jump or a fall.
+/// conditional branch; either alone is a jump or a fall. A block ending in a
+/// dispatch whose table was read goes to its arms, which are its cases.
 fn edges_of(
     successors: &[(r2source::AdvisorySuccessorKind, u64)],
+    dispatch: bool,
     inside: impl Fn(u64) -> bool,
 ) -> Vec<GraphEdge> {
     use r2source::AdvisorySuccessorKind as Kind;
@@ -103,6 +113,7 @@ fn edges_of(
     let mut edges = Vec::with_capacity(successors.len());
     for &(kind, target) in successors {
         let kind = match (kind, conditional) {
+            (Kind::Direct, _) if dispatch => EdgeKind::Case,
             (Kind::Direct, false) => EdgeKind::Jump,
             (Kind::Direct, true) => EdgeKind::Taken,
             (Kind::Fallthrough, false) => EdgeKind::Fall,
@@ -314,25 +325,32 @@ impl<S: Source> OpenProgram<S> {
         self.start_request();
         let (listing, shape) = self.listed_body(entry)?;
         let starts = shape
+            .blocks
             .iter()
             .map(|(address, _, _)| *address)
             .collect::<std::collections::BTreeSet<_>>();
         let mut lines = listing.lines.value.into_iter().peekable();
-        let mut blocks = Vec::with_capacity(shape.len());
+        let mut blocks = Vec::with_capacity(shape.blocks.len());
         // Both are in address order, so each line is placed once.
-        let mut shape = shape;
-        shape.sort_by_key(|(address, _, _)| *address);
-        for (address, size, successors) in shape {
+        let Shape {
+            blocks: mut walked,
+            dispatches,
+        } = shape;
+        walked.sort_by_key(|(address, _, _)| *address);
+        for (address, size, successors) in walked {
             while lines.next_if(|line| line.address < address).is_some() {}
             let mut held = Vec::new();
             while let Some(line) = lines.next_if(|line| line.address < address + size) {
                 held.push(line);
             }
+            let dispatch = held
+                .last()
+                .is_some_and(|line| dispatches.contains(&line.address));
             blocks.push(GraphBlock {
                 address,
                 size,
                 lines: held,
-                edges: edges_of(&successors, |target| starts.contains(&target)),
+                edges: edges_of(&successors, dispatch, |target| starts.contains(&target)),
             });
         }
         Ok(FunctionGraph {
@@ -350,7 +368,10 @@ impl<S: Source> OpenProgram<S> {
         let reason = match self.analysed(&target, entry) {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, &prepared)) {
-                Ok(listing) => return Ok((listing, shape_of(&prepared.body().blocks))),
+                Ok(listing) => {
+                    let shape = shape_of(&prepared.body().blocks, prepared.dispatches());
+                    return Ok((listing, shape));
+                }
                 Err(panicked) => NativeRefusal::from(panicked),
             },
             Err(reason) => reason,
@@ -400,7 +421,8 @@ impl<S: Source> OpenProgram<S> {
             .filter(|stop| stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
-        let shape = shape_of(&body.blocks);
+        // The plain walk reads no table, so it follows no dispatch.
+        let shape = shape_of(&body.blocks, std::iter::empty());
         let lifted = body
             .blocks
             .into_iter()

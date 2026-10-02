@@ -82,6 +82,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "pddj" => decompile_json(session, argument),
         "afl" => discovered(session),
         "afi" => crate::function::info(session, argument),
+        "afb" => crate::function::blocks(session, argument),
         "afv" => crate::function::variables(session, argument),
         "f" => flags(session),
         "ax" => cross_references(session, argument),
