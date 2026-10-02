@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4).",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE).",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -50,8 +50,8 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::main": {
-   "cause": "[P7 calls] The variadic tail of printf is dropped. All six calls render as printf((const int8_t*)\"%d %d %d %d %d %d\\n\") etc. (rendering.c:87,97,107,119,129,137), under int32_t printf(const int8_t*) at :38. printf then reads whatever RSI..R9 and the stack hold, which is C UB (too few arguments for the format) and differs between the O0 and O2 builds. Secondary P4 defect: int v[8] and uint16_t hv[8] are split into scalars. Only stack_m456=*(uint64_t*)0x402010 and stack_m472=*(uint64_t*)0x402030 are rendered; the loads from 0x402018/20/28/38 at 0x4018e4..0x401928 and their stores are not rendered. Yet &s...",
-   "status": "ub"
+   "status": "residual-trap",
+   "cause": "[P7] The run reaches a counted residual (r2sleigh_residual_void). Was ub."
   },
   "tests/corpus/branchy.c::clang-O0::mask_probe": {
    "status": "equal"
@@ -798,8 +798,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O0::main": {
-   "cause": "[P7 calls] The variadic tail of every printf is dropped. Each call renders as `printf((const int8_t*)\"fnv1a32     %08x\\n\");` with the declaration `int32_t printf(const int8_t*);`. The hash value passed in ESI/RSI is never passed, so printf prints whatever is left in RSI (0x3d = 61, the length).",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O0::murmur3_32": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
@@ -855,8 +854,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O1::main": {
-   "cause": "[P7 calls] The variadic tail of __printf_chk is dropped. All 14 calls render as __printf_chk(2, (const int8_t*)\"fnv1a32     %08x\\n\") etc., under int32_t __printf_chk(int32_t, const int8_t*). The hash results are computed and never passed. The format then reads indeterminate EDX/RCX, which is C UB (too few arguments) and differs by build.",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O1::murmur3_32": {
    "status": "equal"
@@ -934,8 +932,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::main": {
-   "cause": "[P7 calls] Every `printf(\"%016llx\\n\", shape_*(a,b))` renders as `printf((const int8_t*)\"%016llx\\n\");` with the declaration `int32_t printf(const int8_t*)`, so the value in RSI is dropped. Stdout prints whatever is left in RSI, for example 0x40302b (the format address).",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. `struct mixed` is 16 bytes laid out as byte@0, half@2, word@4, quad@8. Both eightbytes are INTEGER class, so it is passed in RDI:RSI. tests/equiv/spec.py:175-176 marks every by-value aggregate unsupported. The engine already renders the function register-equivalently as `uint64_t fcn_4016a0(uint64_t RDI_0, uint64_t RSI_0)`, with the field shifts applied to RDI and `^ RSI_0`. The GATE should lift this limitation. CORRECTION: spec.py does not compute a SysV class for aggregates today (grep finds no eightbyte or classification code). The gate firs...",
@@ -1016,8 +1013,7 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_variadic": {
-   "cause": "[P7 calls] The variadic tail of snprintf is dropped. The rendering has snprintf((int8_t*)stack_m184, 160, (const int8_t*)\"%llu\") and the 2-, 3- and 5-value variants (rendering.c:21,27,33,39), declared int32_t snprintf(int8_t*, uint64_t, const int8_t*). a and b are stored and never passed, so snprintf formats indeterminate registers and stack.",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::shape_variadic_local": {
    "status": "equal"
@@ -1119,8 +1115,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_variadic": {
-   "cause": "[P4 memory (frame partition owner; callee reach merges within barriers), with P5 affine callee reach] [G-SPLIT] Frame object split across a proven address escape. `char buffer[160]` at rsp (m200) is filled by `snprintf(buffer, 160, ...)` (four calls), and the source then reads buffer[1..3] (`movzx r13d,BYTE PTR [rsp+0x1]`/[rsp+0x2]/[rsp+0x3] at 0x40119d/0x4011d5/0x40121a). The engine declares `uint8_t stack_m200;` (1 byte) and makes m199/m198/m197 separate 1-byte objects (trace stack-slot-storage: ObjectId(4..7) at StackPointer-200/-199/-198/-197, each with one 1-byte access); nothing writes them in the rendering. Each exactly-accessed offset is its own object; an escaped base is sized by i...",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`RAX_4 = fcn_401240(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), R9_0);`). passed_through_entry_storages (recover_interface.rs:1015-1026) also inflates the caller itself t...",
@@ -1223,8 +1218,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_variadic": {
-   "cause": "[P4 memory (frame partition owner; callee reach merges within barriers), with P5 affine callee reach] [G-SPLIT] Frame object split across a proven address escape. `char buffer[160]` is filled by four `snprintf(buffer, 160, ...)` calls and the source reads buffer[1..3]; the engine declares `uint8_t stack_m200;` and makes m199/m198/m197 separate 1-byte objects no statement writes. Each exactly-accessed offset is its own object; an escaped base is sized by its own access or frame_gap_extent to the next object (r2ssa/src/semantic/certificates/mod.rs:905-935, 399-427), ignoring callee reach, while promote.rs:428-430 treats everything above an escape as reachable (two owners). r2dec then sees a n...",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`RAX_4 = fcn_401240(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also inflates...",
@@ -1245,8 +1239,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::main": {
-   "cause": "[P7 calls] All 15 printf calls drop their variadic tail: `printf((const int8_t*)\"%016llx\\n\");` with `int32_t printf(const int8_t*)`. The shape_* results are never printed.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. The engine spills RDI/RSI to stack_m24/stack_m16 and reads byte/half/word at offsets 0/2/4 and quad from RSI. That is correct at the register level, so the gate should lift this, once it has a SysV aggregate classifier. Separately, the parameter home split into two frame scalars is the known P4 partition issue, not an equivalence problem here.",
@@ -1692,8 +1685,7 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O0::main": {
-   "cause": "[P7 calls] printf's variadic tail is dropped at all 13 calls: `printf((const int8_t*)\"%016llx\\n\");`, with the declaration `int32_t printf(const int8_t*)`.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/values.c::gcc-O0::value_abs_minmax": {
    "status": "equal"
@@ -1737,8 +1729,7 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O1::main": {
-   "cause": "[P7 calls] Every `__printf_chk(2, \"%016llx\\n\", v)` renders as `__printf_chk(2, (const int8_t*)\"%016llx\\n\");`: the value in RDX is dropped, and the declaration is non-variadic.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/values.c::gcc-O1::value_abs_minmax": {
    "status": "equal"
@@ -1782,8 +1773,7 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O2::main": {
-   "cause": "[P7 calls] Same as gcc-O1 main: the __printf_chk variadic tail (RDX) is dropped at all 13 calls.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/values.c::gcc-O2::value_abs_minmax": {
    "status": "equal"
@@ -2002,8 +1992,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O0::main": {
-   "status": "uninit",
-   "cause": "[P4 memory] Item items[2] (96 bytes) is split into 16-byte frame scalars (stack_m104, stack_m88, stack_m72, stack_m56, stack_m40, stack_m64); struct_nested_array and table_walk are handed &stack_m104 and read the neighbours as separate C objects. Was residual-trap until 91f14102: that commit made Result out (32 bytes) one object, which moved the run past the out-param read into the split items array."
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O0::mem_scan2": {
    "status": "equal"
@@ -2052,8 +2041,8 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O2::main": {
-   "status": "differs",
-   "cause": "[P4 memory] Item items[2] (96 bytes) is split into 16-byte frame scalars (stack_m104, stack_m88, stack_m72, stack_m56, stack_m40, stack_m64); struct_nested_array and table_walk are handed &stack_m104 and read the neighbours as separate C objects. Was ub until 91f14102: that commit made Result out (32 bytes) one object, which moved the run past the out-param read into the split items array."
+   "status": "ub",
+   "cause": "[PE result width] main returns `manual_sink == 0`, compiled `xor eax,eax; ...; sete al`; the rendering narrows the result to uint8_t (an INSERT lane) although the machine defined the base bytes, so the upper bytes of eax are whatever each build leaves and the -O0 and -O2 renderings disagree. The frame is right since P4.1 (items[2] is one 80-byte object, &items[1] is stack_m104 + 40) and its accesses are byte copies. Was differs on the split items array."
   },
   "tests/gold/manual_limits.c::clang-O2::mem_scan2": {
    "cause": "[P10 lowering (new lift-layer item in the r2sleigh-lift user_operation table)] CORRECTED DESCRIPTION: PSHUFLW does not broadcast a/b; it widens the compare masks. The a/b broadcasts are only `movd; punpcklbw`. PSHUFLW (imm8=0x50, not 0) sits inside the 2x-unrolled counting loop at 0x4014c0: `pcmpeqb` against a and b, `por`, then `punpcklbw x,x; pshuflw x,x,0x50; pshufd x,x,0x50`. That sign-extends the two 0x00/0xff byte masks into two 64-bit lanes, and `psubq` then accumulates the count. In ia.sinc:8797-8798, PSHUFLW is an opaque user operation (`define pcodeop pshuflw`; XmmReg1 = pshuflw(XmmReg1, src, imm8)). r2sleigh-lift's modelled user-operation table (disasm/user...",
@@ -2182,8 +2171,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O0::main": {
-   "status": "ub",
-   "cause": "[P4 memory] (was differs before p1-identity; the split frame objects now fail differently) [P4 memory] struct node a, b and c (24 bytes each: key, next, tag) are split into independent C scalars: a is stack_m112 (uint32 key), stack_m104 (next) and stack_m96 (tag); b is stack_m88/m80/m72; c is stack_m64/m56/m48. list_len(&a) renders as `fcn_401250((uint64_t)&stack_m112)`. The original list_len reads n->next at +8 of a 4-byte C object, follows a garbage pointer and faults at 0x401277. The same split affects v[4] and d[3], which are passed by address. The same function has other defects: the printf tail is dropped, and avg's XMM0 result is a counted residual."
+   "status": "residual-trap",
+   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was ub."
   },
   "tests/gold/review.c::clang-O0::mul_div": {
    "status": "equal"
@@ -2231,8 +2220,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::main": {
-   "status": "differs",
-   "cause": "[P4 memory] (was ub before p1-identity; the split frame objects now fail differently) [P4 memory] The struct node objects a, b and c are split into scalars: stack_m136 (a.key, uint32_t), stack_m128 (a.next), and so on. list_len(&stack_m136) reads a.next at +8, outside the 4-byte object. With zero-initialised locals (O0 build) the neighbour reads as NULL, so list_len returns and the run reaches the residual trap for avg's double result (XMM0_5 read as r2sleigh_residual_u64(1); P7 F14). With pattern-initialised locals (pattern build) and in the O2 build, list_len follows garbage and faults. Also present: printf(\"%d %s\\n\") with r and buf dropped (P7 F1)."
+   "status": "residual-trap",
+   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was differs."
   },
   "tests/gold/review.c::clang-O1::mul_div": {
    "status": "equal"
@@ -2283,8 +2272,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::main": {
-   "status": "differs",
-   "cause": "[P4 memory] (was ub before p1-identity; the split frame objects now fail differently) [P4 memory] The same as clang-O1 main: struct node a/b/c are split into scalars, so list_len(&stack_m136) walks off a 4-byte object. The O0 build survives list_len thanks to zero-init and traps at avg's residual double result; the pattern and O2 builds fault in list_len. Also: printf's r and buf are dropped, and avg's double result is a residual (XMM0_6)."
+   "status": "residual-trap",
+   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was differs."
   },
   "tests/gold/review.c::clang-O2::mul_div": {
    "status": "equal"

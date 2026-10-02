@@ -54,7 +54,37 @@ fn mentions(dir: &Path, wanted: &[&str]) -> Vec<String> {
 /// What the shell may be built against: the engine it asks, the container
 /// parser it opens with, and the IL's word for byte order, which the container
 /// states and the engine reads.
-const SHELL_MAY_REACH: [&str; 3] = ["r2engine", "r2image", "r2il"];
+/// `r2s-tui` is the visual mode's layout: it owns no fact and reaches no
+/// crate that does, which `the_visual_mode_reaches_no_r2_crate` holds it to.
+const SHELL_MAY_REACH: [&str; 4] = ["r2engine", "r2image", "r2il", "r2s-tui"];
+
+#[test]
+fn the_visual_mode_reaches_no_r2_crate() {
+    let metadata = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root())
+        .output()
+        .expect("cargo metadata runs");
+    let workspace: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).expect("cargo metadata is JSON");
+    let visual = workspace["packages"]
+        .as_array()
+        .expect("the metadata lists packages")
+        .iter()
+        .find(|package| package["name"] == "r2s-tui")
+        .expect("the workspace holds the visual mode");
+    let reached: Vec<&str> = visual["dependencies"]
+        .as_array()
+        .expect("the visual mode declares dependencies")
+        .iter()
+        .filter_map(|dependency| dependency["name"].as_str())
+        .filter(|name| name.starts_with("r2"))
+        .collect();
+    assert!(
+        reached.is_empty(),
+        "the visual mode lays out what the shell spells and depends on no r2 crate: {reached:?}"
+    );
+}
 
 #[test]
 fn the_shell_depends_on_the_engine_and_the_container_only() {
