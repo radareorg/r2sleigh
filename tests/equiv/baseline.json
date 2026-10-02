@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported.",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4).",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -984,8 +984,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::shape_pointer_to_pointer": {
-   "cause": "[P4 memory] The local array `uint64_t *rows[4]` (rbp-0x50..-0x30) is split into four independent C scalars: stack_m88, stack_m80, stack_m72 and stack_m64. `&stack_m88` is passed to indirect_load and indirect_store, which read rows[index] at +8*index. In C those are other objects, so indirect_load dereferences garbage and faults (fault_addr 0x70 at 0x401cf6 `mov rax,[rax]`).",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::shape_recurse_direct": {
    "status": "equal"
@@ -1114,8 +1113,7 @@
    "status": "ub"
   },
   "tests/corpus/shapes.c::clang-O1::shape_struct_pointer": {
-   "cause": "[P4 memory] `struct mixed value` (16 bytes at [rsp]: byte, half, word, quad) is split into `uint8_t stack_m24[8]` and a separate `uint64_t stack_m16`. `&value` (as stack_m24) is passed to mixed_touch, which writes value->quad at +8. That is past the 8-byte C object, so the rendering's frame is overwritten ('stack smashing detected'), and the rendering's read of stack_m16 misses the callee's write.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_struct_value": {
    "status": "equal"
@@ -1219,8 +1217,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_struct_pointer": {
-   "cause": "[P4 memory] Same as clang-O1. The 16-byte struct mixed is split into separate C objects while its address escapes to mixed_touch, which writes +8 past the first object, so the stack protector aborts.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_struct_value": {
    "status": "equal"
@@ -2005,8 +2002,8 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O0::main": {
-   "cause": "[P4 memory (frame partition owner; callee reach merges within barriers), with P5 affine callee reach] [G-SPLIT] Frame object split across a proven address escape. `Result out = {0}` (32 bytes: code, hash, hit, count) lives at m136; the rendering declares `uint8_t stack_m136[24]`, calls `memset((void*)stack_m136, 0, 32)` (itself an overflow of the declared object) and `fcn_4011b0(stack_m144, (uint64_t)stack_m136)` = out_param_parse(s, &out), which writes out->count; the read of `out.count` at offset 24 (m112) is a separate scalar never written, passed as sparse_switch's 3rd argument. The same split makes `memcpy((void*)stack_m104, 0x402030, 80)` overflow `uint8_t stack_m104[32]` (items[2]). ...",
-   "status": "residual-trap"
+   "status": "uninit",
+   "cause": "[P4 memory] Item items[2] (96 bytes) is split into 16-byte frame scalars (stack_m104, stack_m88, stack_m72, stack_m56, stack_m40, stack_m64); struct_nested_array and table_walk are handed &stack_m104 and read the neighbours as separate C objects. Was residual-trap until 91f14102: that commit made Result out (32 bytes) one object, which moved the run past the out-param read into the split items array."
   },
   "tests/gold/manual_limits.c::clang-O0::mem_scan2": {
    "status": "equal"
@@ -2055,8 +2052,8 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O2::main": {
-   "cause": "[P4 memory] The same as clang-O1 main. items[2] and Result out are split into independent objects, including the overlapping stack_m72[16]/stack_m64[8] pair created by the escape re-split. &stack_m64 is published as items[0].next while items[1]'s bytes live in stack_m72[8..16]. The callees read past stack_m104. The O0 build faults in table_walk at 0x401324 (`mov r8,[rdi+0x18]`, it=0x600000005, the bytes of items[1].scores {5,6}); the O2 build returns the original's value. Secondary: the same ill-typed line-81 store (P10), and a uint8_t result for int main (PE Insert lane).",
-   "status": "ub"
+   "status": "differs",
+   "cause": "[P4 memory] Item items[2] (96 bytes) is split into 16-byte frame scalars (stack_m104, stack_m88, stack_m72, stack_m56, stack_m40, stack_m64); struct_nested_array and table_walk are handed &stack_m104 and read the neighbours as separate C objects. Was ub until 91f14102: that commit made Result out (32 bytes) one object, which moved the run past the out-param read into the split items array."
   },
   "tests/gold/manual_limits.c::clang-O2::mem_scan2": {
    "cause": "[P10 lowering (new lift-layer item in the r2sleigh-lift user_operation table)] CORRECTED DESCRIPTION: PSHUFLW does not broadcast a/b; it widens the compare masks. The a/b broadcasts are only `movd; punpcklbw`. PSHUFLW (imm8=0x50, not 0) sits inside the 2x-unrolled counting loop at 0x4014c0: `pcmpeqb` against a and b, `por`, then `punpcklbw x,x; pshuflw x,x,0x50; pshufd x,x,0x50`. That sign-extends the two 0x00/0xff byte masks into two 64-bit lanes, and `psubq` then accumulates the count. In ia.sinc:8797-8798, PSHUFLW is an opaque user operation (`define pcodeop pshuflw`; XmmReg1 = pshuflw(XmmReg1, src, imm8)). r2sleigh-lift's modelled user-operation table (disasm/user...",
