@@ -580,7 +580,7 @@ pub struct SourceMachineContext {
     /// address is one object in this frame, and the object model is built
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
-    callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::SummaryArgumentReach>>,
+    callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     /// The function each captured code pointer table entry names, by the
     /// address of the entry. A slot a relocation fills holds no address the
     /// file states, so what it becomes is a fact about the program rather
@@ -1313,10 +1313,7 @@ impl SourceMachineContext {
 
     pub(crate) fn set_callee_argument_reach(
         &mut self,
-        callee_argument_reach: BTreeMap<
-            u64,
-            BTreeMap<usize, crate::interproc::SummaryArgumentReach>,
-        >,
+        callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     ) {
         self.callee_argument_reach = callee_argument_reach;
     }
@@ -1342,7 +1339,7 @@ impl SourceMachineContext {
     pub fn callee_argument_reach(
         &self,
         address: u64,
-    ) -> Option<&BTreeMap<usize, crate::interproc::SummaryArgumentReach>> {
+    ) -> Option<&BTreeMap<usize, crate::interproc::ArgumentReach>> {
         self.callee_argument_reach.get(&address)
     }
 

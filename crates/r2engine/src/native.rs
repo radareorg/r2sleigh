@@ -23,7 +23,7 @@ use r2source::{
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
 use r2ssa::body::{BodyError, WINDOW};
-use r2ssa::{CalleePreservedCarriers, SummaryArgumentReach, TrustedSsaArtifact};
+use r2ssa::{ArgumentReach, CalleePreservedCarriers, TrustedSsaArtifact};
 
 use crate::{
     CalleeFacts, EngineDecompileResponse, EngineFunctionDecompileRequestInput, EngineFunctionInput,
@@ -1690,7 +1690,7 @@ struct Callees {
     preserved: CalleePreservedCarriers,
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
-    reach: BTreeMap<u64, BTreeMap<usize, SummaryArgumentReach>>,
+    reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
 }
 
 impl Callees {

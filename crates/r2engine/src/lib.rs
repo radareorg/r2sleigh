@@ -1412,9 +1412,7 @@ impl CalleeFacts {
     }
 
     /// How far this callee is proven to touch through each pointer argument.
-    pub fn argument_touch_reach(
-        &self,
-    ) -> std::collections::BTreeMap<usize, r2ssa::SummaryArgumentReach> {
+    pub fn argument_touch_reach(&self) -> std::collections::BTreeMap<usize, r2ssa::ArgumentReach> {
         self.summary.argument_touch_reach()
     }
 

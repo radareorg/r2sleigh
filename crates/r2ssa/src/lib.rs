@@ -92,8 +92,8 @@ pub use graph::{
 };
 pub use integrity::{ScalarWidthRule, SsaIntegrityError, SsaValueSite, validate_ssa_function};
 pub use interproc::{
-    CallArgObservation, FunctionSemanticLinkage, FunctionSemanticSummary, InterprocFunctionId,
-    InterprocFunctionInput, InterprocSummaryDiagnostics, InterprocSummarySet,
+    ArgumentReach, CallArgObservation, FunctionSemanticLinkage, FunctionSemanticSummary,
+    InterprocFunctionId, InterprocFunctionInput, InterprocSummaryDiagnostics, InterprocSummarySet,
     PreparedCalleeSummary, PreparedInterprocFunctionInput, PreparedInterprocSummaryError,
     PreparedInterprocSummarySet, SummaryAllocationEffect, SummaryArgEffect, SummaryArgumentReach,
     SummaryAtomicEffect, SummaryAtomicOp, SummaryAtomicOrdering, SummaryLifetimeEffect,

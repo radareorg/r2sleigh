@@ -2770,7 +2770,9 @@ fn an_unknown_call_leaves_the_reach_through_an_argument_it_is_not_handed() {
     let reach = summary.argument_touch_reach();
     assert_eq!(
         reach.get(&0),
-        Some(&r2ssa::SummaryArgumentReach::Bytes(8)),
+        Some(&r2ssa::ArgumentReach::from([
+            r2ssa::SummaryArgumentReach::Bytes(8)
+        ])),
         "{reach:?}"
     );
     // The second argument is handed to the call, which may touch any of it,
@@ -2879,7 +2881,7 @@ fn touch_reach_at(
     bytes: &[u8],
     name: &'static str,
     entry: u64,
-) -> std::collections::BTreeMap<usize, r2ssa::SummaryArgumentReach> {
+) -> std::collections::BTreeMap<usize, r2ssa::ArgumentReach> {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let program = Fixture {
         bytes: bytes.to_vec(),

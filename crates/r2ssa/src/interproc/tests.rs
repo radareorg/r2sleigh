@@ -2360,7 +2360,7 @@ fn two_argument_arch() -> ArchSpec {
 }
 
 /// What a callee's summary says it reaches through each argument.
-fn touch_reach(prepared: &SsaArtifact) -> BTreeMap<usize, SummaryArgumentReach> {
+fn touch_reach(prepared: &SsaArtifact) -> BTreeMap<usize, ArgumentReach> {
     let abi = prepared.abi().expect("exact ABI");
     PreparedCalleeSummary {
         id: InterprocFunctionId(prepared.function().entry),
@@ -2485,8 +2485,51 @@ fn a_constant_address_read_at_a_scaled_index_is_the_global() {
     );
     assert_eq!(
         touch_reach(&prepared).get(&1),
-        Some(&SummaryArgumentReach::Bytes(4))
+        Some(&ArgumentReach::from([SummaryArgumentReach::Bytes(4)]))
     );
+}
+
+/// `void put(int *a, unsigned long i) { a[0] = 0; a[i] = 1; }`: two
+/// accesses through one argument are two terms of its reach, and the reach is
+/// the furthest of them. Keeping one term per argument let the constant `a[0]`
+/// stand for both, so a caller that passed `i = 9` learnt the callee touched
+/// four bytes of an array it writes forty bytes into.
+#[test]
+fn every_access_through_an_argument_is_a_term_of_its_reach() {
+    let arch = two_argument_arch();
+    let blocks = [block(
+        0x4680,
+        vec![
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: reg(8, 8),
+                val: c(0, 4),
+            },
+            R2ILOp::IntMult {
+                dst: tmp(1, 8),
+                a: reg(32, 8),
+                b: c(4, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: tmp(2, 8),
+                a: reg(8, 8),
+                b: tmp(1, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: tmp(2, 8),
+                val: c(1, 4),
+            },
+            R2ILOp::Return { target: reg(16, 8) },
+        ],
+    )];
+    let prepared = exact_untyped_artifact(&blocks, &arch, b"two-terms", "sysv64", &[8, 32], 16, 24);
+    let reach = touch_reach(&prepared);
+    let through = reach
+        .get(&0)
+        .unwrap_or_else(|| panic!("a reach through the array: {reach:?}"));
+    assert_eq!(through.bytes(|_| Some(9)), Some(40), "{through:?}");
+    assert_eq!(through.bytes(|_| None), None, "{through:?}");
 }
 
 /// `int get(int *a, int i) { return a[i]; }`: the index is sign-extended
@@ -2533,7 +2576,7 @@ fn a_sign_extended_index_reaches_only_as_far_as_its_sign_bit_is_clear() {
     let reach = touch_reach(&prepared);
     let through = reach
         .get(&0)
-        .copied()
+        .cloned()
         .unwrap_or_else(|| panic!("a reach through the array: {reach:?}"));
     assert_eq!(through.bytes(|_| Some(9)), Some(40), "{through:?}");
     assert_eq!(through.bytes(|_| Some(1 << 31)), None, "{through:?}");

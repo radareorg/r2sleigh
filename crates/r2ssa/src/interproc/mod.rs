@@ -116,6 +116,46 @@ impl SummaryArgumentReach {
     }
 }
 
+/// Everything a callee is proven to reach through one pointer argument: the
+/// union of every term its body states.
+///
+/// Two accesses through one argument are two terms -- `p[0]` and `p[i]`, or
+/// `p[i]` and `p[j]` -- and the reach is the furthest of them. Keeping one
+/// term per argument let the last access stated, or the constant one, stand
+/// for all of them, which under-reached: `p[0] = 0; p[i] = 1;` reached only
+/// `p[0]`. The caller multiplies each scaled term out with its own bound on
+/// the scaling argument; a term it cannot bound leaves the reach unbounded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ArgumentReach {
+    terms: BTreeSet<SummaryArgumentReach>,
+}
+
+impl ArgumentReach {
+    pub fn terms(&self) -> impl Iterator<Item = SummaryArgumentReach> + '_ {
+        self.terms.iter().copied()
+    }
+
+    fn insert(&mut self, term: SummaryArgumentReach) {
+        self.terms.insert(term);
+    }
+
+    /// The bytes every term reaches, with `bound` the caller's greatest value
+    /// for a scaling argument. `None` when any term is unbounded at the call.
+    pub fn bytes(&self, mut bound: impl FnMut(usize) -> Option<u64>) -> Option<u64> {
+        self.terms
+            .iter()
+            .try_fold(0u64, |reach, term| Some(reach.max(term.bytes(&mut bound)?)))
+    }
+}
+
+impl<const N: usize> From<[SummaryArgumentReach; N]> for ArgumentReach {
+    fn from(terms: [SummaryArgumentReach; N]) -> Self {
+        Self {
+            terms: terms.into_iter().collect(),
+        }
+    }
+}
+
 /// An offset that grows with one of the callee's own arguments.
 ///
 /// `indirect_load(base, index)` reads at `base + 8 * index`. The stride is a
@@ -1372,9 +1412,8 @@ impl PreparedCalleeSummary {
     /// argument, where it knows one. An offset that scales with an argument
     /// reaches `stride * (bound + 1)`, and is unbounded without a bound, which
     /// is what an empty map says.
-    pub fn argument_touch_reach(&self) -> BTreeMap<usize, SummaryArgumentReach> {
-        let mut scaled = BTreeMap::<usize, SummaryArgumentReach>::new();
-        let mut reach = BTreeMap::<usize, u64>::new();
+    pub fn argument_touch_reach(&self) -> BTreeMap<usize, ArgumentReach> {
+        let mut proven = BTreeMap::<usize, ArgumentReach>::new();
         let mut unbounded = BTreeSet::<usize>::new();
         for effect in &self.local.memory_effects {
             let SummaryMemoryRegion::Arg { index } = effect.location.region else {
@@ -1397,45 +1436,46 @@ impl PreparedCalleeSummary {
                 unbounded.insert(index);
                 continue;
             }
-            if let Some(term) = range.scaled_by {
+            let term = if let Some(scaled) = range.scaled_by {
                 // Stated per index; the caller multiplies it out.
-                scaled.insert(
-                    index,
-                    SummaryArgumentReach::Scaled {
-                        argument: term.argument,
-                        stride: term.stride,
-                        base: range.offset_lo,
-                        width: range.width.unwrap_or(0),
-                        sign_bits: term.sign_bits,
-                    },
-                );
-                continue;
-            }
-            let Some(end) = range.span_from_base() else {
-                unbounded.insert(index);
-                continue;
+                SummaryArgumentReach::Scaled {
+                    argument: scaled.argument,
+                    stride: scaled.stride,
+                    base: range.offset_lo,
+                    width: range.width.unwrap_or(0),
+                    sign_bits: scaled.sign_bits,
+                }
+            } else {
+                let Some(end) = range.span_from_base() else {
+                    unbounded.insert(index);
+                    continue;
+                };
+                SummaryArgumentReach::Bytes(end)
             };
-            reach
-                .entry(index)
-                .and_modify(|known| *known = (*known).max(end))
-                .or_insert(end);
+            proven.entry(index).or_default().insert(term);
         }
         for transfer in &self.local.transfer_effects {
             for location in [transfer.dst, transfer.src] {
                 let SummaryMemoryRegion::Arg { index } = location.region else {
                     continue;
                 };
-                match transfer.len {
-                    SummaryTransferLength::Const(length) => {
-                        reach
-                            .entry(index)
-                            .and_modify(|known| *known = (*known).max(length))
-                            .or_insert(length);
-                    }
-                    SummaryTransferLength::Arg(_) | SummaryTransferLength::Unknown => {
+                let term = match transfer.len {
+                    SummaryTransferLength::Const(length) => SummaryArgumentReach::Bytes(length),
+                    // `n` bytes from the pointer: one byte per unit of the
+                    // length argument, which the caller bounds.
+                    SummaryTransferLength::Arg(length) => SummaryArgumentReach::Scaled {
+                        argument: length,
+                        stride: 1,
+                        base: 0,
+                        width: 0,
+                        sign_bits: None,
+                    },
+                    SummaryTransferLength::Unknown => {
                         unbounded.insert(index);
+                        continue;
                     }
-                }
+                };
+                proven.entry(index).or_default().insert(term);
             }
         }
         // An access or a call nothing places could reach through exactly the
@@ -1444,17 +1484,9 @@ impl PreparedCalleeSummary {
         // reach alone, and an indexed read of a table at a constant address
         // poisons no pointer at all.
         let unplaced = self.local.unplaced_reach;
-        let bounded = |index: &usize| {
+        proven.retain(|index, _| {
             !unbounded.contains(index) && !dependence::names_formal(unplaced, *index)
-        };
-        reach.retain(|index, _| bounded(index));
-        scaled.retain(|index, _| bounded(index));
-        let mut proven = scaled;
-        for (index, bytes) in reach {
-            // A constant span and a scaled one through the same argument both
-            // hold; the constant is the one this body states on its own.
-            proven.insert(index, SummaryArgumentReach::Bytes(bytes));
-        }
+        });
         r2il::refusal_evidence!(
             "argument-reach",
             "{:#x}: reach={proven:?} unbounded={unbounded:?} unplaced={unplaced:#x} unknown_calls={} effects={:?}",
