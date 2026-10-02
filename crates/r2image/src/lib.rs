@@ -9,6 +9,7 @@
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 pub mod debug;
 mod loader;
+pub mod unwind;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -570,6 +571,7 @@ pub struct Image {
     sections: Vec<Section>,
     symbols: Vec<Symbol>,
     debug_prototypes: debug::DebugPrototypes,
+    unwind_frames: unwind::UnwindFrames,
     entry_points: Vec<EntryPoint>,
     relocations: Vec<Relocation>,
     /// The bytes the loader writes before the program runs, sorted and disjoint.
@@ -813,6 +815,7 @@ impl Image {
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
         let debug_prototypes = debug::read(&file);
+        let unwind_frames = unwind::read(&file);
 
         let mut entry_points = Vec::new();
         let declared_entry = file.entry();
@@ -896,6 +899,7 @@ impl Image {
             sections,
             symbols,
             debug_prototypes,
+            unwind_frames,
             entry_points,
             relocations,
             loader_writes,
@@ -934,6 +938,11 @@ impl Image {
     /// return. Empty where it carries none.
     pub fn debug_prototypes(&self) -> &debug::DebugPrototypes {
         &self.debug_prototypes
+    }
+
+    /// Every frame the call-frame information states.
+    pub fn unwind_frames(&self) -> &unwind::UnwindFrames {
+        &self.unwind_frames
     }
 
     /// The slots the loader fills, in address order.
@@ -1368,6 +1377,7 @@ mod tests {
             relocations: Vec::new(),
             loader_writes: Vec::new(),
             debug_prototypes: debug::DebugPrototypes::default(),
+            unwind_frames: unwind::UnwindFrames::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),
