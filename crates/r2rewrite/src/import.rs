@@ -235,6 +235,29 @@ pub fn exact_stack_object_address(artifact: &SsaArtifact, value: ValueId) -> Opt
     artifact.declarable_stack_object(object).then_some(object)
 }
 
+/// The declarable frame object `value` addresses a place inside, at the
+/// constant offset the object model states, where it is one.
+pub fn interior_stack_object_address(
+    artifact: &SsaArtifact,
+    value: ValueId,
+) -> Option<(ObjectId, i64)> {
+    let objects = artifact.objects();
+    let offset = objects.interior_offset(value)?;
+    if objects.address_is_indexed(value) || offset < 0 {
+        return None;
+    }
+    let object = objects.object_for_value(value, r2il::SpaceId::Ram)?;
+    if !matches!(
+        objects.object(object)?.kind,
+        ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
+    ) {
+        return None;
+    }
+    artifact
+        .declarable_stack_object(object)
+        .then_some((object, offset))
+}
+
 /// Entry values whose storage no instruction of the function writes.
 fn entry_values_never_redefined(graph: &r2ssa::SsaGraph) -> BTreeSet<ValueId> {
     let mut rewritten_locations = BTreeSet::new();
@@ -527,7 +550,46 @@ impl Importer<'_> {
                         opaque: false,
                     }
                 }
-                _ => imported,
+                _ => match output
+                    .and_then(|value| self.interior_object_address_of(value))
+                    .and_then(|(object, offset)| {
+                        let offset = u64::try_from(offset).ok()?;
+                        Some((
+                            object,
+                            r2ssa::MachineBitVector::new(ty.width_bits(), offset)?,
+                        ))
+                    }) {
+                    // A place inside a frame object at an offset the object
+                    // model states: `&buf[2]`, `&s.next`. It is the object's
+                    // address plus that offset, never the stack pointer the
+                    // machine measured it from -- which no C object names.
+                    Some((object, offset)) if !imported.opaque => {
+                        let base = self.arena.intern(ty, TermKind::ObjectAddress(object));
+                        self.place_object(object);
+                        let offset = self.arena.intern(ty, TermKind::Literal(offset));
+                        let term = self.arena.intern(
+                            ty,
+                            TermKind::Arithmetic {
+                                op: r2ssa::MachineArithmeticOp::Add,
+                                left: base,
+                                right: offset,
+                            },
+                        );
+                        let mut trace = imported.trace;
+                        trace.push(Rewrite {
+                            rule: OBJECT_ADDRESS,
+                            from: imported.term,
+                            to: term,
+                        });
+                        RootImport {
+                            term,
+                            trace,
+                            substituted: imported.substituted,
+                            opaque: false,
+                        }
+                    }
+                    _ => imported,
+                },
             }
         } else {
             opaque_term(self.arena)
@@ -1250,6 +1312,11 @@ impl Importer<'_> {
 
     fn object_address_of(&self, value: ValueId) -> Option<ObjectId> {
         exact_stack_object_address(self.artifact, value)
+    }
+
+    /// The frame object a place inside lies in, and how far into it.
+    fn interior_object_address_of(&self, value: ValueId) -> Option<(ObjectId, i64)> {
+        interior_stack_object_address(self.artifact, value)
     }
 
     /// The frame position `value` holds, through the copies that carried it.
