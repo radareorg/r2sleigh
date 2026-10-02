@@ -1539,12 +1539,13 @@ pub(crate) fn callee_write_spans(
             else {
                 continue;
             };
-            let Some(name) = machine_context
+            // The callee's name is only the key of an import's modelled
+            // effects below; what a body the capture read reaches is a fact
+            // about that body, whatever the symbol table calls it.
+            let name = machine_context
                 .raw_call_site_at(*instruction)
                 .and_then(|identity| machine_context.callee_name(identity))
-            else {
-                continue;
-            };
+                .unwrap_or("");
             let id = crate::interproc::InterprocFunctionId(
                 resolve_graph_literal_value(graph, Some(facts), target).unwrap_or(0),
             );
@@ -1611,8 +1612,9 @@ pub(crate) fn callee_write_spans(
                     spans.push((root, end));
                 }
             }
-            let Some(seed) =
-                crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name)
+            let Some(seed) = (!name.is_empty())
+                .then(|| crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name))
+                .flatten()
             else {
                 continue;
             };
