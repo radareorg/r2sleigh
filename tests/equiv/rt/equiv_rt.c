@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -433,6 +434,19 @@ static void child_run(struct run_state *run, const struct job_vector *vec, int t
         sigaction(faults[i], &sa, NULL);
     signal(SIGALRM, SIG_DFL);
     signal(SIGPIPE, SIG_DFL);
+    /* A signal mask is inherited across fork and exec, so a gate started from
+     * a process that blocked SIGALRM would arm a timer that never fires, and a
+     * rendering that loops would run until the job's own timeout: the
+     * harness-contracts step stalled for twenty minutes in run_driver. The
+     * timer has to be deliverable, and a CPU limit stands behind it for a run
+     * that spins with the alarm somehow held off. */
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, NULL);
+    struct rlimit cpu;
+    cpu.rlim_cur = (rlim_t)(timeout_ms / 1000) * 2 + 2;
+    cpu.rlim_max = cpu.rlim_cur + 1;
+    setrlimit(RLIMIT_CPU, &cpu);
 
     g_child_slot = run->slot;
     atexit(child_exit_hook);

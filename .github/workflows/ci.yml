@@ -41,7 +41,7 @@ jobs:
   quality:
     name: Format + Clippy + Unit Tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       # The image's preinstalled SDKs are not used here, and the workspace's
       # test build needs the room.
@@ -71,6 +71,32 @@ jobs:
       - name: Unit tests
         run: cargo test --workspace --all-features --no-fail-fast
 
+  # ── One build of the shell every gate grades ───────────────────────
+  #
+  # Built once, with the `ci` profile: optimised, so the gates fit in minutes,
+  # with the debug build's overflow checks and assertions kept, so a panic is
+  # still the function's refusal. Every gate below downloads this binary
+  # instead of compiling its own.
+  build:
+    name: Build the shell
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shell
+      - name: Build
+        run: cargo build --profile ci -p r2s --features sleigh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r2s
+          path: target/ci/r2s
+          retention-days: 1
+          if-no-files-found: error
+
   # ── Native certification gate ───────────────────────────────────────
   #
   # Every named function is rendered and the proof is read: a rendering may not
@@ -78,12 +104,15 @@ jobs:
   capture-gate:
     name: Native Capture Certification Gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    needs: build
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Install the toolchain the repository pins
-        run: rustup toolchain install --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
       # radare2's own test corpus, its ELF directory alone; radare2 itself is
       # not run by this gate.
       - name: Fetch radare2's test binaries
@@ -96,23 +125,18 @@ jobs:
           git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$TESTBINS_REF"
           git -C "$dir" checkout -q FETCH_HEAD
           test -d "$dir/elf"
-      - name: The gate reads the proof line by name
-        run: python3 scripts/test_certify_render.py
-      # No harness may drive the deleted plugin; the equivalence gate's
-      # self-tests must hold before its verdicts mean anything; the DecBench
-      # backend files every function it is asked for.
+      # No harness may drive the deleted plugin; the gate reads the proof line
+      # by name; the DecBench backend files every function it is asked for.
       - name: Harness contracts
         run: |
+          python3 scripts/test_certify_render.py
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
-          timeout -s ABRT 20m python3 -m unittest discover -s tests/equiv -p 'test_*.py' -v
-      - name: Build the shell
-        run: cargo build --release -p r2s --features sleigh
       - name: A rendering may not read what nothing wrote
         run: |
           python3 scripts/certify_render.py \
             --bins "$RUNNER_TEMP/testbins/elf" \
-            --r2s target/release/r2s \
+            --r2s target/ci/r2s \
             --limit 12 --functions 8
 
   # ── Source-gold: graded against the source, not against another tool ──
@@ -125,14 +149,15 @@ jobs:
   source-gold:
     name: Source-Gold Correctness Gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    needs: build
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Install the toolchain the repository pins
-        run: rustup toolchain install --profile minimal
-      - uses: Swatinem/rust-cache@v2
-      - name: Build the shell
-        run: cargo build --release -p r2s --features sleigh
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
       - name: Grade the stripped build against the debug build
         run: |
           set -eu
@@ -142,7 +167,7 @@ jobs:
           python3 scripts/differential_truth.py \
             --debug-build target/source-gold/debug \
             --stripped-build target/source-gold/stripped \
-            --r2s target/release/r2s \
+            --r2s target/ci/r2s \
             --baseline tests/gold/source_gold_baseline.json \
             --json target/source-gold/report.json
       - name: Archive the source-gold report
@@ -153,47 +178,95 @@ jobs:
           path: target/source-gold/report.json
           if-no-files-found: warn
 
+  # ── Equivalence: the harness's own tests ────────────────────────────
+  #
+  # The gate's self-tests and its pipeline over the stub shell. They need gcc
+  # and x86-64 Linux, not the real shell, so they run beside the build.
+  equivalence-harness:
+    name: Equivalence Harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - name: The gate's self-tests and pipeline
+        run: timeout -s ABRT 10m python3 -m unittest discover -s tests/equiv -p 'test_*.py' -v
+
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #
   # Every function of the corpus and the gold programs is decompiled from its
   # stripped build, compiled, and run against the original on the same inputs,
-  # with UBSan and uninitialised-read builds beside it. The baseline holds each
-  # function's status and the reason for it exactly: any change -- a function
-  # that stops being equal, a refusal that stops producing a record, a failure
-  # for a new reason, an improvement not yet blessed -- fails here until the
-  # baseline is re-blessed with its cause. The baseline names the compilers it
-  # was blessed on (Ubuntu 24.04's gcc 13 and clang 18, which this image
-  # carries); another toolchain is refused rather than compared.
-  equivalence:
-    name: Equivalence Ratchet
+  # with UBSan and uninitialised-read builds beside it. The population is graded
+  # in six shards, one per compiler and optimisation level, and the merge job
+  # holds their union to the baseline: any change -- a function that stops
+  # being equal, a refusal that stops producing a record, a failure for a new
+  # reason, an improvement not yet blessed -- fails there until the baseline is
+  # re-blessed with its cause. The merge job writes the proposed baseline as an
+  # artifact, so a bless is read from this run, never from a laptop. The
+  # baseline names the compilers it was blessed on (Ubuntu 24.04's gcc 13 and
+  # clang 18, which this image carries); another toolchain is refused.
+  equivalence-shard:
+    name: Equivalence ${{ matrix.compiler }}-${{ matrix.opt }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    needs: build
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        opt: [O0, O1, O2]
     steps:
       - uses: actions/checkout@v6
-      - name: Install the toolchain the repository pins
-        run: rustup toolchain install --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
       - name: Print the compilers
         run: |
           gcc --version | head -n 1
           clang --version | head -n 1
-      # The debug build, as the baseline was blessed with: a `slow` status is
-      # a statement about how long a rendering runs.
-      - name: Build the shell
-        run: cargo build -p r2s --features sleigh
-      - name: Hold every function to the baseline
+      - name: Grade the shard
         run: |
-          timeout -s ABRT 60m python3 tests/equiv/run_equiv.py \
-            --r2s target/debug/r2s \
-            --baseline tests/equiv/baseline.json \
+          timeout -s ABRT 12m python3 tests/equiv/run_equiv.py \
+            --r2s target/ci/r2s \
+            --compilers ${{ matrix.compiler }} \
+            --opts ${{ matrix.opt }} \
             --jobs 4 \
             --out "$RUNNER_TEMP/equiv"
-      - name: Archive the records
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}
+          path: ${{ runner.temp }}/equiv/records.json
+          retention-days: 7
+          if-no-files-found: error
+
+  equivalence:
+    name: Equivalence Ratchet
+    runs-on: ubuntu-24.04
+    needs: equivalence-shard
+    if: ${{ !cancelled() }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-shard-*
+          path: ${{ runner.temp }}/shards
+      - name: Hold every function to the baseline
+        run: |
+          python3 tests/equiv/merge_shards.py \
+            --baseline tests/equiv/baseline.json \
+            --out "$RUNNER_TEMP/equiv" \
+            "$RUNNER_TEMP"/shards/*/records.json
+      - name: Archive the records and the proposed baseline
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: equivalence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/equiv/records.json
+          path: |
+            ${{ runner.temp }}/equiv/records.json
+            ${{ runner.temp }}/equiv/baseline.proposed.json
           if-no-files-found: warn
 
   # ── Whole-binary render coverage ────────────────────────────────────
@@ -211,12 +284,14 @@ jobs:
   coverage:
     name: Whole-Binary Render Coverage
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - name: Install the toolchain the repository pins
         run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-macos
       - name: Print the compiler
         run: clang --version | head -n 1
       - name: Run coverage sweep
@@ -234,7 +309,7 @@ jobs:
     name: Release Build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [quality, capture-gate, source-gold, equivalence, coverage]
+    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6

@@ -260,12 +260,20 @@ def main(argv: list[str] | None = None) -> int:
                                args.out / "build")
     only = re.compile(args.only) if args.only else None
     records: list[gate.Record] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+    # Rendering is one r2s process per binary and was the serial part of the
+    # run: every binary waited for the one before it to finish rendering. The
+    # binaries render side by side now, and their gradings share one pool.
+    jobs = max(1, args.jobs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool, \
+            concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as renders:
+        pending = []
         for binary in binaries:
             if binary.error:
                 records.append(build_failure_record(binary))
                 continue
-            records.extend(grade_binary(binary, args, config, only, pool))
+            pending.append(renders.submit(grade_binary, binary, args, config, only, pool))
+        for future in pending:
+            records.extend(future.result())
     records.sort(key=lambda r: r.key)
 
     # Nothing in the file depends on when or how fast it ran: two runs over the

@@ -68,6 +68,15 @@ strip = true
 inherits = "dev"
 debug = "full"
 
+# The build every CI gate grades: optimised, so the gates fit in minutes, with
+# the debug build's overflow checks and debug assertions kept, so an arithmetic
+# overflow is still a panic the engine reports as that function's refusal
+# rather than a wrapped value rendered as if it were proven.
+[profile.ci]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+
 [profile.dist]
 inherits = "release"
 lto = true
