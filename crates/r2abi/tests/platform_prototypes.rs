@@ -43,6 +43,12 @@ fn darwin_declares_its_own() {
         darwin.get("printf").is_some(),
         "the portable table still applies"
     );
+    // libSystem's second name for `bzero`, which clang calls on x86-64.
+    assert_eq!(
+        parameters(Platform::Darwin, "__bzero"),
+        Some(vec!["void *".into(), "size_t".into()])
+    );
+    assert_eq!(parameters(Platform::Linux, "__bzero"), None);
 }
 
 #[test]

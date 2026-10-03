@@ -694,7 +694,13 @@ fn returned_result(
         .argument_slots()
         .iter()
         .any(|argument| argument.location() == slot.location());
-    let untouched = live_out.unresolved_blocks().next().is_some();
+    // A return path where the carrier still holds what the caller left in it
+    // is untouched whether that path names no definition at all or reaches the
+    // return through a merge whose arm is the entry value. Where the caller
+    // never fills the carrier, that value is none the program produced, so the
+    // merge is not a result on every path.
+    let untouched = live_out.unresolved_blocks().next().is_some()
+        || (!entry_is_an_argument && returns_the_callers_value(graph, live_out, slot));
     let result = if !live_out.has_returns() {
         if closed_by_calls_that_do_not_return(func) {
             RecoveredFunctionResult::Void
@@ -719,6 +725,39 @@ fn returned_result(
         live_out.clobbered_blocks().count()
     );
     result
+}
+
+/// Whether some return hands back the carrier's entry value, directly or as an
+/// arm of the merges that reach it.
+///
+/// One pass over the live-out values and the phis above them, each visited
+/// once.
+fn returns_the_callers_value(
+    graph: &SsaGraph,
+    live_out: &crate::liveout::FunctionLiveOut,
+    slot: CanonicalStorageId,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut pending = live_out.iter().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            if graph
+                .value(value)
+                .and_then(|value| value.canonical_storage)
+                .is_some_and(|storage| storage.location() == slot.location())
+            {
+                return true;
+            }
+            continue;
+        };
+        if matches!(inst.payload, crate::graph::InstPayload::Phi { .. }) {
+            pending.extend(inst.inputs.iter().copied());
+        }
+    }
+    false
 }
 
 /// Whether every way out of the body is a call its source says does not come back.
@@ -1429,7 +1468,8 @@ fn mint_recovered_interface_inner(
     // and an interface naming none had both storages cleared there while its
     // stacked return still stood -- a mechanism with no carriers, refused as
     // a conflict with the machine.
-    .with_role_register_names(roles.role_register_names());
+    .with_role_register_names(roles.role_register_names())
+    .with_types_as_carrier_widths();
     let interface = if recovered.result_is_return_address() {
         interface.with_body_proven_return_address().ok()?
     } else {

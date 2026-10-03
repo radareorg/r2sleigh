@@ -1051,6 +1051,9 @@ pub(crate) fn restate(
     if interface.prototype_from_source_types() {
         restated = restated.with_prototype_from_source_types();
     }
+    if interface.types_are_carrier_widths() {
+        restated = restated.with_types_as_carrier_widths();
+    }
     Some(restated)
 }
 

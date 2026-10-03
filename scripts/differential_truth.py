@@ -52,6 +52,7 @@ def r2s(binary: Path, commands: str, r2s_bin: str) -> str:
 class Prototype:
     ret: str
     params: list[str] = field(default_factory=list)
+    names: list[str] = field(default_factory=list)
 
 
 def normalize_type(spelling: str) -> str:
@@ -76,34 +77,38 @@ def parse_prototype(line: str) -> Prototype | None:
         return None
     args = match.group("args").strip()
     params: list[str] = []
+    names: list[str] = []
     if args and args != "void":
         for arg in args.split(","):
             # `char *s` gives its type by dropping the trailing identifier.
             tokens = arg.strip().rsplit(" ", 1)
             params.append(normalize_type(tokens[0] if len(tokens) > 1 else arg))
-    return Prototype(normalize_type(match.group("ret")), params)
+            names.append(tokens[1].lstrip("*") if len(tokens) > 1 else "")
+    return Prototype(normalize_type(match.group("ret")), params, names)
 
 
-GENERIC_PARAM = re.compile(r"^(int64_t|int32_t|uint64_t|long|int)$")
+# What the engine names a parameter it recovered with no declaration: the
+# register that carries it at its entry version (`RDI_0`, `X0_0`, `W1_0`), a
+# register Sleigh gives no name (`reg_4008_1_0`), or the caller's stack slot
+# (`stack_p8`).
+RECOVERED_PARAM_NAME = re.compile(r"^(?:(?:[A-Z][A-Z0-9]*|reg_[0-9a-f_]+)_\d+|stack_p\d+)$")
 
 
 def truth_is_real(truth: dict[int, Prototype]) -> bool:
-    """Refuse a debug build whose prototypes are radare2's own guesses.
+    """Refuse a debug build whose prototypes are the engine's own recovery.
 
     Debug info that fails to load looks exactly like debug info that says
-    nothing: every function comes back `void f(int64_t arg1)`. Scoring against
-    that measures the plugin against a guess and reports the difference as the
-    plugin's error, which is worse than reporting nothing. A real debug build
-    names concrete types a generic recovery never produces.
+    nothing: the debug build renders what the stripped one does, and scoring
+    the two against each other reports no error at all. That is how a Mach-O
+    run passed with every pointer parameter recovered as an integer: r2s does
+    not read a separate `.dSYM`, so its "truth" was its own guess.
+
+    Debug information names a parameter by its source name, and the engine,
+    recovering one, names it by the register that carries it, so a truth in
+    which no parameter has a source name was not read from debug information.
     """
-    if not truth:
-        return False
-    concrete = sum(
-        1 for proto in truth.values()
-        if proto.ret not in {"void", "int"}
-        or any("*" in param or not GENERIC_PARAM.match(param) for param in proto.params)
-    )
-    return concrete * 4 >= len(truth)
+    names = [name for proto in truth.values() for name in proto.names]
+    return any(name and not RECOVERED_PARAM_NAME.match(name) for name in names)
 
 
 def addresses(binary: Path, r2s_bin: str) -> list[int]:
@@ -221,9 +226,9 @@ def main() -> int:
 
     truth = truth_from_debug_build(args.debug_build, args.r2s)
     if not truth_is_real(truth):
-        print("refusing to score: the debug build yields generic prototypes, so its "
-              "debug info did not load. Check that the dSYM or DWARF sits where "
-              "the reader looks for it; a copied binary usually leaves it behind.",
+        print("refusing to score: no parameter in the debug build has a source name, "
+              "so its debug info did not load. r2s reads DWARF the binary itself "
+              "carries, and not a separate .dSYM.",
               file=sys.stderr)
         return 2
     recovered = recovered_from_stripped(args.stripped_build, args.r2s)

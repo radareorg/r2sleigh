@@ -2437,7 +2437,7 @@ impl<'a> FoldingContext<'a> {
                 // A root wider than any C integer is a bit vector, and the lane
                 // goes in through the helper that inserts it.
                 if crate::bitvector::is_wide(u32::try_from(root_bits).unwrap_or(0)) {
-                    return self.wide_insert_stmt(insert, lsb_bits, lhs, [root, lane, shift]);
+                    return self.wide_insert_stmt(insert, lhs, [root, lane, shift]);
                 }
                 // The lane's own all-ones, at the root's width and shifted
                 // into place. Spelled rather than folded so a root wider than

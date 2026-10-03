@@ -114,13 +114,16 @@ impl FoldingContext<'_> {
     /// the insertion's three, rendered in order: the root, the lane, and the
     /// position as the shift count.
     ///
-    /// A bit vector has no literal, so a zero root is spelled as the zero
-    /// extension of a zero lane -- or, for a lane that is itself a vector, of
-    /// a zero word; at position zero that extension is the whole write.
+    /// Every operand is written as rendered, a zero root included. The
+    /// rendered root is that value's occurrence, carrying its observation; a
+    /// zero spelled here in its place would leave the value read and never
+    /// rendered, which is the seal's `UnobservedValueCellAtSeal` refusal. A
+    /// zero root is the common case since `r2ssa::demand` releases the base
+    /// of an INSERT nobody reads outside its lane, and that constant is one
+    /// value shared by every INSERT it released.
     pub(super) fn wide_insert_stmt(
         &self,
         insert: &r2ssa::InsertOp,
-        lsb_bits: u64,
         lhs: CExpr,
         operands: [CExpr; 3],
     ) -> OpLoweringResult<Option<CStmt>> {
@@ -129,25 +132,7 @@ impl FoldingContext<'_> {
         let lane_width = insert.value.size.saturating_mul(8);
         let insert_lane = BitVectorHelper::insert(root_width, lane_width)
             .ok_or_else(OpLoweringRefusal::unrepresentable_operation)?;
-        let zero_extend = BitVectorHelper::zero_extend(lane_width, root_width)
-            .ok_or_else(OpLoweringRefusal::unrepresentable_operation)?;
-        if insert.src.constant_bits() != Some(0) {
-            return Ok(self.assign_stmt(lhs, insert_lane.call(vec![root, lane, shift])));
-        }
-        if lsb_bits == 0 {
-            return Ok(self.assign_stmt(lhs, zero_extend.call(vec![lane])));
-        }
-        let zero = if is_wide(lane_width) {
-            BitVectorHelper::zero_extend(64, root_width)
-                .ok_or_else(OpLoweringRefusal::unrepresentable_operation)?
-                .call(vec![CExpr::UIntLit(0)])
-        } else {
-            zero_extend.call(vec![CExpr::cast(
-                uint_type_from_size(insert.value.size),
-                CExpr::UIntLit(0),
-            )])
-        };
-        Ok(self.assign_stmt(lhs, insert_lane.call(vec![zero, lane, shift])))
+        Ok(self.assign_stmt(lhs, insert_lane.call(vec![root, lane, shift])))
     }
 }
 

@@ -2853,6 +2853,15 @@ impl FunctionFacts {
         let Some(graph) = interface.type_graph() else {
             return false;
         };
+        // A graph a body recovery minted holds each carrier's width and
+        // declares nothing more. A parameter the body certifiably accesses
+        // memory through is a pointer to what it reads; read as the exact
+        // signature, the width alone declared every such parameter an integer.
+        // Nothing weaker than that certificate upgrades a width: the evidence
+        // solver's own guesses at pointers and signedness are not proof.
+        let certified_pointers = interface
+            .types_are_carrier_widths()
+            .then(|| crate::signature_infer::certified_parameter_pointers(source));
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {
             return false;
@@ -2932,6 +2941,15 @@ impl FunctionFacts {
             {
                 Some(spelled) => crate::analysis::requalify(ty, spelled),
                 None => ty,
+            };
+            let ty = match certified_pointers
+                .as_ref()
+                .and_then(|pointers| pointers.get(&index))
+            {
+                Some(pointer) if declaration_type_width_bits(&ty, ptr_bits) == Some(ptr_bits) => {
+                    pointer.clone()
+                }
+                _ => ty,
             };
             let name = names
                 .as_ref()

@@ -825,6 +825,11 @@ pub struct SourceFunctionInterface {
     /// The prototype is radare2's, found by an import's name rather than
     /// linked to the address or stated by debug information.
     prototype_from_source_types: bool,
+    /// Every logical type is its carrier's width as an unsigned integer,
+    /// minted from what the body was read to use rather than stated by any
+    /// declaration. The graph places each carrier; it says nothing about
+    /// whether the value is a pointer, signed, or named.
+    types_are_carrier_widths: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1274,6 +1279,7 @@ impl SourceFunctionInterface {
             declared_format_parameter: None,
             body_proven_return_address: false,
             prototype_from_source_types: false,
+            types_are_carrier_widths: false,
         })
     }
 
@@ -1437,6 +1443,19 @@ impl SourceFunctionInterface {
 
     pub const fn prototype_from_source_types(&self) -> bool {
         self.prototype_from_source_types
+    }
+
+    /// The same interface, with its logical types marked as the carriers'
+    /// widths a body recovery minted rather than types anything declared.
+    pub const fn with_types_as_carrier_widths(mut self) -> Self {
+        self.types_are_carrier_widths = true;
+        self
+    }
+
+    /// Whether the logical types are only the carriers' widths, so no
+    /// declaration of the function's types is to be read from them.
+    pub const fn types_are_carrier_widths(&self) -> bool {
+        self.types_are_carrier_widths
     }
 
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {

@@ -577,6 +577,42 @@ fn a_function_is_decompiled_on_aarch64_too() {
     );
 }
 
+/// A lane written into a vector register whose other bytes nobody reads.
+///
+/// `dup` fills all of v2, `mov v2.s[1], w1` inserts one lane into it, and the
+/// `and` keeps the vector a 256-bit carrier; only the inserted lane reaches the
+/// return, so `r2ssa::demand` releases the inserts'
+/// bases to one shared zero constant wider than any C integer. The rendering
+/// spells that zero where each insert reads it, and that is its occurrence:
+/// spelling a fresh zero in its place instead left the constant read and
+/// never rendered, and the seal refused the function as
+/// `RenderedValueRequired`.
+#[test]
+fn a_released_wide_insert_base_is_rendered_where_it_is_read() {
+    const LANE_INSERT: &[u8] = &[
+        0x02, 0x0c, 0x04, 0x4e, // dup v2.4s, w0
+        0x22, 0x1c, 0x0c, 0x4e, // mov v2.s[1], w1
+        0x42, 0x1c, 0x23, 0x4e, // and v2.16b, v2.16b, v3.16b
+        0x40, 0x3c, 0x0c, 0x0e, // umov w0, v2.s[1]
+        0xc0, 0x03, 0x5f, 0xd6, // ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: LANE_INSERT.to_vec(),
+        name: "lane",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
+    );
+    assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
+    assert!(output.contains("return"), "{output}");
+}
+
 /// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
 const ARM_DEAD_LOAD: &[u8] = &[
     0x04, 0x00, 0x9f, 0xe5, // 0x1000 ldr r0, [pc, 4]  -> 0x100c
@@ -1080,6 +1116,37 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
 /// which traps if it is ever reached. Nothing else in the text claims a value.
 fn marks_an_unproven_return(output: &str) -> bool {
     output.starts_with("uint64_t ") && output.contains("return r2sleigh_residual_u64(")
+}
+
+/// A result register filled on one path and holding the caller's on the other.
+///
+/// The caller never fills `rax` on x86-64, so the arm that skips the `mov`
+/// hands back no value the program produced. That is a return proven on some
+/// paths only, which is unproven, not a `uint64_t` result: the merge of the
+/// written `rax` with the entry one read the entry value on the skipped arm,
+/// where nothing assigned it, and declaration placement refused the function.
+#[test]
+fn a_result_written_on_one_path_only_is_a_marked_gap() {
+    const HALF_FILLED: &[u8] = &[
+        0x83, 0xff, 0x09, // cmp edi, 9
+        0x7e, 0x02, // jle ret
+        0x89, 0xf8, // mov eax, edi
+        0xc3, // ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: HALF_FILLED.to_vec(),
+        name: "half",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
+    );
+    assert!(marks_an_unproven_return(output), "{output}");
 }
 
 #[test]
@@ -2046,7 +2113,7 @@ fn a_packed_extension_from_memory_renders_every_lane() {
     const uint32_t want[4] = {{{lanes}}};
     uint32_t got[4];
     memset(got, 0xa5, sizeof got);
-    if ({name}((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {{
+    if ({name}((void*)source, (void*)got) != 0) {{
         return 2;
     }}
     return memcmp(got, want, sizeof want) != 0;
@@ -2075,7 +2142,7 @@ fn a_packed_extension_of_an_argument_takes_the_argument() {
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
     uint32_t got[4];
     memset(got, 0xa5, sizeof got);
-    sign_extend_argument(0xfe7f8001u, (uint64_t)(uintptr_t)got);
+    sign_extend_argument(0xfe7f8001u, (void*)got);
     return memcmp(got, want, sizeof want) != 0;
 }"#,
     );
@@ -2178,7 +2245,7 @@ fn a_256_bit_packed_extension_compiles_on_its_own() {
         want[i] = {widen};
     }}
     memset(got, 0xa5, sizeof got);
-    if ({name}((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {{
+    if ({name}((void*)source, (void*)got) != 0) {{
         return 2;
     }}
     return memcmp(got, want, sizeof want) != 0;
@@ -2248,7 +2315,7 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         source[i] = (uint8_t)(0x80 + 7 * i);
     }}
     memset(got, 0xa5, sizeof got);
-    if ({name}((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {{
+    if ({name}((void*)source, (void*)got) != 0) {{
         return 2;
     }}
     if (memcmp(got, source, {width}) != 0) {{
@@ -2276,7 +2343,7 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
     _Alignas(16) uint32_t got[8];
     memset(got, 0xa5, sizeof got);
-    if (sign_extend_stored_whole((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {
+    if (sign_extend_stored_whole((void*)source, (void*)got) != 0) {
         return 2;
     }
     if (memcmp(got, want, sizeof want) != 0) {

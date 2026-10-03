@@ -182,6 +182,27 @@ fn certified_memory_parameter(
         })
 }
 
+/// Each parameter a certified memory access addresses, as a pointer to the one
+/// width every such access reads, or to `void` where they read several.
+pub(crate) fn certified_parameter_pointers(prepared: &SsaArtifact) -> BTreeMap<usize, CTypeLike> {
+    certified_parameter_memory_widths(prepared)
+        .into_iter()
+        .map(|(index, widths)| {
+            let pointer = match certified_parameter_pointer_type(CTypeLike::Void, Some(&widths)) {
+                CTypeLike::Pointer(inner) => match *inner {
+                    CTypeLike::Int { bits, .. } => CTypeLike::Pointer(Box::new(CTypeLike::Int {
+                        bits,
+                        signedness: Signedness::Unsigned,
+                    })),
+                    inner => CTypeLike::Pointer(Box::new(inner)),
+                },
+                other => other,
+            };
+            (index, pointer)
+        })
+        .collect()
+}
+
 fn certified_parameter_pointer_type(
     initial_ty: CTypeLike,
     widths: Option<&BTreeSet<u32>>,

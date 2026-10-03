@@ -4,7 +4,7 @@
 //! expressions; it is decided here once, from the facts, and the renderer
 //! asks. See `doc/adr-access-syntax.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2rewrite::{TermArena, TermId, TermKind};
 use r2ssa::{MachineExprKind, ObjectId, StructuredAccessId, ValueId};
@@ -195,6 +195,16 @@ fn param_array(
     };
     let slot = usize::try_from(slot).ok()?;
     let base = inputs.render.parameter_values(slot).next()?;
+    // `base[index]` computes the address from the parameter and the index.
+    // Where a rendered object already holds that address, or a part of it
+    // such as the scaled index, a statement computes it, and the subscript
+    // computes it a second time: the shift of `i << 4` ran once into the
+    // bound register and again inside `v[i]`, and the effect ledger refused
+    // the duplicate. So the subscript stands only where the address the plan
+    // spells reads nothing but the parameter and what the index reads.
+    if !address_is_built_on(inputs, fact.address, base, index) {
+        return None;
+    }
     if !inputs
         .render
         .certified_expr_for_value(index)
@@ -217,8 +227,99 @@ fn param_array(
         None if array.field_offset == 0 => None,
         _ => return None,
     };
-    let _ = fact;
     Some(AccessSyntax::ParamArray { base, index, field })
+}
+
+/// The bound names an inlined value's term reads, or the value itself where a
+/// statement computes it.
+fn names_read(inputs: &AccessSyntaxInputs<'_>, value: ValueId) -> BTreeSet<ValueId> {
+    let Some(ValueDisposition::Inline { term, .. }) = inputs.dispositions.get(value.0 as usize)
+    else {
+        return BTreeSet::from([value]);
+    };
+    let arena = inputs.canonical.arena();
+    let mut names = BTreeSet::new();
+    let mut pending = vec![*term];
+    while let Some(term) = pending.pop() {
+        match arena.term(term).kind {
+            TermKind::Leaf(read) => {
+                if let Some(MachineExprKind::Source { binding, .. }) =
+                    inputs.projection.expr(read.expr).map(|expr| expr.kind())
+                {
+                    names.insert(binding.value());
+                }
+            }
+            TermKind::Arithmetic { left, right, .. } | TermKind::Bitwise { left, right, .. } => {
+                pending.extend([left, right]);
+            }
+            TermKind::Shift { value, count, .. } => pending.extend([value, count]),
+            TermKind::Cast { input, .. } | TermKind::Extract { input, .. } => pending.push(input),
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Whether `base[index]` spells the address the plan spells and computes
+/// nothing a statement already computed: the address is inlined, reads
+/// `base`, and every other name it reads is one the index reads too.
+fn address_is_built_on(
+    inputs: &AccessSyntaxInputs<'_>,
+    address: ValueId,
+    base: ValueId,
+    index: ValueId,
+) -> bool {
+    if !matches!(
+        inputs.dispositions.get(address.0 as usize),
+        Some(ValueDisposition::Inline { .. })
+    ) {
+        return false;
+    }
+    let read = names_read(inputs, address);
+    let allowed = names_read(inputs, index);
+    read.contains(&base)
+        && read
+            .iter()
+            .all(|name| *name == base || allowed.contains(name))
+}
+
+/// Whether the address the plan spells is `base` plus exactly `offset`.
+fn address_is_base_plus(
+    inputs: &AccessSyntaxInputs<'_>,
+    address: ValueId,
+    base: ValueId,
+    offset: u64,
+) -> bool {
+    if address == base {
+        return offset == 0;
+    }
+    let Some(ValueDisposition::Inline { term, .. }) = inputs.dispositions.get(address.0 as usize)
+    else {
+        return false;
+    };
+    let arena = inputs.canonical.arena();
+    let leaf = |term: TermId| match arena.term(term).kind {
+        TermKind::Leaf(read) => inputs.projection.expr(read.expr).map(|expr| expr.kind()),
+        _ => None,
+    };
+    let is_base = |term: TermId| matches!(leaf(term), Some(MachineExprKind::Source { binding, .. }) if binding.value() == base);
+    let is_offset = |term: TermId| match arena.term(term).kind {
+        TermKind::Literal(bits) => bits.bits() == offset,
+        _ => {
+            matches!(leaf(term), Some(MachineExprKind::Constant { value, .. }) if value.bits() == offset)
+        }
+    };
+    if offset == 0 && is_base(*term) {
+        return true;
+    }
+    match arena.term(*term).kind {
+        TermKind::Arithmetic {
+            op: r2ssa::MachineArithmeticOp::Add,
+            left,
+            right,
+        } => (is_base(left) && is_offset(right)) || (is_offset(left) && is_base(right)),
+        _ => false,
+    }
 }
 
 /// The parameter a declared member is reached through, proven as `param_array` proves its own.
@@ -254,6 +355,17 @@ fn declared_member_base(
         inputs.dispositions.get(fact.address.0 as usize)
         && address != binding
     {
+        return None;
+    }
+    // `p->field` reads `p` plus the field's offset and nothing else. A member
+    // fact on `p + i * 16 + 4` names the field of an element, and spelling it
+    // `p->beta` dropped the index: a store to `v[i].beta` rendered as one to
+    // `v->beta`.
+    let at_field = match inputs.dispositions.get(fact.address.0 as usize) {
+        Some(ValueDisposition::Bound { .. }) => member.field_offset == 0,
+        _ => address_is_base_plus(inputs, fact.address, base, member.field_offset),
+    };
+    if !at_field {
         return None;
     }
     let declared = inputs.bindings.get(binding.index())?.declaration_type();
