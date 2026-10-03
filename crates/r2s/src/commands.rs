@@ -69,7 +69,8 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "q" | "quit" | "exit" => Err("quit".to_owned()),
         "s" => seek(session, argument),
         "i" => info(session),
-        "ie" => entries(session),
+        "ie" => entries(session, false),
+        "iee" => entries(session, true),
         "iS" => sections(session),
         "is" => symbols(session),
         "ir" => relocations(session),
@@ -89,6 +90,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "ax" => cross_references(session, argument),
         "axt" => references_to(session, argument),
         "iz" => strings(session),
+        "izz" => every_string(session),
         "wx" => write_hex(session, argument),
         "wc" => patches(session),
         "wcr" => revert(session),
@@ -163,30 +165,32 @@ fn info(session: &Session) -> Result<String, String> {
     Ok(out)
 }
 
-fn entries(session: &Session) -> Result<String, String> {
-    let mut out = String::from("paddr      vaddr      type\n");
-    out.push_str(&"-".repeat(32));
-    for entry in session
-        .image()
-        .entry_points()
-        .iter()
-        .filter(|entry| entry.kind == r2image::EntryKind::Main)
-    {
-        let paddr = file_offset_of(session, entry.vaddr);
+/// `ie` and `iee`: where the loader starts the program, or what it runs
+/// before and after it, as radare2 lays them out.
+///
+/// radare2 splits them: `ie` is the program's entry, `iee` the functions an
+/// initialiser or terminator array names. `phaddr` and `vhaddr` are where the
+/// container states each: the header field, or the array slot.
+fn entries(session: &Session, initialisers: bool) -> Result<String, String> {
+    let mut out = String::from("paddr      vaddr      phaddr     vhaddr     type\n");
+    out.push_str(&"-".repeat(48));
+    let spelled = |value: Option<u64>| {
+        value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
+    };
+    for entry in session.image().entry_points() {
+        let kind = match entry.kind {
+            r2image::EntryKind::Main if !initialisers => "program",
+            r2image::EntryKind::Init if initialisers => "init",
+            r2image::EntryKind::Fini if initialisers => "fini",
+            r2image::EntryKind::Preinit if initialisers => "preinit",
+            _ => continue,
+        };
         out.push_str(&format!(
-            "\n{} {:#010x} {}",
-            paddr
-                .map(|offset| format!("{:#010x}", offset))
-                .unwrap_or_else(|| "----------".to_owned()),
+            "\n{} {:#010x} {} {} {kind}",
+            spelled(file_offset_of(session, entry.vaddr)),
             entry.vaddr,
-            match entry.kind {
-                r2image::EntryKind::Main => "program",
-                r2image::EntryKind::Init => "init",
-                r2image::EntryKind::Fini => "fini",
-                r2image::EntryKind::Symbol => "symbol",
-                r2image::EntryKind::CMain => "main",
-                r2image::EntryKind::Declared => "declared",
-            }
+            spelled(entry.stated_at.map(|at| at.offset)),
+            spelled(entry.stated_at.and_then(|at| at.vaddr)),
         ));
     }
     Ok(out)
@@ -238,7 +242,7 @@ struct ListedFunction {
     blocks: usize,
     size: u64,
     name: String,
-    confidence: &'static str,
+    confidence: String,
 }
 
 /// Every function discovery found, with the blocks and span its walk traced.
@@ -262,15 +266,29 @@ fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String
                     .map(r2engine::names::Name::spelled)
                     .or_else(|| one.name.clone())
                     .unwrap_or_else(|| format!("fcn.{:08x}", one.address)),
-                confidence: match one.confidence {
-                    r2engine::discovery::Confidence::Stated => "stated",
-                    r2engine::discovery::Confidence::Called => "called",
-                    r2engine::discovery::Confidence::Handed => "handed",
-                    r2engine::discovery::Confidence::Reached => "reached",
-                },
+                confidence: confidence(&one.confidence),
             }
         })
         .collect())
+}
+
+/// Why a function is believed to be one, and each premise that belief takes for granted.
+fn confidence(confidence: &r2engine::discovery::Confidence) -> String {
+    use r2engine::discovery::{Basis, Premise};
+    let mut spelled = match confidence.basis {
+        Basis::Stated => "stated",
+        Basis::Called => "called",
+        Basis::Handed => "handed",
+        Basis::Reached => "reached",
+    }
+    .to_owned();
+    for premise in &confidence.premises {
+        spelled.push_str(match premise {
+            Premise::ClosedWorld => "+closed-world",
+            Premise::UbFreeSource => "+ub-free",
+        });
+    }
+    spelled
 }
 
 /// Write text at the cursor, as `w` read it. radare2 writes nothing, and says
@@ -386,11 +404,23 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
     let mut count = 0usize;
     for (fact, source) in index.to(wanted) {
         count += 1;
-        let text = crate::listing::spelled(&source.line, names);
-        for owner in &source.owners {
+        let text = match &source.line.syntax {
+            Some(_) => crate::listing::spelled(&source.line, names),
+            // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
+            None => format!("{} {wanted:#010x}", datum(session)),
+        };
+        // A source in no function is radare2's `(nofunc)`.
+        let owners = match source.owners.is_empty() {
+            true => vec!["(nofunc)".to_owned()],
+            false => source
+                .owners
+                .iter()
+                .map(|owner| names.function(*owner))
+                .collect(),
+        };
+        for owner in owners {
             out.push_str(&format!(
-                "{} {:#x} [{}] {text}\n",
-                names.function(*owner),
+                "{owner} {:#x} [{}] {text}\n",
                 fact.from,
                 role(fact.role)
             ));
@@ -404,6 +434,14 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
     }
     out.push_str(&coverage(&index.coverage));
     Ok(out)
+}
+
+/// How radare2 spells a pointer-sized datum: `.qword` or `.dword` by the program's width.
+fn datum(session: &Session) -> &'static str {
+    match session.image().arch().bits {
+        64 => ".qword",
+        _ => ".dword",
+    }
 }
 
 /// What a reference index was read over, as a trailing comment.
@@ -437,21 +475,129 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
 }
 
 /// Every string the data sections hold.
+/// `iz`: every string the program's own data holds, as radare2 lays them out.
+///
+/// The strings the name table holds, which it reads only out of sections the
+/// container states hold the program's data, and only where the loader
+/// leaves the bytes alone. Spelled with escapes, one per line.
 fn strings(session: &mut Session) -> Result<String, String> {
     // The strings are read out of the image, so a patched image has other ones.
     session.program.ensure_current()?;
-    let mut out = String::from("vaddr       size string\n");
-    out.push_str(&"-".repeat(46));
-    let mut count = 0usize;
-    for (vaddr, name) in session.program.names().iter() {
-        if name.namespace != r2engine::names::Namespace::String {
+    let found: Vec<(u64, String)> = session
+        .program
+        .names()
+        .iter()
+        .filter(|(_, name)| name.namespace == r2engine::names::Namespace::String)
+        .map(|(vaddr, name)| (vaddr, name.text.clone()))
+        .collect();
+    Ok(string_table(session, &found))
+}
+
+/// `izz`: every run of text in every section's bytes, whatever the section holds.
+///
+/// A list of candidates, not of strings the program has: the interpreter's
+/// path, the loader's names and a run of the unwind tables all read as text.
+/// It spells radare2's `izz`, whose runs are at least four characters long.
+fn every_string(session: &Session) -> Result<String, String> {
+    const RADARE2_IZZ_MINIMUM: usize = 4;
+    let image = session.image();
+    let mut found = Vec::new();
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| section.file_size > 0)
+    {
+        let Some(bytes) = image.file_bytes(section.file_offset, section.file_size) else {
             continue;
+        };
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let Some(text) = r2engine::names::text_in(&bytes[at..]) else {
+                at += 1;
+                continue;
+            };
+            if text.chars().count() >= RADARE2_IZZ_MINIMUM {
+                let vaddr = match section.loaded {
+                    true => section.vaddr + at as u64,
+                    false => 0,
+                };
+                found.push((section.file_offset + at as u64, vaddr, text.to_owned()));
+            }
+            at += text.len() + 1;
         }
-        count += 1;
-        out.push_str(&format!("\n{:#010x} {:>5} {}", vaddr, name.size, name.text));
     }
-    out.push_str(&format!("\n\n{count} strings"));
+    let mut out = String::from("nth paddr      vaddr      len size section         type  string\n");
+    out.push_str(&"-".repeat(66));
+    for (nth, (paddr, vaddr, text)) in found.iter().enumerate() {
+        out.push_str(&format!(
+            "\n{nth:<3} {paddr:#010x} {vaddr:#010x} {:<3} {:<4} {:<15} {:<5} {}",
+            text.chars().count(),
+            text.len() + 1,
+            section_of(session, *paddr, true),
+            text_type(text),
+            escaped(text)
+        ));
+    }
     Ok(out)
+}
+
+/// The rows of a string listing, as radare2's `iz` lays them out.
+fn string_table(session: &Session, found: &[(u64, String)]) -> String {
+    let mut out = String::from("nth paddr      vaddr      len size section type  string\n");
+    out.push_str(&"-".repeat(55));
+    for (nth, (vaddr, text)) in found.iter().enumerate() {
+        let paddr = file_offset_of(session, *vaddr).map_or_else(
+            || "----------".to_owned(),
+            |offset| format!("{offset:#010x}"),
+        );
+        out.push_str(&format!(
+            "\n{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
+            text.chars().count(),
+            text.len() + 1,
+            section_of(session, *vaddr, false),
+            text_type(text),
+            escaped(text)
+        ));
+    }
+    out
+}
+
+/// The name of the section holding an address, or a file offset where `file` is set.
+fn section_of(session: &Session, at: u64, file: bool) -> String {
+    let holds = |section: &&r2image::Section| match file {
+        true => at >= section.file_offset && at - section.file_offset < section.file_size,
+        false => section.loaded && at >= section.vaddr && at - section.vaddr < section.vsize,
+    };
+    session
+        .image()
+        .sections()
+        .iter()
+        .find(holds)
+        .map_or_else(String::new, |section| section.name.clone())
+}
+
+/// What radare2 calls a string's encoding: `ascii`, or `utf8` where it is not.
+fn text_type(text: &str) -> &'static str {
+    match text.is_ascii() {
+        true => "ascii",
+        false => "utf8",
+    }
+}
+
+/// A string as radare2 prints one: each control character escaped, so one string is one line.
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.
@@ -473,57 +619,218 @@ fn flags(session: &mut Session) -> Result<String, String> {
     Ok(out)
 }
 
+/// `iS`: every section the container states, with its own permissions, flags and type, as radare2 lays them out.
+///
+/// radare2 numbers ELF sections by their header index and Mach-O ones from
+/// zero; a Mach-O section is named with its segment, which is half its
+/// identity. An unloaded section permits nothing, whatever its address says.
 fn sections(session: &Session) -> Result<String, String> {
-    let mut out = String::from("nth paddr           size vaddr          vsize perm name\n");
-    out.push_str(&"-".repeat(70));
-    for (index, section) in session.image().sections().iter().enumerate() {
-        let permissions = session
-            .image()
-            .segment_at(section.vaddr)
-            .map(|segment| segment.permissions)
-            .unwrap_or_default();
+    let mut out =
+        String::from("nth paddr        size vaddr       vsize perm flags type        name\n");
+    out.push_str(&"-".repeat(67));
+    for section in session.image().sections() {
+        let permissions = section.permissions;
+        let (nth, flags, kind, name) = match section.stated {
+            r2image::SectionStatement::Elf { sh_type, sh_flags } => (
+                section.index,
+                sh_flags,
+                elf_section_type(sh_type),
+                section.name.clone(),
+            ),
+            r2image::SectionStatement::MachO { flags } => (
+                section.index.saturating_sub(1),
+                u64::from(flags & !0xff),
+                macho_section_type(flags & 0xff),
+                match &section.segment {
+                    Some(segment) => format!("{segment}.{}", section.name),
+                    None => section.name.clone(),
+                },
+            ),
+            r2image::SectionStatement::Coff { characteristics } => (
+                section.index,
+                u64::from(characteristics),
+                String::new(),
+                section.name.clone(),
+            ),
+            r2image::SectionStatement::Unstated => {
+                (section.index, 0, String::new(), section.name.clone())
+            }
+        };
         out.push_str(&format!(
-            "\n{:<3} {:#010x} {:>10x} {:#010x} {:>10x} -{}{}{} {}",
-            index,
+            "\n{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
             section.file_offset,
-            section.file_size,
+            format!("{:#x}", section.file_size),
             section.vaddr,
-            section.vsize,
+            format!("{:#x}", section.vsize),
             if permissions.read { 'r' } else { '-' },
             if permissions.write { 'w' } else { '-' },
             if permissions.execute { 'x' } else { '-' },
-            section.name
+            format!("{flags:#x}"),
         ));
     }
     Ok(out)
 }
 
-fn symbols(session: &Session) -> Result<String, String> {
-    let mut out = String::from("nth vaddr      size type name\n");
+/// An ELF section type, as radare2 spells it.
+fn elf_section_type(sh_type: u32) -> String {
+    match sh_type {
+        0 => "NULL",
+        1 => "PROGBITS",
+        2 => "SYMTAB",
+        3 => "STRTAB",
+        4 => "RELA",
+        5 => "HASH",
+        6 => "DYNAMIC",
+        7 => "NOTE",
+        8 => "NOBITS",
+        9 => "REL",
+        10 => "SHLIB",
+        11 => "DYNSYM",
+        14 => "INIT_ARRAY",
+        15 => "FINI_ARRAY",
+        16 => "PREINIT_ARRAY",
+        17 => "GROUP",
+        18 => "SYMTAB_SHNDX",
+        19 => "RELR",
+        0x6fff_fff5 => "GNU_ATTRIBUTES",
+        0x6fff_fff6 => "GNU_HASH",
+        0x6fff_fff7 => "GNU_LIBLIST",
+        0x6fff_fffd => "GNU_VERDEF",
+        0x6fff_fffe => "GNU_VERNEED",
+        0x6fff_ffff => "GNU_VERSYM",
+        other => return format!("{other:#x}"),
+    }
+    .to_owned()
+}
+
+/// A Mach-O section type, as radare2 spells it.
+fn macho_section_type(kind: u32) -> String {
+    const NAMES: [&str; 23] = [
+        "REGULAR",
+        "ZEROFILL",
+        "CSTRINGS",
+        "4BYTE_LITERALS",
+        "8BYTE_LITERALS",
+        "LITERAL_POINTERS",
+        "NONLAZY_POINTERS",
+        "LAZY_POINTERS",
+        "SYMBOL_STUBS",
+        "MOD_INIT_FUNC_POINTERS",
+        "MOD_TERM_FUNC_POINTERS",
+        "COALESCED",
+        "GB_ZEROFILL",
+        "INTERPOSING",
+        "16BYTE_LITERALS",
+        "DTRACE_DOF",
+        "LAZY_DYLIB_SYMBOL_POINTERS",
+        "THREAD_LOCAL_REGULAR",
+        "THREAD_LOCAL_ZEROFILL",
+        "THREAD_LOCAL_VARIABLES",
+        "THREAD_LOCAL_VARIABLE_POINTERS",
+        "THREAD_LOCAL_INIT_FUNCTION_POINTERS",
+        "INIT_FUNC_OFFSETS",
+    ];
+    NAMES
+        .get(kind as usize)
+        .map_or_else(|| format!("{kind:#x}"), |name| (*name).to_owned())
+}
+
+/// `is`: every symbol the container states, then every import, as radare2 lays them out.
+///
+/// Each with the binding and type its table states and its index there. An
+/// import is listed at the stub that stands for it, where one does, which
+/// is the address a call to it names; the dynamic table states the imports
+/// where there is one, since the static table repeats them under versioned
+/// names.
+fn symbols(session: &mut Session) -> Result<String, String> {
+    // The stubs are read out of the code, so there must be a decoder first.
+    session.program.ensure_current()?;
+    let mut out = String::from("nth paddr      vaddr      bind   type   size lib name\n");
     out.push_str(&"-".repeat(60));
-    for (index, symbol) in session
+    let spelled = |value: Option<u64>| {
+        value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
+    };
+    let mut stated: Vec<&r2image::Symbol> = session
         .image()
         .symbols()
         .iter()
-        .filter(|symbol| symbol.defined)
-        .enumerate()
-    {
+        .filter(|symbol| !symbol.import)
+        .collect();
+    // Numbered as the static table numbers them, where it states them.
+    let nth = |symbol: &r2image::Symbol| {
+        symbol
+            .origin
+            .table
+            .map_or((true, symbol.origin.dynamic), |index| (false, Some(index)))
+    };
+    stated.sort_by_key(|symbol| nth(symbol));
+    for symbol in stated {
+        let mapped = symbol.defined.then_some(symbol.vaddr);
         out.push_str(&format!(
-            "\n{:<3} {:#010x} {:>4} {:<4} {}",
-            index,
-            symbol.vaddr,
+            "\n{:<3} {} {} {:<6} {:<6} {:<4}     {}",
+            nth(symbol).1.unwrap_or_default(),
+            spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
+            spelled(Some(symbol.vaddr)),
+            binding(symbol.binding),
+            symbol_type(symbol.kind),
             symbol.size,
-            match symbol.kind {
-                r2image::SymbolKind::Function => "FUNC",
-                r2image::SymbolKind::Data => "OBJ",
-                r2image::SymbolKind::Section => "SECT",
-                r2image::SymbolKind::Other => "NOTY",
-                r2image::SymbolKind::Mapping(_) => "SPCL",
-            },
+            symbol.name
+        ));
+    }
+    let dynamic = session
+        .image()
+        .symbols()
+        .iter()
+        .any(|symbol| symbol.import && symbol.origin.dynamic.is_some());
+    let index = |symbol: &r2image::Symbol| match dynamic {
+        true => symbol.origin.dynamic,
+        false => symbol.origin.table,
+    };
+    let mut imports: Vec<&r2image::Symbol> = session
+        .image()
+        .symbols()
+        .iter()
+        .filter(|symbol| symbol.import && index(symbol).is_some())
+        .collect();
+    imports.sort_by_key(|symbol| index(symbol));
+    let stubs = session.program.imports();
+    for symbol in imports {
+        let stub = stubs.iter().find(|(_, stub)| stub.symbol == symbol.name);
+        let at = stub.map(|(at, _)| *at);
+        out.push_str(&format!(
+            "\n{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
+            index(symbol).unwrap_or_default(),
+            spelled(at.and_then(|at| file_offset_of(session, at))),
+            spelled(at),
+            binding(symbol.binding),
+            symbol_type(symbol.kind),
+            // An import's size is the stub's, which is what a call to it reaches.
+            stub.map_or(symbol.size, |(_, stub)| stub.size),
             symbol.name
         ));
     }
     Ok(out)
+}
+
+/// A symbol's binding, as radare2 spells it.
+fn binding(binding: r2image::Binding) -> String {
+    match binding {
+        r2image::Binding::Local => "LOCAL".to_owned(),
+        r2image::Binding::Global => "GLOBAL".to_owned(),
+        r2image::Binding::Weak => "WEAK".to_owned(),
+        r2image::Binding::Other(other) => format!("{other}"),
+    }
+}
+
+/// A symbol's type, as radare2 spells it.
+fn symbol_type(kind: r2image::SymbolKind) -> &'static str {
+    match kind {
+        r2image::SymbolKind::Function => "FUNC",
+        r2image::SymbolKind::Data => "OBJ",
+        r2image::SymbolKind::Section => "SECT",
+        r2image::SymbolKind::File => "FILE",
+        r2image::SymbolKind::Other | r2image::SymbolKind::Mapping(_) => "NOTYPE",
+    }
 }
 
 fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
@@ -573,18 +880,53 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// `ir`: the slots the loader fills, and what it fills them with.
+/// `ir`: every relocation record the loader applies, as radare2 lays them out.
+///
+/// `type` is radare2's: how many bits the record writes, `ADD_` where the
+/// loader adds a stated addend and `SET_` where it sets the word outright;
+/// `ntype` is the format's own number. A record naming no symbol is spelled
+/// by its addend, which for a relative relocation is the address it writes.
 fn relocations(session: &Session) -> Result<String, String> {
-    let mut out = String::from("vaddr      name\n");
+    let mut out = String::from("vaddr      paddr      type   ntype name\n");
     out.push_str(&"-".repeat(40));
-    out.push('\n');
-    for relocation in session.image().relocations() {
+    // In address order, as radare2 lists them; the container keeps the order they are applied in.
+    let mut records: Vec<&r2image::Relocation> = session.image().relocations().iter().collect();
+    records.sort_by_key(|relocation| (relocation.vaddr, relocation.record));
+    for relocation in records {
+        let paddr = file_offset_of(session, relocation.vaddr).map_or_else(
+            || "----------".to_owned(),
+            |offset| format!("{offset:#010x}"),
+        );
+        let additive = relocation.addend.is_some()
+            && relocation.ntype != 0
+            && !matches!(
+                relocation.applies,
+                r2image::Applies::Symbol | r2image::Applies::Resolver
+            );
+        let kind = format!(
+            "{}_{}",
+            if additive { "ADD" } else { "SET" },
+            relocation.width * 8
+        );
+        let mut name = relocation
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.name.clone())
+            .unwrap_or_default();
+        match relocation.addend {
+            Some(addend) if addend < 0 => name.push_str(&format!(" - {:#010x}", -addend)),
+            Some(addend) if addend > 0 && !name.is_empty() => {
+                name.push_str(&format!(" + {addend:#010x}"));
+            }
+            Some(addend) if addend > 0 => name.push_str(&format!(" {addend:#010x}")),
+            _ => {}
+        }
         out.push_str(&format!(
-            "{:#010x} {}\n",
-            relocation.vaddr, relocation.symbol
+            "\n{:#010x} {paddr} {kind:<6} {:<5} {name}",
+            relocation.vaddr, relocation.ntype
         ));
     }
-    Ok(out.trim_end().to_owned())
+    Ok(out)
 }
 
 /// The lift tier: the operations Sleigh produced, before any analysis.
@@ -683,4 +1025,18 @@ fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
     let segment = session.image().segment_at(vaddr)?;
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size).then(|| segment.file_offset + offset_in_segment)
+}
+
+#[cfg(test)]
+mod tests {
+    use r2engine::discovery::{Basis, Confidence, Premise};
+
+    #[test]
+    fn a_confidence_is_spelled_with_every_premise_it_takes_for_granted() {
+        assert_eq!(super::confidence(&Confidence::of(Basis::Called)), "called");
+        let assumed = Confidence::of(Basis::Handed)
+            .assuming(Premise::UbFreeSource)
+            .assuming(Premise::ClosedWorld);
+        assert_eq!(super::confidence(&assumed), "handed+closed-world+ub-free");
+    }
 }

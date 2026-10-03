@@ -136,6 +136,37 @@ impl Indexing {
         }
     }
 
+    /// Take every word the loader writes an address of this program into, as the container states it.
+    ///
+    /// A pointer in data refers to what it points at as surely as an
+    /// instruction does, and the relocation type says it is an address: a
+    /// relative one, a definition's, or a definition another image may
+    /// replace, which the word still names until one does. A word belongs to
+    /// no function, so it has no owner.
+    pub(crate) fn read_words(&mut self, writes: &[crate::program::LoaderWrite]) {
+        for write in writes {
+            let Some(value) = write.stated_address() else {
+                continue;
+            };
+            let line = Line {
+                address: write.place,
+                bytes: Vec::new(),
+                syntax: None,
+                annotations: vec![super::Annotation {
+                    kind: super::AnnotationKind::Points { value },
+                    support: Support::Stated,
+                    operand: None,
+                    reference: true,
+                }],
+            };
+            self.facts.extend(claims_of(&line));
+            self.sources.entry(write.place).or_insert(Claimant {
+                line,
+                owners: Vec::new(),
+            });
+        }
+    }
+
     /// The index, in `O(R log R)` once: sorted by source, one support per reference, and ordered by target beside it.
     pub(crate) fn finish(self, coverage: Coverage) -> References {
         let mut facts = self.facts;

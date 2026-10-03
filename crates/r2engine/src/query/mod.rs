@@ -53,6 +53,8 @@ pub enum Work {
 /// The smallest evidence that establishes a claim, each rung reading more of the program; an unclaimed number has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Support {
+    /// The container states it: the loader writes this address into this word.
+    Stated,
     /// The instruction alone says it: where it transfers, what it accesses, or the bound its own operations put on what it writes.
     Decoded,
     /// Evaluated over the run of instructions around it in its block.

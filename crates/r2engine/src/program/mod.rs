@@ -17,10 +17,7 @@ pub use requests::{
     AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge, Rendering,
 };
 
-pub use source::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section, Segment,
-    Source, Symbol, SymbolKind,
-};
+pub use source::*;
 
 use std::collections::BTreeMap;
 
@@ -51,8 +48,8 @@ pub struct OpenProgram<S: Source> {
     source: S,
     /// What this binary calls each address it names.
     names: NameDb,
-    /// Which stub stands for which import, by the import's own name.
-    imports: BTreeMap<u64, String>,
+    /// Which stub stands for which import, by the import's own name, and how large each is.
+    imports: BTreeMap<u64, naming::Stub>,
     /// Which import each slot the loader fills stands for. A stub's tail
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
@@ -72,6 +69,9 @@ pub struct OpenProgram<S: Source> {
     /// body names, and scanning every section for each was one pass per
     /// question.
     static_data: r2types::ProgramExtents,
+    /// Where the container states instructions lie, indexed once the same
+    /// way; `None` where it states no section holds any.
+    code: Option<r2types::ProgramExtents>,
     /// Whether each function discovery found is Thumb, by its entry.
     ///
     /// Derived from the whole program, since a function nothing states is in
@@ -133,9 +133,8 @@ impl<S: Source> OpenProgram<S> {
             names: NameDb::new(),
             imports: BTreeMap::new(),
             slots: container
-                .relocations
-                .iter()
-                .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
+                .import_slots()
+                .map(|(slot, symbol)| (slot, symbol.to_owned()))
                 .collect(),
             defined: definitions(container),
             extents: r2types::ProgramExtents::new(
@@ -152,6 +151,15 @@ impl<S: Source> OpenProgram<S> {
                     .filter(|section| section.holds_static_data())
                     .map(Section::range),
             ),
+            code: {
+                let code = container
+                    .sections
+                    .iter()
+                    .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
+                    .map(Section::range)
+                    .collect::<Vec<_>>();
+                (!code.is_empty()).then(|| r2types::ProgramExtents::new(code))
+            },
             modes: BTreeMap::new(),
             mapped: container
                 .symbols
@@ -217,13 +225,17 @@ impl<S: Source> OpenProgram<S> {
             return Ok(());
         }
         let machine = self.machine.as_ref().expect("the machine is loaded above");
-        let format = self.source.container().format;
         let mut names = naming::of(&self.source);
         naming::name_strings(&mut names, &self.source);
         // The import stubs can only be read once there is a decoder.
         let imports = naming::imports(&self.source, &machine.disasm, machine.arch.alignment);
-        naming::name_imports(&mut names, format, &imports);
-        naming::name_slots(&mut names, format, &self.slots, &imports);
+        naming::name_imports(&mut names, &imports);
+        naming::name_slots(
+            &mut names,
+            &self.slots,
+            &imports,
+            &self.source.container().loader_writes,
+        );
         // A patch that renamed nothing and moved no stub leaves everything
         // derived from those still good, so the counters move only on a
         // difference rather than on every write; the first derivation is no
@@ -263,7 +275,7 @@ impl<S: Source> OpenProgram<S> {
                 container
                     .sections
                     .iter()
-                    .find(|section| section.is_code && section.vsize > 0)
+                    .find(|section| section.is_code() && section.vsize > 0)
                     .map(|section| section.vaddr)
             })
     }
@@ -290,7 +302,7 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Which stub stands for which import, as of the last `ensure_current`.
-    pub const fn imports(&self) -> &BTreeMap<u64, String> {
+    pub const fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
         &self.imports
     }
 
@@ -328,16 +340,22 @@ impl<S: Source> OpenProgram<S> {
         let bits = container.arch.bits;
         let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
             .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
-        // The format says which platform's ABI applies beyond the convention:
+        // The format says which processor ABI applies beyond the convention:
         // which register it reserves for the thread pointer, and which control
-        // registers it makes callee-saved.
-        let platform = match container.format {
+        // registers it makes callee-saved. A psABI fact, so a static ELF that
+        // names no C library has it too; which library's declarations apply
+        // is `platform`'s question, not this one.
+        let psabi = match container.format {
             Format::Elf => r2abi::Platform::Linux,
             Format::MachO => r2abi::Platform::Darwin,
-            Format::Other => r2abi::Platform::Unknown,
+            // Windows' x64 ABI and the others are tables r2abi does not keep:
+            // no register is reserved beyond what the convention says.
+            Format::Pe | Format::Coff | Format::Wasm | Format::Xcoff | Format::Other => {
+                r2abi::Platform::Unknown
+            }
         };
         let call_effect = conventions.default_convention().and_then(|convention| {
-            crate::native::call_effect(&machine.arch, bits, platform, convention)
+            crate::native::call_effect(&machine.arch, bits, psabi, convention)
         });
         let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
         // The specification names the register; the architecture says where it
@@ -366,9 +384,10 @@ impl<S: Source> OpenProgram<S> {
                 size: register.size,
                 meta: None,
             });
-        // The format says which platform's own declarations apply: `_Exit` is
-        // declared by the platform, not by the table every target shares.
-        let mut prototypes = r2abi::Prototypes::embedded_for(platform);
+        // Which C library's own declarations apply is what the container
+        // states of it, and nothing else: `_Exit` is each library's, and
+        // `__fgets_chk` is two interfaces under one name.
+        let mut prototypes = r2abi::Prototypes::embedded_for(platform(container));
         // What the binary's own debug information says beats the shared table:
         // the table describes what a library is expected to look like, and
         // this describes what this one is.
@@ -531,7 +550,10 @@ impl<S: Source> OpenProgram<S> {
     /// Sleigh specification gives the wrong answer on exactly the binaries
     /// that have literal pools.
     pub fn endian(&self) -> r2il::Endianness {
-        self.source.container().arch.endian
+        match self.source.container().arch.endian {
+            Endian::Little => r2il::Endianness::Little,
+            Endian::Big => r2il::Endianness::Big,
+        }
     }
 }
 
@@ -607,8 +629,19 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
         self.static_data.holds(vaddr)
     }
 
-    fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source.container().loader_writes_any(range)
+    fn loader_writes(&self) -> &[LoaderWrite] {
+        &self.source.container().loader_writes
+    }
+
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.source.container().immutable(range)
+    }
+
+    fn holds_code(&self, vaddr: u64) -> bool {
+        match &self.code {
+            Some(code) => code.holds(vaddr),
+            None => r2ssa::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
+        }
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
@@ -636,6 +669,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.imports
             .get(&vaddr)
+            .map(|stub| &stub.symbol)
             .or_else(|| self.slots.get(&vaddr))
             .cloned()
     }
@@ -704,8 +738,16 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
         self.program.holds_static_data(vaddr)
     }
 
-    fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool {
-        self.program.loader_writes(range)
+    fn loader_writes(&self) -> &[LoaderWrite] {
+        crate::native::Program::loader_writes(self.program)
+    }
+
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        crate::native::Program::immutable(self.program, range)
+    }
+
+    fn holds_code(&self, vaddr: u64) -> bool {
+        crate::native::Program::holds_code(self.program, vaddr)
     }
 
     fn extents(&self) -> &r2types::ProgramExtents {
@@ -757,6 +799,45 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
         answer
     }
 }
+
+/// Which platform's declarations a program's calls are read against, as its container states it.
+///
+/// Mach-O is Apple's format, so it is Darwin's libSystem. An ELF is the
+/// platform of the one C library its evidence names -- the dynamic linker
+/// `PT_INTERP` asks for, the notes that library's start files leave -- and
+/// runs on Linux as far as `EI_OSABI` says. Anything else is `Unknown`, which
+/// reads only the declarations every library shares: no evidence, evidence
+/// naming two libraries, an OS ABI that is not Linux's, and musl, which
+/// declares nothing r2abi keeps a table for. A call then has no prototype,
+/// which is visible, rather than another library's, which is wrong.
+fn platform(container: &Container) -> r2abi::Platform {
+    use r2abi::Platform;
+    match container.format {
+        Format::MachO => return Platform::Darwin,
+        Format::Elf => {}
+        _ => return Platform::Unknown,
+    }
+    let mut named = std::collections::BTreeSet::new();
+    for evidence in &container.platform {
+        match *evidence {
+            PlatformEvidence::Interpreter(libc) | PlatformEvidence::Note(libc) => {
+                named.insert(libc);
+            }
+            // GNU/Linux; zero, which states nothing, is never stated.
+            PlatformEvidence::OsAbi(ELFOSABI_GNU) => {}
+            PlatformEvidence::OsAbi(_) => return Platform::Unknown,
+        }
+    }
+    let mut named = named.into_iter();
+    match (named.next(), named.next()) {
+        (Some(Libc::Glibc), None) => Platform::Linux,
+        (Some(Libc::Bionic), None) => Platform::Android,
+        _ => Platform::Unknown,
+    }
+}
+
+/// `EI_OSABI` for GNU/Linux, which glibc and bionic both run on.
+const ELFOSABI_GNU: u8 = 3;
 
 /// Whether a function begins at each address the binary defines.
 ///

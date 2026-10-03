@@ -892,7 +892,6 @@ dependencies = [
  "crossterm",
  "insta",
  "r2engine",
- "r2il",
  "r2image",
  "r2s-tui",
  "ratatui",

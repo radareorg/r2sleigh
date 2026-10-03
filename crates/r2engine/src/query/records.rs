@@ -72,35 +72,14 @@ impl Memory<'_> {
 
     /// The text this revision holds at an address in a section of static data, where it holds text the loader leaves alone.
     pub(super) fn text(&self, address: u64) -> Option<String> {
-        let text = crate::native::text_at(self.program, address)?;
-        let end = address.saturating_add(text.len() as u64 + 1);
-        (!self.program.loader_writes(&(address..end))).then_some(text)
+        crate::native::text_at(self.program, address)
     }
 
-    /// The value this revision holds at an address, where it holds one the loader leaves alone.
-    pub(super) fn word(&self, address: u64, width: u32) -> Option<u64> {
-        let width = usize::try_from(width)
-            .ok()
-            .filter(|width| (1..=8).contains(width))?;
-        // A rebased pointer or an import's slot reads as what the loader wrote there, which the file does not hold.
-        if self
-            .program
-            .loader_writes(&(address..address.saturating_add(width as u64)))
-        {
-            return None;
-        }
-        let read = self
-            .program
-            .read(address, width)
-            .filter(|read| read.len() == width)?;
-        let mut bytes = [0u8; 8];
-        bytes[..width].copy_from_slice(&read);
-        Some(match self.endian {
-            Endianness::Little => u64::from_le_bytes(bytes),
-            Endianness::Big => u64::from_be_bytes(bytes) >> (8 * (8 - width as u32)),
-            // Nothing says which way a word reads here, so nothing is claimed.
-            Endianness::Mixed | Endianness::Custom => return None,
-        })
+    /// The value the word at an address holds when the program starts: this
+    /// revision's bytes where the loader leaves them alone, or the address
+    /// the container states the loader writes there.
+    pub(super) fn word(&self, address: u64, width: u32) -> Option<crate::stated::StatedWord> {
+        crate::stated::stated_word(self.program, address, width, self.endian)
     }
 }
 
@@ -285,6 +264,20 @@ pub enum AnnotationKind {
         width: u32,
         value: u64,
     },
+    /// The loader writes this address into the word at that address before
+    /// the program runs, as the container states it; like `Holds`, not that
+    /// the load returns it, only what the word starts as.
+    Loaded {
+        address: u64,
+        width: u32,
+        value: u64,
+    },
+    /// Once the loader is done, the word this line is holds this address of
+    /// the program: the container states the loader writes it there.
+    ///
+    /// The claim of a word rather than an instruction, which is how a
+    /// pointer in data refers to what it points at.
+    Points { value: u64 },
     /// The revision holds this text where a claim on the line uses the address as data; like `Holds`, never that the line reads it.
     ///
     /// Never at a transfer's target: a call or a jump there executes the bytes.
@@ -370,7 +363,7 @@ impl AnnotationKind {
             Self::Target { call: false, .. } => Some(Role::Jump),
             Self::Reads { width, .. } => Some(Role::Read { width }),
             Self::Writes { width, .. } => Some(Role::Write { width }),
-            Self::Computes { .. } => Some(Role::Value),
+            Self::Computes { .. } | Self::Points { .. } => Some(Role::Value),
             // A range, what the revision holds, and what a certificate says are no use of an address.
             _ => None,
         }
@@ -383,8 +376,9 @@ impl AnnotationKind {
             | Self::Reads { address, .. }
             | Self::Writes { address, .. }
             | Self::Holds { address, .. }
+            | Self::Loaded { address, .. }
             | Self::Text { address, .. } => Some(address),
-            Self::Computes { value } => Some(value),
+            Self::Computes { value } | Self::Points { value } => Some(value),
             _ => None,
         }
     }

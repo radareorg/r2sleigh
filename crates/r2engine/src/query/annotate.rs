@@ -329,12 +329,19 @@ fn revision_at(
     let mut used = BTreeMap::<u64, Vec<(u32, Support)>>::new();
     for (kind, support) in claims {
         if let AnnotationKind::Reads { address, width } = *kind
-            && let Some(value) = memory.word(address, width)
+            && let Some(word) = memory.word(address, width)
         {
-            let kind = AnnotationKind::Holds {
-                address,
-                width,
-                value,
+            let kind = match word {
+                crate::stated::StatedWord::Held(value) => AnnotationKind::Holds {
+                    address,
+                    width,
+                    value,
+                },
+                crate::stated::StatedWord::Loaded(value) => AnnotationKind::Loaded {
+                    address,
+                    width,
+                    value,
+                },
             };
             said.push((kind, *support));
         }

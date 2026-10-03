@@ -9,6 +9,8 @@
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 pub mod debug;
 mod loader;
+mod platform;
+mod roles;
 pub mod unwind;
 
 use std::borrow::Cow;
@@ -29,110 +31,7 @@ pub enum ImageError {
     UnsupportedArchitecture(object::Architecture),
 }
 
-/// Container format the bytes were parsed as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Elf,
-    MachO,
-    Pe,
-    Coff,
-    Wasm,
-    Xcoff,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Endian {
-    Little,
-    Big,
-}
-
-/// Architecture identity, in the terms a Sleigh specification is selected by.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageArch {
-    /// Name as the lifter spells it, such as `x86-64` or `AArch64`.
-    pub name: &'static str,
-    pub bits: u32,
-    pub endian: Endian,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Permissions {
-    pub read: bool,
-    pub write: bool,
-    pub execute: bool,
-}
-
-impl Permissions {
-    const RX: Self = Self {
-        read: true,
-        write: false,
-        execute: true,
-    };
-}
-
-/// One loadable range, mapping a file extent onto a virtual address range.
-#[derive(Debug, Clone)]
-pub struct Segment {
-    pub vaddr: u64,
-    /// Virtual size, which exceeds `file_size` wherever the range is zero-filled.
-    pub vsize: u64,
-    pub file_offset: u64,
-    pub file_size: u64,
-    pub permissions: Permissions,
-    pub name: Option<String>,
-}
-
-impl Segment {
-    pub fn contains(&self, vaddr: u64) -> bool {
-        vaddr >= self.vaddr && vaddr - self.vaddr < self.vsize
-    }
-}
-
-/// One named range the format declares, finer-grained than a segment.
-#[derive(Debug, Clone)]
-pub struct Section {
-    pub name: String,
-    pub vaddr: u64,
-    pub vsize: u64,
-    pub file_offset: u64,
-    pub file_size: u64,
-    /// Whether the container states this section holds instructions.
-    ///
-    /// Stated, not inferred from a name: ELF says it with `SHF_EXECINSTR`,
-    /// COFF with `IMAGE_SCN_CNT_CODE` or `IMAGE_SCN_MEM_EXECUTE`, and Mach-O
-    /// with the `S_ATTR_PURE_INSTRUCTIONS` or `S_ATTR_SOME_INSTRUCTIONS`
-    /// attribute. Mach-O's `__stubs` and `__auth_stubs` state it too, so the
-    /// stub a call lands on is never data a string can be read out of.
-    pub is_code: bool,
-    /// Whether the loader maps this section, so `vaddr` is an address at all.
-    ///
-    /// A section the loader ignores -- `.shstrtab`, `.symtab`, the debug
-    /// sections -- is reported at address zero, which makes it appear to cover
-    /// the start of the image. A consumer asking what lives at an address got
-    /// `.shstrtab` for everything below its size, which is how a structure
-    /// offset of eighty came to be rendered as the string at address eighty.
-    pub loaded: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolKind {
-    Function,
-    Data,
-    Section,
-    Other,
-    /// An ARM mapping symbol: where the bytes become code of one instruction
-    /// set, or data.
-    Mapping(Mapping),
-}
-
-/// What an ARM mapping symbol (`$a`, `$t`, `$d`) says the bytes from it are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mapping {
-    Arm,
-    Thumb,
-    Data,
-}
+pub use r2abi::statement::*;
 
 /// The mapping a symbol name states, per the ARM ELF ABI: `$a`, `$t` or `$d`,
 /// optionally followed by `.` and anything.
@@ -149,68 +48,6 @@ fn mapping(name: &str) -> Option<Mapping> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Symbol {
-    pub name: String,
-    pub vaddr: u64,
-    pub size: u64,
-    pub kind: SymbolKind,
-    /// False for an undefined symbol, which names an import rather than a body.
-    pub defined: bool,
-    /// Whether this function's code is Thumb, which ARM states in the low bit
-    /// of the symbol's value. False on every other machine.
-    pub thumb: bool,
-}
-
-/// Why an address is a place execution can begin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryKind {
-    /// The format's declared entry point.
-    Main,
-    /// Listed in an initialiser or finaliser array.
-    Init,
-    Fini,
-    /// Named by a symbol typed as a function.
-    Symbol,
-    /// The C `main` the format names outright.
-    ///
-    /// Mach-O's `LC_MAIN` carries the offset of `main` itself, not of the
-    /// runtime's start routine, so the language's own declaration applies:
-    /// `main` returns `int`. An ELF entry is `_start`, which is a different
-    /// function and returns nothing, so this kind is never used for one.
-    CMain,
-    /// Listed in the Mach-O function-starts table.
-    ///
-    /// The linker writes one entry per function it laid out, so this is the
-    /// binary's own statement of where its functions begin -- including the
-    /// ones no symbol names and nothing calls directly.
-    Declared,
-}
-
-#[derive(Debug, Clone)]
-pub struct EntryPoint {
-    pub vaddr: u64,
-    pub kind: EntryKind,
-    /// Whether the address selected Thumb, on a machine where bit 0 does.
-    ///
-    /// The bit is not part of the address and is masked out of `vaddr`; what
-    /// it said about the instruction set is kept here, exactly as it is for a
-    /// symbol. A static ARM binary whose `e_entry` is odd starts in Thumb, and
-    /// decoding it as ARM produces plausible instructions that are not there.
-    pub thumb: bool,
-}
-
-/// One slot the loader fills with the address of a symbol.
-///
-/// The slot is where the pointer goes, not where the code is: a call to an
-/// import reaches a stub that reads this slot, so naming the stub means
-/// following the stub's own read back to here.
-#[derive(Debug, Clone)]
-pub struct Relocation {
-    pub vaddr: u64,
-    pub symbol: String,
-}
-
 /// The address a code pointer names, with the mode bit taken off.
 ///
 /// On 32-bit ARM the low bit of a function's address selects Thumb rather than
@@ -220,7 +57,7 @@ pub struct Relocation {
 /// itself and every instruction after it read from the wrong place.
 ///
 /// The mode the bit selected is kept beside the address, as `Symbol::thumb`.
-fn code_address(arch: &ImageArch, value: u64) -> u64 {
+fn code_address(arch: &Arch, value: u64) -> u64 {
     match is_arm32(arch) {
         true => value & !1,
         false => value,
@@ -228,12 +65,12 @@ fn code_address(arch: &ImageArch, value: u64) -> u64 {
 }
 
 /// Whether the low bit of a function's address selects Thumb on this machine.
-fn is_arm32(arch: &ImageArch) -> bool {
+fn is_arm32(arch: &Arch) -> bool {
     arch.name == "ARM" && arch.bits == 32
 }
 
-/// The address `LC_MAIN` names, where the Mach-O carries that command.
-fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<u64> {
+/// The address `LC_MAIN` names, and the file offset of the field that names it, where the Mach-O carries that command.
+fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<(u64, u64)> {
     match file {
         object::File::MachO64(macho) => c_main(macho, data),
         object::File::MachO32(macho) => c_main(macho, data),
@@ -244,7 +81,7 @@ fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<u64> {
 fn c_main<'data, Mach, R>(
     file: &object::read::macho::MachOFile<'data, Mach, R>,
     data: &'data [u8],
-) -> Option<u64>
+) -> Option<(u64, u64)>
 where
     Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
     R: object::ReadRef<'data>,
@@ -256,12 +93,16 @@ where
     let mut commands = file.macho_header().load_commands(endian, data, 0).ok()?;
     let mut text_base = None;
     let mut entryoff = None;
+    // Load commands follow the header back to back, so each starts where the last one's size ends.
+    let mut at = std::mem::size_of::<Mach>() as u64;
     while let Ok(Some(command)) = commands.next() {
         if command.cmd() == macho::LC_MAIN
             && let Ok(main) = command.data::<macho::EntryPointCommand<Mach::Endian>>()
         {
-            entryoff = Some(main.entryoff.get(endian));
+            // `entryoff` follows `cmd` and `cmdsize`.
+            entryoff = Some((main.entryoff.get(endian), at + 8));
         }
+        at += u64::from(command.cmdsize());
         if text_base.is_none()
             && let Ok(variant) = command.variant()
         {
@@ -281,7 +122,78 @@ where
         }
     }
     // `entryoff` is measured from the start of the mapped image.
-    text_base?.checked_add(entryoff?)
+    let (entryoff, field) = entryoff?;
+    Some((text_base?.checked_add(entryoff)?, field))
+}
+
+/// Where ELF's header states the entry point: `e_entry`, after the sixteen
+/// identification bytes and the type, machine and version fields.
+const ELF_ENTRY_FIELD: u64 = 0x18;
+
+/// Every function an initialiser or terminator array names, as the container states the array.
+///
+/// Found by the section's stated type -- ELF's `SHT_INIT_ARRAY`,
+/// `SHT_FINI_ARRAY` and `SHT_PREINIT_ARRAY`, Mach-O's
+/// `S_MOD_INIT_FUNC_POINTERS` and `S_MOD_TERM_FUNC_POINTERS` -- never by its
+/// name, and each slot read as the loader leaves it: a rebased pointer is the
+/// address the container states it writes there, which a PIE linked without
+/// applying its relocations does not hold in the file at all.
+fn initialisers(
+    sections: &[Section],
+    writes: &[LoaderWrite],
+    data: &[u8],
+    arch: &Arch,
+) -> Vec<Entry> {
+    const S_MOD_INIT_FUNC_POINTERS: u32 = 0x9;
+    const S_MOD_TERM_FUNC_POINTERS: u32 = 0xa;
+    let pointer = u64::from(arch.bits / 8);
+    let mut found = Vec::new();
+    for section in sections {
+        let kind = match section.stated {
+            SectionStatement::Elf { sh_type: 14, .. } => EntryKind::Init,
+            SectionStatement::Elf { sh_type: 15, .. } => EntryKind::Fini,
+            SectionStatement::Elf { sh_type: 16, .. } => EntryKind::Preinit,
+            SectionStatement::MachO { flags } if flags & 0xff == S_MOD_INIT_FUNC_POINTERS => {
+                EntryKind::Init
+            }
+            SectionStatement::MachO { flags } if flags & 0xff == S_MOD_TERM_FUNC_POINTERS => {
+                EntryKind::Fini
+            }
+            _ => continue,
+        };
+        let slots = section.file_size.min(section.vsize) / pointer;
+        for slot in 0..slots {
+            let place = section.vaddr + slot * pointer;
+            let offset = section.file_offset + slot * pointer;
+            let raw = match r2abi::statement::write_at(writes, place) {
+                Some(write) if write.place == place && write.width == pointer => write.value(),
+                // Written with a value the container does not state, or only in part.
+                Some(_) => None,
+                None => usize::try_from(offset)
+                    .ok()
+                    .and_then(|at| data.get(at..at.checked_add(pointer as usize)?))
+                    .map(|bytes| read_pointer(bytes, arch.endian)),
+            };
+            let Some(raw) = raw else {
+                continue;
+            };
+            let vaddr = code_address(arch, raw);
+            // Zero is an empty slot, and all ones the terminator an old `.ctors` ends with.
+            if vaddr == 0 || raw == u64::MAX >> (64 - arch.bits) {
+                continue;
+            }
+            found.push(Entry {
+                vaddr,
+                kind,
+                thumb: is_arm32(arch) && raw & 1 == 1,
+                stated_at: Some(StatedAt {
+                    offset,
+                    vaddr: Some(place),
+                }),
+            });
+        }
+    }
+    found
 }
 
 /// Every function start the Mach-O linker recorded.
@@ -385,12 +297,6 @@ where
     }
 }
 
-/// Which symbol each stub and pointer slot stands for, in a Mach-O.
-///
-/// A section of stubs or of symbol pointers says where its entries begin in the
-/// indirect symbol table (`reserved1`) and how wide one entry is
-/// (`reserved2`), and the table says which symbol each entry stands for. That
-/// is the whole mapping, and it needs no bind-opcode interpreter.
 /// Whether the loader maps this section, asked of the format rather than
 /// guessed from the address.
 ///
@@ -422,160 +328,13 @@ fn states_instructions<'a>(section: &impl object::read::ObjectSection<'a>) -> bo
     }
 }
 
-fn macho_indirect_symbols(file: &object::File<'_>, data: &[u8]) -> Vec<Relocation> {
-    match file {
-        object::File::MachO64(macho) => indirect_symbols(macho, data),
-        object::File::MachO32(macho) => indirect_symbols(macho, data),
-        _ => Vec::new(),
-    }
-}
-
-/// The two fields a Mach-O section uses to point into the indirect symbol
-/// table. They are struct fields rather than trait methods in `object`, so a
-/// generic walk over both widths needs this to reach them.
-trait IndirectRange {
-    fn first_indirect(&self, endian: object::Endianness) -> u32;
-    fn entry_stride(&self, endian: object::Endianness) -> u32;
-}
-
-impl IndirectRange for object::macho::Section64<object::Endianness> {
-    fn first_indirect(&self, endian: object::Endianness) -> u32 {
-        self.reserved1.get(endian)
-    }
-
-    fn entry_stride(&self, endian: object::Endianness) -> u32 {
-        self.reserved2.get(endian)
-    }
-}
-
-impl IndirectRange for object::macho::Section32<object::Endianness> {
-    fn first_indirect(&self, endian: object::Endianness) -> u32 {
-        self.reserved1.get(endian)
-    }
-
-    fn entry_stride(&self, endian: object::Endianness) -> u32 {
-        self.reserved2.get(endian)
-    }
-}
-
-fn indirect_symbols<'data, Mach, R>(
-    file: &object::read::macho::MachOFile<'data, Mach, R>,
-    data: &'data [u8],
-) -> Vec<Relocation>
-where
-    Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
-    Mach::Section: IndirectRange,
-    R: object::ReadRef<'data>,
-{
-    use object::read::macho::{Nlist as _, Section as _};
-    use object::{Object, ObjectSection, macho};
-
-    let endian = match file.macho_header().endian() {
-        Ok(endian) => endian,
-        Err(_) => return Vec::new(),
-    };
-    let Ok(mut commands) = file.macho_header().load_commands(endian, data, 0) else {
-        return Vec::new();
-    };
-    let mut table = None;
-    while let Ok(Some(command)) = commands.next() {
-        if let Ok(Some(dysymtab)) = command.dysymtab() {
-            table = Some(dysymtab);
-            break;
-        }
-    }
-    let Some(dysymtab) = table else {
-        return Vec::new();
-    };
-    let offset = dysymtab.indirectsymoff.get(endian) as usize;
-    let count = dysymtab.nindirectsyms.get(endian) as usize;
-    let Some(end) = count
-        .checked_mul(4)
-        .and_then(|size| offset.checked_add(size))
-    else {
-        return Vec::new();
-    };
-    let Some(bytes) = data.get(offset..end) else {
-        return Vec::new();
-    };
-    let indirect: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|word| {
-            let word = [word[0], word[1], word[2], word[3]];
-            match endian {
-                object::Endianness::Big => u32::from_be_bytes(word),
-                object::Endianness::Little => u32::from_le_bytes(word),
-            }
-        })
-        .collect();
-
-    let symbols = file.macho_symbol_table();
-    let mut named = Vec::new();
-    for section in file.sections() {
-        let raw = section.macho_section();
-        let kind = raw.flags(endian) & macho::SECTION_TYPE;
-        if !matches!(
-            kind,
-            macho::S_NON_LAZY_SYMBOL_POINTERS
-                | macho::S_LAZY_SYMBOL_POINTERS
-                | macho::S_SYMBOL_STUBS
-        ) {
-            continue;
-        }
-        let stride = match kind {
-            macho::S_SYMBOL_STUBS => u64::from(raw.entry_stride(endian)),
-            _ if file.is_64() => 8,
-            _ => 4,
-        };
-        if stride == 0 {
-            continue;
-        }
-        let first = raw.first_indirect(endian) as usize;
-        let entries = section.size() / stride;
-        for entry in 0..entries {
-            let Some(index) = indirect.get(first + entry as usize).copied() else {
-                break;
-            };
-            if index & (macho::INDIRECT_SYMBOL_LOCAL | macho::INDIRECT_SYMBOL_ABS) != 0 {
-                continue;
-            }
-            let Ok(symbol) = symbols.symbol(object::SymbolIndex(index as usize)) else {
-                continue;
-            };
-            let Ok(name) = symbol.name(endian, symbols.strings()) else {
-                continue;
-            };
-            let Ok(name) = core::str::from_utf8(name) else {
-                continue;
-            };
-            if name.is_empty() {
-                continue;
-            }
-            named.push(Relocation {
-                vaddr: section.address() + entry * stride,
-                symbol: name.to_owned(),
-            });
-        }
-    }
-    named
-}
-
 /// A parsed binary, with its bytes retained for address reads.
 #[derive(Debug, Clone)]
 pub struct Image {
     data: Vec<u8>,
-    format: Format,
-    arch: ImageArch,
-    base_address: u64,
-    segments: Vec<Segment>,
-    sections: Vec<Section>,
-    symbols: Vec<Symbol>,
-    debug_prototypes: debug::DebugPrototypes,
-    unwind_frames: unwind::UnwindFrames,
-    entry_points: Vec<EntryPoint>,
-    relocations: Vec<Relocation>,
-    /// The bytes the loader writes before the program runs, sorted and disjoint.
-    loader_writes: Vec<std::ops::Range<u64>>,
+    /// What the container states, read once: nothing after the parse changes
+    /// which sections, symbols or relocations exist.
+    container: Container,
     /// Bytes written over the file's own, by address.
     ///
     /// A patch is a layer rather than an edit: the file on disk is untouched
@@ -639,7 +398,6 @@ impl Image {
 
         let arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
         let format = map_format(file.format());
-        let base_address = file.relative_address_base();
 
         // A relocatable object states no addresses: every section says zero, so
         // each is placed at its own file offset above one base, which is the
@@ -693,18 +451,37 @@ impl Image {
             segments.sort_by_key(|segment| segment.vaddr);
         }
 
+        let base_address = base_address(&file, &segments);
+        let located = roles::Located::of(&file);
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
                 let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                let vaddr = placed(&section);
+                let loaded = section_is_loaded(&section);
+                let stated = section_statement(&file, &section);
                 Section {
+                    index: section.index().0,
                     name: section.name().unwrap_or_default().to_owned(),
-                    vaddr: placed(&section),
+                    segment: section.segment_name().ok().flatten().map(str::to_owned),
+                    permissions: match (loaded, stated) {
+                        (false, _) => Permissions::default(),
+                        (true, SectionStatement::MachO { .. } | SectionStatement::Unstated) => {
+                            segments
+                                .iter()
+                                .find(|segment| segment.contains(vaddr))
+                                .map(|segment| segment.permissions)
+                                .unwrap_or_default()
+                        }
+                        (true, _) => section_permissions(section.flags()),
+                    },
+                    stated,
+                    vaddr,
                     vsize: section.size(),
                     file_offset,
                     file_size,
-                    is_code: states_instructions(&section),
-                    loaded: section_is_loaded(&section),
+                    role: located.role(&section, states_instructions(&section)),
+                    loaded,
                 }
             })
             .collect();
@@ -713,7 +490,7 @@ impl Image {
         // puts __cstring and __const inside __TEXT, and the header itself starts it.
         let code_ranges: Vec<(u64, u64)> = sections
             .iter()
-            .filter(|section| section.is_code && section.vsize > 0)
+            .filter(|section| section.is_code() && section.vsize > 0)
             .map(|section| (section.vaddr, section.vsize))
             .collect();
         let executable = |vaddr: u64| {
@@ -730,7 +507,7 @@ impl Image {
         // Both tables, because a stripped shared library has no `.symtab` and
         // every name it still carries is in `.dynsym`. Reading only the first
         // is why such a library listed no functions at all.
-        let read_symbol = |symbol: object::read::Symbol<'_, '_>| {
+        let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
             let name = symbol.name().ok()?;
             if name.is_empty() {
                 return None;
@@ -743,8 +520,13 @@ impl Image {
                     .and_then(|index| file.section_by_index(index).ok())
                     .map_or(0, |section| placed(&section));
             let mapped = is_arm32(&arch).then(|| mapping(name)).flatten();
+            let import = symbol.section() == object::SymbolSection::Undefined;
             Some(Symbol {
-                name: name.to_owned(),
+                // An import is named by the C identifier it binds.
+                name: match (format, import) {
+                    (Format::MachO, true) => macho_identifier(name).to_owned(),
+                    _ => name.to_owned(),
+                },
                 vaddr: match symbol.kind() {
                     object::SymbolKind::Text => code_address(&arch, address),
                     _ => address,
@@ -755,24 +537,56 @@ impl Image {
                     // A name in code is a function; `__mh_execute_header` is
                     // typed as code and sits at the Mach-O header, where no
                     // instruction begins, so discovery walked the header.
-                    (None, object::SymbolKind::Text) if executable(address) => SymbolKind::Function,
+                    // An import's own type is the statement: nothing here is at its address.
+                    (None, object::SymbolKind::Text)
+                        if executable(address)
+                            || symbol.section() == object::SymbolSection::Undefined =>
+                    {
+                        SymbolKind::Function
+                    }
                     (None, object::SymbolKind::Data) => SymbolKind::Data,
                     (None, object::SymbolKind::Section) => SymbolKind::Section,
+                    (None, object::SymbolKind::File) => SymbolKind::File,
                     (None, _) => SymbolKind::Other,
                 },
                 // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
                 // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
                 defined: matches!(symbol.section(), object::SymbolSection::Section(_))
                     && symbol.kind() != object::SymbolKind::Tls,
+                import,
                 thumb: is_arm32(&arch)
                     && symbol.kind() == object::SymbolKind::Text
                     && address & 1 == 1,
+                binding: symbol_binding(&symbol),
+                visibility: match symbol.flags() {
+                    object::SymbolFlags::Elf { st_other, .. } => match st_other & 3 {
+                        1 => Visibility::Internal,
+                        2 => Visibility::Hidden,
+                        3 => Visibility::Protected,
+                        _ => Visibility::Default,
+                    },
+                    _ => Visibility::Default,
+                },
+                section: symbol.section_index().map(|index| index.0),
+                origin: match dynamic {
+                    true => SymbolOrigin {
+                        table: None,
+                        dynamic: Some(symbol.index().0),
+                    },
+                    false => SymbolOrigin {
+                        table: Some(symbol.index().0),
+                        dynamic: None,
+                    },
+                },
             })
         };
         let mut symbols: Vec<Symbol> = file
             .symbols()
-            .filter_map(&read_symbol)
-            .chain(file.dynamic_symbols().filter_map(&read_symbol))
+            .filter_map(|symbol| read_symbol(symbol, false))
+            .chain(
+                file.dynamic_symbols()
+                    .filter_map(|symbol| read_symbol(symbol, true)),
+            )
             .collect();
         // One name at one address is one symbol, whichever table held it.
         symbols.sort_by(|left, right| {
@@ -781,45 +595,44 @@ impl Image {
                 .then_with(|| left.name.cmp(&right.name))
                 .then_with(|| right.defined.cmp(&left.defined))
         });
-        symbols.dedup_by(|left, right| left.vaddr == right.vaddr && left.name == right.name);
+        symbols.dedup_by(|later, kept| {
+            let same = later.vaddr == kept.vaddr && later.name == kept.name;
+            if same {
+                kept.origin.table = kept.origin.table.or(later.origin.table);
+                kept.origin.dynamic = kept.origin.dynamic.or(later.origin.dynamic);
+            }
+            same
+        });
 
-        // What the loader will write into each slot it fills. `object` reports
-        // the dynamic relocations for a linked image and the static ones for an
-        // object file, and both name their symbol the same way.
-        let mut relocations: Vec<Relocation> = file
-            .dynamic_relocations()
-            .into_iter()
-            .flatten()
-            .filter_map(|(vaddr, relocation)| {
-                let object::RelocationTarget::Symbol(index) = relocation.target() else {
-                    return None;
-                };
-                let table = file.dynamic_symbol_table()?;
-                let symbol =
-                    object::read::ObjectSymbolTable::symbol_by_index(&table, index).ok()?;
-                let name = symbol.name().ok()?;
-                (!name.is_empty()).then(|| Relocation {
-                    vaddr,
-                    symbol: name.to_owned(),
-                })
-            })
-            .collect();
-        // Mach-O states its imports through the indirect symbol table rather
-        // than through relocations, and `object` reports none for it.
-        relocations.extend(macho_indirect_symbols(&file, data.as_slice()));
-        relocations.sort_by(|left, right| left.vaddr.cmp(&right.vaddr));
-        relocations.dedup_by_key(|relocation| relocation.vaddr);
-        let loader_writes =
-            loader::writes(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
+        // Every record the loader applies, once each, and what it writes.
+        let loader::Loaded {
+            relocations,
+            writes: loader_writes,
+            import_stubs,
+        } = loader::read(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
+
+        let sealed = loader::sealed(&file);
+        let platform = platform::evidence(&file);
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
-        let debug_prototypes = debug::read(&file);
-        let unwind_frames = unwind::read(&file);
+        let declared = debug::read(&file).prototypes().collect();
+        let unwind = unwind::read(&file);
 
-        let mut entry_points = Vec::new();
+        let mut entries = Vec::new();
         let declared_entry = file.entry();
         let entry = code_address(&arch, declared_entry);
+        let c_main = macho_c_main(&file, data.as_slice());
+        // Where the header states the entry: ELF's `e_entry`, Mach-O's `LC_MAIN`.
+        let entry_field = match format {
+            Format::Elf => Some(ELF_ENTRY_FIELD),
+            Format::MachO => c_main.map(|(_, field)| field),
+            _ => None,
+        }
+        .map(|offset| StatedAt {
+            offset,
+            vaddr: file_offset_to_vaddr(&segments, offset),
+        });
         if entry != 0 {
             // Mach-O states the entry as a file offset, so translate when unmapped.
             let vaddr = if executable(entry) {
@@ -828,81 +641,76 @@ impl Image {
                 file_offset_to_vaddr(&segments, entry).filter(|vaddr| executable(*vaddr))
             };
             if let Some(vaddr) = vaddr {
-                entry_points.push(EntryPoint {
+                entries.push(Entry {
                     vaddr,
                     kind: EntryKind::Main,
                     thumb: is_arm32(&arch) && declared_entry & 1 == 1,
+                    stated_at: entry_field,
                 });
             }
         }
         for symbol in &symbols {
             if symbol.kind == SymbolKind::Function && symbol.defined && executable(symbol.vaddr) {
-                entry_points.push(EntryPoint {
+                entries.push(Entry {
                     vaddr: symbol.vaddr,
                     kind: EntryKind::Symbol,
                     thumb: symbol.thumb,
+                    stated_at: None,
                 });
             }
         }
-        let pointer_bytes = (arch.bits / 8) as usize;
-        for (section, kind) in [
-            (".init_array", EntryKind::Init),
-            (".fini_array", EntryKind::Fini),
-        ] {
-            let Some(section) = file.section_by_name(section) else {
-                continue;
-            };
-            let Ok(bytes) = section.data() else {
-                continue;
-            };
-            for slot in bytes.chunks_exact(pointer_bytes) {
-                let raw = read_pointer(slot, arch.endian);
-                let vaddr = code_address(&arch, raw);
-                if vaddr != 0 {
-                    entry_points.push(EntryPoint {
-                        vaddr,
-                        kind,
-                        thumb: is_arm32(&arch) && raw & 1 == 1,
-                    });
-                }
-            }
-        }
-        if let Some(vaddr) = macho_c_main(&file, data.as_slice())
+        entries.extend(initialisers(
+            &sections,
+            &loader_writes,
+            data.as_slice(),
+            &arch,
+        ));
+        if let Some((vaddr, field)) = c_main
             && executable(vaddr)
         {
-            entry_points.push(EntryPoint {
+            entries.push(Entry {
                 vaddr,
                 kind: EntryKind::CMain,
                 thumb: false,
+                stated_at: Some(StatedAt {
+                    offset: field,
+                    vaddr: file_offset_to_vaddr(&segments, field),
+                }),
             });
         }
         // The linker wrote one entry per function it laid out, so a body no
         // symbol names and nothing calls is still stated here.
         for vaddr in macho_function_starts(&file, data.as_slice()) {
             if executable(vaddr) {
-                entry_points.push(EntryPoint {
+                entries.push(Entry {
                     vaddr,
                     kind: EntryKind::Declared,
                     thumb: false,
+                    stated_at: None,
                 });
             }
         }
-        entry_points.sort_by_key(|entry| (entry.vaddr, entry.kind as u8));
-        entry_points.dedup_by_key(|entry| (entry.vaddr, entry.kind as u8));
+        entries.sort_by_key(|entry| (entry.vaddr, entry.kind as u8));
+        entries.dedup_by_key(|entry| (entry.vaddr, entry.kind as u8));
 
         Ok(Self {
             data,
-            format,
-            arch,
-            base_address,
-            segments,
-            sections,
-            symbols,
-            debug_prototypes,
-            unwind_frames,
-            entry_points,
-            relocations,
-            loader_writes,
+            container: Container {
+                format,
+                arch,
+                base_address,
+                segments,
+                sections,
+                symbols,
+                relocations,
+                import_stubs,
+                loader_writes,
+                entries,
+                sealed,
+                declared,
+                platform,
+                unwind,
+            },
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),
@@ -910,57 +718,68 @@ impl Image {
         })
     }
 
-    pub fn format(&self) -> Format {
-        self.format
+    /// Everything the container states, in the shape every reader shares.
+    pub const fn container(&self) -> &Container {
+        &self.container
     }
 
-    pub fn arch(&self) -> &ImageArch {
-        &self.arch
+    pub fn format(&self) -> Format {
+        self.container.format
+    }
+
+    pub fn arch(&self) -> &Arch {
+        &self.container.arch
     }
 
     pub fn base_address(&self) -> u64 {
-        self.base_address
+        self.container.base_address
     }
 
     pub fn segments(&self) -> &[Segment] {
-        &self.segments
+        &self.container.segments
     }
 
     pub fn sections(&self) -> &[Section] {
-        &self.sections
+        &self.container.sections
     }
 
     pub fn symbols(&self) -> &[Symbol] {
-        &self.symbols
-    }
-
-    /// What the binary's own debug information says its functions take and
-    /// return. Empty where it carries none.
-    pub fn debug_prototypes(&self) -> &debug::DebugPrototypes {
-        &self.debug_prototypes
+        &self.container.symbols
     }
 
     /// Every frame the call-frame information states.
     pub fn unwind_frames(&self) -> &unwind::UnwindFrames {
-        &self.unwind_frames
+        &self.container.unwind
     }
 
-    /// The slots the loader fills, in address order.
+    /// Every relocation record the loader applies, each once, in the order it applies them.
     pub fn relocations(&self) -> &[Relocation] {
-        &self.relocations
+        &self.container.relocations
     }
 
-    /// The bytes the loader writes before the program runs, sorted and disjoint: what the file holds there is not what the program reads.
-    pub fn loader_writes(&self) -> &[std::ops::Range<u64>] {
-        &self.loader_writes
+    /// The stubs the format declares stand for imports.
+    pub fn import_stubs(&self) -> &[ImportStub] {
+        &self.container.import_stubs
     }
 
-    pub fn entry_points(&self) -> &[EntryPoint] {
-        &self.entry_points
+    /// What the loader writes before the program runs, sorted by place and disjoint: what the file holds there is not what the program reads.
+    pub fn loader_writes(&self) -> &[LoaderWrite] {
+        &self.container.loader_writes
+    }
+
+    pub fn entry_points(&self) -> &[Entry] {
+        &self.container.entries
     }
 
     pub fn segment_at(&self, vaddr: u64) -> Option<&Segment> {
-        self.segments.iter().find(|segment| segment.contains(vaddr))
+        self.container.segment_at(vaddr)
+    }
+
+    /// The file's own bytes at a file offset, whether or not the loader maps them.
+    pub fn file_bytes(&self, offset: u64, len: u64) -> Option<&[u8]> {
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        self.data.get(start..end)
     }
 
     /// Bytes at a virtual address, or `None` when the range is not all mapped.
@@ -1236,6 +1055,17 @@ fn select_fat_slice(data: &[u8]) -> Result<Option<std::ops::Range<usize>>, Image
     Ok(Some(start..end))
 }
 
+/// The C identifier a Mach-O import binds: its linked name less the one
+/// leading underscore Mach-O writes every C name with.
+///
+/// Dropped exactly once, and only here, where the loader states the import:
+/// `___memcpy_chk` binds `__memcpy_chk`, which is another function from
+/// `memcpy_chk` or `memcpy`. A name with no leading underscore is an
+/// assembler symbol with no C name, and is stated as it is.
+pub(crate) fn macho_identifier(linked: &str) -> &str {
+    linked.strip_prefix('_').unwrap_or(linked)
+}
+
 /// Virtual address a file offset maps to, for a format that states one.
 fn file_offset_to_vaddr(segments: &[Segment], offset: u64) -> Option<u64> {
     segments
@@ -1273,6 +1103,74 @@ fn map_format(format: object::BinaryFormat) -> Format {
         object::BinaryFormat::Wasm => Format::Wasm,
         object::BinaryFormat::Xcoff => Format::Xcoff,
         _ => Format::Other,
+    }
+}
+
+/// The address the image's first file byte is mapped at, which radare2 presents as `baddr`.
+///
+/// The lowest segment the file backs maps its file offset at its address, so
+/// the first byte is that address less that offset: the `PT_LOAD` at offset
+/// zero where there is one, Mach-O's `__TEXT`, and an object file's base above
+/// which its sections are placed. PE states its own image base. Presentation
+/// only: no value the loader writes is relative to it.
+fn base_address(file: &object::File<'_>, segments: &[Segment]) -> u64 {
+    if matches!(
+        file.format(),
+        object::BinaryFormat::Pe | object::BinaryFormat::Coff
+    ) {
+        return file.relative_address_base();
+    }
+    segments
+        .iter()
+        .filter(|segment| segment.file_size > 0)
+        .min_by_key(|segment| segment.file_offset)
+        .map_or(0, |segment| segment.vaddr.wrapping_sub(segment.file_offset))
+}
+
+/// A section's type and flags as its format numbers them.
+fn section_statement(
+    file: &object::File<'_>,
+    section: &object::read::Section<'_, '_>,
+) -> SectionStatement {
+    use object::read::elf::SectionHeader as _;
+    let elf_type = |index: object::SectionIndex| match file {
+        object::File::Elf32(elf) => elf
+            .elf_section_table()
+            .section(index)
+            .ok()
+            .map(|header| header.sh_type(elf.endian())),
+        object::File::Elf64(elf) => elf
+            .elf_section_table()
+            .section(index)
+            .ok()
+            .map(|header| header.sh_type(elf.endian())),
+        _ => None,
+    };
+    match section.flags() {
+        object::SectionFlags::Elf { sh_flags } => SectionStatement::Elf {
+            sh_type: elf_type(section.index()).unwrap_or_default(),
+            sh_flags,
+        },
+        object::SectionFlags::MachO { flags } => SectionStatement::MachO { flags },
+        object::SectionFlags::Coff { characteristics } => {
+            SectionStatement::Coff { characteristics }
+        }
+        _ => SectionStatement::Unstated,
+    }
+}
+
+/// A symbol's binding, as its table states it.
+fn symbol_binding(symbol: &object::read::Symbol<'_, '_>) -> Binding {
+    match symbol.flags() {
+        object::SymbolFlags::Elf { st_info, .. } => match st_info >> 4 {
+            0 => Binding::Local,
+            1 => Binding::Global,
+            2 => Binding::Weak,
+            other => Binding::Other(other),
+        },
+        _ if symbol.is_weak() => Binding::Weak,
+        _ if symbol.is_local() => Binding::Local,
+        _ => Binding::Global,
     }
 }
 
@@ -1320,7 +1218,7 @@ fn map_architecture(
     arch: object::Architecture,
     is_64: bool,
     endianness: object::Endianness,
-) -> Result<ImageArch, ImageError> {
+) -> Result<Arch, ImageError> {
     let endian = match endianness {
         object::Endianness::Little => Endian::Little,
         object::Endianness::Big => Endian::Big,
@@ -1333,8 +1231,8 @@ fn map_architecture(
         object::Architecture::Arm => "ARM",
         other => return Err(ImageError::UnsupportedArchitecture(other)),
     };
-    Ok(ImageArch {
-        name,
+    Ok(Arch {
+        name: name.to_owned(),
         bits: if is_64 { 64 } else { 32 },
         endian,
     })
@@ -1363,21 +1261,16 @@ mod tests {
     fn image_with(segments: Vec<Segment>, data: Vec<u8>) -> Image {
         Image {
             data,
-            format: Format::Elf,
-            arch: ImageArch {
-                name: "x86-64",
-                bits: 64,
-                endian: Endian::Little,
+            container: Container {
+                format: Format::Elf,
+                arch: Arch {
+                    name: "x86-64".to_owned(),
+                    bits: 64,
+                    endian: Endian::Little,
+                },
+                segments,
+                ..Container::default()
             },
-            base_address: 0,
-            segments,
-            sections: Vec::new(),
-            symbols: Vec::new(),
-            entry_points: Vec::new(),
-            relocations: Vec::new(),
-            loader_writes: Vec::new(),
-            debug_prototypes: debug::DebugPrototypes::default(),
-            unwind_frames: unwind::UnwindFrames::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),

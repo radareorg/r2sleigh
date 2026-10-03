@@ -10,9 +10,16 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Relocation,
-    Section, Segment, Source, Symbol, SymbolKind,
+    Applies, Arch, Container, Endian, Entry, EntryKind, Format, LoaderWrite, Mapping, OpenProgram,
+    Permissions, PlatformEvidence, Relocation, RelocationSymbol, Section, SectionRole, Segment,
+    Source, Symbol, SymbolKind, WriteKind,
 };
+
+/// What a program linked against the GNU C library states of its platform:
+/// glibc's dynamic linker in `PT_INTERP`.
+pub const GLIBC: &[PlatformEvidence] = &[PlatformEvidence::Interpreter(
+    r2engine::program::Libc::Glibc,
+)];
 
 pub const BASE: u64 = 0x1000;
 /// `mov eax, 1; ret`
@@ -197,6 +204,27 @@ pub const MOVED_STUB: &[u8] = &[
     0x00, 0xf0, 0x9c, 0xe5, // ldr pc, [ip]
 ];
 
+/// ARM's lazy `.plt`, as GNU ld and gold lay it out: PLT0, whose literal word
+/// is the distance to the GOT and decodes as a conditional `andeq`, then two
+/// stubs. The GOT is at 0x2010: PLT0 jumps through its third word, the
+/// resolver's, and the stubs through the fourth and fifth, the imports' slots.
+pub const ARM_PLT: &[u8] = &[
+    0x04, 0xe0, 0x2d, 0xe5, // 0x1000 str lr, [sp, #-4]!
+    0x04, 0xe0, 0x9f, 0xe5, // 0x1004 ldr lr, [pc, #4], the word at 0x1010
+    0x0e, 0xe0, 0x8f, 0xe0, // 0x1008 add lr, pc, lr: the GOT
+    0x08, 0xf0, 0xbe, 0xe5, // 0x100c ldr pc, [lr, #8]!: the resolver
+    0x00, 0x10, 0x00, 0x00, // 0x1010 .word 0x1000, which decodes as `andeq r1, r0, r0`
+    0x00, 0xc6, 0x8f, 0xe2, // 0x1014 add ip, pc, #0, 12
+    0x01, 0xca, 0x8c, 0xe2, // 0x1018 add ip, ip, #0x1000
+    0x00, 0xf0, 0xbc, 0xe5, // 0x101c ldr pc, [ip, #0]!: the slot at 0x201c
+    0x00, 0xc6, 0x8f, 0xe2, // 0x1020 add ip, pc, #0, 12
+    0x01, 0xca, 0x8c, 0xe2, // 0x1024 add ip, ip, #0x1000
+    0x08, 0xf0, 0x3c, 0xe5, // 0x1028 ldr pc, [ip, #-8]!: the slot at 0x2020
+];
+
+/// The import slots `ARM_PLT`'s two stubs read.
+pub const ARM_PLT_SLOTS: [u64; 2] = [0x201c, 0x2020];
+
 /// ARM `movw r0, #0x1010; movt r0, #0; ldr r1, [r0]; bx lr`, then the word at 0x1010: the pair builds one address.
 pub const MOVED: &[u8] = &[
     0x10, 0x00, 0x01, 0xe3, // movw r0, #0x1010
@@ -310,6 +338,32 @@ pub fn table_switch() -> Literal {
     Literal::of_code(TABLE_SWITCH, &[("pick", BASE, 0x2c)])
 }
 
+/// A slot the loader binds to an import, as a `JUMP_SLOT` record states it.
+pub fn import_slot(vaddr: u64, import: &str) -> Relocation {
+    Relocation {
+        vaddr,
+        ntype: 7,
+        width: 8,
+        symbol: Some(RelocationSymbol {
+            name: import.to_owned(),
+            ..RelocationSymbol::default()
+        }),
+        applies: Applies::Symbol,
+        ..Relocation::default()
+    }
+}
+
+/// What the loader writes into an import's slot: the import's address, which another image defines.
+pub fn import_write(place: u64, width: u64, import: &str) -> LoaderWrite {
+    LoaderWrite {
+        place,
+        width,
+        kind: WriteKind::Import {
+            symbol: import.to_owned(),
+        },
+    }
+}
+
 /// One run of code the loader maps readable and executable.
 pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
     Segment {
@@ -321,6 +375,7 @@ pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
             write: false,
             execute: true,
         },
+        ..Segment::default()
     }
 }
 
@@ -342,6 +397,7 @@ impl Literal {
             kind: SymbolKind::Function,
             defined: true,
             thumb: false,
+            ..Symbol::default()
         };
         Self {
             code: &CODE,
@@ -353,15 +409,16 @@ impl Literal {
                 arch: Arch {
                     name: "x86-64".to_owned(),
                     bits: 64,
-                    endian: r2il::Endianness::Little,
+                    endian: Endian::Little,
                 },
                 segments: vec![code_segment(BASE, CODE.len() as u64)],
                 sections: vec![Section {
                     name: ".text".to_owned(),
                     vaddr: BASE,
                     vsize: STUB - BASE,
-                    is_code: true,
+                    role: SectionRole::Code,
                     loaded: true,
+                    ..Section::default()
                 }],
                 symbols: vec![
                     function("one", ONE, 6),
@@ -392,6 +449,7 @@ impl Literal {
                 kind: SymbolKind::Function,
                 defined: true,
                 thumb: false,
+                ..Symbol::default()
             })
             .collect();
         program
@@ -411,6 +469,7 @@ impl Literal {
             kind,
             defined: true,
             thumb,
+            ..Symbol::default()
         };
         program.container.symbols = vec![
             symbol("entry", ARM_ENTRY, SymbolKind::Function, false),
@@ -426,13 +485,18 @@ impl Literal {
         self.container.arch = Arch {
             name: "arm".to_owned(),
             bits: 32,
-            endian: r2il::Endianness::Little,
+            endian: Endian::Little,
         };
         self
     }
 
-    /// A `.plt` holding PLT0, the zero pad after it, and one stub, then a caller.
+    /// A `.plt` holding PLT0, the zero pad after it, and one stub for `_Exit`, then a caller.
     pub fn plt() -> Self {
+        Self::plt_importing("_Exit")
+    }
+
+    /// The same `.plt`, its one stub standing for `import`.
+    pub fn plt_importing(import: &str) -> Self {
         let mut program = Self::new();
         program.code = &PLT;
         program.container.segments = vec![code_segment(BASE, PLT.len() as u64)];
@@ -441,35 +505,49 @@ impl Literal {
                 name: ".plt".to_owned(),
                 vaddr: BASE,
                 vsize: 0x20,
-                is_code: true,
+                role: SectionRole::Code,
                 loaded: true,
+                ..Section::default()
             },
             Section {
                 name: ".text".to_owned(),
                 vaddr: PLT_CALLER,
                 vsize: 6,
-                is_code: true,
+                role: SectionRole::Code,
                 loaded: true,
+                ..Section::default()
             },
         ];
         program.container.symbols.clear();
-        program.container.relocations = vec![Relocation {
-            vaddr: PLT_SLOT,
-            symbol: "_Exit".to_owned(),
-        }];
-        program.container.loader_writes.push(PLT_SLOT..PLT_SLOT + 8);
+        program.container.relocations = vec![import_slot(PLT_SLOT, import)];
+        // The two words before the slot are the ones the x86-64 psABI reserves
+        // for the lazy resolver, which the loader writes with no relocation
+        // naming them, and which the first entry reads.
+        program.container.loader_writes = vec![
+            LoaderWrite {
+                place: PLT_SLOT - 0x10,
+                width: 0x10,
+                kind: WriteKind::Unknown,
+            },
+            import_write(PLT_SLOT, 8, import),
+        ];
         program
+    }
+
+    /// The same program, its container stating this of the platform it runs on.
+    pub fn running_on(mut self, evidence: &[PlatformEvidence]) -> Self {
+        self.container.platform = evidence.iter().copied().collect();
+        self
     }
 
     /// The same code as a `.plt`, stating a 32-bit slot at `slot` the loader fills with `import`.
     pub fn in_plt(mut self, slot: u64, import: &str) -> Self {
         ".plt".clone_into(&mut self.container.sections[0].name);
         self.container.symbols.clear();
-        self.container.relocations.push(Relocation {
-            vaddr: slot,
-            symbol: import.to_owned(),
-        });
-        self.container.loader_writes.push(slot..slot + 4);
+        self.container.relocations.push(import_slot(slot, import));
+        self.container
+            .loader_writes
+            .push(import_write(slot, 4, import));
         self
     }
 
@@ -488,6 +566,7 @@ impl Literal {
             kind: SymbolKind::Function,
             defined: true,
             thumb: false,
+            ..Symbol::default()
         });
         self
     }
@@ -504,6 +583,7 @@ impl Literal {
             vaddr,
             kind,
             thumb: false,
+            ..Entry::default()
         });
         self
     }
@@ -520,8 +600,13 @@ impl Literal {
             name: name.to_owned(),
             vaddr,
             vsize,
-            is_code,
+            role: if is_code {
+                SectionRole::Code
+            } else {
+                SectionRole::Data
+            },
             loaded: true,
+            ..Section::default()
         };
         // The code before the stub is the program's own; the stub and its slot are the loader's.
         let code = &mut self.container.sections[0];
@@ -530,12 +615,11 @@ impl Literal {
             section(".plt", STUB, 6, true),
             section(".got", SLOT, 8, false),
         ]);
-        self.container.relocations.push(Relocation {
-            vaddr: SLOT,
-            symbol: import.to_owned(),
-        });
+        self.container.relocations.push(import_slot(SLOT, import));
         // The loader writes the import's address into the slot, as the container states for every relocation.
-        self.container.loader_writes.push(SLOT..SLOT + 8);
+        self.container
+            .loader_writes
+            .push(import_write(SLOT, 8, import));
         self
     }
 
@@ -545,8 +629,9 @@ impl Literal {
             name: ".data".to_owned(),
             vaddr: TEXT,
             vsize: 8,
-            is_code: false,
+            role: SectionRole::Data,
             loaded: true,
+            ..Section::default()
         });
         self
     }
@@ -570,8 +655,13 @@ impl Literal {
             name: name.to_owned(),
             vaddr: end,
             vsize: stop - end,
-            is_code,
+            role: if is_code {
+                SectionRole::Code
+            } else {
+                SectionRole::Data
+            },
             loaded: true,
+            ..Section::default()
         });
         self
     }
@@ -600,7 +690,29 @@ impl Literal {
                 write,
                 execute: false,
             },
+            ..Segment::default()
         });
+        self
+    }
+
+    /// The same program, stating that the loader makes this range read-only once it is done.
+    pub fn sealed(mut self, range: Range<u64>) -> Self {
+        self.container.sealed.push(range);
+        self
+    }
+
+    /// The same program, with the container naming its `index`th section `name`.
+    pub fn renamed(mut self, index: usize, name: &str) -> Self {
+        name.clone_into(&mut self.container.sections[index].name);
+        self
+    }
+
+    /// The same program, stating that the loader writes this before it runs.
+    pub fn loader_written(mut self, write: LoaderWrite) -> Self {
+        self.container.loader_writes.push(write);
+        self.container
+            .loader_writes
+            .sort_by_key(|write| write.place);
         self
     }
 

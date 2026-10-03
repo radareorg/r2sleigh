@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{OpenProgram, Source, SymbolKind};
-use crate::discovery::{Confidence, Discovered};
+use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
 use crate::query::references::Indexing;
@@ -487,6 +487,7 @@ impl<S: Source> OpenProgram<S> {
         let walked = self.surveyed()?.walked;
         let mut index = Indexing::default();
         let mut coverage = Coverage::default();
+        index.read_words(&self.source.container().loader_writes);
         // A program that states no function is never assembled, and has nothing to index.
         if walked.is_empty() {
             return Ok(index.finish(coverage));
@@ -589,7 +590,7 @@ impl<S: Source> OpenProgram<S> {
                     .map(|symbol| (symbol.vaddr, symbol.thumb)),
             )
             .chain(self.imports.keys().map(|vaddr| (*vaddr, false)))
-            .map(|(vaddr, thumb)| (vaddr, Confidence::Stated, thumb))
+            .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
             .collect()
     }
 

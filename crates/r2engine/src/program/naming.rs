@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use super::source::{EntryKind, Format, Section, Source, Symbol, SymbolKind};
+use super::source::{EntryKind, Section, Source, Symbol, SymbolKind};
 use crate::names::{Name, NameDb, Namespace};
 use r2il::R2ILOp;
 use r2sleigh_lift::Disassembler;
@@ -51,7 +51,9 @@ pub fn of(source: &impl Source) -> NameDb {
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,
                     // An untyped symbol names a place, not an object, which is the difference `loc.` carries.
-                    SymbolKind::Other | SymbolKind::Mapping(_) => Namespace::Label,
+                    SymbolKind::Other | SymbolKind::File | SymbolKind::Mapping(_) => {
+                        Namespace::Label
+                    }
                 },
                 size: symbol.size,
             },
@@ -63,6 +65,7 @@ pub fn of(source: &impl Source) -> NameDb {
     // it, so it gets no second name here.
     let mut inits = 0;
     let mut finis = 0;
+    let mut preinits = 0;
     // Where the format names `main` outright, that address is `main` and not
     // also `entry0`: `LC_MAIN` carries the C function, not a start routine.
     let c_main: std::collections::BTreeSet<u64> = image
@@ -86,6 +89,10 @@ pub fn of(source: &impl Source) -> NameDb {
                 finis += 1;
                 format!("entry.fini{}", finis - 1)
             }
+            EntryKind::Preinit => {
+                preinits += 1;
+                format!("entry.preinit{}", preinits - 1)
+            }
             // The symbol table names one of these already, and a stated
             // function start is a position rather than a name.
             EntryKind::Symbol | EntryKind::Declared => continue,
@@ -102,31 +109,51 @@ pub fn of(source: &impl Source) -> NameDb {
     db
 }
 
-/// Name every string the data sections hold.
+/// Name every string the program's data holds.
 ///
 /// radare2 names a run of printable bytes however it ends, which turns four
 /// bytes of a hash table into `str._E7_`. A string this names is terminated,
 /// because that is what makes it a string a program could pass to anything,
-/// and it is long enough that finding one by chance is not expected.
+/// and it is long enough that finding one by chance is not expected. Only
+/// the program's own data is scanned, as the container states it, and only
+/// the bytes the loader leaves alone: a word it writes holds no text the file
+/// does.
 pub fn name_strings(db: &mut NameDb, source: &impl Source) {
     let image = source.container();
-    let scanned: u64 = image
+    // Section by section, and split at every word the loader writes, so no
+    // string runs across the end of a section or into a relocated pointer.
+    let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
+    for section in image
         .sections
         .iter()
         .filter(|section| section.holds_static_data())
-        .map(|section| section.vsize)
-        .sum();
-    // One bar for the whole listing, because that is what a reader reads: a
-    // short section must not get a lower bar than the binary it is part of.
-    let floor = chance_run_length(scanned);
-    for section in &image.sections {
-        // Section by section, so no string runs across the end of one.
-        if !section.holds_static_data() {
-            continue;
-        }
+    {
         let Some(bytes) = source.read(section.vaddr, section.vsize as usize) else {
             continue;
         };
+        let end = section.vaddr + bytes.len() as u64;
+        let mut from = section.vaddr;
+        let first = image
+            .loader_writes
+            .partition_point(|write| write.end() <= section.vaddr);
+        for write in image.loader_writes[first..]
+            .iter()
+            .take_while(|write| write.place < end)
+        {
+            if write.place > from {
+                let piece = (from - section.vaddr) as usize..(write.place - section.vaddr) as usize;
+                runs.push((from, bytes[piece].to_vec()));
+            }
+            from = from.max(write.end());
+        }
+        if from < end {
+            runs.push((from, bytes[(from - section.vaddr) as usize..].to_vec()));
+        }
+    }
+    // One bar for the whole listing, because that is what a reader reads: a
+    // short section must not get a lower bar than the binary it is part of.
+    let floor = chance_run_length(&runs);
+    for (start, bytes) in runs {
         let mut at = 0usize;
         while at < bytes.len() {
             let Some(text) = crate::names::text_in(&bytes[at..]) else {
@@ -136,7 +163,7 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
             let run = text.len();
             if run >= floor {
                 db.insert(
-                    section.vaddr + at as u64,
+                    start + at as u64,
                     Name {
                         text: text.to_owned(),
                         namespace: Namespace::String,
@@ -151,42 +178,51 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
     }
 }
 
-/// The shortest run this binary is not expected to contain by chance.
+/// The shortest run the scanned bytes are not expected to contain by chance.
 ///
-/// A printable byte is one of ninety-five values in two hundred and fifty-six,
-/// so a run of `n` of them followed by a terminator has probability
-/// `(95/256)^n / 256` at any offset. Over `size` offsets the expected number of
-/// such runs is `size` times that, and this returns the smallest `n` that puts
-/// it at or below one. The bound is derived from the bytes being scanned
-/// rather than picked, so a larger binary asks for a longer run by itself.
-fn chance_run_length(size: u64) -> usize {
-    const PRINTABLE: f64 = 95.0 / 256.0;
-    let expected = (size.max(1) as f64) / 256.0;
+/// A run of `n` printable bytes followed by a terminator has probability
+/// `p^n · q` at any offset, where `p` is how often a scanned byte is
+/// printable and `q` how often it is zero. Both are measured over the bytes
+/// scanned, not assumed: a program's data is mostly words of small integers
+/// padded with zeros, where one printable byte before a zero is common, and
+/// assuming uniform bytes named every such word a one-character string. Over
+/// `N` offsets the expected number of chance runs is `N · p^n · q`, and this
+/// returns the smallest `n` that puts it at or below one.
+fn chance_run_length(runs: &[(u64, Vec<u8>)]) -> usize {
+    let (mut total, mut printable, mut zero) = (0u64, 0u64, 0u64);
+    for byte in runs.iter().flat_map(|(_, bytes)| bytes) {
+        total += 1;
+        match *byte {
+            0 => zero += 1,
+            b'\t' | b'\n' | b' '..=b'~' => printable += 1,
+            _ => {}
+        }
+    }
+    if printable == 0 || zero == 0 || printable == total {
+        return 1;
+    }
+    let (p, q) = (printable as f64 / total as f64, zero as f64 / total as f64);
+    let expected = total as f64 * q;
     if expected <= 1.0 {
         return 1;
     }
-    (expected.ln() / -PRINTABLE.ln()).ceil() as usize
+    ((expected.ln() / -p.ln()).ceil() as usize).max(1)
 }
 
 /// Give each import stub the name of the import it stands for.
 ///
-/// Mach-O decorates a C name with one leading underscore, so the import the
-/// relocation calls `_printf` is `printf` -- the same decoration the prototype
-/// table already accounts for, and the spelling radare2 writes. ELF carries no
-/// such decoration, so nothing is stripped there.
-pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, String>) {
-    let decorated = format == Format::MachO;
-    for (stub, symbol) in imports {
-        let undecorated = match decorated {
-            true => symbol.strip_prefix('_').unwrap_or(symbol),
-            false => symbol.as_str(),
-        };
+/// The container states an import by the C identifier it binds -- the loader
+/// drops Mach-O's one underscore of decoration where it reads the bind -- so
+/// the name is the prototype table's key and the spelling radare2 writes, as
+/// stated.
+pub fn name_imports(db: &mut NameDb, imports: &BTreeMap<u64, Stub>) {
+    for (stub, Stub { symbol, size }) in imports {
         db.insert(
             *stub,
             Name {
-                text: undecorated.to_owned(),
+                text: symbol.clone(),
                 namespace: Namespace::Import,
-                size: 0,
+                size: *size,
             },
         );
     }
@@ -200,11 +236,10 @@ pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Str
 /// container states outright.
 pub fn name_slots(
     db: &mut NameDb,
-    format: Format,
     slots: &BTreeMap<u64, String>,
-    stubs: &BTreeMap<u64, String>,
+    stubs: &BTreeMap<u64, Stub>,
+    writes: &[super::source::LoaderWrite],
 ) {
-    let decorated = format == Format::MachO;
     for (slot, symbol) in slots {
         // Mach-O records its relocations against the stub itself, so the same
         // address is in both tables. A stub is code the program transfers to
@@ -213,58 +248,78 @@ pub fn name_slots(
         if stubs.contains_key(slot) {
             continue;
         }
-        let undecorated = match decorated {
-            true => symbol.strip_prefix('_').unwrap_or(symbol),
-            false => symbol.as_str(),
-        };
-        if undecorated.is_empty() {
+        if symbol.is_empty() {
             continue;
         }
+        // As wide as the word the loader writes there.
+        let size = r2abi::statement::write_at(writes, *slot)
+            .filter(|write| write.place == *slot)
+            .map_or(0, |write| write.width);
         db.insert(
             *slot,
             Name {
-                text: undecorated.to_owned(),
+                text: symbol.clone(),
                 namespace: Namespace::Reloc,
-                size: 0,
+                size,
             },
         );
     }
 }
 
-/// Which stub stands for which import, by its own name.
+/// One linkage stub: the import it stands for, and the bytes it occupies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stub {
+    pub symbol: String,
+    pub size: u64,
+}
+
+/// Which stub stands for which import, by its own name, and how large each is.
 ///
 /// A call to an import reaches a stub, and the stub reads the slot the loader
 /// fills. Following that read back to the relocation names the stub, which is
 /// the address the call names. Reading the stubs rather than assuming an entry
 /// size is what keeps this exact across formats and architectures.
+///
+/// Which sections hold stubs is decided by what they hold, never by what
+/// they are called: a Mach-O section of type `S_SYMBOL_STUBS` says so itself,
+/// and any other section the container states holds code is read as stubs
+/// only while every instruction in it is part of one -- see `section_stubs`.
 pub fn imports(
     source: &impl Source,
     decoder: &Disassembler,
     alignment: u32,
-) -> BTreeMap<u64, String> {
+) -> BTreeMap<u64, Stub> {
     let image = source.container();
-    let slots: BTreeMap<u64, &str> = image
-        .relocations
+    // The format's own statement first: a Mach-O section of stubs says which
+    // import each of its stubs stands for, and how large each is, with nothing to decode.
+    let mut named: BTreeMap<u64, Stub> = image
+        .import_stubs
         .iter()
-        .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
+        .map(|stub| {
+            let stated = Stub {
+                symbol: stub.symbol.clone(),
+                size: stub.size,
+            };
+            (stub.vaddr, stated)
+        })
         .collect();
-    let mut named = BTreeMap::new();
+    let slots: BTreeMap<u64, &str> = image.import_slots().collect();
     if slots.is_empty() {
         return named;
     }
-
-    // Mach-O names the stub itself rather than a slot the stub reads, so a
-    // relocation landing inside a stub section already is the answer.
-    for section in image.sections.iter().filter(|section| stubs(&section.name)) {
-        let end = section.vaddr + section.vsize;
-        for (vaddr, symbol) in slots.range(section.vaddr..end) {
-            named.insert(*vaddr, (*symbol).to_owned());
-        }
-    }
-
-    for section in image.sections.iter().filter(|section| stubs(&section.name)) {
-        for (start, symbol) in section_stubs(source, decoder, section, &slots, alignment) {
-            named.entry(start).or_insert(symbol);
+    let declared = |section: &Section| {
+        let (start, end) = section.range();
+        named.range(start..end).next().is_some()
+    };
+    let decoded: Vec<&Section> = image
+        .sections
+        .iter()
+        .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
+        .filter(|section| !declared(section))
+        .collect();
+    for section in decoded {
+        for (start, stub) in section_stubs(source, decoder, section, &slots, alignment) {
+            named.entry(start).or_insert(stub);
         }
     }
 
@@ -279,13 +334,23 @@ pub fn imports(
 /// landing pad at a stub's head inside the stub: nothing has to decide whether
 /// an instruction that writes nothing is padding before a stub or the first
 /// instruction of one.
+///
+/// A section is a section of stubs only while every run in it is one: a run
+/// of instructions that makes no call and does not return, ending in a jump
+/// through a word the loader writes -- an import's slot, or a word the psABI
+/// reserves for the lazy resolver -- or in a direct jump that stays in the
+/// section, as a lazy entry's jump to the resolver's does. The first
+/// instruction that is none of those ends the question: the section holds
+/// the program's own code, and none of it is a stub. That costs the program's
+/// code sections one run each.
 fn section_stubs(
     source: &impl Source,
     decoder: &Disassembler,
     section: &Section,
     slots: &BTreeMap<u64, &str>,
     alignment: u32,
-) -> Vec<(u64, String)> {
+) -> Vec<(u64, Stub)> {
+    let container = source.container();
     // Where each stub reads the slot the loader fills. A stub is a run of
     // instructions ending in its transfer, and which slot that transfer reads
     // is one question with one answer: the reaching-origin pass the engine
@@ -324,10 +389,17 @@ fn section_stubs(
                 continue;
             }
         };
+        if chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size)) {
+            return Vec::new();
+        }
         let leaves = lifted
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
+        let indirect = lifted
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::BranchInd { .. }));
         starts.push((pc, run.ops.len()));
         run.ops.extend(lifted.ops);
         run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
@@ -337,24 +409,68 @@ fn section_stubs(
             continue;
         }
         let terminal = run.ops.len().saturating_sub(1);
-        if let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
-            && let Some(found) = slots.get(&slot.offset)
-        {
+        let slot = indirect
+            .then(|| r2ssa::terminal_indirect_loaded_slot(&run, terminal))
+            .flatten()
+            .map(|slot| slot.offset);
+        // An indirect jump through a word it places is a stub's only where
+        // the loader writes that word. Through a word this reading cannot
+        // place -- ARM's PLT0 adds a literal it loads from memory -- the jump
+        // says nothing either way, and names nothing.
+        if slot.is_some_and(|slot| container.loader_write_at(slot).is_none()) {
+            return Vec::new();
+        }
+        if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
             readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
         }
         run = fresh_run(pc);
         starts.clear();
     }
+    cells(readers, end)
+}
 
-    // The stubs are uniform cells filling the section's tail: whatever header
-    // the linker put first, the last cell ends where the section ends. That
-    // anchors every cell without deciding what a landing pad or an alignment
-    // nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
-    // twenty-byte header alike.
+/// Whether one instruction's operations make a choice no stub makes.
+///
+/// A stub makes no call, does not return, and leaves only for somewhere in
+/// its own section or through a word. A conditional branch to the
+/// instruction's own fall-through, or within its own operations, transfers
+/// nowhere the straight line does not already go: it is how ARM makes one
+/// instruction's effect conditional, and the literal word after ARM's PLT0
+/// decodes as one.
+fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
+    let stays = |target: &r2il::Varnode| {
+        target.space == r2il::SpaceId::Ram && section.contains(&target.offset)
+    };
+    let within = |target: &r2il::Varnode| {
+        target.space == r2il::SpaceId::Const
+            || (target.space == r2il::SpaceId::Ram && target.offset == next)
+    };
+    ops.iter().any(|op| match op {
+        R2ILOp::Call { .. } | R2ILOp::CallInd { .. } | R2ILOp::Return { .. } => true,
+        R2ILOp::CBranch { target, .. } => !within(target),
+        R2ILOp::Branch { target } => !stays(target),
+        _ => false,
+    })
+}
+
+/// Each stub's cell, from where each reader transfers and the section's end.
+///
+/// The stubs are uniform cells filling the section's tail: whatever header
+/// the linker put first, the last cell ends where the section ends. That
+/// anchors every cell without deciding what a landing pad or an alignment
+/// nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
+/// twenty-byte header alike.
+fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
     let stride = match readers.as_slice() {
         [first, second, ..] => second.0.saturating_sub(first.0),
-        // One stub has no neighbour to measure against, so its cell is what its transfer needs.
-        [(_, start, symbol)] => return vec![(*start, symbol.clone())],
+        // One stub has no neighbour to measure against: its cell runs from where it starts to the section's end, which anchors every cell.
+        [(_, start, symbol)] => {
+            let stub = Stub {
+                symbol: symbol.clone(),
+                size: end.saturating_sub(*start),
+            };
+            return vec![(*start, stub)];
+        }
         [] => return Vec::new(),
     };
     if stride == 0 {
@@ -366,7 +482,11 @@ fn section_stubs(
         .enumerate()
         .filter_map(|(index, (_, _, symbol))| {
             let from_end = count.checked_sub(index as u64)?.checked_mul(stride)?;
-            Some((end.checked_sub(from_end)?, symbol))
+            let stub = Stub {
+                symbol,
+                size: stride,
+            };
+            Some((end.checked_sub(from_end)?, stub))
         })
         .collect()
 }
@@ -431,16 +551,6 @@ fn fresh_run(addr: u64) -> r2il::R2ILBlock {
     }
 }
 
-/// The sections a format puts import stubs in.
-fn stubs(name: &str) -> bool {
-    // `__auth_stubs` is where arm64e puts them, and every Mach-O built for
-    // Apple silicon has that section and no `__stubs`. Missing it left the
-    // import table empty on those binaries, which is not a cosmetic gap: the
-    // table decides which addresses are entries, and that is what bounds a
-    // body walk.
-    name.starts_with(".plt") || matches!(name, "__stubs" | "__auth_stubs" | "__symbol_stub")
-}
-
 /// Whether a symbol names a place in the program.
 ///
 /// An undefined symbol names an import and lives at no address; a symbol at
@@ -471,8 +581,13 @@ mod tests {
         );
         name_imports(
             &mut db,
-            Format::Elf,
-            &BTreeMap::from([(0x1030, "printf".to_owned())]),
+            &BTreeMap::from([(
+                0x1030,
+                Stub {
+                    symbol: "printf".to_owned(),
+                    size: 16,
+                },
+            )]),
         );
         db
     }
@@ -500,6 +615,7 @@ mod tests {
                 kind: SymbolKind::Function,
                 defined: true,
                 thumb: false,
+                ..Symbol::default()
             };
             assert!(!names_an_address(&symbol), "{name}");
         }

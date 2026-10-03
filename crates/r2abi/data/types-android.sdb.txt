@@ -1,0 +1,44 @@
+# What bionic, Android's C library, declares for itself.
+#
+# radare2's types-android.sdb.txt, less the records no bionic program links
+# by that name: `android_log_*` is liblog's `__android_log_*` under a key
+# with the underscores dropped, and `xalloc_die` is gnulib's. See README.md.
+
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.noreturn=true
+func.__stack_chk_fail.ret=void
+
+exit=func
+func.exit.args=1
+func.exit.arg.0=int,status
+func.exit.noreturn=true
+func.exit.ret=void
+
+abort=func
+func.abort.args=0
+func.abort.noreturn=true
+func.abort.ret=void
+
+# bionic's fortified stdio, from <bits/fortify/stdio.h>: the size the caller
+# asked for is an `int` third-from-last, and the size the compiler knows of the
+# buffer comes last. glibc's (types-linux.sdb.txt) puts the buffer's size
+# second, so reading one library's calls in the other's order swaps a length
+# for a stream.
+
+__fgets_chk=func
+func.__fgets_chk.args=4
+func.__fgets_chk.arg.0=char *,s
+func.__fgets_chk.arg.1=int,n
+func.__fgets_chk.arg.2=FILE *,stream
+func.__fgets_chk.arg.3=size_t,size
+func.__fgets_chk.ret=char *
+
+__fread_chk=func
+func.__fread_chk.args=5
+func.__fread_chk.arg.0=void *,ptr
+func.__fread_chk.arg.1=size_t,size
+func.__fread_chk.arg.2=size_t,n
+func.__fread_chk.arg.3=FILE *,stream
+func.__fread_chk.arg.4=size_t,ptrlen
+func.__fread_chk.ret=size_t

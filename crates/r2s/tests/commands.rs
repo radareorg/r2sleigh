@@ -47,7 +47,11 @@ fn on(binary: PathBuf, script: &str) -> Run {
 fn symbols_are_listed_with_their_kind() {
     let run = r2s("is");
     assert!(run.ok, "{}", run.out);
-    assert!(run.out.contains("FUNC fnv1a32"), "{}", run.out);
+    assert!(
+        run.out.contains("GLOBAL FUNC   54       fnv1a32"),
+        "{}",
+        run.out
+    );
     assert!(
         run.out.contains(FNV1A32.trim_start_matches("0x")),
         "{}",
@@ -83,12 +87,11 @@ fn every_discovered_address_says_why_it_is_believed() {
             "{row}"
         );
     }
-    // Discovery may not lose a function the format states outright.
-    assert!(
-        rows.len() >= r2s("is").out.matches("FUNC").count(),
-        "{}",
-        run.out
-    );
+    // Discovery may not lose a function the format states outright: every
+    // one the symbol table defines, which excludes the imports it lists.
+    let defined = r2s("is~FUNC~!imp.?").out;
+    let defined: usize = defined.trim().parse().expect("a count");
+    assert!(rows.len() >= defined, "{}", run.out);
 }
 
 /// `afl` is radare2's: no header, then `addr nbbs size name`, the size being
@@ -312,21 +315,17 @@ fn the_engine_and_the_listing_read_one_entry() {
 #[test]
 fn a_string_is_listed_as_itself_and_flagged_as_an_identifier() {
     // One row answers both: the text a reader wants and the name a listing
-    // can write. They cannot drift because they are the same entry.
-    let listed = r2s("iz");
+    // can write. They cannot drift because they are the same entry. The
+    // interpreter's path this once listed is the loader's, in `.interp`,
+    // which the container states is no data of the program's.
+    let review = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let listed = on(review.clone(), "iz");
     assert!(listed.ok, "{}", listed.out);
-    assert!(
-        listed.out.contains("/lib64/ld-linux-x86-64.so.2"),
-        "{}",
-        listed.out
-    );
-    let flagged = r2s("f~str._lib64");
+    assert!(listed.out.contains("hello global"), "{}", listed.out);
+    assert!(!listed.out.contains("/lib64/ld-linux"), "{}", listed.out);
+    let flagged = on(review, "f~str.hello");
     assert!(flagged.ok, "{}", flagged.out);
-    assert!(
-        flagged.out.contains("str._lib64_ld_linux_x86_64_so_2"),
-        "{}",
-        flagged.out
-    );
+    assert!(flagged.out.contains("str.hello_global"), "{}", flagged.out);
 }
 
 #[test]
@@ -634,13 +633,17 @@ mod listing {
         assert!(run.ok, "{}", run.out);
         let page = "add x8, x8, 0x0 ; defines x8 = 0x100004000 (folded)";
         assert!(run.out.contains(page), "{}", run.out);
-        // The word is a chained fixup dyld rebases to 0x100000400, so what the file holds there is no value to state.
+        // The word is a chained fixup dyld rebases to 0x100000400: what the
+        // file holds there is the fixup's encoding, and what the container
+        // states the loader writes is the address, which is what is said.
         let load = run
             .out
             .lines()
             .find(|line| line.contains("ldr x8, [x8, 0x10]"));
+        let loaded =
+            "ldr x8, [x8, 0x10] ; [0x100004010:8] loaded 0x100000400 sym._table_op_mul (folded)";
         assert!(
-            load.is_some_and(|line| line.ends_with("ldr x8, [x8, 0x10]")),
+            load.is_some_and(|line| line.ends_with(loaded)),
             "{}",
             run.out
         );
@@ -686,8 +689,9 @@ mod listing {
         // The stubs are 0x100000fd8 to 0x100000fe4, and the first string is `__cstring`'s at the end of them.
         let strings = at(fixture, "iz");
         assert!(strings.ok, "{}", strings.out);
+        // The vaddr column, the third of radare2's `nth paddr vaddr`.
         let listed = strings.out.lines().filter_map(|line| {
-            let address = line.split_whitespace().next()?.strip_prefix("0x")?;
+            let address = line.split_whitespace().nth(2)?.strip_prefix("0x")?;
             u64::from_str_radix(address, 16).ok()
         });
         let listed = listed.collect::<Vec<_>>();
@@ -830,9 +834,21 @@ mod stripped {
 
     #[test]
     fn the_symbol_table_states_nothing() {
+        // No function is defined in any table; what the dynamic table still
+        // states is the imports.
         let run = r2s("is");
         assert!(run.ok, "{}", run.out);
-        assert!(!run.out.contains("FUNC"), "{}", run.out);
+        let functions: Vec<&str> = run
+            .out
+            .lines()
+            .filter(|line| line.contains("FUNC"))
+            .collect();
+        assert!(!functions.is_empty(), "{}", run.out);
+        assert!(
+            functions.iter().all(|line| line.contains(" imp.")),
+            "{}",
+            run.out
+        );
     }
 
     #[test]

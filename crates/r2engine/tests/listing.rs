@@ -8,7 +8,7 @@ use common::{
     OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
     THUMB_LEAF, TRANSFERRED, TWO, VENEER, handing, opened, table_switch, transferring,
 };
-use r2engine::program::{Container, OpenProgram, Source};
+use r2engine::program::{Container, LoaderWrite, OpenProgram, Source, WriteKind};
 use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
 
 /// The result each line claims, by address.
@@ -674,16 +674,9 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
     assert!(!unresolved, "{said:?}");
 }
 
-#[test]
-fn a_table_the_program_may_write_is_read_as_the_file_holds_it_and_says_so() {
-    // Nothing the container states is yet asked whether it seals a writable
-    // table after load -- a RELRO range, a read-only segment -- so the table
-    // is read as the file holds it, and it carries that it was unsealed for
-    // the check that asks to consume rather than recompute.
-    let program = table_switch().writable_data_after(BASE + 0x30);
-    let lines = OpenProgram::of(program).function_listing(BASE);
-    let lines = lines.expect("it lists").lines.value;
-    let tables = lines
+/// Each dispatch table a function listing reads: where, how many entries, and what the container states of its bytes.
+fn tables_of(lines: &[Line]) -> Vec<(u64, usize, r2engine::native::TableBytes)> {
+    lines
         .iter()
         .flat_map(|line| &line.annotations)
         .filter_map(|annotation| match &annotation.kind {
@@ -691,9 +684,96 @@ fn a_table_the_program_may_write_is_read_as_the_file_holds_it_and_says_so() {
             _ => None,
         })
         .map(|table| (table.address, table.entries, table.stated))
-        .collect::<Vec<_>>();
-    let unsealed = r2engine::native::TableBytes::Unsealed;
-    assert_eq!(tables, [(BASE + 0x30, 4, unsealed)]);
+        .collect()
+}
+
+#[test]
+fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
+    // A PIE linked without applying its dynamic relocations leaves each
+    // relocated word zero in the file; the relative records state the
+    // addresses. Reading the file's words read four entries at address zero,
+    // and refusing every loader-written table left the dispatch unresolved.
+    let table = BASE + 0x30;
+    let mut literal = table_switch();
+    literal.write(table, &[0; 32]);
+    for (k, target) in [0x100e, 0x1014, 0x101a, 0x1026].into_iter().enumerate() {
+        literal = literal.loader_written(LoaderWrite {
+            place: table + 8 * k as u64,
+            width: 8,
+            kind: WriteKind::Relative(target),
+        });
+    }
+    let lines = OpenProgram::of(literal).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    let loaded = r2engine::native::TableBytes::LoaderWritten;
+    assert_eq!(tables_of(&lines), [(table, 4, loaded)]);
+    let arms = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .find_map(|annotation| match &annotation.kind {
+            AnnotationKind::Switch { arms, .. } => Some(arms.clone()),
+            _ => None,
+        });
+    assert_eq!(
+        arms,
+        Some(vec![(0, 0x100e), (1, 0x1014), (2, 0x101a), (3, 0x1026)])
+    );
+
+    // One entry the loader binds to an import states no address, so the table is refused whole.
+    let mut literal = table_switch().loader_written(LoaderWrite {
+        place: table + 8,
+        width: 8,
+        kind: WriteKind::Import {
+            symbol: "elsewhere".to_owned(),
+        },
+    });
+    literal.write(table + 8, &[0; 8]);
+    let lines = OpenProgram::of(literal).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    assert_eq!(tables_of(&lines), []);
+}
+
+#[test]
+fn a_dispatch_table_in_memory_the_program_may_write_is_refused_unless_the_loader_seals_it() {
+    // The file's entries need not be the ones a writable table holds when the
+    // dispatch runs, so reading them resolved the switch on a guess about
+    // the program's own stores. The same table the loader seals after it is
+    // done -- a RELRO range, a Mach-O `SG_READ_ONLY` segment -- is the
+    // program's for its whole run, and is read.
+    let table = BASE + 0x30;
+    let writable = table_switch().writable_data_after(table);
+    let lines = OpenProgram::of(writable).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    assert_eq!(tables_of(&lines), []);
+    let unresolved = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .any(|annotation| annotation.kind == AnnotationKind::Unresolved);
+    assert!(unresolved, "the dispatch is said to be unresolved");
+
+    let sealed = table_switch()
+        .writable_data_after(table)
+        .sealed(table..table + 0x20);
+    let lines = OpenProgram::of(sealed).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    let read_only = r2engine::native::TableBytes::ReadOnly;
+    assert_eq!(tables_of(&lines), [(table, 4, read_only)]);
+}
+
+#[test]
+fn a_dispatch_table_whose_entry_leaves_what_the_container_states_is_code_is_refused() {
+    // The segment is executable throughout, so every entry decodes; but from
+    // 0x101a on the container states a data section, and a word that decodes
+    // there is not an arm the program was built to jump to.
+    let program = table_switch().with_data_after(BASE + 0x1a);
+    let lines = OpenProgram::of(program).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    assert_eq!(tables_of(&lines), []);
+    let unresolved = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .any(|annotation| annotation.kind == AnnotationKind::Unresolved);
+    assert!(unresolved, "the dispatch is said to be unresolved");
 }
 
 #[test]

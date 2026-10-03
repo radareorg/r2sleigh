@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{BASE, CALLER, Literal, ONE, STUB, TEXT, TWO, opened};
+use common::{BASE, CALLER, GLIBC, Literal, ONE, STUB, TEXT, TWO, opened};
 use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
@@ -35,7 +35,8 @@ fn a_call_is_spelled_by_the_name_the_container_gives_its_target() {
 
 #[test]
 fn a_call_to_an_import_declared_never_to_return_ends_the_function() {
-    let mut program = OpenProgram::of(Literal::new().importing("exit"));
+    // `exit` is declared by each C library, so the program states which it runs on.
+    let mut program = OpenProgram::of(Literal::new().importing("exit").running_on(GLIBC));
     // mov edi, 1; call exit; mov eax, 7; ret -- the last two are never reached.
     let call = i32::try_from(STUB as i64 - (TWO + 10) as i64).expect("near");
     let mut code = vec![0xbf, 0x01, 0, 0, 0, 0xe8];

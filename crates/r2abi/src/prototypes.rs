@@ -1,10 +1,11 @@
 //! What a library function takes and returns.
 //!
 //! An import has no body to read an interface off, so a call to one renders
-//! with no arguments at all unless something states its prototype. radare2
-//! ships that statement for two thousand library functions as `sdb` text, and
-//! this reads it: the data is good, and only the lookup had any business being
-//! on the other side of an FFI boundary.
+//! with no arguments at all unless something states its prototype. These
+//! tables state it for two thousand library functions, as `sdb` text that
+//! began as radare2's and is now r2abi's own: keyed by C identifier, and
+//! scoped per C library where the libraries disagree. `data/README.md` lists
+//! every way they differ from radare2's.
 
 use std::collections::BTreeMap;
 
@@ -187,31 +188,41 @@ pub struct Prototypes {
 
 const EMBEDDED: &str = include_str!("../data/types.sdb.txt");
 const EMBEDDED_LINUX: &str = include_str!("../data/types-linux.sdb.txt");
+const EMBEDDED_ANDROID: &str = include_str!("../data/types-android.sdb.txt");
 const EMBEDDED_DARWIN: &str = include_str!("../data/types-darwin.sdb.txt");
 
-/// Which platform's own declarations apply on top of the portable ones.
+/// Which C library's own declarations apply on top of the portable ones.
 ///
-/// `_Exit` and `__errno_location` are declared per platform, not in the table
-/// every target shares, so a call to one has no prototype until the platform
-/// says which set to read.
+/// A name two libraries both export is not one interface: glibc's
+/// `__fgets_chk` takes the buffer's size second and the stream last, and
+/// bionic's takes the stream third and the size last. So a record one
+/// library states is read only for a program the container says runs on it,
+/// and with no such statement only the portable table applies -- a call with
+/// no prototype, rather than one read in another library's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
+    /// Linux with the GNU C library.
     Linux,
+    /// Android, whose C library is bionic.
+    Android,
+    /// Apple's platforms, whose C library is libSystem's.
     Darwin,
+    /// Nothing the container states names one.
     Unknown,
 }
 
 impl Prototypes {
-    /// The prototypes radare2 ships for every target.
+    /// The prototypes every C library declares alike.
     pub fn embedded() -> Self {
         Self::embedded_for(Platform::Unknown)
     }
 
-    /// Those, with the ones this platform declares itself layered over them.
+    /// Those, with the ones this platform's C library declares itself layered over them.
     pub fn embedded_for(platform: Platform) -> Self {
         let mut prototypes = Self::parse(EMBEDDED);
         let platform = match platform {
             Platform::Linux => Some(EMBEDDED_LINUX),
+            Platform::Android => Some(EMBEDDED_ANDROID),
             Platform::Darwin => Some(EMBEDDED_DARWIN),
             Platform::Unknown => None,
         };
@@ -293,15 +304,16 @@ impl Prototypes {
         }
     }
 
+    /// The prototype declared for exactly this C identifier.
+    ///
+    /// Exact, because a name that differs is a different function: `__memcpy_chk`
+    /// takes one argument more than `memcpy`, and a program's own `_strlen` is
+    /// not the library's `strlen`. A linked name's decoration is the loader's
+    /// to drop, once, when it states the import -- Mach-O's `___strcpy_chk` is
+    /// stated as `__strcpy_chk` -- so nothing is stripped here to make a
+    /// lookup succeed.
     pub fn get(&self, name: &str) -> Option<&Prototype> {
-        // A linked name carries at most the platform's own decoration, which
-        // is one underscore where there is any: Mach-O spells `__strcpy_chk`
-        // as `___strcpy_chk`, and the declaration keeps the other two. Only
-        // that one is dropped. Dropping them until something matched turned
-        // `__memcpy_chk` into `memcpy`, which takes one argument fewer.
-        self.by_name
-            .get(name)
-            .or_else(|| self.by_name.get(name.strip_prefix('_')?))
+        self.by_name.get(name)
     }
 
     pub fn len(&self) -> usize {
@@ -346,17 +358,16 @@ mod tests {
     }
 
     #[test]
-    fn a_decorated_name_finds_its_undecorated_prototype() {
+    fn a_name_is_looked_up_exactly_as_it_is_spelled() {
         let prototypes = Prototypes::embedded();
         assert_eq!(
-            prototypes.get("_strlen").map(|p| p.returns.as_written()),
-            Some("size_t")
-        );
-        // The declaration keeps two underscores and the linker adds a third.
-        assert_eq!(
-            prototypes.get("___strcpy_chk").map(|p| p.parameters.len()),
+            prototypes.get("__strcpy_chk").map(|p| p.parameters.len()),
             Some(3)
         );
+        // A name with one more underscore is another function: a program's
+        // own `_strlen`, or a decoration the loader should have dropped.
+        assert!(prototypes.get("_strlen").is_none());
+        assert!(prototypes.get("___strcpy_chk").is_none());
     }
 
     #[test]

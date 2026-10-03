@@ -16,6 +16,7 @@ pub mod names;
 pub mod native;
 pub mod program;
 pub mod query;
+pub mod stated;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;

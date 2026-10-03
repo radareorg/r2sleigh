@@ -1,29 +1,154 @@
-//! The bytes the loader writes before the program runs, where the file's own bytes are not what the program reads.
+//! What the loader does before the program runs: the relocation records it applies, the bytes it writes, where the file's own bytes are not what the program reads, and the stubs a format declares stand for imports.
 
 use std::ops::Range;
 
 use object::read::pe::ImageNtHeaders;
 use object::{Object, ObjectSection};
 
+use r2abi::statement::{ImportStub, LoaderWrite, Relocation, WriteKind};
+
 mod elf;
 mod macho;
 
-/// Every range of the image the loader writes, sorted and merged.
-pub(crate) fn writes(
+/// What the loader applies to one image.
+pub(crate) struct Loaded {
+    /// Every relocation record, each once, in the order it is applied.
+    pub relocations: Vec<Relocation>,
+    /// What the loader writes, sorted by place and disjoint.
+    pub writes: Vec<LoaderWrite>,
+    pub import_stubs: Vec<ImportStub>,
+}
+
+/// Every record the loader applies to the image, what it writes, and the stubs the format declares.
+pub(crate) fn read(
     file: &object::File<'_>,
     data: &[u8],
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
     pointer: u64,
-) -> Vec<Range<u64>> {
+) -> Loaded {
+    let (relocations, writes, ranges, import_stubs) = match file {
+        _ if file.kind() == object::ObjectKind::Relocatable => (
+            Vec::new(),
+            Vec::new(),
+            linked(file, placed, pointer),
+            Vec::new(),
+        ),
+        object::File::Elf32(_) | object::File::Elf64(_) => {
+            let (relocations, writes, ranges) = elf::read(file, pointer);
+            (relocations, writes, ranges, Vec::new())
+        }
+        object::File::MachO32(_) | object::File::MachO64(_) => {
+            let read = macho::read(file, data);
+            (read.relocations, read.writes, read.ranges, read.stubs)
+        }
+        object::File::Pe32(pe) => (Vec::new(), Vec::new(), pe_writes(pe), Vec::new()),
+        object::File::Pe64(pe) => (Vec::new(), Vec::new(), pe_writes(pe), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+    };
+    Loaded {
+        relocations,
+        writes: composed(writes, ranges),
+        import_stubs,
+    }
+}
+
+/// The ranges of writable segments the loader makes read-only once it is done, sorted and merged.
+///
+/// ELF states them as `PT_GNU_RELRO`, which the dynamic loader `mprotect`s
+/// after relocating; Mach-O as a segment flagged `SG_READ_ONLY`, which dyld
+/// seals after applying its fixups. A segment mapped without write
+/// permission needs no statement: it is read-only from the start.
+pub(crate) fn sealed(file: &object::File<'_>) -> Vec<Range<u64>> {
+    use object::read::ObjectSegment as _;
+    use object::read::elf::ProgramHeader as _;
+    const SG_READ_ONLY: u32 = 0x10;
     let ranges = match file {
-        _ if file.kind() == object::ObjectKind::Relocatable => linked(file, placed, pointer),
-        object::File::Elf32(_) | object::File::Elf64(_) => elf::writes(file, pointer),
-        object::File::MachO32(_) | object::File::MachO64(_) => macho::writes(file, data),
-        object::File::Pe32(pe) => pe_writes(pe),
-        object::File::Pe64(pe) => pe_writes(pe),
+        object::File::Elf32(elf) => relro(elf),
+        object::File::Elf64(elf) => relro(elf),
+        object::File::MachO32(_) | object::File::MachO64(_) => file
+            .segments()
+            .filter(|segment| {
+                matches!(segment.flags(), object::SegmentFlags::MachO { flags, .. } if flags & SG_READ_ONLY != 0)
+            })
+            .map(|segment| written(segment.address(), segment.size()))
+            .collect(),
         _ => Vec::new(),
     };
-    merged(ranges)
+    return merged(ranges);
+
+    fn relro<'data, E: object::read::elf::FileHeader, R: object::ReadRef<'data>>(
+        elf: &object::read::elf::ElfFile<'data, E, R>,
+    ) -> Vec<Range<u64>> {
+        let endian = elf.endian();
+        elf.elf_program_headers()
+            .iter()
+            .filter(|header| header.p_type(endian) == object::elf::PT_GNU_RELRO)
+            .map(|header| written(header.p_vaddr(endian).into(), header.p_memsz(endian).into()))
+            .collect()
+    }
+}
+
+/// The writes as the program sees them once the loader is done: sorted by place and disjoint.
+///
+/// Records writing one place are applied in order, so the last one's value
+/// stands. Two that overlap without writing the same bytes leave a value no
+/// record states, and so does every range the loader writes with no record
+/// saying what: a word its psABI reserves, a section dyld fills whole, a page
+/// of a chain format this reader does not decode. The union of the writes is
+/// exactly the union of what was written. `O(W log W)` once.
+fn composed(mut writes: Vec<LoaderWrite>, ranges: Vec<Range<u64>>) -> Vec<LoaderWrite> {
+    writes.retain(|write| write.width > 0);
+    // Stable, so the writes to one place stay in the order they are applied.
+    writes.sort_by_key(|write| write.place);
+    let mut stated: Vec<LoaderWrite> = Vec::with_capacity(writes.len());
+    for write in writes {
+        match stated.last_mut() {
+            Some(last) if last.place == write.place && last.width == write.width => *last = write,
+            Some(last) if write.place < last.end() => {
+                last.width = last.end().max(write.end()) - last.place;
+                last.kind = WriteKind::Unknown;
+            }
+            _ => stated.push(write),
+        }
+    }
+    // What the ranges write beyond the records: each gap between stated writes.
+    let mut out = Vec::with_capacity(stated.len());
+    let mut next = 0;
+    for range in merged(ranges) {
+        let mut at = range.start;
+        while next < stated.len() && stated[next].end() <= at {
+            out.push(stated[next].clone());
+            next += 1;
+        }
+        while at < range.end {
+            match stated.get(next) {
+                Some(write) if write.place <= at => {
+                    at = at.max(write.end());
+                    out.push(write.clone());
+                    next += 1;
+                }
+                Some(write) if write.place < range.end => {
+                    out.push(unknown(at, write.place));
+                    at = write.place;
+                }
+                _ => {
+                    out.push(unknown(at, range.end));
+                    at = range.end;
+                }
+            }
+        }
+    }
+    out.extend(stated.into_iter().skip(next));
+    out
+}
+
+/// A write of these bytes whose value nothing states.
+fn unknown(start: u64, end: u64) -> LoaderWrite {
+    LoaderWrite {
+        place: start,
+        width: end - start,
+        kind: WriteKind::Unknown,
+    }
 }
 
 /// Sorted, with overlapping and touching ranges made one.
@@ -158,5 +283,35 @@ mod tests {
     fn touching_and_overlapping_writes_are_one_range() {
         let ranges = merged(vec![8..16, 0..8, 32..40, 12..20, 5..5]);
         assert_eq!(ranges, [0..20, 32..40]);
+    }
+
+    #[test]
+    fn a_later_record_at_one_place_stands_and_a_range_no_record_states_is_unknown() {
+        let write = |place, width, kind| LoaderWrite { place, width, kind };
+        let writes = vec![
+            write(0x10, 8, WriteKind::Relative(0x100)),
+            write(
+                0x20,
+                8,
+                WriteKind::Import {
+                    symbol: "f".to_owned(),
+                },
+            ),
+            write(0x10, 8, WriteKind::Relative(0x200)),
+            // Overlaps the import's slot without writing the same bytes.
+            write(0x24, 8, WriteKind::Relative(0x300)),
+        ];
+        // Two touching ranges, which are one written run.
+        let composed = composed(writes, vec![0x08..0x30, 0x30..0x40]);
+        assert_eq!(
+            composed,
+            [
+                write(0x08, 8, WriteKind::Unknown),
+                write(0x10, 8, WriteKind::Relative(0x200)),
+                write(0x18, 8, WriteKind::Unknown),
+                write(0x20, 12, WriteKind::Unknown),
+                write(0x2c, 0x14, WriteKind::Unknown),
+            ]
+        );
     }
 }

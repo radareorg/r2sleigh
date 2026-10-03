@@ -51,12 +51,12 @@ fn mentions(dir: &Path, wanted: &[&str]) -> Vec<String> {
     found
 }
 
-/// What the shell may be built against: the engine it asks, the container
-/// parser it opens with, and the IL's word for byte order, which the container
-/// states and the engine reads.
+/// What the shell may be built against: the engine it asks, and the container
+/// parser it opens with. What the container states reaches the engine in the
+/// loader's own types, so the shell has no word of its own to translate into.
 /// `r2s-tui` is the visual mode's layout: it owns no fact and reaches no
 /// crate that does, which `the_visual_mode_reaches_no_r2_crate` holds it to.
-const SHELL_MAY_REACH: [&str; 4] = ["r2engine", "r2image", "r2il", "r2s-tui"];
+const SHELL_MAY_REACH: [&str; 3] = ["r2engine", "r2image", "r2s-tui"];
 
 #[test]
 fn the_visual_mode_reaches_no_r2_crate() {
@@ -83,6 +83,66 @@ fn the_visual_mode_reaches_no_r2_crate() {
     assert!(
         reached.is_empty(),
         "the visual mode lays out what the shell spells and depends on no r2 crate: {reached:?}"
+    );
+}
+
+#[test]
+fn a_container_statement_type_has_one_definition() {
+    // The loader, the engine and the shell each defined their own sections,
+    // symbols and relocations, and the shell copied the first into the second
+    // field by field, so every fact added to the loader was silently narrowed
+    // away unless someone added it in three places. They are `r2abi`'s.
+    let restated = ["r2image", "r2engine", "r2s"]
+        .iter()
+        .flat_map(|krate| {
+            mentions(
+                &root().join("crates").join(krate).join("src"),
+                &[
+                    "pub struct Section ",
+                    "pub struct Segment ",
+                    "pub struct Symbol ",
+                    "pub enum SymbolKind",
+                    "pub struct Relocation ",
+                    "pub struct Entry ",
+                    "pub struct EntryPoint",
+                    "pub enum EntryKind",
+                    "pub struct Permissions",
+                    "pub struct Container ",
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        restated.is_empty(),
+        "a container statement is defined again outside r2abi::statement:\n{}",
+        restated.join("\n")
+    );
+}
+
+#[test]
+fn how_far_a_derived_fact_is_trusted_has_one_definition() {
+    // Discovery defined its own confidence, so the first inferred fact the
+    // engine produced said how far it could be trusted in a word no other
+    // fact could use. It is `r2source`'s, with the premises a fact assumes,
+    // and every crate that derives a fact states its trust in it.
+    let restated = ["r2engine", "r2s", "r2ssa", "r2types", "r2dec", "r2image"]
+        .iter()
+        .flat_map(|krate| {
+            mentions(
+                &root().join("crates").join(krate).join("src"),
+                &[
+                    "pub enum Confidence",
+                    "pub struct Confidence",
+                    "pub enum Basis",
+                    "pub enum Premise",
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        restated.is_empty(),
+        "a confidence is defined again outside r2source::confidence:\n{}",
+        restated.join("\n")
     );
 }
 
