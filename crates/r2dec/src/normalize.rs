@@ -1547,11 +1547,9 @@ fn materialize_phis_where_with_control<'f>(
 
     for (addr, materialized) in materialized_by_block {
         control.poll()?;
-        if let Some(mut block) = normalized.get_block_mut(addr) {
-            block.retain_phis(r2ssa::Pass::PhiMaterialization, |phi| {
-                !materialized.contains(&phi.dst)
-            });
-        }
+        normalized.retain_phis(addr, r2ssa::Pass::PhiMaterialization, |phi| {
+            !materialized.contains(&phi.dst)
+        });
     }
 
     origins
@@ -1562,7 +1560,7 @@ fn materialize_phis_where_with_control<'f>(
         if copies.is_empty() {
             continue;
         }
-        if let Some(mut block) = normalized.get_block_mut(pred) {
+        if let Some(block) = normalized.get_block(pred) {
             let insert_at = block
                 .ops()
                 .iter()
@@ -1575,7 +1573,8 @@ fn materialize_phis_where_with_control<'f>(
                 .into_iter()
                 .map(|planned| (planned.op, NormalizedOpOrigin::PhiEdgeCopy(planned.origin)))
                 .unzip();
-            block.insert_ops(
+            normalized.insert_ops(
+                pred,
                 insert_at,
                 r2ssa::Pass::PhiMaterialization,
                 ops.into_iter().map(|op| (op, None)),
@@ -1965,13 +1964,14 @@ fn can_materialize_on_branch_edge(
 }
 
 fn remove_phi_edge_operation(
-    block: &mut r2ssa::BlockMut<'_>,
+    func: &mut r2ssa::RewrittenFunction<'_>,
+    block: u64,
     rows: &mut Vec<NormalizedOpOrigin>,
     definition: OriginalPhiDefinition,
     entity: r2ssa::SemanticId,
     site: UseSite,
 ) -> Option<PhiEdgeOrigin> {
-    if block.len() != rows.len() {
+    if func.get_block(block)?.len() != rows.len() {
         return None;
     }
     let row_idx = rows.iter().position(|origin| {
@@ -1980,7 +1980,7 @@ fn remove_phi_edge_operation(
                 && edge.definition == definition
                 && edge.certified_entity == Some(entity))
     })?;
-    block.remove_op(row_idx, r2ssa::Pass::RelocateInitializer);
+    func.remove_op(block, row_idx, r2ssa::Pass::RelocateInitializer)?;
     match rows.remove(row_idx) {
         NormalizedOpOrigin::PhiEdgeCopy(origin) => Some(origin),
         NormalizedOpOrigin::Original(_) | NormalizedOpOrigin::RelocatedInitializer(_) => {
@@ -2140,9 +2140,8 @@ pub(crate) fn materialize_certified_loop_carrier_initializers_with_control(
                 continue;
             }
             let removed_edge = remove_phi_edge_operation(
-                &mut func
-                    .get_block_mut(*predecessor)
-                    .ok_or(NormalizationOriginError::BlockTopology)?,
+                func,
+                *predecessor,
                 origins
                     .rows_mut(*block_id)
                     .ok_or(NormalizationOriginError::BlockTopology)?,
@@ -2191,19 +2190,19 @@ pub(crate) fn materialize_certified_loop_carrier_initializers_with_control(
             };
             origins.replaced_phi_edges.push(replaced);
         } else {
-            let mut block = func
-                .get_block_mut(initializer.predecessor)
+            let block = func
+                .get_block(initializer.predecessor)
                 .ok_or(NormalizationOriginError::BlockTopology)?;
             let insert_at = block
                 .ops()
                 .iter()
                 .rposition(is_block_terminator)
                 .unwrap_or(block.ops().len());
-            block.insert_op(
+            func.insert_ops(
+                initializer.predecessor,
                 insert_at,
-                SSAOp::Copy { dst, src },
-                None,
                 r2ssa::Pass::RelocateInitializer,
+                [(SSAOp::Copy { dst, src }, None)],
             );
             origins
                 .rows_mut(initializer_block_id)
@@ -2252,13 +2251,19 @@ mod tests {
                 guarded: None,
             })
         };
-        let mut block =
+        let mut lifted = R2ILBlock::new(0x1000, 4);
+        lifted.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let source = SSAFunction::from_blocks_raw_no_arch(&[lifted]).expect("source function");
+        let block =
             r2ssa::FunctionSSABlock::from_parts(0x1000, 4, vec![op.clone(), op], Vec::new());
-        let mut arena = r2ssa::OpArena::default();
+        let mut func = r2ssa::RewrittenFunction::new(&source, vec![block]);
         let mut rows = vec![edge(0), edge(1)];
 
         let removed = remove_phi_edge_operation(
-            &mut r2ssa::BlockMut::new(&mut block, &mut arena),
+            &mut func,
+            0x1000,
             &mut rows,
             definition,
             entity,
@@ -2270,7 +2275,11 @@ mod tests {
         .expect("certified occurrence");
 
         assert_eq!(removed.incoming.input_idx, 0);
-        assert_eq!(block.len(), 1, "one byte-identical copy must remain");
+        assert_eq!(
+            func.get_block(0x1000).map(|block| block.len()),
+            Some(1),
+            "one byte-identical copy must remain"
+        );
         assert!(matches!(
             rows.as_slice(),
             [NormalizedOpOrigin::PhiEdgeCopy(origin)] if origin.incoming.input_idx == 1
@@ -2348,10 +2357,12 @@ mod tests {
             .expect("materialized predecessor")
             .ops()[op_idx]
             .clone();
-        duplicate_function
-            .get_block_mut(block_addr)
-            .expect("materialized predecessor")
-            .insert_op(op_idx, duplicate_op.clone(), None, r2ssa::Pass::Fixture);
+        assert!(duplicate_function.insert_ops(
+            block_addr,
+            op_idx,
+            r2ssa::Pass::Fixture,
+            [(duplicate_op.clone(), None)],
+        ));
         let mut duplicate_origins = origins.clone();
         let duplicate_origin = duplicate_origins
             .rows(block_id)
@@ -2369,9 +2380,8 @@ mod tests {
 
         let mut omitted_function = normalized.duplicate();
         omitted_function
-            .get_block_mut(block_addr)
-            .expect("materialized predecessor")
-            .remove_op(op_idx, r2ssa::Pass::Fixture);
+            .remove_op(block_addr, op_idx, r2ssa::Pass::Fixture)
+            .expect("materialized predecessor");
         let mut omitted_origins = origins.clone();
         omitted_origins
             .rows_mut(block_id)
@@ -2388,14 +2398,15 @@ mod tests {
             .expect("join fixture has a second incoming edge");
         assert_ne!(block_id, omitted_block_id);
         let mut duplicate_and_omitted_function = normalized.duplicate();
+        assert!(duplicate_and_omitted_function.insert_ops(
+            block_addr,
+            op_idx,
+            r2ssa::Pass::Fixture,
+            [(duplicate_op, None)],
+        ));
         duplicate_and_omitted_function
-            .get_block_mut(block_addr)
-            .expect("duplicated predecessor")
-            .insert_op(op_idx, duplicate_op, None, r2ssa::Pass::Fixture);
-        duplicate_and_omitted_function
-            .get_block_mut(omitted_block_addr)
-            .expect("omitted predecessor")
-            .remove_op(omitted_op_idx, r2ssa::Pass::Fixture);
+            .remove_op(omitted_block_addr, omitted_op_idx, r2ssa::Pass::Fixture)
+            .expect("omitted predecessor");
         let mut duplicate_and_omitted_origins = origins;
         duplicate_and_omitted_origins
             .rows_mut(block_id)

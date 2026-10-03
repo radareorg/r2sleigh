@@ -2813,10 +2813,49 @@ impl<'a> RewrittenFunction<'a> {
         self.source.dominates(a, b)
     }
 
-    /// One block's operations, mutable, for the pass that is still building.
-    pub fn get_block_mut(&mut self, addr: u64) -> Option<BlockMut<'_>> {
+    /// One block of this copy, with the arena what it gains is minted from.
+    fn block_mut(&mut self, addr: u64) -> Option<BlockMut<'_>> {
         let index = *self.block_index.get(&addr)? as usize;
         Some(BlockMut::new(self.blocks.get_mut(index)?, &mut self.arena))
+    }
+
+    /// Insert operations at `at` in the block at `addr`, each derived by
+    /// `pass` from the operation named beside it and minted an id above every
+    /// id the source holds. Answers whether the block exists.
+    pub fn insert_ops(
+        &mut self,
+        addr: u64,
+        at: usize,
+        pass: Pass,
+        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+    ) -> bool {
+        let Some(mut block) = self.block_mut(addr) else {
+            return false;
+        };
+        block.insert_ops(at, pass, ops);
+        true
+    }
+
+    /// Remove the operation at `at` of the block at `addr`; its id is
+    /// tombstoned in this copy's arena, never in the source's.
+    pub fn remove_op(&mut self, addr: u64, at: usize, pass: Pass) -> Option<SSAOp> {
+        let mut block = self.block_mut(addr)?;
+        (at < block.len()).then(|| block.remove_op(at, pass))
+    }
+
+    /// Keep the phis of the block at `addr` that `keep` accepts. Answers
+    /// whether the block exists.
+    pub fn retain_phis(
+        &mut self,
+        addr: u64,
+        pass: Pass,
+        keep: impl FnMut(&PhiNode) -> bool,
+    ) -> bool {
+        let Some(mut block) = self.block_mut(addr) else {
+            return false;
+        };
+        block.retain_phis(pass, keep);
+        true
     }
 
     /// Every operation the source and this rewrite ever held, by id.
