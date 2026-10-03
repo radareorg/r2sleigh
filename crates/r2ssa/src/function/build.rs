@@ -38,6 +38,7 @@ impl SSAFunction {
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
+            written: crate::lanes::Written::default(),
             query_index: RwLock::new(None),
         }
     }
@@ -566,6 +567,7 @@ impl SSAFunction {
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
+            written: crate::lanes::Written::default(),
             query_index: RwLock::new(None),
         };
         function.zero_scratch_insert_roots(abi_carriers);

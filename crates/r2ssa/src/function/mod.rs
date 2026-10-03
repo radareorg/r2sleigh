@@ -2530,6 +2530,10 @@ pub struct SSAFunction {
     /// variable, valued by the root's storage. The rebuild restates what the
     /// caller passed; it is no write the body made.
     formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
+    /// Which bytes each operation and phi wrote as data, recorded when the
+    /// function was lifted and kept through every rewrite by id
+    /// (doc/adr-written-lanes.md).
+    written: crate::lanes::Written,
     /// Structural def/use index for repeated SSA queries.
     query_index: RwLock<Option<SsaQueryIndex>>,
 }
@@ -2675,6 +2679,16 @@ impl SSAFunction {
     }
 
     /// Every operation and phi this function ever held, by id.
+    /// Which bytes each operation and phi wrote as data, as lifted.
+    pub fn written(&self) -> &crate::lanes::Written {
+        &self.written
+    }
+
+    /// Record what each operation writes, before anything rewrites one.
+    pub(crate) fn capture_written(&mut self) {
+        self.written = crate::lanes::Written::capture(self);
+    }
+
     pub fn arena(&self) -> &OpArena {
         self.blocks.arena()
     }
@@ -2808,6 +2822,7 @@ impl Clone for SSAFunction {
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
+            written: self.written.clone(),
             query_index: RwLock::new(None),
         }
     }

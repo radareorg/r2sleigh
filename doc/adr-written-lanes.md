@@ -1,6 +1,6 @@
 # ADR: written lanes, and widths read from them
 
-Status: accepted, not started (ROADMAP PE; lands after F1 step 2)
+Status: accepted, result widths landed (ROADMAP PE)
 
 ## Context
 
@@ -72,3 +72,33 @@ from treating a vector register's partial writes as its width.
 - Depends on F1 step 2: the record is taken in `Lifted` and read in `Sealed`.
 - Cost: one forward pass over the operations at construction, O(ops × W) for
   width W in bytes; one lookup per live-out value at recovery.
+
+## As landed
+
+- `r2ssa::lanes` holds the record. `Lifted::prepare` takes it before
+  optimisation and keeps it on the function by `OpId`
+  (`SSAFunction::written`). Interface recovery reads it for the value each
+  return hands back. A value defined after the lift (a lane projection) is
+  read through its inputs by the same transfer.
+- Each byte is `Data` or the set of ways it was not computed: `Zero`,
+  `Sign`, or `Entry(register byte)`. A byte is *written* if it is data, or
+  if it holds an entry byte from anywhere other than where it now sits.
+  `mov eax, edi` writes four bytes; `setg al` alone writes one. The join is
+  the union, and more than four ways count as data. The relation is the
+  forward one only. Folding the demand pass onto the same relation is still
+  to do.
+- A literal's bytes are data, so `return 1` is as wide as the instruction
+  that wrote it.
+- A result some path never wrote is unproven, not void. On arm64,
+  `int id(int x) { return x; }` is a bare `ret`, and the untouched `x0` is
+  the result.
+- A result whose byte above its width is `Sign` on every path is minted
+  `SignedInteger`. `movsx eax, al` returning -1, 0 or 1 is `int8_t`, not
+  `uint8_t`. Interface types are now keyed by width and sign.
+- Two consequences were fixed at the owner. `exact_logical_lane_input`
+  follows a chain of extensions or low inserts down to the lane exactly as
+  wide as the result, so `return (uint64_t)DIL_0` from a `uint8_t` function
+  is now `return` of the byte.
+- Not done: the XMM lane noise, and the `cover(demanded)` restatement of
+  parameter widths, which the demand pass computes already.
+

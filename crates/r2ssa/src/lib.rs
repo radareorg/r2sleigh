@@ -35,6 +35,7 @@ pub mod graph;
 pub mod indirect;
 pub(crate) mod integrity;
 pub mod interproc;
+pub mod lanes;
 pub mod liveness;
 pub(crate) mod liveout;
 pub(crate) mod machine;

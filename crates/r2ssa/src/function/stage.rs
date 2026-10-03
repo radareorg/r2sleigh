@@ -72,6 +72,8 @@ impl Lifted {
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         control.poll()?;
+        // What each operation wrote, before an optimisation folds it away.
+        self.ir.capture_written();
         let config: crate::optimize::OptimizationConfig = config.into();
         crate::optimize::optimize_function_with_interface_and_control(
             &mut self.ir,

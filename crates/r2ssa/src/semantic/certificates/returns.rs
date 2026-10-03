@@ -450,9 +450,7 @@ pub(crate) fn exact_logical_return_projection(
             // width, or the insert of that lane at its low end: certify the
             // lane value itself, usually the named local, so the return names
             // it rather than casting the carrier.
-            if let Some(input) =
-                exact_logical_lane_input(graph, boundary.value, physical_value, logical_width)
-            {
+            if let Some(input) = exact_logical_lane_input(graph, boundary.value, logical_width) {
                 return Some((input, logical_width, Some(logical)));
             }
             // Otherwise the carrier holds the logical value in its low lane
@@ -499,36 +497,51 @@ pub(crate) fn exact_logical_return_projection(
     }
 }
 
-/// The lane value the carrier's own definition widens or inserts at its low
-/// end, when that lane is the logical width.
+/// The value whose bytes are the carrier's low `logical_width` bytes,
+/// exactly: the lane an extension widens, or one an insert writes at the
+/// carrier's low end, followed down while that lane is still wider.
+///
+/// The low bytes of `zext(x)`, of `sext(x)` and of an insert of `x` at
+/// position zero are the low bytes of `x` for any width up to `x`'s, so the
+/// walk ends at a value exactly as wide as the logical return, or at the
+/// first definition that is none of these. `movzx eax, al` then a 32-bit
+/// write's zero extension is two steps from `RAX` to `AL`.
 ///
 /// Returns `None` for every other shape, including a merge, so the caller can
 /// go on to ask the wider question rather than refusing here.
 pub(crate) fn exact_logical_lane_input(
     graph: &SsaGraph,
     carrier: ValueId,
-    carrier_value: &crate::graph::GraphValue,
     logical_width: u32,
 ) -> Option<ValueId> {
-    let producer = graph.def_inst(carrier).and_then(|id| graph.inst(id))?;
-    if producer.output != Some(carrier) {
-        return None;
+    let mut at = carrier;
+    loop {
+        let value = graph.value(at)?;
+        if value.var.size == logical_width && at != carrier {
+            return Some(at);
+        }
+        let producer = graph.def_inst(at).and_then(|id| graph.inst(id))?;
+        if producer.output != Some(at) {
+            return None;
+        }
+        let (lane, lane_var) = match (&producer.payload, producer.inputs.as_slice()) {
+            (
+                InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }),
+                [input],
+            ) if *dst == value.var => (*input, src),
+            (InstPayload::Op(SSAOp::Insert(insert)), [_, input, _])
+                if insert.dst == value.var && insert.position.constant_bits() == Some(0) =>
+            {
+                (*input, &insert.value)
+            }
+            _ => return None,
+        };
+        let lane_value = graph.value(lane)?;
+        if lane_value.var != *lane_var || lane_value.var.size < logical_width {
+            return None;
+        }
+        at = lane;
     }
-    let (lane, lane_var) = match (&producer.payload, producer.inputs.as_slice()) {
-        (InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }), [input])
-            if *dst == carrier_value.var =>
-        {
-            (*input, src)
-        }
-        (InstPayload::Op(SSAOp::Insert(insert)), [_, input, _])
-            if insert.dst == carrier_value.var && insert.position.constant_bits() == Some(0) =>
-        {
-            (*input, &insert.value)
-        }
-        _ => return None,
-    };
-    let lane_value = graph.value(lane)?;
-    (lane_value.var == *lane_var && lane_value.var.size == logical_width).then_some(lane)
 }
 
 pub(crate) fn return_carrier_for_boundary_value(
