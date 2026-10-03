@@ -516,6 +516,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     let incomplete = super::super::collect_prepared_function_certificates(
         super::super::Body {
             function: allocated.function(),
+            prep: Some(allocated.decompile_prep_facts()),
             graph: allocated.graph(),
             machine_context: Some(allocated.machine_context()),
         },
@@ -558,6 +559,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     let overlapping = super::super::collect_prepared_function_certificates(
         super::super::Body {
             function: allocated.function(),
+            prep: Some(allocated.decompile_prep_facts()),
             graph: allocated.graph(),
             machine_context: Some(allocated.machine_context()),
         },

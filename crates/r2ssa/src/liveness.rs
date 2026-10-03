@@ -1362,7 +1362,7 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
         let mut func = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("ssa");
-        func.get_block_mut(0x1000).expect("block").replace_ops(
+        func.edit_block(0x1000).expect("block").replace_ops(
             crate::Pass::Fixture,
             entries
                 .iter()

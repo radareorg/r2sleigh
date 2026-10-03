@@ -856,7 +856,7 @@ pub fn recover_interface(
     slots: &SourceConventionSlots,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, slots, None, loader_role)
+    recover_interface_inner(func, None, slots, None, loader_role)
 }
 
 /// Recover an interface while retaining exact source-owned call boundaries.
@@ -864,13 +864,16 @@ pub fn recover_interface(
 /// This is the production path. The context is provisional only in that it
 /// does not yet contain the function interface being recovered; its call-site
 /// identities and interfaces are already final source facts.
+///
+/// `prep` is the prep facts of `func`, which is prepared and never sealed.
 pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
+    prep: &crate::DecompilePrepFacts,
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, slots, Some(machine_context), loader_role)
+    recover_interface_inner(func, Some(prep), slots, Some(machine_context), loader_role)
 }
 
 /// `loader_role` is the source's record that the program loader calls this
@@ -879,6 +882,7 @@ pub(crate) fn recover_interface_with_context(
 /// the register; parameters are still read off the body.
 fn recover_interface_inner(
     func: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
     loader_role: Option<r2source::SourceLoaderRole>,
@@ -904,6 +908,7 @@ fn recover_interface_inner(
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         crate::semantic::PreparedFunctionFacts::collect_with_context(
             func,
+            prep,
             &graph,
             &storage_spans,
             &crate::AssumptionSet::default(),
@@ -1602,6 +1607,21 @@ mod tests {
         }
     }
 
+    /// Recovery under a context, over a function prepared and never sealed,
+    /// with the prep facts its preparation gives it.
+    fn recover_in_context(
+        function: &SSAFunction,
+        context: &crate::SourceMachineContext,
+    ) -> Option<RecoveredInterface> {
+        recover_interface_with_context(
+            function,
+            &function.prep_facts_for_test(),
+            &candidates(),
+            context,
+            None,
+        )
+    }
+
     fn candidates() -> SourceConventionSlots {
         SourceConventionSlots::new(
             "arm64",
@@ -1754,8 +1774,7 @@ mod tests {
         let function = SSAFunction::for_decompile_under(&blocks, Some(&arch), &machine_context)
             .expect("decompile-normalized ssa");
         let recovered =
-            recover_interface_with_context(&function, &candidates(), &machine_context, None)
-                .expect("contextual recovery");
+            recover_in_context(&function, &machine_context).expect("contextual recovery");
 
         assert_eq!(recovered.parameters().len(), 1);
         assert_eq!(recovered.parameters()[0].slot(), register(0, 8));
@@ -2067,7 +2086,7 @@ mod tests {
             Vec::new(),
             vec![identity],
         );
-        let unproven = recover_interface_with_context(&function, &candidates(), &unknown, None)
+        let unproven = recover_in_context(&function, &unknown)
             .expect("an unproven result is still an interface");
         assert_eq!(
             unproven.result(),
@@ -2110,8 +2129,8 @@ mod tests {
             vec![interface],
             vec![identity],
         );
-        let recovered = recover_interface_with_context(&function, &candidates(), &known, None)
-            .expect("a proven tail boundary owns the result");
+        let recovered =
+            recover_in_context(&function, &known).expect("a proven tail boundary owns the result");
         assert_eq!(
             recovered.result().register().map(|result| result.slot()),
             Some(register(0, 8))
@@ -2176,7 +2195,7 @@ mod tests {
             Vec::new(),
             vec![identity],
         );
-        let recovered = recover_interface_with_context(&function, &candidates(), &context, None)
+        let recovered = recover_in_context(&function, &context)
             .expect("a direct return answers the boundary the tail leaves open");
         assert_eq!(
             recovered.result().register().map(|result| result.slot()),
@@ -2228,9 +2247,7 @@ pub struct RecoveredStackSlot {
 /// is is the preparation's answer too, so a parameter copied or narrowed
 /// before the spill is still recognised.
 pub fn recovered_stack_slots(prepared: &crate::SsaArtifact) -> Vec<RecoveredStackSlot> {
-    let Some(facts) = prepared.function().decompile_prep_facts() else {
-        return Vec::new();
-    };
+    let facts = prepared.decompile_prep_facts();
     let mut slots = Vec::new();
     for (object, certificate) in &prepared.certificates().stack_slots {
         // The frame carriers a function manages for itself are not the

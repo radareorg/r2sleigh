@@ -77,8 +77,8 @@ fn unchecked_and_controlled_decompile_builders_produce_identical_artifacts() {
         }
     }
     assert_eq!(
-        unchecked.function().decompile_prep_facts(),
-        controlled.function().decompile_prep_facts()
+        unchecked.decompile_prep_facts(),
+        controlled.decompile_prep_facts()
     );
     assert_eq!(unchecked.graph(), controlled.graph());
     assert_eq!(unchecked.facts(), controlled.facts());
@@ -109,10 +109,6 @@ fn prepared_function_ssa_tracks_mode_and_keeps_named_blocks() {
         .with_name("prepared_demo");
 
     assert_eq!(prepared.name.as_deref(), Some("prepared_demo"));
-    assert!(
-        prepared.decompile_prep_facts().is_some(),
-        "decompile preparation should retain prep facts"
-    );
 
     let local_blocks = prepared.local_ssa_blocks();
     assert_eq!(local_blocks.len(), 1);
@@ -122,12 +118,9 @@ fn prepared_function_ssa_tracks_mode_and_keeps_named_blocks() {
         prepared.blocks().iter().next().expect("entry block").ops()
     );
 
-    let symbolic = SsaArtifact::for_symbolic(&blocks, Some(&arch))
-        .expect("symbolic prepared SSA should build");
-    assert!(
-        symbolic.decompile_prep_facts().is_some(),
-        "symbolic preparation should retain canonical prep facts for shared consumers"
-    );
+    // Every artifact is sealed, so the symbolic one carries prep facts too:
+    // the type says so, where a test used to.
+    SsaArtifact::for_symbolic(&blocks, Some(&arch)).expect("symbolic prepared SSA should build");
 }
 
 #[test]
@@ -329,7 +322,7 @@ fn prepared_expression_certificates_render_loop_carried_recurrence_phi() {
     let update_source = SSAVar::new("tmp:update", 1, 8);
     let update = SSAVar::new("RAX", 3, 8);
     function
-        .get_block_mut(0x1810)
+        .edit_block(0x1810)
         .expect("loop header")
         .replace_phis(
             crate::Pass::Fixture,
@@ -340,7 +333,7 @@ fn prepared_expression_certificates_render_loop_carried_recurrence_phi() {
             }],
         );
     function
-        .get_block_mut(0x1820)
+        .edit_block(0x1820)
         .expect("loop latch")
         .replace_ops(
             crate::Pass::Fixture,
@@ -360,15 +353,12 @@ fn prepared_expression_certificates_render_loop_carried_recurrence_phi() {
                 },
             ],
         );
-    function
-        .get_block_mut(0x1814)
-        .expect("loop exit")
-        .replace_ops(
-            crate::Pass::Fixture,
-            vec![SSAOp::Return {
-                target: phi.clone(),
-            }],
-        );
+    function.edit_block(0x1814).expect("loop exit").replace_ops(
+        crate::Pass::Fixture,
+        vec![SSAOp::Return {
+            target: phi.clone(),
+        }],
+    );
 
     let prepared = SsaArtifact::new(function);
     let carrier = prepared
@@ -437,7 +427,7 @@ fn prepared_predicates_preserve_machine_point_comparison_before_normalization() 
     let zero = SSAVar::constant(0, 8);
     let condition = SSAVar::new("tmp:condition", 1, 1);
     function
-        .get_block_mut(0x1900)
+        .edit_block(0x1900)
         .expect("branch block")
         .replace_ops(
             crate::Pass::Fixture,
@@ -534,7 +524,7 @@ fn prepared_predicates_recover_signed_greater_equal_from_x86_flags() {
     let sign = SSAVar::new("SF", 1, 1);
     let condition = SSAVar::new("tmp:condition", 1, 1);
     function
-        .get_block_mut(0x1920)
+        .edit_block(0x1920)
         .expect("branch block")
         .replace_ops(
             crate::Pass::Fixture,
@@ -656,7 +646,7 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
     let result = SSAVar::new("RAX", 4, 8);
     let chained_result = SSAVar::new("RAX", 5, 8);
     function
-        .get_block_mut(0x1a20)
+        .edit_block(0x1a20)
         .expect("loop header")
         .replace_phis(
             crate::Pass::Fixture,
@@ -667,7 +657,7 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
             }],
         );
     function
-        .get_block_mut(0x1a20)
+        .edit_block(0x1a20)
         .expect("loop header")
         .replace_ops(
             crate::Pass::Fixture,
@@ -688,7 +678,7 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
             ],
         );
     function
-        .get_block_mut(0x1a30)
+        .edit_block(0x1a30)
         .expect("loop exit")
         .replace_phis(
             crate::Pass::Fixture,
@@ -698,18 +688,15 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
                 canonical_storage: None,
             }],
         );
+    function.edit_block(0x1a30).expect("loop exit").replace_ops(
+        crate::Pass::Fixture,
+        vec![SSAOp::CBranch {
+            target: SSAVar::new("ram:1a50", 0, 8),
+            cond: SSAVar::constant(1, 1),
+        }],
+    );
     function
-        .get_block_mut(0x1a30)
-        .expect("loop exit")
-        .replace_ops(
-            crate::Pass::Fixture,
-            vec![SSAOp::CBranch {
-                target: SSAVar::new("ram:1a50", 0, 8),
-                cond: SSAVar::constant(1, 1),
-            }],
-        );
-    function
-        .get_block_mut(0x1a40)
+        .edit_block(0x1a40)
         .expect("exit bypass")
         .replace_ops(
             crate::Pass::Fixture,
@@ -719,7 +706,7 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
             }],
         );
     function
-        .get_block_mut(0x1a50)
+        .edit_block(0x1a50)
         .expect("final exit")
         .replace_phis(
             crate::Pass::Fixture,
@@ -730,7 +717,7 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
             }],
         );
     function
-        .get_block_mut(0x1a50)
+        .edit_block(0x1a50)
         .expect("final exit")
         .replace_ops(
             crate::Pass::Fixture,
@@ -1211,14 +1198,14 @@ fn noncarrier_use_follows_copy_and_phi_chains() {
     let copied = SSAVar::new("flag", 2, 1);
     let merged = SSAVar::new("flag", 3, 1);
     let forwarded = SSAVar::new("flag", 4, 1);
-    func.get_block_mut(0x1000).expect("copy block").replace_ops(
+    func.edit_block(0x1000).expect("copy block").replace_ops(
         crate::Pass::Fixture,
         vec![SSAOp::Copy {
             dst: copied.clone(),
             src: source.clone(),
         }],
     );
-    let mut merge = func.get_block_mut(0x1004).expect("merge block");
+    let mut merge = func.edit_block(0x1004).expect("merge block");
     merge.replace_phis(
         crate::Pass::Fixture,
         vec![PhiNode {
@@ -1237,7 +1224,7 @@ fn noncarrier_use_follows_copy_and_phi_chains() {
 
     assert!(!func.has_noncarrier_use(&source));
 
-    func.get_block_mut(0x1004).expect("consumer block").push_op(
+    func.edit_block(0x1004).expect("consumer block").push_op(
         SSAOp::Return { target: forwarded },
         None,
         crate::Pass::Fixture,
@@ -1531,7 +1518,7 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
     let arch = make_x86_64_prep_arch();
     let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
         .expect("prepared SSA should build");
-    let facts = func.decompile_prep_facts().expect("prep facts");
+    let facts = func.prep_facts_for_test();
     let merge = func.get_block(0x100c).expect("merge block");
     assert_eq!(merge.phis().len(), 1, "expected trivial merge phi");
 

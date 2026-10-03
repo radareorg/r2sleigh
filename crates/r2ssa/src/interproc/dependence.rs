@@ -512,9 +512,7 @@ fn is_frame_object(objects: &ObjectModel, object: ObjectId) -> bool {
 /// argument slot for the formal's storage, and by the preparation's own index
 /// where the storage is a lane of a slot rather than the slot.
 fn formal_values(prepared: &SsaArtifact, abi: &AbiProfile) -> Vec<(ValueId, usize)> {
-    let Some(prep) = prepared.function().decompile_prep_facts() else {
-        return Vec::new();
-    };
+    let prep = prepared.decompile_prep_facts();
     let graph = prepared.graph();
     // Only the values a formal arrives as: an entry register, or the lane
     // projection minted from one. A copy or a reload of a formal is also a

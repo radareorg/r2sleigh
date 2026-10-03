@@ -2840,9 +2840,12 @@ mod tests {
             },
         ];
 
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa func");
-        func = func.with_name("sym._check_secret_like");
-        func.get_block_mut(0x1000).expect("entry").replace_ops(r2ssa::Pass::Fixture, vec![
+        let mut func = r2ssa::Lifted::new(
+            SSAFunction::from_blocks_raw_no_arch(&blocks)
+                .expect("ssa func")
+                .with_name("sym._check_secret_like"),
+        );
+        func.edit_block(0x1000).expect("entry").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::IntSub {
                 dst: make_var("RSP", 1, 8),
                 a: make_var("RSP", 0, 8),
@@ -2886,7 +2889,7 @@ mod tests {
                 target: make_var("ram:1008", 0, 8),
             },
         ]);
-        func.get_block_mut(0x1004).expect("then").replace_ops(r2ssa::Pass::Fixture, vec![
+        func.edit_block(0x1004).expect("then").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::Copy {
                 dst: make_var("RAX", 1, 8),
                 src: make_var("const:1", 0, 8),
@@ -2896,11 +2899,11 @@ mod tests {
                 instruction: None,
             },
         ]);
-        func.get_block_mut(0x1008).expect("else").replace_ops(r2ssa::Pass::Fixture, vec![SSAOp::Copy {
+        func.edit_block(0x1008).expect("else").replace_ops(r2ssa::Pass::Fixture, vec![SSAOp::Copy {
             dst: make_var("RAX", 2, 8),
             src: make_var("const:0", 0, 8),
         }]);
-        func.get_block_mut(0x100c).expect("exit").replace_ops(r2ssa::Pass::Fixture, vec![
+        func.edit_block(0x100c).expect("exit").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::Load {
                 dst: make_var("tmp:savedfp", 1, 8),
                 space: r2il::SpaceId::Ram,

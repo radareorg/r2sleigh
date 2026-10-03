@@ -2148,6 +2148,7 @@ pub(crate) struct ReachingAbiPolicy {
 #[derive(Clone, Copy)]
 pub(crate) struct ReachingAbi<'a> {
     pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) storage: CanonicalStorageId,
     pub(crate) policy: ReachingAbiPolicy,
@@ -2209,6 +2210,7 @@ impl DeclaredStackSlots {
 #[derive(Clone, Copy)]
 pub(crate) struct Body<'a> {
     pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
 }

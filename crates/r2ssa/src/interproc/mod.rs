@@ -2726,7 +2726,7 @@ fn classify_memory_access_location(
 /// value view says whose bits it extends, and how.
 fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
     let var = prepared.value_var(value)?;
-    let facts = prepared.function().decompile_prep_facts()?;
+    let facts = prepared.decompile_prep_facts();
     if let Some(index) = facts.formal_parameter_of(var) {
         return Some((index, None));
     }
@@ -2872,10 +2872,8 @@ fn classify_address_root(
 fn address_candidates(prepared: &SsaArtifact, value_id: ValueId) -> Vec<ValueId> {
     let mut candidates = vec![value_id];
     let graph = prepared.graph();
-    if let (Some(facts), Some(var)) = (
-        prepared.function().decompile_prep_facts(),
-        prepared.value_var(value_id),
-    ) {
+    if let Some(var) = prepared.value_var(value_id) {
+        let facts = prepared.decompile_prep_facts();
         for root in [facts.canonical_root(var), facts.same_integer_root(var)] {
             if let Some(root) = graph.value_id_for_var(root)
                 && !candidates.contains(&root)

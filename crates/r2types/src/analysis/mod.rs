@@ -1402,7 +1402,7 @@ pub fn build_source_owned_type_analysis(
     let derived = build_type_analysis_inner(
         derived_input,
         semantic_inputs,
-        source.decompile_prep_facts(),
+        Some(source.decompile_prep_facts()),
         Some(&machine_profile),
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
     );

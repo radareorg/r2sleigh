@@ -8,6 +8,7 @@ mod blocks;
 mod build;
 mod edit;
 mod rewrite;
+mod stage;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
@@ -52,8 +53,8 @@ use crate::span::StorageSpans;
 use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 use blocks::Blocks;
-pub use blocks::IrRevision;
 pub(crate) use edit::{Anchor, BlockEdits, EditPlan, Insertion, ShapeEdit};
+pub use stage::{Lifted, Prepared, Sealed};
 
 /// Query-only CFG risk summary for decompilation preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +79,14 @@ pub use r2source::StackAddressBase;
 ///
 /// `#[track_caller]` puts the caller's line in the message, so each site costs
 /// nothing to say and cannot drift from where it actually is.
+/// The validator's typed refusal, as the one error preparation reports, with
+/// the integrity error named in the evidence.
+#[track_caller]
+fn integrity_refusal(error: SsaIntegrityError) -> SsaPrepareError {
+    r2il::refusal_evidence!("ssa-integrity", "{error:?}");
+    malformed_ssa_input()
+}
+
 #[track_caller]
 fn malformed_ssa_input() -> SsaPrepareError {
     let location = std::panic::Location::caller();
@@ -98,11 +107,12 @@ pub struct StackAddressRoot {
 }
 
 /// Decompiler-prep analysis facts derived from SSA.
+///
+/// Collected once, when a function is sealed, from the blocks the sealed
+/// function keeps; nothing changes those blocks after, so the facts never
+/// describe blocks that no longer exist.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
-    /// The revision of the blocks these facts were computed from: they are
-    /// handed out only while the blocks are still at it.
-    pub revision: IrRevision,
     /// Which values carry the same bits, and each value's representative.
     ///
     /// The one identity fact every stage builds on (`crate::view`): a value
@@ -293,8 +303,9 @@ pub struct ArtifactSpellings {
 pub struct SsaArtifact {
     authority: SsaArtifactAuthority,
     provenance: SsaArtifactProvenance,
-    function: SSAFunction,
-    graph: SsaGraph,
+    /// The sealed function, its prep facts and its graph: everything below
+    /// was derived from it, and nothing can change it.
+    sealed: Sealed,
     liveness: ArtifactLiveness,
     unobserved_merges: crate::deadphi::DeadPhis,
     facts: PreparedFunctionFacts,
@@ -423,46 +434,6 @@ pub struct DecompileInputs<'a> {
     pub callee_interfaces: BTreeMap<u64, SourceFunctionInterface>,
 }
 
-/// The graph every preparation reads, built from a validated function with the source's formals minted.
-pub(crate) fn prepare_graph(
-    function: &mut SSAFunction,
-    machine_context: &SourceMachineContext,
-) -> Result<SsaGraph, SsaPrepareError> {
-    // The validator answers with a typed integrity error naming the block
-    // and the edge it disagreed about; discarding it left the reader with
-    // "malformed SSA source input" and nothing to look at.
-    validate_ssa_function(function).map_err(|error| {
-        r2il::refusal_evidence!("ssa-integrity", "{error:?}");
-        malformed_ssa_input()
-    })?;
-    function.apply_boundary_constants(machine_context);
-    function.mint_entry_lane_projections(machine_context);
-    // Before the graph, so every fact built from it counts readers of a
-    // copied value where they are, not where the copy was. It rewrites
-    // reads to variables the validated function already defines, so the
-    // validation above still holds; the minted lanes could not pass it.
-    function.forward_copies();
-    // Each rewrite above changed the blocks the prep facts were collected
-    // from; they are collected once more, over the blocks every later stage
-    // reads.
-    function.recollect_decompile_prep_facts();
-    let mut graph = SsaGraph::from_function_with_storage(function);
-    // A lane write whose untouched bytes nothing reads does not read the
-    // value it was written into (`demand`); releasing those bases changes an
-    // operand, so the facts and the graph are taken once more where it did.
-    let released = release_undemanded_bytes(function, machine_context, &graph);
-    if !released.is_empty() {
-        function.apply_edits(released);
-        function.recollect_decompile_prep_facts();
-        graph = SsaGraph::from_function_with_storage(function);
-    }
-    crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
-    let formal_parameters =
-        crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
-    function.install_exact_formal_parameters(&graph, &formal_parameters);
-    Ok(graph)
-}
-
 /// Release the base of every INSERT whose demanded bytes lie in its lane.
 ///
 /// The demand is rooted at what leaves through the return registers, so it
@@ -505,9 +476,14 @@ fn release_undemanded_bytes(
 /// Which listed number is a step towards another is read off this, so the listing and the
 /// reference index answer it from the same graph.
 pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<SsaGraph> {
-    let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
+    let function = SSAFunction::from_blocks_raw(blocks, arch)?;
     let machine_context = SourceMachineContext::from_blocks(blocks, arch);
-    let graph = prepare_graph(&mut function, &machine_context).ok()?;
+    let sealed = Lifted::new(function)
+        .validate()
+        .map_err(integrity_refusal)
+        .ok()?
+        .seal(&machine_context);
+    let graph = sealed.graph().clone();
     (!graph.blocks.is_empty()).then_some(graph)
 }
 
@@ -515,6 +491,18 @@ impl SsaArtifact {
     #[cfg(test)]
     fn new(function: SSAFunction) -> Self {
         Self::new_with_context(function, SourceMachineContext::from_blocks(&[], None))
+    }
+
+    /// The artifact of a function a test prepared itself.
+    #[cfg(test)]
+    fn from_prepared(prepared: Prepared, machine_context: SourceMachineContext) -> Self {
+        Self::seal_with_provenance(
+            prepared,
+            machine_context,
+            SsaArtifactProvenance::Manual,
+            &UncheckedSsaWorkControl,
+        )
+        .expect("an unchecked control never stops")
     }
 
     fn new_with_context(function: SSAFunction, machine_context: SourceMachineContext) -> Self {
@@ -536,94 +524,30 @@ impl SsaArtifact {
     }
 
     fn new_with_context_control_and_provenance<C: SsaWorkControl + ?Sized>(
-        mut function: SSAFunction,
+        function: SSAFunction,
+        machine_context: SourceMachineContext,
+        provenance: SsaArtifactProvenance,
+        control: &C,
+    ) -> Result<Self, SsaPrepareError> {
+        control.poll()?;
+        let prepared = Lifted::new(function)
+            .validate()
+            .map_err(integrity_refusal)?;
+        Self::seal_with_provenance(prepared, machine_context, provenance, control)
+    }
+
+    /// Seal a prepared function and derive the artifact's facts from it.
+    fn seal_with_provenance<C: SsaWorkControl + ?Sized>(
+        prepared: Prepared,
         machine_context: SourceMachineContext,
         provenance: SsaArtifactProvenance,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
-        let graph = prepare_graph(&mut function, &machine_context)?;
-        let return_storages = machine_context
-            .abi_model()
-            .return_registers()
-            .iter()
-            .map(|slot| slot.storage())
-            .collect::<Vec<_>>();
-        let live_out =
-            crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
-        let mut content = crate::liveness::ValueContent::of(&graph, Some(&machine_context));
-        let mut liveness =
-            crate::liveness::ValueLiveness::compute(&graph, &live_out, content.clone());
-        let storage_spans = StorageSpans::compute(&graph, &liveness);
-        let graph_built_bytes = r2il::allocation::live_bytes();
-        let facts = PreparedFunctionFacts::collect_with_context_and_control(
-            crate::semantic::CollectionOver {
-                function: &function,
-                graph: &graph,
-                storage_spans: &storage_spans,
-                assumptions: &AssumptionSet::default(),
-                machine_context: Some(&machine_context),
-                site: "prepare",
-            },
-            control,
-        )?;
-        // What one prepared function holds is the space every later stage has
-        // to work above, so it is reported beside the phases that built it.
-        r2il::refusal_evidence!(
-            "prepare-held",
-            "{:#x}/{} holds {} bytes after preparation: function+graph {} facts {}",
-            function.entry,
-            function.num_blocks(),
-            r2il::allocation::live_bytes().saturating_sub(prepare_entry_bytes),
-            graph_built_bytes.saturating_sub(prepare_entry_bytes),
-            r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
-        );
-        // Two reads of the same bytes that the same memory reaches are one
-        // content, which the graph cannot see and the memory facts can. The
-        // spans above were judged without this and are at worst finer.
-        content.declare_same_content(&same_content_reads(&facts.structured, &facts.memory));
-        // A call's conventional read of a register the certified call does
-        // not pass is not a read the text performs, and held values live
-        // across every call that the machine merely might have read. The
-        // spans above were judged with those reads and are at worst finer.
-        let ignored_reads = uncertified_call_reads(&graph, &facts.boundaries);
-        liveness = crate::liveness::ValueLiveness::compute_with_relocations(
-            &graph,
-            &live_out,
-            &std::collections::BTreeMap::new(),
-            content,
-            &ignored_reads,
-        );
-        function.install_formal_parameter_identity(&graph, &facts.addresses);
-        let unobserved_merges = crate::deadphi::DeadPhis::find(&graph, &live_out, &facts);
-        let aggregate_accesses = collect_aggregate_access_projections(
-            &graph,
-            &facts.addresses,
-            &facts.structured.memory_accesses,
-            &machine_context,
-        );
-        control.poll()?;
-        let mut artifact = Self {
-            authority: SsaArtifactAuthority::new(),
-            provenance,
-            function,
-            graph,
-            liveness: ArtifactLiveness {
-                storage_spans,
-                live_out,
-                values: liveness,
-                ignored_reads,
-            },
-            unobserved_merges,
-            facts,
-            machine_context,
-            aggregate_accesses,
-            spellings: ArtifactSpellings {
-                display_names: r2source::DisplayNames::default(),
-                user_operations: Arc::from([] as [String; 0]),
-            },
-        };
+        let sealed = prepared.seal(&machine_context);
+        let mut artifact =
+            sealed.into_artifact(machine_context, provenance, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
         Ok(artifact)
     }
@@ -704,10 +628,7 @@ impl SsaArtifact {
     }
 
     pub fn for_decompile(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
-        Some(Self::new_with_context(
-            SSAFunction::from_blocks_for_decompile(blocks, arch)?,
-            SourceMachineContext::from_blocks(blocks, arch),
-        ))
+        Self::for_decompile_with_control(blocks, arch, &UncheckedSsaWorkControl).ok()
     }
 
     /// Build a complete decompiler SSA artifact under cooperative control.
@@ -719,10 +640,23 @@ impl SsaArtifact {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let function = SSAFunction::from_blocks_for_decompile_with_control(blocks, arch, control)?;
-        control.poll()?;
         let machine_context = SourceMachineContext::from_blocks(blocks, arch);
-        Self::new_with_context_and_control(function, machine_context, control)
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            blocks,
+            arch,
+            InterfaceQuestions::none(),
+            &machine_context,
+            &CalleeBoundaries::default(),
+            None,
+            control,
+        )?;
+        control.poll()?;
+        Self::seal_with_provenance(
+            function,
+            machine_context,
+            SsaArtifactProvenance::Manual,
+            control,
+        )
     }
 
     /// Build decompiler-prepared SSA with an explicit function interface.
@@ -796,23 +730,29 @@ impl SsaArtifact {
             call_site_interfaces,
             tail_call_identities,
         );
-        Some(Self::new_with_context(
-            SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-                blocks,
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            blocks,
+            arch,
+            InterfaceQuestions::new(&machine_context),
+            &machine_context,
+            &CalleeBoundaries::from_interfaces(
                 arch,
-                InterfaceQuestions::new(&machine_context),
-                &machine_context,
-                &CalleeBoundaries::from_interfaces(
-                    arch,
-                    &callee_preserved_carriers,
-                    &callee_interfaces,
-                ),
-                None,
+                &callee_preserved_carriers,
+                &callee_interfaces,
+            ),
+            None,
+            &UncheckedSsaWorkControl,
+        )
+        .ok()?;
+        Some(
+            Self::seal_with_provenance(
+                function,
+                machine_context,
+                SsaArtifactProvenance::Manual,
                 &UncheckedSsaWorkControl,
             )
-            .ok()?,
-            machine_context,
-        ))
+            .expect("internal SSA artifact construction requires a validated function"),
+        )
     }
 
     /// Build controlled decompiler SSA from explicit source interfaces, machine roles and call effect.
@@ -844,7 +784,12 @@ impl SsaArtifact {
             control,
         )?;
         control.poll()?;
-        Self::new_with_context_and_control(function, machine_context, control)
+        Self::seal_with_provenance(
+            function,
+            machine_context,
+            SsaArtifactProvenance::Manual,
+            control,
+        )
     }
 
     /// Build analysis-only decompiler SSA directly from an immutable genuine lift.
@@ -896,7 +841,7 @@ impl SsaArtifact {
             return Err(malformed_ssa_input());
         }
         control.poll()?;
-        let mut artifact = Self::new_with_context_control_and_provenance(
+        let mut artifact = Self::seal_with_provenance(
             function,
             machine_context,
             SsaArtifactProvenance::GenuineLiftOnly,
@@ -968,8 +913,7 @@ impl SsaArtifact {
         function_interface: Option<SourceFunctionInterface>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
-        let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
-        function.refresh_decompile_prep_facts();
+        let function = SSAFunction::from_blocks_raw(blocks, arch)?;
         Some(Self::new_with_context(
             function,
             SourceMachineContext::from_blocks_with_interfaces(
@@ -985,7 +929,13 @@ impl SsaArtifact {
     }
 
     pub fn function(&self) -> &SSAFunction {
-        &self.function
+        self.sealed.function()
+    }
+
+    /// The decompiler-prep facts, collected once when the function was
+    /// sealed.
+    pub fn decompile_prep_facts(&self) -> &DecompilePrepFacts {
+        self.sealed.decompile_prep_facts()
     }
 
     /// What the calling convention says this function's caller may read.
@@ -1041,7 +991,7 @@ impl SsaArtifact {
         members: &std::collections::BTreeSet<crate::ValueId>,
     ) -> std::collections::BTreeSet<crate::ValueId> {
         let storage_of = |value: crate::ValueId| {
-            self.graph
+            self.graph()
                 .value(value)
                 .and_then(|value| value.canonical_storage)
                 .filter(|storage| !storage.is_unknown())
@@ -1074,7 +1024,7 @@ impl SsaArtifact {
                 if crate::mirror::carrier_mirrors_memory(
                     structured,
                     objects,
-                    &self.graph,
+                    self.graph(),
                     loop_fact,
                     &members,
                 ) {
@@ -1121,11 +1071,7 @@ impl SsaArtifact {
     }
 
     pub fn graph(&self) -> &SsaGraph {
-        &self.graph
-    }
-
-    pub fn into_function(self) -> SSAFunction {
-        self.function
+        self.sealed.graph()
     }
 
     pub fn facts(&self) -> &PreparedFunctionFacts {
@@ -1155,15 +1101,16 @@ impl SsaArtifact {
 
     pub fn with_assumptions(&self, assumptions: &AssumptionSet) -> Self {
         let facts = PreparedFunctionFacts::collect_with_context(
-            &self.function,
-            &self.graph,
+            self.function(),
+            Some(self.decompile_prep_facts()),
+            self.graph(),
             self.liveness.storage_spans(),
             assumptions,
             &self.machine_context,
             "assume",
         );
         let aggregate_accesses = collect_aggregate_access_projections(
-            &self.graph,
+            self.graph(),
             &facts.addresses,
             &facts.structured.memory_accesses,
             &self.machine_context,
@@ -1171,8 +1118,7 @@ impl SsaArtifact {
         Self {
             authority: SsaArtifactAuthority::new(),
             provenance: SsaArtifactProvenance::Manual,
-            function: self.function.clone(),
-            graph: self.graph.clone(),
+            sealed: self.sealed.clone(),
             liveness: self.liveness.clone(),
             unobserved_merges: self.unobserved_merges.clone(),
             facts,
@@ -1347,7 +1293,7 @@ impl SsaArtifact {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&CallsiteCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
+        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let callsite = self.facts.certificates.callsites_by_inst.get(&inst)?;
         self.facts.certificates.callsites.get(callsite)
     }
@@ -1421,8 +1367,8 @@ impl SsaArtifact {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&StackReloadSourceCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
-        let value = self.graph.inst(inst)?.output?;
+        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
+        let value = self.graph().inst(inst)?.output?;
         self.facts.certificates.stack_reloads.get(&value)
     }
 
@@ -1438,7 +1384,7 @@ impl SsaArtifact {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&CallResultCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
+        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let value = self.facts.certificates.call_results_by_inst.get(&inst)?;
         self.facts.certificates.call_results.get(value)
     }
@@ -1462,7 +1408,7 @@ impl SsaArtifact {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&ReturnValueCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
+        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let index = self.facts.certificates.returns_by_inst.get(&inst)?;
         self.facts.certificates.returns.get(*index)
     }
@@ -1470,7 +1416,7 @@ impl SsaArtifact {
     pub fn resolved_call_target(&self, call: &crate::semantic::CallSiteFact) -> Option<u64> {
         call.direct_target.or_else(|| {
             let value_id = canonical_root_value_id(self, call.target);
-            let value = self.graph.value(value_id)?;
+            let value = self.graph().value(value_id)?;
             value.var.constant_bits().or_else(|| {
                 value.canonical_storage.and_then(|storage| {
                     matches!(
@@ -1493,7 +1439,7 @@ impl SsaArtifact {
     pub fn folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
         crate::constant::prepared_folded_value(
             self.graph(),
-            self.function().decompile_prep_facts(),
+            Some(self.decompile_prep_facts()),
             value_id,
         )
     }
@@ -1506,7 +1452,7 @@ impl SsaArtifact {
     }
 
     pub fn value_var(&self, value_id: crate::graph::ValueId) -> Option<&SSAVar> {
-        self.graph.value(value_id).map(|value| &value.var)
+        self.graph().value(value_id).map(|value| &value.var)
     }
 
     /// Exact stack-relative coordinate proved for one artifact-local SSA value.
@@ -1519,7 +1465,7 @@ impl SsaArtifact {
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<StackAddressRoot> {
-        let facts = self.function.decompile_prep_facts()?;
+        let facts = self.decompile_prep_facts();
         let value = self.value_var(value_id)?;
         facts.stack_address_root_of(value).copied().or_else(|| {
             let root = canonical_root_value_id(self, value_id);
@@ -1548,8 +1494,8 @@ impl SsaArtifact {
                 .map(|(name, storage)| (name.as_str(), storage.offset, storage.size)),
         );
         let mut entries_by_family = HashMap::<usize, usize>::new();
-        for value in &self.graph.values {
-            if value.var.version != 0 || self.graph.def_inst(value.id).is_some() {
+        for value in &self.graph().values {
+            if value.var.version != 0 || self.graph().def_inst(value.id).is_some() {
                 continue;
             }
             let Some(storage) = value
@@ -1571,7 +1517,7 @@ impl SsaArtifact {
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<StackAddressRoot> {
-        let facts = self.function.decompile_prep_facts()?;
+        let facts = self.decompile_prep_facts();
         let value = self.value_var(value_id)?;
         facts
             .entry_stack_address_root_of(value)
@@ -1585,11 +1531,11 @@ impl SsaArtifact {
     }
 
     pub fn inst_op_site(&self, inst_id: crate::graph::InstId) -> Option<(u64, usize)> {
-        self.graph.op_site_for_inst(inst_id)
+        self.graph().op_site_for_inst(inst_id)
     }
 
     pub fn object_for_var(&self, var: &SSAVar, space: r2il::SpaceId) -> Option<ObjectId> {
-        self.graph
+        self.graph()
             .value_id_for_var(var)
             .and_then(|value_id| self.objects().object_for_value(value_id, space))
     }
@@ -1599,7 +1545,7 @@ impl SsaArtifact {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&[MemoryUseFact]> {
-        self.graph
+        self.graph()
             .inst_id_for_op_site(block_addr, op_idx)
             .and_then(|inst_id| self.memory().uses_by_inst.get(&inst_id))
             .map(|facts| facts.as_slice())
@@ -1610,19 +1556,19 @@ impl SsaArtifact {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&[MemoryDefFact]> {
-        self.graph
+        self.graph()
             .inst_id_for_op_site(block_addr, op_idx)
             .and_then(|inst_id| self.memory().defs_by_inst.get(&inst_id))
             .map(|facts| facts.as_slice())
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.function = self.function.with_name(name);
+        self.sealed = self.sealed.named(name.into());
         self
     }
 
     pub fn local_ssa_blocks(&self) -> &[LocalSSABlock] {
-        self.function.blocks()
+        self.function().blocks()
     }
 }
 
@@ -2205,8 +2151,14 @@ impl TrustedSsaArtifact {
                 // carrier handed straight to its callee. The latter is still
                 // a parameter even though implicit call reads leave no source
                 // operation behind.
+                // The preliminary function is analysed and dropped, never
+                // sealed, so its prep facts are its own and go with it.
+                let Ok(preliminary_prep) = preliminary.provisional_prep_facts(control) else {
+                    break 'recovered None;
+                };
                 let recovered = crate::recover_interface::recover_interface_with_context(
                     &preliminary,
+                    &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
                     source.function().loader_role(),
@@ -2291,13 +2243,13 @@ impl TrustedSsaArtifact {
         // function was named.
         let presented = source.presentation().display_name();
         if !r2source::display_names::is_generated_function_name(presented) {
-            function = function.with_name(presented);
+            function = function.named(presented.to_string());
         }
         if function.entry != source.image().entry_address() {
             return Err(malformed_ssa_input());
         }
         control.poll()?;
-        let mut artifact = SsaArtifact::new_with_context_control_and_provenance(
+        let mut artifact = SsaArtifact::seal_with_provenance(
             function,
             machine_context,
             SsaArtifactProvenance::TrustedSource(source),
@@ -2382,9 +2334,7 @@ pub(crate) fn canonical_root_value_id(
     prepared: &SsaArtifact,
     value_id: crate::graph::ValueId,
 ) -> crate::graph::ValueId {
-    let Some(facts) = prepared.function().decompile_prep_facts() else {
-        return value_id;
-    };
+    let facts = prepared.decompile_prep_facts();
     let Some(start) = prepared.value_var(value_id) else {
         return value_id;
     };
@@ -2398,7 +2348,7 @@ impl Deref for SsaArtifact {
     type Target = SSAFunction;
 
     fn deref(&self) -> &Self::Target {
-        &self.function
+        self.function()
     }
 }
 
@@ -2523,11 +2473,6 @@ pub struct SSAFunction {
     /// variable, valued by the root's storage. The rebuild restates what the
     /// caller passed; it is no write the body made.
     formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
-    /// Optional decompiler-prep fact snapshot for the current SSA state.
-    decompile_prep_facts: Option<DecompilePrepFacts>,
-    /// The interface the prep facts were last collected with, to collect them
-    /// again after a rewrite.
-    prep_interface: Option<SourceFunctionInterface>,
     /// Structural def/use index for repeated SSA queries.
     query_index: RwLock<Option<SsaQueryIndex>>,
 }
@@ -2729,6 +2674,7 @@ impl SSAFunction {
     /// One block, open for change with the arena; for applying a plan.
     fn block_for_change(&mut self, addr: u64) -> Option<BlockMut<'_>> {
         let index = *self.block_index.get(&addr)? as usize;
+        self.invalidate_query_index();
         self.blocks.block_mut(index)
     }
 
@@ -2742,12 +2688,24 @@ impl SSAFunction {
         self.block_order = self.cfg.reverse_postorder();
         self.reorder_blocks();
         self.domtree = DomTree::compute(&self.cfg);
-        self.decompile_prep_facts = None;
     }
 }
 
 #[cfg(test)]
 impl SSAFunction {
+    /// The prep facts of this function as it stands, with no interface, for
+    /// a test that reads them off a function it does not seal.
+    pub(crate) fn prep_facts_for_test(&self) -> DecompilePrepFacts {
+        self.collect_decompile_prep_facts_with_control(None, &UncheckedSsaWorkControl)
+            .expect("an unchecked control never stops")
+    }
+
+    /// One block, open for change, for a test that writes a fixture a block
+    /// at a time; outside tests a block opens only on a [`Lifted`] function.
+    pub(crate) fn edit_block(&mut self, addr: u64) -> Option<BlockMut<'_>> {
+        self.block_for_change(addr)
+    }
+
     /// The control-flow graph, open for a test that corrupts it to show the
     /// validator refuses what follows.
     pub(crate) fn corrupt_cfg(&mut self) -> &mut CFG {
@@ -2793,8 +2751,6 @@ impl Clone for SSAFunction {
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
-            decompile_prep_facts: self.decompile_prep_facts.clone(),
-            prep_interface: self.prep_interface.clone(),
             query_index: RwLock::new(None),
         }
     }
@@ -3343,17 +3299,6 @@ impl SSAFunction {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
-    /// Get a mutable block by address.
-    ///
-    /// What the block gains is minted an id and what it loses is
-    /// tombstoned, through the arena the returned view carries.
-    pub fn get_block_mut(&mut self, addr: u64) -> Option<BlockMut<'_>> {
-        let index = *self.block_index.get(&addr)? as usize;
-        self.invalidate_query_index();
-        self.decompile_prep_facts = None;
-        self.blocks.block_mut(index)
-    }
-
     /// All blocks in reverse postorder.
     pub fn blocks(&self) -> &[SSABlock] {
         &self.blocks
@@ -3586,50 +3531,6 @@ impl SSAFunction {
         validate_ssa_function(self)
     }
 
-    /// Snapshot the current decompiler-prep fact view, if available.
-    ///
-    /// Facts computed from blocks that have since been rewritten describe an
-    /// IR that no longer exists, and answering with them is how one value
-    /// came to have two identities. That is a defect in whichever rewrite did
-    /// not refresh them, so it stops here, loudly: the engine's isolation
-    /// boundary turns the panic into this function's refusal, naming where.
-    pub fn decompile_prep_facts(&self) -> Option<&DecompilePrepFacts> {
-        let facts = self.decompile_prep_facts.as_ref()?;
-        assert_eq!(
-            facts.revision,
-            self.blocks.revision(),
-            "the prep facts of {:#x} were collected at IR revision {:?} and read at {:?}: \
-             a rewrite did not refresh them",
-            self.entry,
-            facts.revision,
-            self.blocks.revision()
-        );
-        Some(facts)
-    }
-
-    /// Collect the prep facts again over the blocks as they now are, with the
-    /// interface they were first collected with; nothing where none were.
-    ///
-    /// The rewrites after preparation -- boundary constants, entry lanes,
-    /// forwarded copies -- each change the blocks the facts describe, and the
-    /// facts are collected once after the last of them rather than patched by
-    /// each. O(collection), once per prepared function.
-    pub(crate) fn recollect_decompile_prep_facts(&mut self) {
-        if self.decompile_prep_facts.is_none() {
-            return;
-        }
-        let interface = self.prep_interface.clone();
-        self.refresh_decompile_prep_facts_with_interface_and_control(
-            interface.as_ref(),
-            &UncheckedSsaWorkControl,
-        )
-        .expect("unchecked decompiler fact collection cannot stop");
-    }
-
-    /// Install the canonical source-boundary parameter projection into the
-    /// decompiler preparation view. This deliberately accepts `ValueId`
-    /// facts, then resolves the already-built graph value back to its `SSAVar`;
-    /// no register spelling participates in slot identity.
     /// The storage an entry-lane projection stands for.
     pub fn formal_projection_storage(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
         self.formal_projections.get(var).copied()

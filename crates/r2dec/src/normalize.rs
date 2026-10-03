@@ -1967,19 +1967,14 @@ fn remove_phi_edge_operation(
     func: &mut r2ssa::RewrittenFunction<'_>,
     block: u64,
     rows: &mut Vec<NormalizedOpOrigin>,
-    definition: OriginalPhiDefinition,
-    entity: r2ssa::SemanticId,
-    site: UseSite,
+    is_edge: impl Fn(&PhiEdgeOrigin) -> bool,
 ) -> Option<PhiEdgeOrigin> {
     if func.get_block(block)?.len() != rows.len() {
         return None;
     }
-    let row_idx = rows.iter().position(|origin| {
-        matches!(origin, NormalizedOpOrigin::PhiEdgeCopy(edge)
-            if edge.incoming == site
-                && edge.definition == definition
-                && edge.certified_entity == Some(entity))
-    })?;
+    let row_idx = rows.iter().position(
+        |origin| matches!(origin, NormalizedOpOrigin::PhiEdgeCopy(edge) if is_edge(edge)),
+    )?;
     func.remove_op(block, row_idx, r2ssa::Pass::RelocateInitializer)?;
     match rows.remove(row_idx) {
         NormalizedOpOrigin::PhiEdgeCopy(origin) => Some(origin),
@@ -2145,9 +2140,11 @@ pub(crate) fn materialize_certified_loop_carrier_initializers_with_control(
                 origins
                     .rows_mut(*block_id)
                     .ok_or(NormalizationOriginError::BlockTopology)?,
-                definition,
-                *id,
-                *site,
+                |edge| {
+                    edge.incoming == *site
+                        && edge.definition == definition
+                        && edge.certified_entity == Some(*id)
+                },
             )
             .ok_or(NormalizationOriginError::RemovedPhiEdge)?;
             origins.replaced_phi_edges.push(removed_edge);
@@ -2261,17 +2258,15 @@ mod tests {
         let mut func = r2ssa::RewrittenFunction::new(&source, vec![block]);
         let mut rows = vec![edge(0), edge(1)];
 
-        let removed = remove_phi_edge_operation(
-            &mut func,
-            0x1000,
-            &mut rows,
-            definition,
-            entity,
-            UseSite {
-                inst: definition.inst,
-                input_idx: 0,
-            },
-        )
+        let removed = remove_phi_edge_operation(&mut func, 0x1000, &mut rows, |edge| {
+            edge.incoming
+                == UseSite {
+                    inst: definition.inst,
+                    input_idx: 0,
+                }
+                && edge.definition == definition
+                && edge.certified_entity == Some(entity)
+        })
         .expect("certified occurrence");
 
         assert_eq!(removed.incoming.input_idx, 0);
@@ -2527,8 +2522,8 @@ mod tests {
         let hash_4 = SSAVar::new("RAX", 4, 8);
         let cond = SSAVar::new("tmp:cond", 1, 1);
 
-        let mut func = loop_backedge_phi_fixture();
-        func.get_block_mut(0x1000).expect("entry").replace_ops(
+        let mut func = r2ssa::Lifted::new(loop_backedge_phi_fixture());
+        func.edit_block(0x1000).expect("entry").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::Copy {
@@ -2541,7 +2536,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x1004).expect("header").replace_phis(
+        func.edit_block(0x1004).expect("header").replace_phis(
             r2ssa::Pass::Fixture,
             vec![PhiNode {
                 dst: hash_2.clone(),
@@ -2549,14 +2544,14 @@ mod tests {
                 canonical_storage: None,
             }],
         );
-        func.get_block_mut(0x1004).expect("header").replace_ops(
+        func.edit_block(0x1004).expect("header").replace_ops(
             r2ssa::Pass::Fixture,
             vec![SSAOp::Branch {
                 target: SSAVar::new("ram:1008", 0, 8),
                 instruction: None,
             }],
         );
-        func.get_block_mut(0x1008).expect("latch").replace_ops(
+        func.edit_block(0x1008).expect("latch").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::IntAdd {
@@ -2575,7 +2570,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x100c).expect("exit").replace_ops(
+        func.edit_block(0x100c).expect("exit").replace_ops(
             r2ssa::Pass::Fixture,
             vec![SSAOp::Return {
                 target: SSAVar::new("const:0", 0, 8),
@@ -2603,8 +2598,8 @@ mod tests {
     fn self_phi_input_is_projected_as_an_explicit_noop_use() {
         let entry_value = SSAVar::new("RAX", 1, 8);
         let phi_value = SSAVar::new("RAX", 2, 8);
-        let mut func = loop_backedge_phi_fixture();
-        func.get_block_mut(0x1000).expect("entry").replace_ops(
+        let mut func = r2ssa::Lifted::new(loop_backedge_phi_fixture());
+        func.edit_block(0x1000).expect("entry").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::Copy {
@@ -2617,7 +2612,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x1004).expect("header").replace_phis(
+        func.edit_block(0x1004).expect("header").replace_phis(
             r2ssa::Pass::Fixture,
             vec![PhiNode {
                 dst: phi_value.clone(),
@@ -2625,14 +2620,14 @@ mod tests {
                 canonical_storage: None,
             }],
         );
-        func.get_block_mut(0x1004).expect("header").replace_ops(
+        func.edit_block(0x1004).expect("header").replace_ops(
             r2ssa::Pass::Fixture,
             vec![SSAOp::Branch {
                 target: SSAVar::new("ram:1008", 0, 8),
                 instruction: None,
             }],
         );
-        func.get_block_mut(0x1008).expect("latch").replace_ops(
+        func.edit_block(0x1008).expect("latch").replace_ops(
             r2ssa::Pass::Fixture,
             vec![SSAOp::CBranch {
                 target: SSAVar::new("ram:1004", 0, 8),
@@ -2671,8 +2666,8 @@ mod tests {
         let hash_4 = SSAVar::new("RAX", 4, 8);
         let cond = SSAVar::new("tmp:cond", 1, 1);
 
-        let mut func = loop_backedge_phi_fixture();
-        func.get_block_mut(0x1000).expect("entry").replace_ops(
+        let mut func = r2ssa::Lifted::new(loop_backedge_phi_fixture());
+        func.edit_block(0x1000).expect("entry").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::Copy {
@@ -2685,7 +2680,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x1004).expect("header").replace_phis(
+        func.edit_block(0x1004).expect("header").replace_phis(
             r2ssa::Pass::Fixture,
             vec![PhiNode {
                 dst: hash_2.clone(),
@@ -2693,14 +2688,14 @@ mod tests {
                 canonical_storage: None,
             }],
         );
-        func.get_block_mut(0x1004).expect("header").replace_ops(
+        func.edit_block(0x1004).expect("header").replace_ops(
             r2ssa::Pass::Fixture,
             vec![SSAOp::Branch {
                 target: SSAVar::new("ram:1008", 0, 8),
                 instruction: None,
             }],
         );
-        func.get_block_mut(0x1008).expect("latch").replace_ops(
+        func.edit_block(0x1008).expect("latch").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::IntAdd {
@@ -2719,7 +2714,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x100c).expect("exit").replace_ops(
+        func.edit_block(0x100c).expect("exit").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::Copy {
@@ -2832,8 +2827,8 @@ mod tests {
         let value_1 = SSAVar::new("RAX", 1, 8);
         let value_2 = SSAVar::new("RAX", 2, 8);
         let value_4 = SSAVar::new("RAX", 4, 8);
-        let mut func = loop_backedge_phi_fixture();
-        func.get_block_mut(0x1000).expect("entry").replace_ops(
+        let mut func = r2ssa::Lifted::new(loop_backedge_phi_fixture());
+        func.edit_block(0x1000).expect("entry").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::Copy {
@@ -2846,7 +2841,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x1004).expect("header").replace_phis(
+        func.edit_block(0x1004).expect("header").replace_phis(
             r2ssa::Pass::Fixture,
             vec![PhiNode {
                 dst: value_2.clone(),
@@ -2854,14 +2849,14 @@ mod tests {
                 canonical_storage: None,
             }],
         );
-        func.get_block_mut(0x1004).expect("header").replace_ops(
+        func.edit_block(0x1004).expect("header").replace_ops(
             r2ssa::Pass::Fixture,
             vec![SSAOp::Branch {
                 target: SSAVar::new("ram:1008", 0, 8),
                 instruction: None,
             }],
         );
-        func.get_block_mut(0x1008).expect("latch").replace_ops(
+        func.edit_block(0x1008).expect("latch").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::IntAdd {
@@ -2898,8 +2893,8 @@ mod tests {
     fn keep_parallel_phi_bundle_when_moves_are_cyclic() {
         let a = SSAVar::new("RAX", 2, 8);
         let b = SSAVar::new("RBX", 2, 8);
-        let mut func = loop_backedge_phi_fixture();
-        func.get_block_mut(0x1000).expect("entry").replace_ops(
+        let mut func = r2ssa::Lifted::new(loop_backedge_phi_fixture());
+        func.edit_block(0x1000).expect("entry").replace_ops(
             r2ssa::Pass::Fixture,
             vec![
                 SSAOp::Copy {
@@ -2916,7 +2911,7 @@ mod tests {
                 },
             ],
         );
-        func.get_block_mut(0x1004).expect("header").replace_phis(
+        func.edit_block(0x1004).expect("header").replace_phis(
             r2ssa::Pass::Fixture,
             vec![
                 PhiNode {

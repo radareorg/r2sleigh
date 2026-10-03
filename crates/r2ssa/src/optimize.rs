@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::control::{SsaExecutionStopReason, SsaWorkControl, UncheckedSsaWorkControl};
+use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::function::{EditPlan, ShapeEdit};
 use crate::{
     BlockTerminator, CanonicalStorageId, CanonicalStorageSpace, PhiNode, SSAFunction, SSAOp,
@@ -78,11 +78,12 @@ pub struct OptimizationStats {
 }
 
 /// Run the SSA optimization pipeline on a function.
+#[cfg(test)]
 pub(crate) fn optimize_function(
     func: &mut SSAFunction,
     config: &OptimizationConfig,
 ) -> OptimizationStats {
-    optimize_function_with_control(func, config, &UncheckedSsaWorkControl)
+    optimize_function_with_control(func, config, &crate::control::UncheckedSsaWorkControl)
         .expect("unchecked SSA optimization cannot stop")
 }
 
@@ -384,7 +385,8 @@ fn evaluate_terminator_sccp(
 
 #[cfg(test)]
 fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
-    sccp_with_control(func, &UncheckedSsaWorkControl).expect("unchecked SCCP cannot stop")
+    sccp_with_control(func, &crate::control::UncheckedSsaWorkControl)
+        .expect("unchecked SCCP cannot stop")
 }
 
 fn sccp_with_control<C: SsaWorkControl + ?Sized>(

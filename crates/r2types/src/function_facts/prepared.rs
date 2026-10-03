@@ -1565,14 +1565,12 @@ impl<'a> AddressBases<'a> {
         }
         // The same address under another name: a copy, a zero extension, a
         // merge of copies.
-        if let Some(facts) = prepared.function().decompile_prep_facts() {
-            let root = facts.same_integer_root(var);
-            if root != var {
-                return match graph.value_id_for_var(root) {
-                    Some(root) => AddressStep::Displaced(root, 0),
-                    None => AddressStep::Settled(None),
-                };
-            }
+        let root = prepared.decompile_prep_facts().same_integer_root(var);
+        if root != var {
+            return match graph.value_id_for_var(root) {
+                Some(root) => AddressStep::Displaced(root, 0),
+                None => AddressStep::Settled(None),
+            };
         }
         if let Some(reload) = prepared
             .stack_reload_certificate_for_value(value)

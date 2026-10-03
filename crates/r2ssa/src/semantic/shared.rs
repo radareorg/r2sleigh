@@ -607,12 +607,17 @@ pub(crate) fn induction_step_for_update(
 /// be reconstructed here. A call the convention does not restore has no such
 /// record, and the position is then unknown.
 pub(crate) fn call_entering_stack_pointer_offset(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    block: &crate::function::SSABlock,
-    call_op_index: usize,
-    calls_move_stack_pointer: bool,
+    at: super::boundaries::CallPosition<'_>,
 ) -> Option<(StackAddressRoot, bool)> {
+    let super::boundaries::CallPosition {
+        function,
+        prep,
+        graph,
+        block_addr,
+        op_index: call_op_index,
+        calls_move_stack_pointer,
+    } = at;
+    let block = function.get_block(block_addr)?;
     let recorded = block
         .ops()
         .get(call_op_index.checked_add(1)?..)?
@@ -639,6 +644,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
             };
             match reaching_stack_pointer_before(
                 function,
+                prep,
                 graph,
                 storage,
                 block.addr,
@@ -667,7 +673,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
         }
     };
     let entering = &entering;
-    let Some(root) = resolve_entry_stack_root(function.decompile_prep_facts(), entering) else {
+    let Some(root) = resolve_entry_stack_root(prep, entering) else {
         r2il::refusal_evidence!(
             "call-entering-stack-pointer",
             "call at ({:#x}, {call_op_index}) found {entering}, which has no entry-relative root; \
@@ -711,8 +717,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                 let mut chain = Vec::new();
                 let mut cursor = Some(entering.clone());
                 while let Some(var) = cursor.take() {
-                    let rooted =
-                        resolve_entry_stack_root(function.decompile_prep_facts(), &var).is_some();
+                    let rooted = resolve_entry_stack_root(prep, &var).is_some();
                     let Some((_, text, sources)) = defs.iter().find(|(dst, _, _)| *dst == var)
                     else {
                         chain.push(format!("{var}=<no def> rooted={rooted}"));
@@ -724,8 +729,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                         .map(|source| {
                             format!(
                                 "{source}:{:?}",
-                                resolve_entry_stack_root(function.decompile_prep_facts(), source)
-                                    .map(|root| root.offset)
+                                resolve_entry_stack_root(prep, source).map(|root| root.offset)
                             )
                         })
                         .collect::<Vec<_>>();
@@ -737,20 +741,15 @@ pub(crate) fn call_entering_stack_pointer_offset(
                         .iter()
                         .find(|source| {
                             source.name() == var.name()
-                                && resolve_entry_stack_root(function.decompile_prep_facts(), source)
-                                    .is_none()
+                                && resolve_entry_stack_root(prep, source).is_none()
                         })
                         .or_else(|| sources.iter().find(|source| source.name() == var.name()))
                         .cloned();
                 }
                 chain
             },
-            function
-                .decompile_prep_facts()
-                .map_or(0, |facts| facts.entry_stack_address_roots.len()),
-            function
-                .decompile_prep_facts()
-                .map_or(0, |facts| facts.stack_address_roots.len())
+            prep.map_or(0, |facts| facts.entry_stack_address_roots.len()),
+            prep.map_or(0, |facts| facts.stack_address_roots.len())
         );
         return None;
     };
@@ -874,6 +873,7 @@ pub(crate) fn projected_logical_register_storage(
 
 pub(crate) fn reaching_abi_value_in_block(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
     block_addr: u64,
@@ -882,6 +882,7 @@ pub(crate) fn reaching_abi_value_in_block(
 ) -> Option<ValueId> {
     reaching_abi_value_in_block_with_policy(
         function,
+        prep,
         graph,
         machine_context,
         block_addr,
@@ -899,6 +900,7 @@ pub(crate) fn reaching_abi_value_in_block(
 /// but no machine context of its own.
 pub(crate) fn reaching_stack_pointer_before(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     storage: CanonicalStorageId,
     block_addr: u64,
@@ -908,6 +910,7 @@ pub(crate) fn reaching_stack_pointer_before(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
+        prep,
         graph,
         storage,
         policy: ReachingAbiPolicy {
@@ -931,6 +934,7 @@ pub(crate) fn reaching_stack_pointer_before(
 
 pub(crate) fn reaching_abi_value_in_block_with_policy(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
     block_addr: u64,
@@ -941,6 +945,7 @@ pub(crate) fn reaching_abi_value_in_block_with_policy(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
+        prep,
         graph,
         storage,
         policy: ReachingAbiPolicy {
@@ -998,6 +1003,7 @@ pub(crate) fn reaching_abi_value_before(
 ) -> Option<ReachingAbiPath> {
     let ReachingAbi {
         function,
+        prep,
         graph,
         storage,
         policy,
@@ -1153,7 +1159,7 @@ pub(crate) fn reaching_abi_value_before(
             && phi
                 .inputs
                 .iter()
-                .all(|input| value_is_entry_stack_pointer(function, graph, *input, storage))
+                .all(|input| value_is_entry_stack_pointer(prep, graph, *input, storage))
         {
             return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
         }
@@ -1233,7 +1239,7 @@ pub(crate) fn reaching_abi_value_before(
 /// entry value itself, or one the geometry roots at the entry pointer with no
 /// offset.
 pub(crate) fn value_is_entry_stack_pointer(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     value: ValueId,
     storage: CanonicalStorageId,
@@ -1247,9 +1253,7 @@ pub(crate) fn value_is_entry_stack_pointer(
     {
         return true;
     }
-    function
-        .decompile_prep_facts()
-        .and_then(|facts| facts.entry_stack_address_root_of(&graph_value.var))
+    prep.and_then(|facts| facts.entry_stack_address_root_of(&graph_value.var))
         .is_some_and(|root| root.base == StackAddressBase::StackPointer && root.offset == 0)
 }
 

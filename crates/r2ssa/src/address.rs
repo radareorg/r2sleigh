@@ -254,6 +254,8 @@ impl AffineScalar {
 
 struct AddressCollector<'a> {
     function: &'a SSAFunction,
+    /// The function's prep facts, where it was prepared.
+    prep: Option<&'a crate::DecompilePrepFacts>,
     graph: &'a SsaGraph,
     /// Which values carry the same bits; absent only where no preparation
     /// ran, and then there is no formal to propagate either.
@@ -276,6 +278,7 @@ struct AddressCollector<'a> {
 impl<'a> AddressCollector<'a> {
     fn new(
         function: &'a SSAFunction,
+        prep: Option<&'a crate::DecompilePrepFacts>,
         graph: &'a SsaGraph,
         _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
@@ -286,7 +289,7 @@ impl<'a> AddressCollector<'a> {
             .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
             .collect();
         let mut expressions = BTreeMap::new();
-        if let Some(prep) = function.decompile_prep_facts() {
+        if let Some(prep) = prep {
             // Every formal, not only those that arrived at their ABI storage's
             // full width. A narrow parameter -- an `unsigned` in `w1` where
             // the convention names `x1` -- is a lane projection rather than a
@@ -329,8 +332,9 @@ impl<'a> AddressCollector<'a> {
             .count();
         Self {
             function,
+            prep,
             graph,
-            views: function.decompile_prep_facts().map(|prep| &prep.views),
+            views: prep.map(|prep| &prep.views),
             definitions,
             seeded: expressions.keys().copied().collect(),
             expressions,
@@ -643,7 +647,7 @@ impl<'a> AddressCollector<'a> {
     }
 
     fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
-        let prep = self.function.decompile_prep_facts()?;
+        let prep = self.prep?;
         prep.stack_address_root_of(var)
             .or_else(|| prep.stack_address_root_of(prep.canonical_root(var)))
             .copied()
@@ -762,10 +766,11 @@ fn signed_constant(var: &SSAVar) -> Option<i64> {
 
 pub(crate) fn collect_address_provenance(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> AddressProvenanceFacts {
-    AddressCollector::new(function, graph, machine_context).collect()
+    AddressCollector::new(function, prep, graph, machine_context).collect()
 }
 
 #[cfg(test)]

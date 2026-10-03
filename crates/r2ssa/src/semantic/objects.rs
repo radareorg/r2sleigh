@@ -10,16 +10,18 @@ pub(crate) struct AccessSummary {
 
 pub(crate) fn collect_object_and_memory_facts(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     addresses: &AddressProvenanceFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
     values: &crate::values::ValueRanges,
 ) -> (ObjectModel, MemorySSAFacts) {
-    let facts = function.decompile_prep_facts();
+    let facts = prep;
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
     let mut object_model = builder.build(function, graph, values);
-    object_model.frame_reach = FrameReach::of(function, graph, &object_model, machine_context);
+    object_model.frame_reach =
+        FrameReach::of(function, prep, graph, &object_model, machine_context);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
