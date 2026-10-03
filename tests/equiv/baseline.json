@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal.",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -50,8 +50,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::main": {
-   "status": "residual-trap",
-   "cause": "[P7] The run reaches a counted residual (r2sleigh_residual_void). Was ub."
+   "cause": "[P7] The run reaches a counted residual (r2sleigh_residual_void). Was ub.",
+   "reason": "r2sleigh_residual_void",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O0::mask_probe": {
    "status": "equal"
@@ -106,6 +107,7 @@
   },
   "tests/corpus/branchy.c::clang-O1::addr_chain": {
    "cause": "[PE] The result is narrowed to the inserted byte. The machine does xor eax,eax (0x4013dd), cmp rcx,0x506010, sete al, so RAX = INSERT(zero, ZF, 0). recovered_result (recover_interface.rs:759) takes narrow_zero_extend_input_size, whose Insert arm (:790-794) returns the 1-byte lane size. That yields uint8_t fcn_4013c0(void) for int addr_chain(void). A C function returning uint8_t leaves RAX bits 8..63 ABI-unspecified, while the original defines EAX as 0 or 1.",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O1::affine_probe": {
@@ -137,10 +139,12 @@
   },
   "tests/corpus/branchy.c::clang-O1::gate_three": {
    "cause": "[PE] The result is narrowed to the inserted byte. At 0x40115b-0x40115f the machine does xor eax,eax; or edx,esi; sete al. pdim shows RAX_1 = COPY const:0 and RAX_2 = INSERT(RAX_1, ZF_6, const:0). The Insert arm of narrow_zero_extend_input_size (recover_interface.rs:790-794) returns the 1-byte lane, so the rendering is uint8_t fcn_401150 while the source returns int. Bits 8..31 of EAX are unspecified in the C rendering but 0 in the original.",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O1::global_eq_guard": {
    "cause": "[PE] The result is narrowed to the inserted byte. At 0x40123c-0x401241 the machine does xor eax,eax; cmp ecx,0xb; sete al, which is INSERT(zero, flag, 0). recover_interface.rs:790-794 then yields uint8_t for an int function, so the upper result bytes are ABI-unspecified in the rendering.",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O1::half_stride": {
@@ -157,6 +161,7 @@
   },
   "tests/corpus/branchy.c::clang-O1::main": {
    "cause": "[PE (exact Insert transfer + forward definedness; covered insert chains projected root-free), deleting the one-shot zero_scratch_insert_roots heuristic] [G-LANES] `xorps xmm0,xmm0` (0x401431) lifts as four lane writes `XMM0_Dx = XMM0_Dx ^ XMM0_Dx`, which rename turns into INSERT^4 over entry XMM0_0 covering all 16 bytes. optimize.rs:1796 folds each x^x to 0 (pdim: `XMM0_1 = INSERT(XMM0_0, const:0, const:0)` .. `XMM0_4 = INSERT(XMM0_3, const:0, const:60)`), but nothing then removes the chain root once the windows cover it. deadphi.rs observed_input_bytes has no Insert arm (:251 `_ => whole`), and the machine projection has no rule that an insert whose root contributes no observed byte is its lane (the known gap of critique:lowering#4 and #1(...",
+   "reason": "r2sleigh_residual_u128",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O1::mask_probe": {
@@ -170,10 +175,12 @@
   },
   "tests/corpus/branchy.c::clang-O1::opaque_self_xor": {
    "cause": "[PE] The result is narrowed to the inserted byte. At 0x40120c-0x401214 the machine does xor eax,eax; cmp ecx,[0x404028]; setne al. recover_interface.rs:790-794 then renders uint8_t for int opaque_self_xor.",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O1::paired_sum_diff": {
    "cause": "[PE] The result width is narrowed to the lane of an INSERT whose base bytes are defined. The machine runs `xor eax,eax; ... sete al; ret`, so all of RAX is written (bits 8..63 = 0). The lift gives RAX_1 = COPY 0 (the zero idiom, which the lifter records as a 64-bit constant copy) and RAX_2 = INSERT(RAX_1, ZF_5, 0). recovered_result calls narrow_zero_extend_input_size, whose Insert arm treats an Insert at position 0 as a zero-extension and returns the lane size (1 byte), whatever the base is. The function is therefore declared `uint8_t fcn_401180(...)`. Compiled, the rendering defines only AL, so...",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/branchy.c::clang-O1::pure_zero_guard": {
@@ -193,6 +200,7 @@
   },
   "tests/corpus/branchy.c::clang-O1::slot_eq_guard": {
    "cause": "[PE] The result is narrowed to the inserted byte. At 0x401258-0x40125d the machine does xor eax,eax; cmp ecx,0xb; sete al. recover_interface.rs:790-794 then renders uint8_t for int slot_eq_guard.",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O1::tail_guard": {
@@ -212,6 +220,7 @@
   },
   "tests/corpus/branchy.c::clang-O2::addr_chain": {
    "cause": "[PE] The same as clang-O1: the xor eax,eax; cmp; sete al result is narrowed to uint8_t by the Insert arm of narrow_zero_extend_input_size (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O2::affine_probe": {
@@ -243,10 +252,12 @@
   },
   "tests/corpus/branchy.c::clang-O2::gate_three": {
    "cause": "[PE] The same as clang-O1: xor eax,eax then sete al becomes INSERT(0, ZF, 0), which is narrowed to uint8_t (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O2::global_eq_guard": {
    "cause": "[PE] The same as clang-O1: the sete into a zeroed EAX is narrowed to uint8_t (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O2::half_stride": {
@@ -263,6 +274,7 @@
   },
   "tests/corpus/branchy.c::clang-O2::main": {
    "cause": "[PE (exact Insert transfer + forward definedness; covered insert chains projected root-free), deleting the one-shot zero_scratch_insert_roots heuristic] [G-LANES] `xorps xmm0,xmm0` (0x40141f) lifts as four lane writes `XMM0_Dx = XMM0_Dx ^ XMM0_Dx`, which rename turns into INSERT^4 over entry XMM0_0 covering all 16 bytes. optimize.rs:1796 folds each x^x to 0, but nothing removes the covered chain root. deadphi.rs:251 has no Insert arm, and the projection has no rule for a root that contributes no observed byte (the known gap of critique:lowering#4 and #1). zero_scratch_insert_roots (r2ssa/src/function/rewrite.rs:26) runs once at build (r2ssa/src/function/build.rs:576), before the fold, while the lane Subpiece reads still count as Observed. T...",
+   "reason": "r2sleigh_residual_u128",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O2::mask_probe": {
@@ -276,10 +288,12 @@
   },
   "tests/corpus/branchy.c::clang-O2::opaque_self_xor": {
    "cause": "[PE] The same as clang-O1: the setne into a zeroed EAX is narrowed to uint8_t (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O2::paired_sum_diff": {
    "cause": "[PE] Identical to clang-O1. `xor eax,eax; or edi,ecx; sete al; ret` gives RAX = INSERT(COPY 0, ZF, 0). narrow_zero_extend_input_size's Insert arm narrows the recovered result to 1 byte (`uint8_t fcn_401170`), which drops the zero bytes 1..3 that the machine defines and that the int caller reads.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/branchy.c::clang-O2::pure_zero_guard": {
@@ -299,6 +313,7 @@
   },
   "tests/corpus/branchy.c::clang-O2::slot_eq_guard": {
    "cause": "[PE] The same as clang-O1: the sete into a zeroed EAX is narrowed to uint8_t (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/corpus/branchy.c::clang-O2::tail_guard": {
@@ -366,6 +381,7 @@
   },
   "tests/corpus/branchy.c::gcc-O0::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::mask_probe": {
@@ -400,6 +416,7 @@
   },
   "tests/corpus/branchy.c::gcc-O0::slot_eq_guard": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::tail_guard": {
@@ -470,6 +487,7 @@
   },
   "tests/corpus/branchy.c::gcc-O1::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O1::mask_probe": {
@@ -570,6 +588,7 @@
   },
   "tests/corpus/branchy.c::gcc-O2::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O2::mask_probe": {
@@ -667,6 +686,7 @@
   },
   "tests/corpus/hashes.c::clang-O0::unaligned_words": {
    "cause": "[P10 lowering] An unaligned machine load is spelled as a typed dereference. The source does memcpy(&w, p+i+1, 4). The rendering at rendering.c:15 is `(int32_t)*(uint32_t*)(stack_m40 + (uint64_t)stack_m16 + 1)`. In C that requires 4-byte alignment and a uint32_t effective type, while an x86 mov r32 has neither requirement. r2dec's memory renderer emits *(T*)addr with no effective-type or alignment proof (memory_renderer.rs:973-978 generic fallback; the same shape at :818-821 and :839-842; 'align' appears nowhere in the file).",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/hashes.c::clang-O0::xxhash32": {
@@ -716,6 +736,7 @@
   },
   "tests/corpus/hashes.c::clang-O1::unaligned_words": {
    "cause": "[P10 lowering] An unaligned 4-byte load (stride 7, displacement +1) is spelled `*(uint32_t*)(RDI_0 + RDX_1 + 1)` at rendering.c:14, with no effective-type or alignment proof (memory_renderer.rs:973-978).",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/hashes.c::clang-O1::xxhash32": {
@@ -765,6 +786,7 @@
   },
   "tests/corpus/hashes.c::clang-O2::unaligned_words": {
    "cause": "[P10 lowering] The same construct: `*(uint32_t*)(RDI_0 + RDX_1 + 1)` at rendering.c:14 for an unaligned machine load, with no effective-type or alignment proof.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/hashes.c::clang-O2::xxhash32": {
@@ -802,6 +824,7 @@
   },
   "tests/corpus/hashes.c::gcc-O0::murmur3_32": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O0::pearson": {
@@ -809,6 +832,7 @@
   },
   "tests/corpus/hashes.c::gcc-O0::rotl32": {
    "cause": "[P10 lowering] A rotate is spelled as two shifts. The machine does `rol edx,cl`, which is defined for every count. The rendering at rendering.c:14 is `tmp_11f00_1 << t | tmp_11f00_1 >> (uint8_t)(32 - t)` with t = (uint8_t)r & 31. When t == 0 the right operand is `>> 32`, which is UB in C. No layer proves shift-count admissibility, and there is no rotate rule.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/hashes.c::gcc-O0::sdbm": {
@@ -816,14 +840,17 @@
   },
   "tests/corpus/hashes.c::gcc-O0::siphash24": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O0::unaligned_words": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O0::xxhash32": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O1::adler32": {
@@ -870,6 +897,7 @@
   },
   "tests/corpus/hashes.c::gcc-O1::unaligned_words": {
    "cause": "[P10 lowering] An unaligned load is spelled as a typed dereference: `*(uint32_t*)(RDI_0 + RDX_1 + 1)` at rendering.c:17, with no effective-type or alignment proof (memory_renderer.rs:973-978).",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/hashes.c::gcc-O1::xxhash32": {
@@ -904,6 +932,7 @@
   },
   "tests/corpus/hashes.c::gcc-O2::main": {
    "cause": "[P6 body (callee facts from the one resolved body, bottom-up, including its callees' contracts and preserved sets) + P7 calls (Exact/AtLeast arity)] main calls `combined(p, n)` (0x401b70), but the rendering declares `uint64_t fcn_401b70(void);` and calls it with no arguments. The original combined then runs with garbage RDI and faults in fnv1a64 at 0x4013b0 (`movzx edx,BYTE PTR [rdi]`). The reason is that combined, when it is prepared as a callee, gets no facts for its own callees: prepare_callee calls declare_imports only. Two things follow. (1) Its first call, fnv1a64(p,n), falls back to caller writes. RDI and RSI there are entry values, not written_by_body, so the arity is 0 and is marked complete. (2) gcc -fipa-ra keeps p and n in R...",
+   "reason": "exit",
    "status": "differs"
   },
   "tests/corpus/hashes.c::gcc-O2::murmur3_32": {
@@ -920,6 +949,7 @@
   },
   "tests/corpus/hashes.c::gcc-O2::unaligned_words": {
    "cause": "[P10 lowering] An unaligned load is spelled as a typed dereference: `uint32_t tmp_11f00_2 = *(uint32_t*)(RDI_0 + RDX_1 + 1);` at rendering.c:13 (memory_renderer.rs:973-978).",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/hashes.c::gcc-O2::xxhash32": {
@@ -936,10 +966,12 @@
   },
   "tests/corpus/shapes.c::clang-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. `struct mixed` is 16 bytes laid out as byte@0, half@2, word@4, quad@8. Both eightbytes are INTEGER class, so it is passed in RDI:RSI. tests/equiv/spec.py:175-176 marks every by-value aggregate unsupported. The engine already renders the function register-equivalently as `uint64_t fcn_4016a0(uint64_t RDI_0, uint64_t RSI_0)`, with the field shifts applied to RDI and `^ RSI_0`. The GATE should lift this limitation. CORRECTION: spec.py does not compute a SysV class for aggregates today (grep finds no eightbyte or classification code). The gate firs...",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O0::mixed_from": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. `struct mixed` has two INTEGER eightbytes and comes back in RAX:RDX. The gate cannot lift it yet, because the ENGINE drops the second eightbyte. The machine code does `mov rdx,[rbp-0x8]` (value.quad = a^b), but pdd @0x401730 declares `uint64_t` and returns only `*(uint64_t*)stack_m24` (RAX), so the computed `stack_m16 = a ^ b` is dead. Order: first the engine models the RAX:RDX result (P7 result classes). Then the gate classifies the aggregate return (it needs the same SysV classifier as mixed_fold) and reuses its int128 (RAX:RDX) compare (spec.py:119-1...",
+   "reason": "an aggregate return (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O0::mixed_touch": {
@@ -962,6 +994,7 @@
   },
   "tests/corpus/shapes.c::clang-O0::shape_byte_indexed_buffer": {
    "cause": "[P4 memory (save slot / return address as MUST barriers; promote -O0 counter), P5 index bound] [G-SAVESLOT] The prologue `push rbp` store renders as a data store into the buffer object `struct r2sleigh_bits_2048 stack_m88`: `((uint64_t*)&stack_m88)[10] = r2sleigh_residual_u64(1)` reads callee-saved entry RBP_0 (Held) as the first statement. The object for `uint8_t buf[64]` (m88) crosses both parameter homes, the saved-RBP slot and the return address and runs 168 bytes past the entry SP into the caller frame (256 bytes = the [0,0xf8]+8 reach of `buf + (i & 0xf8)` with i unbounded): its extent comes from MAY evidence (escape into the `p = (a&1) ? buf : &total` merge; an index whose -O0...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_call_chain": {
@@ -972,6 +1005,7 @@
   },
   "tests/corpus/shapes.c::clang-O0::shape_multiword_return": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee wide_make (`struct wide {uint64_t low, high;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`stack_m32 = r2sleigh_residual_u64(1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_interface.rs:690). The callee's RDX write on every r...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_mutual_even": {
@@ -1006,10 +1040,12 @@
   },
   "tests/corpus/shapes.c::clang-O0::shape_struct_pointer": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee mixed_from (static, not inlined at O0; `struct mixed {uint8_t; uint16_t; uint32_t; uint64_t;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`stack_m32 = r2sleigh_residual_u64(1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_inte...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_struct_value": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee mixed_from (static, not inlined at O0; `struct mixed {uint8_t; uint16_t; uint32_t; uint64_t;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`stack_m32 = r2sleigh_residual_u64(1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_inte...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_variadic": {
@@ -1020,10 +1056,12 @@
   },
   "tests/corpus/shapes.c::clang-O0::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition (spec.py:110-111). The engine must lift first. It renders `uint64_t fcn_4012e0(uint32_t EDI_0, uint64_t RSI_0, ..., uint64_t R9_0)`: the va_start spills of RSI..R9 are taken as 6 fixed parameters. The register-save area is split into frame scalars, AL (the SysV vector count) and XMM are read as residuals, and overflow_arg_area points into the rendering's own frame, not the caller's stack. Lifting the gate now would give ub/differs. Order: engine P7 first (a `variadic` interface bit, AtLeast arity, and the va_list save-area idiom rendered as `...`/va_ar...",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O0::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. `struct wide` is two u64 returned in RAX:RDX. The engine drops RDX (value.high = (a^b)*0xc2b2ae3d27d4eb4f) and declares `uint64_t fcn_401c30(uint64_t,uint64_t)`. The engine must lift first (P7 result classes RAX+RDX). The gate then compares both halves through its int128 path.",
+   "reason": "an aggregate return (struct wide)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O1::indirect_load": {
@@ -1034,10 +1072,12 @@
   },
   "tests/corpus/shapes.c::clang-O1::main": {
    "cause": "[P7 calls] The printf variadic tail is dropped: 15 calls of printf((const int8_t*)\"%016llx\\n\") with no value argument, under int32_t printf(const int8_t*). printf prints whatever RSI holds.",
+   "reason": "-O0 and -O2 builds disagree stdout",
    "status": "ub"
   },
   "tests/corpus/shapes.c::clang-O1::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value (struct mixed in RDI:RSI). VERIFIED: pdd renders `return RSI_0 ^ ((RDI_0 >> 24 & (uint64_t)-0x100) | (RDI_0 << 56 | (uint64_t)((uint32_t)RDI_0 & 0xffff0000) << 24));`. RDI<<56 is byte<<56. (RDI&0xffff0000)<<24 is half<<40. (RDI>>24)&~0xff is word<<8. The bit ranges 56-63, 40-55 and 8-39 are disjoint, so OR equals XOR, and the result is bit-exact to the source. The gate should lift this once it has a SysV aggregate classifier (spec.py has none yet) and can pass the two eightbytes.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O1::mixed_touch": {
@@ -1060,30 +1100,37 @@
   },
   "tests/corpus/shapes.c::clang-O1::shape_byte_indexed_buffer": {
    "cause": "[P4 memory (with P5 trip bound)] `uint8_t buf[64]` (frame object ObjectId(2) at SP-72) is written by byte stores `mov [rsp+rdx-0x48],cl`. The index rdx runs 0..63, but the loop exit is `cmp rdx,0x40; jne`, and the value analysis gives no bound (accessed-object-extent bound=None). The same object is also read and written by qword accesses (`add [rsp+rax-0x48],rcx`, `mov rax,[rsp+rsi-0x48]`), and its base escapes into the cmove merge. The stack-array layout refuses with ConflictingAccessWidths (certificates/mod.rs:501-519). With no extent there is no storage, so the binding plan refuses the object with MissingSourceIdentity....",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: missing machine projection authorization: OpLowering(lowering.rs)",
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O1::shape_call_chain": {
    "cause": "[P4 memory (promote.rs escape and frame-pointer facts; needs an immediate soundness guard)] The `second` and `third` locals ([rsp+0x10] and [rsp+0x8]) have their addresses passed to shape_stash, yet they are promoted to SSA registers, so the reload after each stash folds to the initial 0. The rendering has `fcn_4013b0(0)` twice, and second*3 and third*7 vanish from the return. The cause is in promote.rs. In this frameless function, the first register Copy of an SP-derived address after the first prologue step is pdil op 45 `RDI = COPY uniq:0x4e00` (= rsp+0x18, the outgoing argument &first), and it is taken as 'the frame pointer'. At op 45 itself (at == established), RDI is derived...",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O1::shape_function_pointer": {
    "cause": "[P7 calls (Exact/AtLeast arity; an assumed arity is a residual; target-set join, fed by P5's folding of loads from immutable memory)] The indirect call `call QWORD PTR [r15+rax]` (chosen(accumulator, b+index)) renders as `((uint64_t(*)(void))tmp_11f80_2)()`: no arguments, marked complete. The call has no callee contract, so it falls back to caller writes. That fallback stops at argument slot 0, because RDI is a loop phi of the entry value and the previous call's result, not written_by_body. It reports arity 0 and sets arguments_complete=true. As a result, the function's own interface drops parameter b, since RSI only feeds `lea rsi,[rbx+r12]` for the call: `fcn_4019e0(uint64_t RDI_0)`. The targets come from a 24-byte tabl...",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O1::shape_multiword_return": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee wide_make (`struct wide {uint64_t low, high;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`uint64_t RAX_2 = fcn_401850(r2sleigh_residual_u64(1), RAX_1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_interface.rs:690). The calle...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::shape_mutual_even": {
    "cause": "[P1 reads (SSA construction soundness)] The walked body follows the tail jumps even->odd->even, so the function entry 0x401710 is also a loop header: its single CFG predecessor is odd's step block 0x401745. SSA places no phi at the entry block. Both the frontier computation and phi placement count only blocks with two or more CFG predecessors, and neither models the implicit edge from the caller. So `test rdi,rdi` in the header always reads the entry value RDI_0. odd's step (RSI = RAX*17 + RDI*4; RDI--) computes values that are then unobserved and elided. The rendered loop never executes odd's step, never updates RSI, and decreme...",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O1::shape_mutual_odd": {
    "cause": "[P1 reads (SSA construction soundness)] Mirror of shape_mutual_even. The entry 0x401740 is a loop header reached by even's tail jump. With no phi at the entry, the header reads the entry RDI_0/RSI_0, and even's step (RSI = RSI*31 + RDI; RDI--) is unobserved and dropped. The loop never alternates.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O1::shape_pointer_to_pointer": {
    "cause": "[P4 memory] `rows[0] = &zero`, and `zero` sits at the stack pointer itself, so the compiler stores the raw RSP as data (`mov rax,rsp; mov [rsp+0x20],rax`; the copy is forwarded, so the Store reads the RSP SSA value directly). CORRECTED MECHANISM: the engine already knows this value is `&zero`. The lowering's write projection spells it `AddrOf(Var(<frame object>))`. What fails is disposition. Because the carrier's own value is a data operand, r2ssa's stack-geometry certificate (semantic/certificates/stack.rs:903-955) evicts it, and the eviction cascades back through the carrier chain (RSP_1, RSP_0). r2d...",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingValue",
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O1::shape_recurse_direct": {
@@ -1106,6 +1153,7 @@
   },
   "tests/corpus/shapes.c::clang-O1::shape_struct_array": {
    "cause": "[P4 memory] An indexed frame access whose index has no solved bound becomes a scalar object at its displacement. struct pair table[8] occupies [rsp-72, rsp-8). The .low stores [rsp+rcx*8-0x48] (rcx in [0,8)) go through the loop-scoped scalar `uint32_t stack_m72;` as `*(uint32_t*)((uint64_t)&stack_m72 + RCX_1*8)` (rendering.c:19-22). The second loop's [rsp+rcx*8-0x60] (rcx in [3,11)) reads an unwritten, loop-scoped `uint32_t stack_m96` as `((uint32_t*)&stack_m96)[RCX_4*2]` (:37-38). Only .high, whose index `(rcx&7)*8` has a bound, got a span (stack_m68, 64 bytes). Two engine defects cause this. (a) shar...",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/shapes.c::clang-O1::shape_struct_pointer": {
@@ -1119,14 +1167,17 @@
   },
   "tests/corpus/shapes.c::clang-O1::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`RAX_4 = fcn_401240(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), R9_0);`). passed_through_entry_storages (recover_interface.rs:1015-1026) also inflates the caller itself t...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. VERIFIED: the engine renders 6 fixed parameters (EDI_0, RSI_0..R9_0) and `__uint128_t stack_m88` for the save area, addressed as `(uint64_t)&stack_m88 - 96` and `+ 96`. Those are out-of-object pointers, which is UB in C. RAX_0 (AL) and XMM3_0 are read as residuals. The engine must lift first (P7), then the gate.",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O1::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. VERIFIED: the machine code computes `movabs rdx,0xc2b2ae3d27d4eb4f; imul rdx,rsi` into RDX (value.high). pdd renders `return RSI_0 - RDI_0 * 0x61c8864680b583eb;` with a uint64_t result. That is exactly the low half, since 2^64 - 0x9e3779b97f4a7c15 = 0x61c8864680b583eb. The high half is lost. The engine must lift first (P7), then the gate.",
+   "reason": "an aggregate return (struct wide)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O2::indirect_load": {
@@ -1137,10 +1188,12 @@
   },
   "tests/corpus/shapes.c::clang-O2::main": {
    "cause": "[P7 calls] The printf variadic tail is dropped: 15 calls of printf(\"%016llx\\n\") with no argument, under int32_t printf(const int8_t*).",
+   "reason": "-O0 and -O2 builds disagree stdout",
    "status": "ub"
   },
   "tests/corpus/shapes.c::clang-O2::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value (struct mixed in RDI:RSI). The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`, which is register-equivalent. The gate should lift this by passing the two eightbytes, which first needs a SysV aggregate classifier in spec.py.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O2::mixed_touch": {
@@ -1163,26 +1216,32 @@
   },
   "tests/corpus/shapes.c::clang-O2::shape_byte_indexed_buffer": {
    "cause": "[P4 memory (with P5 trip bound)] Clang vectorised the word loop into constant-offset accesses inside buf's region [rsp-0x48, rsp-0x08): `add [rsp-0x48],rdi`, a movdqu xmm read-modify-write of [rsp-0x40]/[rsp-0x30]/[rsp-0x20], and `add [rsp-0x10],rax`. The byte loop writes the region through an index with no bound (step 2, `cmp rdx,0x40; jne`; bound=None), so the frame is split. [rsp-0x20] and [rsp-0x10] become separate scalar bindings stack_m32 and stack_m16. Their first reads (the movdqu xmm3 load and the `add [rsp-0x10]`) come before any write to those bindings, because the real writes went through the byte subscript. Th...",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O2::shape_call_chain": {
    "cause": "[P4 memory] Same as clang-O1. `lea rdi,[rsp+0x18]` is misidentified as the frame pointer in promote.rs, so the later escaping `lea rdi,[rsp+0x10]` and `lea rdi,[rsp+0x8]` are not recorded as escapes. Slots 56 and 64 are promoted, and the reloads after each stash fold to 0 (`fcn_401430(0)` twice).",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O2::shape_function_pointer": {
    "cause": "[P7 calls (with P2 immutability and P5 table folding)] VERIFIED: clang folded `table[3]` into a read-only .rodata table at 0x402080 = {0x401b60 op_add, 0x401b70 op_xor, 0x401b80 op_mul} and unrolled the loop. Five iterations are `call [rcx+0x402080]`. The sixth is a tail jump `jmp [rax+0x402080]` at 0x401c6a, taken after `pop rbx; pop r14; pop r15` with the stack at entry height. r2ssa does not classify this terminal BranchInd as a tail call. transfer() (r2engine native.rs:2263-2281) only announces TailSlot for a relocated slot, and the call-site gate (machine_context.rs:2146 'loads no slot') names no call site. It is not a dispatch either: dis...",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O2::shape_multiword_return": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee wide_make (`struct wide {uint64_t low, high;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`uint64_t RAX_2 = fcn_4019b0(r2sleigh_residual_u64(1), RAX_1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_interface.rs:690). The calle...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::shape_mutual_even": {
    "cause": "[P1 reads] Same as clang-O1. Mutual tail recursion makes the entry a loop header with one CFG predecessor. No phi is placed at the entry, the header reads the entry values, and the partner's step block is elided as unobserved.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O2::shape_mutual_odd": {
    "cause": "[P1 reads] Same as clang-O1 shape_mutual_odd. The entry block is a loop header and gets no phi, so even's step is dropped.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O2::shape_pointer_to_pointer": {
@@ -1199,6 +1258,7 @@
   },
   "tests/corpus/shapes.c::clang-O2::shape_stack_buffer": {
    "cause": "[P4 memory] An unbounded indexed frame access mints a scalar object at its displacement. The loop, unrolled by 2 with rdx = 1, 3, ..., 63, stores buffer[rdx-1] via [rsp+rdx-0x49] and buffer[rdx] via [rsp+rdx-0x48]. The -73 displacement becomes the loop-scoped `uint8_t stack_m73;`, written as `*(uint8_t*)((uint64_t)&stack_m73 + RDX_1)` (rendering.c:14-17), out of bounds of a 1-byte object; the other half goes to `uint8_t stack_m72[64]`. The engine path is the same as shape_struct_array. Here the lower bound alone would suffice: with rdx >= 1 known, first_reached (shared.rs:1711-1716) would give root -72...",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/shapes.c::clang-O2::shape_stash": {
@@ -1221,14 +1281,17 @@
   },
   "tests/corpus/shapes.c::clang-O2::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`RAX_4 = fcn_401240(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also inflates...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders a 6-fixed-parameter prototype built from the va_start spills, with residual AL/XMM reads. The engine must lift first (P7 variadic + va_list model), then the gate.",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O2::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine renders only RAX (uint64_t) and loses value.high. The engine must lift first (P7 multi-register result), then the gate uses its int128 path.",
+   "reason": "an aggregate return (struct wide)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::indirect_load": {
@@ -1242,10 +1305,12 @@
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. The engine spills RDI/RSI to stack_m24/stack_m16 and reads byte/half/word at offsets 0/2/4 and quad from RSI. That is correct at the register level, so the gate should lift this, once it has a SysV aggregate classifier. Separately, the parameter home split into two frame scalars is the known P4 partition issue, not an equivalence problem here.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_from": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine renders a `uint64_t` result from RAX only and drops value.quad in RDX. The engine must lift first: P7 needs a multi-register result class. The gate then classifies the struct return and reuses its int128 compare.",
+   "reason": "an aggregate return (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_touch": {
@@ -1268,18 +1333,22 @@
   },
   "tests/corpus/shapes.c::gcc-O0::shape_byte_indexed_buffer": {
    "cause": "[P4 memory (save slot / return address as MUST barriers; promote -O0 counter), P5 index bound] [G-SAVESLOT] The prologue `push rbp` store renders as a data store into the buffer object `struct r2sleigh_bits_768 stack_m88`: `((uint64_t*)&stack_m88)[10] = r2sleigh_residual_u64(1)` reads callee-saved entry RBP_0 (Held) as the first statement. The object for `uint8_t buf[64]` (m88) crosses the canary slot, the saved-RBP slot and the return address up to the frame top (96 bytes: buf 64 + gap + canary [9] + saved RBP [10] + return address): its extent comes from MAY evidence (escape into the `p = (a&1) ? buf : &total` merge; an index whose -O0 bound sits in a spilled counter) via frame_gap...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_call_chain": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_function_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_multiword_return": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee wide_make (`struct wide {uint64_t low, high;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`uint64_t RAX_4 = fcn_401e08(r2sleigh_residual_u64(1), RAX_2);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_interface.rs:690). The calle...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_mutual_even": {
@@ -1290,10 +1359,12 @@
   },
   "tests/corpus/shapes.c::gcc-O0::shape_pointer_to_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_recurse_direct": {
    "cause": "[P7 calls] The self-recursive call takes its arity from caller register writes. The function's own interface is (RDI, RSI) -> RAX, rendered as `uint64_t fcn_401b92(uint64_t RDI_0, uint64_t RSI_0)`. r2engine never prepares the root's own entry as a callee: read_callees filters `*address != entry` (crates/r2engine/src/native.rs:715). So the self call at 0x401be4 has no SourceCallSiteInterface. The recover_interface.rs:822-830 comment only describes that the provisional context lacks the root's interface. convention_call_boundary (semantic/boundaries.rs:765-803; arity rule at :789-795) then counts RDX, w...",
+   "reason": "too many arguments to function \u2018fcn\u2019",
    "status": "compile-error"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_recurse_mutual": {
@@ -1304,6 +1375,7 @@
   },
   "tests/corpus/shapes.c::gcc-O0::shape_stack_buffer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_stash": {
@@ -1314,30 +1386,37 @@
   },
   "tests/corpus/shapes.c::gcc-O0::shape_struct_array": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_struct_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `stack_m32 = r2sleigh_residual_u64(2)` = RDX_2 after the call to mixed_from (two-eightbyte struct return in R...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_struct_value": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee mixed_from (static, not inlined at O0; `struct mixed {uint8_t; uint16_t; uint32_t; uint64_t;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`stack_m32 = r2sleigh_residual_u64(1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_inte...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_variadic": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`uint64_t RAX_6 = fcn_4013c9(1, tmp_11f80_2, tmp_11f80_1, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). Here the caller keeps its 2 parameters, so the first ca...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders 6 fixed parameters from the save-area spills, with 5 residual reads. The engine must lift first (P7), then the gate.",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. The engine computes `stack_m16 = (a^b)*0xc2b2ae3d27d4eb4f` (value.high, which the epilogue loads into RDX) but returns only `stack_m24`, so the RDX result is dropped. The engine must lift first (P7), then the gate.",
+   "reason": "an aggregate return (struct wide)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O1::indirect_load": {
@@ -1348,10 +1427,12 @@
   },
   "tests/corpus/shapes.c::gcc-O1::main": {
    "cause": "[P7 calls] The __printf_chk variadic tail is dropped: 15 calls of __printf_chk(2, (const int8_t*)\"%016llx\\n\") under int32_t __printf_chk(int32_t, const int8_t*).",
+   "reason": "-O0 and -O2 builds disagree stdout",
    "status": "ub"
   },
   "tests/corpus/shapes.c::gcc-O1::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value in RDI:RSI. The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`. The gate should lift this, which needs a SysV aggregate classifier plus an eightbyte thunk.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O1::mixed_touch": {
@@ -1374,30 +1455,37 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_byte_indexed_buffer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_call_chain": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_function_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_multiword_return": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee wide_make (`struct wide {uint64_t low, high;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`uint64_t RAX_2 = fcn_40198e(r2sleigh_residual_u64(1), RAX_1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_interface.rs:690). The calle...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_mutual_even": {
    "cause": "[P6 body (callee facts bottom-up over call-graph SCCs, memoised per Revision) + P7 calls (optimistic result fixpoint over the SCC; result state separate from the parameter contract so that an Unproven result keeps its proven interface, per F15)] [G-SCC] Mutual recursion through `call partner; add rsp,8; ret`. r2engine prepare_callee prepares the partner against imports only (r2engine/src/native.rs:609-657: declare_imports, then prepare_restated with an empty callee-facts list), so the partner's call back to the root gets the convention-fallback boundary with no result (boundaries.rs:1128 'interface=false ... results=0') -> Unstated (r2ssa/src/recover_interface.rs:629) -> the partner's result is Unproven (:749; evidence :620/:714). At the root, mint_recovered_call_site_interface refuses a callee whose result is Unproven (recover_int...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_mutual_odd": {
    "cause": "[P6 body (callee facts bottom-up over call-graph SCCs, memoised per Revision) + P7 calls (optimistic result fixpoint over the SCC; result state separate from the parameter contract, per F15)] [G-SCC] Mutual recursion through `call partner; add rsp,8; ret`. r2engine prepare_callee prepares the partner (even, 0x401845) against imports only (r2engine/src/native.rs:609-657), so its call back to odd has the convention-fallback boundary with no result -> Unstated (r2ssa/src/recover_interface.rs:629) -> even's result is Unproven (:749). At odd's call site, mint_recovered_call_site_interface refuses the Unproven callee (recover_interface.rs:1505-1511, the critique:calls F15 proxy). The r2engine body_proven_return upgrade (lib.rs:1365-1376) cannot fire for an Unproven interface (machine_...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_pointer_to_pointer": {
    "cause": "[P4 memory] Same defect as NEW-3. gcc stores RSP directly (`mov [rsp+0x20],rsp`, which is &zero at SP+0). The RSP carrier is Bound instead of being absorbed as geometry. The CallRestore at the in-loop call (RSP_6 = RSP_4) is then both a CoalescedCopy elided write and a rendered write, giving ConflictingWrite(InstId(139)). REPRODUCED without a loop: scratch exp/p2p.c straight_calls, gcc -O1, fcn.4011db (`mov [rsp+0x10],rsp; ...; call ld; call ld`) is refused with ConflictingWrite(InstId(62)) on CallRestore RSP_4<-RSP_2. The trace there shows ValueId(8)=RSP_2 `Bound{BindingId(0)}` stored into ObjectId(4)...",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingValue",
    "status": "refused"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_recurse_direct": {
@@ -1411,6 +1499,7 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_stack_buffer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_stash": {
@@ -1421,10 +1510,12 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_struct_array": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_struct_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_struct_value": {
@@ -1432,18 +1523,22 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_variadic": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`uint64_t RAX_4 = fcn_401303(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders 6 fixed parameters with residual AL/XMM reads. The engine must lift first (P7), then the gate.",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O1::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine keeps one result register (RAX). The engine must lift first (P7), then the gate.",
+   "reason": "an aggregate return (struct wide)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O2::indirect_load": {
@@ -1454,10 +1549,12 @@
   },
   "tests/corpus/shapes.c::gcc-O2::main": {
    "cause": "[P7 calls] The __printf_chk variadic tail is dropped: 15 calls of __printf_chk(2, \"%016llx\\n\") with no value argument.",
+   "reason": "-O0 and -O2 builds disagree stdout",
    "status": "ub"
   },
   "tests/corpus/shapes.c::gcc-O2::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value in RDI:RSI. The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`. The gate should lift this, which needs a SysV aggregate classifier plus an eightbyte thunk.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O2::mixed_touch": {
@@ -1480,30 +1577,37 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_byte_indexed_buffer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_call_chain": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_function_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_multiword_return": {
    "cause": "[P7 calls (ABI classifier with multi-eightbyte results)] [G-PAIR] Two-eightbyte aggregate return: callee wide_make (`struct wide {uint64_t low, high;}`) returns 16 INTEGER bytes in RAX:RDX, but the call result is RAX only, so the RDX read after the call (`uint64_t RAX_2 = fcn_401c20(r2sleigh_residual_u64(1), RAX_1);`) is an unclaimed CallDefine -> NeverAssigned residual. Root: one-register result contract -- SourceFunctionReturn::Register{storage} (r2source/src/contracts.rs:977-990), single SourceConventionSlots::result_slot (contracts.rs:3861), recover_interface returned_result reads only that slot (r2ssa/src/recover_interface.rs:690). The calle...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_mutual_even": {
    "cause": "[P1 reads] gcc's layout puts odd at 0x401a80 (`jmp 401ab0`) and even at 0x401ab0 (`jmp 401a80`). The entry 0x401ab0 has the single predecessor 0x401a98 (odd's step) and gets no phi, so the while-loop tests and updates only the entry values, and odd's step is lost.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_mutual_odd": {
    "cause": "[P1 reads] Same as gcc-O2 shape_mutual_even. The entry 0x401a80 is the target of even's tail jmp (its single predecessor is 0x401ac8). No phi is placed, and even's step is dropped.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_pointer_to_pointer": {
    "cause": "[P4 memory] Same defect as NEW-3. The raw RSP (&zero) becomes data through `movq xmm0,rsp` (IntZExt XMM0_1 <- RSP_1), which builds rows[0..1] with punpcklqdq. The RSP carrier is bound as a program value and spelled. The loop-call CallRestore RSP_4 = RSP_2 is recorded both as a coalesced copy and as a rendered write, giving ConflictingWrite(InstId(172)).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingWrite",
    "status": "refused"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_recurse_direct": {
@@ -1517,6 +1621,7 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_stack_buffer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_stash": {
@@ -1527,10 +1632,12 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_struct_array": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_struct_pointer": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_struct_value": {
@@ -1538,18 +1645,22 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_variadic": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`uint64_t RAX_4 = fcn_401510(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::vfold": {
-   "status": "unsupported",
-   "cause": "[P7 variadic] The engine now renders vfold (4 counted residuals; the signature drops `count`), and the gate does not grade a variadic definition: the count of its trailing arguments is unknown. Refused before p1-identity."
+   "cause": "[P7 variadic] The engine now renders vfold (4 counted residuals; the signature drops `count`), and the gate does not grade a variadic definition: the count of its trailing arguments is unknown. Refused before p1-identity.",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O2::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine keeps RAX only. The engine must lift first (P7), then the gate.",
+   "reason": "an aggregate return (struct wide)",
    "status": "unsupported"
   },
   "tests/corpus/values.c::clang-O0::main": {
@@ -1569,6 +1680,7 @@
   },
   "tests/corpus/values.c::clang-O0::value_count_bits": {
    "cause": "[P10 lowering (new lift-layer item in r2sleigh-lift; no plan phase owns it yet)] __builtin_clzll/__builtin_ctzll compile to `bsr` and `tzcnt`. Their SLEIGH semantics are instruction-local count LOOPS with a backward p-code branch (ia.sinc:2842-2856 BSR Reg64, `goto <start>`; bmi1.sinc:179-194 TZCNT Reg64, `goto <loopbegin>`). r2sleigh-lift internal_control.rs:44-47 turns any local branch with target_index <= branch_index into R2ILOp::Unimplemented. The forward `if ... goto <done>` over the loop body is not speculatable either, so it also becomes Unimplemented (the else arm at :85). That gives 3 Unimplemented per BSR and 2 per TZCNT. r2ssa obligation.rs:1485-1494 seeds a...",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 13 refused (volatile-or-unknown at 0x), 0 unaccounted, 0 conflicts",
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O0::value_div_pow2": {
@@ -1612,6 +1724,7 @@
   },
   "tests/corpus/values.c::clang-O1::value_count_bits": {
    "cause": "[P10 lowering (new lift-layer item)] Same as NEW-1. `bsr rcx,rcx` (0x4016b0), `tzcnt rax,rax` (0x4016c2) and `bsr ecx,edi` (0x401719) are lifted with Unimplemented in place of their p-code loops (internal_control.rs:44-47). 2x3 + 1x2 = 8 VolatileOrUnknownEffect obligations refused.",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 8 refused (volatile-or-unknown at 0x), 0 unaccounted, 0 conflicts",
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O1::value_div_pow2": {
@@ -1628,6 +1741,7 @@
   },
   "tests/corpus/values.c::clang-O1::value_rotate": {
    "cause": "[P10 lowering] A 64-bit rol is spelled `RDI_0 << t | RDI_0 >> (uint8_t)(64 - t)` with t = (uint8_t)R9_3 & 63 (rendering.c:16). At t==0 that is `>> 64`, which is UB; the machine rol is total. The 32-bit rotate has the same unguarded `>> (uint8_t)(32 - t)`.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/values.c::clang-O1::value_sign_extend": {
@@ -1656,6 +1770,7 @@
   },
   "tests/corpus/values.c::clang-O2::value_count_bits": {
    "cause": "[P10 lowering (new lift-layer item)] Same as NEW-1. bsr (0x401970), tzcnt (0x401982) and bsr (0x4019d9) are lifted as Unimplemented because of their instruction-local loops, giving 8 VolatileOrUnknownEffect refusals.",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 8 refused (volatile-or-unknown at 0x), 0 unaccounted, 0 conflicts",
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O2::value_div_pow2": {
@@ -1672,6 +1787,7 @@
   },
   "tests/corpus/values.c::clang-O2::value_rotate": {
    "cause": "[P10 lowering] The same as clang-O1: every unrolled rotate is spelled `x << t | x >> (uint8_t)(64 - t)` or `(32 - t)` (rendering.c:13 onward), which is UB at t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/values.c::clang-O2::value_sign_extend": {
@@ -1700,6 +1816,7 @@
   },
   "tests/corpus/values.c::gcc-O0::value_count_bits": {
    "cause": "[P10 lowering (new lift-layer item)] Same as NEW-1. `bsr rax,[rbp-0x20]`, `tzcnt rax,[rbp-0x20]`, `bsr rax,[rbp-0x18]`, `tzcnt rax,[rbp-0x18]` and `bsr eax,eax` are Unimplemented: 3x3 + 2x2 = 13 VolatileOrUnknownEffect refusals. The popcounts are calls to the statically linked libgcc __popcountdi2 (0x402470), which render fine.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: UnownedBindingSymbol",
    "status": "refused"
   },
   "tests/corpus/values.c::gcc-O0::value_div_pow2": {
@@ -1713,6 +1830,7 @@
   },
   "tests/corpus/values.c::gcc-O0::value_overflow_flags": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/corpus/values.c::gcc-O0::value_rotate": {
@@ -1744,6 +1862,7 @@
   },
   "tests/corpus/values.c::gcc-O1::value_count_bits": {
    "cause": "[P10 lowering (new lift-layer item) + P4 memory (the function-wide stack-root veto, NEW-4)] NEW-1 is the root cause. It surfaces first as journal UnownedBindingSymbol through NEW-4. CORRECTED MECHANISM (it is not about the ops 'lying between the calls'): r2ssa function/rewrite.rs:546-556 sets entry_stack_roots_are_stable=false for the WHOLE function as soon as any SSAOp::Unimplemented exists, so no value gets an entry-relative stack root. The trace confirms 'call ... found RSP_9, which has no entry-relative root ... the function has 0 entry-relative and 18 declared-base roots' (semantic/shared.rs:661). r2dec's stack_base_absorbed_by therefore cannot absorb the RSP carrier binding:...",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: UnownedBindingSymbol",
    "status": "refused"
   },
   "tests/corpus/values.c::gcc-O1::value_div_pow2": {
@@ -1760,6 +1879,7 @@
   },
   "tests/corpus/values.c::gcc-O1::value_rotate": {
    "cause": "[P10 lowering] A rotate is spelled as two shifts: `RAX_1 ^= RDI_0 << t | RDI_0 >> (uint8_t)(64 - t);` (rendering.c:14), which is UB when t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/values.c::gcc-O1::value_sign_extend": {
@@ -1788,6 +1908,7 @@
   },
   "tests/corpus/values.c::gcc-O2::value_count_bits": {
    "cause": "[P10 lowering (new lift-layer item) + P4 memory (NEW-4)] Same as gcc-O1. bsr 0x401932, tzcnt 0x401936/0x401967 and bsr 0x40199c are Unimplemented (NEW-1): 2x3 + 2x2 = 10 per lift. The dump shows 30 because the function is lifted three times (the gap retry re-lifts), not twice. The presence of any Unimplemented vetoes all entry-relative stack roots (rewrite.rs:546-556, NEW-4). Every call's entering RSP has 'no entry-relative root', the RSP CallRestore binding is not absorbed, and sealing fails with UnownedBindingSymbol.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: UnownedBindingSymbol",
    "status": "refused"
   },
   "tests/corpus/values.c::gcc-O2::value_div_pow2": {
@@ -1804,6 +1925,7 @@
   },
   "tests/corpus/values.c::gcc-O2::value_rotate": {
    "cause": "[P10 lowering] A rotate is spelled as two shifts: `RAX_1 ^= RDI_0 << t | RDI_0 >> (uint8_t)(64 - t);` (rendering.c:17), which is UB when t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/corpus/values.c::gcc-O2::value_sign_extend": {
@@ -1832,10 +1954,12 @@
   },
   "tests/gold/code_pointer_table.c::clang-O1::main": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof, P2 immutable ranges and P5/P8 loads from an immutable table] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call QWORD PTR [r14*8+0x402010]` at 0x401157 (reached through main's `jmp 0x401140`), whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The loop body meanwhile consumes the same CallDefine as a uint64_t result under a fallback-assumed arity of 2 (two views of one call). Closing fact: the target set from the immutable .rodata table at 0x402010 = {table_o...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::clang-O1::table_dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof, P2 immutable ranges and P5/P8 loads from an immutable table] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call QWORD PTR [r14*8+0x402010]` at 0x401157, whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The loop body meanwhile consumes the same CallDefine as a uint64_t result under a fallback-assumed arity of 2 (two views of one call). Closing fact: the target set from the immutable .rodata table at 0x402010 = {table_op_add 0x401110, table_op_xor 0x401120, t...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::clang-O1::table_op_add": {
@@ -1867,6 +1991,7 @@
   },
   "tests/gold/code_pointer_table.c::gcc-O0::table_dispatch": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Latent after the canary: the indirect call renders with 4 arguments `((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t))t)(acc...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::gcc-O0::table_op_add": {
@@ -1880,10 +2005,12 @@
   },
   "tests/gold/code_pointer_table.c::gcc-O1::main": {
    "cause": "[P7 calls (Exact/AtLeast arity; target-set join over the stack-built table {table_op_add, table_op_xor, table_op_mul})] main calls table_dispatch(3, 5), but table_dispatch's recovered interface is void, so the rendering calls `fcn_401156()` with no arguments and the original runs on garbage RDI/RSI. table_dispatch loses its parameters because its only reads of RDI and RSI feed the indirect call `call [rsp+rbx*8]`. That call has no contract, so it gets the caller-writes fallback arity: RDI is a loop phi of the entry value, not written_by_body, so the arity is 0 and marked complete. RSI only feeds `lea rsi,[rbx+rbp]` for the same call. table_dispatch's own pdd also renders `fcn_401156(void)` and `((uint64_t(*)...",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/code_pointer_table.c::gcc-O1::table_dispatch": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Latent after the canary: signature collapses to `fcn_401156(void)`, the indirect calls take no arguments `((uint64_t(*)(void))...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::gcc-O1::table_op_add": {
@@ -1897,10 +2024,12 @@
   },
   "tests/gold/code_pointer_table.c::gcc-O2::main": {
    "cause": "[P7 calls] Same as gcc-O1. table_dispatch (0x401190) is recovered as void, because RDI at its indirect call `call [rsp+rbx*8]` is an entry value or loop phi, so the fallback arity is 0 and marked complete. main then renders `fcn_401190()` without arguments.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/code_pointer_table.c::gcc-O2::table_dispatch": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Latent after the canary: signature `fcn_401190(void)`, zero-argument indirect calls (unknown arity, trace:calls F5, P7), and t...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::gcc-O2::table_op_add": {
@@ -1932,6 +2061,7 @@
   },
   "tests/gold/flag_materialisation.c::clang-O1::gt": {
    "cause": "[PE] The result is narrowed to the inserted byte. At 0x401110-0x401114 the machine does xor eax,eax; cmp edi,esi; setg al, i.e. INSERT(0, flag, 0). The Insert arm of narrow_zero_extend_input_size (recover_interface.rs:790-794) renders `uint8_t fcn_401110(...) { return (int32_t)ESI_0 < (int32_t)EDI_0; }` for int gt, so the upper EAX bytes are unspecified.",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/gold/flag_materialisation.c::clang-O1::sum_carry": {
@@ -1945,6 +2075,7 @@
   },
   "tests/gold/flag_materialisation.c::clang-O2::gt": {
    "cause": "[PE] The same as clang-O1 gt: xor eax,eax; cmp; setg al is narrowed to uint8_t by the Insert arm (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/gold/flag_materialisation.c::clang-O2::sum_carry": {
@@ -1982,6 +2113,7 @@
   },
   "tests/gold/flag_materialisation.c::gcc-O2::gt": {
    "cause": "[PE] gcc -O2 uses the same idiom (0x401124 xor eax,eax; cmp edi,esi; setg al), so the result is narrowed to uint8_t (recover_interface.rs:790-794).",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/gold/flag_materialisation.c::gcc-O2::sum_carry": {
@@ -2016,6 +2148,7 @@
   },
   "tests/gold/manual_limits.c::clang-O1::main": {
    "cause": "[P4 memory] Frame aggregates whose addresses escape are split into separate C objects, and two of the pieces overlap. Item items[2] (80 bytes, entry-relative [-104,-24)) becomes __uint128_t stack_m104, stack_m88, stack_m56 and stack_m40, plus uint8_t stack_m72[16] ([-72,-56)) and uint8_t stack_m64[8] ([-64,-56)). stack_m64 lies inside stack_m72. Result out becomes stack_m136 and stack_m120. The machine stores &items[1] (lea rax,[rsp+0x48]) into items[0].next ([rsp+0x40]). That escaping address re-inserts a -64 root inside the 16-byte movaps span at -72: this is the ordering bug recorded in critique:mem...",
+   "reason": "-O0 and -O2 builds disagree return",
    "status": "ub"
   },
   "tests/gold/manual_limits.c::clang-O1::mem_scan2": {
@@ -2040,11 +2173,13 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O2::main": {
-   "status": "ub",
-   "cause": "[PE result width] main returns `manual_sink == 0`, compiled `xor eax,eax; ...; sete al`; the rendering narrows the result to uint8_t (an INSERT lane) although the machine defined the base bytes, so the upper bytes of eax are whatever each build leaves and the -O0 and -O2 renderings disagree. The frame is right since P4.1 (items[2] is one 80-byte object, &items[1] is stack_m104 + 40) and its accesses are byte copies. Was differs on the split items array."
+   "cause": "[PE result width] main returns `manual_sink == 0`, compiled `xor eax,eax; ...; sete al`; the rendering narrows the result to uint8_t (an INSERT lane) although the machine defined the base bytes, so the upper bytes of eax are whatever each build leaves and the -O0 and -O2 renderings disagree. The frame is right since P4.1 (items[2] is one 80-byte object, &items[1] is stack_m104 + 40) and its accesses are byte copies. Was differs on the split items array.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
   },
   "tests/gold/manual_limits.c::clang-O2::mem_scan2": {
    "cause": "[P10 lowering (new lift-layer item in the r2sleigh-lift user_operation table)] CORRECTED DESCRIPTION: PSHUFLW does not broadcast a/b; it widens the compare masks. The a/b broadcasts are only `movd; punpcklbw`. PSHUFLW (imm8=0x50, not 0) sits inside the 2x-unrolled counting loop at 0x4014c0: `pcmpeqb` against a and b, `por`, then `punpcklbw x,x; pshuflw x,x,0x50; pshufd x,x,0x50`. That sign-extends the two 0x00/0xff byte masks into two 64-bit lanes, and `psubq` then accumulates the count. In ia.sinc:8797-8798, PSHUFLW is an opaque user operation (`define pcodeop pshuflw`; XmmReg1 = pshuflw(XmmReg1, src, imm8)). r2sleigh-lift's modelled user-operation table (disasm/user...",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unmodelled machine operation pshuflw at 0x",
    "status": "refused"
   },
   "tests/gold/manual_limits.c::clang-O2::out_param_parse": {
@@ -2067,6 +2202,7 @@
   },
   "tests/gold/manual_limits.c::gcc-O0::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::gcc-O0::mem_scan2": {
@@ -2092,6 +2228,7 @@
   },
   "tests/gold/manual_limits.c::gcc-O1::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `(uint64_t)r2sleigh_residual_u32(2)` passed as sparse_switch's 3rd argument = out.count (stack_m128): `Result...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::gcc-O1::mem_scan2": {
@@ -2117,6 +2254,7 @@
   },
   "tests/gold/manual_limits.c::gcc-O2::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `(uint64_t)r2sleigh_residual_u32(2)` passed as sparse_switch's 3rd argument = out.count (stack_m128): `Result...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::gcc-O2::mem_scan2": {
@@ -2142,6 +2280,7 @@
   },
   "tests/gold/review.c::clang-O0::avg": {
    "cause": "[P7 calls (float result class, and the result proof: defined on every path and demanded by a caller)] avg returns a double in XMM0, but the recovered interface has no floating-point result class. All the addsd/divsd work is dropped as unobserved, and the result is claimed as RAX, which nothing demands. At -O0, RAX holds whatever was last loaded into EAX, which is the loop index i. The rendering is `uint32_t fcn_4012e0(...)` with `return (uint32_t)stack_m36;`, so XMM0 is never written.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::clang-O0::bit_count": {
@@ -2155,6 +2294,7 @@
   },
   "tests/gold/review.c::clang-O0::dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call through parameter fn (`mov rax,[rbp-0x8]; ...; call rax` at 0x4015ac), whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The call itself is spelled through a `void(*)(...)` cast, so the value the source returns is dropped. Closing fact: the target set {add} from the only caller main (`dispatch(add, argc)`), a closed-world join over the proven call sites ...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O0::fact": {
@@ -2170,8 +2310,9 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O0::main": {
-   "status": "residual-trap",
-   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was ub."
+   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was ub.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O0::mul_div": {
    "status": "equal"
@@ -2190,6 +2331,7 @@
   },
   "tests/gold/review.c::clang-O1::avg": {
    "cause": "[P7 calls (float result class; the result must be defined on every return path and demanded), plus P1 reads (an entry read of a non-argument register must be a residual)] The recovered interface has no floating-point result class, so the double result in XMM0 cannot be represented and the addsd/divsd chain is dropped as unobserved. The result is claimed as Register(RAX). The value live in RAX at the return is a phi of the caller's unspecified entry RAX (on the n<=0 path) and ZEXT(ESI) (the loop bound). The rendering returns `RAX_1`, which is uninitialized on one path (-Wmaybe-uninitialized), and never writes XMM0.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::clang-O1::bit_count": {
@@ -2197,6 +2339,7 @@
   },
   "tests/gold/review.c::clang-O1::classify": {
    "cause": "[P8 data] The switch lookup table (int[8] {10,21,32,43,54,65,-1,87} in .rodata at 0x402068) is symbolised as the string literal \"\\n\" from its first bytes 0a 00: `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). This reads past a 2-byte literal in the rendering's own image, at a misaligned address. The machine is `mov eax,[rax*4+0x402068]`. The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::clang-O1::copy_name": {
@@ -2204,6 +2347,7 @@
   },
   "tests/gold/review.c::clang-O1::dispatch": {
    "cause": "[P7 calls (tail transfer classified in r2ssa)] VERIFIED. `int dispatch(fn, a) { return fn(a, a+1); }` compiles to `mov ecx,esi; mov rax,rdi; lea esi,[rcx+1]; mov edi,ecx; jmp rax`, a tail call through the entry value of RDI. transfer() (r2engine native.rs:2263-2281) announces a BranchInd only as TailSlot through a loaded relocated slot. r2ssa accepts a terminal BranchInd as a tail call only when announced ('terminal indirect transfer at 0x40134a ... loads no slot and the source does not declare the block terminal, so it names no call site', machine_context.rs:2146). So it becomes an IndirectBranch with no call site. RDI_0 is Bound but h...",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
    "status": "refused"
   },
   "tests/gold/review.c::clang-O1::fact": {
@@ -2219,14 +2363,16 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::main": {
-   "status": "residual-trap",
-   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was differs."
+   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was differs.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O1::mul_div": {
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::rotl": {
    "cause": "[P10 lowering] rol is spelled `EDI_0 << t | EDI_0 >> (uint8_t)(32 - t)` with t = SIL & 31 (rendering.c:8), which is `>> 32` (UB) at t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/gold/review.c::clang-O1::sext": {
@@ -2240,6 +2386,7 @@
   },
   "tests/gold/review.c::clang-O2::avg": {
    "cause": "[P7 calls (+P1 reads)] Same as clang-O1 avg. The interface has no float result, so the vectorised FP accumulation and the XMM0 return are dropped. RAX is claimed as the result although it holds an entry value on the n<=0 path (`return RAX_2;`, possibly uninitialized). Vector n=0: the original returns 0.0 in xmm0, and the rendering leaves garbage there.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::clang-O2::bit_count": {
@@ -2247,6 +2394,7 @@
   },
   "tests/gold/review.c::clang-O2::classify": {
    "cause": "[P8 data] The same as clang-O1: the lookup table is mis-symbolised as \"\\n\" (rendering.c:10). The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::clang-O2::copy_name": {
@@ -2254,14 +2402,17 @@
   },
   "tests/gold/review.c::clang-O2::dispatch": {
    "cause": "[P7 calls (tail transfer classified in r2ssa)] The code is identical to clang-O1 (`jmp rax` with rax = entry RDI). The tail transfer is not classified, so RDI_0 has no rendered occurrence and the journal fails with RenderedValueRequired.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
    "status": "refused"
   },
   "tests/gold/review.c::clang-O2::fact": {
    "cause": "[gate-limitation] The -O0 build of the rendering overruns its budget of 4 x timeout_ms. The original and the -O2 build return. Since 1e53fc79 the gate grades a timeout as `slow` instead of as an O0/O2 `ub` disagreement; it grades `slow` both inside the full run and alone (--jobs 1). The rendering is correct. It is slow at -O0 because the vectorised pmuludq loop is spelled as __uint128_t lane-merge chains, the known XMM lane noise (PE, and lane-induction recovery).",
+   "reason": "O0",
    "status": "slow"
   },
   "tests/gold/review.c::clang-O2::fill": {
    "cause": "[P10 lowering] An unaligned movdqu store is spelled as a typed 16-byte dereference: `*(__uint128_t*)0x404054 = XMM1_2;` (rendering.c:26), and likewise at 0x404064 and 0x404074. __uint128_t requires 16-byte alignment and a __uint128_t effective type. The target is g_table+4 (int[16]), which is only 4-aligned, and movdqu has no alignment requirement. No effective-type or alignment proof is consulted (memory_renderer.rs:973-978). Unrelated known defects: the void function is rendered as uint32_t with a return value (critique:calls F8), plus XMM lane noise.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/gold/review.c::clang-O2::find": {
@@ -2271,14 +2422,16 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::main": {
-   "status": "residual-trap",
-   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was differs."
+   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was differs.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O2::mul_div": {
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::rotl": {
    "cause": "[P10 lowering] rol is spelled as two shifts, `>> (uint8_t)(32 - t)` (rendering.c:8), which is UB at t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/gold/review.c::clang-O2::sext": {
@@ -2292,6 +2445,7 @@
   },
   "tests/gold/review.c::gcc-O0::avg": {
    "cause": "[P7 calls] The XMM0 double result is dropped because there is no float result class. The interface claims RAX, whose last load is the loop index, so the rendering returns `(uint32_t)stack_m20` (i). The accumulation into s is elided as unobserved.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::gcc-O0::bit_count": {
@@ -2305,6 +2459,7 @@
   },
   "tests/gold/review.c::gcc-O0::dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call rdx` at 0x401510, whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The call itself is spelled through a `void(*)(...)` cast, so the value the source returns is dropped. Closing fact: the target set {add} from the only caller main, a closed-world join.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O0::fact": {
@@ -2321,6 +2476,7 @@
   },
   "tests/gold/review.c::gcc-O0::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `r2sleigh_float_from_bits_64(r2sleigh_residual_u64(2))` = XMM0_8, avg's double result read after `call avg` w...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O0::mul_div": {
@@ -2328,6 +2484,7 @@
   },
   "tests/gold/review.c::gcc-O0::rotl": {
    "cause": "[P10 lowering] gcc -O0 emits `rol edx,cl` (0x401438), rendered as `tmp_11f00_2 << t | tmp_11f00_2 >> (uint8_t)(32 - t)` (rendering.c:14), which is UB at t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/gold/review.c::gcc-O0::sext": {
@@ -2341,6 +2498,7 @@
   },
   "tests/gold/review.c::gcc-O1::avg": {
    "cause": "[P7 calls (ABI classifier with float result class)] [G-FLOAT] avg returns double in XMM0, but the contract has one integer result slot: returned_result reads only RAX (r2ssa/src/recover_interface.rs:690), RAX is untouched on a path -> 'unresolved=1 -> Unproven' (:714), and body_proven_result's unique-carrier rule fails. Both returns render `return r2sleigh_residual_u64(n)` and the FP accumulation is elided as unobserved.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::bit_count": {
@@ -2354,6 +2512,7 @@
   },
   "tests/gold/review.c::gcc-O1::dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call rax` at 0x4013a8, whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The call itself is spelled through a `void(*)(...)` cast, so the value the source returns is dropped. Closing fact: the target set {add} from the only caller main, a closed-world join.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::fact": {
@@ -2370,6 +2529,7 @@
   },
   "tests/gold/review.c::gcc-O1::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `r2sleigh_float_from_bits_64(r2sleigh_residual_u64(2))` = XMM0_2, avg's double result read after the call wit...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::mul_div": {
@@ -2377,6 +2537,7 @@
   },
   "tests/gold/review.c::gcc-O1::rotl": {
    "cause": "[P10 lowering] rol is spelled as two shifts at rendering.c:8, which is UB at t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/gold/review.c::gcc-O1::sext": {
@@ -2390,6 +2551,7 @@
   },
   "tests/gold/review.c::gcc-O2::avg": {
    "cause": "[P7 calls (ABI classifier with float result class)] [G-FLOAT] avg returns double in XMM0, but the contract has one integer result slot: returned_result reads only RAX (r2ssa/src/recover_interface.rs:690), RAX is untouched on a path -> 'unresolved=1 -> Unproven' (:714), and body_proven_result's unique-carrier rule fails. Both returns render `return r2sleigh_residual_u64(n)` and the FP accumulation is elided as unobserved.",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::bit_count": {
@@ -2397,6 +2559,7 @@
   },
   "tests/gold/review.c::gcc-O2::classify": {
    "cause": "[P8 data] gcc's CSWTCH.12 int[8] table is rendered as the string literal \"\\n\": `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
+   "reason": "return",
    "status": "differs"
   },
   "tests/gold/review.c::gcc-O2::copy_name": {
@@ -2404,6 +2567,7 @@
   },
   "tests/gold/review.c::gcc-O2::dispatch": {
    "cause": "[P7 calls (tail transfer classified in r2ssa)] `endbr64; mov rax,rdi; mov edi,esi; lea esi,[rsi+1]; jmp rax` is an unclassified register tail transfer (native.rs:2263-2281; machine_context.rs:2146), giving RenderedValueRequired on RDI_0.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
    "status": "refused"
   },
   "tests/gold/review.c::gcc-O2::fact": {
@@ -2420,6 +2584,7 @@
   },
   "tests/gold/review.c::gcc-O2::main": {
    "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `r2sleigh_float_from_bits_64(r2sleigh_residual_u64(2))` = XMM0_4, avg's double result (kept live across `call...",
+   "reason": "r2sleigh_residual_u64",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::mul_div": {
@@ -2427,6 +2592,7 @@
   },
   "tests/gold/review.c::gcc-O2::rotl": {
    "cause": "[P10 lowering] rol is spelled as two shifts at rendering.c:8, which is UB at t==0.",
+   "reason": "ubsan",
    "status": "ub"
   },
   "tests/gold/review.c::gcc-O2::sext": {
@@ -2436,5 +2602,9 @@
    "status": "equal"
   }
  },
- "schema": 1
+ "schema": 1,
+ "toolchain": {
+  "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+  "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+ }
 }

@@ -249,8 +249,43 @@ class RatchetTests(unittest.TestCase):
     }
 
     def test_holding_the_baseline_is_clean(self):
-        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "equal"}
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "refused"}
         self.assertEqual(gate.ratchet(self.BASELINE, now), [])
+
+    def test_any_change_of_status_blocks_until_blessed(self):
+        # An improvement the baseline does not hold is one the next change
+        # could silently lose; a refusal that stops producing a record at all
+        # is the departure this rule was written for.
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "equal"}
+        self.assertEqual(gate.ratchet(self.BASELINE, now),
+                         ["a::gcc-O0::h: refused -> equal; bless it with its cause"])
+        now["a::gcc-O0::h"] = "no-record"
+        self.assertEqual(gate.ratchet(self.BASELINE, now),
+                         ["a::gcc-O0::h: refused -> no-record; bless it with its cause"])
+
+    def test_the_same_status_for_another_reason_blocks(self):
+        baseline = json.loads(json.dumps(self.BASELINE))
+        baseline["records"]["a::gcc-O0::h"]["reason"] = "refused: observation journal: ConflictingWrite"
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs",
+               "a::gcc-O0::h": ("refused", "refused: observation journal: ConflictingWrite")}
+        self.assertEqual(gate.ratchet(baseline, now), [])
+        now["a::gcc-O0::h"] = ("refused", "refused: observation journal: ConflictingValue")
+        problems = gate.ratchet(baseline, now)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("still refused, for another reason", problems[0])
+
+    def test_a_function_the_baseline_does_not_know_must_be_blessed(self):
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "refused",
+               "a::gcc-O0::new": "equal"}
+        self.assertEqual(gate.ratchet(self.BASELINE, now),
+                         ["a::gcc-O0::new: not in the baseline (now equal); bless it"])
+
+    def test_a_reason_names_the_cause_and_not_where_it_landed(self):
+        one = gate.reason("refused", {"cause": "r2sleigh refused fcn.401a50: missing (lowering.rs:253)"})
+        two = gate.reason("refused", {"cause": "r2sleigh refused fcn.4015d0: missing (lowering.rs:261)"})
+        self.assertEqual(one, two)
+        self.assertEqual(gate.reason("differs", {"field": "return", "a_bytes": "00"}), "return")
+        self.assertEqual(gate.reason("equal", {}), "")
 
     def test_leaving_equal_blocks(self):
         now = {"a::gcc-O0::f": "residual-trap", "a::gcc-O0::g": "differs",

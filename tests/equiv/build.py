@@ -48,6 +48,19 @@ class Binary:
             return self.source.name
 
 
+def toolchain(compilers: list[str]) -> dict[str, str]:
+    """What each compiler says it is: the first line of its ``--version``.
+
+    The population is built by these, and what a binary is depends on which
+    compiler made it, so a baseline only grades runs built the same way.
+    """
+    found = {}
+    for compiler in compilers:
+        proc = subprocess.run([compiler, "--version"], capture_output=True, text=True, check=False)
+        found[compiler] = (proc.stdout.splitlines() or ["absent"])[0].strip()
+    return found
+
+
 def default_sources() -> list[Path]:
     """``tests/corpus/*.c`` and ``tests/gold/*.c``: every program the repository keeps."""
     found = sorted((REPO / "tests" / "corpus").glob("*.c"))

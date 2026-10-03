@@ -245,6 +245,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_SETUP
 
     sources = [s.resolve() for s in (args.sources or build.default_sources())]
+    toolchain = build.toolchain(args.compilers.split(","))
+    if args.baseline is not None:
+        blessed = gate.load_baseline(args.baseline).get("toolchain")
+        if blessed is not None and any(blessed.get(name) != version
+                                       for name, version in toolchain.items()):
+            # Another compiler makes other binaries: every status could move
+            # for a reason that is not the change being gated.
+            print(f"ratchet: the baseline was blessed on {blessed}, this run builds with "
+                  f"{toolchain}; the statuses are not comparable. Run on the blessed "
+                  "toolchain, or bless a baseline for this one.")
+            return EXIT_RATCHET
     binaries = build.build_all(sources, args.compilers.split(","), args.opts.split(","),
                                args.out / "build")
     only = re.compile(args.only) if args.only else None
@@ -266,7 +277,8 @@ def main(argv: list[str] | None = None) -> int:
         "config": {"vectors": args.vectors, "timeout_ms": args.timeout_ms, "cc": args.cc,
                    "compilers": args.compilers, "opts": args.opts, "only": args.only,
                    "sources": [build.Binary(s, "", "", s, s).source_key for s in sources],
-                   "fixed_layout": bool(gate.fixed_layout_prefix())},
+                   "fixed_layout": bool(gate.fixed_layout_prefix()),
+                   "toolchain": toolchain},
         "records": [record.to_json() for record in records],
     }
     (args.out / "records.json").write_text(json.dumps(payload, indent=1) + "\n",
@@ -281,7 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         baseline = gate.load_baseline(args.baseline)
         selected = selected_predicate(args, sources)
         held = {key for key in baseline["records"] if selected(key)}
-        problems = gate.ratchet(baseline, {r.key: r.status for r in records}, held)
+        graded = {r.key: (r.status, gate.reason(r.status, r.evidence)) for r in records}
+        problems = gate.ratchet(baseline, graded, held)
         for line in problems:
             print(f"ratchet: {line}")
         if problems:
@@ -291,7 +304,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.write_baseline is not None:
         previous = gate.load_baseline(args.write_baseline) if args.write_baseline.exists() else None
         args.write_baseline.write_text(
-            json.dumps(gate.baseline_from(records, previous), indent=1, sort_keys=True) + "\n",
+            json.dumps(gate.baseline_from(records, previous, toolchain), indent=1,
+                       sort_keys=True) + "\n",
             encoding="utf-8",
         )
         print(f"baseline written: {args.write_baseline} (fill in a cause for every non-equal "

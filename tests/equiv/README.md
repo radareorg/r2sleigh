@@ -138,20 +138,30 @@ The ratchet
 -----------
 
 `tests/equiv/baseline.json` holds, per key, a status and -- for every record
-that is not `equal` -- the recorded cause. With `--baseline`:
+that is not `equal` -- the person's recorded cause and the machine's reason
+(`gate.reason`: the refusal cause, the differing field, the residual helper,
+with addresses, generated names and source line numbers erased). It also
+names the compilers it was blessed on. With `--baseline` the ratchet is exact:
 
-- a function the baseline holds `equal` must stay `equal`;
-- a `differs`, `uninit` or `ub` the baseline does not already record for that
-  function blocks;
+- every function's status must be the baseline's. Falling short blocks, and
+  so does an improvement the baseline does not hold yet: the next change could
+  lose it silently, and a refusal that stops producing any record at all is a
+  status change like any other;
+- a `differs`, `uninit` or `ub` the baseline does not record is reported as
+  `new` under its own message, the worst departure;
+- a non-`equal` record must fail for the baseline's reason, where the baseline
+  records one;
 - a function the baseline knows, inside the run's selection, must still be
-  graded;
-- a non-`equal` baseline record without a cause is itself a failure.
+  graded, and one it does not know must be blessed;
+- a non-`equal` baseline record without a cause is itself a failure;
+- a run built by other compilers than the baseline names is refused before
+  anything is graded, since another compiler makes other binaries.
 
+CI runs this on every push (`equivalence` in `.github/workflows/ci.yml`).
 The baseline is written only with `--write-baseline PATH`, which keeps any
-cause already recorded for an unchanged status and leaves the others `null`
-for a person to fill in after reading the records. No baseline is checked in
-yet: the gate needs `pddj` (plan P0), and the first blessing is the
-integrator's.
+cause already recorded for an unchanged status and reason, records each
+reason and the toolchain, and leaves the other causes `null` for a person to
+fill in after reading the records.
 
 Limits, stated
 --------------

@@ -146,6 +146,49 @@ jobs:
           path: target/source-gold/report.json
           if-no-files-found: warn
 
+  # ── Equivalence ratchet ─────────────────────────────────────────────
+  #
+  # Every function of the corpus and the gold programs is decompiled from its
+  # stripped build, compiled, and run against the original on the same inputs,
+  # with UBSan and uninitialised-read builds beside it. The baseline holds each
+  # function's status and the reason for it exactly: any change -- a function
+  # that stops being equal, a refusal that stops producing a record, a failure
+  # for a new reason, an improvement not yet blessed -- fails here until the
+  # baseline is re-blessed with its cause. The baseline names the compilers it
+  # was blessed on; another toolchain is refused rather than compared.
+  equivalence:
+    name: Equivalence Ratchet
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust PATH
+        run: |
+          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
+            if [ -d "$p" ]; then
+              echo "$p" >> "$GITHUB_PATH"
+              export PATH="$p:$PATH"
+            fi
+          done
+          command -v cargo >/dev/null
+      # The debug build, as the baseline was blessed with: a `slow` status is
+      # a statement about how long a rendering runs.
+      - name: Build the shell
+        run: cargo build -p r2s --features sleigh
+      - name: Hold every function to the baseline
+        run: |
+          python3 tests/equiv/run_equiv.py \
+            --r2s "$CARGO_TARGET_DIR/debug/r2s" \
+            --baseline tests/equiv/baseline.json \
+            --jobs 4 \
+            --out "$RUNNER_TEMP/equiv"
+      - name: Archive the records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: equivalence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/equiv/records.json
+          if-no-files-found: warn
+
   # ── Whole-binary render coverage ────────────────────────────────────
   #
   # The other gates score nine hand-picked functions and check that what they

@@ -53,6 +53,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import signal
 import subprocess
 from dataclasses import dataclass, field
@@ -462,50 +463,111 @@ def load_baseline(path: Path) -> dict:
     return payload
 
 
-def ratchet(baseline: dict, records: dict[str, str], selected: set[str] | None = None) -> list[str]:
-    """Every way ``records`` (key -> status) falls short of ``baseline``.
+def reason(status: str, evidence: dict) -> str:
+    """Why a record has its status, normalised so the same cause reads the same.
 
-    * a function the baseline holds ``equal`` must still be ``equal``;
-    * a ``differs``, ``uninit`` or ``ub`` the baseline does not already record
-      for that function blocks;
-    * a function the baseline knows must still be graded (when ``selected`` is
-      given, only the selected keys are held);
+    The ratchet holds this beside the status: a refusal that keeps its status
+    for another cause is a different defect, and so is a disagreement in
+    another field. Addresses, generated names and source line numbers move with
+    every build and every edit, so they are erased; what is left names the
+    cause, not where it happened to land.
+    """
+    if status == "equal":
+        return ""
+    if status == "residual-trap":
+        text = str(evidence.get("helper", ""))
+    elif status in ("differs", "ub", "uninit"):
+        text = " ".join(str(evidence.get(key, "")) for key in ("detector", "field")).strip()
+    elif status == "compile-error":
+        errors = [line.split("error:", 1)[1] for line in str(evidence.get("diagnostics", "")).splitlines()
+                  if "error:" in line]
+        text = errors[0] if errors else ""
+    elif status == "slow":
+        text = str(evidence.get("build", ""))
+    else:
+        text = str(evidence.get("cause", ""))
+    text = re.sub(r"\b(?:fcn|sub)[._][0-9a-f]+\b", "fcn", text)
+    text = re.sub(r"0x[0-9a-fA-F]+", "0x", text)
+    text = re.sub(r"(?<=0x):(?:op:)?\d+", "", text)
+    text = re.sub(r"\b([A-Za-z_][\w/]*\.rs):\d+(?::\d+)?", r"\1", text)
+    return " ".join(text.split())
+
+
+def ratchet(baseline: dict, records: dict[str, "str | tuple[str, str]"],
+            selected: set[str] | None = None) -> list[str]:
+    """Every way ``records`` departs from ``baseline``.
+
+    The baseline is exact, so it only moves by a bless:
+
+    * a record's status must be the baseline's -- falling short blocks, and so
+      does improving, because an improvement the baseline does not hold is one
+      the next change may silently lose;
+    * a ``differs``, ``uninit`` or ``ub`` the baseline does not record blocks
+      under its own message, as the worst departure;
+    * a non-``equal`` record must fail for the reason the baseline records,
+      where it records one;
+    * a function the baseline knows must still be graded, and one it does not
+      know must be blessed (when ``selected`` is given, only the selected keys
+      are held);
     * every non-``equal`` baseline record carries a recorded cause.
+
+    ``records`` maps a key to its status, or to its status and reason.
     """
     problems: list[str] = []
     held = baseline["records"]
+
+    def split(graded):
+        return graded if isinstance(graded, tuple) else (graded, None)
+
     for key, entry in sorted(held.items()):
         if selected is not None and key not in selected:
             continue
         before = entry.get("status")
         if before != "equal" and not entry.get("cause"):
             problems.append(f"{key}: baseline status {before} has no recorded cause")
-        now = records.get(key)
-        if now is None:
+        if key not in records:
             problems.append(f"{key}: in the baseline but not graded by this run")
             continue
-        if before == "equal" and now != "equal":
-            problems.append(f"{key}: left equal (now {now})")
-    for key, now in sorted(records.items()):
-        before = held.get(key, {}).get("status")
+        now, why = split(records[key])
         if now in BLOCKING and now != before:
-            problems.append(f"{key}: new {now} (baseline: {before or 'absent'})")
+            problems.append(f"{key}: new {now} (baseline: {before})")
+        elif before == "equal" and now != "equal":
+            problems.append(f"{key}: left equal (now {now})")
+        elif now != before:
+            problems.append(f"{key}: {before} -> {now}; bless it with its cause")
+        elif why is not None and entry.get("reason") is not None and why != entry["reason"]:
+            problems.append(f"{key}: still {now}, for another reason: {why!r} "
+                            f"(baseline: {entry['reason']!r})")
+    for key, graded in sorted(records.items()):
+        if key in held:
+            continue
+        now, _ = split(graded)
+        if now in BLOCKING:
+            problems.append(f"{key}: new {now} (baseline: absent)")
+        else:
+            problems.append(f"{key}: not in the baseline (now {now}); bless it")
     return problems
 
 
-def baseline_from(records: list[Record], previous: dict | None = None) -> dict:
-    """A baseline holding this run, keeping every cause a previous one recorded."""
+def baseline_from(records: list[Record], previous: dict | None = None,
+                  toolchain: dict[str, str] | None = None) -> dict:
+    """A baseline holding this run, keeping every cause a previous one recorded
+    for the same status and reason."""
     old = (previous or {}).get("records", {})
     out: dict[str, dict] = {}
     for record in sorted(records, key=lambda r: r.key):
-        entry = {"status": record.status}
-        cause = old.get(record.key, {}).get("cause")
+        entry: dict = {"status": record.status}
         if record.status != "equal":
-            entry["cause"] = cause if cause and old.get(record.key, {}).get("status") == record.status else None
+            why = reason(record.status, record.evidence)
+            kept = old.get(record.key, {})
+            same = kept.get("status") == record.status and kept.get("reason", why) == why
+            entry["cause"] = kept.get("cause") if same else None
+            entry["reason"] = why
         out[record.key] = entry
     return {
         "schema": 1,
-        "note": (
+        "toolchain": toolchain if toolchain is not None else (previous or {}).get("toolchain"),
+        "note": (previous or {}).get("note") or (
             "Blessed by the integrator after reading records.json. A non-equal record needs a "
             "cause before the ratchet accepts this file."
         ),
