@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE).",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -1186,8 +1186,7 @@
    "status": "differs"
   },
   "tests/corpus/shapes.c::clang-O2::shape_pointer_to_pointer": {
-   "cause": "[P4 memory] A frame array whose address escapes is split into scalars. uint64_t *rows[4] becomes four independent locals: int64_t* stack_m72 and uint64_t stack_m64, stack_m56 and stack_m48 (rendering.c:14-17). Only &stack_m72 is passed to indirect_load and indirect_store (fcn_401a10/fcn_401a20), which read rows[index] for index 0..3, i.e. past the 8-byte object. -O2 deletes the stores to stack_m64/56/48 as dead, so the callee dereferences garbage. Secondary P1 defect: the entry RSP is rendered as an uninitialised local (`int64_t* RSP_0; RSP_0 = (int64_t*)((uint64_t)RSP_0 - 8);` four times, then RSP_0 =...",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_recurse_direct": {
    "status": "equal"
@@ -2299,8 +2298,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::classify": {
-   "cause": "[P4 memory (slot promotion) + P5 dispatch] This is the original OOM case (values-dispatch F1/F2), now stopped by the P0 region check. `cmp DWORD PTR [rbp-4],7; ja` narrows load L1, but the dispatch reads L2 = `mov eax,[rbp-4]`, zero-extended. indirect.rs therefore reports 4294967296 entries 0x402018..=0x800402010, and native.rs:1918-1923 refuses the fetch ('past the region ending at 0x402388'). The unresolved `notrack jmp rax` has no rendered occurrence for its target, giving ExactUseRequiresRenderedOccurrence (place.rs:409-417 comment-only fallback). Fix: P4 promotion of [rbp-4], plus P5 dispatch labels, plus the residual fallback.",
-   "status": "refused"
+   "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::copy_name": {
    "status": "equal"
