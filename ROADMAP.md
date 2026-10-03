@@ -166,6 +166,7 @@ and V (visual mode and shell experience).
 | CI under ten minutes: one `ci`-profile build every gate downloads, equivalence in six shards held to the baseline by `tests/equiv/merge_shards.py`, the harness's own tests in their own job | The slowest job finishes in ten minutes; it was 33 for equivalence alone |
 | CI green, with the equivalence, coverage and source-gold baselines re-blessed from CI's own run (the merge job writes `baseline.proposed.json`) | Every gate passes on a push with no laptop baseline |
 | Queued-run alert; pinned containers for gcc 13, clang 18 and the macOS coverage compiler; compiled coverage cells replaced by pinned bytes | A gate result does not depend on the runner |
+| Diagnose the equivalence `PipelineTests`/`SelfTestSuite` stall on hosted runners (a driver run never returns from unittest, while the same self-tests pass in every shard); the job reports without blocking until fixed | The `equivalence-pipeline` job gates again |
 | arm64 equivalence under qemu-user (D6) | `tests/equiv` reports both architectures |
 | SSA integrity check in CI: one definition per value, every use dominated | Fails on the duplicate `tmp:2c200_1` definition seen in #56, or proves it a display artefact |
 | Split PR #66 into reviewable pieces and merge | `master` carries the program |
