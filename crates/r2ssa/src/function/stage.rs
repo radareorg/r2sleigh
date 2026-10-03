@@ -275,15 +275,14 @@ impl Sealed {
         self
     }
 
-    /// The artifact over this sealed function: liveness, the semantic
-    /// facts, and the one addition they make to the prep facts -- the formals
-    /// the address facts prove, which exist only once the semantic facts are
-    /// collected from this function. It consumes the sealed function, so
-    /// that addition is made once.
+    /// The artifact over this sealed function: liveness and the semantic
+    /// facts, collected from the prep facts as they were sealed. Neither is
+    /// written into the other afterwards (`SsaArtifact::formal_parameter_of`
+    /// asks both).
     pub(super) fn into_artifact<C: SsaWorkControl + ?Sized>(
-        mut self,
+        self,
         machine_context: SourceMachineContext,
-        provenance: super::SsaArtifactProvenance,
+        finish: super::Finish,
         control: &C,
         prepare_entry_bytes: usize,
     ) -> Result<super::SsaArtifact, SsaPrepareError> {
@@ -301,7 +300,7 @@ impl Sealed {
             crate::liveness::ValueLiveness::compute(&self.graph, &live_out, content.clone());
         let storage_spans = StorageSpans::compute(&self.graph, &liveness);
         let graph_built_bytes = r2il::allocation::live_bytes();
-        let facts = crate::semantic::PreparedFunctionFacts::collect_with_context_and_control(
+        let mut facts = crate::semantic::PreparedFunctionFacts::collect_with_context_and_control(
             crate::semantic::CollectionOver {
                 function: &self.ir,
                 prep: Some(&self.prep),
@@ -340,8 +339,6 @@ impl Sealed {
             content,
             &ignored_reads,
         );
-        self.prep
-            .install_formal_parameter_identity(&self.graph, &facts.addresses);
         let unobserved_merges = crate::deadphi::DeadPhis::find(&self.graph, &live_out, &facts);
         let aggregate_accesses = crate::aggregate_access::collect_aggregate_access_projections(
             &self.graph,
@@ -349,10 +346,18 @@ impl Sealed {
             &facts.structured.memory_accesses,
             &machine_context,
         );
+        // The obligations are about the native instructions of the lift the
+        // function came from; a span the obligations cannot bind means the
+        // lift and the function disagree.
+        if let Some(spans) = finish.native_spans
+            && !facts.obligations.bind_genuine_native_spans(spans)
+        {
+            return Err(super::malformed_ssa_input());
+        }
         control.poll()?;
         Ok(super::SsaArtifact {
             authority: super::SsaArtifactAuthority::new(),
-            provenance,
+            provenance: finish.provenance,
             sealed: self,
             liveness: super::ArtifactLiveness {
                 storage_spans,
@@ -364,10 +369,7 @@ impl Sealed {
             facts,
             machine_context,
             aggregate_accesses,
-            spellings: super::ArtifactSpellings {
-                display_names: r2source::DisplayNames::default(),
-                user_operations: std::sync::Arc::from([] as [String; 0]),
-            },
+            spellings: finish.spellings,
         })
     }
 }

@@ -117,9 +117,26 @@ Step 2 as landed:
   `Lifted::prepare` optimises and validates; `Lifted::validate` is the raw
   route, with no optimisation; `Prepared::seal` consumes the function and runs
   the fixed sequence; `Sealed::into_artifact`, private to the stage module,
-  collects liveness and the semantic facts and makes the one addition they
-  make to the prep facts (the formals the address facts prove) before
-  consuming itself into `SsaArtifact`, which holds the `Sealed`.
+  collects liveness and the semantic facts and consumes itself into
+  `SsaArtifact`, which holds the `Sealed`.
+- Nothing is written into an artifact once it is built. Several things used
+  to be:
+  - the formals the address facts prove were installed into the prep facts
+    that the address facts had been collected from;
+  - the spellings were assigned after sealing;
+  - the obligations were bound to the lift's native spans after sealing.
+
+  Now `SsaArtifact::formal_parameter_of` (and `_of_view`, and
+  `formal_parameters`) asks the two owners, the entry and the address facts,
+  each for its own evidence. A `Finish` (provenance, spellings, native spans)
+  is given to `into_artifact`. One write remains:
+  `seal_body_proven_interface` rewrites the interface's format parameter
+  from the facts, and that becomes one `Fact` at C1
+  (doc/adr-provenance.md).
+- Open: no test and no census function changes when the address-proven
+  formals are turned off, including an `-O0` callee that indexes through a
+  spilled parameter, which is the case their comment names. P7 either proves
+  what they are for or deletes them.
 - The order inside `seal` is boundary constants, entry lanes, copy
   forwarding, a graph, the demand plan over it (applied, and the graph built
   again, only where a base is released), then the one prep collection. The

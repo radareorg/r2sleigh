@@ -2726,12 +2726,11 @@ fn classify_memory_access_location(
 /// value view says whose bits it extends, and how.
 fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
     let var = prepared.value_var(value)?;
-    let facts = prepared.decompile_prep_facts();
-    if let Some(index) = facts.formal_parameter_of(var) {
+    if let Some(index) = prepared.formal_parameter_of(var) {
         return Some((index, None));
     }
-    let view = facts.view(var);
-    let index = facts.formal_parameter_of_view(&view)?;
+    let view = prepared.decompile_prep_facts().view(var);
+    let index = prepared.formal_parameter_of_view(&view)?;
     match view.extension {
         crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
         crate::view::ViewExtension::Sign => Some((index, Some(view.prefix_bits))),

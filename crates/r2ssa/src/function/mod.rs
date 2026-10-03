@@ -286,7 +286,7 @@ impl ArtifactLiveness {
 /// Neither field is a dataflow, ABI or typing fact. They are retained because
 /// the lift and the snapshot are the only things that ever saw them, and both
 /// are gone by the time anything renders.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ArtifactSpellings {
     /// Spellings the source carried for the addresses this function calls, so
     /// the renderer prints `sym.imp.strcmp` where it would print an address.
@@ -296,6 +296,29 @@ pub struct ArtifactSpellings {
     /// table it came from, so the table travels with the artifact rather than
     /// the renderer guessing.
     user_operations: Arc<[String]>,
+}
+
+/// What an artifact is built with besides its function: where it came from,
+/// how its names read to a person, and the native instructions its
+/// obligations are about. Given at construction, so nothing is written into
+/// an artifact once it is built.
+struct Finish {
+    provenance: SsaArtifactProvenance,
+    spellings: ArtifactSpellings,
+    /// Each native instruction of a genuine lift, which the obligations are
+    /// bound to; absent where the function was not lifted from one.
+    native_spans: Option<Vec<crate::GenuineNativeInstructionSpan>>,
+}
+
+impl Finish {
+    /// A function a test or an internal path built, from no lift.
+    fn manual() -> Self {
+        Self {
+            provenance: SsaArtifactProvenance::Manual,
+            spellings: ArtifactSpellings::default(),
+            native_spans: None,
+        }
+    }
 }
 
 /// Canonical SSA artifact consumed by downstream analysis layers.
@@ -496,10 +519,10 @@ impl SsaArtifact {
     /// The artifact of a function a test prepared itself.
     #[cfg(test)]
     fn from_prepared(prepared: Prepared, machine_context: SourceMachineContext) -> Self {
-        Self::seal_with_provenance(
+        Self::seal_finished(
             prepared,
             machine_context,
-            SsaArtifactProvenance::Manual,
+            Finish::manual(),
             &UncheckedSsaWorkControl,
         )
         .expect("an unchecked control never stops")
@@ -533,21 +556,29 @@ impl SsaArtifact {
         let prepared = Lifted::new(function)
             .validate()
             .map_err(integrity_refusal)?;
-        Self::seal_with_provenance(prepared, machine_context, provenance, control)
+        Self::seal_finished(
+            prepared,
+            machine_context,
+            Finish {
+                provenance,
+                ..Finish::manual()
+            },
+            control,
+        )
     }
 
     /// Seal a prepared function and derive the artifact's facts from it.
-    fn seal_with_provenance<C: SsaWorkControl + ?Sized>(
+    fn seal_finished<C: SsaWorkControl + ?Sized>(
         prepared: Prepared,
         machine_context: SourceMachineContext,
-        provenance: SsaArtifactProvenance,
+        finish: Finish,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
         let sealed = prepared.seal(&machine_context);
         let mut artifact =
-            sealed.into_artifact(machine_context, provenance, control, prepare_entry_bytes)?;
+            sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
         Ok(artifact)
     }
@@ -651,12 +682,7 @@ impl SsaArtifact {
             control,
         )?;
         control.poll()?;
-        Self::seal_with_provenance(
-            function,
-            machine_context,
-            SsaArtifactProvenance::Manual,
-            control,
-        )
+        Self::seal_finished(function, machine_context, Finish::manual(), control)
     }
 
     /// Build decompiler-prepared SSA with an explicit function interface.
@@ -745,10 +771,10 @@ impl SsaArtifact {
         )
         .ok()?;
         Some(
-            Self::seal_with_provenance(
+            Self::seal_finished(
                 function,
                 machine_context,
-                SsaArtifactProvenance::Manual,
+                Finish::manual(),
                 &UncheckedSsaWorkControl,
             )
             .expect("internal SSA artifact construction requires a validated function"),
@@ -784,12 +810,7 @@ impl SsaArtifact {
             control,
         )?;
         control.poll()?;
-        Self::seal_with_provenance(
-            function,
-            machine_context,
-            SsaArtifactProvenance::Manual,
-            control,
-        )
+        Self::seal_finished(function, machine_context, Finish::manual(), control)
     }
 
     /// Build analysis-only decompiler SSA directly from an immutable genuine lift.
@@ -841,20 +862,16 @@ impl SsaArtifact {
             return Err(malformed_ssa_input());
         }
         control.poll()?;
-        let mut artifact = Self::seal_with_provenance(
+        Self::seal_finished(
             function,
             machine_context,
-            SsaArtifactProvenance::GenuineLiftOnly,
+            Finish {
+                provenance: SsaArtifactProvenance::GenuineLiftOnly,
+                spellings: ArtifactSpellings::default(),
+                native_spans: Some(native_spans),
+            },
             control,
-        )?;
-        if !artifact
-            .facts
-            .obligations
-            .bind_genuine_native_spans(native_spans)
-        {
-            return Err(malformed_ssa_input());
-        }
-        Ok(artifact)
+        )
     }
 
     /// Build analysis-only decompiler SSA from one complete genuine lift.
@@ -936,6 +953,65 @@ impl SsaArtifact {
     /// sealed.
     pub fn decompile_prep_facts(&self) -> &DecompilePrepFacts {
         self.sealed.decompile_prep_facts()
+    }
+
+    /// The formal a value is: one the entry proves, which the prep facts
+    /// hold, or one the address facts prove holds exactly that parameter
+    /// with nothing added -- a copy or a reload of it. The entry's answer is
+    /// authoritative where both answer.
+    ///
+    /// Two owners, each for its own evidence. The address facts are
+    /// collected over the prep facts, so writing their answer back into the
+    /// prep facts left the two describing different functions. O(log n).
+    pub fn formal_parameter_of(&self, var: &SSAVar) -> Option<usize> {
+        self.decompile_prep_facts()
+            .formal_parameter_of(var)
+            .or_else(|| self.addressed_formal(var))
+    }
+
+    /// The formal whose bits a view names: the root itself, or a formal that
+    /// is exactly those bits of the root -- `esi` of `rsi`, which a widening
+    /// of `esi` views as `rsi`'s low 32 bits. O(formals).
+    pub fn formal_parameter_of_view(&self, view: &crate::view::ValueView) -> Option<usize> {
+        let prep = self.decompile_prep_facts();
+        let names = |formal: &SSAVar| {
+            let lane = prep.view(formal);
+            lane.root == view.root
+                && lane.prefix_bits == view.prefix_bits
+                && lane.extension == crate::view::ViewExtension::Exact
+        };
+        self.formal_parameter_of(&view.root).or_else(|| {
+            self.formal_parameters()
+                .find_map(|(formal, index)| names(formal).then_some(index))
+        })
+    }
+
+    /// Every value that is a formal, with its parameter: the entry's first,
+    /// then the address facts', each in its own order.
+    pub fn formal_parameters(&self) -> impl Iterator<Item = (&SSAVar, usize)> + '_ {
+        let prep = self.decompile_prep_facts();
+        let graph = self.graph();
+        let entry = prep
+            .formal_parameters
+            .iter()
+            .map(|(var, index)| (var, *index));
+        let addressed = self
+            .addresses()
+            .parameter_expressions
+            .iter()
+            .filter(|(_, expression)| expression.terms.is_empty() && expression.offset == 0)
+            .filter_map(move |(value, expression)| {
+                let var = &graph.value(*value)?.var;
+                (!prep.formal_parameters.contains_key(var)).then_some((var, expression.parameter))
+            });
+        entry.chain(addressed)
+    }
+
+    /// The parameter a value holds exactly, by the address facts.
+    fn addressed_formal(&self, var: &SSAVar) -> Option<usize> {
+        let value = self.graph().value_id_for_var(var)?;
+        let expression = self.addresses().parameter_expression(value)?;
+        (expression.terms.is_empty() && expression.offset == 0).then_some(expression.parameter)
     }
 
     /// What the calling convention says this function's caller may read.
@@ -2249,23 +2325,19 @@ impl TrustedSsaArtifact {
             return Err(malformed_ssa_input());
         }
         control.poll()?;
-        let mut artifact = SsaArtifact::seal_with_provenance(
+        let artifact = SsaArtifact::seal_finished(
             function,
             machine_context,
-            SsaArtifactProvenance::TrustedSource(source),
+            Finish {
+                provenance: SsaArtifactProvenance::TrustedSource(source),
+                spellings: ArtifactSpellings {
+                    display_names,
+                    user_operations: Arc::from(arch.user_ops.clone()),
+                },
+                native_spans: Some(native_spans),
+            },
             control,
         )?;
-        artifact.spellings = ArtifactSpellings {
-            display_names,
-            user_operations: Arc::from(arch.user_ops.clone()),
-        };
-        if !artifact
-            .facts
-            .obligations
-            .bind_genuine_native_spans(native_spans)
-        {
-            return Err(malformed_ssa_input());
-        }
         Ok(Self {
             artifact: Arc::new(artifact),
             lift_authority,
@@ -2394,21 +2466,6 @@ impl DecompilePrepFacts {
 
     pub fn formal_parameter_of(&self, var: &SSAVar) -> Option<usize> {
         self.formal_parameters.get(var).copied()
-    }
-
-    /// The formal whose bits a view names: the root itself, or a formal that
-    /// is exactly those bits of the root -- `esi` of `rsi`, which a widening
-    /// of `esi` views as `rsi`'s low 32 bits. O(formals).
-    pub fn formal_parameter_of_view(&self, view: &crate::view::ValueView) -> Option<usize> {
-        self.formal_parameter_of(&view.root).or_else(|| {
-            self.formal_parameters.iter().find_map(|(formal, index)| {
-                let lane = self.views.view(formal);
-                (lane.root == view.root
-                    && lane.prefix_bits == view.prefix_bits
-                    && lane.extension == crate::view::ViewExtension::Exact)
-                    .then_some(*index)
-            })
-        })
     }
 }
 

@@ -185,32 +185,6 @@ impl PreparedFunctionFacts {
         .expect("an unchecked control never stops")
     }
 
-    pub fn collect_with_assumptions(
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        assumptions: &AssumptionSet,
-    ) -> Self {
-        let liveness = crate::liveness::ValueLiveness::compute(
-            graph,
-            &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(graph, None),
-        );
-        let storage_spans = StorageSpans::compute(graph, &liveness);
-        Self::collect_inner(
-            CollectionOver {
-                function,
-                prep: None,
-                graph,
-                storage_spans: &storage_spans,
-                assumptions,
-                machine_context: None,
-                site: "assume",
-            },
-            &crate::control::UncheckedSsaWorkControl,
-        )
-        .expect("an unchecked control never stops")
-    }
-
     pub(crate) fn collect_with_context(
         function: &SSAFunction,
         prep: Option<&crate::function::DecompilePrepFacts>,

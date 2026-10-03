@@ -1413,7 +1413,7 @@ fn declared_formal_type(
     }
     let source = source_owned.source();
     let var = &source.graph().value(value)?.var;
-    let index = source.decompile_prep_facts().formal_parameter_of(var)?;
+    let index = source.formal_parameter_of(var)?;
     let ty = facts
         .merged_signature
         .as_ref()?

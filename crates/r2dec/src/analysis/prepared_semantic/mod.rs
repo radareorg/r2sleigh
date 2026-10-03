@@ -267,7 +267,7 @@ impl PreparedSemanticView {
         prepared: &SsaArtifact,
         var: &SSAVar,
     ) -> Option<crate::symbol::SymbolId> {
-        let slot = prepared.decompile_prep_facts().formal_parameter_of(var)?;
+        let slot = prepared.formal_parameter_of(var)?;
         let slot = u32::try_from(slot).ok()?;
         let disposition = match self.binding_names.as_ref()?.require_parameter_slot(slot) {
             Ok(disposition) => disposition,
@@ -377,10 +377,8 @@ fn preflight_rendered_identities(
     parameter_slots.extend(
         inputs
             .prepared
-            .decompile_prep_facts()
-            .formal_parameters
-            .values()
-            .filter_map(|slot| u32::try_from(*slot).ok()),
+            .formal_parameters()
+            .filter_map(|(_, slot)| u32::try_from(slot).ok()),
     );
     if let Some(render) = inputs.function_facts.render() {
         for entity in render.certified_entities.values() {
