@@ -560,7 +560,7 @@ fn a_rendering_under_way_blocks_neither_the_frame_nor_the_keys() {
 #[test]
 fn an_answer_for_a_seek_the_user_left_is_dropped() {
     let (host, seen, started, release) = gated();
-    visual(host, seen.clone(), |ui| {
+    visual(host, Arc::clone(&seen), |ui| {
         assert!(ui.key('p'));
         assert_eq!(started.recv(), Ok(0x1000));
         // Back in the disassembly (already held), follow the call, and look
@@ -622,7 +622,7 @@ fn a_resize_lays_the_panes_out_again() {
 fn the_host_is_only_asked_on_the_engines_thread() {
     let (host, seen) = Program::new();
     let ui_thread = std::thread::current().id();
-    visual(host, seen.clone(), |ui| {
+    visual(host, Arc::clone(&seen), |ui| {
         ui.press("pppppl:afl\n\x1bg1000\n");
         ui.press("ppp");
         ui.press("i12\x1b");

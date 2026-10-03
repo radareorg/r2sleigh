@@ -285,6 +285,26 @@ mod tests {
         driver.settle().expect("the engine answers");
     }
 
+    /// From `main`, move down to the call to `add`, follow it, and look at
+    /// the C.
+    fn follow_the_call_and_decompile(mut driver: Driver, call: usize) {
+        driver
+            .handle(Msg::Resize(120, 30))
+            .expect("the engine is there");
+        driver.settle().expect("the engine answers");
+        let shown = screen(&driver);
+        assert!(shown.contains("0x00001549  endbr64"), "{shown}");
+        for _ in 0..call {
+            press(&mut driver, KeyCode::Char('j'));
+        }
+        press(&mut driver, KeyCode::Enter);
+        assert_eq!(driver.app().seek(), 0x11a9);
+        press(&mut driver, KeyCode::Char('p'));
+        assert_eq!(driver.app().view(), View::Decompiler);
+        let decompiled = screen(&driver);
+        assert!(decompiled.contains("return"), "{decompiled}");
+    }
+
     /// The panes show what the commands print: the disassembly row is `pd`'s
     /// spelling, following the first call lands on `add`, the decompiler pane
     /// renders the function the cursor is in, and the function list is
@@ -304,24 +324,7 @@ mod tests {
             .expect("main calls add");
         let (driver, engine) = r2s_tui::connect();
         std::thread::scope(|scope| {
-            let ui = scope.spawn(move || {
-                let mut driver = driver;
-                driver
-                    .handle(Msg::Resize(120, 30))
-                    .expect("the engine is there");
-                driver.settle().expect("the engine answers");
-                let shown = screen(&driver);
-                assert!(shown.contains("0x00001549  endbr64"), "{shown}");
-                for _ in 0..call {
-                    press(&mut driver, KeyCode::Char('j'));
-                }
-                press(&mut driver, KeyCode::Enter);
-                assert_eq!(driver.app().seek(), 0x11a9);
-                press(&mut driver, KeyCode::Char('p'));
-                assert_eq!(driver.app().view(), View::Decompiler);
-                let decompiled = screen(&driver);
-                assert!(decompiled.contains("return"), "{decompiled}");
-            });
+            let ui = scope.spawn(move || follow_the_call_and_decompile(driver, call));
             engine.serve(&mut host);
             if let Err(panic) = ui.join() {
                 std::panic::resume_unwind(panic);

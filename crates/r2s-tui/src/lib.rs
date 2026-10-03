@@ -83,11 +83,7 @@ impl Driver {
     pub fn handle(&mut self, msg: Msg) -> io::Result<bool> {
         for effect in self.app.update(msg) {
             match effect {
-                Effect::Request(request) => {
-                    if self.requests.send(request).is_err() {
-                        return Err(gone());
-                    }
-                }
+                Effect::Request(request) => self.requests.send(request).map_err(|_| gone())?,
                 Effect::Quit => return Ok(false),
             }
         }
@@ -118,17 +114,21 @@ impl Driver {
     /// once a flush sent last is answered, everything before it is.
     pub fn settle(&mut self) -> io::Result<()> {
         loop {
-            self.requests.send(Request::Flush).map_err(|_| gone())?;
-            loop {
-                let answer = self.answers.recv().map_err(|_| gone())?;
-                if answer == Answer::Flushed {
-                    break;
-                }
-                self.handle(Msg::Answer(answer))?;
-            }
+            self.flush()?;
             if !self.app.waiting() {
                 return Ok(());
             }
+        }
+    }
+
+    /// Handle every answer to the requests sent so far, waiting for them.
+    fn flush(&mut self) -> io::Result<()> {
+        self.requests.send(Request::Flush).map_err(|_| gone())?;
+        loop {
+            match self.answers.recv().map_err(|_| gone())? {
+                Answer::Flushed => return Ok(()),
+                answer => self.handle(Msg::Answer(answer))?,
+            };
         }
     }
 }

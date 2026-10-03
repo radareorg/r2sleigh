@@ -460,19 +460,7 @@ impl App {
             View::List(_) => (false, false, false, false),
         };
         if lines {
-            // A window from the cache may make the moves kept for it, which
-            // moves the top to where another window is wanted.
-            loop {
-                let key = self.wanted_lines();
-                let held = self.lines.held.as_ref().is_some_and(|held| held.key == key);
-                if held && !self.lines.stale {
-                    break;
-                }
-                self.want(key, effects);
-                if self.lines.pending() || self.wanted_lines() == key {
-                    break;
-                }
-            }
+            self.sync_lines(effects);
         }
         if bytes {
             let key = self.wanted_bytes();
@@ -518,6 +506,23 @@ impl App {
             }
         }
         self.sync_seek(effects);
+    }
+
+    /// Ask for the disassembly window at the top. A window from the cache
+    /// may make the moves kept for it, which moves the top to where another
+    /// window is wanted; each pass makes at least one kept move or stops.
+    fn sync_lines(&mut self, effects: &mut Vec<Effect>) {
+        loop {
+            let key = self.wanted_lines();
+            let held = self.lines.held.as_ref().is_some_and(|held| held.key == key);
+            if held && !self.lines.stale {
+                return;
+            }
+            self.want(key, effects);
+            if self.lines.pending() || self.wanted_lines() == key {
+                return;
+            }
+        }
     }
 
     /// Tell the engine's thread where the cursor is, if it has moved since.
@@ -1019,7 +1024,7 @@ impl App {
         // The engine's thread runs it at the seek on screen.
         self.sync_seek(effects);
         self.running += 1;
-        self.running_what = what.to_owned();
+        what.clone_into(&mut self.running_what);
         effects.push(Effect::Request(request));
     }
 
@@ -1163,18 +1168,20 @@ impl App {
                 return;
             }
         }
-        if notch != 0 {
-            match self.view {
-                View::Graph => {
-                    if let Some(pane) = &mut self.graph.held {
-                        pan(pane, 0, 2 * WHEEL as i64 * notch as i64);
-                    }
-                }
-                _ => self.step(notch * WHEEL * self.row()),
-            }
-            return;
+        if notch == 0 {
+            self.click(mouse.column, mouse.row);
+        } else {
+            self.wheel(notch);
         }
-        self.click(mouse.column, mouse.row);
+    }
+
+    /// One notch of the wheel: the rows of three keys, or a pan in the graph.
+    fn wheel(&mut self, notch: isize) {
+        match (self.view, &mut self.graph.held) {
+            (View::Graph, Some(pane)) => pan(pane, 0, 2 * WHEEL as i64 * notch as i64),
+            (View::Graph, None) => {}
+            _ => self.step(notch * WHEEL * self.row()),
+        }
     }
 
     /// A left click at a cell of the terminal.
