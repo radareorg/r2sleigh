@@ -125,6 +125,9 @@ Bindings: 5
   b2 RAX_1 Int { bits: 64, signedness: Unsigned } Local [26 33 34]
   b3 tmp:11e00_2 Int { bits: 8, signedness: Unsigned } Local [45]
   b4 stack_p0 Int { bits: 64, signedness: Unsigned } StackObject { object: ObjectId(1) } entry-declared []
+Frame: 2 objects, 0 escaped
+  o1 slot sp+0x0 private
+  o2 slot sp+0x8 private
 Values:
   const:0_0 elided UnobservedValue
   CF_1 elided UnobservedValue

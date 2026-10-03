@@ -957,7 +957,11 @@ fn pdim_states_which_frame_objects_outside_code_can_reach() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
     let run = on(fixture, "pdim @ 0x13e3");
     assert!(run.ok, "{}", run.out);
-    assert!(run.out.contains("Frame: 6 objects, 0 escaped"), "{}", run.out);
+    assert!(
+        run.out.contains("Frame: 6 objects, 0 escaped"),
+        "{}",
+        run.out
+    );
     let calls = run
         .out
         .lines()
@@ -965,7 +969,9 @@ fn pdim_states_which_frame_objects_outside_code_can_reach() {
         .collect::<Vec<_>>();
     assert_eq!(calls.len(), 2, "{}", run.out);
     assert!(
-        calls.iter().all(|line| line.ends_with("reaches no private object")),
+        calls
+            .iter()
+            .all(|line| line.ends_with("reaches no private object")),
         "{}",
         run.out
     );
