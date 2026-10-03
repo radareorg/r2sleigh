@@ -993,8 +993,8 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::shape_byte_indexed_buffer": {
-   "cause": "[P4 memory (save slot / return address as MUST barriers; promote -O0 counter), P5 index bound] [G-SAVESLOT] The prologue `push rbp` store renders as a data store into the buffer object `struct r2sleigh_bits_2048 stack_m88`: `((uint64_t*)&stack_m88)[10] = r2sleigh_residual_u64(1)` reads callee-saved entry RBP_0 (Held) as the first statement. The object for `uint8_t buf[64]` (m88) crosses both parameter homes, the saved-RBP slot and the return address and runs 168 bytes past the entry SP into the caller frame (256 bytes = the [0,0xf8]+8 reach of `buf + (i & 0xf8)` with i unbounded): its extent comes from MAY evidence (escape into the `p = (a&1) ? buf : &total` merge; an index whose -O0...",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P4 frame partition] The buffer indexed by x8 & 0xf8 absorbs the two parameter homes above it: a home is not a MUST boundary (C may copy a parameter into the buffer). The trap moved from a u64 to a void residual after MAY spans were clipped at MUST boundaries (6cf8cd7e).",
+   "reason": "r2sleigh_residual_void",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_call_chain": {
@@ -1119,18 +1119,14 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::shape_mutual_even": {
-   "cause": "[P1 reads (SSA construction soundness)] The walked body follows the tail jumps even->odd->even, so the function entry 0x401710 is also a loop header: its single CFG predecessor is odd's step block 0x401745. SSA places no phi at the entry block. Both the frontier computation and phi placement count only blocks with two or more CFG predecessors, and neither models the implicit edge from the caller. So `test rdi,rdi` in the header always reads the entry value RDI_0. odd's step (RSI = RAX*17 + RDI*4; RDI--) computes values that are then unobserved and elided. The rendered loop never executes odd's step, never updates RSI, and decreme...",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_mutual_odd": {
-   "cause": "[P1 reads (SSA construction soundness)] Mirror of shape_mutual_even. The entry 0x401740 is a loop header reached by even's tail jump. With no phi at the entry, the header reads the entry RDI_0/RSI_0, and even's step (RSI = RSI*31 + RDI; RDI--) is unobserved and dropped. The loop never alternates.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_pointer_to_pointer": {
-   "cause": "[P4 memory] `rows[0] = &zero`, and `zero` sits at the stack pointer itself, so the compiler stores the raw RSP as data (`mov rax,rsp; mov [rsp+0x20],rax`; the copy is forwarded, so the Store reads the RSP SSA value directly). CORRECTED MECHANISM: the engine already knows this value is `&zero`. The lowering's write projection spells it `AddrOf(Var(<frame object>))`. What fails is disposition. Because the carrier's own value is a data operand, r2ssa's stack-geometry certificate (semantic/certificates/stack.rs:903-955) evicts it, and the eviction cascades back through the carrier chain (RSP_1, RSP_0). r2d...",
-   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingValue",
+   "cause": "[P4 frame partition] Refused by the observation journal (ConflictingWrite, was ConflictingValue) after MAY spans were clipped at MUST boundaries (6cf8cd7e); the frame object the row buffer and its slot share is still split differently by the partition and the journal.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingWrite",
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O1::shape_recurse_direct": {
@@ -1235,14 +1231,10 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::shape_mutual_even": {
-   "cause": "[P1 reads] Same as clang-O1. Mutual tail recursion makes the entry a loop header with one CFG predecessor. No phi is placed at the entry, the header reads the entry values, and the partner's step block is elided as unobserved.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_mutual_odd": {
-   "cause": "[P1 reads] Same as clang-O1 shape_mutual_odd. The entry block is a loop header and gets no phi, so even's step is dropped.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_pointer_to_pointer": {
    "status": "equal"
@@ -1484,8 +1476,8 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_pointer_to_pointer": {
-   "cause": "[P4 memory] Same defect as NEW-3. gcc stores RSP directly (`mov [rsp+0x20],rsp`, which is &zero at SP+0). The RSP carrier is Bound instead of being absorbed as geometry. The CallRestore at the in-loop call (RSP_6 = RSP_4) is then both a CoalescedCopy elided write and a rendered write, giving ConflictingWrite(InstId(139)). REPRODUCED without a loop: scratch exp/p2p.c straight_calls, gcc -O1, fcn.4011db (`mov [rsp+0x10],rsp; ...; call ld; call ld`) is refused with ConflictingWrite(InstId(62)) on CallRestore RSP_4<-RSP_2. The trace there shows ValueId(8)=RSP_2 `Bound{BindingId(0)}` stored into ObjectId(4)...",
-   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingValue",
+   "cause": "[P4 frame partition] Refused by the observation journal (ConflictingWrite, was ConflictingValue) after MAY spans were clipped at MUST boundaries (6cf8cd7e); the frame object the row buffer and its slot share is still split differently by the partition and the journal.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingWrite",
    "status": "refused"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_recurse_direct": {
@@ -1596,14 +1588,10 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_mutual_even": {
-   "cause": "[P1 reads] gcc's layout puts odd at 0x401a80 (`jmp 401ab0`) and even at 0x401ab0 (`jmp 401a80`). The entry 0x401ab0 has the single predecessor 0x401a98 (odd's step) and gets no phi, so the while-loop tests and updates only the entry values, and odd's step is lost.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_mutual_odd": {
-   "cause": "[P1 reads] Same as gcc-O2 shape_mutual_even. The entry 0x401a80 is the target of even's tail jmp (its single predecessor is 0x401ac8). No phi is placed, and even's step is dropped.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_pointer_to_pointer": {
    "cause": "[P4 memory] Same defect as NEW-3. The raw RSP (&zero) becomes data through `movq xmm0,rsp` (IntZExt XMM0_1 <- RSP_1), which builds rows[0..1] with punpcklqdq. The RSP carrier is bound as a program value and spelled. The loop-call CallRestore RSP_4 = RSP_2 is recorded both as a coalesced copy and as a rendered write, giving ConflictingWrite(InstId(172)).",
@@ -1679,8 +1667,8 @@
    "status": "equal"
   },
   "tests/corpus/values.c::clang-O0::value_count_bits": {
-   "cause": "[P10 lowering (new lift-layer item in r2sleigh-lift; no plan phase owns it yet)] __builtin_clzll/__builtin_ctzll compile to `bsr` and `tzcnt`. Their SLEIGH semantics are instruction-local count LOOPS with a backward p-code branch (ia.sinc:2842-2856 BSR Reg64, `goto <start>`; bmi1.sinc:179-194 TZCNT Reg64, `goto <loopbegin>`). r2sleigh-lift internal_control.rs:44-47 turns any local branch with target_index <= branch_index into R2ILOp::Unimplemented. The forward `if ... goto <done>` over the loop body is not speculatable either, so it also becomes Unimplemented (the else arm at :85). That gives 3 Unimplemented per BSR and 2 per TZCNT. r2ssa obligation.rs:1485-1494 seeds a...",
-   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 13 refused (volatile-or-unknown at 0x), 0 unaccounted, 0 conflicts",
+   "cause": "[core-lift merged; lzcount pending] BSR/BSF/TZCNT now lift as the count their p-code loop computes (core-lift); the count-leading-zeros it computes has no C spelling until the lzcount track's total helper lands, so rendering refuses on the unrepresentable operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O0::value_div_pow2": {
@@ -1723,8 +1711,8 @@
    "status": "equal"
   },
   "tests/corpus/values.c::clang-O1::value_count_bits": {
-   "cause": "[P10 lowering (new lift-layer item)] Same as NEW-1. `bsr rcx,rcx` (0x4016b0), `tzcnt rax,rax` (0x4016c2) and `bsr ecx,edi` (0x401719) are lifted with Unimplemented in place of their p-code loops (internal_control.rs:44-47). 2x3 + 1x2 = 8 VolatileOrUnknownEffect obligations refused.",
-   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 8 refused (volatile-or-unknown at 0x), 0 unaccounted, 0 conflicts",
+   "cause": "[core-lift merged; lzcount pending] BSR/BSF/TZCNT now lift as the count their p-code loop computes (core-lift); the count-leading-zeros it computes has no C spelling until the lzcount track's total helper lands, so rendering refuses on the unrepresentable operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O1::value_div_pow2": {
@@ -1769,8 +1757,8 @@
    "status": "equal"
   },
   "tests/corpus/values.c::clang-O2::value_count_bits": {
-   "cause": "[P10 lowering (new lift-layer item)] Same as NEW-1. bsr (0x401970), tzcnt (0x401982) and bsr (0x4019d9) are lifted as Unimplemented because of their instruction-local loops, giving 8 VolatileOrUnknownEffect refusals.",
-   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 8 refused (volatile-or-unknown at 0x), 0 unaccounted, 0 conflicts",
+   "cause": "[core-lift merged; lzcount pending] BSR/BSF/TZCNT now lift as the count their p-code loop computes (core-lift); the count-leading-zeros it computes has no C spelling until the lzcount track's total helper lands, so rendering refuses on the unrepresentable operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
    "status": "refused"
   },
   "tests/corpus/values.c::clang-O2::value_div_pow2": {
@@ -1815,8 +1803,8 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O0::value_count_bits": {
-   "cause": "[P10 lowering (new lift-layer item)] Same as NEW-1. `bsr rax,[rbp-0x20]`, `tzcnt rax,[rbp-0x20]`, `bsr rax,[rbp-0x18]`, `tzcnt rax,[rbp-0x18]` and `bsr eax,eax` are Unimplemented: 3x3 + 2x2 = 13 VolatileOrUnknownEffect refusals. The popcounts are calls to the statically linked libgcc __popcountdi2 (0x402470), which render fine.",
-   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: UnownedBindingSymbol",
+   "cause": "[core-lift merged; lzcount pending] BSR/BSF/TZCNT now lift as the count their p-code loop computes (core-lift); the count-leading-zeros it computes has no C spelling until the lzcount track's total helper lands, so rendering refuses on the unrepresentable operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
    "status": "refused"
   },
   "tests/corpus/values.c::gcc-O0::value_div_pow2": {
@@ -1861,8 +1849,8 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O1::value_count_bits": {
-   "cause": "[P10 lowering (new lift-layer item) + P4 memory (the function-wide stack-root veto, NEW-4)] NEW-1 is the root cause. It surfaces first as journal UnownedBindingSymbol through NEW-4. CORRECTED MECHANISM (it is not about the ops 'lying between the calls'): r2ssa function/rewrite.rs:546-556 sets entry_stack_roots_are_stable=false for the WHOLE function as soon as any SSAOp::Unimplemented exists, so no value gets an entry-relative stack root. The trace confirms 'call ... found RSP_9, which has no entry-relative root ... the function has 0 entry-relative and 18 declared-base roots' (semantic/shared.rs:661). r2dec's stack_base_absorbed_by therefore cannot absorb the RSP carrier binding:...",
-   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: UnownedBindingSymbol",
+   "cause": "[core-lift merged; lzcount pending] BSR/BSF/TZCNT now lift as the count their p-code loop computes (core-lift); the count-leading-zeros it computes has no C spelling until the lzcount track's total helper lands, so rendering refuses on the unrepresentable operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
    "status": "refused"
   },
   "tests/corpus/values.c::gcc-O1::value_div_pow2": {
@@ -1907,8 +1895,8 @@
    "status": "equal"
   },
   "tests/corpus/values.c::gcc-O2::value_count_bits": {
-   "cause": "[P10 lowering (new lift-layer item) + P4 memory (NEW-4)] Same as gcc-O1. bsr 0x401932, tzcnt 0x401936/0x401967 and bsr 0x40199c are Unimplemented (NEW-1): 2x3 + 2x2 = 10 per lift. The dump shows 30 because the function is lifted three times (the gap retry re-lifts), not twice. The presence of any Unimplemented vetoes all entry-relative stack roots (rewrite.rs:546-556, NEW-4). Every call's entering RSP has 'no entry-relative root', the RSP CallRestore binding is not absorbed, and sealing fails with UnownedBindingSymbol.",
-   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: UnownedBindingSymbol",
+   "cause": "[core-lift merged; lzcount pending] BSR/BSF/TZCNT now lift as the count their p-code loop computes (core-lift); the count-leading-zeros it computes has no C spelling until the lzcount track's total helper lands, so rendering refuses on the unrepresentable operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
    "status": "refused"
   },
   "tests/corpus/values.c::gcc-O2::value_div_pow2": {
@@ -2178,9 +2166,7 @@
    "status": "ub"
   },
   "tests/gold/manual_limits.c::clang-O2::mem_scan2": {
-   "cause": "[P10 lowering (new lift-layer item in the r2sleigh-lift user_operation table)] CORRECTED DESCRIPTION: PSHUFLW does not broadcast a/b; it widens the compare masks. The a/b broadcasts are only `movd; punpcklbw`. PSHUFLW (imm8=0x50, not 0) sits inside the 2x-unrolled counting loop at 0x4014c0: `pcmpeqb` against a and b, `por`, then `punpcklbw x,x; pshuflw x,x,0x50; pshufd x,x,0x50`. That sign-extends the two 0x00/0xff byte masks into two 64-bit lanes, and `psubq` then accumulates the count. In ia.sinc:8797-8798, PSHUFLW is an opaque user operation (`define pcodeop pshuflw`; XmmReg1 = pshuflw(XmmReg1, src, imm8)). r2sleigh-lift's modelled user-operation table (disasm/user...",
-   "reason": "refused: r2sleigh refused fcn: native rendering refused: unmodelled machine operation pshuflw at 0x",
-   "status": "refused"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O2::out_param_parse": {
    "status": "equal"
