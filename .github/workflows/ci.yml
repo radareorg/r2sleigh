@@ -214,15 +214,19 @@ jobs:
   equivalence-pipeline:
     name: Equivalence Pipeline (diagnosing)
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 14
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6
+      # A step past its own timeout fails and keeps its log; the job's timeout
+      # cancels it and keeps nothing, which is how two runs left no trace.
       - name: Self-tests from unittest
+        timeout-minutes: 5
         run: tests/equiv/bounded.sh 240 test_equiv.SelfTestSuite
       - name: The pipeline over the stub shell
         if: always()
-        run: tests/equiv/bounded.sh 360 test_equiv.PipelineTests
+        timeout-minutes: 6
+        run: tests/equiv/bounded.sh 330 test_equiv.PipelineTests
 
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #

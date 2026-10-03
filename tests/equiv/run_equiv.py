@@ -134,6 +134,7 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
     if not wanted:
         return []
     addresses = [sub.low_pc for _, sub in wanted]
+    started = time.monotonic()
     report = run_batch(args.r2s, binary.stripped, addresses,
                        function_timeout=args.function_timeout,
                        startup_timeout=args.startup_timeout)
@@ -155,7 +156,13 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
         answer: Answer | None = answers.get(sub.low_pc)
         futures.append(pool.submit(gate.grade, key, workdir, binary.unstripped, dwarf, spec,
                                    answer, config))
-    return [future.result() for future in futures]
+    records = [future.result() for future in futures]
+    # Where a shard's time goes, so the CI matrix can be split by measurement
+    # rather than by record count. Printed, never written to records.json,
+    # which must not depend on how fast it ran.
+    print(f"timing: {binary.source_key}::{binary.config}: {len(records)} functions, "
+          f"{time.monotonic() - started:.0f}s", file=sys.stderr, flush=True)
+    return records
 
 
 def build_failure_record(binary: build.Binary) -> gate.Record:
