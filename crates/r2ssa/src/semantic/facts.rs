@@ -307,6 +307,12 @@ pub struct ObjectModel {
     /// Which frame objects outside code can touch: those whose address
     /// escapes, and each call's argument area (`frame_reach`).
     pub frame_reach: FrameReach,
+    /// How many bytes each frame object can hold at most: from its start to
+    /// the first position no object of the program's extends across -- a
+    /// slot the convention restores a register from, or the entry stack
+    /// pointer. MUST evidence; a reach only MAY evidence proves (an index's
+    /// range) ends here under the UB-free premise.
+    pub frame_ceilings: BTreeMap<ObjectId, u64>,
 }
 
 impl ObjectModel {
@@ -1397,6 +1403,8 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) escaping_roots: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     pub(crate) callee_write_spans: BTreeMap<StackAddressRoot, i64>,
+    /// The positions no frame object extends across.
+    pub(crate) frame_boundaries: FrameBoundaries,
     /// Every frame address a call is handed, bounded or not.
     pub(crate) callee_handed_roots: BTreeSet<StackAddressRoot>,
     /// What every value can be, for an index's lower bound.
@@ -1462,6 +1470,7 @@ impl<'a> ObjectModelBuilder<'a> {
             evidenced_spans: BTreeMap::new(),
             escaping_roots: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
+            frame_boundaries: FrameBoundaries::default(),
             callee_handed_roots: BTreeSet::new(),
             values: empty_value_ranges(),
             resolving: BTreeSet::new(),
@@ -1519,6 +1528,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 &callee_spans.unbounded,
                 &boundaries,
             );
+            self.frame_boundaries = boundaries;
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;
             self.escaping_roots = evidenced.escaping;
@@ -1612,11 +1622,21 @@ impl<'a> ObjectModelBuilder<'a> {
                     .map(|(_, object)| *object)
             })
             .collect();
+        let frame_ceilings = self
+            .stack_objects
+            .iter()
+            .filter_map(|(key, object)| {
+                let ceiling = self.frame_boundaries.ceiling(key.root)?;
+                let bytes = u64::try_from(ceiling.checked_sub(key.root.offset)?).ok()?;
+                Some((*object, bytes))
+            })
+            .collect();
         ObjectModel {
             callee_write_reach,
             escaping_addresses,
             callee_reached,
             frame_reach: FrameReach::default(),
+            frame_ceilings,
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,

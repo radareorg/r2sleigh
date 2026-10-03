@@ -1711,7 +1711,7 @@ pub(crate) struct CalleeSpans {
 /// Each boundary is placed in every coordinate base an address in this body is
 /// measured from, through the offset between that base and the entry stack
 /// pointer that the body's own addresses prove.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct FrameBoundaries {
     /// Per base, the `[lo, hi)` byte ranges of the slots, sorted.
     slots: BTreeMap<StackAddressBase, BTreeSet<(i64, i64)>>,
@@ -1814,6 +1814,28 @@ impl FrameBoundaries {
             (Some(slot), Some(entry)) => Some(slot.min(entry)),
             (slot, entry) => slot.or(entry),
         }
+    }
+}
+
+/// Where a span only MAY evidence reaches -- an index's range, a callee's
+/// write reach -- can end.
+///
+/// `buf[i]` proves that every `i` the program executes lies inside `buf`, not
+/// that every `i` the range admits does. A save slot the convention restores
+/// and the return address lie inside no object of the program's, so under the
+/// UB-free premise the reach stops at the first one above the span's start;
+/// a bound looser than that is the range analysis's imprecision, not the
+/// buffer's size. One ordered lookup per span.
+fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i64 {
+    match boundaries.ceiling(start) {
+        Some(ceiling) if ceiling < end => {
+            r2il::refusal_evidence!(
+                "frame-boundary-clip",
+                "{start:?} reaches {end} by MAY evidence, clipped to the boundary at {ceiling}"
+            );
+            ceiling
+        }
+        _ => end,
     }
 }
 
@@ -2032,6 +2054,7 @@ pub(crate) fn evidenced_stack_roots(
                 base: root.base,
                 offset: root.offset.saturating_add(first),
             };
+            let end = clipped(boundaries, start, end);
             spans
                 .entry(start)
                 .and_modify(|known| *known = (*known).max(end))
@@ -2039,10 +2062,11 @@ pub(crate) fn evidenced_stack_roots(
         }
     }
     for (start, end) in callee_write_spans {
+        let end = clipped(boundaries, *start, *end);
         spans
             .entry(*start)
-            .and_modify(|known| *known = (*known).max(*end))
-            .or_insert(*end);
+            .and_modify(|known| *known = (*known).max(end))
+            .or_insert(end);
     }
     // A callee that reaches through a frame address without a bound reaches
     // the object the address is in, and nothing states where that object

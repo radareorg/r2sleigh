@@ -579,6 +579,22 @@ pub(crate) fn stack_array_layout(
             StackArrayLayoutRefusal::MissingConstantOffset,
         );
     };
+    // The index's range is MAY evidence: every index the program executes
+    // lies inside the object, so where the frame says the object must end,
+    // the elements end there too, however far the range admits.
+    let maximum_constant_offset = match objects.frame_ceilings.get(&object) {
+        Some(ceiling) if *ceiling >= u64::from(stride) => {
+            let last = (ceiling / u64::from(stride) - 1) * u64::from(stride);
+            if last < maximum_constant_offset {
+                r2il::refusal_evidence!(
+                    "stack-array-layout",
+                    "{object:?} index reaches {maximum_constant_offset}, the frame ends it at {ceiling}"
+                );
+            }
+            maximum_constant_offset.min(last)
+        }
+        _ => maximum_constant_offset,
+    };
     let Some(extent) = maximum_constant_offset.checked_add(u64::from(stride)) else {
         return StackArrayLayoutDisposition::Refused(StackArrayLayoutRefusal::InvalidExtent);
     };
