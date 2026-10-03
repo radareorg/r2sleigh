@@ -89,10 +89,22 @@ from treating a vector register's partial writes as its width.
   to do.
 - A literal's bytes are data, so `return 1` is as wide as the instruction
   that wrote it.
+- Fills are of two kinds. The architecture's zero above a lower-half
+  write (`RAX = zext(EAX)` after `xor eax, eax`, arm64's `X0 = zext(tmp)`)
+  is not written. A zero extension doubling a register lane, with nothing
+  later in its instruction extending it again, is taken as that. An
+  extension the instruction states (`movzx eax, al`, then the
+  convention's) writes its destination whole, as `Widened`. The pure-data
+  rule made gcc's `return (m > 0) ^ (n > 0);` (`movzx eax, al`) a
+  `uint8_t`, which the equivalence gate caught as `ub`: the caller reads
+  EAX. Where one P-code operation does both (arm64 `cset w0` is
+  `X0 = zext(ZR)`), the whole is taken as written. Too wide is sound; too
+  narrow drops bytes the caller reads. A sign extension is never the
+  convention.
 - A result some path never wrote is unproven, not void. On arm64,
   `int id(int x) { return x; }` is a bare `ret`, and the untouched `x0` is
   the result.
-- A result whose byte above its width is `Sign` on every path is minted
+- A result whose top written bytes are a stated sign extension is minted
   `SignedInteger`. `movsx eax, al` returning -1, 0 or 1 is `int8_t`, not
   `uint8_t`. Interface types are now keyed by width and sign.
 - Two consequences were fixed at the owner. `exact_logical_lane_input`

@@ -45,9 +45,10 @@ pub struct RegisterByte {
 /// A way a byte came to hold what it holds without an operation computing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Fill {
-    /// The zero an unsigned extension writes above its source.
+    /// The zero the architecture writes above a narrower write of the same
+    /// register: the upper half of `RAX` after a write of `EAX`.
     Zero,
-    /// The sign an extension copies above its source.
+    /// The sign the architecture copies above a narrower write.
     Sign,
     /// The byte this register byte held when the function was entered.
     Entry(RegisterByte),
@@ -62,6 +63,10 @@ pub const MOST_WAYS: usize = 4;
 pub enum Byte {
     /// Computed by an operation from its inputs or a literal, on some path.
     Data,
+    /// Written by an instruction that states the extension -- `movzx eax,
+    /// al`, `movsx eax, al` -- as part of its destination: the zero or the
+    /// sign above its source. A caller reads these bytes as the value.
+    Widened { sign: bool },
     /// Not computed on any path that reaches it; the ways, sorted. Empty
     /// only before the pass has reached it, which a settled record never is.
     Filled(Vec<Fill>),
@@ -78,6 +83,8 @@ impl Byte {
     fn join(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::Data, _) | (_, Self::Data) => Self::Data,
+            (Self::Widened { sign: a }, Self::Widened { sign: b }) if a == b => self.clone(),
+            (Self::Widened { .. }, _) | (_, Self::Widened { .. }) => Self::Data,
             (Self::Filled(a), Self::Filled(b)) => {
                 let mut ways = a.iter().chain(b).copied().collect::<Vec<_>>();
                 ways.sort_unstable();
@@ -94,7 +101,7 @@ impl Byte {
     /// byte it moved from anywhere but `home`, the place it now sits.
     pub fn written_at(&self, home: Option<RegisterByte>) -> bool {
         match self {
-            Self::Data => true,
+            Self::Data | Self::Widened { .. } => true,
             Self::Filled(ways) => ways.iter().any(|way| match way {
                 Fill::Entry(from) => Some(*from) != home,
                 Fill::Zero | Fill::Sign => false,
@@ -123,13 +130,19 @@ impl Written {
         self.by_op.get(&id)
     }
 
+    /// Whether nothing was recorded: the function was never prepared.
+    pub fn is_empty(&self) -> bool {
+        self.by_op.is_empty()
+    }
+
     /// Take the record of a function before anything rewrites it.
     pub fn capture(function: &SSAFunction) -> Self {
         let mut by_var = BTreeMap::<SSAVar, Bytes>::new();
         let mut by_op = BTreeMap::<OpId, Bytes>::new();
+        let writes = Writes::of(function);
         // Until nothing changes: a loop's phi reads a value defined below it.
         while function.blocks().iter().fold(false, |changed, block| {
-            changed | capture_block(function, block, &mut by_var, &mut by_op)
+            changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
         }) {}
         Self { by_op }
     }
@@ -138,6 +151,7 @@ impl Written {
 /// One pass over a block's phis and operations; whether any record moved.
 fn capture_block(
     function: &SSAFunction,
+    writes: &Writes,
     block: &crate::block::SSABlock,
     by_var: &mut BTreeMap<SSAVar, Bytes>,
     by_op: &mut BTreeMap<OpId, Bytes>,
@@ -155,11 +169,69 @@ fn capture_block(
     }
     for (id, op) in block.sited() {
         if let Some(dst) = op.dst() {
-            let bytes = transfer(op, |var| read(function, by_var, var));
+            let convention = by_convention(function, writes, op);
+            let bytes = transfer(op, convention, |var| read(function, by_var, var));
             changed |= settle(by_var, by_op, id, dst, bytes);
         }
     }
     changed
+}
+
+/// Whether a zero extension is the architecture's rather than the
+/// program's: it doubles a lane into the register that lane is the low half
+/// of, and nothing later in the same instruction extends what it wrote.
+///
+/// The 64-bit machines this engine reads zero the upper half of a register
+/// on a write of its lower half. `xor eax, eax` lifts to
+/// `EAX = EAX ^ EAX; RAX = zext(EAX)`, a `cmovle eax, ecx` to
+/// `RAX = zext(EAX); EAX = SELECT(..)`, and an arm64 `add w0, w0, #1` to
+/// `tmp = W0 + 1; X0 = zext(tmp)`: each widening by half is the convention.
+/// `movzx eax, al` lifts to `EAX = zext(AL); RAX = zext(EAX)` and
+/// `movzx eax, word [m]` to `EAX = zext(tmp); RAX = zext(EAX)`: the first
+/// extension of each is followed by the convention's, so it is the
+/// instruction's own, writing its whole destination operand. Where one
+/// operation does both -- arm64's `cset w0` is `X0 = zext(ZR)`, `ldrb` is
+/// `X0 = zext(tmp)` -- the P-code cannot tell the stated part from the
+/// conventional one, and the whole is taken as written: too wide is a
+/// claim the caller can still check, too narrow drops bytes it reads. A
+/// sign extension is always the program's.
+fn by_convention(function: &SSAFunction, writes: &Writes, op: &SSAOp) -> bool {
+    let SSAOp::IntZExt { dst, src } = op else {
+        return false;
+    };
+    let register = function
+        .canonical_storage_for_var(dst)
+        .is_some_and(|storage| storage.space == CanonicalStorageSpace::Register);
+    let halves = src.size.checked_mul(2) == Some(dst.size);
+    let outermost = !writes.extended.contains(dst);
+    register && halves && outermost
+}
+
+/// Every value an extension in the same instruction as its definition
+/// widens again, as lifted.
+struct Writes {
+    extended: std::collections::BTreeSet<SSAVar>,
+}
+
+impl Writes {
+    fn of(function: &SSAFunction) -> Self {
+        let arena = function.arena();
+        let mut definers = BTreeMap::new();
+        let mut extended = std::collections::BTreeSet::new();
+        for (id, op) in function.blocks().iter().flat_map(|block| block.sited()) {
+            if let SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } = op
+                && let Some(definer) = definers.get(src)
+                && arena.instruction(*definer).is_some()
+                && arena.instruction(*definer) == arena.instruction(id)
+            {
+                extended.insert(src.clone());
+            }
+            if let Some(dst) = op.dst() {
+                definers.insert(dst.clone(), id);
+            }
+        }
+        Self { extended }
+    }
 }
 
 /// Record what `id` wrote to `dst`, joined with what it was recorded as
@@ -222,12 +294,17 @@ pub fn home(storage: Option<CanonicalStorageId>, byte: u64) -> Option<RegisterBy
 /// What an operation writes to each byte of its output, given what each of
 /// its inputs holds. Only operations that move bytes without computing them
 /// are modelled; every other result is data.
-pub(crate) fn transfer(op: &SSAOp, input: impl Fn(&SSAVar) -> Bytes) -> Bytes {
+pub(crate) fn transfer(op: &SSAOp, convention: bool, input: impl Fn(&SSAVar) -> Bytes) -> Bytes {
     let size = op.dst().map_or(0, |dst| dst.size as usize);
+    let fill = |sign| match (convention, sign) {
+        (true, false) => Byte::fill(Fill::Zero),
+        (true, true) => Byte::fill(Fill::Sign),
+        (false, sign) => Byte::Widened { sign },
+    };
     let mut out = match op {
         SSAOp::Copy { src, .. } => input(src),
-        SSAOp::IntZExt { src, .. } => extended(input(src), size, Fill::Zero),
-        SSAOp::IntSExt { src, .. } => extended(input(src), size, Fill::Sign),
+        SSAOp::IntZExt { src, .. } => extended(input(src), size, fill(false)),
+        SSAOp::IntSExt { src, .. } => extended(input(src), size, fill(true)),
         SSAOp::Subpiece { src, offset, .. } => {
             input(src).into_iter().skip(*offset as usize).collect()
         }
@@ -255,9 +332,9 @@ pub(crate) fn transfer(op: &SSAOp, input: impl Fn(&SSAVar) -> Bytes) -> Bytes {
 }
 
 /// A value's bytes, with `fill` above them up to `size`.
-fn extended(mut bytes: Bytes, size: usize, fill: Fill) -> Bytes {
+fn extended(mut bytes: Bytes, size: usize, fill: Byte) -> Bytes {
     if bytes.len() < size {
-        bytes.resize(size, Byte::fill(fill));
+        bytes.resize(size, fill);
     }
     bytes
 }
@@ -282,13 +359,19 @@ pub fn written_width(bytes: &[Byte], storage: CanonicalStorageId) -> Option<u32>
     Some(width.min(storage.size))
 }
 
-/// Whether the byte just above a result of `width` bytes is the sign of the
-/// result on every path, and nothing else: the function sign-extended what
-/// it computed, so the value is signed at that width.
-pub fn sign_filled_above(bytes: &[Byte], width: u32) -> bool {
-    bytes
-        .get(width as usize)
-        .is_some_and(|byte| *byte == Byte::Filled(vec![Fill::Sign]))
+/// Whether a result of `width` bytes is signed by what wrote it: its top
+/// bytes are a sign extension the instruction stated (`movsx eax, al`), or
+/// the byte above it is the architecture's sign fill on every path.
+pub fn signed(bytes: &[Byte], width: u32) -> bool {
+    let width = (width as usize).min(bytes.len());
+    let top = &bytes[..width];
+    let stated = top.last() == Some(&Byte::Widened { sign: true })
+        && top
+            .iter()
+            .rev()
+            .take_while(|byte| matches!(byte, Byte::Widened { .. }))
+            .all(|byte| *byte == Byte::Widened { sign: true });
+    stated || bytes.get(width) == Some(&Byte::Filled(vec![Fill::Sign]))
 }
 
 #[cfg(test)]
@@ -360,6 +443,43 @@ mod tests {
         // Nothing written: no width at all, rather than the carrier's.
         let untouched: Vec<Byte> = (0..8).map(|byte| Byte::fill(at(byte))).collect();
         assert_eq!(written_width(&untouched, rax()), None);
+    }
+
+    /// An extension the instruction states writes its destination whole; a
+    /// sign extension it states makes the value signed.
+    #[test]
+    fn a_stated_extension_writes_its_destination_and_says_its_sign() {
+        let zero = || Byte::fill(Fill::Zero);
+        let widened = |sign| Byte::Widened { sign };
+        // `movzx eax, al` then the 32-bit write's convention.
+        let movzx = [
+            Byte::Data,
+            widened(false),
+            widened(false),
+            widened(false),
+            zero(),
+            zero(),
+            zero(),
+            zero(),
+        ];
+        assert_eq!(written_width(&movzx, rax()), Some(4));
+        assert!(!signed(&movzx, 4));
+        // `movsx eax, al`: four bytes, signed.
+        let movsx = [
+            Byte::Data,
+            widened(true),
+            widened(true),
+            widened(true),
+            zero(),
+            zero(),
+            zero(),
+            zero(),
+        ];
+        assert_eq!(written_width(&movsx, rax()), Some(4));
+        assert!(signed(&movsx, 4));
+        // A stated extension joined with data on another path is data.
+        assert_eq!(widened(true).join(&Byte::Data), Byte::Data);
+        assert_eq!(widened(true).join(&widened(false)), Byte::Data);
     }
 
     #[test]

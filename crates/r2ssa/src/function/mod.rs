@@ -2684,6 +2684,16 @@ impl SSAFunction {
         &self.written
     }
 
+    /// The record, or for a function no preparation recorded -- one built
+    /// raw, which nothing has optimised -- the record taken from it as it
+    /// stands, which is as lifted.
+    pub fn written_or_captured(&self) -> std::borrow::Cow<'_, crate::lanes::Written> {
+        match self.written.is_empty() {
+            false => std::borrow::Cow::Borrowed(&self.written),
+            true => std::borrow::Cow::Owned(crate::lanes::Written::capture(self)),
+        }
+    }
+
     /// Record what each operation writes, before anything rewrites one.
     pub(crate) fn capture_written(&mut self) {
         self.written = crate::lanes::Written::capture(self);

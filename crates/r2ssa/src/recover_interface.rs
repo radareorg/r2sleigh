@@ -795,6 +795,7 @@ fn recovered_result(
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
 ) -> RecoveredFunctionResult {
+    let written = func.written_or_captured();
     let mut observed = None;
     let mut signed = true;
     for value in live_out.iter() {
@@ -809,11 +810,11 @@ fn recovered_result(
         if storage.location() != slot.location() || storage.size == 0 || storage.size > slot.size {
             return RecoveredFunctionResult::Unproven;
         }
-        let bytes = written_bytes(func, graph, value, &mut BTreeSet::new());
+        let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
         let Some(observed_size) = crate::lanes::written_width(&bytes, storage) else {
             return RecoveredFunctionResult::Unproven;
         };
-        signed &= crate::lanes::sign_filled_above(&bytes, observed_size);
+        signed &= crate::lanes::signed(&bytes, observed_size);
         let storage = CanonicalStorageId {
             space: slot.space,
             offset: slot.offset,
@@ -827,7 +828,7 @@ fn recovered_result(
         RecoveredFunctionResult::Register(RecoveredResult {
             slot,
             observed,
-            signed: signed && observed.size < slot.size,
+            signed,
         })
     })
 }
@@ -842,7 +843,7 @@ fn recovered_result(
 /// defined after the lift -- a lane projection -- is read through its inputs;
 /// a cycle among such values, which no record breaks, is data.
 fn written_bytes(
-    func: &SSAFunction,
+    written: &crate::lanes::Written,
     graph: &SsaGraph,
     value: crate::ValueId,
     visiting: &mut BTreeSet<crate::ValueId>,
@@ -856,7 +857,7 @@ fn written_bytes(
     };
     if let Some(recorded) = graph
         .op_for_inst(inst_id)
-        .and_then(|id| func.written().of(id))
+        .and_then(|id| written.of(id))
         .filter(|bytes| bytes.len() == size as usize)
     {
         return recorded.clone();
@@ -868,14 +869,16 @@ fn written_bytes(
         return vec![crate::lanes::Byte::Data; size as usize];
     }
     let mut input = |var: &crate::SSAVar| match graph.value_id_for_var(var) {
-        Some(input) if var.constant_bits().is_none() => written_bytes(func, graph, input, visiting),
+        Some(input) if var.constant_bits().is_none() => {
+            written_bytes(written, graph, input, visiting)
+        }
         _ => vec![crate::lanes::Byte::Data; var.size as usize],
     };
     let bytes = match &inst.payload {
         crate::graph::InstPayload::Phi { .. } => {
             let mut joined: Option<crate::lanes::Bytes> = None;
             for source in inst.inputs.clone() {
-                let source = written_bytes(func, graph, source, visiting);
+                let source = written_bytes(written, graph, source, visiting);
                 joined = Some(match joined {
                     None => source,
                     Some(held) => crate::lanes::join(&held, &source),
@@ -889,7 +892,9 @@ fn written_bytes(
                 .into_iter()
                 .map(|var| (var.clone(), input(var)))
                 .collect::<BTreeMap<_, _>>();
-            crate::lanes::transfer(op, |var| {
+            // A definition the lift did not make states no instruction's
+            // extension, so none of its fills is the architecture's.
+            crate::lanes::transfer(op, false, |var| {
                 inputs
                     .get(var)
                     .cloned()
