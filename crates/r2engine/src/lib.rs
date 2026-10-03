@@ -1411,6 +1411,11 @@ impl CalleeFacts {
         &self.interface
     }
 
+    /// What the callee's own body does with each parameter, as the interprocedural fixpoint reads it.
+    pub const fn summary(&self) -> &r2ssa::PreparedCalleeSummary {
+        &self.summary
+    }
+
     /// How far this callee is proven to touch through each pointer argument.
     pub fn argument_touch_reach(&self) -> std::collections::BTreeMap<usize, r2ssa::ArgumentReach> {
         self.summary.argument_touch_reach()

@@ -342,3 +342,29 @@ fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
         "a root that read a held callee did not see a write to that callee"
     );
 }
+
+#[test]
+fn a_listing_asks_a_held_callee_what_its_parameters_take_without_preparing_it() {
+    // `hands` hands `ident` a number that does not move with the program.
+    // Whether it is an address is what `ident`'s body does with the
+    // parameter, which preparing `hands` already read.
+    let mut code = common::HANDING.to_vec();
+    code[0x10..0x1b].copy_from_slice(&[
+        0xbf, 0x40, 0x10, 0x00, 0x00, // mov edi, 0x1040
+        0xe8, 0xe6, 0xff, 0xff, 0xff, // call ident
+        0xc3, // ret
+    ]);
+    let functions = [("ident", common::BASE, 4), ("hands", common::HANDS, 0xb)];
+    let mut program =
+        OpenProgram::of(Literal::of_code(code.leak(), &functions).with_data_after(common::HANDED));
+    program.prepared(common::HANDS).expect("it prepares");
+    let before = program.memo_stats();
+    assert_eq!((before.callees_read, before.callee_hits), (1, 0));
+    program.function_listing(common::HANDS).expect("it lists");
+    let after = program.memo_stats();
+    assert_eq!(
+        (after.callees_read, after.callee_hits),
+        (1, 1),
+        "the listing prepared a callee whose summary was held"
+    );
+}

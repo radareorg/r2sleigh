@@ -118,7 +118,19 @@ impl<S: Source> OpenProgram<S> {
         address: u64,
         visiting: &mut BTreeSet<u64>,
     ) -> (BTreeMap<CanonicalStorageId, Support>, bool) {
-        let Some(summary) = crate::native::callee_summary(target, self, address) else {
+        // A callee some root has read already carries its summary; otherwise it
+        // is prepared for this alone, which costs less than reading it whole.
+        let held = self
+            .callee_reads
+            .get(self.revision(), address)
+            .and_then(|(read, _)| {
+                read.facts
+                    .as_ref()
+                    .ok()
+                    .map(|facts| facts.summary().clone())
+            });
+        let Some(summary) = held.or_else(|| crate::native::callee_summary(target, self, address))
+        else {
             return (BTreeMap::new(), false);
         };
         let slots = crate::native::argument_slots(target);
