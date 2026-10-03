@@ -115,11 +115,8 @@ pub enum CExpr {
     Call {
         func: Box<CExpr>,
         args: Vec<CExpr>,
-        /// Boxed: the site is present on a minority of calls and a call is a
-        /// minority of expressions, but an inline `Option<(u64, usize)>` is
-        /// twenty-four bytes and so set the width of every expression node in
-        /// a rendered function.
-        site: Option<Box<(u64, usize)>>,
+        /// The call instruction, in the source graph.
+        site: Option<r2ssa::InstId>,
     },
     /// Array/pointer subscript: `arr[index]`.
     Subscript { base: Box<CExpr>, index: Box<CExpr> },
@@ -502,11 +499,11 @@ impl CExpr {
     }
 
     /// A call that knows which site makes it.
-    pub fn call_at(site: (u64, usize), func: CExpr, args: Vec<CExpr>) -> Self {
+    pub fn call_at(site: r2ssa::InstId, func: CExpr, args: Vec<CExpr>) -> Self {
         Self::Call {
             func: Box::new(func),
             args,
-            site: Some(Box::new(site)),
+            site: Some(site),
         }
     }
 

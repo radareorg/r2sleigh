@@ -6,6 +6,23 @@ use r2il::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// The instruction a fixture names by its block and its place in the block.
+fn inst_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ssa::InstId {
+    prepared
+        .graph()
+        .inst_for_op(op_at(prepared, block_addr, index))
+        .expect("the fixture's instruction")
+}
+
+/// The operation a fixture names by its block and its place in the block.
+fn op_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ssa::OpId {
+    prepared
+        .function()
+        .get_block(block_addr)
+        .and_then(|block| block.op_id(index))
+        .expect("the fixture's operation")
+}
+
 #[test]
 fn constant_looking_spelling_is_not_constant_evidence() {
     assert_eq!(
@@ -542,8 +559,6 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
     let certificate = r2ssa::CallsiteCertificate {
         call_site: call_site_id,
         at,
-        block_addr: 0x401000,
-        op_index: 2,
         target,
         direct_target: Some(0x402000),
         fallthrough: None,
@@ -737,8 +752,7 @@ fn function_facts_owns_input_quality_evidence() {
 #[test]
 fn function_facts_owns_canonical_callee_resolution() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 3,
+        at: r2ssa::InstId(3),
     };
     let function_names = HashMap::from([(0x402000, "sym.helper".to_string())]);
     let symbols = HashMap::new();
@@ -771,8 +785,7 @@ fn prepared_display_name_does_not_create_a_known_signature() {
     });
     let prepared = x86_stack_home_under(&[block], None, Vec::new()).expect("prepared direct call");
     let callsite = CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 0,
+        at: inst_at(&prepared, 0x401000, 0),
     };
     let mut names = crate::DisplayNames::default();
     names.insert_function(0x402000, "sym.imp.__memcpy_chk");
@@ -793,8 +806,7 @@ fn prepared_display_name_does_not_create_a_known_signature() {
 #[test]
 fn function_facts_owns_canonical_callsite_arguments() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 7,
+        at: r2ssa::InstId(7),
     };
     let value = r2ssa::ValueId(11);
     let callsites = FunctionCallsiteFacts {
@@ -976,8 +988,7 @@ fn a_storage_width_scalar_is_not_evidence_for_replacing_another_one() {
 #[test]
 fn certified_call_argument_projects_callee_pointer_type_to_caller_parameter() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 7,
+        at: r2ssa::InstId(7),
     };
     let value = r2ssa::ValueId(11);
     let signed_byte = CTypeLike::Int {
@@ -1088,8 +1099,7 @@ fn certified_call_argument_projects_callee_pointer_type_to_caller_parameter() {
 #[test]
 fn function_facts_owns_canonical_call_render_disposition() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 7,
+        at: r2ssa::InstId(7),
     };
     let target = r2ssa::ValueId(10);
     let arg = r2ssa::ValueId(11);
@@ -1120,8 +1130,7 @@ fn function_facts_owns_canonical_call_render_disposition() {
 #[test]
 fn callsite_facts_own_canonical_argument_vector() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 7,
+        at: r2ssa::InstId(7),
     };
     let register_value = r2ssa::ValueId(11);
     let stack_value = r2ssa::ValueId(12);
@@ -1190,8 +1199,7 @@ fn callsite_facts_own_canonical_argument_vector() {
 #[test]
 fn function_facts_owns_canonical_call_results() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 7,
+        at: r2ssa::InstId(7),
     };
     let value = r2ssa::ValueId(21);
     let derived_value = r2ssa::ValueId(22);
@@ -1282,8 +1290,7 @@ fn function_facts_owns_canonical_call_results() {
 #[test]
 fn call_result_definition_is_not_replaced_by_a_later_stack_owner() {
     let callsite = crate::CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 7,
+        at: r2ssa::InstId(7),
     };
     let defined = r2ssa::ValueId(20);
     let stored = r2ssa::ValueId(21);
@@ -1489,7 +1496,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     assert!(prepared.graph().use_sites(parameter.value).is_empty());
     assert_eq!(
         prepared
-            .callsite_certificate_for_op(0x401000, 0)
+            .callsite_certificate_for_inst(inst_at(&prepared, 0x401000, 0))
             .expect("callsite certificate")
             .argument_values,
         [parameter.value]
@@ -1498,8 +1505,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let mut facts = FunctionFacts::default();
     facts.attach_prepared_decompile_evidence(&prepared);
     let callsite = CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 0,
+        at: inst_at(&prepared, 0x401000, 0),
     };
     assert_eq!(
         facts
@@ -1561,8 +1567,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
     });
     let prepared = x86_stack_home_prepared(&[block]);
     let callsite = CallsiteKey {
-        block_addr: 0x401000,
-        op_index: 0,
+        at: inst_at(&prepared, 0x401000, 0),
     };
     let sentinel_value = r2ssa::ValueId(0xfeed);
     let sentinel_callsite = CallsiteArgumentFacts {
@@ -1594,14 +1599,12 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
         residual_reason: Some("upstream refusal".to_string()),
     };
     let string_value = r2ssa::ValueId(0xcafe);
-    let member_op = (0x501000, 3, false);
+    let member_op = (r2ssa::InstId(7), false);
     let member_access = MemberAccessRenderFact {
         access: r2ssa::StructuredAccessId {
             inst: r2ssa::InstId(7),
             ordinal: 0,
         },
-        block_addr: member_op.0,
-        op_index: member_op.1,
         object: r2ssa::ObjectId(9),
         is_write: false,
         field_offset: 8,
@@ -1621,7 +1624,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
                 source: StringLiteralRenderSource::TypedFunctionFacts,
             },
         )]),
-        member_accesses_by_op: BTreeMap::from([(member_op, vec![member_access])]),
+        member_accesses_by_inst: BTreeMap::from([(member_op, vec![member_access])]),
         ..FunctionRenderFacts::default()
     };
     let mut facts = FunctionFacts::default()
@@ -1659,7 +1662,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
     assert!(
         facts
             .render()
-            .and_then(|render| render.member_accesses_by_op.get(&member_op))
+            .and_then(|render| render.member_accesses_by_inst.get(&member_op))
             .is_none(),
         "an unvalidated detached member projection must be removed during source rebuild"
     );
@@ -1761,7 +1764,7 @@ fn field_certificates_populate_direct_member_render_facts() {
 
     let render = facts.render().expect("prepared render facts");
     let member = render
-        .member_access_for_op(0x401000, 1, false, "hash", 8, Some(8))
+        .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
         .expect("typed member render fact");
     let expected = CTypeLike::Int {
         bits: 64,
@@ -1872,12 +1875,18 @@ fn field_certificates_do_not_follow_a_loop_carried_pointer_as_the_parameter() {
     let render = facts.render().expect("prepared render facts");
     assert!(
         render
-            .member_access_for_op(0x401000, 1, false, "value", 8, Some(8))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "value", 8, Some(8))
             .is_none()
     );
     assert!(
         render
-            .member_access_for_op(0x401010, 1, false, "next", 0x10, Some(8))
+            .member_access_for_inst(
+                inst_at(&prepared, 0x401010, 1),
+                false,
+                "next",
+                0x10,
+                Some(8)
+            )
             .is_none()
     );
     let borrowed = CTypeLike::Pointer(Box::new(CTypeLike::Struct("Node".to_string())));
@@ -1922,7 +1931,7 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_width() {
 
     assert!(
         facts.render().is_none_or(|render| render
-            .member_access_for_op(0x401000, 1, false, "small", 8, Some(8))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "small", 8, Some(8))
             .is_none()),
         "wrong-width field certificate must not authorize member rendering"
     );
@@ -1961,7 +1970,7 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
 
     assert!(
         facts.render().is_none_or(|render| render
-            .member_access_for_op(0x401000, 1, false, "hash", 8, Some(8))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
             .is_none()),
         "a field certificate for one parameter slot must not authorize the same offset on another parameter"
     );
@@ -1985,7 +1994,7 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
 
     assert!(
         matching_facts.render().is_some_and(|render| render
-            .member_access_for_op(0x401000, 1, false, "hash", 8, Some(8))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
             .is_some()),
         "the same memory proof should authorize the certificate for the matching parameter slot"
     );
@@ -2206,8 +2215,16 @@ fn prepared_render_facts_certify_params_stack_memory_and_returns_by_semantic_id(
     );
     assert_eq!(memory_effects, 2);
     assert!(return_effects >= 1);
-    assert!(render.return_effect_id_for_op(0x401000, 4).is_some());
-    assert!(render.return_for_op(0x401000, 4).is_some());
+    assert!(
+        render
+            .return_effect_id_for_inst(inst_at(&prepared, 0x401000, 4))
+            .is_some()
+    );
+    assert!(
+        render
+            .return_for_inst(inst_at(&prepared, 0x401000, 4))
+            .is_some()
+    );
 }
 
 #[test]
@@ -2412,7 +2429,7 @@ fn field_certificates_fail_closed_without_param_slot_resolver() {
 
     assert!(
         facts.render().is_none_or(|render| render
-            .member_access_for_op(0x401000, 1, false, "hash", 8, Some(8))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
             .is_none()),
         "missing ABI slot evidence must not guess rdi as parameter slot 0"
     );
@@ -2481,7 +2498,7 @@ fn field_certificates_populate_stack_home_member_render_facts() {
 
     assert!(
         facts.render().is_some_and(|render| render
-            .member_access_for_op(0x401000, 6, false, "hash", 4, Some(4))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 6), false, "hash", 4, Some(4))
             .is_some()),
         "field certificate plus prepared stack-reload proof must authorize O0 stack-home member rendering"
     );
@@ -2509,7 +2526,7 @@ fn field_certificates_do_not_populate_stack_home_member_without_reload_proof() {
 
     assert!(
         facts.render().is_none_or(|render| render
-            .member_access_for_op(0x401000, 4, false, "hash", 4, Some(4))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 4), false, "hash", 4, Some(4))
             .is_none()),
         "field certificate must not authorize a member render through an unproven stack load"
     );
@@ -2552,7 +2569,7 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
         .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
         .expect("array load");
     let index_value = prepared
-        .memory_certificate_for_op_site(0x401000, load_index, false)
+        .memory_certificate_for_inst(inst_at(&prepared, 0x401000, load_index), false)
         .expect("array load certificate")
         .address;
     let index_value = prepared
@@ -2576,8 +2593,7 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
         }],
         scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: load_index,
+            op: op_at(&prepared, 0x401000, load_index),
             is_write: false,
             field_offset: 4,
             element_stride: 16,
@@ -2602,18 +2618,36 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
     let render = facts.render().expect("render facts");
     assert!(
         render
-            .member_access_for_op(0x401000, load_index, false, "score", 4, Some(4))
+            .member_access_for_inst(
+                inst_at(&prepared, 0x401000, load_index),
+                false,
+                "score",
+                4,
+                Some(4)
+            )
             .is_some(),
         "scalar array candidate plus field certificate must authorize indexed member rendering"
     );
     assert!(
         render
-            .array_access_for_op(0x401000, load_index, false, 4, 16, Some(4))
+            .array_access_for_inst(
+                inst_at(&prepared, 0x401000, load_index),
+                false,
+                4,
+                16,
+                Some(4)
+            )
             .is_some(),
         "scalar array candidate must still authorize array rendering"
     );
     let array = render
-        .array_access_for_op(0x401000, load_index, false, 4, 16, Some(4))
+        .array_access_for_inst(
+            inst_at(&prepared, 0x401000, load_index),
+            false,
+            4,
+            16,
+            Some(4),
+        )
         .expect("stable array render fact");
     assert_eq!(array.base, Some(r2ssa::SemanticId::Parameter(0)));
     assert_eq!(
@@ -2646,8 +2680,7 @@ fn scalar_array_member_candidate_requires_semantic_index_identity() {
         }],
         scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
             slot,
-            block_addr: 0x401000,
-            op_index: 0,
+            op: op_at(&prepared, 0x401000, 0),
             is_write: false,
             field_offset: 4,
             element_stride: 16,
@@ -2665,7 +2698,7 @@ fn scalar_array_member_candidate_requires_semantic_index_identity() {
     );
     assert!(
         wrong_slot_facts.render().is_none_or(|render| render
-            .member_access_for_op(0x401000, 0, false, "score", 4, Some(4))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 0), false, "score", 4, Some(4))
             .is_none()),
         "scalar-array member candidate from rsi must not render with a slot 0 certificate"
     );
@@ -2678,7 +2711,7 @@ fn scalar_array_member_candidate_requires_semantic_index_identity() {
     );
     assert!(
         matching_slot_facts.render().is_none_or(|render| render
-            .member_access_for_op(0x401000, 0, false, "score", 4, Some(4))
+            .member_access_for_inst(inst_at(&prepared, 0x401000, 0), false, "score", 4, Some(4))
             .is_none()),
         "coordinate-only array candidates must not authorize member rendering"
     );
@@ -2820,8 +2853,6 @@ fn function_facts_owns_canonical_render_facts() {
                     id: memory_id,
                     fact: MemoryAccessRenderFact {
                         access,
-                        block_addr: 0x401000,
-                        op_index: 4,
                         space: r2il::SpaceId::Ram,
                         object,
                         address: r2ssa::ValueId(52),
@@ -2840,8 +2871,7 @@ fn function_facts_owns_canonical_render_facts() {
                     id: return_id,
                     at: return_at,
                     fact: ReturnValueRenderFact {
-                        block_addr: 0x401010,
-                        op_index: 2,
+                        at: return_at,
                         value,
                         width: 8,
                         control_domain: test_control_domain(),
@@ -2849,8 +2879,8 @@ fn function_facts_owns_canonical_render_facts() {
                 },
             ),
         ]),
-        return_effects_by_op: BTreeMap::from([((0x401010, 2), return_id)]),
-        memory_effects_by_op: BTreeMap::from([((0x401000, 4, true), vec![memory_id])]),
+        return_effects_by_inst: BTreeMap::from([(return_at, return_id)]),
+        memory_effects_by_inst: BTreeMap::from([((r2ssa::InstId(7), true), vec![memory_id])]),
         string_literals_by_value: BTreeMap::from([(
             value,
             StringLiteralRenderFact {
@@ -2860,12 +2890,10 @@ fn function_facts_owns_canonical_render_facts() {
                 source: StringLiteralRenderSource::TypedFunctionFacts,
             },
         )]),
-        member_accesses_by_op: BTreeMap::from([(
-            (0x401000, 4, true),
+        member_accesses_by_inst: BTreeMap::from([(
+            (r2ssa::InstId(7), true),
             vec![MemberAccessRenderFact {
                 access,
-                block_addr: 0x401000,
-                op_index: 4,
                 object,
                 is_write: true,
                 field_offset: 0,
@@ -2876,12 +2904,10 @@ fn function_facts_owns_canonical_render_facts() {
                 source: MemberAccessSource::ExternalLayout,
             }],
         )]),
-        array_accesses_by_op: BTreeMap::from([(
-            (0x401000, 4, true),
+        array_accesses_by_inst: BTreeMap::from([(
+            (r2ssa::InstId(7), true),
             vec![ArrayAccessRenderFact {
                 access,
-                block_addr: 0x401000,
-                op_index: 4,
                 object,
                 is_write: true,
                 field_offset: 0,
@@ -2911,13 +2937,13 @@ fn function_facts_owns_canonical_render_facts() {
     );
     assert!(
         facts.render().is_some_and(|render| render
-            .member_access_for_op(0x401000, 4, true, "value", 0, Some(8))
+            .member_access_for_inst(r2ssa::InstId(7), true, "value", 0, Some(8))
             .is_some()),
         "member access render proof must travel through FunctionFacts"
     );
     assert!(
         facts.render().is_some_and(|render| render
-            .array_access_for_op(0x401000, 4, true, 0, 8, Some(8))
+            .array_access_for_inst(r2ssa::InstId(7), true, 0, 8, Some(8))
             .is_some()),
         "array access render proof must travel through FunctionFacts"
     );
@@ -2925,7 +2951,7 @@ fn function_facts_owns_canonical_render_facts() {
         facts
             .render()
             .and_then(|render| {
-                render.memory_access_for_op(0x401000, 4, true, r2il::SpaceId::Ram)
+                render.memory_access_for_inst(r2ssa::InstId(7), true, r2il::SpaceId::Ram)
             })
             .map(|memory| (memory.access, memory.space, memory.value, memory.width)),
         Some((access, r2il::SpaceId::Ram, Some(value), 8)),
@@ -2934,7 +2960,7 @@ fn function_facts_owns_canonical_render_facts() {
     assert_eq!(
         facts
             .render()
-            .and_then(|render| render.return_for_op(0x401010, 2))
+            .and_then(|render| render.return_for_inst(return_at))
             .map(|ret| (ret.value, ret.width)),
         Some((value, 8)),
         "return value proof must travel through FunctionFacts"
@@ -3007,8 +3033,6 @@ fn function_render_facts_require_exact_array_access_identity() {
                 id: memory_id,
                 fact: MemoryAccessRenderFact {
                     access,
-                    block_addr: 0x401000,
-                    op_index: 4,
                     space: r2il::SpaceId::Ram,
                     object,
                     address: r2ssa::ValueId(52),
@@ -3021,13 +3045,11 @@ fn function_render_facts_require_exact_array_access_identity() {
                 },
             },
         )]),
-        memory_effects_by_op: BTreeMap::from([((0x401000, 4, false), vec![memory_id])]),
-        array_accesses_by_op: BTreeMap::from([(
-            (0x401000, 4, false),
+        memory_effects_by_inst: BTreeMap::from([((r2ssa::InstId(7), false), vec![memory_id])]),
+        array_accesses_by_inst: BTreeMap::from([(
+            (r2ssa::InstId(7), false),
             vec![ArrayAccessRenderFact {
                 access,
-                block_addr: 0x401000,
-                op_index: 4,
                 object,
                 is_write: false,
                 field_offset: 0,
@@ -3042,67 +3064,67 @@ fn function_render_facts_require_exact_array_access_identity() {
 
     assert!(
         render
-            .array_access_for_op(0x401000, 4, false, 0, 4, Some(4))
+            .array_access_for_inst(r2ssa::InstId(7), false, 0, 4, Some(4))
             .is_some(),
         "exact op/access/object/direction/width/stride identity should authorize array rendering"
     );
     assert!(
         render
-            .array_access_for_op(0x401000, 5, false, 0, 4, Some(4))
+            .array_access_for_inst(r2ssa::InstId(8), false, 0, 4, Some(4))
             .is_none(),
         "wrong op site must not authorize array rendering"
     );
     assert!(
         render
-            .array_access_for_op(0x401000, 4, true, 0, 4, Some(4))
+            .array_access_for_inst(r2ssa::InstId(7), true, 0, 4, Some(4))
             .is_none(),
         "wrong direction must not authorize array rendering"
     );
     assert!(
         render
-            .array_access_for_op(0x401000, 4, false, 4, 4, Some(4))
+            .array_access_for_inst(r2ssa::InstId(7), false, 4, 4, Some(4))
             .is_none(),
         "wrong field offset must not authorize array rendering"
     );
     assert!(
         render
-            .array_access_for_op(0x401000, 4, false, 0, 8, Some(4))
+            .array_access_for_inst(r2ssa::InstId(7), false, 0, 8, Some(4))
             .is_none(),
         "wrong stride must not authorize array rendering"
     );
     assert!(
         render
-            .array_access_for_op(0x401000, 4, false, 0, 4, Some(8))
+            .array_access_for_inst(r2ssa::InstId(7), false, 0, 4, Some(8))
             .is_none(),
         "wrong access width must not authorize array rendering"
     );
 
     let mut wrong_object = render.clone();
     wrong_object
-        .array_accesses_by_op
-        .get_mut(&(0x401000, 4, false))
+        .array_accesses_by_inst
+        .get_mut(&(r2ssa::InstId(7), false))
         .expect("array fact")
         .first_mut()
         .expect("array fact")
         .object = r2ssa::ObjectId(9);
     assert!(
         wrong_object
-            .array_access_for_op(0x401000, 4, false, 0, 4, Some(4))
+            .array_access_for_inst(r2ssa::InstId(7), false, 0, 4, Some(4))
             .is_none(),
         "wrong object identity must not authorize array rendering"
     );
 
     let mut wrong_access = render;
     wrong_access
-        .array_accesses_by_op
-        .get_mut(&(0x401000, 4, false))
+        .array_accesses_by_inst
+        .get_mut(&(r2ssa::InstId(7), false))
         .expect("array fact")
         .first_mut()
         .expect("array fact")
         .access = other_access;
     assert!(
         wrong_access
-            .array_access_for_op(0x401000, 4, false, 0, 4, Some(4))
+            .array_access_for_inst(r2ssa::InstId(7), false, 0, 4, Some(4))
             .is_none(),
         "wrong memory-access identity must not authorize array rendering"
     );
@@ -3126,8 +3148,6 @@ fn memory_access_lookup_requires_exact_address_space() {
                 id,
                 fact: MemoryAccessRenderFact {
                     access,
-                    block_addr: 0x401000,
-                    op_index: 4,
                     space,
                     object: r2ssa::ObjectId(3),
                     address: r2ssa::ValueId(52),
@@ -3148,25 +3168,28 @@ fn memory_access_lookup_requires_exact_address_space() {
             effect(ram_access, r2il::SpaceId::Ram),
             effect(custom_access, r2il::SpaceId::Custom(7)),
         ]),
-        memory_effects_by_op: BTreeMap::from([((0x401000, 4, false), vec![ram_id, custom_id])]),
+        memory_effects_by_inst: BTreeMap::from([(
+            (r2ssa::InstId(7), false),
+            vec![ram_id, custom_id],
+        )]),
         ..FunctionRenderFacts::default()
     };
 
     assert_eq!(
         render
-            .memory_access_for_op(0x401000, 4, false, r2il::SpaceId::Ram)
+            .memory_access_for_inst(r2ssa::InstId(7), false, r2il::SpaceId::Ram)
             .map(|fact| fact.access),
         Some(ram_access)
     );
     assert_eq!(
         render
-            .memory_access_for_op(0x401000, 4, false, r2il::SpaceId::Custom(7))
+            .memory_access_for_inst(r2ssa::InstId(7), false, r2il::SpaceId::Custom(7))
             .map(|fact| fact.access),
         Some(custom_access)
     );
     assert!(
         render
-            .memory_access_for_op(0x401000, 4, false, r2il::SpaceId::Custom(8))
+            .memory_access_for_inst(r2ssa::InstId(7), false, r2il::SpaceId::Custom(8))
             .is_none()
     );
 }

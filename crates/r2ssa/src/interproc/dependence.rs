@@ -248,11 +248,11 @@ impl FormalDependence {
         // What the last call in this block was handed: the definitions that
         // follow it are what it left, and may be any of it.
         let mut last_call = 0u64;
-        for (index, op) in block.ops().iter().enumerate() {
+        for (id, op) in block.sited() {
             if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
                 last_call = prepared
                     .graph()
-                    .inst_id_for_op_site(block.addr, index)
+                    .inst_for_op(id)
                     .and_then(|inst| prepared.call_sites().by_inst.get(&inst))
                     .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
                 let unseen = self.unseen | last_call;
@@ -355,8 +355,8 @@ impl FrameTraffic {
         let mut loads = Vec::<(ValueId, FramePlace)>::new();
         let mut stores = Vec::<(InstId, ValueId, FramePlace)>::new();
         for block in prepared.function().blocks() {
-            for (index, op) in block.ops().iter().enumerate() {
-                let Some(inst) = graph.inst_id_for_op_site(block.addr, index) else {
+            for (id, op) in block.sited() {
+                let Some(inst) = graph.inst_for_op(id) else {
                     continue;
                 };
                 let (addr, space, loaded, stored) = match op {

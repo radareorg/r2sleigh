@@ -561,7 +561,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
     let call = prepared
         .sole_callsite_certificate_in_block(0x1600)
         .expect("callsite certificate");
-    assert_eq!(call.block_addr, 0x1600);
+    assert_eq!(prepared.graph().block_addr_of(call.at), Some(0x1600));
     assert_eq!(call.argument_values.len(), 1);
     let arg_value = call.argument_values[0];
     let arg = prepared.graph().value(arg_value).expect("arg value");
@@ -602,10 +602,10 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
     }
 
     let memory = prepared
-        .memory_certificate_for_op_site(0x1600, 1, false)
+        .inst_at(0x1600, 1)
+        .and_then(|inst| prepared.memory_certificate_for_inst(inst, false))
         .expect("memory certificate");
-    assert_eq!(memory.block_addr, 0x1600);
-    assert_eq!(memory.op_index, 1);
+    assert_eq!(Some(memory.access.inst), prepared.inst_at(0x1600, 1));
     assert!(!memory.is_write);
 
     let return_idx = prepared
@@ -620,7 +620,8 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .expect("return op index");
     assert!(
         prepared
-            .return_certificate_for_op(0x1600, return_idx)
+            .inst_at(0x1600, return_idx)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
             .is_none()
     );
 
@@ -640,7 +641,8 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .expect("post-call result op");
     assert!(
         prepared
-            .call_result_certificate_for_op(0x1600, result.0)
+            .inst_at(0x1600, result.0)
+            .and_then(|inst| prepared.call_result_certificate_for_inst(inst))
             .is_none()
     );
     assert!(

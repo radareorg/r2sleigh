@@ -38,8 +38,8 @@ pub(crate) fn collect_access_summaries(
     let mut summaries = BTreeMap::new();
 
     for block in function.blocks() {
-        for (op_idx, op) in block.ops().iter().enumerate() {
-            let Some(inst_id) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+        for (op_id, op) in block.sited() {
+            let Some(inst_id) = graph.inst_for_op(op_id) else {
                 continue;
             };
             let mut uses = Vec::new();
@@ -258,8 +258,8 @@ pub(crate) fn build_memory_ssa(
             let Some(block) = function.get_block(block_addr) else {
                 continue;
             };
-            for (op_idx, _) in block.ops().iter().enumerate() {
-                let Some(inst_id) = graph.inst_id_for_op_site(block_addr, op_idx) else {
+            for (op_id, _) in block.sited() {
+                let Some(inst_id) = graph.inst_for_op(op_id) else {
                     continue;
                 };
                 let Some(summary) = access_summaries.get(&inst_id) else {

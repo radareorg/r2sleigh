@@ -609,22 +609,54 @@ impl SsaGraph {
         })
     }
 
-    /// The instruction the operation at a site became: a block address and
-    /// an index into the block's operations, phis not counted.
-    pub fn inst_id_for_op_site(&self, block_addr: u64, op_idx: usize) -> Option<InstId> {
-        let block = self
-            .blocks
-            .get(self.block_by_addr.get(&block_addr)?.0 as usize)?;
-        block.insts.get(self.phi_count(block) + op_idx).copied()
-    }
-
-    /// Where an operation's instruction stands: its block's address and its
-    /// index among the block's operations. `None` for a phi.
-    pub fn op_site_for_inst(&self, id: InstId) -> Option<(u64, usize)> {
+    /// Where an operation's instruction stands among its block's operations,
+    /// phis not counted. `None` for a phi.
+    ///
+    /// A presentation view of a sealed function, for spelling a site as
+    /// `0x{block}:op:{n}` and for ordering what is spelled. A fact is keyed
+    /// by the [`InstId`] or the [`OpId`], never by this.
+    pub fn op_ordinal(&self, id: InstId) -> Option<usize> {
         let inst = self.inst(id)?;
         let block = self.blocks.get(inst.block.0 as usize)?;
-        let index = inst.ordinal.checked_sub(self.phi_count(block))?;
-        Some((block.addr, index))
+        inst.ordinal.checked_sub(self.phi_count(block))
+    }
+
+    /// Where a walk over a sealed block from this instruction starts: the
+    /// block's address and the instruction's place among the block's
+    /// operations.
+    ///
+    /// A cursor for the walks that read the operations before or after an
+    /// instruction, private to the crate. The way back from a place is the
+    /// block's own [`SSABlock::op_id`](crate::FunctionSSABlock::op_id) and
+    /// [`Self::inst_for_op`]; no fact is keyed by a place.
+    pub(crate) fn walk_start(&self, id: InstId) -> Option<(u64, usize)> {
+        Some((self.block_addr_of(id)?, self.op_ordinal(id)?))
+    }
+
+    /// The instruction a spelled site `0x{block}:{n}` names: the inverse of
+    /// [`Self::op_ordinal`], for reading back a site a person wrote.
+    pub(crate) fn inst_spelled_at(&self, block_addr: u64, ordinal: usize) -> Option<InstId> {
+        let block = self.block(self.block_id_for_addr(block_addr)?)?;
+        block.insts.get(self.phi_count(block) + ordinal).copied()
+    }
+
+    /// The operation of `function` an instruction was built from: the sealed
+    /// function's own copy, which the graph's payload restates.
+    pub(crate) fn function_op<'f>(
+        &self,
+        function: &'f SSAFunction,
+        id: InstId,
+    ) -> Option<&'f SSAOp> {
+        let (block_addr, index) = self.walk_start(id)?;
+        let block = function.get_block(block_addr)?;
+        (block.op_id(index)? == self.op_for_inst(id)?)
+            .then(|| block.ops().get(index))
+            .flatten()
+    }
+
+    /// The address of the block an instruction stands in.
+    pub fn block_addr_of(&self, id: InstId) -> Option<u64> {
+        Some(self.block(self.inst(id)?.block)?.addr)
     }
 
     /// Which machine instruction this operation came from.

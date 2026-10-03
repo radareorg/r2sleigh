@@ -829,7 +829,11 @@ fn prepared_local_inference_certifies_cross_block_spill_reload() {
     assert!(
         artifacts.indexed_accesses.iter().any(|candidate| {
             candidate.slot == 0
-                && candidate.block_addr == 0x401020
+                && prepared
+                    .graph()
+                    .inst_for_op(candidate.op)
+                    .and_then(|inst| prepared.graph().block_addr_of(inst))
+                    == Some(0x401020)
                 && !candidate.is_write
                 && candidate.field_offset == 0
                 && candidate.element_stride == 4

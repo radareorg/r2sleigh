@@ -18,7 +18,7 @@
 
 use crate::SSAOp;
 use crate::function::{SSAFunction, SsaArtifact};
-use crate::graph::{GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
+use crate::graph::{GraphInst, InstId, InstPayload, SsaGraph, UseSite, ValueId};
 
 pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) -> Option<ValueId> {
     let value = *inst.inputs.get(input_idx)?;
@@ -112,7 +112,6 @@ impl IndexChain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTableRead {
     pub block_addr: u64,
-    pub op_index: usize,
     /// The instruction that makes the transfer, where the lift recorded it.
     /// What the body walk is keyed by, so it can be told where to continue.
     pub instruction: Option<u64>,
@@ -311,8 +310,7 @@ fn index_operand(
 fn dispatch_load<'a>(
     graph: &'a SsaGraph,
     values: &crate::values::ValueRanges,
-    block_addr: u64,
-    op_index: usize,
+    inst: InstId,
     op: &SSAOp,
 ) -> Option<(Option<&'a GraphInst>, Option<EntryTransform>, ValueId)> {
     // A tail call through a table is a branch, not a call, and it reaches the
@@ -320,9 +318,7 @@ fn dispatch_load<'a>(
     let (SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. }) = op else {
         return None;
     };
-    let call_inst = graph
-        .inst_id_for_op_site(block_addr, op_index)
-        .and_then(|inst| graph.inst(inst))?;
+    let call_inst = graph.inst(inst)?;
     let target_value = exact_input(graph, call_inst, 0)?;
     if graph.value_id_for_var(target) != Some(target_value) {
         return None;
@@ -342,7 +338,7 @@ fn dispatch_table_read(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
     block_addr: u64,
-    op_index: usize,
+    inst: InstId,
     op: &SSAOp,
 ) -> Option<DispatchTableRead> {
     let (SSAOp::CallInd { instruction, .. } | SSAOp::BranchInd { instruction, .. }) = op else {
@@ -352,10 +348,9 @@ fn dispatch_table_read(
     // it: either the target is not read out of memory, or what it reads is
     // not a bounded walk of one table.
     let evidence = |why: &str| {
-        r2il::refusal_evidence!("dispatch-table", "{block_addr:#x}:{op_index}: {why}");
+        r2il::refusal_evidence!("dispatch-table", "{block_addr:#x} {inst:?}: {why}");
     };
-    let Some((Some(load_inst), Some(transform), address)) =
-        dispatch_load(graph, values, block_addr, op_index, op)
+    let Some((Some(load_inst), Some(transform), address)) = dispatch_load(graph, values, inst, op)
     else {
         evidence("the target is not a constant affine function of a load");
         return None;
@@ -404,13 +399,12 @@ fn dispatch_table_read(
     };
     r2il::refusal_evidence!(
         "dispatch-table",
-        "{block_addr:#x}:{op_index} at {instruction:?} reads {count} entries {base:#x}..={last:#x} by {stride}, target = {}*entry + {:#x}, on {selector:?}",
+        "{block_addr:#x} {inst:?} at {instruction:?} reads {count} entries {base:#x}..={last:#x} by {stride}, target = {}*entry + {:#x}, on {selector:?}",
         transform.scale,
         transform.displacement
     );
     Some(DispatchTableRead {
         block_addr,
-        op_index,
         instruction: *instruction,
         address: base,
         stride,
@@ -437,11 +431,11 @@ pub(crate) fn dispatch_selectors(
         .blocks()
         .iter()
         .filter_map(|block| {
-            let (op_index, op) =
-                block.ops().iter().enumerate().rev().find(|(_, op)| {
-                    matches!(op, SSAOp::CallInd { .. } | SSAOp::BranchInd { .. })
-                })?;
-            let (_, _, address) = dispatch_load(graph, values, block.addr, op_index, op)?;
+            let (id, op) = block
+                .sited()
+                .rev()
+                .find(|(_, op)| matches!(op, SSAOp::CallInd { .. } | SSAOp::BranchInd { .. }))?;
+            let (_, _, address) = dispatch_load(graph, values, graph.inst_for_op(id)?, op)?;
             Some((block.addr, selector_of(graph, values, address).0))
         })
         .collect()
@@ -457,8 +451,8 @@ fn dispatch_table_reads_in_graph(
         .blocks()
         .iter()
         .flat_map(|block| {
-            block.ops().iter().enumerate().filter_map(|(op_index, op)| {
-                dispatch_table_read(graph, values, block.addr, op_index, op)
+            block.sited().filter_map(|(id, op)| {
+                dispatch_table_read(graph, values, block.addr, graph.inst_for_op(id)?, op)
             })
         })
         .collect()

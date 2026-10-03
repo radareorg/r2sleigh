@@ -147,7 +147,6 @@ pub(crate) fn ram_memory_access_matches_source(
     if access.space != SpaceId::Ram
         || !access.provenance_complete
         || access.id.ordinal != 0
-        || graph.op_site_for_inst(access.id.inst) != Some((access.block_addr, access.op_index))
         || objects.object_for_value(access.address, SpaceId::Ram) != Some(access.object)
         || objects
             .object(access.object)
@@ -158,10 +157,7 @@ pub(crate) fn ram_memory_access_matches_source(
     let Some(graph_inst) = graph.inst(access.id.inst) else {
         return false;
     };
-    let Some(prepared_op) = function
-        .get_block(access.block_addr)
-        .and_then(|block| block.ops().get(access.op_index))
-    else {
+    let Some(prepared_op) = graph.function_op(function, access.id.inst) else {
         return false;
     };
     let InstPayload::Op(graph_op) = &graph_inst.payload else {

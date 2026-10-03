@@ -403,16 +403,24 @@ pub(crate) fn instruction_strictly_precedes(
     first: InstId,
     second: InstId,
 ) -> bool {
-    let Some((first_block, first_op)) = graph.op_site_for_inst(first) else {
+    // Phis stand first in a block and precede no operation here.
+    let operation = |id: InstId| {
+        graph
+            .inst(id)
+            .filter(|inst| matches!(inst.payload, InstPayload::Op(_)))
+    };
+    let (Some(first), Some(second)) = (operation(first), operation(second)) else {
         return false;
     };
-    let Some((second_block, second_op)) = graph.op_site_for_inst(second) else {
-        return false;
-    };
-    if first_block == second_block {
-        first_op < second_op
-    } else {
-        function.dominates(first_block, second_block)
+    if first.block == second.block {
+        return first.ordinal < second.ordinal;
+    }
+    match (
+        graph.block(first.block).map(|block| block.addr),
+        graph.block(second.block).map(|block| block.addr),
+    ) {
+        (Some(first), Some(second)) => function.dominates(first, second),
+        _ => false,
     }
 }
 
@@ -1032,7 +1040,7 @@ pub(crate) fn accessed_object_storage(
             Some(existing) => {
                 // Which accesses disagree, at what offsets, is what says
                 // whether this is one object read two ways or two objects.
-                let site_of = |id: &StructuredAccessId| graph.op_site_for_inst(id.inst);
+                let site_of = |id: &StructuredAccessId| graph.walk_start(id.inst);
                 let filed = structured
                     .memory_accesses
                     .iter()
@@ -1399,7 +1407,7 @@ pub(crate) fn collect_stack_call_argument_values(
     call_site: &CallSiteFact,
     calls_move_stack_pointer: bool,
 ) -> Vec<StackCallArgumentCertificate> {
-    let Some((block_addr, op_idx)) = graph.op_site_for_inst(call_site.at) else {
+    let Some((block_addr, op_idx)) = graph.walk_start(call_site.at) else {
         return Vec::new();
     };
     let Some(block) = function.get_block(block_addr) else {
@@ -1442,12 +1450,28 @@ pub(crate) fn collect_stack_call_argument_values(
             continue;
         };
 
-        for (access_id, access) in structured.memory_accesses.iter().filter(|(_, access)| {
-            access.block_addr == block_addr
-                && access.op_index == producer_idx
-                && access.is_write
-                && ram_memory_access_matches_source(function, graph, objects, access)
-        }) {
+        let Some(producer) = block
+            .op_id(producer_idx)
+            .and_then(|id| graph.inst_for_op(id))
+        else {
+            continue;
+        };
+        let accesses = StructuredAccessId {
+            inst: producer,
+            ordinal: 0,
+        }..=StructuredAccessId {
+            inst: producer,
+            ordinal: u32::MAX,
+        };
+        for (access_id, access) in
+            structured
+                .memory_accesses
+                .range(accesses)
+                .filter(|(_, access)| {
+                    access.is_write
+                        && ram_memory_access_matches_source(function, graph, objects, access)
+                })
+        {
             if access.value != Some(value) {
                 continue;
             }

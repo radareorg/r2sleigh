@@ -48,6 +48,7 @@ use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
 
 use crate::address::{AddressProvenanceFacts, collect_address_provenance};
+use crate::arena::OpId;
 use crate::assumption::{AssumptionSet, AssumptionSubject, AssumptionUsageReport, AssumptionValue};
 use crate::cfg::BlockTerminator;
 use crate::function::{DecompilePrepFacts, SSAFunction, StackAddressBase, StackAddressRoot};
@@ -301,7 +302,7 @@ impl PreparedFunctionFacts {
             loops,
             memory_accesses,
             member_run_stores,
-            recursive_calls: collect_structured_recursive_call_facts(function, graph, &call_sites),
+            recursive_calls: collect_structured_recursive_call_facts(function, &call_sites),
         };
         phase!("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
@@ -445,10 +446,12 @@ pub(crate) fn ensure_source_formal_parameter_values(
 /// to one question.
 pub fn value_reaching(
     artifact: &crate::SsaArtifact,
-    block_addr: u64,
-    op_index: usize,
+    op: crate::OpId,
     storage: CanonicalStorageId,
 ) -> Option<ValueId> {
+    let (block_addr, op_index) = artifact
+        .graph()
+        .walk_start(artifact.graph().inst_for_op(op)?)?;
     match reaching_abi_value_in_block_with_policy(
         artifact.function(),
         Some(artifact.decompile_prep_facts()),

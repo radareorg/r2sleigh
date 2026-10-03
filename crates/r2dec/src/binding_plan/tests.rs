@@ -267,8 +267,8 @@ fn certified_address_reads_are_owned_by_exact_affine_provenance() {
     let source = source_owned.source();
     let access = source
         .certificates()
-        .memory_accesses_by_op
-        .get(&(0x1000, 2, false))
+        .memory_accesses_by_inst
+        .get(&(crate::inst_at(source, 0x1000, 2).expect("the load"), false))
         .and_then(|accesses| accesses.first())
         .copied()
         .expect("exact structured load access");
@@ -419,9 +419,7 @@ fn dead_phi_reader_does_not_force_a_live_temporary_copy_to_bind() {
     let source = source_owned.source();
     // The copy feeds the merge, so it is the merge's edge write and stays a
     // copy the merge reads; that read is what the dead-value analysis owns.
-    let producer = source
-        .graph()
-        .inst_id_for_op_site(0x1004, 0)
+    let producer = crate::inst_at(source, 0x1004, 0)
         .and_then(|inst| source.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("copy output");
@@ -490,9 +488,7 @@ fn copy_of_bound_load_survives_temporary_storage_reuse_inline() {
     ]);
     let source = source_owned.source();
     let output_at = |op_index| {
-        source
-            .graph()
-            .inst_id_for_op_site(0x1000, op_index)
+        crate::inst_at(source, 0x1000, op_index)
             .and_then(|inst| source.graph().inst(inst))
             .and_then(|inst| inst.output)
             .expect("operation output")
@@ -566,9 +562,7 @@ fn a_constant_proven_only_through_a_bound_producer_keeps_its_own_binding() {
     });
     let source_owned = source_owned_blocks(&[entry, body, join]);
     let source = source_owned.source();
-    let shifted = source
-        .graph()
-        .inst_id_for_op_site(0x1000, 1)
+    let shifted = crate::inst_at(source, 0x1000, 1)
         .and_then(|inst| source.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("shift output");

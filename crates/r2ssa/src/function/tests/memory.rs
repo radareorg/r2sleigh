@@ -201,7 +201,12 @@ fn prepared_function_does_not_infer_memory_backed_return_phi() {
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1214, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1214, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -335,7 +340,7 @@ fn prepared_function_ssa_builds_memory_phis_per_object() {
 
     let load_inst = prepared
         .graph()
-        .inst_id_for_op_site(0x130c, 0)
+        .inst_spelled_at(0x130c, 0)
         .expect("load inst");
     let load_use = prepared
         .memory()

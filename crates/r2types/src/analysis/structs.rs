@@ -25,8 +25,8 @@ pub(crate) struct LocalAffineValue {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LocalMemoryVersionFacts {
-    pub(crate) stores_by_site: HashMap<(u64, usize), Vec<MemoryVersion>>,
-    pub(crate) loads_by_site: HashMap<(u64, usize), Vec<MemoryVersion>>,
+    pub(crate) stores_by_op: HashMap<r2ssa::OpId, Vec<MemoryVersion>>,
+    pub(crate) loads_by_op: HashMap<r2ssa::OpId, Vec<MemoryVersion>>,
     pub(crate) phi_inputs: HashMap<MemoryVersion, Vec<MemoryVersion>>,
     pub(crate) value_ids: HashMap<SSAVar, r2ssa::ValueId>,
 }
@@ -59,7 +59,7 @@ impl LocalMemoryVersionFacts {
                 .map(|value| (value.var.clone(), value.id)),
         );
         for block in prepared.function().blocks() {
-            for (op_index, op) in block.ops().iter().enumerate() {
+            for (op_id, op) in block.sited() {
                 if !matches!(
                     op,
                     SSAOp::Load {
@@ -72,29 +72,26 @@ impl LocalMemoryVersionFacts {
                 ) {
                     continue;
                 }
-                let store_versions = prepared
-                    .memory_defs_for_op_site(block.addr, op_index)
+                let inst = prepared.graph().inst_for_op(op_id);
+                let store_versions = inst
+                    .and_then(|inst| prepared.memory_defs_for_inst(inst))
                     .into_iter()
                     .flatten()
                     .map(|fact| fact.next_version)
                     .filter(|version| is_stack(*version))
                     .collect::<Vec<_>>();
                 if !store_versions.is_empty() {
-                    facts
-                        .stores_by_site
-                        .insert((block.addr, op_index), store_versions);
+                    facts.stores_by_op.insert(op_id, store_versions);
                 }
-                let load_versions = prepared
-                    .memory_uses_for_op_site(block.addr, op_index)
+                let load_versions = inst
+                    .and_then(|inst| prepared.memory_uses_for_inst(inst))
                     .into_iter()
                     .flatten()
                     .map(|fact| fact.version)
                     .filter(|version| is_stack(*version))
                     .collect::<Vec<_>>();
                 if !load_versions.is_empty() {
-                    facts
-                        .loads_by_site
-                        .insert((block.addr, op_index), load_versions);
+                    facts.loads_by_op.insert(op_id, load_versions);
                 }
             }
         }
@@ -691,10 +688,12 @@ pub(crate) fn prepared_parameter_indexed_accesses(
         {
             continue;
         }
+        let Some(op) = prepared.graph().op_for_inst(access.access.inst) else {
+            continue;
+        };
         candidates.push(ScalarArrayRenderCandidate {
             slot: address.parameter,
-            block_addr: access.block_addr,
-            op_index: access.op_index,
+            op,
             is_write: access.is_write,
             field_offset,
             element_stride,
@@ -775,7 +774,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     loop {
         let mut changed = false;
         for block in ssa_blocks {
-            for (op_index, op) in block.ops().iter().enumerate() {
+            for (op_id, op) in block.sited() {
                 let addr_of = |var: &SSAVar, map: &HashMap<SSAVar, LocalAddrExpr>| {
                     if var.version == 0 {
                         let key = var.name().to_ascii_lowercase();
@@ -1052,8 +1051,8 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             && let Some(mut expr) = addr_of(val, &addr_exprs)
                         {
                             expr.confidence = expr.confidence.saturating_sub(2);
-                            if let Some(versions) = memory_versions
-                                .and_then(|facts| facts.stores_by_site.get(&(block.addr, op_index)))
+                            if let Some(versions) =
+                                memory_versions.and_then(|facts| facts.stores_by_op.get(&op_id))
                             {
                                 for version in versions {
                                     match memory_version_values.get(version) {
@@ -1083,7 +1082,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         addr,
                     } => {
                         let exact_expr = memory_versions
-                            .and_then(|facts| facts.loads_by_site.get(&(block.addr, op_index)))
+                            .and_then(|facts| facts.loads_by_op.get(&op_id))
                             .and_then(|versions| {
                                 let facts = memory_versions?;
                                 local_expr_for_memory_versions(
@@ -1113,7 +1112,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     }
 
     for block in ssa_blocks {
-        for (op_index, op) in block.ops().iter().enumerate() {
+        for (op_id, op) in block.sited() {
             let resolve_addr = |addr: &SSAVar| -> Option<LocalAddrExpr> {
                 if addr.version == 0 {
                     let key = addr.name().to_ascii_lowercase();
@@ -1153,8 +1152,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         {
                             indexed_accesses.push(ScalarArrayRenderCandidate {
                                 slot: expr.slot,
-                                block_addr: block.addr,
-                                op_index,
+                                op: op_id,
                                 is_write: false,
                                 field_offset: expr.offset as u64,
                                 element_stride,
@@ -1205,8 +1203,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         {
                             indexed_accesses.push(ScalarArrayRenderCandidate {
                                 slot: expr.slot,
-                                block_addr: block.addr,
-                                op_index,
+                                op: op_id,
                                 is_write: true,
                                 field_offset: expr.offset as u64,
                                 element_stride,

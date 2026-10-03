@@ -210,13 +210,7 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
         .insts
         .iter()
         .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
-        .filter(|inst| {
-            graph
-                .op_site_for_inst(inst.id)
-                .map(|(block_addr, _)| block_addr)
-                .or_else(|| block_addr(graph, inst))
-                .is_some_and(|addr| widen_at.contains(&addr))
-        })
+        .filter(|inst| block_addr(graph, inst).is_some_and(|addr| widen_at.contains(&addr)))
         .map(|inst| inst.id)
         .collect::<BTreeSet<_>>();
 

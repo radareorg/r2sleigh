@@ -1054,7 +1054,7 @@ pub(crate) fn reaching_abi_value_before(
         if op.dst().is_none() {
             continue;
         }
-        let Some(producer) = graph.inst_id_for_op_site(block_addr, op_index) else {
+        let Some(producer) = block.op_id(op_index).and_then(|id| graph.inst_for_op(id)) else {
             continue;
         };
         let Some(dst_storage) = graph.inst(producer).and_then(|inst| inst.canonical_storage) else {
@@ -1322,9 +1322,8 @@ pub(crate) fn observed_convention_call_result_after_call(
             let SSAOp::CallDefine { dst } = op else {
                 return None;
             };
-            let inst = graph.inst_id_for_op_site(
-                block_addr,
-                call_op_index.checked_add(1)?.checked_add(relative_index)?,
+            let inst = graph.inst_for_op(
+                block.op_id(call_op_index.checked_add(1)?.checked_add(relative_index)?)?,
             )?;
             let graph_inst = graph.inst(inst)?;
             let storage = graph_inst.canonical_storage?;
@@ -1440,15 +1439,11 @@ pub(crate) fn block_entry_storage_state(
 
 pub(crate) fn transfer_storage_state(
     graph: &SsaGraph,
-    block_addr: u64,
-    op_index: usize,
+    op: OpId,
     storage: CanonicalStorageId,
     state: ReachingStorageState,
 ) -> ReachingStorageState {
-    let Some(inst) = graph
-        .inst_id_for_op_site(block_addr, op_index)
-        .and_then(|inst| graph.inst(inst))
-    else {
+    let Some(inst) = graph.inst_for_op(op).and_then(|inst| graph.inst(inst)) else {
         return ReachingStorageState::Conflict;
     };
     let Some(written) = inst.canonical_storage else {
@@ -1490,8 +1485,8 @@ pub(crate) fn reaching_storage_states_before(
             exits.insert(block_addr, ReachingStorageState::Conflict);
             continue;
         };
-        for op_index in 0..block.ops().len() {
-            state = transfer_storage_state(graph, block_addr, op_index, storage, state);
+        for (op, _) in block.sited() {
+            state = transfer_storage_state(graph, op, storage, state);
         }
         if exits.get(&block_addr).copied() == Some(state) {
             continue;
@@ -1506,11 +1501,11 @@ pub(crate) fn reaching_storage_states_before(
         let Some(block) = function.get_block(block_addr) else {
             continue;
         };
-        for op_index in 0..block.ops().len() {
-            if let Some(inst) = graph.inst_id_for_op_site(block_addr, op_index) {
+        for (op, _) in block.sited() {
+            if let Some(inst) = graph.inst_for_op(op) {
                 before.insert(inst, state);
             }
-            state = transfer_storage_state(graph, block_addr, op_index, storage, state);
+            state = transfer_storage_state(graph, op, storage, state);
         }
     }
     before
@@ -1552,7 +1547,7 @@ pub(crate) fn callee_write_spans(
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
     for block in function.blocks() {
-        for (op_idx, op) in block.ops().iter().enumerate() {
+        for (op_id, op) in block.sited() {
             let (target, instruction) = match op {
                 SSAOp::Call {
                     target,
@@ -1577,7 +1572,7 @@ pub(crate) fn callee_write_spans(
             let target =
                 target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), target));
             let id = crate::interproc::InterprocFunctionId(target.unwrap_or(0));
-            let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+            let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
             let mut argument = |index: usize| -> Option<&SSAVar> {
@@ -2793,13 +2788,13 @@ pub(crate) fn insert_raw_memory_subeffect(
     sink: EffectSink<'_>,
     memory: &MemorySSAFacts,
     objects: &ObjectModel,
-    site: AccessSite,
+    inst: InstId,
     access: RawAccess,
 ) {
-    let provenance = raw_memory_subeffect_provenance(memory, objects, site.inst, access);
+    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, access);
     insert_structured_memory_access(
         sink,
-        site,
+        inst,
         access,
         provenance.object,
         provenance.complete,
@@ -2809,17 +2804,12 @@ pub(crate) fn insert_raw_memory_subeffect(
 
 pub(crate) fn insert_structured_memory_access(
     sink: EffectSink<'_>,
-    site: AccessSite,
+    inst: InstId,
     access: RawAccess,
     object: ObjectId,
     provenance_complete: bool,
     object_offset: Option<i64>,
 ) {
-    let AccessSite {
-        inst,
-        block_addr,
-        op_index,
-    } = site;
     let RawAccess {
         address,
         space,
@@ -2837,8 +2827,6 @@ pub(crate) fn insert_structured_memory_access(
         id,
         StructuredMemoryAccessFact {
             id,
-            block_addr,
-            op_index,
             space,
             object,
             address,

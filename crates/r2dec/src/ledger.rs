@@ -18,7 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use r2ssa::{SemanticObligationId, SemanticObligationInventory, SemanticObligationKind};
+use r2ssa::{
+    SemanticObligationId, SemanticObligationInventory, SemanticObligationKind, SpelledObligation,
+    SsaGraph,
+};
 
 /// Why an obligation needed no output for the rendering to be complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -230,8 +233,8 @@ impl std::fmt::Display for ElisionReason {
 /// What became of one obligation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
-    /// Discharged by output at this operation site.
-    Rendered { block_addr: u64, op_idx: usize },
+    /// Discharged by output at the obligation's own instruction.
+    Rendered,
     /// Proven to need no output.
     Elided(ElisionReason),
     /// Could not be discharged. The obligation's own kind says what it was.
@@ -244,7 +247,7 @@ pub enum Outcome {
     /// closure equation therefore still balances, while
     /// [`LedgerClosure::is_fully_proven`] is false: a gapped function is
     /// rendered, not proven.
-    Gapped { block_addr: u64, op_idx: usize },
+    Gapped,
     /// No layer recorded a fate, which is a decompiler defect rather than a property of the input.
     Unattributed,
 }
@@ -310,24 +313,42 @@ pub struct ObligationLedger {
     /// Obligations of definitions whose values were split out of a shared
     /// variable, so that every rendered read sees the value it stands for.
     split: BTreeSet<SemanticObligationId>,
+    /// Every obligation as it is spelled, in the order the spelling reads:
+    /// by block, then by an operation's place in it. An obligation names its
+    /// operation by identity, so this order is taken from the sealed
+    /// function once, when the ledger opens.
+    reading_order: Vec<SpelledObligation>,
 }
 
 impl ObligationLedger {
-    /// Open a ledger over an inventory, with every obligation present and undecided.
-    pub fn open(inventory: &SemanticObligationInventory) -> Self {
-        Self::over(inventory.obligations().keys().copied())
+    /// Open a ledger over an inventory, with every obligation present and
+    /// undecided, spelled against the graph of the function it is about.
+    pub fn open(inventory: &SemanticObligationInventory, graph: &SsaGraph) -> Self {
+        Self::over(inventory.obligations().keys().copied(), graph)
     }
 
     /// Open a ledger over a set of obligations, each undecided.
-    pub fn over(ids: impl IntoIterator<Item = SemanticObligationId>) -> Self {
+    pub fn over(ids: impl IntoIterator<Item = SemanticObligationId>, graph: &SsaGraph) -> Self {
+        let outcomes = ids
+            .into_iter()
+            .map(|id| (id, Outcome::Unattributed))
+            .collect::<BTreeMap<_, _>>();
+        let mut reading_order = outcomes
+            .keys()
+            .map(|id| id.spelled(graph))
+            .collect::<Vec<_>>();
+        reading_order.sort();
         Self {
-            outcomes: ids
-                .into_iter()
-                .map(|id| (id, Outcome::Unattributed))
-                .collect(),
+            outcomes,
             conflicts: BTreeMap::new(),
             split: BTreeSet::new(),
+            reading_order,
         }
+    }
+
+    /// Every obligation, spelled, in the order the spelling reads.
+    pub fn spelled(&self) -> impl Iterator<Item = &SpelledObligation> {
+        self.reading_order.iter()
     }
 
     /// Say what became of one obligation, keeping the first answer if two disagree.
@@ -366,7 +387,7 @@ impl ObligationLedger {
     pub fn split_rendered(&self) -> usize {
         self.split
             .iter()
-            .filter(|id| matches!(self.outcomes.get(id), Some(Outcome::Rendered { .. })))
+            .filter(|id| matches!(self.outcomes.get(id), Some(Outcome::Rendered)))
             .count()
     }
 
@@ -397,15 +418,18 @@ impl ObligationLedger {
             .unwrap_or(Outcome::Unattributed)
     }
 
-    /// Every obligation, in inventory order.
+    /// Every obligation, in the order the spelling reads.
     pub fn entries(&self) -> impl Iterator<Item = (&SemanticObligationId, Outcome)> {
-        self.outcomes.iter().map(|(id, outcome)| (id, *outcome))
+        self.reading_order
+            .iter()
+            .filter_map(|spelled| self.outcomes.get_key_value(&spelled.id()))
+            .map(|(id, outcome)| (id, *outcome))
     }
 
-    /// The obligations no layer spoke about, which is the list of decompiler defects.
+    /// The obligations no layer spoke about, which is the list of decompiler
+    /// defects, in the order the spelling reads.
     pub fn unattributed(&self) -> impl Iterator<Item = &SemanticObligationId> {
-        self.outcomes
-            .iter()
+        self.entries()
             .filter(|(_, outcome)| !outcome.is_decided())
             .map(|(id, _)| id)
     }
@@ -419,9 +443,34 @@ impl ObligationLedger {
         counts
     }
 
-    /// Obligations with incompatible answers, in canonical source order.
+    /// Obligations with incompatible answers, in the order the spelling
+    /// reads.
     pub fn conflicts(&self) -> impl Iterator<Item = (&SemanticObligationId, usize)> {
-        self.conflicts.iter().map(|(id, count)| (id, *count))
+        self.reading_order
+            .iter()
+            .filter_map(|spelled| self.conflicts.get_key_value(&spelled.id()))
+            .map(|(id, count)| (id, *count))
+    }
+
+    /// The first obligation, in the order the spelling reads, that `wanted`
+    /// accepts, spelled.
+    pub fn first_spelled(
+        &self,
+        mut wanted: impl FnMut(&SemanticObligationId, Outcome) -> bool,
+    ) -> Option<SpelledObligation> {
+        self.reading_order.iter().copied().find(|spelled| {
+            self.outcomes
+                .get(&spelled.id())
+                .is_some_and(|outcome| wanted(&spelled.id(), *outcome))
+        })
+    }
+
+    /// The first conflicting obligation in the order the spelling reads.
+    pub fn first_conflict_spelled(&self) -> Option<SpelledObligation> {
+        self.reading_order
+            .iter()
+            .copied()
+            .find(|spelled| self.conflicts.contains_key(&spelled.id()))
     }
 
     /// How many refusals there are, by the kind of obligation refused.
@@ -505,9 +554,10 @@ impl ObligationLedger {
         );
         section(
             "refused-ids",
-            self.entries()
-                .filter(|&(_, outcome)| outcome == Outcome::Refused)
-                .map(|(id, _)| id.to_string())
+            self.reading_order
+                .iter()
+                .filter(|spelled| self.outcomes.get(&spelled.id()) == Some(&Outcome::Refused))
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(" "),
         );
@@ -524,7 +574,7 @@ impl ObligationLedger {
         let trace = r2il::refusal_evidence::tracing();
         for (id, outcome) in &self.outcomes {
             match outcome {
-                Outcome::Rendered { .. } => closure.rendered += 1,
+                Outcome::Rendered => closure.rendered += 1,
                 Outcome::Elided(_) => closure.elided += 1,
                 Outcome::Refused => {
                     closure.refused += 1;
@@ -532,7 +582,7 @@ impl ObligationLedger {
                         eprintln!("obligation refused {id:?} {outcome:?}");
                     }
                 }
-                Outcome::Gapped { .. } => {
+                Outcome::Gapped => {
                     closure.gapped += 1;
                     if trace {
                         eprintln!("obligation gapped {id:?} {outcome:?}");
@@ -555,11 +605,16 @@ mod tests {
     use super::*;
     use r2ssa::{CanonicalInstructionId, CanonicalInstructionSite, SemanticObligationComponent};
 
-    fn obligation(op_index: u64, kind: SemanticObligationKind) -> SemanticObligationId {
+    /// A distinct obligation per `index`: the ledger reads identities, not
+    /// what they stand for.
+    fn obligation(index: u64, kind: SemanticObligationKind) -> SemanticObligationId {
         SemanticObligationId {
             instruction: CanonicalInstructionId {
                 block_addr: 0x1000,
-                site: CanonicalInstructionSite::Op(op_index),
+                site: CanonicalInstructionSite::NativeSpan {
+                    instruction_addr: 0x1000 + index,
+                    size: 1,
+                },
             },
             kind,
             component: SemanticObligationComponent::Whole,
@@ -567,7 +622,14 @@ mod tests {
     }
 
     fn ledger_of(ids: &[SemanticObligationId]) -> ObligationLedger {
-        ObligationLedger::over(ids.iter().copied())
+        // The ids name no operation, so any function spells them the same.
+        let mut block = r2il::R2ILBlock::new(0x1000, 4);
+        block.push(r2il::R2ILOp::Return {
+            target: r2il::Varnode::register(0, 8),
+        });
+        let artifact =
+            r2ssa::SsaArtifact::raw(&[block], None).expect("an artifact to spell against");
+        ObligationLedger::over(ids.iter().copied(), artifact.graph())
     }
 
     #[test]
@@ -576,13 +638,7 @@ mod tests {
         let silent = obligation(1, SemanticObligationKind::LiveValueProducer);
         let mut ledger = ledger_of(&[spoken, silent]);
 
-        ledger.record(
-            spoken,
-            Outcome::Rendered {
-                block_addr: 0x1000,
-                op_idx: 0,
-            },
-        );
+        ledger.record(spoken, Outcome::Rendered);
 
         let closure = ledger.close();
         assert_eq!(closure.total, 2);
@@ -602,13 +658,7 @@ mod tests {
         ];
         let mut ledger = ledger_of(&ids);
 
-        ledger.record(
-            ids[0],
-            Outcome::Rendered {
-                block_addr: 0x1000,
-                op_idx: 0,
-            },
-        );
+        ledger.record(ids[0], Outcome::Rendered);
         ledger.record(ids[1], Outcome::Elided(ElisionReason::StackFrame));
         ledger.record(ids[2], Outcome::Refused);
 
@@ -630,20 +680,8 @@ mod tests {
             obligation(1, SemanticObligationKind::Trap),
         ];
         let mut ledger = ledger_of(&ids);
-        ledger.record(
-            ids[0],
-            Outcome::Rendered {
-                block_addr: 0x1000,
-                op_idx: 0,
-            },
-        );
-        ledger.record(
-            ids[1],
-            Outcome::Gapped {
-                block_addr: 0x1000,
-                op_idx: 1,
-            },
-        );
+        ledger.record(ids[0], Outcome::Rendered);
+        ledger.record(ids[1], Outcome::Gapped);
 
         let closure = ledger.close();
         assert_eq!(closure.gapped, 1);
@@ -665,10 +703,7 @@ mod tests {
     fn a_second_answer_that_disagrees_is_reported_rather_than_applied() {
         let id = obligation(0, SemanticObligationKind::LiveValueProducer);
         let mut ledger = ledger_of(&[id]);
-        let rendered = Outcome::Rendered {
-            block_addr: 0x1000,
-            op_idx: 0,
-        };
+        let rendered = Outcome::Rendered;
 
         assert_eq!(ledger.record(id, rendered), Record::Accepted);
         assert_eq!(ledger.record(id, rendered), Record::Redundant);
@@ -685,13 +720,7 @@ mod tests {
     fn taking_back_a_disproven_claim_is_not_a_conflict() {
         let id = obligation(0, SemanticObligationKind::LiveValueProducer);
         let mut ledger = ledger_of(&[id]);
-        ledger.record(
-            id,
-            Outcome::Rendered {
-                block_addr: 0x1000,
-                op_idx: 0,
-            },
-        );
+        ledger.record(id, Outcome::Rendered);
 
         let refused = Outcome::Refused;
         assert_eq!(ledger.overwrite(id, refused), Record::Accepted);
@@ -707,16 +736,7 @@ mod tests {
         let foreign = obligation(9, SemanticObligationKind::Call);
         let mut ledger = ledger_of(&[held]);
 
-        assert_eq!(
-            ledger.record(
-                foreign,
-                Outcome::Rendered {
-                    block_addr: 0x1000,
-                    op_idx: 9,
-                },
-            ),
-            Record::Unknown
-        );
+        assert_eq!(ledger.record(foreign, Outcome::Rendered,), Record::Unknown);
         assert_eq!(ledger.close().total, 1);
     }
 }

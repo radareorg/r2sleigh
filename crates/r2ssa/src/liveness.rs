@@ -899,7 +899,7 @@ mod tests {
 
     fn defined_at(graph: &SsaGraph, addr: u64, op_idx: usize) -> ValueId {
         graph
-            .inst_id_for_op_site(addr, op_idx)
+            .inst_spelled_at(addr, op_idx)
             .and_then(|inst| graph.inst(inst))
             .and_then(|inst| inst.output)
             .unwrap_or_else(|| panic!("no definition at {addr:#x}:{op_idx}"))

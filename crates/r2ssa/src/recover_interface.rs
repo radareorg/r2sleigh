@@ -1244,7 +1244,7 @@ fn direct_return_result(
         .by_id
         .values()
         .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
-        .filter_map(|call| graph.op_site_for_inst(call.at).map(|(block, _)| block))
+        .filter_map(|call| graph.block_addr_of(call.at))
         .collect::<BTreeSet<_>>();
     if tail_blocks.is_empty() {
         return None;
@@ -1899,7 +1899,7 @@ mod tests {
         });
         let graph = graph_for(block);
         let defined = graph
-            .inst_id_for_op_site(0x1000, 0)
+            .inst_spelled_at(0x1000, 0)
             .and_then(|inst| graph.inst(inst))
             .and_then(|inst| inst.output)
             .expect("defined x0 value");

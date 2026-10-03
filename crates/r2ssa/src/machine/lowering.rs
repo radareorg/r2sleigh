@@ -132,10 +132,7 @@ impl MachineBuilder {
                 let source_space = access.space;
                 let model = artifact.machine_context().memory_model();
                 let space_model = model.space(source_space);
-                let prepared_op = artifact
-                    .function()
-                    .get_block(access.block_addr)
-                    .and_then(|block| block.ops().get(access.op_index));
+                let prepared_op = graph.function_op(artifact.function(), access.id.inst);
                 if !access.provenance_complete
                     || access.is_write
                     || access.id.ordinal != 0

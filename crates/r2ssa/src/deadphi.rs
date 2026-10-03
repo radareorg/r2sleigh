@@ -511,7 +511,11 @@ impl DeadPhis {
                 .values()
                 .filter(|obligation| obligation.inputs.contains(&value.id))
                 .map(|obligation| {
-                    format!("{:?}/{:?}", obligation.id.kind, obligation.id.instruction)
+                    format!(
+                        "{:?}/{}",
+                        obligation.id.kind,
+                        obligation.id.instruction.spelled(graph)
+                    )
                 })
                 .collect::<Vec<_>>();
             let definition = graph
@@ -523,14 +527,21 @@ impl DeadPhis {
                     instruction
                         .obligations
                         .iter()
-                        .map(|id| format!("{:?}/{:?}/{}", id.kind, id.component, id.instruction))
+                        .map(|id| {
+                            format!(
+                                "{:?}/{:?}/{}",
+                                id.kind,
+                                id.component,
+                                id.instruction.spelled(graph)
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
             let definition_site = graph.def_inst(value.id).map(|inst| {
                 (
                     inst,
-                    graph.op_site_for_inst(inst),
+                    graph.walk_start(inst),
                     graph.inst(inst).map(|inst| format!("{:?}", inst.payload)),
                 )
             });

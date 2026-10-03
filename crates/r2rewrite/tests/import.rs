@@ -213,7 +213,13 @@ fn a_definitionless_constant_has_a_canonical_value_term() {
     let projection = projection(&artifact);
     let graph = artifact.graph();
     let inst = graph
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_for_op(
+            artifact
+                .function()
+                .get_block(0x1000)
+                .and_then(|block| block.op_id(0))
+                .expect("return operation"),
+        )
         .expect("return instruction");
     let constant = graph.inst(inst).expect("return graph instruction").inputs[0];
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");

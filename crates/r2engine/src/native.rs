@@ -1733,7 +1733,7 @@ impl Native<'_> {
         let sites = call_sites(&walked.body, self.program);
         let mut found = Vec::new();
         for block in prepared.function().blocks() {
-            for (op_index, op) in block.ops().iter().enumerate() {
+            for (id, op) in block.sited() {
                 let Some((instruction, callee)) = self.called_name(prepared.as_ref(), &sites, op)
                 else {
                     continue;
@@ -1748,9 +1748,8 @@ impl Native<'_> {
                     let Some(storage) = self.machine.slots.argument_slots().get(index) else {
                         continue;
                     };
-                    let Some(address) =
-                        r2ssa::value_reaching(prepared.as_ref(), block.addr, op_index, *storage)
-                            .and_then(|value| prepared.folded_value(value))
+                    let Some(address) = r2ssa::value_reaching(prepared.as_ref(), id, *storage)
+                        .and_then(|value| prepared.folded_value(value))
                     else {
                         continue;
                     };

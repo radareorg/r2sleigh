@@ -232,7 +232,7 @@ impl FormatForwardingLookup<'_> {
         if let Some(call_site) = self.call_sites.by_inst.get(&definition) {
             return Some(*call_site);
         }
-        let (block_addr, op_index) = graph.op_site_for_inst(definition)?;
+        let (block_addr, op_index) = graph.walk_start(definition)?;
         let block = function.get_block(block_addr)?;
         if !matches!(block.ops().get(op_index)?, SSAOp::CallDefine { .. }) {
             r2il::refusal_evidence!(
@@ -258,7 +258,7 @@ impl FormatForwardingLookup<'_> {
         while index > 0 {
             index -= 1;
             if !matches!(block.ops().get(index)?, SSAOp::CallDefine { .. }) {
-                let inst = graph.inst_id_for_op_site(block_addr, index)?;
+                let inst = graph.inst_for_op(block.op_id(index)?)?;
                 let site = self.call_sites.by_inst.get(&inst).copied();
                 if site.is_none() {
                     r2il::refusal_evidence!(
@@ -309,7 +309,7 @@ impl FormatForwardingLookup<'_> {
         };
         let index = usize::try_from(rule.msgid_argument_index()).ok()?;
         let storage = interface.arguments().get(index)?.register_storage()?;
-        let (block_addr, op_index) = graph.op_site_for_inst(fact.at)?;
+        let (block_addr, op_index) = graph.walk_start(fact.at)?;
         match reaching_abi_argument_in_block(
             function,
             prep,
@@ -945,7 +945,7 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             if interface.is_complete()
-                && let Some((block_addr, op_index)) = graph.op_site_for_inst(call_site.at)
+                && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
             {
                 let fixed_arguments = interface
                     .arguments()
@@ -1135,7 +1135,7 @@ pub(crate) fn collect_source_boundary_facts(
         if !boundary.complete
             && boundary.calling_convention.is_none()
             && let Some(machine_context) = machine_context
-            && let Some((block_addr, op_index)) = graph.op_site_for_inst(call_site.at)
+            && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
         {
             let convention = convention_call_boundary(
                 function,
@@ -1232,7 +1232,7 @@ pub(crate) fn collect_source_boundary_facts(
                     // An unproven result claims no value, so the return is as complete as a void one.
                     Some(Void | Unproven) => complete = true,
                     Some(SourceFunctionReturn::Register { .. }) if abi_is_coherent => {
-                        if let Some((block_addr, op_index)) = graph.op_site_for_inst(inst.id) {
+                        if let Some((block_addr, op_index)) = graph.walk_start(inst.id) {
                             for slot in return_slots {
                                 if let Some(value) = reaching_source_return_register_in_block(
                                     function,
@@ -1260,7 +1260,7 @@ pub(crate) fn collect_source_boundary_facts(
                 }
                 if let Some(storage) = stack_pointer_storage {
                     exit_stack_pointer = graph
-                        .op_site_for_inst(inst.id)
+                        .walk_start(inst.id)
                         .and_then(|(block_addr, op_index)| {
                             reaching_preserved_abi_value_in_block(
                                 function,
@@ -1785,8 +1785,9 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
             if op.dst().is_none() {
                 continue;
             }
-            let Some(inst) = graph
-                .inst_id_for_op_site(candidate_addr, op_index)
+            let Some(inst) = block
+                .op_id(op_index)
+                .and_then(|id| graph.inst_for_op(id))
                 .and_then(|inst| graph.inst(inst))
             else {
                 return false;
@@ -1846,11 +1847,12 @@ pub(crate) fn call_result_values_after_call(
             let SSAOp::CallDefine { dst } = op else {
                 return None;
             };
-            let inst = graph.inst_id_for_op_site(
-                block_addr,
-                call_op_index
-                    .saturating_add(1)
-                    .saturating_add(relative_index),
+            let inst = graph.inst_for_op(
+                block.op_id(
+                    call_op_index
+                        .saturating_add(1)
+                        .saturating_add(relative_index),
+                )?,
             )?;
             let graph_inst = graph.inst(inst)?;
             if dst.size != storage.size || graph_inst.canonical_storage != Some(storage) {

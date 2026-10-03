@@ -1,6 +1,7 @@
 //! What the analysis proves about arrays and their elements.
 
 use super::super::*;
+use super::op_at;
 
 #[test]
 fn phi_scalar_array_addr_expr_preserves_max_confidence() {
@@ -93,8 +94,14 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         .iter()
         .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
         .expect("indexed load");
+    let load_inst = prepared
+        .function()
+        .get_block(0x401000)
+        .and_then(|block| block.op_id(load_index))
+        .and_then(|op| prepared.graph().inst_for_op(op))
+        .expect("indexed load instruction");
     let address = prepared
-        .memory_certificate_for_op_site(0x401000, load_index, false)
+        .memory_certificate_for_inst(load_inst, false)
         .expect("memory certificate");
     let parameter_address = prepared
         .addresses()
@@ -111,7 +118,11 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         .expect("custom-space load");
     assert!(
         prepared
-            .memory_certificate_for_op_site(0x401000, custom_index, false)
+            .function()
+            .get_block(0x401000)
+            .and_then(|block| block.op_id(custom_index))
+            .and_then(|op| prepared.graph().inst_for_op(op))
+            .and_then(|inst| prepared.memory_certificate_for_inst(inst, false))
             .is_some(),
         "the Custom-space access must exist before type filtering"
     );
@@ -122,8 +133,11 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         candidates,
         vec![ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: load_index,
+            op: prepared
+                .function()
+                .get_block(0x401000)
+                .and_then(|block| block.op_id(load_index))
+                .expect("indexed load"),
             is_write: false,
             field_offset: 0,
             element_stride: 1,
@@ -257,8 +271,7 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
             slot: legacy_array_slot_for_stack_slot(&buf_slot),
-            block_addr: 0x4013b1,
-            op_index: 5,
+            op: op_at(&ssa_blocks, 0x4013b1, 5),
             is_write: true,
             field_offset: 0,
             element_stride: 1,

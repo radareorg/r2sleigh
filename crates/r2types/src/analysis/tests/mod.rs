@@ -10,6 +10,15 @@ use r2ssa::PhiNode;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The operation a fixture names by its block and its place in the block.
+fn op_at(blocks: &[SSABlock], block_addr: u64, index: usize) -> r2ssa::OpId {
+    blocks
+        .iter()
+        .find(|block| block.addr == block_addr)
+        .and_then(|block| block.op_id(index))
+        .expect("the fixture's operation")
+}
+
 fn parse_test_type(spelling: &str, ptr_bits: u32) -> CTypeLike {
     parse_c_type_like(spelling, ptr_bits).expect("test type spelling should parse")
 }

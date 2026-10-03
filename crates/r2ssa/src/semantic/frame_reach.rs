@@ -282,14 +282,14 @@ fn call_reaches(
         .map_or(0, |placement| placement.first_offset().max(0));
     let states = reaching_storage_states_before(function, graph, stack_pointer);
     for block in function.blocks() {
-        for (op_idx, op) in block.ops().iter().enumerate() {
+        for (op_id, op) in block.sited() {
             let instruction = match op {
                 SSAOp::Call { instruction, .. } | SSAOp::CallInd { instruction, .. } => {
                     *instruction
                 }
                 _ => continue,
             };
-            let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+            let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
             let sp = match states.get(&call) {

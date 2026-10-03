@@ -336,7 +336,7 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
     let prepared = SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA");
     let return_value = prepared
         .graph()
-        .inst_id_for_op_site(0x1740, 2)
+        .inst_spelled_at(0x1740, 2)
         .and_then(|inst| prepared.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("zero-extended return-register value");

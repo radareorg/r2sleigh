@@ -66,7 +66,8 @@ fn tail_slot_is_a_terminal_callsite_through_either_ssa_shape() {
             .expect("tail slot SSA");
         let artifact = SsaArtifact::new_with_context(function, context);
         let certificate = artifact
-            .callsite_certificate_for_op(block.addr, op_index)
+            .inst_at(block.addr, op_index)
+            .and_then(|inst| artifact.callsite_certificate_for_inst(inst))
             .expect("tail slot callsite certificate");
         assert_eq!(
             certificate.transfer,
@@ -293,11 +294,11 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
     let entry = prepared.get_block(0x1100).expect("entry block");
     let load_inst = prepared
         .graph()
-        .inst_id_for_op_site(0x1100, 1)
+        .inst_spelled_at(0x1100, 1)
         .expect("load inst");
     let store_inst = prepared
         .graph()
-        .inst_id_for_op_site(0x1100, 2)
+        .inst_spelled_at(0x1100, 2)
         .expect("store inst");
     assert!(
         prepared.memory().uses_by_inst.contains_key(&load_inst),
@@ -404,7 +405,8 @@ fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
         .expect("control return op");
     assert!(
         prepared
-            .return_certificate_for_op(0x1890, return_op_idx)
+            .inst_at(0x1890, return_op_idx)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
             .is_none()
     );
 }
@@ -505,7 +507,8 @@ fn prepared_function_refuses_display_named_stack_merge_at_control_return() {
         .expect("control return op");
     assert!(
         prepared
-            .return_certificate_for_op(0x190c, return_op_idx)
+            .inst_at(0x190c, return_op_idx)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
             .is_none()
     );
 }
@@ -669,7 +672,8 @@ fn prepared_stack_reload_refuses_display_named_param_home() {
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(
         prepared
-            .stack_reload_certificate_for_op(0x1820, 2)
+            .inst_at(0x1820, 2)
+            .and_then(|inst| prepared.stack_reload_certificate_for_inst(inst))
             .is_none()
     );
 
@@ -1092,13 +1096,13 @@ fn artifact_projects_typed_stack_roots_by_value_id_without_register_aliases() {
         .expect("typed decompile artifact");
     let frame_setup = artifact
         .graph()
-        .inst_id_for_op_site(0x3400, 0)
+        .inst_spelled_at(0x3400, 0)
         .and_then(|inst| artifact.graph().inst(inst))
         .expect("frame setup graph instruction");
     let entry_sp = frame_setup.inputs[0];
     let local_address = artifact
         .graph()
-        .inst_id_for_op_site(0x3400, 1)
+        .inst_spelled_at(0x3400, 1)
         .and_then(|inst| artifact.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("local-address graph value");

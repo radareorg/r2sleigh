@@ -191,10 +191,11 @@ impl LegacyObservationJournal {
             .filter_map(|definition| self.source.graph().inst(*definition)?.output)
             .collect::<BTreeSet<_>>();
         for definition in order {
-            let block = self
-                .source
-                .inst_op_site(definition)
-                .map(|(block, _)| block)
+            // An operation's block; a phi has never been given one here.
+            let graph = self.source.graph();
+            let block = graph
+                .op_ordinal(definition)
+                .and_then(|_| graph.block_addr_of(definition))
                 .unwrap_or_default();
             let inst = self
                 .source
@@ -729,7 +730,7 @@ impl LegacyObservationJournal {
                 .collect(),
             gapped: self.gapped_effects,
             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
-                coalesced_store_sites: self.coalesced_store_sites,
+                coalesced_stores: self.coalesced_stores,
                 coalesced_carrier_uses: self.coalesced_carrier_uses,
                 coalesced_carrier_phis: self.coalesced_carrier_phi_writes,
                 coalesced_copies: self.coalesced_copy_writes,

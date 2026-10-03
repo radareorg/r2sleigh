@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use r2ssa::function::DefLocation;
 use r2ssa::{
-    CompareKind, MemoryLocation, ObjectKind, SSAOp, SSAVar, SsaArtifact, ValueId, ValueOwner,
+    CompareKind, InstId, MemoryLocation, ObjectKind, SSAOp, SSAVar, SsaArtifact, ValueId,
+    ValueOwner,
 };
 use r2types::{
     CalleeIdentity, CalleeResolutionFacts, CalleeTargetIdentityRequest, CallsiteKey,
@@ -52,9 +53,9 @@ pub(crate) struct PreparedSemanticView {
     pub(crate) owner_expr_by_value: HashMap<ValueId, CExpr>,
     pub(crate) stack_offset_by_value: HashMap<ValueId, i64>,
     pub(crate) predicate_expr_by_value: HashMap<ValueId, CExpr>,
-    pub(crate) call_view_by_site: BTreeMap<(u64, usize), PreparedCallView>,
+    pub(crate) call_view_by_site: BTreeMap<InstId, PreparedCallView>,
     pub(crate) call_result_facts_by_value: BTreeMap<ValueId, r2types::CallResultFact>,
-    pub(crate) call_result_source_by_value: HashMap<ValueId, (u64, usize)>,
+    pub(crate) call_result_source_by_value: HashMap<ValueId, InstId>,
     /// Byte offset and width of every access the capture projects onto a struct
     /// member rather than an array element. An index must not be invented for
     /// these: the offset reaches a field, and its stride is not an element size.
@@ -313,7 +314,7 @@ impl PreparedSemanticView {
             .and_then(|value_id| self.predicate_expr_by_value.get(&value_id))
     }
 
-    pub(crate) fn call_view_for_site(&self, site: (u64, usize)) -> Option<&PreparedCallView> {
+    pub(crate) fn call_view_for_site(&self, site: InstId) -> Option<&PreparedCallView> {
         self.call_view_by_site.get(&site)
     }
 
@@ -321,7 +322,7 @@ impl PreparedSemanticView {
         &self,
         prepared: &SsaArtifact,
         var: &SSAVar,
-    ) -> Option<(u64, usize)> {
+    ) -> Option<InstId> {
         Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.call_result_source_by_value.get(&value_id).copied())
     }
@@ -484,13 +485,6 @@ fn exact_prepared_copy_provenance(
         source_var: Some(src.clone()),
         stack_slot,
     }
-}
-
-fn prepared_call_site_tuple(
-    prepared: &SsaArtifact,
-    inst_id: r2ssa::InstId,
-) -> Option<(u64, usize)> {
-    prepared.inst_op_site(inst_id)
 }
 
 pub(crate) fn build_prepared_runtime_facts_with_control(
@@ -721,7 +715,7 @@ fn populate_owner_exprs(
     }
 
     for block in prepared.function().blocks() {
-        for (op_idx, op) in block.ops().iter().enumerate() {
+        for (op_idx, (op_id, op)) in block.sited().enumerate() {
             if let SSAOp::Load {
                 dst,
                 space: r2il::SpaceId::Ram,
@@ -741,7 +735,9 @@ fn populate_owner_exprs(
                     })
                     .or_else(|| {
                         prepared
-                            .memory_uses_for_op_site(block.addr, op_idx)
+                            .graph()
+                            .inst_for_op(op_id)
+                            .and_then(|inst| prepared.memory_uses_for_inst(inst))
                             .and_then(|facts| {
                                 let mut ram = facts
                                     .iter()
@@ -1087,7 +1083,7 @@ fn refine_load_owner_exprs(
 ) {
     let prepared = inputs.prepared;
     for block in prepared.function().blocks() {
-        for (op_idx, op) in block.ops().iter().enumerate() {
+        for (op_idx, (op_id, op)) in block.sited().enumerate() {
             let SSAOp::Load {
                 dst,
                 space: r2il::SpaceId::Ram,
@@ -1109,7 +1105,9 @@ fn refine_load_owner_exprs(
                 })
                 .or_else(|| {
                     prepared
-                        .memory_uses_for_op_site(block.addr, op_idx)
+                        .graph()
+                        .inst_for_op(op_id)
+                        .and_then(|inst| prepared.memory_uses_for_inst(inst))
                         .and_then(|facts| {
                             let mut ram = facts
                                 .iter()
@@ -1369,10 +1367,8 @@ fn populate_call_result_sources(
     for cert in call_result_facts.by_value.values() {
         view.call_result_facts_by_value
             .insert(cert.value, cert.clone());
-        view.call_result_source_by_value.insert(
-            cert.value,
-            (cert.callsite.block_addr, cert.callsite.op_index),
-        );
+        view.call_result_source_by_value
+            .insert(cert.value, cert.callsite.at);
     }
 }
 
@@ -1713,9 +1709,7 @@ fn populate_calls(
     inputs: &PreparedSemanticViewInputs<'_>,
 ) {
     for call_site in inputs.prepared.call_sites().by_id.values() {
-        let Some(site) = prepared_call_site_tuple(inputs.prepared, call_site.at) else {
-            continue;
-        };
+        let site = call_site.at;
         let direct_target = callsite_direct_target(inputs.callsite_facts(), site);
         let mut callee_identity = lookup_callee_identity_for_site(inputs, site, direct_target);
         if inputs
@@ -1735,12 +1729,7 @@ fn populate_calls(
             result_owner: None,
             render_fact: inputs
                 .call_render_facts()
-                .and_then(|facts| {
-                    facts.fact_for_site(CallsiteKey {
-                        block_addr: site.0,
-                        op_index: site.1,
-                    })
-                })
+                .and_then(|facts| facts.fact_for_site(CallsiteKey { at: site }))
                 .cloned(),
         };
         call_view.result_owner = certified_call_result_owner(
@@ -1779,13 +1768,10 @@ fn populate_calls(
 
 fn callsite_direct_target(
     callsite_facts: Option<&FunctionCallsiteFacts>,
-    site: (u64, usize),
+    site: InstId,
 ) -> Option<u64> {
     callsite_facts?
-        .arguments_for_site(CallsiteKey {
-            block_addr: site.0,
-            op_index: site.1,
-        })?
+        .arguments_for_site(CallsiteKey { at: site })?
         .direct_target
 }
 
@@ -1804,7 +1790,7 @@ fn callsite_direct_target(
 /// it yields the prefix before the gap rather than a resequenced list.
 fn canonical_call_authoritative_args(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    site: (u64, usize),
+    site: InstId,
     function: &r2ssa::SSAFunction,
     prepared: &SsaArtifact,
     view: &PreparedSemanticView,
@@ -1813,13 +1799,14 @@ fn canonical_call_authoritative_args(
     let Some(callsite_facts) = callsite_facts else {
         return Vec::new();
     };
-    let Some(call_facts) = callsite_facts.arguments_for_site(CallsiteKey {
-        block_addr: site.0,
-        op_index: site.1,
-    }) else {
+    let Some(call_facts) = callsite_facts.arguments_for_site(CallsiteKey { at: site }) else {
         return Vec::new();
     };
-    let Some(block) = function.get_block(site.0) else {
+    let Some(block) = prepared
+        .graph()
+        .block_addr_of(site)
+        .and_then(|addr| function.get_block(addr))
+    else {
         return Vec::new();
     };
 
@@ -2036,16 +2023,13 @@ fn prepared_result_expr_for_var(
 
 fn certified_call_result_owner(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    site: (u64, usize),
+    site: InstId,
     prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     call_result_facts: Option<&FunctionCallResultFacts>,
 ) -> Option<CExpr> {
     call_result_facts?
-        .results_for_site(CallsiteKey {
-            block_addr: site.0,
-            op_index: site.1,
-        })
+        .results_for_site(CallsiteKey { at: site })
         .filter_map(|cert| certified_call_result_owner_expr(symbols, cert, prepared, view))
         .next()
 }
@@ -2076,7 +2060,7 @@ fn certified_call_result_owner_expr(
 }
 
 fn assign_certified_call_result_owner(
-    site: (u64, usize),
+    site: InstId,
     prepared: &SsaArtifact,
     view: &mut PreparedSemanticView,
     call_result_facts: Option<&FunctionCallResultFacts>,
@@ -2085,10 +2069,7 @@ fn assign_certified_call_result_owner(
     let Some(call_result_facts) = call_result_facts else {
         return;
     };
-    for cert in call_result_facts.results_for_site(CallsiteKey {
-        block_addr: site.0,
-        op_index: site.1,
-    }) {
+    for cert in call_result_facts.results_for_site(CallsiteKey { at: site }) {
         let Some(ValueOwner::StackSlot { object, .. }) = cert.owner.as_ref() else {
             continue;
         };
@@ -2416,15 +2397,12 @@ fn binary_op_for_compare(kind: CompareKind) -> BinaryOp {
 
 fn lookup_callee_identity_for_site(
     inputs: &PreparedSemanticViewInputs<'_>,
-    site: (u64, usize),
+    site: InstId,
     direct_target: Option<u64>,
 ) -> Option<CalleeIdentity> {
     CalleeResolutionFacts::resolve_target_identity(CalleeTargetIdentityRequest {
         resolution: inputs.callee_resolution(),
-        callsite: Some(CallsiteKey {
-            block_addr: site.0,
-            op_index: site.1,
-        }),
+        callsite: Some(CallsiteKey { at: site }),
         prepared_identity: None,
         prepared_direct_target: direct_target,
         direct_target_context: None,
@@ -3167,9 +3145,7 @@ fn populate_prepared_call_runtime_facts(
             else {
                 continue;
             };
-            let Some(site) = prepared.inst_op_site(*inst) else {
-                continue;
-            };
+            let site = *inst;
             let Some(call_view) = view.call_view_for_site(site) else {
                 continue;
             };
@@ -3185,7 +3161,7 @@ fn populate_prepared_call_runtime_facts(
 }
 
 fn prepared_call_expr(
-    site: (u64, usize),
+    site: InstId,
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     call_view: &PreparedCallView,
 ) -> Option<CExpr> {

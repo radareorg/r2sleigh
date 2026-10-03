@@ -54,13 +54,15 @@ fn callee_stack_allocation_reaches_unchanged_sp_through_loop_fixpoint() {
     )
     .expect("loop stack allocation artifact");
     let [store] = artifact
-        .memory_defs_for_op_site(0x6080, 1)
+        .inst_at(0x6080, 1)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("saved stack definition")
     else {
         panic!("one saved stack definition")
     };
     let [load] = artifact
-        .memory_uses_for_op_site(0x6094, 0)
+        .inst_at(0x6094, 0)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .expect("saved stack use after loop")
     else {
         panic!("one saved stack use")
@@ -152,7 +154,8 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
     )
     .expect("frame round-trip artifact");
     let [store] = artifact
-        .memory_defs_for_op_site(0x60a0, 2)
+        .inst_at(0x60a0, 2)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("frame save")
     else {
         panic!("one frame save")
@@ -165,13 +168,11 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
     let inst_sites = certificate
         .insts
         .iter()
-        .filter_map(|inst| artifact.graph().op_site_for_inst(*inst))
+        .filter_map(|inst| artifact.graph().walk_start(*inst))
         .collect::<BTreeSet<_>>();
     assert_eq!(certificate.storage, frame_storage);
     assert_eq!(
-        artifact
-            .graph()
-            .op_site_for_inst(certificate.store_access.inst),
+        artifact.graph().walk_start(certificate.store_access.inst),
         Some((0x60a0, 2))
     );
     assert_eq!(certificate.load_accesses.len(), 1);
@@ -206,7 +207,7 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
         .stack_geometry
         .insts
         .iter()
-        .filter_map(|inst| artifact.graph().op_site_for_inst(*inst))
+        .filter_map(|inst| artifact.graph().walk_start(*inst))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         geometry_sites,
@@ -214,7 +215,7 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
     );
     let stack_sub = artifact
         .graph()
-        .inst_id_for_op_site(0x60a0, 1)
+        .inst_spelled_at(0x60a0, 1)
         .expect("stack subtraction instruction");
     assert!(
         artifact
@@ -309,7 +310,8 @@ fn frame_round_trip_certifies_through_a_merge_no_observation_depends_on() {
     )
     .expect("callee-saved round-trip artifact");
     let [store] = artifact
-        .memory_defs_for_op_site(0x7000, 2)
+        .inst_at(0x7000, 2)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("callee-saved save")
     else {
         panic!("one callee-saved save")
@@ -518,11 +520,11 @@ fn machine_return_control_certificate_owns_exact_stack_reload() {
     .expect("stack return-control artifact");
     let return_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x60c0, 2)
+        .inst_spelled_at(0x60c0, 2)
         .expect("return instruction");
     let load_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x60c0, 0)
+        .inst_spelled_at(0x60c0, 0)
         .expect("return-address load");
     let certificate = artifact
         .certificates()

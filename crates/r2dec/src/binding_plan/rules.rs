@@ -610,9 +610,7 @@ pub(super) fn effectful_definition_values(source: &r2ssa::SsaArtifact) -> BTreeS
             )
         })
         .filter_map(|obligation| match obligation.id.instruction.site {
-            r2ssa::CanonicalInstructionSite::Op(op_idx) => {
-                graph.inst_id_for_op_site(obligation.id.instruction.block_addr, op_idx as usize)
-            }
+            r2ssa::CanonicalInstructionSite::Op(op) => graph.inst_for_op(op),
             _ => None,
         })
         .filter_map(|inst| graph.inst(inst).and_then(|inst| inst.output))
@@ -1651,9 +1649,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
     let mut call_arg_readers = BTreeMap::<ValueId, BTreeSet<InstId>>::new();
     if let Some(callsites) = source_owned.report().callsites() {
         for (site, facts) in &callsites.by_callsite {
-            let Some(inst) = graph.inst_id_for_op_site(site.block_addr, site.op_index) else {
-                continue;
-            };
+            let inst = site.at;
             for argument in &facts.argument_values {
                 call_arg_readers
                     .entry(argument.value)

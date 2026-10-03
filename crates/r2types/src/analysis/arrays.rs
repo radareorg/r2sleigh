@@ -470,7 +470,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
     }
 
     for block in ssa_blocks {
-        for (op_index, op) in block.ops().iter().enumerate() {
+        for (op_id, op) in block.sited() {
             match op {
                 SSAOp::Load {
                     dst,
@@ -515,8 +515,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 .render_candidates
                                 .push(ScalarArrayRenderCandidate {
                                     slot: expr.pointer.slot,
-                                    block_addr: block.addr,
-                                    op_index,
+                                    op: op_id,
                                     is_write: false,
                                     field_offset: expr.field_offset,
                                     element_stride: expr.pointer.element_stride,
@@ -569,8 +568,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 .render_candidates
                                 .push(ScalarArrayRenderCandidate {
                                     slot: expr.pointer.slot,
-                                    block_addr: block.addr,
-                                    op_index,
+                                    op: op_id,
                                     is_write: true,
                                     field_offset: expr.field_offset,
                                     element_stride: expr.pointer.element_stride,
