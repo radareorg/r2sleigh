@@ -31,12 +31,17 @@ env:
   # a moving corpus would move the gate.
   TESTBINS_URL: https://github.com/radareorg/radare2-testbins
   TESTBINS_REF: a2a92dc41a06aff40e24cd6a44d372587f01747c
+  # A harness that stalls says where: the steps below that drive one run
+  # under `timeout -s ABRT`, and the fault handler prints every thread's
+  # stack when that signal lands.
+  PYTHONFAULTHANDLER: 1
 
 jobs:
   # ── Quality checks (single compile pipeline) ───────────────────────
   quality:
     name: Format + Clippy + Unit Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       # The image's preinstalled SDKs are not used here, and the workspace's
       # test build needs the room.
@@ -73,6 +78,7 @@ jobs:
   capture-gate:
     name: Native Capture Certification Gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - name: Install the toolchain the repository pins
@@ -99,7 +105,7 @@ jobs:
         run: |
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
-          python3 -m unittest discover -s tests/equiv -p 'test_*.py'
+          timeout -s ABRT 20m python3 -m unittest discover -s tests/equiv -p 'test_*.py' -v
       - name: Build the shell
         run: cargo build --release -p r2s --features sleigh
       - name: A rendering may not read what nothing wrote
@@ -119,6 +125,7 @@ jobs:
   source-gold:
     name: Source-Gold Correctness Gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Install the toolchain the repository pins
@@ -160,6 +167,7 @@ jobs:
   equivalence:
     name: Equivalence Ratchet
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - name: Install the toolchain the repository pins
@@ -175,7 +183,7 @@ jobs:
         run: cargo build -p r2s --features sleigh
       - name: Hold every function to the baseline
         run: |
-          python3 tests/equiv/run_equiv.py \
+          timeout -s ABRT 60m python3 tests/equiv/run_equiv.py \
             --r2s target/debug/r2s \
             --baseline tests/equiv/baseline.json \
             --jobs 4 \
@@ -203,6 +211,7 @@ jobs:
   coverage:
     name: Whole-Binary Render Coverage
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - name: Install the toolchain the repository pins
@@ -224,6 +233,7 @@ jobs:
   release:
     name: Release Build
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     needs: [quality, capture-gate, source-gold, equivalence, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
