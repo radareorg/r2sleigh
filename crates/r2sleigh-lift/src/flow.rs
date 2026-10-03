@@ -75,7 +75,7 @@ mod tests {
         assert_eq!(
             of(&block(vec![R2ILOp::Copy {
                 dst: Varnode::register(0, 8),
-                src: address.clone(),
+                src: address,
             }])),
             Flow::Fall
         );
@@ -92,12 +92,7 @@ mod tests {
             }])),
             Flow::ConditionalJump
         );
-        assert_eq!(
-            of(&block(vec![R2ILOp::Call {
-                target: ram.clone()
-            }])),
-            Flow::Call
-        );
+        assert_eq!(of(&block(vec![R2ILOp::Call { target: ram }])), Flow::Call);
         // A conditional return: the condition skips the return.
         assert_eq!(
             of(&block(vec![

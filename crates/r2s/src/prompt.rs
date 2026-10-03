@@ -118,7 +118,7 @@ pub(crate) fn interactive(session: &mut Session, reader: &mut Reader) -> Ended {
                 .program
                 .names()
                 .iter()
-                .map(|(_, name)| name.spelled().to_string())
+                .map(|(_, name)| name.spelled())
                 .collect();
         }
         match editor.read_line(&Seek(session.addr)) {
