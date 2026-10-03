@@ -16,34 +16,41 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# GitHub-hosted runners: every job starts from a clean image, so nothing here
+# depends on a machine someone has to keep alive. A CI build is never edited
+# and rebuilt in place, so incremental artifacts are dead weight, and the
+# workspace's test build does not fit the runner's disk with debug info on.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Self-hosted runner optimization: persist incremental build artifacts
-  # across jobs/runs to avoid repeatedly recompiling the full workspace.
-  CARGO_TARGET_DIR: /tmp/r2sleigh-target
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # The radare2 test binaries the certification gate reads, at the commit it
+  # was last run against: the gate takes the first binaries in name order, so
+  # a moving corpus would move the gate.
+  TESTBINS_URL: https://github.com/radareorg/radare2-testbins
+  TESTBINS_REF: a2a92dc41a06aff40e24cd6a44d372587f01747c
 
 jobs:
   # ── Quality checks (single compile pipeline) ───────────────────────
   quality:
     name: Format + Clippy + Unit Tests
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust PATH
+      # The image's preinstalled SDKs are not used here, and the workspace's
+      # test build needs the room.
+      - name: Free disk
         run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. See scripts/setup-runner.sh"
-            exit 1
-          fi
-      - name: Prepare shared target dir
-        run: mkdir -p "$CARGO_TARGET_DIR"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v6
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal --component rustfmt,clippy
+      # r2rewrite's rule proofs link Z3.
+      - name: Install Z3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libz3-dev
+      - uses: Swatinem/rust-cache@v2
       - name: Print versions
         run: |
           echo "rustc:      $(rustc --version)"
@@ -65,23 +72,24 @@ jobs:
   # read what nothing wrote. radare2 is not run here, which is the point.
   capture-gate:
     name: Native Capture Certification Gate
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # radare2's own test corpus, its ELF directory alone; radare2 itself is
+      # not run by this gate.
+      - name: Fetch radare2's test binaries
         run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          command -v cargo >/dev/null
-      # The binaries are radare2's own test corpus; radare2 itself is not run
-      # by this gate, which is the point of it: the native route answers for
-      # itself.
-      - name: Ensure radare2 checkout for its test binaries
-        run: bash .github/scripts/ensure-radare2-ci.sh
+          set -eu
+          dir="$RUNNER_TEMP/testbins"
+          git init -q "$dir"
+          git -C "$dir" remote add origin "$TESTBINS_URL"
+          git -C "$dir" sparse-checkout set elf
+          git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$TESTBINS_REF"
+          git -C "$dir" checkout -q FETCH_HEAD
+          test -d "$dir/elf"
       - name: The gate reads the proof line by name
         run: python3 scripts/test_certify_render.py
       # No harness may drive the deleted plugin; the equivalence gate's
@@ -96,14 +104,8 @@ jobs:
         run: cargo build --release -p r2s --features sleigh
       - name: A rendering may not read what nothing wrote
         run: |
-          set -eu
-          bins="${R2SLEIGH_RADARE2_CACHE_DIR:-}"
-          if [ -z "$bins" ] || [ ! -d "$bins/test/bins/elf" ]; then
-            bins="$(ls -d /tmp/radare2-* 2>/dev/null | head -1)"
-          fi
-          test -d "$bins/test/bins/elf"
           python3 scripts/certify_render.py \
-            --bins "$bins/test/bins/elf" \
+            --bins "$RUNNER_TEMP/testbins/elf" \
             --r2s target/release/r2s \
             --limit 12 --functions 8
 
@@ -116,18 +118,12 @@ jobs:
   # confidently is worse than one that says it does not know.
   source-gold:
     name: Source-Gold Correctness Gate
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          command -v cargo >/dev/null
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
       - name: Build the shell
         run: cargo build --release -p r2s --features sleigh
       - name: Grade the stripped build against the debug build
@@ -135,8 +131,7 @@ jobs:
           set -eu
           mkdir -p target/source-gold
           cc -g -O0 -o target/source-gold/debug tests/corpus/hashes.c
-          strip -o target/source-gold/stripped target/source-gold/debug 2>/dev/null \
-            || llvm-strip -o target/source-gold/stripped target/source-gold/debug
+          strip -o target/source-gold/stripped target/source-gold/debug
           python3 scripts/differential_truth.py \
             --debug-build target/source-gold/debug \
             --stripped-build target/source-gold/stripped \
@@ -160,21 +155,20 @@ jobs:
   # that stops being equal, a refusal that stops producing a record, a failure
   # for a new reason, an improvement not yet blessed -- fails here until the
   # baseline is re-blessed with its cause. The baseline names the compilers it
-  # was blessed on; another toolchain is refused rather than compared.
+  # was blessed on (Ubuntu 24.04's gcc 13 and clang 18, which this image
+  # carries); another toolchain is refused rather than compared.
   equivalence:
     name: Equivalence Ratchet
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Print the compilers
         run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          command -v cargo >/dev/null
+          gcc --version | head -n 1
+          clang --version | head -n 1
       # The debug build, as the baseline was blessed with: a `slow` status is
       # a statement about how long a rendering runs.
       - name: Build the shell
@@ -182,7 +176,7 @@ jobs:
       - name: Hold every function to the baseline
         run: |
           python3 tests/equiv/run_equiv.py \
-            --r2s "$CARGO_TARGET_DIR/debug/r2s" \
+            --r2s target/debug/r2s \
             --baseline tests/equiv/baseline.json \
             --jobs 4 \
             --out "$RUNNER_TEMP/equiv"
@@ -202,22 +196,20 @@ jobs:
   # two programs the repository ships as bytes, reports the compiled cells, and
   # reports whatever the runner has at `/bin/ls` without gating on it, because
   # the runner image decides which program that name points at.
+  #
+  # macOS, because the compiled cells are built for x86-64 and arm64 with
+  # Apple clang's `-arch`, which is what the baseline was blessed with. A
+  # different clang reports the compiled cells without gating them.
   coverage:
     name: Whole-Binary Render Coverage
-    runs-on: self-hosted
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          command -v cargo >/dev/null
-      - name: Ensure radare2 + headers
-        run: bash .github/scripts/ensure-radare2-ci.sh
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Print the compiler
+        run: clang --version | head -n 1
       - name: Run coverage sweep
         run: ./tests/coverage/run_coverage.sh
       - name: Archive coverage report
@@ -231,27 +223,13 @@ jobs:
   # ── Release build check ────────────────────────────────────────────
   release:
     name: Release Build
-    runs-on: self-hosted
-    needs: [quality, capture-gate, source-gold, coverage]
+    runs-on: ubuntu-24.04
+    needs: [quality, capture-gate, source-gold, equivalence, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. See scripts/setup-runner.sh"
-            exit 1
-          fi
-      - name: Prepare shared target dir
-        run: mkdir -p "$CARGO_TARGET_DIR"
-      - name: Ensure radare2 + headers
-        run: bash .github/scripts/ensure-radare2-ci.sh
-
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
