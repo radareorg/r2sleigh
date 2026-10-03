@@ -12,8 +12,11 @@ records and a proposed baseline beside them. The proposed baseline keeps every
 cause the current one records for the same status and reason, so blessing a
 run is reading it, filling in the causes it leaves empty, and committing it.
 
-A baseline record whose configuration no shard ran is not held, and a shard
-built with another toolchain than the baseline's is refused, as in the gate.
+Every baseline record must be graded by some shard: a shard missing from the
+matrix would otherwise drop its records unseen. ``--partial`` holds only the
+configurations the given shards ran, for a local run over part of the
+population. A shard built with another toolchain than the baseline's is
+refused, as in the gate.
 """
 
 from __future__ import annotations
@@ -60,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--partial", action="store_true",
+                        help="hold only the configurations these shards ran")
     parser.add_argument("records", type=Path, nargs="+")
     args = parser.parse_args(argv)
 
@@ -97,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         parts = key.split("::")
         return len(parts) == 3 and (parts[0], parts[1]) in ran
 
-    selected = {key for key in baseline["records"] if held(key)}
+    selected = {key for key in baseline["records"] if not args.partial or held(key)}
     graded = {r.key: (r.status, gate.reason(r.status, r.evidence)) for r in records}
     problems = gate.ratchet(baseline, graded, selected)
     for line in problems:

@@ -229,15 +229,23 @@ jobs:
   # baseline names the compilers it was blessed on (Ubuntu 24.04's gcc 13 and
   # clang 18, which this image carries); another toolchain is refused.
   equivalence-shard:
-    name: Equivalence ${{ matrix.compiler }}-${{ matrix.opt }}
+    name: Equivalence ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
     runs-on: ubuntu-24.04
     needs: build
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
         opt: [O0, O1, O2]
+        # Two halves of the population by record count (406 and 350 of 756).
+        # The merge job refuses if a baseline record goes ungraded, so a new
+        # source file has to be added to one half here.
+        part:
+          - name: a
+            sources: tests/corpus/branchy.c tests/corpus/hashes.c tests/corpus/values.c tests/gold/flag_materialisation.c
+          - name: b
+            sources: tests/corpus/shapes.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
@@ -251,8 +259,9 @@ jobs:
           clang --version | head -n 1
       - name: Grade the shard
         run: |
-          timeout -s ABRT 12m python3 tests/equiv/run_equiv.py \
+          timeout -s ABRT 8m python3 tests/equiv/run_equiv.py \
             --r2s target/ci/r2s \
+            --sources ${{ matrix.part.sources }} \
             --compilers ${{ matrix.compiler }} \
             --opts ${{ matrix.opt }} \
             --jobs 4 \
@@ -260,7 +269,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}
+          name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
           path: ${{ runner.temp }}/equiv/records.json
           retention-days: 7
           if-no-files-found: error
