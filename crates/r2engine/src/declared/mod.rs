@@ -27,6 +27,9 @@ use crate::native::{NativeTarget, storage};
 pub(crate) struct Declared<'a> {
     pub(crate) prototype: &'a Prototype,
     pub(crate) graph: &'a TypeGraph,
+    /// Which declaration it is: the binary's debug information, or a
+    /// library's prototype found by a name.
+    pub(crate) basis: r2source::Basis,
 }
 
 impl<'a> Declared<'a> {
@@ -42,6 +45,7 @@ impl<'a> Declared<'a> {
         Some(Self {
             prototype: declarations.function_at(entry)?,
             graph: declarations.graph(),
+            basis: r2source::Basis::DebugInfo,
         })
     }
 
@@ -50,6 +54,7 @@ impl<'a> Declared<'a> {
         Some(Self {
             prototype: target.prototypes.get(name)?,
             graph: target.prototypes.graph(),
+            basis: r2source::Basis::Declared,
         })
     }
 }
@@ -354,7 +359,8 @@ impl Placement<'_> {
             );
         })
         .ok()?;
-        let interface = variadic(declared.prototype, interface)?;
+        let interface = variadic(declared.prototype, interface)?
+            .with_types(r2source::Confidence::of(declared.basis));
         self.carriers(name, interface, frame.frame_pointer)
     }
 
@@ -384,9 +390,7 @@ impl Placement<'_> {
                 Some(storage) => interface.with_frame_pointer_storage(storage),
             });
         match placed {
-            // The prototype was read rather than recovered, which is what this
-            // flag says.
-            Ok(interface) => Some(interface.with_prototype_from_source_types()),
+            Ok(interface) => Some(interface),
             Err(error) => {
                 r2il::refusal_evidence!(
                     "declared-interface",

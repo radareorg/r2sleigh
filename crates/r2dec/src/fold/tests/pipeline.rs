@@ -864,7 +864,7 @@ mod tests {
                         variadic: cert.variadic,
                         fixed_argument_count: cert.fixed_argument_count,
                         callee_signature: None,
-                        callee_signature_from_source_types: false,
+                        callee_signature_types: None,
                         variadic_argument_count_evidence: cert
                             .variadic_argument_count_evidence,
                         variadic_argument_count_refusal: cert.variadic_argument_count_refusal,

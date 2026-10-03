@@ -638,8 +638,9 @@ pub struct CallsiteArgumentFacts {
     /// source-owned capture. Its carrier contract has already been checked
     /// against this call site by `r2ssa`.
     pub callee_signature: Option<crate::FunctionType>,
-    /// Whether that signature is radare2's by-name prototype for an import.
-    pub callee_signature_from_source_types: bool,
+    /// What that signature's types are read from: a declaration, or a
+    /// recovery of the callee's body.
+    pub callee_signature_types: Option<r2source::Confidence>,
     /// Per-callsite argument-count proof for a variadic call. This is absent
     /// for fixed calls and never inferred from live argument registers.
     pub variadic_argument_count_evidence: Option<r2ssa::VariadicCallsiteArgumentCountEvidence>,
@@ -1284,7 +1285,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     // source-owned callee analysis fills this only after its
                     // exact retained interface matches this call site.
                     callee_signature: None,
-                    callee_signature_from_source_types: false,
+                    callee_signature_types: None,
                     variadic_argument_count_evidence: cert.variadic_argument_count_evidence,
                     variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
                     register_argument_locations,

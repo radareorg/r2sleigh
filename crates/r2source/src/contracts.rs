@@ -822,14 +822,13 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
-    /// The prototype is radare2's, found by an import's name rather than
-    /// linked to the address or stated by debug information.
-    prototype_from_source_types: bool,
-    /// Every logical type is its carrier's width as an unsigned integer,
-    /// minted from what the body was read to use rather than stated by any
-    /// declaration. The graph places each carrier; it says nothing about
-    /// whether the value is a pointer, signed, or named.
-    types_are_carrier_widths: bool,
+    /// What the logical types are read from (doc/adr-provenance.md):
+    /// `DebugInfo` where the binary declares the body, `Declared` where a
+    /// library's prototype was found by an import's name, `CarrierWidth`
+    /// where a body recovery minted each carrier's width and declares
+    /// nothing of pointer, sign or name. An interface nothing marked claims
+    /// no more than `Convention`.
+    types: crate::confidence::Confidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1278,8 +1277,7 @@ impl SourceFunctionInterface {
             variadic: false,
             declared_format_parameter: None,
             body_proven_return_address: false,
-            prototype_from_source_types: false,
-            types_are_carrier_widths: false,
+            types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
 
@@ -1435,27 +1433,23 @@ impl SourceFunctionInterface {
         self.body_proven_return_address
     }
 
-    /// The same interface, with its prototype marked as radare2's by-name lookup.
-    pub const fn with_prototype_from_source_types(mut self) -> Self {
-        self.prototype_from_source_types = true;
+    /// The same interface, its logical types read from `types`.
+    #[must_use]
+    pub fn with_types(mut self, types: crate::confidence::Confidence) -> Self {
+        self.types = types;
         self
     }
 
-    pub const fn prototype_from_source_types(&self) -> bool {
-        self.prototype_from_source_types
+    /// What the logical types are read from.
+    pub const fn types(&self) -> &crate::confidence::Confidence {
+        &self.types
     }
 
-    /// The same interface, with its logical types marked as the carriers'
-    /// widths a body recovery minted rather than types anything declared.
-    pub const fn with_types_as_carrier_widths(mut self) -> Self {
-        self.types_are_carrier_widths = true;
-        self
-    }
-
-    /// Whether the logical types are only the carriers' widths, so no
-    /// declaration of the function's types is to be read from them.
-    pub const fn types_are_carrier_widths(&self) -> bool {
-        self.types_are_carrier_widths
+    /// Whether a declaration states the logical types -- the binary's debug
+    /// information or a library prototype -- rather than a recovery or a
+    /// convention.
+    pub fn types_are_declared(&self) -> bool {
+        self.types.grade() <= crate::confidence::Grade::Declared
     }
 
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {

@@ -755,7 +755,7 @@ mod indexed_argument_tests {
                 variadic: false,
                 fixed_argument_count: None,
                 callee_signature: None,
-                callee_signature_from_source_types: false,
+                callee_signature_types: None,
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 register_argument_locations: Vec::new(),

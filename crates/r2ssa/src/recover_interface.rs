@@ -1547,7 +1547,7 @@ fn mint_recovered_interface_inner(
     // stacked return still stood -- a mechanism with no carriers, refused as
     // a conflict with the machine.
     .with_role_register_names(roles.role_register_names())
-    .with_types_as_carrier_widths();
+    .with_types(r2source::Confidence::of(r2source::Basis::CarrierWidth));
     let interface = if recovered.result_is_return_address() {
         interface.with_body_proven_return_address().ok()?
     } else {

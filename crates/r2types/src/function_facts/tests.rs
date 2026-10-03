@@ -415,7 +415,7 @@ fn signed_i32_return_source(has_return: bool, read: bool) -> r2ssa::SsaArtifact 
     .and_then(|interface| interface.with_return_address_storage(storage(0x30)))
     .map(|interface| {
         if read {
-            interface.with_prototype_from_source_types()
+            interface.with_types(r2source::Confidence::of(r2source::Basis::Declared))
         } else {
             interface
         }
@@ -810,7 +810,7 @@ fn function_facts_owns_canonical_callsite_arguments() {
                 variadic: false,
                 fixed_argument_count: None,
                 callee_signature: None,
-                callee_signature_from_source_types: false,
+                callee_signature_types: None,
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 register_argument_locations: vec![RegisterCallArgumentLocationFact {
@@ -1017,7 +1017,7 @@ fn certified_call_argument_projects_callee_pointer_type_to_caller_parameter() {
                 variadic: false,
                 fixed_argument_count: None,
                 callee_signature: None,
-                callee_signature_from_source_types: false,
+                callee_signature_types: None,
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 register_argument_locations: Vec::new(),
@@ -1139,7 +1139,7 @@ fn callsite_facts_own_canonical_argument_vector() {
         variadic: false,
         fixed_argument_count: None,
         callee_signature: None,
-        callee_signature_from_source_types: false,
+        callee_signature_types: None,
         variadic_argument_count_evidence: None,
         variadic_argument_count_refusal: None,
         register_argument_locations: vec![RegisterCallArgumentLocationFact {
@@ -1578,7 +1578,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
         variadic: false,
         fixed_argument_count: None,
         callee_signature: None,
-        callee_signature_from_source_types: false,
+        callee_signature_types: None,
         variadic_argument_count_evidence: None,
         variadic_argument_count_refusal: None,
         register_argument_locations: Vec::new(),

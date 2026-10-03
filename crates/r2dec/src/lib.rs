@@ -4068,7 +4068,11 @@ impl Decompiler {
             .callsites()
             .into_iter()
             .flat_map(|facts| facts.by_callsite.values())
-            .filter(|fact| fact.callee_signature_from_source_types)
+            .filter(|fact| {
+                fact.callee_signature_types
+                    .as_ref()
+                    .is_some_and(|types| types.grade() <= r2source::Grade::Declared)
+            })
             .count();
         crate::stage_timing::mark("effect_ledger");
         native.finalize_effect_ledger(

@@ -1514,8 +1514,7 @@ impl FunctionFacts {
                 let mut logical_signature = signature.signature.clone();
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
-                arguments.callee_signature_from_source_types =
-                    signature.interface.prototype_from_source_types();
+                arguments.callee_signature_types = Some(signature.interface.types().clone());
             } else {
                 let site = source
                     .call_site_interface(arguments.call_site_id)
@@ -2859,8 +2858,7 @@ impl FunctionFacts {
         // signature, the width alone declared every such parameter an integer.
         // Nothing weaker than that certificate upgrades a width: the evidence
         // solver's own guesses at pointers and signedness are not proof.
-        let certified_pointers = interface
-            .types_are_carrier_widths()
+        let certified_pointers = (interface.types().basis == r2source::Basis::CarrierWidth)
             .then(|| crate::signature_infer::certified_parameter_pointers(source));
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {

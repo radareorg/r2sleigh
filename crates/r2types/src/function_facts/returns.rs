@@ -119,8 +119,7 @@ impl ReturnTypeFact {
     ) -> Self {
         let interface = source.machine_context().function_interface();
         // A recovered interface's graph states the carrier the body fills, not a declaration.
-        let read =
-            interface.is_some_and(r2ssa::SourceFunctionInterface::prototype_from_source_types);
+        let read = interface.is_some_and(r2ssa::SourceFunctionInterface::types_are_declared);
         let graph = crate::exact_source_return_type(source);
         if let Some(ty) = graph.clone().filter(|_| read) {
             return Self::decided_by(ty, ReturnTypeEvidence::ExactSource);

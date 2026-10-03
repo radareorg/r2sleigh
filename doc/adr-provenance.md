@@ -102,7 +102,7 @@ Each step keeps every gate green and deletes what it replaces.
 | Step | Change | Deletes |
 |------|--------|---------|
 | C0 | `Grade`, the extended `Basis`, `Fact<T>`; the order laws (basis refines grade, fewer premises stronger, `and` idempotent, commutative, associative and never stronger) checked over the whole finite domain; spelling moved beside the type — **done** | the premise order `BTreeSet`'s lexicographic `Ord` gave, under which `{closed-world, ub-free}` outranked `{ub-free}`; r2s's own spelling of a basis |
-| C1 | Interface provenance as `Confidence`/`Fact`; r2types and r2dec read the grade (after F1 step 2, which edits `recover_interface.rs`) | the three booleans, the format pair, `callee_signature_from_source_types`, `from_source_signature` |
+| C1 | Interface provenance as `Confidence`/`Fact`; r2types and r2dec read the grade. **Types done**: `SourceFunctionInterface::types` (debug info, a library prototype, a recovery's carrier widths, else convention) replaces `prototype_from_source_types` and `types_are_carrier_widths`, and `callee_signature_types` replaces `callee_signature_from_source_types`. The old flag marked debug-info bodies and library imports alike; they are now told apart. The format pair and `seal_body_proven_interface` remain | the two type booleans, `callee_signature_from_source_types`; remaining: the format pair, `from_source_signature` |
 | C2 | r2engine answers as `Fact`; `afi`, `afv`, `aflj` and `pddj` read them | `return_unproven` |
 | C3 | r2types candidates and source enums onto `Basis` | every `confidence: u8`, `TypeFactSource`, `StructDeclSource`, `ConstraintSource`, the projection-confidence fields |
 | C4 | References carry `Confidence`; the answer-field Dylint | `Support` |

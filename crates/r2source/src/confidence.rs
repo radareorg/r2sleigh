@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 /// One scale for every fact, so a consumer states the least grade it acts on
 /// rather than testing how one producer happened to flag its output. Derived
 /// from the [`Basis`], never stored beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub enum Grade {
     /// The file says so, in its tables or its debug information.
     Stated,
@@ -37,7 +37,7 @@ pub enum Grade {
 /// or above the level it is willing to act on, and a fact found twice keeps
 /// the stronger reason: a symbol that is also called is stated, not inferred.
 /// The order refines [`Grade`]'s: every basis sorts with its grade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub enum Basis {
     /// The image says so. An entry point, an initialiser or finaliser array
     /// slot, a symbol typed as a function, a linkage stub the format declares.
@@ -142,7 +142,7 @@ impl Basis {
 /// A premise is not evidence. It is the condition under which the evidence
 /// means what the fact says, and a consumer that cannot grant it must not
 /// act on the fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub enum Premise {
     /// Every transfer into the code is one the image shows: no caller outside
     /// it -- another image, a callback registered at run time, generated
@@ -171,7 +171,7 @@ impl Premise {
 /// Ordered strongest first: by basis, then by how many premises it takes for
 /// granted, so the same basis with fewer premises is the stronger claim, then
 /// by which, so the order is total.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Confidence {
     pub basis: Basis,
     /// What the fact takes for granted. Empty where it assumes nothing beyond

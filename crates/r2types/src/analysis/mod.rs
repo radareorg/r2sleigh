@@ -145,8 +145,7 @@ impl TypeAnalysis {
         // An import's prototype is radare2's: its parameters are what the
         // interface declares, and no body reads them for an entity to certify.
         let interface = self.source.machine_context().function_interface();
-        let prototype =
-            interface.is_some_and(r2ssa::SourceFunctionInterface::prototype_from_source_types);
+        let prototype = interface.is_some_and(r2ssa::SourceFunctionInterface::types_are_declared);
         let params = signature
             .params
             .iter()
