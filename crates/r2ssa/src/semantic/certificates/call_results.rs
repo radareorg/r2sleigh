@@ -158,7 +158,7 @@ pub(crate) fn process_call_result_flow_block(
         call_results_by_callsite,
     } = sink;
     let mut active_call = None;
-    for (op_index, op) in block.ops.iter().enumerate() {
+    for (op_index, op) in block.ops().iter().enumerate() {
         match op {
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 kill_return_register_flow_values(&mut state);

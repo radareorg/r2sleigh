@@ -160,7 +160,7 @@ pub(crate) fn ram_memory_access_matches_source(
     };
     let Some(prepared_op) = function
         .get_block(access.block_addr)
-        .and_then(|block| block.ops.get(access.op_index))
+        .and_then(|block| block.ops().get(access.op_index))
     else {
         return false;
     };

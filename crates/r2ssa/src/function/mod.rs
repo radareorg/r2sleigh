@@ -6,6 +6,7 @@
 
 mod blocks;
 mod build;
+mod edit;
 mod rewrite;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -20,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::aggregate_access::{
     AggregateAccessProjectionFacts, collect_aggregate_access_projections,
 };
+use crate::arena::{OpArena, OpId, Pass};
+use crate::block::BlockMut;
 pub use crate::block::SSABlock;
 use crate::block::SSABlock as LocalSSABlock;
 use crate::cfg::{CFG, CFGEdge};
@@ -50,6 +53,7 @@ use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 use blocks::Blocks;
 pub use blocks::IrRevision;
+pub(crate) use edit::{Anchor, BlockEdits, EditPlan, Insertion};
 
 /// Query-only CFG risk summary for decompilation preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,7 +426,7 @@ pub struct DecompileInputs<'a> {
 /// The graph every preparation reads, built from a validated function with the source's formals minted.
 pub(crate) fn prepare_graph(
     function: &mut SSAFunction,
-    machine_context: &mut SourceMachineContext,
+    machine_context: &SourceMachineContext,
 ) -> Result<SsaGraph, SsaPrepareError> {
     // The validator answers with a typed integrity error naming the block
     // and the edge it disagreed about; discarding it left the reader with
@@ -471,7 +475,7 @@ fn release_undemanded_bytes(
     let inserts = function
         .blocks()
         .iter()
-        .flat_map(|block| &block.ops)
+        .flat_map(|block| block.ops())
         .any(|op| matches!(op, SSAOp::Insert(insert) if insert.src.constant_bits().is_none()));
     if !inserts {
         return false;
@@ -500,8 +504,8 @@ fn release_undemanded_bytes(
 /// reference index answer it from the same graph.
 pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<SsaGraph> {
     let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
-    let mut machine_context = SourceMachineContext::from_blocks(blocks, arch);
-    let graph = prepare_graph(&mut function, &mut machine_context).ok()?;
+    let machine_context = SourceMachineContext::from_blocks(blocks, arch);
+    let graph = prepare_graph(&mut function, &machine_context).ok()?;
     (!graph.blocks.is_empty()).then_some(graph)
 }
 
@@ -531,13 +535,13 @@ impl SsaArtifact {
 
     fn new_with_context_control_and_provenance<C: SsaWorkControl + ?Sized>(
         mut function: SSAFunction,
-        mut machine_context: SourceMachineContext,
+        machine_context: SourceMachineContext,
         provenance: SsaArtifactProvenance,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
-        let graph = prepare_graph(&mut function, &mut machine_context)?;
+        let graph = prepare_graph(&mut function, &machine_context)?;
         let return_storages = machine_context
             .abi_model()
             .return_registers()
@@ -2501,14 +2505,6 @@ pub struct SSAFunction {
     /// The same addresses as `blocks`, in the same order, for readers that want
     /// the addresses without the operations.
     block_order: Vec<u64>,
-    /// Which machine instruction each operation came from, by its site.
-    ///
-    /// Renaming inserts operations the lift never had, so an index into these
-    /// operations stops agreeing with an index into the lifted ones at the
-    /// first insertion in a block. This is the answer in *this* index space,
-    /// recorded where both were known. Absent for a phi and for anything the
-    /// lifter stamped no address on.
-    op_instruction_addrs: BTreeMap<(u64, usize), u64>,
     /// Canonical lifted storage retained during SSA renaming.
     ///
     /// Values are attached from raw varnodes at the lift/SSA seam. Consumers
@@ -2657,50 +2653,40 @@ fn block_at_mut<'a>(
 }
 
 impl SSAFunction {
-    /// Which machine instruction this operation came from.
+    /// Which machine instruction the operation at this site executes for.
     ///
     /// The site is in the operations' own index space: a block address and an
-    /// index into that block's `ops`. `None` for an operation renaming added
-    /// and for anything the lifter stamped no address on.
+    /// index into that block's operations. An operation a pass added answers
+    /// for the operation it was derived from; `None` for one derived from
+    /// nothing and for anything the lifter stamped no address on.
     pub fn instruction_at(&self, block_addr: u64, op_idx: usize) -> Option<u64> {
-        self.op_instruction_addrs
-            .get(&(block_addr, op_idx))
-            .copied()
+        let id = self.get_block(block_addr)?.op_id(op_idx)?;
+        self.blocks.arena().instruction(id)
     }
 
-    /// Insert operations at one index of a block; every later operation keeps its own instruction.
-    pub(crate) fn insert_ops(
-        &mut self,
-        block_addr: u64,
-        at: usize,
-        ops: Vec<(SSAOp, Option<u64>)>,
-    ) {
-        let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), block_addr) else {
+    /// Which machine instruction this operation executes for; see
+    /// [`OpArena::instruction`].
+    pub fn instruction_of(&self, id: OpId) -> Option<u64> {
+        self.blocks.arena().instruction(id)
+    }
+
+    /// Every operation and phi this function ever held, by id.
+    pub fn arena(&self) -> &OpArena {
+        self.blocks.arena()
+    }
+
+    /// One more than the largest id minted so far: the length of a dense
+    /// map indexed by [`OpId`].
+    pub fn id_limit(&self) -> usize {
+        self.blocks.arena().id_limit()
+    }
+
+    /// Apply a pass's plan, minting what it inserts in IR order.
+    pub(crate) fn apply_edits(&mut self, plan: EditPlan) {
+        if plan.is_empty() {
             return;
-        };
-        let at = at.min(block.ops.len());
-        let count = ops.len();
-        let (ops, from): (Vec<_>, Vec<_>) = ops.into_iter().unzip();
-        block.ops.splice(at..at, ops);
-        let moved = self
-            .op_instruction_addrs
-            .range((block_addr, at)..=(block_addr, usize::MAX))
-            .map(|(site, addr)| (site.1, *addr))
-            .collect::<Vec<_>>();
-        for (index, _) in &moved {
-            self.op_instruction_addrs.remove(&(block_addr, *index));
         }
-        let placed = moved
-            .into_iter()
-            .map(|(index, addr)| (index + count, addr))
-            .chain(
-                from.into_iter()
-                    .enumerate()
-                    .filter_map(|(offset, addr)| Some((at + offset, addr?))),
-            );
-        for (index, addr) in placed {
-            self.op_instruction_addrs.insert((block_addr, index), addr);
-        }
+        self.blocks.apply(plan);
         self.invalidate_query_index();
     }
 }
@@ -2728,7 +2714,6 @@ impl Clone for SSAFunction {
             blocks: self.blocks.clone(),
             block_index: self.block_index.clone(),
             block_order: self.block_order.clone(),
-            op_instruction_addrs: self.op_instruction_addrs.clone(),
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
@@ -2750,6 +2735,10 @@ pub struct RewrittenFunction<'a> {
     source: &'a SSAFunction,
     blocks: Vec<SSABlock>,
     block_index: BTreeMap<u64, u32>,
+    /// The source's arena, copied, so that what this rewrite inserts is
+    /// minted above every id the source holds and never names one of its
+    /// operations.
+    arena: OpArena,
 }
 
 impl<'a> RewrittenFunction<'a> {
@@ -2760,6 +2749,7 @@ impl<'a> RewrittenFunction<'a> {
             source,
             blocks,
             block_index,
+            arena: source.arena().clone(),
         }
     }
 
@@ -2824,16 +2814,31 @@ impl<'a> RewrittenFunction<'a> {
     }
 
     /// One block's operations, mutable, for the pass that is still building.
-    pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
+    pub fn get_block_mut(&mut self, addr: u64) -> Option<BlockMut<'_>> {
         let index = *self.block_index.get(&addr)? as usize;
-        self.blocks.get_mut(index)
+        Some(BlockMut::new(self.blocks.get_mut(index)?, &mut self.arena))
+    }
+
+    /// Every operation the source and this rewrite ever held, by id.
+    pub fn arena(&self) -> &OpArena {
+        &self.arena
+    }
+
+    /// Which machine instruction this operation executes for.
+    pub fn instruction_of(&self, id: OpId) -> Option<u64> {
+        self.arena.instruction(id)
     }
 
     /// A second copy of these operations over the same function, for a test
     /// that wants to rewrite them again.
     #[must_use]
     pub fn duplicate(&self) -> Self {
-        Self::new(self.source, self.blocks.clone())
+        Self {
+            source: self.source,
+            blocks: self.blocks.clone(),
+            block_index: self.block_index.clone(),
+            arena: self.arena.clone(),
+        }
     }
 
     /// The rewritten operations, in the text the source function dumps.
@@ -2879,7 +2884,7 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
             }
 
             // Phi nodes
-            for phi in &block.phis {
+            for phi in block.phis() {
                 let sources: Vec<String> = phi
                     .sources
                     .iter()
@@ -2890,7 +2895,7 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
 
             // Operations, spelled the way the phis above are: `SSAOp` has a
             // Display of its own and the derived Debug was shadowing it.
-            for op in &block.ops {
+            for op in block.ops() {
                 out.push_str(&format!("  {op}\n"));
             }
 
@@ -3231,15 +3236,22 @@ impl SSAFunction {
     pub(crate) fn op_mut(&mut self, block: u64, index: usize) -> Option<&mut SSAOp> {
         let position = *self.block_index.get(&block)? as usize;
         self.invalidate_query_index();
-        self.blocks.edit().get_mut(position)?.ops.get_mut(index)
+        self.blocks
+            .edit()
+            .get_mut(position)?
+            .ops_mut()
+            .get_mut(index)
     }
 
     /// Get a mutable block by address.
-    pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
+    ///
+    /// What the block gains is minted an id and what it loses is
+    /// tombstoned, through the arena the returned view carries.
+    pub fn get_block_mut(&mut self, addr: u64) -> Option<BlockMut<'_>> {
         let index = *self.block_index.get(&addr)? as usize;
         self.invalidate_query_index();
         self.decompile_prep_facts = None;
-        self.blocks.edit().get_mut(index)
+        self.blocks.block_mut(index)
     }
 
     /// All blocks in reverse postorder.
@@ -3343,7 +3355,8 @@ impl SSAFunction {
 
     /// Remove a block from SSA and CFG.
     pub fn remove_block(&mut self, addr: u64) {
-        self.blocks.edit().retain(|block| block.addr != addr);
+        self.blocks
+            .retain(Pass::RemoveBlock, |block| block.addr != addr);
         self.block_order.retain(|&a| a != addr);
         self.block_index = block_index_of(&self.blocks);
         self.cfg.remove_block(addr);
@@ -3353,8 +3366,8 @@ impl SSAFunction {
 
     /// Remove phi sources for a specific predecessor edge.
     pub fn remove_phi_source(&mut self, block_addr: u64, pred_addr: u64) {
-        if let Some(block) = self.get_block_mut(block_addr) {
-            for phi in &mut block.phis {
+        if let Some(mut block) = self.get_block_mut(block_addr) {
+            for phi in block.phis_mut() {
                 phi.sources.retain(|(pred, _)| *pred != pred_addr);
             }
         }
@@ -3365,24 +3378,18 @@ impl SSAFunction {
     /// Recompute cached metadata after CFG mutation.
     /// Put the blocks back in the order `block_order` states, and reindex.
     fn reorder_blocks(&mut self) {
-        let mut ordered = Vec::with_capacity(self.block_order.len());
-        for &addr in &self.block_order {
-            if let Some(position) = self.blocks.iter().position(|block| block.addr == addr) {
-                ordered.push(self.blocks.edit().swap_remove(position));
-            }
-        }
-        *self.blocks.edit() = ordered;
+        self.blocks.reorder(&self.block_order);
         self.block_index = block_index_of(&self.blocks);
     }
 
     /// Iterate over all SSA operations in the function.
     pub fn all_ops(&self) -> impl Iterator<Item = &SSAOp> {
-        self.blocks.iter().flat_map(|b| b.ops.iter())
+        self.blocks.iter().flat_map(|b| b.ops().iter())
     }
 
     /// Iterate over all phi nodes in the function.
     pub fn all_phis(&self) -> impl Iterator<Item = &PhiNode> {
-        self.blocks.iter().flat_map(|b| b.phis.iter())
+        self.blocks.iter().flat_map(|b| b.phis().iter())
     }
 
     /// Get all variables defined in this function.
@@ -3468,10 +3475,10 @@ impl SSAFunction {
                 };
                 let carrier = match location {
                     UseLocation::Phi { phi_idx, .. } => {
-                        block.phis.get(phi_idx).map(|phi| phi.dst.clone())
+                        block.phis().get(phi_idx).map(|phi| phi.dst.clone())
                     }
                     UseLocation::Op { op_idx, .. } => {
-                        block.ops.get(op_idx).and_then(|op| match op {
+                        block.ops().get(op_idx).and_then(|op| match op {
                             SSAOp::Copy { dst, .. } => Some(dst.clone()),
                             _ => None,
                         })
@@ -3594,7 +3601,7 @@ impl SSAFunction {
     ) -> bool {
         let mut realigned = None;
         for block in self.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 let SSAOp::IntAnd { dst, a, b } = op else {
                     continue;
                 };
@@ -3649,7 +3656,7 @@ impl SSAFunction {
             let Some(block) = self.get_block(addr) else {
                 continue;
             };
-            for phi in &block.phis {
+            for phi in block.phis() {
                 for (dst, root, entry) in speculated {
                     if *dst != phi.dst {
                         continue;
@@ -4329,8 +4336,8 @@ pub enum UseLocation {
 fn defined_var<'a>(blocks: &'a [SSABlock], site: &(u32, DefLocation)) -> Option<&'a SSAVar> {
     let block = blocks.get(site.0 as usize)?;
     match site.1 {
-        DefLocation::Phi(phi_idx) => block.phis.get(phi_idx).map(|phi| &phi.dst),
-        DefLocation::Op(op_idx) => block.ops.get(op_idx)?.dst(),
+        DefLocation::Phi(phi_idx) => block.phis().get(phi_idx).map(|phi| &phi.dst),
+        DefLocation::Op(op_idx) => block.ops().get(op_idx)?.dst(),
     }
 }
 
@@ -4339,13 +4346,13 @@ fn used_var<'a>(blocks: &'a [SSABlock], site: &(u32, UseLocation)) -> Option<&'a
     let block = blocks.get(site.0 as usize)?;
     match site.1 {
         UseLocation::Phi { phi_idx, src_idx } => block
-            .phis
+            .phis()
             .get(phi_idx)?
             .sources
             .get(src_idx)
             .map(|(_, src)| src),
         UseLocation::Op { op_idx, src_idx } => {
-            block.ops.get(op_idx)?.sources().get(src_idx).copied()
+            block.ops().get(op_idx)?.sources().get(src_idx).copied()
         }
     }
 }
@@ -4357,13 +4364,13 @@ impl SsaQueryIndex {
         let mut uses = Vec::new();
         for (index, block) in blocks.iter().enumerate() {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
-            for (phi_idx, phi) in block.phis.iter().enumerate() {
+            for (phi_idx, phi) in block.phis().iter().enumerate() {
                 defs.push((index, DefLocation::Phi(phi_idx)));
                 for src_idx in 0..phi.sources.len() {
                     uses.push((index, UseLocation::Phi { phi_idx, src_idx }));
                 }
             }
-            for (op_idx, op) in block.ops.iter().enumerate() {
+            for (op_idx, op) in block.ops().iter().enumerate() {
                 if op.dst().is_some() {
                     defs.push((index, DefLocation::Op(op_idx)));
                 }
@@ -4416,7 +4423,7 @@ impl SsaQueryIndex {
 impl SSABlock {
     /// Visit all phi source variables in deterministic index order.
     pub fn for_each_phi_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
-        for (phi_idx, phi) in self.phis.iter().enumerate() {
+        for (phi_idx, phi) in self.phis().iter().enumerate() {
             for (src_idx, (pred_addr, src)) in phi.sources.iter().enumerate() {
                 f(SourceRef {
                     var: src,
@@ -4432,7 +4439,7 @@ impl SSABlock {
 
     /// Visit all operation source variables in deterministic index order.
     pub fn for_each_op_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
-        for (op_idx, op) in self.ops.iter().enumerate() {
+        for (op_idx, op) in self.ops().iter().enumerate() {
             let mut src_idx = 0usize;
             op.for_each_source(|src| {
                 f(SourceRef {
@@ -4452,14 +4459,14 @@ impl SSABlock {
 
     /// Visit all destination definitions (phis first, then ops) in index order.
     pub fn for_each_def<F: FnMut(DefRef<'_>)>(&self, mut f: F) {
-        for (phi_idx, phi) in self.phis.iter().enumerate() {
+        for (phi_idx, phi) in self.phis().iter().enumerate() {
             f(DefRef {
                 var: &phi.dst,
                 site: DefSite::Phi { phi_idx },
             });
         }
 
-        for (op_idx, op) in self.ops.iter().enumerate() {
+        for (op_idx, op) in self.ops().iter().enumerate() {
             if let Some(dst) = op.dst() {
                 f(DefRef {
                     var: dst,
@@ -4471,26 +4478,26 @@ impl SSABlock {
 
     /// Get all operations including phi nodes (as SSAOp::Phi).
     pub fn all_ops(&self) -> impl Iterator<Item = SSAOp> + '_ {
-        let phi_ops = self.phis.iter().map(|phi| SSAOp::Phi {
+        let phi_ops = self.phis().iter().map(|phi| SSAOp::Phi {
             dst: phi.dst.clone(),
             sources: phi.sources.iter().map(|(_, v)| v.clone()).collect(),
         });
-        phi_ops.chain(self.ops.iter().cloned())
+        phi_ops.chain(self.ops().iter().cloned())
     }
 
     /// Check if this block has any phi nodes.
     pub fn has_phis(&self) -> bool {
-        !self.phis.is_empty()
+        !self.phis().is_empty()
     }
 
     /// Get the number of phi nodes.
     pub fn num_phis(&self) -> usize {
-        self.phis.len()
+        self.phis().len()
     }
 
     /// Get the number of operations (excluding phi nodes).
     pub fn num_ops(&self) -> usize {
-        self.ops.len()
+        self.ops().len()
     }
 }
 

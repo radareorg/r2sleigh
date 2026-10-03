@@ -36,7 +36,7 @@ pub(crate) fn collect_access_summaries(
     let mut summaries = BTreeMap::new();
 
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             let Some(inst_id) = graph.inst_id_for_op_site(block.addr, op_idx) else {
                 continue;
             };
@@ -256,7 +256,7 @@ pub(crate) fn build_memory_ssa(
             let Some(block) = function.get_block(block_addr) else {
                 continue;
             };
-            for (op_idx, _) in block.ops.iter().enumerate() {
+            for (op_idx, _) in block.ops().iter().enumerate() {
                 let Some(inst_id) = graph.inst_id_for_op_site(block_addr, op_idx) else {
                     continue;
                 };

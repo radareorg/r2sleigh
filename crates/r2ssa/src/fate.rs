@@ -178,7 +178,7 @@ mod tests {
             let converted = function
                 .blocks()
                 .iter()
-                .flat_map(|block| &block.ops)
+                .flat_map(|block| block.ops())
                 .find(|ssa| ssa.dst().is_some())
                 .expect("the operation defines a value");
             assert_eq!(converted.value_use(), op.value_use(), "{op:?}");

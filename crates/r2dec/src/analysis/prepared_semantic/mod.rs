@@ -705,7 +705,7 @@ fn populate_owner_exprs(
     let prepared = inputs.prepared;
     let mut producer_by_dst = HashMap::<SSAVar, &SSAOp>::new();
     for block in prepared.function().blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             if let Some(dst) = op.dst() {
                 producer_by_dst.insert(dst.clone(), op);
             }
@@ -727,7 +727,7 @@ fn populate_owner_exprs(
     }
 
     for block in prepared.function().blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             if let SSAOp::Load {
                 dst,
                 space: r2il::SpaceId::Ram,
@@ -788,7 +788,7 @@ fn populate_owner_exprs(
         let mut changed = false;
 
         for block in prepared.function().blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::IntZExt { dst, src }
@@ -1093,7 +1093,7 @@ fn refine_load_owner_exprs(
 ) {
     let prepared = inputs.prepared;
     for block in prepared.function().blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             let SSAOp::Load {
                 dst,
                 space: r2il::SpaceId::Ram,
@@ -1442,7 +1442,7 @@ fn populate_derived_predicates(
         let mut changed = false;
 
         for block in inputs.prepared.function().blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 let Some(dst) = op.dst() else {
                     continue;
                 };
@@ -1574,7 +1574,7 @@ fn reconstruct_zero_compare_from_nonzero_def(
         return None;
     };
     let block = inputs.prepared.function().get_block(block_addr)?;
-    let def = block.ops.get(op_idx)?;
+    let def = block.ops().get(op_idx)?;
 
     match def {
         SSAOp::Copy { src, .. }
@@ -1665,7 +1665,7 @@ fn compare_def_expr_for_predicate_operand(
         return None;
     };
     let block = inputs.prepared.function().get_block(block_addr)?;
-    let op = block.ops.get(op_idx)?;
+    let op = block.ops().get(op_idx)?;
 
     match op {
         SSAOp::Copy { src, .. }
@@ -1928,7 +1928,7 @@ fn authoritative_scalar_expr_for_value(
     }
 
     let (_, op) = block
-        .ops
+        .ops()
         .iter()
         .enumerate()
         .find(|(_, op)| op.dst() == Some(var))?;
@@ -2979,7 +2979,7 @@ fn local_store_owner_expr_for_offset(
         .as_deref()
         .is_some_and(|name| !is_generic_prepared_stack_alias(name));
 
-    for op in block.ops[..before_idx].iter().rev() {
+    for op in block.ops()[..before_idx].iter().rev() {
         let SSAOp::Store {
             space: r2il::SpaceId::Ram,
             addr,
@@ -3082,7 +3082,7 @@ fn collect_prepared_runtime_facts(
     view: &PreparedSemanticView,
 ) {
     for block in blocks {
-        for phi in &block.phis {
+        for phi in block.phis() {
             let _ = bind_prepared_value_id(use_info, prepared, &phi.dst);
             for (_, src) in &phi.sources {
                 // Bind first, then let the one helper write both halves.
@@ -3093,7 +3093,7 @@ fn collect_prepared_runtime_facts(
             let _ = bind_prepared_value_id(use_info, prepared, &phi.dst);
         }
 
-        for op in &block.ops {
+        for op in block.ops() {
             for src in op.sources() {
                 let _ = bind_prepared_value_id(use_info, prepared, src);
             }
@@ -3164,7 +3164,7 @@ fn populate_prepared_call_runtime_facts(
     origins: &crate::normalize::NormalizationOrigins,
 ) {
     for block in blocks {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             if !matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
                 continue;
             }

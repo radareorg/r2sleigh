@@ -33,7 +33,7 @@ impl crate::SsaArtifact {
             .blocks()
             .iter()
             .flat_map(|block| {
-                let calls = block.ops.iter().enumerate();
+                let calls = block.ops().iter().enumerate();
                 calls.filter_map(|(index, op)| match function.enters_supervisor(op) {
                     true => graph.inst_id_for_op_site(block.addr, index),
                     false => None,

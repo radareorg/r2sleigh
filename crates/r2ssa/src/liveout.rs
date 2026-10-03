@@ -64,7 +64,7 @@ impl FunctionLiveOut {
                 .cfg()
                 .get_block(block.addr)
                 .is_some_and(|cfg| cfg.is_return())
-                || matches!(block.ops.last(), Some(crate::op::SSAOp::Return { .. }));
+                || matches!(block.ops().last(), Some(crate::op::SSAOp::Return { .. }));
             if !returns {
                 continue;
             }
@@ -134,7 +134,7 @@ impl FunctionLiveOut {
             // the zero and left everything the comparison computed observed by
             // nothing. Walking back until the location is covered names every
             // definition the caller actually reads.
-            for op in block.ops.iter().rev() {
+            for op in block.ops().iter().rev() {
                 // The shared rule, so this walk and the return boundary's
                 // cannot drift. Walking past a call named the last thing put in
                 // the register before it -- for a function whose final act is
@@ -162,7 +162,7 @@ impl FunctionLiveOut {
                     break;
                 }
             }
-            for phi in &block.phis {
+            for phi in block.phis() {
                 let Some(storage) = graph.canonical_storage_for_var(&phi.dst) else {
                     continue;
                 };
@@ -171,7 +171,7 @@ impl FunctionLiveOut {
                 }
                 // Only a write that covers the whole return storage replaces the
                 // merge. A narrower one leaves the remaining bytes to the phi.
-                let overwritten = block.ops.iter().any(|op| {
+                let overwritten = block.ops().iter().any(|op| {
                     op.dst().is_some_and(|dst| {
                         graph
                             .canonical_storage_for_var(dst)
@@ -458,7 +458,7 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&x86_64_arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let returned = func.blocks().iter().next().expect("one block").ops[1]
+        let returned = func.blocks().iter().next().expect("one block").ops()[1]
             .dst()
             .and_then(|value| graph.value_id_for_var(value))
             .expect("last return-register definition");
@@ -768,7 +768,7 @@ mod tests {
         let merge = func
             .get_block(0x100c)
             .expect("merge block")
-            .phis
+            .phis()
             .iter()
             .filter_map(|phi| graph.value_id_for_var(&phi.dst))
             .collect::<Vec<_>>();
@@ -782,7 +782,7 @@ mod tests {
             let defined = func
                 .get_block(arm)
                 .expect("arm block")
-                .ops
+                .ops()
                 .iter()
                 .filter_map(|op| op.dst())
                 .filter(|dst| func.canonical_storage_for_var(dst) == Some(storage(0, 8)))
@@ -805,7 +805,7 @@ mod tests {
             let roots = func
                 .get_block(0x1000)
                 .expect("return block")
-                .ops
+                .ops()
                 .iter()
                 .filter_map(|op| op.dst())
                 .filter(|dst| func.canonical_storage_for_var(dst) == Some(storage(0, 8)))

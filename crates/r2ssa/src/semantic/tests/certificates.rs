@@ -389,7 +389,7 @@ fn stack_geometry_certificate_closes_equal_root_merge_phi() {
     let phi = artifact
         .function()
         .get_block(0x60cc)
-        .and_then(|block| block.phis.first())
+        .and_then(|block| block.phis().first())
         .expect("stack-address merge phi");
     let phi_value = artifact
         .graph()

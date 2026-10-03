@@ -68,7 +68,7 @@ pub(crate) fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) 
                         // outright. A dispatch through a table does not, and
                         // what it switches on comes from the value analysis,
                         // which has not run yet -- it is filled in there.
-                        selector: block.ops.iter().rev().find_map(|op| match op {
+                        selector: block.ops().iter().rev().find_map(|op| match op {
                             SSAOp::Switch { selector } => graph.value_id_for_var(selector),
                             _ => None,
                         }),
@@ -105,7 +105,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     let mut signed_sign_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
 
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             if let SSAOp::IntSub { dst, a, b } = op
                 && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
             {
@@ -115,7 +115,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     }
 
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             if let SSAOp::IntSBorrow { dst, a, b } = op
                 && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
             {
@@ -133,7 +133,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     propagate_compare_source_aliases(function, &mut signed_sign_sources);
 
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             let Some((dst, kind, lhs, rhs)) = compare_components(op) else {
                 if let Some((dst, kind, lhs, rhs)) = signed_flag_compare_components(
                     graph,
@@ -200,7 +200,7 @@ pub(crate) fn propagate_compare_definitions(
     loop {
         let mut changed = false;
         for block in function.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 let propagated = match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
@@ -255,7 +255,7 @@ pub(crate) fn propagate_compare_source_aliases(
     loop {
         let mut changed = false;
         for block in function.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 let (dst, src) = match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }

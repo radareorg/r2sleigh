@@ -111,10 +111,10 @@ fn detached_advisory_analysis_drops_invalid_interproc_schema() {
 fn local_pointee_type_evidence_requires_exact_ram_space() {
     let ram_addr = SSAVar::new("ram_addr", 1, 8);
     let custom_addr = SSAVar::new("custom_addr", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        phis: Vec::new(),
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        0,
+        vec![
             SSAOp::Store {
                 space: r2il::SpaceId::Ram,
                 addr: ram_addr.clone(),
@@ -126,8 +126,8 @@ fn local_pointee_type_evidence_requires_exact_ram_space() {
                 val: SSAVar::new("custom_value", 1, 8),
             },
         ],
-        size: 0,
-    }];
+        Vec::new(),
+    )];
 
     let types = local_pointer_pointee_types(&blocks, 64, &HashMap::new());
     assert_eq!(

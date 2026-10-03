@@ -2475,7 +2475,7 @@ fn collect_local_summary_facts_with_obligation_authority(
     }
 
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             match op {
                 SSAOp::Load { addr, dst, space }
                 | SSAOp::LoadLinked {
@@ -3035,7 +3035,7 @@ fn collect_call_arg_state_with_iteration_limit(
             let Some(block) = function.get_block(block_addr) else {
                 continue;
             };
-            for phi in &block.phis {
+            for phi in block.phis() {
                 update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
             }
             let old = in_states.insert(block_addr, state.clone());
@@ -3043,7 +3043,7 @@ fn collect_call_arg_state_with_iteration_limit(
                 changed = true;
             }
 
-            for op in &block.ops {
+            for op in block.ops() {
                 apply_call_carrier_transfer(prepared, abi, &mut state, op);
             }
             let new_state = state;
@@ -3067,10 +3067,10 @@ fn collect_call_arg_state_with_iteration_limit(
             continue;
         };
         let mut state = in_states.get(&block_addr).cloned().unwrap_or_default();
-        for phi in &block.phis {
+        for phi in block.phis() {
             update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
         }
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             if op_idx == call_op_idx {
                 let args = call_argument_carriers(prepared, abi, call_id)
                     .map(|carriers| {

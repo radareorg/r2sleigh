@@ -59,7 +59,7 @@ impl LocalMemoryVersionFacts {
                 .map(|value| (value.var.clone(), value.id)),
         );
         for block in prepared.function().blocks() {
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (op_index, op) in block.ops().iter().enumerate() {
                 if !matches!(
                     op,
                     SSAOp::Load {
@@ -251,14 +251,14 @@ pub(crate) fn local_struct_type_slots(
         };
 
     for block in blocks {
-        for phi in &block.phis {
+        for phi in block.phis() {
             remember_seed(&mut classes, &mut seeds, &phi.dst);
             for (_, source) in &phi.sources {
                 remember_seed(&mut classes, &mut seeds, source);
                 classes.union_vars(&phi.dst, source, ptr_bytes);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             if let Some(dst) = op.dst() {
                 remember_seed(&mut classes, &mut seeds, dst);
             }
@@ -321,12 +321,12 @@ pub(crate) fn local_pointer_pointee_types(
     };
 
     for block in blocks {
-        for phi in &block.phis {
+        for phi in block.phis() {
             for (_, source) in &phi.sources {
                 link(source, &phi.dst);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::Copy { dst, src }
                 | SSAOp::Cast { dst, src }
@@ -718,10 +718,10 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
 ) -> LocalStructArtifacts {
     let type_slots = local_struct_type_slots(ssa_blocks, pointer_arg_slot_map, ptr_bits);
     let scalar_signedness = infer_scalar_signedness(
-        ssa_blocks.iter().flat_map(|block| block.ops.iter()),
+        ssa_blocks.iter().flat_map(|block| block.ops().iter()),
         ssa_blocks.iter().flat_map(|block| {
             block
-                .phis
+                .phis()
                 .iter()
                 .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
         }),
@@ -740,7 +740,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     let offset_bound = 0x4000i64;
     let definitions = ssa_blocks
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
         .collect::<HashMap<_, _>>();
     let mut affine_memo = HashMap::<SSAVar, Option<LocalAffineValue>>::new();
@@ -756,13 +756,13 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                 });
             }
         };
-        for phi in &block.phis {
+        for phi in block.phis() {
             seed_var(&phi.dst);
             for (_, source) in &phi.sources {
                 seed_var(source);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             if let Some(dst) = op.dst() {
                 seed_var(dst);
             }
@@ -775,7 +775,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     loop {
         let mut changed = false;
         for block in ssa_blocks {
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (op_index, op) in block.ops().iter().enumerate() {
                 let addr_of = |var: &SSAVar, map: &HashMap<SSAVar, LocalAddrExpr>| {
                     if var.version == 0 {
                         let key = var.name().to_ascii_lowercase();
@@ -1113,7 +1113,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     }
 
     for block in ssa_blocks {
-        for (op_index, op) in block.ops.iter().enumerate() {
+        for (op_index, op) in block.ops().iter().enumerate() {
             let resolve_addr = |addr: &SSAVar| -> Option<LocalAddrExpr> {
                 if addr.version == 0 {
                     let key = addr.name().to_ascii_lowercase();

@@ -174,7 +174,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         return BTreeMap::new();
     };
     let contains_call = function.blocks().iter().any(|block| {
-        block.ops.iter().any(|op| {
+        block.ops().iter().any(|op| {
             matches!(
                 op,
                 SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
@@ -1407,7 +1407,7 @@ pub(crate) fn collect_stack_call_argument_values(
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();
-    for (producer_idx, op) in block.ops[..op_idx].iter().enumerate().rev() {
+    for (producer_idx, op) in block.ops()[..op_idx].iter().enumerate().rev() {
         if matches!(
             op,
             SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Return { .. }

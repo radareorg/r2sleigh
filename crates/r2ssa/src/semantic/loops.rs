@@ -213,7 +213,7 @@ pub(crate) fn loop_carrier_facts(
         return Vec::new();
     };
     let mut carriers = header_block
-        .phis
+        .phis()
         .iter()
         .filter_map(|phi| {
             let phi_value = graph.value_id_for_var(&phi.dst)?;

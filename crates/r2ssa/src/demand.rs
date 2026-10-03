@@ -384,7 +384,7 @@ mod tests {
             function
                 .blocks()
                 .iter()
-                .flat_map(|block| &block.ops)
+                .flat_map(|block| block.ops())
                 .any(|op| matches!(op, SSAOp::Insert(_))),
             "the byte write is an INSERT into RDX"
         );

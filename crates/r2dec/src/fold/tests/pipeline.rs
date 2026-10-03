@@ -1131,7 +1131,7 @@ mod tests {
         // The narrow addition defines a lane temporary; the root's definition
         // is the lift's extension of it, which is the write rendered here.
         let copy_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::IntZExt { dst, .. } if dst.size == 8))
             .expect("carrier extension");
@@ -1228,7 +1228,7 @@ mod tests {
         .with_name("observed_contextual_stack_load");
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let load_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Load { .. }))
             .expect("stack load");
@@ -1260,7 +1260,7 @@ mod tests {
             Some(r2ssa::MachineWriteDisposition::Exact(_))
         ));
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[load_idx], block.addr, load_idx)
+            .op_to_stmt_with_args(&block.ops()[load_idx], block.addr, load_idx)
             .expect("supported load lowering")
             .expect("structured stack load");
         let CStmt::Expr(assignment) = stmt.unobserved() else {
@@ -1334,7 +1334,7 @@ mod tests {
         // assignment of its own.
         enter_exact_test_site(&ctx, block.addr, 1);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[1], block.addr, 1)
+            .op_to_stmt_with_args(&block.ops()[1], block.addr, 1)
             .expect("signed borrow reader has exact scalar lowering")
             .expect("signed borrow reader definition");
         let rendered = format!("{stmt:?}");
@@ -1377,10 +1377,10 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("canonical_literal_rule_rendering");
         let block = prepared.function().get_block(0x1000).expect("entry block");
-        let SSAOp::IntSBorrow { dst: flag, .. } = &block.ops[0] else {
+        let SSAOp::IntSBorrow { dst: flag, .. } = &block.ops()[0] else {
             panic!("fixture must begin with signed borrow");
         };
-        let SSAOp::IntZExt { dst: widened, .. } = &block.ops[1] else {
+        let SSAOp::IntZExt { dst: widened, .. } = &block.ops()[1] else {
             panic!("fixture must widen the signed-borrow flag");
         };
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
@@ -1419,7 +1419,7 @@ mod tests {
         // only statement left, and it is where the spelled constant shows.
         enter_exact_test_site(&ctx, block.addr, 3);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[3], block.addr, 3)
+            .op_to_stmt_with_args(&block.ops()[3], block.addr, 3)
             .expect("canonical literal has exact scalar lowering")
             .expect("the store of the constant");
         let rendered = format!("{stmt:?}");
@@ -1477,7 +1477,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, 0);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[0], block.addr, 0)
+            .op_to_stmt_with_args(&block.ops()[0], block.addr, 0)
             .expect("population count has exact scalar lowering")
             .expect("population-count definition");
         assert!(format!("{stmt:?}").contains("__builtin_popcountll"));
@@ -1582,7 +1582,7 @@ mod tests {
         .with_name("observed_contextual_stack_store");
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let store_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Store { .. }))
             .expect("stack store");
@@ -1599,7 +1599,7 @@ mod tests {
         let (plan, names, journal) = install_observed_lowering(&mut ctx, &prepared);
         let mut body = Vec::new();
         for prefix_idx in 0..store_idx {
-            if block.ops[prefix_idx]
+            if block.ops()[prefix_idx]
                 .dst()
                 .is_some_and(|dst| ctx.is_dead(dst))
             {
@@ -1607,7 +1607,7 @@ mod tests {
             }
             enter_exact_test_site(&ctx, block.addr, prefix_idx);
             if let Some(prefix) = ctx
-                .op_to_stmt_with_args(&block.ops[prefix_idx], block.addr, prefix_idx)
+                .op_to_stmt_with_args(&block.ops()[prefix_idx], block.addr, prefix_idx)
                 .expect("supported stack-address prefix lowering")
             {
                 body.push(prefix);
@@ -1640,7 +1640,7 @@ mod tests {
         assert_eq!(effect_obligations.len(), 1);
 
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[store_idx], block.addr, store_idx)
+            .op_to_stmt_with_args(&block.ops()[store_idx], block.addr, store_idx)
             .expect("supported store lowering")
             .expect("structured stack store");
         let CStmt::Expr(assignment) = stmt.unobserved() else {
@@ -1722,7 +1722,7 @@ mod tests {
         );
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let op_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| {
                 if indirect {
@@ -1772,7 +1772,7 @@ mod tests {
             // the graph records none -- so the staging writes reach this and
             // the loop has to skip them exactly as the folder does.
             // A definition the plan does not bind has no statement of its own.
-            if block.ops[prefix_idx].dst().is_some_and(|dst| {
+            if block.ops()[prefix_idx].dst().is_some_and(|dst| {
                 !matches!(
                     ctx.prepared_value_id_for_var(dst)
                         .and_then(|value| names.disposition_for_value(value)),
@@ -1783,7 +1783,7 @@ mod tests {
             }
             enter_exact_test_site(&ctx, block.addr, prefix_idx);
             if let Some(prefix) = ctx
-                .op_to_stmt_with_args(&block.ops[prefix_idx], block.addr, prefix_idx)
+                .op_to_stmt_with_args(&block.ops()[prefix_idx], block.addr, prefix_idx)
                 .expect("supported call-prefix lowering")
             {
                 body.push(prefix);
@@ -1791,7 +1791,7 @@ mod tests {
         }
         enter_exact_test_site(&ctx, block.addr, op_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[op_idx], block.addr, op_idx)
+            .op_to_stmt_with_args(&block.ops()[op_idx], block.addr, op_idx)
             .expect("supported call lowering")
             .expect("certified call statement");
         let effect_obligations = ctx.exact_effect_obligations_for_normalized_value(
@@ -1818,8 +1818,8 @@ mod tests {
         );
         assert_eq!(*ctx.observation_error.borrow(), None);
         body.push(stmt);
-        for suffix_idx in op_idx + 1..block.ops.len() {
-            if block.ops[suffix_idx]
+        for suffix_idx in op_idx + 1..block.ops().len() {
+            if block.ops()[suffix_idx]
                 .dst()
                 .is_some_and(|dst| ctx.is_dead(dst))
             {
@@ -1827,7 +1827,7 @@ mod tests {
             }
             enter_exact_test_site(&ctx, block.addr, suffix_idx);
             if let Some(suffix) = ctx
-                .op_to_stmt_with_args(&block.ops[suffix_idx], block.addr, suffix_idx)
+                .op_to_stmt_with_args(&block.ops()[suffix_idx], block.addr, suffix_idx)
                 .expect("supported post-call definition lowering")
             {
                 body.push(suffix);
@@ -2529,10 +2529,10 @@ mod tests {
         let prepared =
             prepared_from_r2il_blocks(&[entry], &arch).with_name("sealed_inline_admission");
         let block = prepared.function().get_block(0x1000).expect("entry block");
-        let SSAOp::Copy { src, .. } = &block.ops[0] else {
+        let SSAOp::Copy { src, .. } = &block.ops()[0] else {
             panic!("fixture must begin with a copy");
         };
-        let SSAOp::IntAdd { dst, .. } = &block.ops[2] else {
+        let SSAOp::IntAdd { dst, .. } = &block.ops()[2] else {
             panic!("fixture must add the register to the literal");
         };
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
@@ -2842,7 +2842,7 @@ mod tests {
 
         let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa func");
         func = func.with_name("sym._check_secret_like");
-        func.get_block_mut(0x1000).expect("entry").ops = vec![
+        func.get_block_mut(0x1000).expect("entry").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::IntSub {
                 dst: make_var("RSP", 1, 8),
                 a: make_var("RSP", 0, 8),
@@ -2885,8 +2885,8 @@ mod tests {
                 cond: make_var("tmp:12800", 1, 1),
                 target: make_var("ram:1008", 0, 8),
             },
-        ];
-        func.get_block_mut(0x1004).expect("then").ops = vec![
+        ]);
+        func.get_block_mut(0x1004).expect("then").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::Copy {
                 dst: make_var("RAX", 1, 8),
                 src: make_var("const:1", 0, 8),
@@ -2895,12 +2895,12 @@ mod tests {
                 target: make_var("ram:100c", 0, 8),
                 instruction: None,
             },
-        ];
-        func.get_block_mut(0x1008).expect("else").ops = vec![SSAOp::Copy {
+        ]);
+        func.get_block_mut(0x1008).expect("else").replace_ops(r2ssa::Pass::Fixture, vec![SSAOp::Copy {
             dst: make_var("RAX", 2, 8),
             src: make_var("const:0", 0, 8),
-        }];
-        func.get_block_mut(0x100c).expect("exit").ops = vec![
+        }]);
+        func.get_block_mut(0x100c).expect("exit").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::Load {
                 dst: make_var("tmp:savedfp", 1, 8),
                 space: r2il::SpaceId::Ram,
@@ -2928,10 +2928,10 @@ mod tests {
             SSAOp::Return {
                 target: make_var("RIP", 1, 8),
             },
-        ];
+        ]);
 
         let then_preserves_return_one =
-            func.get_block(0x1004).expect("then").ops.iter().any(|op| {
+            func.get_block(0x1004).expect("then").ops().iter().any(|op| {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
@@ -2942,7 +2942,7 @@ mod tests {
                 )
             });
         let else_preserves_return_zero =
-            func.get_block(0x1008).expect("else").ops.iter().any(|op| {
+            func.get_block(0x1008).expect("else").ops().iter().any(|op| {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
@@ -3007,8 +3007,8 @@ mod tests {
         });
 
         let block = prepared.function().get_block(0x1000).expect("entry");
-        let SSAOp::Call { target, .. } = &block.ops[1] else {
-            panic!("expected call op, got {:?}", block.ops[1]);
+        let SSAOp::Call { target, .. } = &block.ops()[1] else {
+            panic!("expected call op, got {:?}", block.ops()[1]);
         };
 
         let call_view = ctx
@@ -3118,7 +3118,7 @@ mod tests {
         ctx.set_function_names(HashMap::from([(0x401050, "sym.helper".to_string())]));
         let block = prepared.function().get_block(0x1000).expect("entry");
         let call_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
@@ -3132,7 +3132,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         assert_eq!(
-            ctx.op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx),
+            ctx.op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx),
             Err(OpLoweringRefusal::missing_machine_projection()),
             "a certified position without binding-plan spelling authority must refuse the call"
         );
@@ -3167,7 +3167,7 @@ mod tests {
             .function()
             .get_block(0x1000)
             .expect("entry")
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
@@ -3229,7 +3229,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
+            .op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call stmt");
 
@@ -3302,7 +3302,7 @@ mod tests {
             .with_name("certified_frame_address_argument");
         let block = prepared.function().get_block(0x1000).expect("entry");
         let call_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
@@ -3336,7 +3336,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
+            .op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call statement");
         let CStmt::Expr(call_expr) = stmt.unobserved() else {
@@ -3413,7 +3413,7 @@ mod tests {
             .with_name("bound_frame_address_argument");
         let block = prepared.function().get_block(0x1800).expect("entry");
         let call_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
@@ -3447,7 +3447,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
+            .op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call statement");
         let CStmt::Expr(call_expr) = stmt.unobserved() else {
@@ -3534,7 +3534,7 @@ mod tests {
             .find_map(|block_id| {
                 let block_addr = graph.block(*block_id)?.addr;
                 let block = normalized.get_block(block_addr)?;
-                let synthetic_idx = (0..block.ops.len()).find(|op_idx| {
+                let synthetic_idx = (0..block.ops().len()).find(|op_idx| {
                     let site = crate::normalize::NormalizedOpSite {
                         block: *block_id,
                         op_idx: *op_idx,
@@ -3559,7 +3559,7 @@ mod tests {
                         })
                 })?;
                 let (shifted_idx, shifted_inst) =
-                    (synthetic_idx + 1..block.ops.len()).find_map(|op_idx| {
+                    (synthetic_idx + 1..block.ops().len()).find_map(|op_idx| {
                         match origins.origin(crate::normalize::NormalizedOpSite {
                             block: *block_id,
                             op_idx,
@@ -3767,7 +3767,7 @@ mod tests {
             .with_name("rendered_integer_division_trap");
         let block = prepared.function().get_block(0x1910).expect("entry");
         let op_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::IntDiv { .. }))
             .expect("division operation");
@@ -3932,7 +3932,7 @@ mod tests {
         let (_plan, names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         enter_exact_test_site(&ctx, 0x1000, 1);
         let block = prepared.function().get_block(0x1000).expect("entry block");
-        let SSAOp::Load { dst, addr, .. } = &block.ops[1] else {
+        let SSAOp::Load { dst, addr, .. } = &block.ops()[1] else {
             panic!("fixture load must remain at its exact source site");
         };
         let memory = ctx

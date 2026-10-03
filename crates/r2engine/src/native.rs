@@ -1791,7 +1791,7 @@ impl Native<'_> {
         let sites = call_sites(&walked.body, self.program);
         let mut found = Vec::new();
         for block in prepared.function().blocks() {
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (op_index, op) in block.ops().iter().enumerate() {
                 let Some((instruction, callee)) = self.called_name(prepared.as_ref(), &sites, op)
                 else {
                     continue;

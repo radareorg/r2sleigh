@@ -237,14 +237,14 @@ fn refine_parameter_signedness(
             .function()
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter()),
+            .flat_map(|block| block.ops().iter()),
         prepared
             .function()
             .blocks()
             .iter()
             .flat_map(|block| {
                 block
-                    .phis
+                    .phis()
                     .iter()
                     .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
             })

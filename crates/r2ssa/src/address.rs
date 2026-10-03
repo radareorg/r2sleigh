@@ -282,7 +282,7 @@ impl<'a> AddressCollector<'a> {
         let definitions = function
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter())
+            .flat_map(|block| block.ops().iter())
             .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
             .collect();
         let mut expressions = BTreeMap::new();
@@ -319,7 +319,7 @@ impl<'a> AddressCollector<'a> {
         let load_count = function
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter())
+            .flat_map(|block| block.ops().iter())
             .filter(|op| {
                 matches!(
                     op,
@@ -445,10 +445,10 @@ impl<'a> AddressCollector<'a> {
         // So the block's own values are derived again from this input alone,
         // and it has changed exactly where one of them came out different.
         let defined = block
-            .phis
+            .phis()
             .iter()
             .map(|phi| &phi.dst)
-            .chain(block.ops.iter().filter_map(SSAOp::dst))
+            .chain(block.ops().iter().filter_map(SSAOp::dst))
             .filter_map(|var| self.graph.value_id_for_var(var))
             .filter(|value| !self.seeded.contains(value))
             .collect::<Vec<_>>();
@@ -470,7 +470,7 @@ impl<'a> AddressCollector<'a> {
         block: &crate::block::SSABlock,
         stack: &mut BTreeMap<SpillSlotKey, AddressExpression>,
     ) {
-        for phi in &block.phis {
+        for phi in block.phis() {
             let expressions = phi
                 .sources
                 .iter()
@@ -487,7 +487,7 @@ impl<'a> AddressCollector<'a> {
                 self.insert_expression(&phi.dst, expression);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::Store { space, addr, val }
                 | SSAOp::StoreGuarded {
@@ -1026,7 +1026,7 @@ mod tests {
         let loaded_values = artifact
             .get_block(0x1100)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter_map(|op| match op {
                 SSAOp::Load { dst, space, .. } if *space == SpaceId::Custom(7) => artifact
@@ -1531,7 +1531,7 @@ mod tests {
         let (load_index, _) = artifact
             .get_block(0x1000)
             .expect("block")
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .find(|(_, op)| matches!(op, SSAOp::Load { .. }))
@@ -1577,12 +1577,12 @@ mod tests {
         .expect("source-bound artifact");
         let block = artifact.get_block(0x1000).expect("block");
         let store_index = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Store { .. }))
             .expect("store");
         let load_index = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Load { .. }))
             .expect("load");

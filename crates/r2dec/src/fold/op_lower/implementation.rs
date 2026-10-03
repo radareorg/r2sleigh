@@ -1371,7 +1371,7 @@ impl<'a> FoldingContext<'a> {
         // a value the gap reads from outside is assigned before the marker.
         let mut pending_gaps: Vec<(usize, FoldedOpStmt)> = Vec::new();
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             self.current_op_idx.set(Some(op_idx));
             // A gap a previous attempt planned is opened here, at its anchor,
             // before any of the operations it covers can render and claim a
@@ -1381,7 +1381,7 @@ impl<'a> FoldingContext<'a> {
                     return Err(reason.refusal());
                 };
                 self.gapped_sites.borrow_mut().extend(owned);
-                let last = (op_idx..block.ops.len())
+                let last = (op_idx..block.ops().len())
                     .filter(|index| self.normalized_op_is_gapped(block.addr, *index))
                     .max()
                     .unwrap_or(op_idx);

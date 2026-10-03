@@ -194,7 +194,7 @@ fn decompile_artifact_two_address_stack_updates_read_incoming_versions() {
         .function()
         .get_block(0x1000)
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| match op {
             SSAOp::IntSub { dst, a, .. } | SSAOp::IntAdd { dst, a, .. } if dst.name() == "rsp" => {
@@ -309,7 +309,7 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
     );
     // The flag is a lane of `rbx`: its write inserts into the root and
     // the branch's read is a subpiece of it.
-    assert_eq!(entry.ops.len(), 7);
+    assert_eq!(entry.ops().len(), 7);
 
     assert_eq!(prepared.predicates().predicates.len(), 1);
     let predicate = prepared
@@ -397,7 +397,7 @@ fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
         .get_block(0x1890)
         .and_then(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .position(|op| matches!(op, SSAOp::Return { target } if target.name().eq_ignore_ascii_case("rip")))
         })
@@ -498,7 +498,7 @@ fn prepared_function_refuses_display_named_stack_merge_at_control_return() {
         .get_block(0x190c)
         .and_then(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .position(|op| matches!(op, SSAOp::Return { target } if target.name().eq_ignore_ascii_case("rip")))
         })
@@ -765,41 +765,46 @@ fn test_decompile_prep_facts_refuse_display_named_stack_roots() {
     }];
 
     let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    func.get_block_mut(0x2000).expect("entry block").ops = vec![
-        SSAOp::IntAdd {
-            dst: SSAVar::new("tmp:1", 1, 8),
-            a: SSAVar::new("rsp", 0, 8),
-            b: SSAVar::constant(0xfffffffffffffff0, 8),
-        },
-        SSAOp::Copy {
-            dst: SSAVar::new("tmp:2", 1, 8),
-            src: SSAVar::new("tmp:1", 1, 8),
-        },
-        SSAOp::IntSub {
-            dst: SSAVar::new("tmp:3", 1, 8),
-            a: SSAVar::new("rbp", 0, 8),
-            b: SSAVar::constant(0x20, 8),
-        },
-        SSAOp::Copy {
-            dst: SSAVar::new("tmp:4", 1, 8),
-            src: SSAVar::new("tmp:3", 1, 8),
-        },
-        SSAOp::IntAdd {
-            dst: SSAVar::new("tmp:5", 1, 8),
-            a: SSAVar::new("rsp", 0, 8),
-            b: SSAVar::constant(0xffff_fff0, 4),
-        },
-        SSAOp::IntAdd {
-            dst: SSAVar::new("tmp:max", 1, 8),
-            a: SSAVar::new("rsp", 0, 8),
-            b: SSAVar::constant(i64::MAX as u64, 8),
-        },
-        SSAOp::IntAdd {
-            dst: SSAVar::new("tmp:overflow", 1, 8),
-            a: SSAVar::new("tmp:max", 1, 8),
-            b: SSAVar::constant(1, 8),
-        },
-    ];
+    func.get_block_mut(0x2000)
+        .expect("entry block")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![
+                SSAOp::IntAdd {
+                    dst: SSAVar::new("tmp:1", 1, 8),
+                    a: SSAVar::new("rsp", 0, 8),
+                    b: SSAVar::constant(0xfffffffffffffff0, 8),
+                },
+                SSAOp::Copy {
+                    dst: SSAVar::new("tmp:2", 1, 8),
+                    src: SSAVar::new("tmp:1", 1, 8),
+                },
+                SSAOp::IntSub {
+                    dst: SSAVar::new("tmp:3", 1, 8),
+                    a: SSAVar::new("rbp", 0, 8),
+                    b: SSAVar::constant(0x20, 8),
+                },
+                SSAOp::Copy {
+                    dst: SSAVar::new("tmp:4", 1, 8),
+                    src: SSAVar::new("tmp:3", 1, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: SSAVar::new("tmp:5", 1, 8),
+                    a: SSAVar::new("rsp", 0, 8),
+                    b: SSAVar::constant(0xffff_fff0, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: SSAVar::new("tmp:max", 1, 8),
+                    a: SSAVar::new("rsp", 0, 8),
+                    b: SSAVar::constant(i64::MAX as u64, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: SSAVar::new("tmp:overflow", 1, 8),
+                    a: SSAVar::new("tmp:max", 1, 8),
+                    b: SSAVar::constant(1, 8),
+                },
+            ],
+        );
     func.refresh_decompile_prep_facts();
 
     let facts = func.decompile_prep_facts().expect("prep facts");
@@ -910,7 +915,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     let op_roots = typed_function
         .get_block(0x3000)
         .expect("entry")
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| op.dst())
         .filter_map(|dst| {
@@ -923,7 +928,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     let entry_op_roots = typed_function
         .get_block(0x3000)
         .expect("entry")
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| op.dst())
         .filter_map(|dst| {
@@ -985,7 +990,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
         typed_function
             .get_block(0x3000)
             .expect("entry")
-            .ops
+            .ops()
             .iter()
             .filter_map(SSAOp::dst)
             .filter(|dst| dst.size == 4)
@@ -1409,7 +1414,7 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
         .expect("subregister New artifact");
     let block = artifact.function().get_block(0x3480).expect("entry block");
     let new_dst = block
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::New { dst, .. } => Some(dst),
@@ -1417,7 +1422,7 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
         })
         .expect("New output");
     let load_addr = block
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Load { addr, .. } => Some(addr),
@@ -1457,22 +1462,25 @@ fn test_decompile_prep_facts_refuse_renamed_stack_carriers() {
         op_metadata: Default::default(),
     }];
     let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    func.get_block_mut(0x1000).expect("entry").ops = vec![
-        SSAOp::IntSub {
-            dst: SSAVar::new("runtime.materialized.rsp", 1, 8),
-            a: SSAVar::new("runtime.materialized.rsp", 0, 8),
-            b: SSAVar::constant(8, 8),
-        },
-        SSAOp::Copy {
-            dst: SSAVar::new("runtime.materialized.rbp", 1, 8),
-            src: SSAVar::new("runtime.materialized.rsp", 1, 8),
-        },
-        SSAOp::IntAdd {
-            dst: SSAVar::new("tmp:fp_slot", 1, 8),
-            a: SSAVar::new("runtime.materialized.rbp", 1, 8),
-            b: SSAVar::constant(0xffffffffffffffe8, 8),
-        },
-    ];
+    func.get_block_mut(0x1000).expect("entry").replace_ops(
+        crate::Pass::Fixture,
+        vec![
+            SSAOp::IntSub {
+                dst: SSAVar::new("runtime.materialized.rsp", 1, 8),
+                a: SSAVar::new("runtime.materialized.rsp", 0, 8),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Copy {
+                dst: SSAVar::new("runtime.materialized.rbp", 1, 8),
+                src: SSAVar::new("runtime.materialized.rsp", 1, 8),
+            },
+            SSAOp::IntAdd {
+                dst: SSAVar::new("tmp:fp_slot", 1, 8),
+                a: SSAVar::new("runtime.materialized.rbp", 1, 8),
+                b: SSAVar::constant(0xffffffffffffffe8, 8),
+            },
+        ],
+    );
     func.refresh_decompile_prep_facts();
 
     let facts = func.decompile_prep_facts().expect("prep facts");

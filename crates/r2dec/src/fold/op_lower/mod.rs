@@ -355,7 +355,7 @@ impl<'a> CertifiedRenderContext<'a> {
         is_write: bool,
     ) -> Option<&'a r2types::MemoryAccessRenderFact> {
         let block = self.prepared.function().get_block(block_addr)?;
-        let space = block.ops.get(op_idx)?.memory_space()?;
+        let space = block.ops().get(op_idx)?.memory_space()?;
         self.render_facts
             .memory_access_for_op(block_addr, op_idx, is_write, space)
     }

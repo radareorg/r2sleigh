@@ -360,7 +360,7 @@ fn a_restored_stack_pointer_renders() {
         .function()
         .get_block(0x1008)
         .expect("call arm")
-        .ops
+        .ops()
         .iter()
         .filter(|op| matches!(op, r2ssa::SSAOp::CallRestore { .. }))
         .count();
@@ -370,7 +370,7 @@ fn a_restored_stack_pointer_renders() {
             .function()
             .get_block(0x1010)
             .expect("join")
-            .phis
+            .phis()
             .iter()
             .any(|phi| phi.canonical_storage == Some(storage(0x28))),
         "the called and uncalled paths must merge their stack carriers"
@@ -1300,7 +1300,7 @@ fn native_standard_path_renders_its_internal_build() {
     );
     let block = prepared.function().get_block(0x1000).expect("entry block");
     let copy_source = block
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Copy { src, .. } => Some(src),
@@ -1312,7 +1312,7 @@ fn native_standard_path_renders_its_internal_build() {
         .value_id_for_var(copy_source)
         .expect("copy source must retain exact ValueId");
     let return_op = block
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, SSAOp::Return { .. }))
         .expect("return op");

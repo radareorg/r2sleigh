@@ -62,7 +62,7 @@ fn decompile_ssa_models_post_call_arm64_return_register_clobber() {
     }];
 
     let prepared = prepared_preserving(&blocks, &arch, &[]).expect("prepared SSA should build");
-    let ops = &prepared.get_block(0x1400).expect("entry block").ops;
+    let ops = prepared.get_block(0x1400).expect("entry block").ops();
     let post_call_x0 = ops
         .iter()
         .find_map(|op| match op {
@@ -267,7 +267,7 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
         .function()
         .get_block(0x16c0)
         .into_iter()
-        .flat_map(|block| &block.ops)
+        .flat_map(|block| block.ops())
         .find_map(|op| match op {
             SSAOp::Subpiece {
                 dst,
@@ -429,7 +429,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
             .function()
             .get_block(0x1000)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case(name))
@@ -446,7 +446,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
         .function()
         .get_block(0x1000)
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Store { val, .. } => Some(val.clone()),
@@ -505,7 +505,7 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
             .function()
             .get_block(0x1000)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rbx"))
@@ -519,7 +519,7 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
             .function()
             .get_block(0x1000)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .find_map(|op| match op {
                 SSAOp::Store { val, .. } => Some(val.clone()),

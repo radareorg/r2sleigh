@@ -33,9 +33,8 @@ impl SSAFunction {
             cfg,
             domtree,
             block_index: block_index_of(&ordered),
-            blocks: Blocks::new(ordered),
+            blocks: Blocks::adopting(ordered),
             block_order,
-            op_instruction_addrs: BTreeMap::new(),
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
@@ -506,41 +505,31 @@ impl SSAFunction {
         // cloned: holding both copies doubled every operation of the function,
         // and each operation owns up to four named variables.
         let mut renamed_blocks = renamed.blocks;
-        let mut renamed_addrs = renamed.instruction_addrs;
+        let mut renamed_origins = renamed.origins;
         let renamed_block_order = renamed.block_order;
         let renamed_storage = renamed.canonical_storage_by_var;
-        let mut ssa_blocks = Vec::with_capacity(renamed_block_order.len());
-        let mut op_instruction_addrs = BTreeMap::new();
+        let mut shaped = Vec::with_capacity(renamed_block_order.len());
         for &addr in &renamed_block_order {
             control.poll()?;
             let cfg_block = cfg.get_block(addr).ok_or_else(malformed_ssa_input)?;
             let ops = renamed_blocks.remove(&addr).unwrap_or_default();
-            let mut instruction_addrs = renamed_addrs.remove(&addr).unwrap_or_default();
-            // Renaming keeps the two in step; an operation with no address
-            // beside it would silently take the next operation's, so the
-            // shorter vector is padded rather than trusted.
-            instruction_addrs.resize(ops.len(), None);
+            let origins = renamed_origins.remove(&addr).unwrap_or_default();
+            // Renaming keeps the two in step; an operation without its origin
+            // beside it is malformed input, not an operation of no origin.
+            if origins.len() != ops.len() {
+                return Err(malformed_ssa_input());
+            }
 
-            // Separate phi nodes from other ops. The addresses travel with
-            // them: a phi is dropped and every other operation keeps the
-            // instruction it was emitted for, at its new index.
+            // Separate phi nodes from other ops; the origins travel with them.
             let (phi_ops, other_ops): (Vec<_>, Vec<_>) = ops
                 .into_iter()
-                .zip(instruction_addrs)
+                .zip(origins)
                 .partition(|(op, _)| matches!(op, SSAOp::Phi { .. }));
-            let phi_ops = phi_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
-            op_instruction_addrs.extend(
-                other_ops
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(op_idx, (_, from))| Some(((addr, op_idx), (*from)?))),
-            );
-            let other_ops = other_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
 
             // Convert phi ops to PhiNode structs
             let preds = cfg.predecessors(addr);
             let mut phis = Vec::with_capacity(phi_ops.len());
-            for (phi_idx, op) in phi_ops.into_iter().enumerate() {
+            for (phi_idx, (op, _)) in phi_ops.into_iter().enumerate() {
                 let SSAOp::Phi { dst, sources } = op else {
                     unreachable!("phi partition contains only phi operations");
                 };
@@ -562,16 +551,14 @@ impl SSAFunction {
                     canonical_storage,
                 });
             }
-
-            let ssa_block = SSABlock {
+            shaped.push(ShapedBlock {
                 addr,
                 size: cfg_block.size,
-                ops: other_ops,
                 phis,
-            };
-            ssa_blocks.push(ssa_block);
+                ops: other_ops,
+            });
         }
-
+        let (arena, ssa_blocks) = mint_renamed_blocks(shaped);
         let mut cfg = cfg;
         cfg.release_operations();
         let mut function = Self {
@@ -587,8 +574,7 @@ impl SSAFunction {
             domtree,
             block_index: block_index_of(&ssa_blocks),
             block_order: renamed_block_order,
-            blocks: Blocks::new(ssa_blocks),
-            op_instruction_addrs,
+            blocks: Blocks::new(ssa_blocks, arena),
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
@@ -619,9 +605,10 @@ impl SSAFunction {
     }
 
     pub fn refresh_after_cfg_mutation(&mut self) {
-        self.blocks
-            .edit()
-            .retain(|block| self.cfg.get_block(block.addr).is_some());
+        let cfg = &self.cfg;
+        self.blocks.retain(Pass::RemoveBlock, |block| {
+            cfg.get_block(block.addr).is_some()
+        });
         self.block_order = self.cfg.reverse_postorder();
         self.reorder_blocks();
         self.domtree = DomTree::compute(&self.cfg);
@@ -779,4 +766,89 @@ fn lifted_cfg(
 ) -> Result<CFG, SsaPrepareError> {
     CFG::from_blocks_with_declared_successors(blocks, declared_successors)
         .ok_or_else(malformed_ssa_input)
+}
+
+/// One renamed block before its operations have ids: its address, size,
+/// phis, and each operation with where renaming says it came from.
+struct ShapedBlock {
+    addr: u64,
+    size: u32,
+    phis: Vec<PhiNode>,
+    ops: Vec<(SSAOp, crate::rename::RenamedOrigin)>,
+}
+
+/// Mint every operation of a freshly renamed function its id.
+///
+/// The lifted operations first, blocks in reverse postorder and each block's
+/// in lift order, so that ids `0..n` are the lift's own operations in R2IL
+/// order; then each block's phis and the operations renaming added, in the
+/// order they stand. Both walks are over vectors, so the numbering is a
+/// function of the IR alone.
+fn mint_renamed_blocks(shaped: Vec<ShapedBlock>) -> (OpArena, Vec<SSABlock>) {
+    use crate::arena::OpOrigin;
+    use crate::rename::RenamedOrigin;
+    let mut arena = OpArena::default();
+    let lifted = shaped
+        .iter()
+        .map(|ShapedBlock { addr, ops, .. }| {
+            ops.iter()
+                .filter_map(|(_, origin)| match *origin {
+                    RenamedOrigin::Lifted { index, instruction } => Some((
+                        index,
+                        arena.mint(OpOrigin::Lifted {
+                            block: *addr,
+                            index,
+                            instruction,
+                        }),
+                    )),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+    let blocks = shaped
+        .into_iter()
+        .zip(lifted)
+        .map(
+            |(
+                ShapedBlock {
+                    addr,
+                    size,
+                    phis,
+                    ops,
+                },
+                lifted,
+            )| {
+                let phis = phis
+                    .into_iter()
+                    .map(|phi| {
+                        let id = arena.mint(OpOrigin::Derived {
+                            from: None,
+                            pass: Pass::PhiPlacement,
+                        });
+                        (id, phi)
+                    })
+                    .collect();
+                let ops = ops
+                    .into_iter()
+                    .map(|(op, origin)| {
+                        let id = match origin {
+                            RenamedOrigin::Lifted { index, .. } => lifted[&index],
+                            RenamedOrigin::Derived { index } => arena.mint(OpOrigin::Derived {
+                                from: lifted.get(&index).copied(),
+                                pass: Pass::Rename,
+                            }),
+                            RenamedOrigin::Phi => arena.mint(OpOrigin::Derived {
+                                from: None,
+                                pass: Pass::PhiPlacement,
+                            }),
+                        };
+                        (id, op)
+                    })
+                    .collect();
+                SSABlock::from_sited(addr, size, ops, phis)
+            },
+        )
+        .collect();
+    (arena, blocks)
 }

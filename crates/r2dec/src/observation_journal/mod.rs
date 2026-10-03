@@ -2306,7 +2306,7 @@ impl LegacyObservationJournal {
                 .ok_or(LegacyObservationJournalError::Normalization(
                     NormalizationOriginError::BlockTopology,
                 ))?;
-            let rows = (0..block.ops.len())
+            let rows = (0..block.ops().len())
                 .map(|op_idx| {
                     let site = NormalizedOpSite {
                         block: block_id,
@@ -2342,7 +2342,7 @@ impl LegacyObservationJournal {
                     NormalizationOriginError::BlockTopology,
                 ));
             };
-            for (op_idx, op) in block.ops.iter().enumerate() {
+            for (op_idx, op) in block.ops().iter().enumerate() {
                 let site = NormalizedOpSite {
                     block: block_id,
                     op_idx,

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::arena::OpId;
 use crate::function::SSAFunction;
 use crate::op::SSAOp;
 use crate::var::SSAVar;
@@ -79,20 +80,25 @@ mod tests {
     fn phi_storage_identity_survives_removing_preceding_phi() {
         let mut func = two_phi_merge();
         let merge = func.get_block(0x100c).expect("merge block");
-        assert_eq!(merge.phis.len(), 2, "the fixture must merge two registers");
-        let retained_storage = merge.phis[1]
+        assert_eq!(
+            merge.phis().len(),
+            2,
+            "the fixture must merge two registers"
+        );
+        let retained_storage = merge.phis()[1]
             .canonical_storage
             .expect("second merge storage");
-        let retained_dst = merge.phis[1].dst.clone();
-        assert_ne!(retained_storage, merge.phis[0].canonical_storage.unwrap());
+        let retained_dst = merge.phis()[1].dst.clone();
+        let removed_dst = merge.phis()[0].dst.clone();
+        assert_ne!(retained_storage, merge.phis()[0].canonical_storage.unwrap());
 
-        let merge = func.get_block_mut(0x100c).expect("merge block");
-        merge.phis.remove(0);
+        let mut merge = func.get_block_mut(0x100c).expect("merge block");
+        merge.retain_phis(crate::Pass::Fixture, |phi| phi.dst != removed_dst);
 
         let merge = func.get_block(0x100c).expect("merge block");
-        assert_eq!(merge.phis.len(), 1);
-        assert_eq!(merge.phis[0].dst, retained_dst);
-        assert_eq!(merge.phis[0].canonical_storage, Some(retained_storage));
+        assert_eq!(merge.phis().len(), 1);
+        assert_eq!(merge.phis()[0].dst, retained_dst);
+        assert_eq!(merge.phis()[0].canonical_storage, Some(retained_storage));
 
         let graph = SsaGraph::from_function(&func);
         let graph_phi = graph
@@ -216,8 +222,12 @@ pub struct SsaGraph {
     /// variable back out of `values`, which is where it already is, and asks
     /// once.
     pub(crate) value_index: Vec<u32>,
-    pub op_inst_by_site: BTreeMap<(u64, usize), InstId>,
-    pub op_site_by_inst: BTreeMap<InstId, (u64, usize)>,
+    /// The instruction each operation and phi became, indexed by its
+    /// [`OpId`]: dense over the function's arena, `None` for an id whose
+    /// operation is dead.
+    pub(crate) inst_by_op: Vec<Option<InstId>>,
+    /// The operation or phi each instruction is, indexed by [`InstId`].
+    pub(crate) op_by_inst: Vec<OpId>,
     /// Which machine instruction each operation came from.
     ///
     /// Carried here from the function so a consumer holding only the graph can
@@ -346,8 +356,8 @@ impl SsaGraph {
         let mut def_of = Vec::new();
         let mut uses_of: Vec<Vec<UseSite>> = Vec::new();
         let mut insts = Vec::new();
-        let mut op_inst_by_site = BTreeMap::new();
-        let mut op_site_by_inst = BTreeMap::new();
+        let mut inst_by_op = vec![None; function.id_limit()];
+        let mut op_by_inst = Vec::new();
         let mut instruction_by_inst = BTreeMap::new();
         let mut insts_by_instruction: BTreeMap<u64, Vec<InstId>> = BTreeMap::new();
 
@@ -381,7 +391,7 @@ impl SsaGraph {
         for block in function.blocks() {
             let block_id = block_by_addr[&block.addr];
 
-            for (phi_idx, phi) in block.phis.iter().enumerate() {
+            for (phi_idx, (op_id, phi)) in block.sited_phis().enumerate() {
                 let inputs = phi
                     .sources
                     .iter()
@@ -430,9 +440,11 @@ impl SsaGraph {
                     payload: InstPayload::Phi { predecessors },
                 });
                 blocks[block_id.0 as usize].insts.push(inst_id);
+                inst_by_op[op_id.index()] = Some(inst_id);
+                op_by_inst.push(op_id);
             }
 
-            for (op_idx, op) in block.ops.iter().enumerate() {
+            for (op_idx, (op_id, op)) in block.sited().enumerate() {
                 let inputs = op
                     .sources()
                     .into_iter()
@@ -468,7 +480,7 @@ impl SsaGraph {
                 insts.push(GraphInst {
                     id: inst_id,
                     block: block_id,
-                    ordinal: block.phis.len() + op_idx,
+                    ordinal: block.phis().len() + op_idx,
                     inputs,
                     output,
                     canonical_storage: output
@@ -477,13 +489,13 @@ impl SsaGraph {
                     payload: InstPayload::Op(op.clone()),
                 });
                 blocks[block_id.0 as usize].insts.push(inst_id);
-                op_inst_by_site.insert((block.addr, op_idx), inst_id);
-                op_site_by_inst.insert(inst_id, (block.addr, op_idx));
+                inst_by_op[op_id.index()] = Some(inst_id);
+                op_by_inst.push(op_id);
                 record_instruction(
                     &mut instruction_by_inst,
                     &mut insts_by_instruction,
                     inst_id,
-                    function.instruction_at(block.addr, op_idx),
+                    function.instruction_of(op_id),
                 );
             }
         }
@@ -513,8 +525,8 @@ impl SsaGraph {
             use_sites: uses_of.into_iter().flatten().collect(),
             block_by_addr,
             value_index,
-            op_inst_by_site,
-            op_site_by_inst,
+            inst_by_op,
+            op_by_inst,
             instruction_by_inst,
             insts_by_instruction,
             formal_projections,
@@ -578,12 +590,41 @@ impl SsaGraph {
         }
     }
 
-    pub fn inst_id_for_op_site(&self, block_addr: u64, op_idx: usize) -> Option<InstId> {
-        self.op_inst_by_site.get(&(block_addr, op_idx)).copied()
+    /// The instruction an operation or phi became.
+    pub fn inst_for_op(&self, id: OpId) -> Option<InstId> {
+        self.inst_by_op.get(id.index()).copied().flatten()
     }
 
+    /// The operation or phi an instruction is.
+    pub fn op_for_inst(&self, id: InstId) -> Option<OpId> {
+        self.op_by_inst.get(id.0 as usize).copied()
+    }
+
+    /// How many of a block's instructions are its phis: they stand first.
+    fn phi_count(&self, block: &GraphBlock) -> usize {
+        block.insts.partition_point(|inst| {
+            self.insts
+                .get(inst.0 as usize)
+                .is_some_and(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
+        })
+    }
+
+    /// The instruction the operation at a site became: a block address and
+    /// an index into the block's operations, phis not counted.
+    pub fn inst_id_for_op_site(&self, block_addr: u64, op_idx: usize) -> Option<InstId> {
+        let block = self
+            .blocks
+            .get(self.block_by_addr.get(&block_addr)?.0 as usize)?;
+        block.insts.get(self.phi_count(block) + op_idx).copied()
+    }
+
+    /// Where an operation's instruction stands: its block's address and its
+    /// index among the block's operations. `None` for a phi.
     pub fn op_site_for_inst(&self, id: InstId) -> Option<(u64, usize)> {
-        self.op_site_by_inst.get(&id).copied()
+        let inst = self.inst(id)?;
+        let block = self.blocks.get(inst.block.0 as usize)?;
+        let index = inst.ordinal.checked_sub(self.phi_count(block))?;
+        Some((block.addr, index))
     }
 
     /// Which machine instruction this operation came from.
