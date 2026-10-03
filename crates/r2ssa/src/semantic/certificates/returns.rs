@@ -319,9 +319,24 @@ pub(crate) fn exact_logical_return_projection(
     let Some(interface) = machine_context.and_then(SourceMachineContext::function_interface) else {
         return Some((boundary.value, physical_value.var.size, None));
     };
-    let (Some(logical), Some(type_graph)) =
-        (interface.return_logical_value(), interface.type_graph())
-    else {
+    // Only an interface that states no types leaves the result the carrier's
+    // width. One that states types and none for a register result has said
+    // nothing about it, and the carrier's width is not a statement either:
+    // the declaration owns the logical return, or nothing does.
+    let Some(type_graph) = interface.type_graph() else {
+        return Some((boundary.value, physical_value.var.size, None));
+    };
+    let Some(logical) = interface.return_logical_value() else {
+        if matches!(
+            interface.return_kind(),
+            SourceFunctionReturn::Register { .. }
+        ) {
+            r2il::refusal_evidence!(
+                "return-logical-projection",
+                "the interface types its values and states no type for its register result"
+            );
+            return None;
+        }
         return Some((boundary.value, physical_value.var.size, None));
     };
     let SourceFunctionReturn::Register { storage } = interface.return_kind() else {

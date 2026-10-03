@@ -45,8 +45,9 @@ pub struct Container {
     /// done, sorted and disjoint: ELF's `PT_GNU_RELRO`, and a Mach-O segment
     /// flagged `SG_READ_ONLY`, whose fixups dyld applies before sealing it.
     pub sealed: Vec<Range<u64>>,
-    /// Prototypes the program's own debug information declares.
-    pub declared: Vec<crate::Prototype>,
+    /// What the program's own debug information declares: its functions by
+    /// the address each body begins, its objects by address.
+    pub declarations: crate::Declarations,
     /// What the container states about the C library the program runs
     /// against. Evidence only: which platform's declarations apply is decided
     /// by the engine from it, and none of it is a guess from a symbol's name.

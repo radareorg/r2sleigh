@@ -21,12 +21,12 @@ pub use r2source::{
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
     SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity,
     SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
-    SourceCarrierProjection, SourceConventionSlots, SourceFormatParameterRule,
+    SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots, SourceFormatParameterRule,
     SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError, SourceParameterLocation,
-    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceType, SourceTypeAlias, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
-    StackAddressBase,
+    SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag,
+    SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
+    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 26;
@@ -2739,9 +2739,18 @@ mod tests {
 
     #[test]
     fn function_interface_retains_exact_logical_type_graph() {
-        assert_eq!(
+        // An `int` aligned to two bytes is m68k's; one aligned to eight, in
+        // four bytes, is no C object anywhere.
+        assert!(
             SourceTypeGraph::new(
                 [SourceType::new(0, SourceTypeKind::SignedInteger, 32, 16)],
+                [],
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            SourceTypeGraph::new(
+                [SourceType::new(0, SourceTypeKind::SignedInteger, 32, 64)],
                 [],
             ),
             Err(SourceTypeGraphError::InvalidType)

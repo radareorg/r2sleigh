@@ -1696,7 +1696,8 @@ pub(crate) struct CalleeSpans {
 }
 
 /// The frame positions no object may extend across: the slots the function
-/// saves a preserved register in, and the return address.
+/// saves a preserved register in, the return address, and the extents of the
+/// objects the source declares.
 ///
 /// A local is the program's; a save slot is the frame's bookkeeping. Under the
 /// UB-free premise a pointer to a local never reaches a save slot, so an
@@ -1757,6 +1758,18 @@ impl FrameBoundaries {
         for save in machine_context.frame_saves() {
             boundaries.insert_entry(save.entry_offset, width);
         }
+        // A declared object is one the source states, with its extent: no
+        // other object lies across its bytes, so its start bounds whatever
+        // lies below it, and its end whatever starts inside it.
+        let declared = machine_context
+            .function_interface()
+            .map(crate::SourceFunctionInterface::stack_slots)
+            .unwrap_or_default()
+            .iter()
+            .filter(|slot| slot.base() == StackAddressBase::StackPointer && slot.size_bytes() > 0);
+        for slot in declared {
+            boundaries.insert_entry(slot.offset(), i64::from(slot.size_bytes()));
+        }
         let Some(effect) = machine_context.call_effect() else {
             return boundaries;
         };
@@ -1801,10 +1814,18 @@ impl FrameBoundaries {
     /// save slot above it, else the entry stack pointer. `None` when neither
     /// is known in this base.
     pub(crate) fn ceiling(&self, root: StackAddressRoot) -> Option<i64> {
+        // The first slot that starts above the root, or the end of one the
+        // root starts at or inside: a declared object ends where it is
+        // declared to.
+        let bound = |(lo, hi): &(i64, i64)| match *lo > root.offset {
+            true => Some(*lo),
+            false if root.offset < *hi => Some(*hi),
+            false => None,
+        };
         let slot = self
             .slots
             .get(&root.base)
-            .and_then(|slots| slots.iter().map(|(lo, _)| *lo).find(|lo| *lo > root.offset));
+            .and_then(|slots| slots.iter().filter_map(bound).min());
         let entry = self
             .entry
             .get(&root.base)

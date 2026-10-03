@@ -386,12 +386,9 @@ impl<S: Source> OpenProgram<S> {
             });
         // Which C library's own declarations apply is what the container
         // states of it, and nothing else: `_Exit` is each library's, and
-        // `__fgets_chk` is two interfaces under one name.
-        let mut prototypes = r2abi::Prototypes::embedded_for(platform(container));
-        // What the binary's own debug information says beats the shared table:
-        // the table describes what a library is expected to look like, and
-        // this describes what this one is.
-        prototypes.declare(container.declared.iter().cloned());
+        // `__fgets_chk` is two interfaces under one name. The program's own
+        // declarations are read by address, beside these, not merged in.
+        let prototypes = r2abi::Prototypes::embedded_for(platform(container));
         self.assembled = Some(Assembled {
             machine: key,
             conventions,
@@ -431,6 +428,7 @@ impl<S: Source> OpenProgram<S> {
             call_effect: assembled.call_effect.as_ref(),
             compiler: &assembled.compiler,
             prototypes: &assembled.prototypes,
+            declarations: &self.source.container().declarations,
         })
     }
 

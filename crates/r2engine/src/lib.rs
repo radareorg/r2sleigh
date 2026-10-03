@@ -10,6 +10,7 @@
 #[path = "lib_tests.rs"]
 mod tests;
 
+mod declared;
 pub mod discovery;
 pub mod isolation;
 pub mod names;
@@ -1206,7 +1207,8 @@ fn source_member_type_spelling(
         | r2ssa::SourceTypeKind::Union { .. }
         | r2ssa::SourceTypeKind::Array { .. }
         | r2ssa::SourceTypeKind::Void
-        | r2ssa::SourceTypeKind::Code => return None,
+        | r2ssa::SourceTypeKind::Code { .. }
+        | r2ssa::SourceTypeKind::Opaque { .. } => return None,
     };
     // A member wider than one element repeats it. The capture states the repeat
     // count, but the Rust contract for a member does not carry it, so the
@@ -1435,7 +1437,7 @@ fn trusted_parsed_context(
     let signature = trusted_source_signature(trusted, ptr_bits);
     let external_type_db = trusted_external_type_db(trusted);
     // What this function's own capture states: an object's type is the program's, so no other request can add to it.
-    let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_radare2(
+    let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_source(
         trusted
             .source()
             .image()

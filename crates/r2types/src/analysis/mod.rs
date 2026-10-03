@@ -1529,6 +1529,31 @@ pub(crate) fn requalify(graph: CTypeLike, spelled: &CTypeLike) -> CTypeLike {
     }
 }
 
+/// Code of one of the graph's signatures, as the type layer states it.
+///
+/// A signature that states no parameters is not one that takes none, and the
+/// type layer has no spelling for the difference, so it is not spelled.
+fn source_code_like(
+    graph: &r2ssa::SourceTypeGraph,
+    signature_id: u32,
+    visiting: &mut BTreeSet<u32>,
+) -> Option<CTypeLike> {
+    let signature = graph
+        .signatures()
+        .get(usize::try_from(signature_id).ok()?)
+        .filter(|signature| signature.prototyped() && !signature.variadic())?;
+    let ret = source_type_like(graph, signature.return_type_id(), visiting)?;
+    let params = signature
+        .parameter_type_ids()
+        .iter()
+        .map(|parameter| source_type_like(graph, *parameter, visiting))
+        .collect::<Option<Box<[_]>>>()?;
+    Some(CTypeLike::Function {
+        ret: Box::new(ret),
+        params,
+    })
+}
+
 pub fn source_type_like(
     graph: &r2ssa::SourceTypeGraph,
     type_id: u32,
@@ -1597,16 +1622,28 @@ pub fn source_type_like(
             count,
         } => CTypeLike::Array(
             Box::new(source_type_like(graph, element_type_id, visiting)?),
-            Some(usize::try_from(count).ok()?),
+            match count {
+                Some(count) => Some(usize::try_from(count).ok()?),
+                None => None,
+            },
         ),
         r2ssa::SourceTypeKind::Float => CTypeLike::Float(bits),
         r2ssa::SourceTypeKind::Void => CTypeLike::Void,
-        // A function whose signature the graph does not carry; spelled with
-        // an empty parameter list, which in C is an unspecified one.
-        r2ssa::SourceTypeKind::Code => CTypeLike::Function {
-            ret: Box::new(CTypeLike::Void),
-            params: Box::new([]),
-        },
+        r2ssa::SourceTypeKind::Code { signature_id } => {
+            source_code_like(graph, signature_id, visiting)?
+        }
+        // A tag the source never completes keeps its name, which is all a
+        // pointer to it needs.
+        r2ssa::SourceTypeKind::Opaque { tag_id } => {
+            let tag = graph.opaque_tags().get(usize::try_from(tag_id).ok()?)?;
+            let name = tag.name().to_owned();
+            match tag.keyword() {
+                r2ssa::SourceTagKeyword::Struct => CTypeLike::Struct(name),
+                r2ssa::SourceTagKeyword::Union => CTypeLike::Union(name),
+                r2ssa::SourceTagKeyword::Enum => CTypeLike::Enum(name),
+                r2ssa::SourceTagKeyword::Typedef => CTypeLike::typedef(name),
+            }
+        }
     };
     visiting.remove(&type_id);
     Some(named(ty))

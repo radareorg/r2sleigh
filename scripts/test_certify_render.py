@@ -80,6 +80,46 @@ uint64_t _from_rbx(void)
 """
 
 
+# `list_len` from `tests/fixtures/rv_O0g`, as the engine renders it once the
+# binary's own declaration types its parameter: the struct it reads through
+# is defined above it, and `next` is a member of that struct.
+LIST_LEN = """
+struct node {
+    int32_t key;
+    struct node* next;
+    int8_t tag[8];
+};
+
+int32_t list_len(const struct node* n)
+{
+    /* r2dec proof: no individual construct is marked; 48 source obligations: 17 rendered, 31 elided, 0 refused; 7 statements rendered; 1 local name supplied by the source */
+    {
+        int32_t c;
+        c = 0;
+        while ((uint64_t)n != 0) {
+            c = (int32_t)((uint32_t)c + 1);
+            int64_t* tmp_11f80_4 = (int64_t*)n->next;
+            n = (const struct node*)tmp_11f80_4;
+        }
+        return c;
+    }
+}
+"""
+
+
+class AggregateTests(unittest.TestCase):
+    def test_a_member_of_a_defined_struct_is_no_object(self) -> None:
+        # Read as a declaration, `struct node* next;` made `n->next` a read of
+        # an object nothing assigns.
+        self.assertEqual(gate.uncertified_reads(lines(LIST_LEN)), "")
+
+    def test_an_object_declared_after_the_struct_is_still_one(self) -> None:
+        unassigned = LIST_LEN.replace(
+            "        int32_t c;\n", "        int32_t c;\n        int32_t key;\n"
+        ).replace("return c;", "return key;")
+        self.assertIn("reads key which nothing assigns", gate.uncertified_reads(lines(unassigned)))
+
+
 class DeclarationTests(unittest.TestCase):
     def test_a_return_is_not_a_declaration(self) -> None:
         self.assertIsNone(gate.DECLARATION.match("        return RSI_0;"))

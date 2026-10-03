@@ -22,8 +22,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 mod contracts;
+mod type_graph;
 
 pub use contracts::*;
+pub use type_graph::*;
 
 /// Endianness captured from the active analyzer configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

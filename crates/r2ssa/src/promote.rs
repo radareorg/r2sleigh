@@ -443,6 +443,12 @@ pub(crate) fn promote_private_stack_slots(
     // With no convention, nothing says which registers are preserved, and
     // every home is kept.
     let mut saves = BTreeSet::<i64>::new();
+    // The slots the prologue fills with a parameter's entry value. One that
+    // nothing writes again holds that value at every read, and the formal's
+    // own declaration names and types it, so promoting a declared one loses
+    // nothing the source stated. A home written again holds values the formal
+    // does not name; it keeps its memory, where its declaration is read.
+    let mut homes = BTreeSet::<i64>::new();
     let is_save = |root: &r2il::Varnode| {
         call_effect.is_none_or(|effect| {
             effect.preserves(CanonicalStorageId {
@@ -680,10 +686,12 @@ pub(crate) fn promote_private_stack_slots(
                         };
                         widths.entry(displacement).or_default().insert(val.size);
                         if index == 0
-                            && spills_an_incoming_value(block, at, val)
-                                .is_some_and(|root| is_save(&root))
+                            && let Some(root) = spills_an_incoming_value(block, at, val)
                         {
-                            saves.insert(displacement);
+                            match is_save(&root) {
+                                true => saves.insert(displacement),
+                                false => homes.insert(displacement),
+                            };
                         }
                         accesses.push(SlotAccess {
                             block: index,
@@ -863,7 +871,16 @@ pub(crate) fn promote_private_stack_slots(
         let is_save = saves.contains(displacement) && read_back(*displacement);
         let reachable = escaped.range(..=*displacement).next_back();
         let widest = *sizes.iter().next_back().expect("one width");
-        let is_declared = declared_covers(*displacement, widest);
+        let read_only_home = homes.contains(displacement)
+            && accesses
+                .iter()
+                .filter(|access| {
+                    access.slot.displacement == *displacement
+                        && matches!(blocks[access.block].ops[access.op], R2ILOp::Store { .. })
+                })
+                .count()
+                == 1;
+        let is_declared = declared_covers(*displacement, widest) && !read_only_home;
         if sizes.len() != 1 || is_declared || is_save || reachable.is_some() {
             r2il::refusal_evidence!(
                 "promote-stack-slot",

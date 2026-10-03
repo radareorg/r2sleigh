@@ -7,7 +7,7 @@
 //! threads behind an `Arc`.
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
-pub mod debug;
+mod debug;
 mod loader;
 mod platform;
 mod roles;
@@ -616,7 +616,7 @@ impl Image {
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
-        let declared = debug::read(&file).prototypes().collect();
+        let declarations = debug::read(&file);
         let unwind = unwind::read(&file);
 
         let mut entries = Vec::new();
@@ -707,7 +707,7 @@ impl Image {
                 loader_writes,
                 entries,
                 sealed,
-                declared,
+                declarations,
                 platform,
                 unwind,
             },
@@ -750,6 +750,13 @@ impl Image {
     /// Every frame the call-frame information states.
     pub fn unwind_frames(&self) -> &unwind::UnwindFrames {
         &self.container.unwind
+    }
+
+    /// What the binary's own debug information declares: its functions by
+    /// the address each body begins, its objects by address, and the types
+    /// both name. Empty where it carries none.
+    pub fn declarations(&self) -> &r2abi::Declarations {
+        &self.container.declarations
     }
 
     /// Every relocation record the loader applies, each once, in the order it applies them.

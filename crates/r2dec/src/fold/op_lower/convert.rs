@@ -133,7 +133,10 @@ fn implicit_is_exact(from: (bool, u32), _to: (bool, u32)) -> bool {
 /// thing, and the literal does not carry a width, so the type is stated the
 /// one way that is always available.
 fn spell_constant(expr: CExpr, to: &CType, pointer_bits: u32) -> CExpr {
-    if matches!(to, CType::Pointer(_)) {
+    // `Function` is how the type layer spells a pointer to code, and a
+    // constant becomes one only through the conversion an object pointer
+    // needs too.
+    if matches!(to, CType::Pointer(_) | CType::Function { .. }) {
         return CExpr::cast(to.clone(), expr);
     }
     // A constant read as a floating value is that value's bits; a payload no
@@ -640,6 +643,26 @@ mod tests {
         ))
         .expect("a constant address is a conversion");
         assert_eq!((ty, inner), (CType::ptr(CType::u8()), CExpr::IntLit(16)));
+    }
+
+    /// `dispatch(int (*fn)(int, int), int a)` called with the address of
+    /// `add`: the type layer spells a pointer to code as `Function`, and an
+    /// integer is no more a function pointer than an object pointer without
+    /// the conversion C requires (`-Wint-conversion`, an error from GCC 14).
+    #[test]
+    fn a_constant_passed_as_a_pointer_to_code_is_converted_to_it() {
+        let code = CType::Function {
+            ret: Box::new(CType::i32()),
+            params: Box::new([CType::i32(), CType::i32()]),
+        };
+        let (ty, inner, _) = cast_of(&convert(
+            CExpr::IntLit(0x11a9),
+            &CValue::Constant,
+            &code,
+            64,
+        ))
+        .expect("a code address is a conversion");
+        assert_eq!((ty, inner), (code, CExpr::IntLit(0x11a9)));
     }
 
     #[test]
