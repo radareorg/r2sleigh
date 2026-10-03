@@ -1,0 +1,112 @@
+//! The shell's prompt on a terminal: line editing, history and its search.
+//!
+//! Only a terminal gets this. A pipe, `-c` and `-q` read lines as they come
+//! and print no prompt, so a script's output is the same byte for byte
+//! whoever runs it.
+
+use crate::line::Reader;
+use crate::session::Session;
+use reedline::{
+    FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus,
+    Reedline, Signal,
+};
+use std::borrow::Cow;
+use std::ffi::OsStr;
+use std::path::PathBuf;
+
+/// How many lines the history keeps.
+const HISTORY: usize = 1000;
+
+/// Where the history is kept: `~/.r2s_history`, or nowhere without a home.
+fn history_file(home: Option<&OsStr>) -> Option<PathBuf> {
+    home.filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".r2s_history"))
+}
+
+/// The line editor, its history read from the file where there is one and
+/// held in memory otherwise.
+fn editor() -> Reedline {
+    let file = history_file(std::env::var_os("HOME").as_deref());
+    let history = match file {
+        Some(file) => FileBackedHistory::with_file(HISTORY, file.clone()).map_err(|error| {
+            eprintln!(
+                "r2s: history {}: {error}; kept for this session only",
+                file.display()
+            );
+        }),
+        None => Err(()),
+    }
+    .or_else(|()| FileBackedHistory::new(HISTORY).map_err(|_| ()));
+    let editor = Reedline::create();
+    match history {
+        Ok(history) => editor.with_history(Box::new(history)),
+        Err(()) => editor,
+    }
+}
+
+/// radare2's prompt: the seek, in brackets.
+struct Seek(u64);
+
+impl Prompt for Seek {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Owned(format!("[{:#010x}]", self.0))
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("> ")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed("... ")
+    }
+
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
+        let failing = match search.status {
+            PromptHistorySearchStatus::Passing => "",
+            PromptHistorySearchStatus::Failing => "failing ",
+        };
+        Cow::Owned(format!("({failing}reverse-i-search: {}) ", search.term))
+    }
+}
+
+/// Read lines at the terminal and run each, until one quits or the user
+/// leaves with `Ctrl-D`.
+pub(crate) fn interactive(session: &mut Session, reader: &mut Reader) {
+    let mut editor = editor();
+    loop {
+        match editor.read_line(&Seek(session.addr)) {
+            Ok(Signal::Success(line)) => {
+                // Whichever spelling quit, and wherever on the line it stood.
+                if crate::run_script(session, reader, &line).quit {
+                    break;
+                }
+            }
+            // A line given up, as a shell gives it up.
+            Ok(Signal::CtrlC) => {}
+            Ok(Signal::CtrlD) => break,
+            Err(error) => {
+                eprintln!("r2s: {error}");
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_history_is_kept_in_home_and_nowhere_without_one() {
+        assert_eq!(
+            history_file(Some(OsStr::new("/home/r"))),
+            Some(PathBuf::from("/home/r/.r2s_history"))
+        );
+        assert_eq!(history_file(Some(OsStr::new(""))), None);
+        assert_eq!(history_file(None), None);
+    }
+}

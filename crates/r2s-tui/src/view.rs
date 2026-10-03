@@ -1,10 +1,15 @@
 //! Drawing: the title bar, the pane in front, and the status and prompt lines.
+//!
+//! Everything here reads the state and nothing else; a pane whose answer is
+//! on its way draws what it last held and says it is waiting.
 
-use crate::app::{App, GraphPane, Message, Prompt, View, matches_filter};
+use crate::app::{
+    App, GraphPane, HeldRendering, Message, Prompt, View, matches_filter, screen_areas, split_areas,
+};
 use crate::graph::{Canvas, Ink};
-use crate::host::{DecompiledLine, EdgeKind, Host, ListKind};
+use crate::host::{DecompiledLine, EdgeKind, ListKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -17,33 +22,42 @@ const TITLE: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 const LIT: Style = Style::new().bg(Color::DarkGray);
 const VIEWPORT: Style = Style::new().fg(Color::Yellow);
 
-pub(crate) fn draw(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host) {
-    let [title, main, status] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    app.rows = usize::from(main.height.saturating_sub(2)).max(1);
+/// What a pane's title carries while its answer is on its way.
+pub const PENDING: &str = "…";
 
+/// The spinner the title bar turns while anything is on its way.
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+pub(crate) fn draw(app: &App, frame: &mut Frame<'_>) {
+    let [title, main, status] = screen_areas(frame.area());
+
+    let spinner = if app.waiting() {
+        format!("  {}", SPINNER[app.ticks % SPINNER.len()])
+    } else {
+        String::new()
+    };
+    let named = if app.opened {
+        app.title.as_str()
+    } else {
+        PENDING
+    };
     frame.render_widget(
         Paragraph::new(format!(
-            " r2s  {}  [{}]  {:#x}",
-            host.title(),
+            " r2s  {named}  [{}]  {:#x}{spinner}",
             app.view.title(),
-            host.seek()
+            app.seek
         ))
         .style(TITLE),
         title,
     );
 
     match app.view {
-        View::Disassembly => disassembly(app, frame, host, main),
-        View::Decompiler => decompiler(app, frame, host, main),
-        View::Hex => hex(app, frame, host, main),
-        View::Graph => graph(app, frame, host, main),
-        View::Split => split(app, frame, host, main),
-        View::List(kind) => list(app, frame, host, main, kind),
+        View::Disassembly => disassembly(app, frame, main),
+        View::Decompiler => decompiler(app, frame, main),
+        View::Hex => hex(app, frame, main),
+        View::Graph => graph(app, frame, main),
+        View::Split => split(app, frame, main),
+        View::List(kind) => list(app, frame, main, kind),
     }
 
     if let Message::Output(output) = &app.message {
@@ -68,6 +82,9 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host) {
         Prompt::None => match &app.message {
             Message::Info(text) => Line::from(text.as_str()),
             Message::Error(text) => Line::styled(text.as_str(), ERROR),
+            Message::None | Message::Output(_) if app.running > 0 => {
+                Line::styled(format!("{} {PENDING}", app.running_what), DIM)
+            }
             Message::None | Message::Output(_) => Line::styled(help(app.view), DIM),
         },
     };
@@ -89,15 +106,20 @@ fn help(view: View) -> &'static str {
     }
 }
 
-fn pane(title: String) -> Block<'static> {
+/// A pane's border and title, the title marked while an answer is pending.
+fn pane(title: String, pending: bool) -> Block<'static> {
+    let title = if pending {
+        format!("{} {PENDING} ", title.trim_end())
+    } else {
+        title
+    };
     Block::default().borders(Borders::ALL).title(title)
 }
 
-fn disassembly(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
-    app.listed = host.disassemble(app.top, app.rows);
-    app.cursor = app.cursor.min(app.listed.len().saturating_sub(1));
-    let lines = app
-        .listed
+fn disassembly(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let shown = app.shown_lines();
+    let cursor = app.cursor.min(shown.len().saturating_sub(1));
+    let lines = shown
         .iter()
         .enumerate()
         .map(|(row, line)| {
@@ -107,49 +129,25 @@ fn disassembly(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: 
                 spans.push(Span::styled(format!("  -> {target:#x}"), DIM));
             }
             let text = Line::from(spans);
-            if row == app.cursor {
+            if row == cursor {
                 text.style(CURSOR)
             } else {
                 text
             }
         })
         .collect::<Vec<_>>();
-    let body = if lines.is_empty() {
-        vec![Line::styled("nothing mapped here", ERROR)]
-    } else {
+    let pending = app.lines.pending();
+    let body = if !lines.is_empty() {
         lines
+    } else if pending || app.lines.held.is_none() {
+        Vec::new()
+    } else {
+        vec![Line::styled("nothing mapped here", ERROR)]
     };
     frame.render_widget(
-        Paragraph::new(body).block(pane(" disassembly ".to_owned())),
+        Paragraph::new(body).block(pane(" disassembly ".to_owned(), pending)),
         area,
     );
-}
-
-/// Make the held rendering the function's at the seek; whether it was asked
-/// for now.
-///
-/// The rendering is the function's, so it is kept while the seek stays
-/// between the lowest and highest instruction its lines were rendered from --
-/// an instruction no line names (a prologue's push) is still the function's --
-/// and asked for again only when the seek leaves that span. O(lines) per draw.
-fn decompiled(app: &mut App, host: &mut dyn Host) -> bool {
-    let seek = host.seek();
-    let inside = |lines: &[DecompiledLine]| {
-        let addresses = || lines.iter().flat_map(|line| line.addresses.iter().copied());
-        match (addresses().min(), addresses().max()) {
-            (Some(low), Some(high)) => (low..=high).contains(&seek),
-            _ => false,
-        }
-    };
-    let stale = match &app.decompiled {
-        Some((_, Ok(lines))) => !inside(lines),
-        Some((at, Err(_))) => *at != seek,
-        None => true,
-    };
-    if stale {
-        app.decompiled = Some((seek, host.decompile(seek)));
-    }
-    stale
 }
 
 /// The rows of a rendering from `skip`, highlighted as C, with `lit` lines
@@ -195,46 +193,46 @@ fn decompiler_title(lines: &[DecompiledLine]) -> String {
     }
 }
 
-fn decompiler(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
-    let seek = host.seek();
-    if decompiled(app, host)
-        && let Some((_, Ok(lines))) = &app.decompiled
-    {
-        // Land on the line the seek was rendered into.
-        app.cursor = lines
-            .iter()
-            .position(|line| line.addresses.binary_search(&seek).is_ok())
-            .unwrap_or(0);
-    }
-    let (body, title) = match &app.decompiled {
-        Some((_, Ok(lines))) => {
+fn decompiler(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let (body, title) = match &app.rendering.held {
+        Some(HeldRendering {
+            result: Ok(lines), ..
+        }) => {
             let skip = app.cursor.saturating_sub(app.rows.saturating_sub(1));
             let body = decompiled_rows(lines, skip, app.rows, Some(app.cursor), |_| false);
             (body, decompiler_title(lines))
         }
-        Some((_, Err(error))) => (
+        Some(HeldRendering {
+            result: Err(error), ..
+        }) => (
             vec![Line::styled(error.clone(), ERROR)],
             " decompiler ".to_owned(),
         ),
         None => (Vec::new(), " decompiler ".to_owned()),
     };
-    frame.render_widget(Paragraph::new(body).block(pane(title)), area);
+    frame.render_widget(
+        Paragraph::new(body).block(pane(title, app.rendering.pending())),
+        area,
+    );
 }
 
 /// The disassembly beside the C: the cursor moves in the disassembly, and
 /// every line of C rendered from the instruction under it is lit, the first
 /// of them kept in view.
-fn split(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-    disassembly(app, frame, host, left);
+fn split(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let [left, right] = split_areas(area);
+    disassembly(app, frame, left);
     // The disassembly seeks the line under its cursor as it moves; this
     // reads the same line, so the two never disagree by a draw.
-    let under = app.listed.get(app.cursor).map(|line| line.address);
-    decompiled(app, host);
+    let shown = app.shown_lines();
+    let under = shown
+        .get(app.cursor.min(shown.len().saturating_sub(1)))
+        .map(|line| line.address);
     let rows = usize::from(right.height.saturating_sub(2)).max(1);
-    let (body, title) = match &app.decompiled {
-        Some((_, Ok(lines))) => {
+    let (body, title) = match &app.rendering.held {
+        Some(HeldRendering {
+            result: Ok(lines), ..
+        }) => {
             let lit = |line: &DecompiledLine| {
                 under.is_some_and(|address| line.addresses.binary_search(&address).is_ok())
             };
@@ -245,28 +243,43 @@ fn split(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) 
                 decompiler_title(lines),
             )
         }
-        Some((_, Err(error))) => (
+        Some(HeldRendering {
+            result: Err(error), ..
+        }) => (
             vec![Line::styled(error.clone(), ERROR)],
             " decompiler ".to_owned(),
         ),
         None => (Vec::new(), " decompiler ".to_owned()),
     };
-    frame.render_widget(Paragraph::new(body).block(pane(title)), right);
+    frame.render_widget(
+        Paragraph::new(body).block(pane(title, app.rendering.pending())),
+        right,
+    );
 }
 
-fn hex(app: &App, frame: &mut Frame<'_>, host: &dyn Host, area: Rect) {
-    let bytes = host.read(app.top, app.rows * 16);
+fn hex(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    // The bytes held, at the address they were read from: the pane's own
+    // once they arrive.
+    let (base, bytes) = match &app.bytes.held {
+        Some(held) => (held.at, held.bytes.as_slice()),
+        None => (app.top, &[][..]),
+    };
+    let cursor = if base == app.top {
+        Some(app.cursor)
+    } else {
+        None
+    };
     let mut lines = Vec::with_capacity(app.rows);
     for row in 0..app.rows {
         let start = row * 16;
-        let address = app.top + start as u64;
+        let address = base + start as u64;
         let chunk = bytes.get(start..).map(|rest| &rest[..rest.len().min(16)]);
         let Some(chunk) = chunk.filter(|chunk| !chunk.is_empty()) else {
             break;
         };
         let mut spans = vec![Span::styled(format!("{address:#010x}  "), ADDRESS)];
         for (column, byte) in chunk.iter().enumerate() {
-            let here = start + column == app.cursor;
+            let here = cursor == Some(start + column);
             let text = match (here, app.editing) {
                 (true, Some(Some(high))) => format!("{high:x}_"),
                 _ => format!("{byte:02x}"),
@@ -288,20 +301,18 @@ fn hex(app: &App, frame: &mut Frame<'_>, host: &dyn Host, area: Rect) {
         spans.push(Span::styled(ascii, DIM));
         lines.push(Line::from(spans));
     }
-    if lines.is_empty() {
+    let pending = app.bytes.pending();
+    if lines.is_empty() && !pending && app.bytes.held.is_some() {
         lines.push(Line::styled("nothing mapped here", ERROR));
     }
     let title = match app.editing {
         Some(_) => " hex [edit] ".to_owned(),
         None => " hex ".to_owned(),
     };
-    frame.render_widget(Paragraph::new(lines).block(pane(title)), area);
+    frame.render_widget(Paragraph::new(lines).block(pane(title, pending)), area);
 }
 
-fn list(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect, kind: ListKind) {
-    if app.entries.as_ref().is_none_or(|(held, _)| *held != kind) {
-        app.entries = Some((kind, host.list(kind)));
-    }
+fn list(app: &App, frame: &mut Frame<'_>, area: Rect, kind: ListKind) {
     let entries = app.visible_entries();
     let len = entries.len();
     let cursor = app.cursor.min(len.saturating_sub(1));
@@ -323,14 +334,22 @@ fn list(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect, k
             }
         })
         .collect::<Vec<_>>();
-    let total = app.entries.as_ref().map_or(0, |(_, all)| all.len());
+    let total = app
+        .list
+        .held
+        .as_ref()
+        .filter(|held| held.kind == kind)
+        .map_or(0, |held| held.entries.len());
     let title = if app.filter.is_empty() {
         format!(" {} ({total}) ", kind.title())
     } else {
         debug_assert!(entries.iter().all(|e| matches_filter(&e.text, &app.filter)));
         format!(" {} ({len}/{total}) /{} ", kind.title(), app.filter)
     };
-    frame.render_widget(Paragraph::new(body).block(pane(title)), area);
+    frame.render_widget(
+        Paragraph::new(body).block(pane(title, app.list.pending())),
+        area,
+    );
 }
 
 fn inset(area: Rect, x: u16, y: u16) -> Rect {
@@ -342,58 +361,15 @@ fn inset(area: Rect, x: u16, y: u16) -> Rect {
     }
 }
 
-/// The graph pane: the function holding the seek, laid out once and painted
-/// through the window.
-/// Make the held graph the function's at the seek, selecting the block the
-/// seek is in; laid out only when the seek leaves the held function.
-fn held_graph(app: &mut App, host: &mut dyn Host) {
-    let seek = host.seek();
-    let held = app.graph.as_ref().map(|pane| match &pane.drawn {
-        Ok((graph, _)) => graph.node_at(seek),
-        Err(_) if pane.at == seek => Some(0),
-        Err(_) => None,
-    });
-    match held {
-        Some(Some(node)) => {
-            if let Some(pane) = &mut app.graph
-                && pane.selected != node
-                && pane.drawn.is_ok()
-            {
-                pane.selected = node;
-                pane.recentre = true;
-            }
-        }
-        _ => {
-            let drawn = host.graph(seek).map(|graph| {
-                let layout = crate::graph::lay_out(&graph, false);
-                (graph, layout)
-            });
-            let selected = match &drawn {
-                Ok((graph, _)) => graph
-                    .node_at(seek)
-                    .or_else(|| graph.node_at(graph.entry))
-                    .unwrap_or(0),
-                Err(_) => 0,
-            };
-            app.graph = Some(GraphPane {
-                at: seek,
-                drawn,
-                selected,
-                scroll: (0, 0),
-                mini: false,
-                recentre: true,
-                minimap: true,
-            });
-        }
-    }
-}
-
-fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
-    held_graph(app, host);
-    let Some(pane) = &mut app.graph else {
+/// The graph pane: the function holding the seek, laid out when it arrived
+/// and painted through the window.
+fn graph(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let pending = app.graph.pending();
+    let Some(pane) = &app.graph.held else {
+        frame.render_widget(pane(" graph ".to_owned(), pending), area);
         return;
     };
-    let block = pane_title(pane);
+    let block = pane_title(pane, pending);
     let inner = block.inner(area);
     let (graph, layout) = match &pane.drawn {
         Ok(drawn) => drawn,
@@ -405,13 +381,6 @@ fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) 
             return;
         }
     };
-    if pane.recentre && !layout.boxes.is_empty() {
-        let placed = layout.boxes[pane.selected.min(layout.boxes.len() - 1)];
-        let centre = i64::from(placed.x) + i64::from(placed.width) / 2;
-        pane.scroll.0 = (centre - i64::from(inner.width) / 2).max(0);
-        pane.scroll.1 = (i64::from(placed.y) - 2).max(0);
-        pane.recentre = false;
-    }
     frame.render_widget(block, area);
     let mut canvas = Canvas::new(
         pane.scroll.0,
@@ -503,7 +472,7 @@ fn minimap(frame: &mut Frame<'_>, inner: Rect, layout: &crate::graph::Layout, pa
     }
 }
 
-fn pane_title(held: &GraphPane) -> Block<'static> {
+fn pane_title(held: &GraphPane, pending: bool) -> Block<'static> {
     let title = match &held.drawn {
         Ok((graph, _)) => {
             let note = graph
@@ -520,7 +489,7 @@ fn pane_title(held: &GraphPane) -> Block<'static> {
         }
         Err(_) => " graph ".to_owned(),
     };
-    pane(title)
+    pane(title, pending)
 }
 
 /// radare2's edge colours: true green, false red, unconditional blue.

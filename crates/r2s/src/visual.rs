@@ -254,7 +254,7 @@ impl Host for Visual<'_> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use r2s_tui::{App, View};
+    use r2s_tui::{Driver, Msg, View};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -265,11 +265,9 @@ mod tests {
         Session::open(path).expect("the fixture opens")
     }
 
-    fn screen(app: &mut App, host: &mut Visual<'_>) -> String {
+    fn screen(driver: &Driver) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("a terminal");
-        terminal
-            .draw(|frame| app.draw(frame, host))
-            .expect("a draw");
+        terminal.draw(|frame| driver.draw(frame)).expect("a draw");
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)
             .map(|y| {
@@ -281,14 +279,37 @@ mod tests {
             .join("\n")
     }
 
-    fn press(app: &mut App, host: &mut Visual<'_>, code: KeyCode) {
-        assert!(app.handle_key(host, KeyEvent::new(code, KeyModifiers::NONE)));
+    fn press(driver: &mut Driver, code: KeyCode) {
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(driver.handle(Msg::Key(key)).expect("the engine is there"));
+        driver.settle().expect("the engine answers");
+    }
+
+    /// From `main`, move down to the call to `add`, follow it, and look at
+    /// the C.
+    fn follow_the_call_and_decompile(mut driver: Driver, call: usize) {
+        driver
+            .handle(Msg::Resize(120, 30))
+            .expect("the engine is there");
+        driver.settle().expect("the engine answers");
+        let shown = screen(&driver);
+        assert!(shown.contains("0x00001549  endbr64"), "{shown}");
+        for _ in 0..call {
+            press(&mut driver, KeyCode::Char('j'));
+        }
+        press(&mut driver, KeyCode::Enter);
+        assert_eq!(driver.app().seek(), 0x11a9);
+        press(&mut driver, KeyCode::Char('p'));
+        assert_eq!(driver.app().view(), View::Decompiler);
+        let decompiled = screen(&driver);
+        assert!(decompiled.contains("return"), "{decompiled}");
     }
 
     /// The panes show what the commands print: the disassembly row is `pd`'s
     /// spelling, following the first call lands on `add`, the decompiler pane
     /// renders the function the cursor is in, and the function list is
-    /// `afl`'s rows with their addresses.
+    /// `afl`'s rows with their addresses. The shell is served on this thread,
+    /// where it lives, and the visual mode drawn on another, as `V` runs them.
     #[test]
     fn the_visual_mode_over_the_real_engine_follows_a_call_and_decompiles_it() {
         let mut session = fixture();
@@ -296,24 +317,21 @@ mod tests {
         let mut host = Visual {
             session: &mut session,
         };
-        let mut app = App::new(&host);
-        let shown = screen(&mut app, &mut host);
-        assert!(shown.contains("0x00001549  endbr64"), "{shown}");
         let call = host
             .disassemble(0x1549, 64)
             .into_iter()
             .position(|line| line.target == Some(0x11a9))
             .expect("main calls add");
-        for _ in 0..call {
-            press(&mut app, &mut host, KeyCode::Char('j'));
-        }
-        screen(&mut app, &mut host);
-        press(&mut app, &mut host, KeyCode::Enter);
+        let (driver, engine) = r2s_tui::connect();
+        std::thread::scope(|scope| {
+            let ui = scope.spawn(move || follow_the_call_and_decompile(driver, call));
+            engine.serve(&mut host);
+            if let Err(panic) = ui.join() {
+                std::panic::resume_unwind(panic);
+            }
+        });
+        // The shell's cursor is where the visual mode left it.
         assert_eq!(host.seek(), 0x11a9);
-        press(&mut app, &mut host, KeyCode::Char('p'));
-        assert_eq!(app.view(), View::Decompiler);
-        let decompiled = screen(&mut app, &mut host);
-        assert!(decompiled.contains("return"), "{decompiled}");
         // The graph of the function holding an address inside its body is
         // that function's: `sum_array`'s loop body is not a function.
         let graph = host.graph(0x11e5).expect("sum_array graphs");
