@@ -186,7 +186,7 @@ and V (visual mode and shell experience).
 |------|-----------|------|
 | **PE** Byte-dependency relation; result width from the written-lane lattice; `narrow_zero_extend_input_size` deleted | F1 | `main` returns `int`-width, `gt` is not `uint8_t`, `fnv1a32` returns 32 bits (#58, #63) |
 | **P1.7** Entry lanes rewritten: `mint_entry_lane_projections` defines version-0 values (a live-in with a definition) and rebuilds a whole-register read from the declared lanes "with zero above them", which invents the caller's upper bytes. A formal becomes a view of a lane of its live-in (`ValueView`), and the bytes no declaration covers an `Unspecified(width)` leaf that renders as a residual | PE, F1 | The rotl listing makes no false claim; the sealed function validates |
-| **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted |
+| **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted. **Designed** in `doc/adr-provenance.md`: grade derived from basis, steps C0–C4; C0 (the vocabulary) done |
 | **P4** Memory model: frame partition (P4.1 in part), MemorySSA on stable ids, stack-protector elision, `afv`/`afi` from sealed entities | F1, C | The canary traps in #61 are gone; one owner of frame objects |
 | **Q** Demand-driven query database; `memo.rs` and the eight caches deleted | F1 | A random-write session equals a fresh open |
 | **I** Unread container facts: CFI extents and save slots as stated entries, LSDA, IBT, RELRO, init arrays | Q | Stripped discovery finds every FDE start |

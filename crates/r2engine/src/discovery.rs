@@ -27,7 +27,7 @@ use crate::native::Program;
 ///
 /// `r2source`'s, the one type every derived fact states its trust in; the
 /// engine's answers carry it, so the shell reads it from here.
-pub use r2source::confidence::{Basis, Confidence, Premise};
+pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
 
 /// One address discovery believes is a function.
 #[derive(Debug, Clone)]

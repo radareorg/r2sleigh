@@ -625,29 +625,10 @@ fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String
                     .map(r2engine::names::Name::spelled)
                     .or_else(|| one.name.clone())
                     .unwrap_or_else(|| format!("fcn.{:08x}", one.address)),
-                confidence: confidence(&one.confidence),
+                confidence: one.confidence.to_string(),
             }
         })
         .collect())
-}
-
-/// Why a function is believed to be one, and each premise that belief takes for granted.
-fn confidence(confidence: &r2engine::discovery::Confidence) -> String {
-    use r2engine::discovery::{Basis, Premise};
-    let mut spelled = match confidence.basis {
-        Basis::Stated => "stated",
-        Basis::Called => "called",
-        Basis::Handed => "handed",
-        Basis::Reached => "reached",
-    }
-    .to_owned();
-    for premise in &confidence.premises {
-        spelled.push_str(match premise {
-            Premise::ClosedWorld => "+closed-world",
-            Premise::UbFreeSource => "+ub-free",
-        });
-    }
-    spelled
 }
 
 /// Write text at the cursor, as `w` read it. radare2 writes nothing, and says
@@ -1461,18 +1442,4 @@ fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
     let segment = session.image().segment_at(vaddr)?;
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size).then(|| segment.file_offset + offset_in_segment)
-}
-
-#[cfg(test)]
-mod tests {
-    use r2engine::discovery::{Basis, Confidence, Premise};
-
-    #[test]
-    fn a_confidence_is_spelled_with_every_premise_it_takes_for_granted() {
-        assert_eq!(super::confidence(&Confidence::of(Basis::Called)), "called");
-        let assumed = Confidence::of(Basis::Handed)
-            .assuming(Premise::UbFreeSource)
-            .assuming(Premise::ClosedWorld);
-        assert_eq!(super::confidence(&assumed), "handed+closed-world+ub-free");
-    }
 }
