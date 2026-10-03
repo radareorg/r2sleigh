@@ -248,15 +248,15 @@ pub struct FunctionRenderFacts {
     pub certified_entities: BTreeMap<r2ssa::SemanticId, CertifiedEntity>,
     /// Canonical certified observable-effect graph keyed by stable semantic identity.
     pub certified_effects: BTreeMap<r2ssa::SemanticId, CertifiedEffect>,
-    /// Stable return-effect identity for each canonical SSA op site.
-    pub return_effects_by_op: BTreeMap<OpSiteKey, r2ssa::SemanticId>,
-    /// Stable memory-effect identities for each canonical SSA op site.
-    pub memory_effects_by_op: BTreeMap<MemoryOpSiteKey, Vec<r2ssa::SemanticId>>,
+    /// Stable return-effect identity for each returning instruction.
+    pub return_effects_by_inst: BTreeMap<r2ssa::InstId, r2ssa::SemanticId>,
+    /// Stable memory-effect identities for each instruction, by direction.
+    pub memory_effects_by_inst: BTreeMap<MemoryEffectKey, Vec<r2ssa::SemanticId>>,
     /// Value annotations that supplement, rather than duplicate, certified expressions.
     pub string_literals_by_value: BTreeMap<r2ssa::ValueId, StringLiteralRenderFact>,
     /// Type-owner render projections tied back to canonical memory-effect identities.
-    pub member_accesses_by_op: BTreeMap<MemoryOpSiteKey, Vec<MemberAccessRenderFact>>,
-    pub array_accesses_by_op: BTreeMap<MemoryOpSiteKey, Vec<ArrayAccessRenderFact>>,
+    pub member_accesses_by_inst: BTreeMap<MemoryEffectKey, Vec<MemberAccessRenderFact>>,
+    pub array_accesses_by_inst: BTreeMap<MemoryEffectKey, Vec<ArrayAccessRenderFact>>,
 }
 
 impl FunctionRenderFacts {
@@ -272,11 +272,11 @@ impl FunctionRenderFacts {
         self.certified_exprs.is_empty()
             && self.certified_entities.is_empty()
             && self.certified_effects.is_empty()
-            && self.return_effects_by_op.is_empty()
-            && self.memory_effects_by_op.is_empty()
+            && self.return_effects_by_inst.is_empty()
+            && self.memory_effects_by_inst.is_empty()
             && self.string_literals_by_value.is_empty()
-            && self.member_accesses_by_op.is_empty()
-            && self.array_accesses_by_op.is_empty()
+            && self.member_accesses_by_inst.is_empty()
+            && self.array_accesses_by_inst.is_empty()
     }
 
     pub fn expression_for_value(&self, value: r2ssa::ValueId) -> Option<&ExpressionRenderFact> {
@@ -375,28 +375,21 @@ impl FunctionRenderFacts {
         slots.is_empty().then_some(slot)
     }
 
-    pub fn return_effect_id_for_op(
-        &self,
-        block_addr: u64,
-        op_index: usize,
-    ) -> Option<r2ssa::SemanticId> {
-        self.return_effects_by_op
-            .get(&(block_addr, op_index))
-            .copied()
+    pub fn return_effect_id_for_inst(&self, inst: r2ssa::InstId) -> Option<r2ssa::SemanticId> {
+        self.return_effects_by_inst.get(&inst).copied()
     }
 
-    pub fn memory_effect_id_for_op(
+    pub fn memory_effect_id_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         space: r2il::SpaceId,
         address: r2ssa::ValueId,
         value: Option<r2ssa::ValueId>,
     ) -> Option<r2ssa::SemanticId> {
         let mut matching = self
-            .memory_effects_by_op
-            .get(&(block_addr, op_index, is_write))?
+            .memory_effects_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .filter_map(|id| match self.certified_effects.get(id) {
                 Some(CertifiedEffect::Memory { fact, .. })
@@ -428,14 +421,12 @@ impl FunctionRenderFacts {
     /// identity rather than uniqueness is what selects the fact.
     pub fn memory_access_for_access(
         &self,
-        block_addr: u64,
-        op_index: usize,
         is_write: bool,
         access: r2ssa::StructuredAccessId,
     ) -> Option<&MemoryAccessRenderFact> {
         let mut matching = self
-            .memory_effects_by_op
-            .get(&(block_addr, op_index, is_write))?
+            .memory_effects_by_inst
+            .get(&(access.inst, is_write))?
             .iter()
             .filter_map(|id| {
                 self.certified_effects
@@ -447,16 +438,15 @@ impl FunctionRenderFacts {
         matching.next().is_none().then_some(first)
     }
 
-    pub fn memory_access_for_op(
+    pub fn memory_access_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         space: r2il::SpaceId,
     ) -> Option<&MemoryAccessRenderFact> {
         let mut matching = self
-            .memory_effects_by_op
-            .get(&(block_addr, op_index, is_write))?
+            .memory_effects_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .filter_map(|id| {
                 self.certified_effects
@@ -488,11 +478,9 @@ impl FunctionRenderFacts {
         access: r2ssa::StructuredAccessId,
     ) -> Option<&MemberAccessRenderFact> {
         let memory = self.memory_access(access)?;
-        let facts = self.member_accesses_by_op.get(&(
-            memory.block_addr,
-            memory.op_index,
-            memory.is_write,
-        ))?;
+        let facts = self
+            .member_accesses_by_inst
+            .get(&(memory.access.inst, memory.is_write))?;
         let mut matching = facts.iter().filter(|fact| {
             fact.access == memory.access
                 && fact.object == memory.object
@@ -623,34 +611,28 @@ impl FunctionRenderFacts {
             .filter(|entity| matches!(entity, CertifiedEntity::LoopCarrier { .. }))
     }
 
-    pub fn return_for_op(
-        &self,
-        block_addr: u64,
-        op_index: usize,
-    ) -> Option<&ReturnValueRenderFact> {
-        self.return_effect_id_for_op(block_addr, op_index)
+    pub fn return_for_inst(&self, inst: r2ssa::InstId) -> Option<&ReturnValueRenderFact> {
+        self.return_effect_id_for_inst(inst)
             .and_then(|id| self.certified_effects.get(&id))
             .and_then(CertifiedEffect::return_fact)
     }
 
-    pub fn member_access_for_op(
+    pub fn member_access_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         field_name: &str,
         field_offset: u64,
         access_width: Option<u32>,
     ) -> Option<&MemberAccessRenderFact> {
-        self.member_accesses_by_op
-            .get(&(block_addr, op_index, is_write))?
+        self.member_accesses_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .find(|fact| {
                 let Some(memory) = self.memory_access(fact.access) else {
                     return false;
                 };
-                memory.block_addr == block_addr
-                    && memory.op_index == op_index
+                memory.access.inst == inst
                     && memory.is_write == is_write
                     && memory.object == fact.object
                     && memory.width == fact.access_width
@@ -660,52 +642,35 @@ impl FunctionRenderFacts {
             })
     }
 
-    pub fn member_access_for_op_any_direction(
+    pub fn member_access_for_inst_any_direction(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         field_name: &str,
         field_offset: u64,
         access_width: Option<u32>,
     ) -> Option<&MemberAccessRenderFact> {
-        self.member_access_for_op(
-            block_addr,
-            op_index,
-            false,
-            field_name,
-            field_offset,
-            access_width,
-        )
-        .or_else(|| {
-            self.member_access_for_op(
-                block_addr,
-                op_index,
-                true,
-                field_name,
-                field_offset,
-                access_width,
-            )
-        })
+        self.member_access_for_inst(inst, false, field_name, field_offset, access_width)
+            .or_else(|| {
+                self.member_access_for_inst(inst, true, field_name, field_offset, access_width)
+            })
     }
 
-    pub fn array_access_for_op(
+    pub fn array_access_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         field_offset: u64,
         element_stride: u64,
         access_width: Option<u32>,
     ) -> Option<&ArrayAccessRenderFact> {
-        self.array_accesses_by_op
-            .get(&(block_addr, op_index, is_write))?
+        self.array_accesses_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .find(|fact| {
                 let Some(memory) = self.memory_access(fact.access) else {
                     return false;
                 };
-                memory.block_addr == block_addr
-                    && memory.op_index == op_index
+                memory.access.inst == inst
                     && memory.is_write == is_write
                     && memory.object == fact.object
                     && memory.width == fact.access_width
@@ -715,32 +680,17 @@ impl FunctionRenderFacts {
             })
     }
 
-    pub fn array_access_for_op_any_direction(
+    pub fn array_access_for_inst_any_direction(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         field_offset: u64,
         element_stride: u64,
         access_width: Option<u32>,
     ) -> Option<&ArrayAccessRenderFact> {
-        self.array_access_for_op(
-            block_addr,
-            op_index,
-            false,
-            field_offset,
-            element_stride,
-            access_width,
-        )
-        .or_else(|| {
-            self.array_access_for_op(
-                block_addr,
-                op_index,
-                true,
-                field_offset,
-                element_stride,
-                access_width,
-            )
-        })
+        self.array_access_for_inst(inst, false, field_offset, element_stride, access_width)
+            .or_else(|| {
+                self.array_access_for_inst(inst, true, field_offset, element_stride, access_width)
+            })
     }
 
     pub fn has_stack_slot_offset(&self, offset: i64) -> bool {
@@ -1916,8 +1866,8 @@ impl FunctionFacts {
             // layout's `f_8`.
             let indexed = self
                 .render
-                .array_accesses_by_op
-                .get(&(memory.block_addr, memory.op_index, memory.is_write))
+                .array_accesses_by_inst
+                .get(&(memory.access.inst, memory.is_write))
                 .and_then(|facts| {
                     facts.iter().find(|fact| {
                         fact.access == memory.access
@@ -2013,8 +1963,6 @@ impl FunctionFacts {
             );
             member_facts.push(MemberAccessRenderFact {
                 access: memory.access,
-                block_addr: memory.block_addr,
-                op_index: memory.op_index,
                 object: memory.object,
                 is_write: memory.is_write,
                 field_offset: offset_bits / 8,
@@ -2030,8 +1978,8 @@ impl FunctionFacts {
             });
         }
         for fact in member_facts {
-            let key = (fact.block_addr, fact.op_index, fact.is_write);
-            let facts = self.render.member_accesses_by_op.entry(key).or_default();
+            let key = (fact.access.inst, fact.is_write);
+            let facts = self.render.member_accesses_by_inst.entry(key).or_default();
             // The declared name replaces one an external layout guessed: two facts for one
             // access are no fact at all, because the lookup requires exactly one.
             facts.retain(|existing| {
@@ -2077,8 +2025,11 @@ impl FunctionFacts {
             {
                 continue;
             }
-            let key = (candidate.block_addr, candidate.op_index, candidate.is_write);
-            let Some(effect_ids) = self.render.memory_effects_by_op.get(&key) else {
+            let Some(inst) = prepared.graph().inst_for_op(candidate.op) else {
+                continue;
+            };
+            let key = (inst, candidate.is_write);
+            let Some(effect_ids) = self.render.memory_effects_by_inst.get(&key) else {
                 continue;
             };
             for effect_id in effect_ids {
@@ -2089,8 +2040,7 @@ impl FunctionFacts {
                 else {
                     continue;
                 };
-                if memory.block_addr != candidate.block_addr
-                    || memory.op_index != candidate.op_index
+                if memory.access.inst != inst
                     || memory.is_write != candidate.is_write
                     || memory.width == 0
                     || memory.width != candidate.access_width
@@ -2114,18 +2064,16 @@ impl FunctionFacts {
         }
 
         for fact in member_facts {
-            let key = (fact.block_addr, fact.op_index, fact.is_write);
-            let facts = self.render.member_accesses_by_op.entry(key).or_default();
+            let key = (fact.access.inst, fact.is_write);
+            let facts = self.render.member_accesses_by_inst.entry(key).or_default();
             if !facts.contains(&fact) {
                 facts.push(fact);
             }
         }
 
-        for facts in self.render.member_accesses_by_op.values_mut() {
+        for facts in self.render.member_accesses_by_inst.values_mut() {
             facts.sort_by(|a, b| {
                 (
-                    a.block_addr,
-                    a.op_index,
                     a.is_write,
                     a.field_offset,
                     a.access_width,
@@ -2133,8 +2081,6 @@ impl FunctionFacts {
                     a.access,
                 )
                     .cmp(&(
-                        b.block_addr,
-                        b.op_index,
                         b.is_write,
                         b.field_offset,
                         b.access_width,
@@ -2162,8 +2108,6 @@ impl FunctionFacts {
             })
             .map(|cert| MemberAccessRenderFact {
                 access: memory.access,
-                block_addr: memory.block_addr,
-                op_index: memory.op_index,
                 object: memory.object,
                 is_write: memory.is_write,
                 field_offset,
@@ -2197,8 +2141,11 @@ impl FunctionFacts {
             {
                 continue;
             }
-            let key = (candidate.block_addr, candidate.op_index, candidate.is_write);
-            let Some(effect_ids) = self.render.memory_effects_by_op.get(&key) else {
+            let Some(inst) = prepared.graph().inst_for_op(candidate.op) else {
+                continue;
+            };
+            let key = (inst, candidate.is_write);
+            let Some(effect_ids) = self.render.memory_effects_by_inst.get(&key) else {
                 continue;
             };
             let effect_ids = effect_ids.clone();
@@ -2210,8 +2157,7 @@ impl FunctionFacts {
                 else {
                     continue;
                 };
-                if memory.block_addr != candidate.block_addr
-                    || memory.op_index != candidate.op_index
+                if memory.access.inst != inst
                     || memory.is_write != candidate.is_write
                     || memory.width == 0
                     || memory.width != candidate.access_width
@@ -2225,8 +2171,6 @@ impl FunctionFacts {
                 };
                 let fact = ArrayAccessRenderFact {
                     access: memory.access,
-                    block_addr: memory.block_addr,
-                    op_index: memory.op_index,
                     object: memory.object,
                     is_write: memory.is_write,
                     field_offset: candidate.field_offset,
@@ -2235,18 +2179,16 @@ impl FunctionFacts {
                     base: Some(base),
                     index: Some(index),
                 };
-                let facts = self.render.array_accesses_by_op.entry(key).or_default();
+                let facts = self.render.array_accesses_by_inst.entry(key).or_default();
                 if !facts.contains(&fact) {
                     facts.push(fact);
                 }
             }
         }
 
-        for facts in self.render.array_accesses_by_op.values_mut() {
+        for facts in self.render.array_accesses_by_inst.values_mut() {
             facts.sort_by_key(|fact| {
                 (
-                    fact.block_addr,
-                    fact.op_index,
                     fact.is_write,
                     fact.field_offset,
                     fact.element_stride,

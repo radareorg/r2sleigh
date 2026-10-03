@@ -396,9 +396,15 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // no successor, and it is resolved: its callsite fact renders the
         // terminal return. Only a dispatch nothing certified is unresolved.
         let certified_terminal_call = self.func.get_block(addr).is_some_and(|block| {
-            block.ops().iter().enumerate().any(|(op_idx, _)| {
-                self.fold_ctx
-                    .certified_call_render_fact_for_op(addr, op_idx)
+            let graph = self
+                .fold_ctx
+                .inputs
+                .prepared_ssa
+                .map(r2ssa::SsaArtifact::graph);
+            block.sited().any(|(id, _)| {
+                graph
+                    .and_then(|graph| graph.inst_for_op(id))
+                    .and_then(|call| self.fold_ctx.certified_call_render_fact_for_op(call))
                     .is_some_and(|fact| fact.disposition.is_terminal_return())
             })
         });
@@ -591,16 +597,15 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // taking the last op then found one of those and declined, which is one
         // of the two reasons no real jump table has ever structured.
         let mut dispatches = block
-            .ops()
-            .iter()
+            .sited()
             .enumerate()
-            .filter_map(|(index, op)| match op {
+            .filter_map(|(index, (id, op))| match op {
                 SSAOp::BranchInd { target, .. } | SSAOp::Switch { selector: target } => {
-                    Some((index, target))
+                    Some((index, id, target))
                 }
                 _ => None,
             });
-        let Some((op_idx, target)) = dispatches.next() else {
+        let Some((op_idx, dispatch, target)) = dispatches.next() else {
             r2il::refusal_evidence!("switch-selector", "{switch_addr:#x} has no indirect branch");
             return Ok(None);
         };
@@ -680,7 +685,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .fold_ctx
             .inputs
             .prepared_ssa
-            .and_then(|prepared| prepared.graph().inst_id_for_op_site(switch_addr, op_idx))
+            .and_then(|prepared| prepared.graph().inst_for_op(dispatch))
         else {
             return Ok(None);
         };

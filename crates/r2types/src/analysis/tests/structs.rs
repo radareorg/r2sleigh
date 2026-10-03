@@ -517,8 +517,7 @@ fn local_generated_struct_replaces_stale_generated_external_layout() {
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: 3,
+            op: op_at(&ssa_blocks, 0x401000, 3),
             is_write: false,
             field_offset: 8,
             element_stride: 56,
@@ -1216,12 +1215,12 @@ fn local_struct_inference_uses_memory_ssa_for_spilled_element_pointer() {
         version: 1,
     };
     let memory_versions = LocalMemoryVersionFacts {
-        stores_by_site: HashMap::from([((entry, 4), vec![stack_version])]),
-        loads_by_site: HashMap::from([
-            ((entry, 5), vec![stack_version]),
-            ((successor, 0), vec![stack_version]),
-            ((successor, 3), vec![stack_version]),
-            ((successor, 6), vec![stack_version]),
+        stores_by_op: HashMap::from([(op_at(&blocks, entry, 4), vec![stack_version])]),
+        loads_by_op: HashMap::from([
+            (op_at(&blocks, entry, 5), vec![stack_version]),
+            (op_at(&blocks, successor, 0), vec![stack_version]),
+            (op_at(&blocks, successor, 3), vec![stack_version]),
+            (op_at(&blocks, successor, 6), vec![stack_version]),
         ]),
         phi_inputs: HashMap::new(),
         value_ids: HashMap::from([(SSAVar::new("W1", 0, 4), r2ssa::ValueId(1))]),
@@ -1432,8 +1431,7 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
         vec![
             ScalarArrayRenderCandidate {
                 slot: 0,
-                block_addr: 0x4012d0,
-                op_index: 6,
+                op: op_at(&ssa_blocks, 0x4012d0, 6),
                 is_write: false,
                 field_offset: 0x10,
                 element_stride: 40,
@@ -1442,8 +1440,7 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
             },
             ScalarArrayRenderCandidate {
                 slot: 0,
-                block_addr: 0x4012d0,
-                op_index: 8,
+                op: op_at(&ssa_blocks, 0x4012d0, 8),
                 is_write: false,
                 field_offset: 4,
                 element_stride: 40,
@@ -1452,8 +1449,7 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
             },
             ScalarArrayRenderCandidate {
                 slot: 0,
-                block_addr: 0x4012d0,
-                op_index: 9,
+                op: op_at(&ssa_blocks, 0x4012d0, 9),
                 is_write: false,
                 field_offset: 0,
                 element_stride: 40,
@@ -1605,8 +1601,7 @@ fn stack_home_strength_reduced_index_certifies_struct_array_field_access() {
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: 8,
+            op: op_at(&ssa_blocks, 0x401000, 8),
             is_write: false,
             field_offset: 0x34,
             element_stride: 56,

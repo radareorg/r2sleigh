@@ -1364,12 +1364,10 @@ impl SsaArtifact {
         &self.facts.obligations
     }
 
-    pub fn callsite_certificate_for_op(
+    pub fn callsite_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&CallsiteCertificate> {
-        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let callsite = self.facts.certificates.callsites_by_inst.get(&inst)?;
         self.facts.certificates.callsites.get(callsite)
     }
@@ -1389,25 +1387,24 @@ impl SsaArtifact {
             .certificates
             .callsites
             .values()
-            .filter(|certificate| certificate.block_addr == block_addr);
+            .filter(|certificate| self.graph().block_addr_of(certificate.at) == Some(block_addr));
         let certificate = found.next()?;
         found.next().is_none().then_some(certificate)
     }
 
-    pub fn memory_certificates_for_op_site(
+    pub fn memory_certificates_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Vec<&MemoryAccessCertificate> {
         let certs = &self.facts.certificates;
         let read = certs
-            .memory_accesses_by_op
-            .get(&(block_addr, op_idx, false))
+            .memory_accesses_by_inst
+            .get(&(inst, false))
             .into_iter()
             .flatten();
         let write = certs
-            .memory_accesses_by_op
-            .get(&(block_addr, op_idx, true))
+            .memory_accesses_by_inst
+            .get(&(inst, true))
             .into_iter()
             .flatten();
         read.chain(write)
@@ -1415,17 +1412,16 @@ impl SsaArtifact {
             .collect()
     }
 
-    pub fn memory_certificate_for_op_site(
+    pub fn memory_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
         is_write: bool,
     ) -> Option<&MemoryAccessCertificate> {
         let certs = &self.facts.certificates;
         self.facts
             .certificates
-            .memory_accesses_by_op
-            .get(&(block_addr, op_idx, is_write))?
+            .memory_accesses_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .filter_map(|id| certs.memory_accesses.get(id))
             .find(|cert| cert.is_write == is_write)
@@ -1438,12 +1434,10 @@ impl SsaArtifact {
         self.facts.certificates.stack_reloads.get(&value_id)
     }
 
-    pub fn stack_reload_certificate_for_op(
+    pub fn stack_reload_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&StackReloadSourceCertificate> {
-        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let value = self.graph().inst(inst)?.output?;
         self.facts.certificates.stack_reloads.get(&value)
     }
@@ -1455,12 +1449,10 @@ impl SsaArtifact {
         self.facts.certificates.call_results.get(&value_id)
     }
 
-    pub fn call_result_certificate_for_op(
+    pub fn call_result_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&CallResultCertificate> {
-        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let value = self.facts.certificates.call_results_by_inst.get(&inst)?;
         self.facts.certificates.call_results.get(value)
     }
@@ -1479,12 +1471,10 @@ impl SsaArtifact {
             .collect()
     }
 
-    pub fn return_certificate_for_op(
+    pub fn return_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&ReturnValueCertificate> {
-        let inst = self.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let index = self.facts.certificates.returns_by_inst.get(&inst)?;
         self.facts.certificates.returns.get(*index)
     }
@@ -1606,8 +1596,12 @@ impl SsaArtifact {
             })
     }
 
-    pub fn inst_op_site(&self, inst_id: crate::graph::InstId) -> Option<(u64, usize)> {
-        self.graph().op_site_for_inst(inst_id)
+    /// The instruction a test names by its block and its place among the
+    /// block's operations.
+    #[cfg(test)]
+    pub(crate) fn inst_at(&self, block_addr: u64, index: usize) -> Option<crate::graph::InstId> {
+        let op = self.function().get_block(block_addr)?.op_id(index)?;
+        self.graph().inst_for_op(op)
     }
 
     pub fn object_for_var(&self, var: &SSAVar, space: r2il::SpaceId) -> Option<ObjectId> {
@@ -1616,25 +1610,17 @@ impl SsaArtifact {
             .and_then(|value_id| self.objects().object_for_value(value_id, space))
     }
 
-    pub fn memory_uses_for_op_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<&[MemoryUseFact]> {
-        self.graph()
-            .inst_id_for_op_site(block_addr, op_idx)
-            .and_then(|inst_id| self.memory().uses_by_inst.get(&inst_id))
+    pub fn memory_uses_for_inst(&self, inst: crate::graph::InstId) -> Option<&[MemoryUseFact]> {
+        self.memory()
+            .uses_by_inst
+            .get(&inst)
             .map(|facts| facts.as_slice())
     }
 
-    pub fn memory_defs_for_op_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<&[MemoryDefFact]> {
-        self.graph()
-            .inst_id_for_op_site(block_addr, op_idx)
-            .and_then(|inst_id| self.memory().defs_by_inst.get(&inst_id))
+    pub fn memory_defs_for_inst(&self, inst: crate::graph::InstId) -> Option<&[MemoryDefFact]> {
+        self.memory()
+            .defs_by_inst
+            .get(&inst)
             .map(|facts| facts.as_slice())
     }
 

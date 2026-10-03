@@ -317,10 +317,10 @@ impl SSAFunction {
             }
             // The operation as the function holds it, which the graph's
             // payload restates.
-            let Some((id, SSAOp::Insert(insert))) = graph
-                .op_site_for_inst(inst.id)
-                .and_then(|(block, index)| self.get_block(block)?.sited().nth(index))
-            else {
+            let Some((id, SSAOp::Insert(insert))) = graph.op_for_inst(inst.id).and_then(|id| {
+                let block = self.get_block(graph.block_addr_of(inst.id)?)?;
+                Some((id, block.ops().get(block.position(id)?)?))
+            }) else {
                 continue;
             };
             r2il::refusal_evidence!(

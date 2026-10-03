@@ -19,24 +19,23 @@
 
 use std::collections::BTreeMap;
 
+use r2ssa::InstId;
+
 use crate::ast::{CExpr, CFunction, CStmt};
 use crate::binding_plan::BindingNameResolution;
 use crate::structured_region::{RegionId, SealedStructuredRegionArtifact};
 
-/// A call site, identified by the address of the call and its index there.
-pub(crate) type CallSite = (u64, usize);
-
 /// A repeated call site lacks an upstream one-evaluation certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SingleEvaluationError {
-    RepeatedCallRequiresCertifiedBinding { site: CallSite, occurrences: usize },
+    RepeatedCallRequiresCertifiedBinding { site: InstId, occurrences: usize },
 }
 
-fn source_of(expr: &CExpr) -> Option<CallSite> {
+fn source_of(expr: &CExpr) -> Option<InstId> {
     match expr.unobserved() {
         CExpr::Call {
             site: Some(site), ..
-        } => Some(**site),
+        } => Some(*site),
         _ => None,
     }
 }
@@ -54,7 +53,7 @@ fn verify_call_sites_are_single_per_execution(
     func: &CFunction,
     regions: Option<&SealedStructuredRegionArtifact>,
 ) -> Result<(), SingleEvaluationError> {
-    let mut occurrences: BTreeMap<CallSite, Vec<Option<RegionId>>> = BTreeMap::new();
+    let mut occurrences: BTreeMap<InstId, Vec<Option<RegionId>>> = BTreeMap::new();
     for stmt in &func.body {
         collect_in_stmt(stmt, regions, None, &mut occurrences);
     }
@@ -86,7 +85,7 @@ fn collect_in_stmt(
     stmt: &CStmt,
     regions: Option<&SealedStructuredRegionArtifact>,
     current_region: Option<RegionId>,
-    occurrences: &mut BTreeMap<CallSite, Vec<Option<RegionId>>>,
+    occurrences: &mut BTreeMap<InstId, Vec<Option<RegionId>>>,
 ) {
     match stmt {
         CStmt::StructuredRegion { marker, stmt } => {
@@ -115,7 +114,7 @@ fn collect_in_stmt(
 fn collect_in_expr(
     expr: &CExpr,
     current_region: Option<RegionId>,
-    occurrences: &mut BTreeMap<CallSite, Vec<Option<RegionId>>>,
+    occurrences: &mut BTreeMap<InstId, Vec<Option<RegionId>>>,
 ) {
     expr.visit(&mut |node| {
         if let Some(source) = source_of(node) {
@@ -201,12 +200,12 @@ mod tests {
     fn call(
         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
         name: &str,
-        site: CallSite,
+        site: InstId,
     ) -> CExpr {
         CExpr::Call {
             func: Box::new(CExpr::Var(crate::symbol::declare(symbols, name))),
             args: vec![CExpr::IntLit(16)],
-            site: Some(Box::new(site)),
+            site: Some(site),
         }
     }
 
@@ -242,8 +241,8 @@ mod tests {
         let func = function_from(
             &symbols,
             vec![
-                CStmt::Expr(call(&symbols, "fcn.1000", (0x1000, 0))),
-                CStmt::Return(Some(call(&symbols, "fcn.1000", (0x1000, 0)))),
+                CStmt::Expr(call(&symbols, "fcn.1000", InstId(0))),
+                CStmt::Return(Some(call(&symbols, "fcn.1000", InstId(0)))),
             ],
         );
         let before = func.body.clone();
@@ -252,7 +251,7 @@ mod tests {
             verify_call_sites_are_single_per_execution(&func, None),
             Err(
                 SingleEvaluationError::RepeatedCallRequiresCertifiedBinding {
-                    site: (0x1000, 0),
+                    site: InstId(0),
                     occurrences: 2,
                 }
             )
@@ -266,8 +265,8 @@ mod tests {
         let func = function_from(
             &symbols,
             vec![
-                CStmt::Expr(call(&symbols, "fcn.1000", (0x1000, 0))),
-                CStmt::Return(Some(call(&symbols, "fcn.1000", (0x2000, 0)))),
+                CStmt::Expr(call(&symbols, "fcn.1000", InstId(0))),
+                CStmt::Return(Some(call(&symbols, "fcn.1000", InstId(1)))),
             ],
         );
         let before = func.body.clone();
@@ -290,11 +289,11 @@ mod tests {
                     cond: CExpr::IntLit(1),
                     then_body: Box::new(CStmt::structured_region(
                         StructuredRegionMarker::unsealed(0x1020, StructuredRegionKind::Block),
-                        CStmt::Expr(call(&symbols, "fcn.1000", (0x1000, 0))),
+                        CStmt::Expr(call(&symbols, "fcn.1000", InstId(0))),
                     )),
                     else_body: Some(Box::new(CStmt::structured_region(
                         StructuredRegionMarker::unsealed(0x1030, StructuredRegionKind::Block),
-                        CStmt::Expr(call(&symbols, "fcn.1000", (0x1000, 0))),
+                        CStmt::Expr(call(&symbols, "fcn.1000", InstId(0))),
                     ))),
                 },
             ),

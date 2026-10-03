@@ -46,17 +46,10 @@ fn callee_declaration_return_type(
 }
 
 impl<'a> FoldingContext<'a> {
-    pub(super) fn prepared_direct_call_target(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<u64> {
+    pub(super) fn prepared_direct_call_target(&self, call: InstId) -> Option<u64> {
         self.inputs
             .callsite_facts()?
-            .arguments_for_site(r2types::CallsiteKey {
-                block_addr,
-                op_index: op_idx,
-            })?
+            .arguments_for_site(r2types::CallsiteKey { at: call })?
             .direct_target
     }
 
@@ -102,8 +95,7 @@ impl<'a> FoldingContext<'a> {
     /// call came to be rendered as `RAX_3(...)`, which is not callable C.
     pub(super) fn certified_callee_signature(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
         args: &CertifiedCallArgs,
     ) -> OpLoweringResult<(CType, Vec<CType>, bool)> {
         // A callee body captured with this caller owns the strongest logical
@@ -113,10 +105,10 @@ impl<'a> FoldingContext<'a> {
         // widths the call itself proves rather than trusting a name or an
         // incomplete recorded prototype.
         let cert = self
-            .certified_callsite_for_op(block_addr, op_idx)
+            .certified_callsite_for_op(call)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
         let render_fact = self
-            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .certified_call_render_fact_for_op(call)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
         // Only the named parameters go in the list. The tail this call passes
         // is what differs between call sites, and the ellipsis stands for it.
@@ -127,7 +119,7 @@ impl<'a> FoldingContext<'a> {
                 .ok_or_else(|| {
                     r2il::refusal_evidence!(
                         "variadic-callsite-count",
-                        "callsite=({block_addr:#x}, {op_idx}) target={:?} arguments={} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
+                        "callsite={call:?} target={:?} arguments={} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
                         cert.direct_target,
                         args.values.len(),
                         cert.fixed_argument_count,
@@ -152,7 +144,7 @@ impl<'a> FoldingContext<'a> {
             if signature.variadic != cert.variadic || signature.params.len() != named {
                 r2il::refusal_evidence!(
                     "callee-signature-arity",
-                    "callsite=({block_addr:#x}, {op_idx}) target={:?} certified_arguments={} named={named} signature_params={} fixed_argument_count={:?} call_variadic={} signature_variadic={} argument_locations={:?}",
+                    "callsite={call:?} target={:?} certified_arguments={} named={named} signature_params={} fixed_argument_count={:?} call_variadic={} signature_variadic={} argument_locations={:?}",
                     cert.direct_target,
                     args.values.len(),
                     signature.params.len(),
@@ -173,7 +165,7 @@ impl<'a> FoldingContext<'a> {
             )
         } else {
             let call_result_bits = self
-                .certified_call_result_value((block_addr, op_idx))
+                .certified_call_result_value(call)
                 .and_then(|value| self.machine_value_width_bits(value));
             let ret_type = callee_declaration_return_type(
                 render_fact.disposition,
@@ -183,7 +175,7 @@ impl<'a> FoldingContext<'a> {
             .ok_or_else(|| {
                 r2il::refusal_evidence!(
                     "callee-declaration-return",
-                    "callsite=({block_addr:#x}, {op_idx}) disposition={:?} function_return_type={:?} call_result_bits={call_result_bits:?}",
+                    "callsite={call:?} disposition={:?} function_return_type={:?} call_result_bits={call_result_bits:?}",
                     render_fact.disposition,
                     self.inputs.function_return_type
                 );
@@ -220,15 +212,14 @@ impl<'a> FoldingContext<'a> {
     pub(super) fn record_callee_declaration(
         &self,
         func_expr: &CExpr,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
         args: &CertifiedCallArgs,
     ) -> OpLoweringResult<()> {
         let CExpr::External { name, .. } = func_expr.unobserved() else {
             return Ok(());
         };
         let cert = self
-            .certified_callsite_for_op(block_addr, op_idx)
+            .certified_callsite_for_op(call)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
         // A call to this function needs no prototype: its definition is the
         // one being written.
@@ -242,10 +233,9 @@ impl<'a> FoldingContext<'a> {
             return Ok(());
         }
         let render_fact = self
-            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .certified_call_render_fact_for_op(call)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
-        let (ret_type, params, variadic) =
-            self.certified_callee_signature(block_addr, op_idx, args)?;
+        let (ret_type, params, variadic) = self.certified_callee_signature(call, args)?;
         let from_source_signature = cert.callee_signature.is_some();
         let declaration = crate::ast::CExternDecl {
             name: name.clone(),
@@ -263,7 +253,7 @@ impl<'a> FoldingContext<'a> {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 r2il::refusal_evidence!(
                     "callee-declaration",
-                    "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} disposition={:?} declaration={:?}",
+                    "callsite={call:?} name={} signature={} fixed_argument_count={:?} arguments={:?} disposition={:?} declaration={:?}",
                     declaration.name,
                     cert.callee_signature.is_some(),
                     cert.fixed_argument_count,
@@ -291,7 +281,7 @@ impl<'a> FoldingContext<'a> {
                         declaration,
                         from_source_signature,
                     },
-                    (block_addr, op_idx),
+                    call,
                     (cert, render_fact),
                 ),
         }
@@ -311,13 +301,12 @@ impl<'a> FoldingContext<'a> {
             crate::fold::context::RecordedCalleeDeclaration,
         >,
         proposed: crate::fold::context::RecordedCalleeDeclaration,
-        site: (u64, usize),
+        call: InstId,
         evidence: (
             &r2types::CallsiteArgumentFacts,
             &r2types::CallsiteRenderFact,
         ),
     ) -> OpLoweringResult<()> {
-        let (block_addr, op_idx) = site;
         let (cert, render_fact) = evidence;
         let crate::fold::context::RecordedCalleeDeclaration {
             declaration,
@@ -351,7 +340,7 @@ impl<'a> FoldingContext<'a> {
         {
             r2il::refusal_evidence!(
                 "callee-declaration-stated",
-                "callsite=({block_addr:#x}, {op_idx}) name={} takes {:?} over {:?}",
+                "callsite={call:?} name={} takes {:?} over {:?}",
                 declaration.name,
                 match from_source_signature {
                     true => &agreed,
@@ -379,7 +368,7 @@ impl<'a> FoldingContext<'a> {
         {
             r2il::refusal_evidence!(
                 "callee-declaration-arity",
-                "callsite=({block_addr:#x}, {op_idx}) name={} first={:?} this={:?} admitted={reconciled:?}",
+                "callsite={call:?} name={} first={:?} this={:?} admitted={reconciled:?}",
                 declaration.name,
                 slot.get().declaration,
                 agreed
@@ -389,7 +378,7 @@ impl<'a> FoldingContext<'a> {
         }
         r2il::refusal_evidence!(
             "callee-declaration-conflict",
-            "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} registers={:?} stack={:?} disposition={:?} first={:?} this={:?}",
+            "callsite={call:?} name={} signature={} fixed_argument_count={:?} arguments={:?} registers={:?} stack={:?} disposition={:?} first={:?} this={:?}",
             declaration.name,
             cert.callee_signature.is_some(),
             cert.fixed_argument_count,
@@ -427,13 +416,13 @@ impl<'a> FoldingContext<'a> {
     /// to produce.
     fn call_argument_as_declared(
         &self,
-        site: (u64, usize),
+        call: InstId,
         argument_index: usize,
         value: r2ssa::ValueId,
         expr: CExpr,
     ) -> CExpr {
         let Some(declared) = self
-            .certified_callsite_for_op(site.0, site.1)
+            .certified_callsite_for_op(call)
             .and_then(|cert| cert.callee_signature.as_ref())
             .and_then(|signature| signature.params.get(argument_index))
             .cloned()
@@ -447,9 +436,7 @@ impl<'a> FoldingContext<'a> {
             .or_else(|| self.value_type(value));
         r2il::refusal_evidence!(
             "call-argument-conversion",
-            "{:#x}:{} arg {argument_index} {value:?} source={source:?} declared={declared:?} expr={expr:?}",
-            site.0,
-            site.1
+            "{call:?} arg {argument_index} {value:?} source={source:?} declared={declared:?} expr={expr:?}"
         );
         self.convert_from(expr, source.as_ref(), &declared)
     }
@@ -464,23 +451,16 @@ impl<'a> FoldingContext<'a> {
 
     fn resolved_callee_target(
         &self,
-        source_call: Option<(u64, usize)>,
+        source_call: Option<InstId>,
         prepared_direct_target: Option<u64>,
     ) -> Option<r2types::ResolvedCalleeTarget> {
-        let callsite = source_call.map(|(block_addr, op_idx)| r2types::CallsiteKey {
-            block_addr,
-            op_index: op_idx,
-        });
-        let prepared_call_view = source_call
-            .and_then(|(block_addr, op_idx)| self.prepared_call_view_for_site(block_addr, op_idx));
+        let callsite = source_call.map(|call| r2types::CallsiteKey { at: call });
+        let prepared_call_view =
+            source_call.and_then(|call| self.prepared_call_view_for_site(call));
         let prepared_identity = prepared_call_view.and_then(|view| view.callee_identity.as_ref());
         let prepared_direct_target = prepared_direct_target
             .or_else(|| prepared_call_view.and_then(|view| view.direct_target))
-            .or_else(|| {
-                source_call.and_then(|(block_addr, op_idx)| {
-                    self.prepared_direct_call_target(block_addr, op_idx)
-                })
-            });
+            .or_else(|| source_call.and_then(|call| self.prepared_direct_call_target(call)));
         r2types::CalleeResolutionFacts::resolve_target_policy(
             r2types::CalleeTargetResolutionRequest {
                 identity: r2types::CalleeTargetIdentityRequest {
@@ -497,37 +477,27 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn resolved_callee_target_for_site(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
     ) -> Option<r2types::ResolvedCalleeTarget> {
-        self.resolved_callee_target(Some((block_addr, op_idx)), None)
+        self.resolved_callee_target(Some(call), None)
     }
 
-    pub(super) fn callee_identity_for_callsite(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<CalleeIdentity> {
-        self.resolved_callee_target_for_site(block_addr, op_idx)
+    pub(super) fn callee_identity_for_callsite(&self, call: InstId) -> Option<CalleeIdentity> {
+        self.resolved_callee_target_for_site(call)
             .map(|target| target.identity)
     }
 
-    pub(super) fn resolved_callee_identity_expr_for_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<CExpr> {
-        self.resolved_callee_target_for_site(block_addr, op_idx)
+    pub(super) fn resolved_callee_identity_expr_for_site(&self, call: InstId) -> Option<CExpr> {
+        self.resolved_callee_target_for_site(call)
             .map(|target| self.callee_identity_expr(&target.identity))
     }
 
     pub(super) fn resolve_call_target_for_site(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
         target: &SSAVar,
     ) -> OpLoweringResult<CExpr> {
-        if let Some(resolved) = self.resolved_callee_identity_expr_for_site(block_addr, op_idx) {
+        if let Some(resolved) = self.resolved_callee_identity_expr_for_site(call) {
             return Ok(resolved);
         }
         self.resolve_call_target(target)
@@ -535,28 +505,24 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn admitted_callsite(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
     ) -> OpLoweringResult<(
         &r2types::CallsiteArgumentFacts,
         &r2types::CallsiteRenderFact,
     )> {
         let cert = self
-            .certified_callsite_for_op(block_addr, op_idx)
+            .certified_callsite_for_op(call)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
         let render_fact = self
-            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .certified_call_render_fact_for_op(call)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
-        let expected_site = r2types::CallsiteKey {
-            block_addr,
-            op_index: op_idx,
-        };
+        let expected_site = r2types::CallsiteKey { at: call };
         if render_fact.disposition == r2types::CallsiteRenderDisposition::Residualized
             && cert.variadic
         {
             r2il::refusal_evidence!(
                 "variadic-callsite-residualized",
-                "callsite=({block_addr:#x}, {op_idx}) target={:?} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
+                "callsite={call:?} target={:?} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
                 cert.direct_target,
                 cert.fixed_argument_count,
                 cert.variadic_argument_count_evidence,
@@ -574,7 +540,7 @@ impl<'a> FoldingContext<'a> {
         if !cert.arguments_complete {
             r2il::refusal_evidence!(
                 "callsite-arguments-incomplete",
-                "callsite=({block_addr:#x}, {op_idx}) target={:?} variadic={}                  fixed_argument_count={:?} results_complete={}",
+                "callsite={call:?} target={:?} variadic={}                  fixed_argument_count={:?} results_complete={}",
                 cert.direct_target,
                 cert.variadic,
                 cert.fixed_argument_count,
@@ -597,17 +563,15 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn certified_call_args_for_site(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
     ) -> OpLoweringResult<CertifiedCallArgs> {
-        let (cert, render_fact) = self.admitted_callsite(block_addr, op_idx)?;
+        let (cert, render_fact) = self.admitted_callsite(call)?;
         let indexed = exact_indexed_call_arguments(cert, render_fact)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
 
         let mut args = Vec::with_capacity(indexed.len());
         for (index, value) in indexed.iter().copied() {
-            let Some(expr) =
-                self.certified_call_arg_expr_for_value_at_site((block_addr, op_idx), index, value)
+            let Some(expr) = self.certified_call_arg_expr_for_value_at_site(call, index, value)
             else {
                 // The typed refusal deliberately keeps only its stable kind
                 // and deciding site. The argument identity is per-call
@@ -617,7 +581,7 @@ impl<'a> FoldingContext<'a> {
                 // reader reconstruct the one fact this loop already knew.
                 r2il::refusal_evidence!(
                     "call-argument-spelling",
-                    "callsite=({block_addr:#x}, {op_idx}) argument_index={index} value={value:?}"
+                    "callsite={call:?} argument_index={index} value={value:?}"
                 );
                 return Err(OpLoweringRefusal::missing_machine_projection());
             };
@@ -647,12 +611,10 @@ impl<'a> FoldingContext<'a> {
     /// the same way.
     fn certified_call_arg_expr_for_value_at_site(
         &self,
-        site: (u64, usize),
+        call: InstId,
         argument_index: usize,
         value: r2ssa::ValueId,
     ) -> Option<CExpr> {
-        let prepared = self.inputs.prepared_ssa?;
-        let call = prepared.graph().inst_id_for_op_site(site.0, site.1)?;
         let expr = match self.planned_value_expr(value) {
             Ok(expr) => expr,
             Err(error) => {
@@ -669,21 +631,17 @@ impl<'a> FoldingContext<'a> {
                 .and_then(|names| names.disposition_for_value(value)),
             Some(crate::binding_plan::ValueDisposition::Bound { .. })
         ) {
-            return Some(self.call_argument_as_declared(site, argument_index, value, expr));
+            return Some(self.call_argument_as_declared(call, argument_index, value, expr));
         }
         let expr = self.observe_certified_value_read_expr(value, call, expr);
-        Some(self.call_argument_as_declared(site, argument_index, value, expr))
+        Some(self.call_argument_as_declared(call, argument_index, value, expr))
     }
 
-    pub(super) fn known_signature_for_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<r2types::FunctionType> {
-        self.certified_callsite_for_op(block_addr, op_idx)
+    pub(super) fn known_signature_for_site(&self, call: InstId) -> Option<r2types::FunctionType> {
+        self.certified_callsite_for_op(call)
             .and_then(|cert| cert.callee_signature.clone())
             .or_else(|| {
-                self.callee_identity_for_callsite(block_addr, op_idx)
+                self.callee_identity_for_callsite(call)
                     .and_then(|identity| identity.known_signature().cloned())
             })
     }
@@ -708,8 +666,8 @@ impl<'a> FoldingContext<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn is_modeled_call_target_for_site(&self, block_addr: u64, op_idx: usize) -> bool {
-        self.resolved_callee_target_for_site(block_addr, op_idx)
+    pub(super) fn is_modeled_call_target_for_site(&self, call: InstId) -> bool {
+        self.resolved_callee_target_for_site(call)
             .is_some_and(|target| target.policy.modeled)
     }
 }
@@ -735,8 +693,7 @@ mod indexed_argument_tests {
         proof_values: &[u32],
     ) -> (r2types::CallsiteArgumentFacts, r2types::CallsiteRenderFact) {
         let callsite = r2types::CallsiteKey {
-            block_addr: 0x1000,
-            op_index: 2,
+            at: r2ssa::InstId(2),
         };
         (
             r2types::CallsiteArgumentFacts {

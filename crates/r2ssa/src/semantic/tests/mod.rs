@@ -103,13 +103,15 @@ fn dual_space_locations(artifact: &SsaArtifact) -> (MemoryLocation, MemoryLocati
     let ram_index = loads.next().expect("RAM load").0;
     let custom_index = loads.next().expect("Custom load").0;
     let ram = artifact
-        .memory_uses_for_op_site(0x1000, ram_index)
+        .inst_at(0x1000, ram_index)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .and_then(|uses| uses.first())
         .expect("RAM location")
         .location
         .clone();
     let custom = artifact
-        .memory_uses_for_op_site(0x1000, custom_index)
+        .inst_at(0x1000, custom_index)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .and_then(|uses| uses.first())
         .expect("Custom location")
         .location
@@ -163,7 +165,8 @@ fn calls_clobber_every_present_typed_memory_space() {
         .position(|op| matches!(op, crate::SSAOp::Call { .. }))
         .expect("call op");
     let spaces = artifact
-        .memory_defs_for_op_site(0x1000, call_index)
+        .inst_at(0x1000, call_index)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("call memory defs")
         .iter()
         .map(|fact| fact.location.space)
@@ -488,11 +491,7 @@ fn raw_memory_access(
         },
         &memory,
         &objects,
-        super::AccessSite {
-            inst,
-            block_addr: 0x1000,
-            op_index: 0,
-        },
+        inst,
         super::RawAccess {
             address: ValueId(0),
             space,

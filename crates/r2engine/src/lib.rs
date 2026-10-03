@@ -2695,11 +2695,17 @@ fn effect_obligation_refusal_reason(audit: EffectObligationAudit) -> Option<Stri
             fn tally(
                 count: usize,
                 label: &str,
-                obligation: Option<r2ssa::SemanticObligationId>,
+                obligation: Option<r2ssa::SpelledObligation>,
             ) -> String {
                 obligation.map_or_else(
                     || format!("{count} {label}"),
-                    |id| format!("{count} {label} ({} at {})", id.kind, id.instruction),
+                    |spelled| {
+                        format!(
+                            "{count} {label} ({} at {})",
+                            spelled.id().kind,
+                            spelled.instruction()
+                        )
+                    },
                 )
             }
             format!(

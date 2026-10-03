@@ -245,13 +245,15 @@ fn a_member_of_a_declared_aggregate_is_the_aggregate_at_an_offset() {
         .expect("aggregate artifact");
 
     let [base_store] = artifact
-        .memory_defs_for_op_site(0x3700, 4)
+        .inst_at(0x3700, 4)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("aggregate base definition")
     else {
         panic!("one definition at the aggregate's base")
     };
     let [member_store] = artifact
-        .memory_defs_for_op_site(0x3700, 6)
+        .inst_at(0x3700, 6)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("member definition")
     else {
         panic!("one definition at the member")
@@ -275,7 +277,8 @@ fn a_member_of_a_declared_aggregate_is_the_aggregate_at_an_offset() {
         "two members that do not overlap must not alias"
     );
     let [reload] = artifact
-        .memory_uses_for_op_site(0x3700, 7)
+        .inst_at(0x3700, 7)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .expect("base reload")
     else {
         panic!("one use at the aggregate's base")
@@ -355,19 +358,22 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
             .expect("dual-coordinate artifact");
 
     let [save] = artifact
-        .memory_defs_for_op_site(0x3600, 1)
+        .inst_at(0x3600, 1)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("saved-frame definition")
     else {
         panic!("one saved-frame definition")
     };
     let [local_store] = artifact
-        .memory_defs_for_op_site(0x3600, 4)
+        .inst_at(0x3600, 4)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("local definition")
     else {
         panic!("one local definition")
     };
     let [local_load] = artifact
-        .memory_uses_for_op_site(0x3600, 5)
+        .inst_at(0x3600, 5)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .expect("local use")
     else {
         panic!("one local use")
@@ -488,7 +494,8 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     )
     .expect("allocated dual-coordinate artifact");
     let [allocated_save] = allocated
-        .memory_defs_for_op_site(0x3600, 1)
+        .inst_at(0x3600, 1)
+        .and_then(|inst| allocated.memory_defs_for_inst(inst))
         .expect("allocated saved-frame definition")
     else {
         panic!("one allocated saved-frame definition")
@@ -545,7 +552,8 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     );
 
     let allocated_local = allocated
-        .memory_defs_for_op_site(0x3600, 4)
+        .inst_at(0x3600, 4)
+        .and_then(|inst| allocated.memory_defs_for_inst(inst))
         .and_then(|facts| facts.first())
         .expect("allocated local definition");
     let mut overlapping_objects = allocated.objects().clone();
@@ -603,7 +611,8 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     )
     .expect("opposite-direction artifact");
     let [wrong_direction_save] = wrong_direction
-        .memory_defs_for_op_site(0x3600, 1)
+        .inst_at(0x3600, 1)
+        .and_then(|inst| wrong_direction.memory_defs_for_inst(inst))
         .expect("opposite-direction saved-frame definition")
     else {
         panic!("one opposite-direction saved-frame definition")
@@ -797,13 +806,15 @@ fn unknown_pointer_versions(escape: bool) -> (MemoryVersion, Vec<MemoryVersion>)
     let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
         .expect("artifact");
     let [store] = artifact
-        .memory_defs_for_op_site(0x3800, 1)
+        .inst_at(0x3800, 1)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("the local's store")
     else {
         panic!("one definition of the local")
     };
     let reload = artifact
-        .memory_uses_for_op_site(0x3800, 4 + usize::from(escape))
+        .inst_at(0x3800, 4 + usize::from(escape))
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .expect("the local's reload");
     (
         store.next_version,

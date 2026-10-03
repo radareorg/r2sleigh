@@ -79,7 +79,8 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
             .any(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
     );
     let call = artifact
-        .callsite_certificate_for_op(0x1000, 0)
+        .inst_at(0x1000, 0)
+        .and_then(|inst| artifact.callsite_certificate_for_inst(inst))
         .expect("tail callsite certificate");
     assert_eq!(call.transfer, crate::semantic::CallSiteTransfer::TailCall);
     assert_eq!(call.fallthrough, None);
@@ -828,9 +829,24 @@ fn prepared_function_refuses_return_without_source_boundary_authority() {
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1014, 0).is_none());
-    assert!(prepared.return_certificate_for_op(0x1004, 0).is_none());
-    assert!(prepared.return_certificate_for_op(0x1010, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1014, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
+    assert!(
+        prepared
+            .inst_at(0x1004, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
+    assert!(
+        prepared
+            .inst_at(0x1010, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -919,7 +935,7 @@ fn prepared_function_ssa_collects_structured_dataflow_facts() {
     assert!(loop_fact.condition.is_some());
     assert!(
         structured.memory_accesses.values().any(|access| {
-            access.block_addr == 0x1408 && access.op_index == 0 && access.is_write
+            Some(access.id.inst) == prepared.inst_at(0x1408, 0) && access.is_write
         })
     );
     let certificates = prepared.certificates();
@@ -960,7 +976,7 @@ fn prepared_function_ssa_collects_structured_dataflow_facts() {
         .next()
         .expect("recursive call fact");
     assert_eq!(recursive.structured().recursive_calls.len(), 1);
-    assert_eq!(call.block_addr, 0x1500);
+    assert_eq!(recursive.graph().block_addr_of(call.at), Some(0x1500));
     assert_eq!(call.target, 0x1500);
 }
 
@@ -1465,7 +1481,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     let pure = SsaArtifact::raw(&pure_blocks, None).expect("pure SSA");
     let pure_value = pure
         .graph()
-        .inst_id_for_op_site(0x1700, 1)
+        .inst_spelled_at(0x1700, 1)
         .and_then(|inst| pure.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("pure expression output");
@@ -1496,7 +1512,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     let loaded = SsaArtifact::raw(&load_blocks, None).expect("load SSA");
     let loaded_value = loaded
         .graph()
-        .inst_id_for_op_site(0x1710, 0)
+        .inst_spelled_at(0x1710, 0)
         .and_then(|inst| loaded.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("load output");
@@ -1532,7 +1548,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     let userop = SsaArtifact::raw(&userop_blocks, None).expect("userop SSA");
     let userop_value = userop
         .graph()
-        .inst_id_for_op_site(0x1720, 0)
+        .inst_spelled_at(0x1720, 0)
         .and_then(|inst| userop.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("userop output");
@@ -1584,9 +1600,17 @@ fn prepared_return_certificates_require_complete_source_boundary() {
     let prepared = SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA");
 
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1770, 1).is_none());
     assert!(
-        prepared.return_certificate_for_op(0x1760, 0).is_none(),
+        prepared
+            .inst_at(0x1770, 1)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
+    assert!(
+        prepared
+            .inst_at(0x1760, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none(),
         "a predecessor return-register write is dataflow, not a return effect"
     );
 }

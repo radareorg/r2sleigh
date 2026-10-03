@@ -295,7 +295,7 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         for index in 0..=2 {
             let copy = graph
-                .inst_id_for_op_site(0x1000, index)
+                .inst_spelled_at(0x1000, index)
                 .and_then(|inst| graph.inst(inst))
                 .and_then(|inst| inst.output)
                 .expect("copy output");

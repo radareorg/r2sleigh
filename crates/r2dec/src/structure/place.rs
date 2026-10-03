@@ -454,7 +454,7 @@ impl ControlFlowStructurer<'_, '_> {
             .callsites
             .values()
             .any(|certificate| {
-                certificate.block_addr == from
+                prepared.graph().block_addr_of(certificate.at) == Some(from)
                     && certificate.transfer == r2ssa::CallSiteTransfer::TailCall
             })
     }

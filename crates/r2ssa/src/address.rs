@@ -1542,7 +1542,8 @@ mod tests {
             .find(|(_, op)| matches!(op, SSAOp::Load { .. }))
             .expect("load");
         let uses = artifact
-            .memory_uses_for_op_site(0x1000, load_index)
+            .inst_at(0x1000, load_index)
+            .and_then(|inst| artifact.memory_uses_for_inst(inst))
             .expect("memory use");
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].version.version, 0);
@@ -1592,12 +1593,14 @@ mod tests {
             .position(|op| matches!(op, SSAOp::Load { .. }))
             .expect("load");
         let written = artifact
-            .memory_defs_for_op_site(0x1000, store_index)
+            .inst_at(0x1000, store_index)
+            .and_then(|inst| artifact.memory_defs_for_inst(inst))
             .and_then(|defs| defs.first())
             .expect("memory def")
             .next_version;
         let uses = artifact
-            .memory_uses_for_op_site(0x1000, load_index)
+            .inst_at(0x1000, load_index)
+            .and_then(|inst| artifact.memory_uses_for_inst(inst))
             .expect("memory use");
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].version, written);

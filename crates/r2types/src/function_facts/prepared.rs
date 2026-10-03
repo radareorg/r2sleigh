@@ -2,9 +2,9 @@
 
 use super::*;
 
-pub type OpSiteKey = (u64, usize);
-
-pub type MemoryOpSiteKey = (u64, usize, bool);
+/// One instruction's memory effects in one direction: a read and a write
+/// performed by one instruction are different effects.
+pub type MemoryEffectKey = (r2ssa::InstId, bool);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallsiteRenderFact {
@@ -475,8 +475,6 @@ impl CertifiedEffect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAccessRenderFact {
     pub access: r2ssa::StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub space: r2il::SpaceId,
     pub object: r2ssa::ObjectId,
     pub address: r2ssa::ValueId,
@@ -508,8 +506,6 @@ pub enum StringLiteralRenderSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberAccessRenderFact {
     pub access: r2ssa::StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub object: r2ssa::ObjectId,
     pub is_write: bool,
     pub field_offset: u64,
@@ -536,8 +532,6 @@ pub enum MemberAccessSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayAccessRenderFact {
     pub access: r2ssa::StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub object: r2ssa::ObjectId,
     pub is_write: bool,
     pub field_offset: u64,
@@ -549,8 +543,7 @@ pub struct ArrayAccessRenderFact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnValueRenderFact {
-    pub block_addr: u64,
-    pub op_index: usize,
+    pub at: r2ssa::InstId,
     pub value: r2ssa::ValueId,
     pub width: u32,
     pub control_domain: r2ssa::ControlDomain,
@@ -891,12 +884,13 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
     let mut return_count = 0usize;
     for &block_addr in source.function().block_addrs() {
         let block = source.function().get_block(block_addr)?;
-        for (op_index, op) in block.ops().iter().enumerate() {
-            if !matches!(op, r2ssa::SSAOp::Return { .. }) {
+        for (op, ssa_op) in block.sited() {
+            if !matches!(ssa_op, r2ssa::SSAOp::Return { .. }) {
                 continue;
             }
             return_count = return_count.checked_add(1)?;
-            let certificate = source.return_certificate_for_op(block_addr, op_index)?;
+            let certificate =
+                source.return_certificate_for_inst(source.graph().inst_for_op(op)?)?;
             if !exact_return_certificate_matches(
                 certificate,
                 logical,
@@ -1198,14 +1192,7 @@ pub(crate) fn prepared_callee_resolution_facts(
             .values()
             .filter_map(|call_site| {
                 let direct_target = prepared.resolved_call_target(call_site)?;
-                let (block_addr, op_index) = prepared.inst_op_site(call_site.at)?;
-                Some((
-                    CallsiteKey {
-                        block_addr,
-                        op_index,
-                    },
-                    direct_target,
-                ))
+                Some((CallsiteKey { at: call_site.at }, direct_target))
             }),
         &ctx,
     )
@@ -1218,12 +1205,8 @@ pub(crate) fn prepared_callsite_argument_facts(
         .certificates()
         .callsites
         .values()
-        .filter_map(|cert| {
-            let (block_addr, op_index) = prepared.inst_op_site(cert.at)?;
-            let callsite = CallsiteKey {
-                block_addr,
-                op_index,
-            };
+        .map(|cert| {
+            let callsite = CallsiteKey { at: cert.at };
             let argument_values = cert
                 .argument_values
                 .iter()
@@ -1269,7 +1252,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     })
                 })
                 .collect();
-            Some((
+            (
                 callsite,
                 CallsiteArgumentFacts {
                     callsite,
@@ -1292,7 +1275,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     arguments_complete: cert.arguments_complete,
                     results_complete: cert.results_complete,
                 },
-            ))
+            )
         })
         .collect();
     FunctionCallsiteFacts { by_callsite }
@@ -1306,8 +1289,7 @@ pub(crate) fn prepared_call_result_facts(prepared: &r2ssa::SsaArtifact) -> Funct
             continue;
         };
         let callsite = CallsiteKey {
-            block_addr: callsite_cert.block_addr,
-            op_index: callsite_cert.op_index,
+            at: callsite_cert.at,
         };
         by_callsite.entry(callsite).or_default().push(cert.value);
         by_value.insert(
@@ -1336,10 +1318,7 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
         .callsites
         .values()
         .map(|cert| {
-            let callsite = CallsiteKey {
-                block_addr: cert.block_addr,
-                op_index: cert.op_index,
-            };
+            let callsite = CallsiteKey { at: cert.at };
             // This fact says how control leaves the site, not what the
             // statement assigns; the plan owns that, from the value it defines.
             let count_refusal = if cert.variadic {
@@ -1880,7 +1859,12 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             let id = r2ssa::SemanticId::memory_access(*access);
             let control_domain = prepared
                 .control_domains()
-                .for_block(cert.block_addr)
+                .for_block(
+                    prepared
+                        .graph()
+                        .block_addr_of(access.inst)
+                        .expect("memory certificate instruction stands in a block"),
+                )
                 .expect("memory certificate block has a control domain")
                 .clone();
             (
@@ -1889,8 +1873,6 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     id,
                     fact: MemoryAccessRenderFact {
                         access: cert.access,
-                        block_addr: cert.block_addr,
-                        op_index: cert.op_index,
                         space: cert.space,
                         object: cert.object,
                         address: cert.address,
@@ -1905,8 +1887,8 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let memory_effects_by_op = certificates
-        .memory_accesses_by_op
+    let memory_effects_by_inst = certificates
+        .memory_accesses_by_inst
         .iter()
         .map(|(op, accesses)| {
             (
@@ -1926,7 +1908,12 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             let id = r2ssa::SemanticId::return_value(cert.at);
             let control_domain = prepared
                 .control_domains()
-                .for_block(cert.block_addr)
+                .for_block(
+                    prepared
+                        .graph()
+                        .block_addr_of(cert.at)
+                        .expect("return certificate instruction stands in a block"),
+                )
                 .expect("return certificate block has a control domain")
                 .clone();
             (
@@ -1935,8 +1922,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     id,
                     at: cert.at,
                     fact: ReturnValueRenderFact {
-                        block_addr: cert.block_addr,
-                        op_index: cert.op_index,
+                        at: cert.at,
                         value: cert.value,
                         width: cert.width,
                         control_domain,
@@ -1945,13 +1931,9 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let return_effects_by_op = certified_return_effects
+    let return_effects_by_inst = certified_return_effects
         .iter()
-        .filter_map(|(id, effect)| {
-            effect
-                .return_fact()
-                .map(|fact| ((fact.block_addr, fact.op_index), *id))
-        })
+        .filter_map(|(id, effect)| effect.return_fact().map(|fact| (fact.at, *id)))
         .collect();
     let mut certified_entities = certificates
         .stack_slots
@@ -2105,11 +2087,11 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
         certified_exprs,
         certified_entities,
         certified_effects,
-        return_effects_by_op,
-        memory_effects_by_op,
+        return_effects_by_inst,
+        memory_effects_by_inst,
         string_literals_by_value: BTreeMap::new(),
-        member_accesses_by_op: BTreeMap::new(),
-        array_accesses_by_op: BTreeMap::new(),
+        member_accesses_by_inst: BTreeMap::new(),
+        array_accesses_by_inst: BTreeMap::new(),
     }
 }
 

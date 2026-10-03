@@ -139,7 +139,8 @@ pub use obligation::{
     ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION,
     SemanticInstructionDisposition, SemanticInstructionState, SemanticMemoryOrdering,
     SemanticObligation, SemanticObligationComponent, SemanticObligationId,
-    SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite,
+    SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite, SpelledInstruction,
+    SpelledObligation,
 };
 pub use op::{AtomicCasOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
 pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};

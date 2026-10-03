@@ -181,7 +181,12 @@ fn prepared_function_does_not_infer_return_phi_without_source_boundary_authority
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1114, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1114, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -245,7 +250,7 @@ fn prepared_expression_certificates_render_only_identity_phis() {
     let identity_phi = prepared_with_phi_values(7, 7);
     let identity_value = identity_phi
         .graph()
-        .inst_id_for_op_site(0x1730, 0)
+        .inst_spelled_at(0x1730, 0)
         .and_then(|inst| identity_phi.graph().inst(inst))
         .and_then(|inst| inst.inputs.first().copied())
         .expect("identity phi return input");
@@ -261,7 +266,7 @@ fn prepared_expression_certificates_render_only_identity_phis() {
     let mixed_phi = prepared_with_phi_values(7, 9);
     let mixed_value = mixed_phi
         .graph()
-        .inst_id_for_op_site(0x1730, 0)
+        .inst_spelled_at(0x1730, 0)
         .and_then(|inst| mixed_phi.graph().inst(inst))
         .and_then(|inst| inst.inputs.first().copied())
         .expect("mixed phi return input");

@@ -5,8 +5,6 @@ use super::super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnValueCertificate {
     pub at: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub value: ValueId,
     pub width: u32,
     pub carrier: Option<ReturnCarrier>,
@@ -246,9 +244,6 @@ pub(crate) fn collect_return_value_certificates(
             );
             continue;
         }
-        let Some((block_addr, op_index)) = graph.op_site_for_inst(boundary.at) else {
-            continue;
-        };
         let Some(inst) = graph.inst(boundary.at) else {
             continue;
         };
@@ -282,8 +277,6 @@ pub(crate) fn collect_return_value_certificates(
             };
             ReturnValueCertificate {
                 at: boundary.at,
-                block_addr,
-                op_index,
                 value,
                 width,
                 carrier: return_carrier_for_boundary_value(boundary_value, stack_reloads),

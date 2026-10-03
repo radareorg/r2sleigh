@@ -79,6 +79,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 pub(crate) use structure::ControlFlowStructurer;
 
+/// The instruction a test fixture names by its block and its place among the
+/// block's operations in the sealed function.
+#[cfg(test)]
+pub(crate) fn inst_at(
+    artifact: &r2ssa::SsaArtifact,
+    block_addr: u64,
+    index: usize,
+) -> Option<r2ssa::InstId> {
+    let op = artifact.function().get_block(block_addr)?.op_id(index)?;
+    artifact.graph().inst_for_op(op)
+}
+
 #[cfg(test)]
 pub(crate) fn certified_memory_result_name(access: r2ssa::StructuredAccessId) -> String {
     format!("memory_value_{}_{}", access.inst.0, access.ordinal)
@@ -2105,12 +2117,13 @@ pub struct EffectObligationAudit {
     pub gapped: usize,
     pub unaccounted: usize,
     pub conflicts: usize,
-    /// First refused obligation in canonical source order, for diagnostics.
-    pub refused_obligation: Option<r2ssa::SemanticObligationId>,
+    /// First refused obligation in the order the spelling reads, for
+    /// diagnostics.
+    pub refused_obligation: Option<r2ssa::SpelledObligation>,
     /// First obligation with no occurrence or certificate, for diagnostics.
-    pub unaccounted_obligation: Option<r2ssa::SemanticObligationId>,
+    pub unaccounted_obligation: Option<r2ssa::SpelledObligation>,
     /// First obligation with incompatible occurrences, for diagnostics.
-    pub conflicting_obligation: Option<r2ssa::SemanticObligationId>,
+    pub conflicting_obligation: Option<r2ssa::SpelledObligation>,
 }
 
 impl EffectObligationAudit {
@@ -2147,11 +2160,10 @@ impl EffectObligationAudit {
             gapped: closure.gapped,
             unaccounted: closure.unattributed,
             conflicts: closure.conflicts,
-            refused_obligation: ledger.entries().find_map(|(id, outcome)| {
-                matches!(outcome, crate::ledger::Outcome::Refused).then_some(*id)
-            }),
-            unaccounted_obligation: ledger.unattributed().next().copied(),
-            conflicting_obligation: ledger.conflicts().next().map(|(id, _)| *id),
+            refused_obligation: ledger
+                .first_spelled(|_, outcome| matches!(outcome, crate::ledger::Outcome::Refused)),
+            unaccounted_obligation: ledger.first_spelled(|_, outcome| !outcome.is_decided()),
+            conflicting_obligation: ledger.first_conflict_spelled(),
         }
     }
 
@@ -4129,8 +4141,7 @@ impl Decompiler {
             .map(|slot| slot.storage().location())
             .collect::<std::collections::BTreeSet<_>>();
         let transfer_inputs = graph
-            .inst_id_for_op_site(callsite.block_addr, callsite.op_index)
-            .and_then(|inst| graph.inst(inst))
+            .inst(callsite.at)
             .map(|inst| inst.inputs.to_vec())
             .unwrap_or_default();
         let observable = graph.insts.iter().find(|inst| {
@@ -4182,10 +4193,7 @@ impl Decompiler {
                 .function_facts
                 .callee_resolution()
                 .and_then(|resolution| {
-                    resolution.identity_for_callsite(r2types::CallsiteKey {
-                        block_addr: callsite.block_addr,
-                        op_index: callsite.op_index,
-                    })
+                    resolution.identity_for_callsite(r2types::CallsiteKey { at: callsite.at })
                 })
         else {
             r2il::refusal_evidence!(
@@ -4221,10 +4229,7 @@ impl Decompiler {
         // call renders with: the import's declaration, placed at the slot
         // the stub jumps through. The identity's own is a by-name lookup,
         // which a capture that states no names has nothing in.
-        let key = r2types::CallsiteKey {
-            block_addr: callsite.block_addr,
-            op_index: callsite.op_index,
-        };
+        let key = r2types::CallsiteKey { at: callsite.at };
         let certified = self
             .context
             .function_facts
@@ -4234,9 +4239,8 @@ impl Decompiler {
         let Some(signature) = certified.or(identity.signature.as_ref()) else {
             r2il::refusal_evidence!(
                 "import-stub-declaration",
-                "tail transfer at {:#x}:{} resolves to {name}, which has no prototype",
-                callsite.block_addr,
-                callsite.op_index
+                "tail transfer at {:?} resolves to {name}, which has no prototype",
+                callsite.at
             );
             let reason = format!(
                 "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
@@ -4248,9 +4252,8 @@ impl Decompiler {
         };
         r2il::refusal_evidence!(
             "import-stub-declaration",
-            "tail transfer at {:#x}:{} resolves to {name}, declared rather than defined",
-            callsite.block_addr,
-            callsite.op_index
+            "tail transfer at {:?} resolves to {name}, declared rather than defined",
+            callsite.at
         );
         let reason = format!(
             "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \

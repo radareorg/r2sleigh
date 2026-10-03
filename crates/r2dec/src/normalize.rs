@@ -238,11 +238,12 @@ impl NormalizationOrigins {
                 let block = func
                     .get_block(graph_block.addr)
                     .expect("source graph and SSA function have identical blocks");
-                let rows = (0..block.ops().len())
-                    .map(|op_idx| {
+                let rows = block
+                    .sited()
+                    .map(|(id, _)| {
                         NormalizedOpOrigin::Original(
                             graph
-                                .inst_id_for_op_site(block.addr, op_idx)
+                                .inst_for_op(id)
                                 .expect("every source SSA operation has an exact graph InstId"),
                         )
                     })
@@ -263,6 +264,15 @@ impl NormalizationOrigins {
 
     pub(crate) fn for_unchanged(func: &SSAFunction, prepared: &r2ssa::SsaArtifact) -> Self {
         Self::from_source(func, prepared.graph(), Some(prepared.authority().clone()))
+    }
+
+    /// Where an original instruction of the source stands in the normalized
+    /// block at `block`: a scan of that block's rows.
+    pub(crate) fn original_site(&self, block: BlockId, inst: InstId) -> Option<NormalizedOpSite> {
+        let op_idx = self.blocks.get(block.0 as usize)?.rows.iter().position(
+            |origin| matches!(origin, NormalizedOpOrigin::Original(original) if *original == inst),
+        )?;
+        Some(NormalizedOpSite { block, op_idx })
     }
 
     /// O(1) lookup from an exact normalized site to its sealed origin.
@@ -1672,7 +1682,7 @@ fn guarded_loop_backedge_phi_op(
         SSAOp::CBranch { cond, .. } if cond != dst => cond.clone(),
         _ => return None,
     };
-    let guard_inst = graph.inst_id_for_op_site(pred, terminator_idx)?;
+    let guard_inst = graph.inst_for_op(source_block.op_id(terminator_idx)?)?;
     let guard = UseSite {
         inst: guard_inst,
         input_idx: 1,
@@ -2765,8 +2775,10 @@ mod tests {
         let guarded = edge.guarded.expect("guard use and preserve operand");
         assert_eq!(guarded.guard.input_idx, 1, "CBranch condition use");
         assert_eq!(guarded.preserve.input_idx, 2, "false arm preserves carrier");
-        let original_terminator = graph
-            .inst_id_for_op_site(0x1008, 2)
+        let original_terminator = func
+            .get_block(0x1008)
+            .and_then(|block| block.op_id(2))
+            .and_then(|op| graph.inst_for_op(op))
             .expect("source branch InstId");
         assert!(matches!(
             origins.origin(NormalizedOpSite {

@@ -123,9 +123,7 @@ fn exact_access_binding(
     access: &StructuredMemoryAccessFact,
     expected_space: SpaceId,
 ) -> Option<AggregateAccessBinding> {
-    if access.id.ordinal != 0
-        || graph.op_site_for_inst(access.id.inst) != Some((access.block_addr, access.op_index))
-    {
+    if access.id.ordinal != 0 {
         return None;
     }
     let instruction = graph.inst(access.id.inst)?;
@@ -462,14 +460,13 @@ mod tests {
         matches: impl Fn(&crate::SSAOp) -> bool,
     ) -> crate::InstId {
         let block = artifact.function().get_block(block_addr).expect("block");
-        let index = block
-            .ops()
-            .iter()
-            .position(matches)
+        let (id, _) = block
+            .sited()
+            .find(|(_, op)| matches(op))
             .expect("an operation of the requested kind");
         artifact
             .graph()
-            .inst_id_for_op_site(block_addr, index)
+            .inst_for_op(id)
             .expect("instruction for the operation")
     }
 

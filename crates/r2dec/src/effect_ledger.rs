@@ -13,14 +13,15 @@ use r2ssa::{
     SemanticObligationKind, SsaArtifact,
 };
 
-fn rendered_site(id: SemanticObligationId) -> Option<(u64, usize)> {
-    match id.instruction.site {
-        CanonicalInstructionSite::Phi(_) => Some((id.instruction.block_addr, 0)),
-        CanonicalInstructionSite::Op(op_idx) => usize::try_from(op_idx)
-            .ok()
-            .map(|op_idx| (id.instruction.block_addr, op_idx)),
-        CanonicalInstructionSite::NativeSpan { .. } => None,
-    }
+/// What one surviving occurrence of an obligation discharges: a rendering, for
+/// an instruction the output can stand at. A native span with no operation
+/// has nowhere to render.
+fn rendered_outcome(id: SemanticObligationId) -> Option<Outcome> {
+    (!matches!(
+        id.instruction.site,
+        CanonicalInstructionSite::NativeSpan { .. }
+    ))
+    .then_some(Outcome::Rendered)
 }
 
 /// The zero-occurrence disposition, with an eye on the ones that must not be
@@ -70,10 +71,9 @@ fn observed_object_elision(
     // obligation is real -- writing memory is an effect -- and it is answered
     // by the certificate that nothing can observe the result.
     if id.kind == SemanticObligationKind::ObservableMemoryWrite
-        && let CanonicalInstructionSite::Op(op_index) = id.instruction.site
-        && let Ok(op_index) = usize::try_from(op_index)
-        && crate::binding_plan::certified_dead_frame_slot_accesses(prepared)
-            .contains(&(id.instruction.block_addr, op_index))
+        && let CanonicalInstructionSite::Op(op) = id.instruction.site
+        && let Some(inst) = prepared.graph().inst_for_op(op)
+        && crate::binding_plan::certified_dead_frame_slot_accesses(prepared).contains(&inst)
     {
         return Some(ElisionReason::DeadFrameSlotStore);
     }
@@ -85,17 +85,17 @@ fn observed_object_elision(
         SemanticObligationKind::ObservableMemoryWrite
             | SemanticObligationKind::ObservableMemoryRead
             | SemanticObligationKind::LiveValueProducer
-    ) && let CanonicalInstructionSite::Op(op_index) = id.instruction.site
-        && let Ok(op_index) = usize::try_from(op_index)
+    ) && let CanonicalInstructionSite::Op(op) = id.instruction.site
+        && let Some(inst) = prepared.graph().inst_for_op(op)
         && prepared
             .certificates()
             .memory_round_trips
             .values()
             .any(|certificate| {
-                certificate.block_addr == id.instruction.block_addr
-                    && (certificate.write_op_index == op_index
-                        || certificate.read_op_index == op_index
-                        || certificate.redundant_read_op_indexes.contains(&op_index))
+                [certificate.write, certificate.read]
+                    .iter()
+                    .chain(&certificate.redundant_reads)
+                    .any(|access| access.inst == inst)
             })
     {
         return Some(ElisionReason::MemoryRoundTrip);
@@ -503,7 +503,7 @@ pub(crate) fn build_obligation_ledger(
     residual: &std::collections::BTreeSet<SemanticObligationId>,
 ) -> ObligationLedger {
     let obligations = prepared.obligations();
-    let mut ledger = ObligationLedger::open(obligations);
+    let mut ledger = ObligationLedger::open(obligations, prepared.graph());
     for id in obligations.obligations().keys().copied() {
         let count = effects
             .occurrence_count(id)
@@ -515,22 +515,23 @@ pub(crate) fn build_obligation_ledger(
         // obligation a residual read stands in for has its occurrence, and
         // reading one as rendered would count a statement that traps.
         if effects.gapped_effect(id) || residual.contains(&id) {
-            if let Some((block_addr, op_idx)) = rendered_site(id) {
-                let _ = ledger.record(id, Outcome::Gapped { block_addr, op_idx });
+            if !matches!(
+                id.instruction.site,
+                CanonicalInstructionSite::NativeSpan { .. }
+            ) {
+                let _ = ledger.record(id, Outcome::Gapped);
             }
             continue;
         }
         let outcome = match count {
             0 => traced_zero_occurrence_outcome(prepared, origins, effects, id),
-            1 => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            1 => rendered_outcome(id),
             // Several occurrences are one execution when the structured form
             // put them on paths that exclude one another -- a shared tail
             // emitted once per path that reaches it rather than jumped to.
             // Anything else rendered twice is a duplicate, which changes what
             // the program does and is scored as a refusal.
-            _ if effects.duplicates_are_exclusive(id) => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            _ if effects.duplicates_are_exclusive(id) => rendered_outcome(id),
             // And several occurrences are one execution when what was rendered
             // is a literal. The machine writes the temporary once; a reader
             // that spells the constant instead of naming it performs nothing,
@@ -538,17 +539,13 @@ pub(crate) fn build_obligation_ledger(
             // many times it was computed. Admitted only for a value that reads
             // nothing at all, because an expression repeated at three readers
             // would be three evaluations.
-            _ if effects.duplicates_are_a_repeated_literal(id) => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            _ if effects.duplicates_are_a_repeated_literal(id) => rendered_outcome(id),
             // And an address computation every access spells by naming its
             // object. The machine computes it once and no rendered access
             // performs it, so the count is how many accesses named it.
-            _ if effects.duplicates_are_a_named_object_address(id) => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            _ if effects.duplicates_are_a_named_object_address(id) => rendered_outcome(id),
             _ => {
-                if let Some(outcome) = rendered_site(id)
-                    .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx })
-                {
+                if let Some(outcome) = rendered_outcome(id) {
                     let _ = ledger.record(id, outcome);
                 }
                 let _ = ledger.record_conflict(id);
