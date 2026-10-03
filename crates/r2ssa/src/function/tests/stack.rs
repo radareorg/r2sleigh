@@ -615,7 +615,7 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    let artifact = SsaArtifact::new_with_context(function, machine_context);
+    let artifact = SsaArtifact::from_prepared(function, machine_context);
     let call = artifact
         .sole_callsite_certificate_in_block(0x1600)
         .expect("callsite certificate")
@@ -765,49 +765,45 @@ fn test_decompile_prep_facts_refuse_display_named_stack_roots() {
     }];
 
     let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    func.get_block_mut(0x2000)
-        .expect("entry block")
-        .replace_ops(
-            crate::Pass::Fixture,
-            vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:1", 1, 8),
-                    a: SSAVar::new("rsp", 0, 8),
-                    b: SSAVar::constant(0xfffffffffffffff0, 8),
-                },
-                SSAOp::Copy {
-                    dst: SSAVar::new("tmp:2", 1, 8),
-                    src: SSAVar::new("tmp:1", 1, 8),
-                },
-                SSAOp::IntSub {
-                    dst: SSAVar::new("tmp:3", 1, 8),
-                    a: SSAVar::new("rbp", 0, 8),
-                    b: SSAVar::constant(0x20, 8),
-                },
-                SSAOp::Copy {
-                    dst: SSAVar::new("tmp:4", 1, 8),
-                    src: SSAVar::new("tmp:3", 1, 8),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:5", 1, 8),
-                    a: SSAVar::new("rsp", 0, 8),
-                    b: SSAVar::constant(0xffff_fff0, 4),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:max", 1, 8),
-                    a: SSAVar::new("rsp", 0, 8),
-                    b: SSAVar::constant(i64::MAX as u64, 8),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:overflow", 1, 8),
-                    a: SSAVar::new("tmp:max", 1, 8),
-                    b: SSAVar::constant(1, 8),
-                },
-            ],
-        );
-    func.refresh_decompile_prep_facts();
-
-    let facts = func.decompile_prep_facts().expect("prep facts");
+    func.edit_block(0x2000).expect("entry block").replace_ops(
+        crate::Pass::Fixture,
+        vec![
+            SSAOp::IntAdd {
+                dst: SSAVar::new("tmp:1", 1, 8),
+                a: SSAVar::new("rsp", 0, 8),
+                b: SSAVar::constant(0xfffffffffffffff0, 8),
+            },
+            SSAOp::Copy {
+                dst: SSAVar::new("tmp:2", 1, 8),
+                src: SSAVar::new("tmp:1", 1, 8),
+            },
+            SSAOp::IntSub {
+                dst: SSAVar::new("tmp:3", 1, 8),
+                a: SSAVar::new("rbp", 0, 8),
+                b: SSAVar::constant(0x20, 8),
+            },
+            SSAOp::Copy {
+                dst: SSAVar::new("tmp:4", 1, 8),
+                src: SSAVar::new("tmp:3", 1, 8),
+            },
+            SSAOp::IntAdd {
+                dst: SSAVar::new("tmp:5", 1, 8),
+                a: SSAVar::new("rsp", 0, 8),
+                b: SSAVar::constant(0xffff_fff0, 4),
+            },
+            SSAOp::IntAdd {
+                dst: SSAVar::new("tmp:max", 1, 8),
+                a: SSAVar::new("rsp", 0, 8),
+                b: SSAVar::constant(i64::MAX as u64, 8),
+            },
+            SSAOp::IntAdd {
+                dst: SSAVar::new("tmp:overflow", 1, 8),
+                a: SSAVar::new("tmp:max", 1, 8),
+                b: SSAVar::constant(1, 8),
+            },
+        ],
+    );
+    let facts = func.prep_facts_for_test();
     assert!(
         facts.stack_address_roots.is_empty(),
         "display names cannot establish stack roots without typed carrier evidence"
@@ -911,7 +907,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     let typed = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
         .expect("typed decompile artifact");
     let typed_function = typed.function();
-    let typed_facts = typed_function.decompile_prep_facts().expect("typed facts");
+    let typed_facts = typed.decompile_prep_facts();
     let op_roots = typed_function
         .get_block(0x3000)
         .expect("entry")
@@ -1020,9 +1016,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("source-free decompile artifact");
     assert!(
         source_free
-            .function()
             .decompile_prep_facts()
-            .expect("source-free facts")
             .stack_address_roots
             .is_empty(),
         "register names and architecture storage alone cannot grant stack roots"
@@ -1206,10 +1200,7 @@ fn a_mask_that_aligns_the_stack_pointer_opens_a_frame_of_its_own() {
     }];
     let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
         .expect("realigned artifact must build");
-    let facts = artifact
-        .function()
-        .decompile_prep_facts()
-        .expect("custom prep facts");
+    let facts = artifact.decompile_prep_facts();
     let realigned = facts
         .stack_address_roots
         .values()
@@ -1331,10 +1322,7 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
             [sp_storage],
         )
         .unwrap_or_else(|| panic!("{name} artifact must build"));
-        let facts = artifact
-            .function()
-            .decompile_prep_facts()
-            .expect("custom prep facts");
+        let facts = artifact.decompile_prep_facts();
         assert!(
             !facts.stack_address_roots.is_empty(),
             "{name} must preserve source-declared stack roots"
@@ -1429,10 +1417,7 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
             _ => None,
         })
         .expect("load address");
-    let facts = artifact
-        .function()
-        .decompile_prep_facts()
-        .expect("decompile prep facts");
+    let facts = artifact.decompile_prep_facts();
 
     assert!(facts.stack_address_root_of(new_dst).is_none());
     assert!(facts.stack_address_root_of(load_addr).is_none());
@@ -1462,7 +1447,7 @@ fn test_decompile_prep_facts_refuse_renamed_stack_carriers() {
         op_metadata: Default::default(),
     }];
     let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    func.get_block_mut(0x1000).expect("entry").replace_ops(
+    func.edit_block(0x1000).expect("entry").replace_ops(
         crate::Pass::Fixture,
         vec![
             SSAOp::IntSub {
@@ -1481,9 +1466,7 @@ fn test_decompile_prep_facts_refuse_renamed_stack_carriers() {
             },
         ],
     );
-    func.refresh_decompile_prep_facts();
-
-    let facts = func.decompile_prep_facts().expect("prep facts");
+    let facts = func.prep_facts_for_test();
     assert_eq!(
         facts.stack_address_root_of(&SSAVar::new("runtime.materialized.rsp", 1, 8)),
         None

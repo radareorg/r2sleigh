@@ -2,11 +2,15 @@
 
 use super::*;
 
-pub(crate) fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) -> PredicateFacts {
+pub(crate) fn collect_predicate_facts(
+    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+) -> PredicateFacts {
     let mut predicates = BTreeMap::new();
     let mut block_assumptions = BTreeMap::<u64, Vec<BlockAssumption>>::new();
     let mut switches = BTreeMap::new();
-    let compare_defs = collect_compare_defs(function, graph);
+    let compare_defs = collect_compare_defs(function, prep, graph);
     let evaluated_compare_defs = &compare_defs.evaluated;
     let compare_defs = &compare_defs.normalized;
     let mut next_predicate_id = 0u32;
@@ -93,12 +97,16 @@ pub(crate) struct CompareDefinitions {
     pub(crate) evaluated: BTreeMap<SSAVar, CompareProvenance>,
 }
 
-pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> CompareDefinitions {
+pub(crate) fn collect_compare_defs(
+    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+) -> CompareDefinitions {
     let mut normalized = BTreeMap::<SSAVar, CompareProvenance>::new();
     let mut evaluated = BTreeMap::<SSAVar, CompareProvenance>::new();
     // A compared operand is named by its copy class: the values with its bits
     // at its width, as the one identity fact states them.
-    let views = function.decompile_prep_facts().map(|facts| &facts.views);
+    let views = prep.map(|facts| &facts.views);
     let operand = |var: &SSAVar| crate::view::class_value(graph, views, var);
     let mut sub_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
     let mut signed_overflow_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();

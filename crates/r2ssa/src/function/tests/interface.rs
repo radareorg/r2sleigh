@@ -174,7 +174,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
         crate::testing::prepared(&blocks, &arch, Some(interface), Vec::new(), [sp_storage])
             .expect("prepared SSA should build");
     let function = prepared.function();
-    let facts = function.decompile_prep_facts().expect("prep facts");
+    let facts = prepared.decompile_prep_facts();
     let block = function.get_block(0x4000).expect("entry block");
 
     // The projection is the layer a new operation is most easily missed
@@ -460,14 +460,11 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
     assert_eq!(prepared.graph().def_inst(parameter.value), None);
     assert_eq!(
         prepared
-            .function()
-            .decompile_prep_facts()
-            .and_then(|facts| {
-                prepared
-                    .graph()
-                    .value(parameter.value)
-                    .and_then(|value| facts.formal_parameter_of(&value.var))
-            }),
+            .graph()
+            .value(parameter.value)
+            .and_then(|value| prepared
+                .decompile_prep_facts()
+                .formal_parameter_of(&value.var)),
         Some(0),
     );
 
@@ -697,7 +694,7 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    let artifact = SsaArtifact::new_with_context(function, machine_context);
+    let artifact = SsaArtifact::from_prepared(function, machine_context);
     let facts = artifact.facts();
     let boundary_of = |target: u64| {
         let call = facts

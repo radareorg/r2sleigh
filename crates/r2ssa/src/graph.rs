@@ -92,7 +92,7 @@ mod tests {
         let removed_dst = merge.phis()[0].dst.clone();
         assert_ne!(retained_storage, merge.phis()[0].canonical_storage.unwrap());
 
-        let mut merge = func.get_block_mut(0x100c).expect("merge block");
+        let mut merge = func.edit_block(0x100c).expect("merge block");
         merge.retain_phis(crate::Pass::Fixture, |phi| phi.dst != removed_dst);
 
         let merge = func.get_block(0x100c).expect("merge block");

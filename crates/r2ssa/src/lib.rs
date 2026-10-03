@@ -85,10 +85,11 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use function::{
     CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
-    GenuineNativeInstructionSpan, IrRevision, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
-    RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction,
-    SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
-    StackAddressBase, StackAddressRoot, TrustedSsaArtifact, def_use_graph,
+    GenuineNativeInstructionSpan, Lifted, PhiNode, Prepared, RegisterFamilyInfo,
+    RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
+    SSAFunction, Sealed, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
+    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedSsaArtifact,
+    def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -141,7 +142,7 @@ pub use obligation::{
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite,
 };
 pub use op::{AtomicCasOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
-pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, optimize_function};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
 pub use promote::promoted_slot_offset;
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,

@@ -798,10 +798,7 @@ mod tests {
     /// The function the blocks lift to, with its identity facts and nothing
     /// folded: the constant folder is not what these ask about.
     fn prepared(blocks: &[R2ILBlock]) -> SSAFunction {
-        let mut function =
-            SSAFunction::from_blocks_raw(blocks, Some(&arch())).expect("raw SSA builds");
-        function.refresh_decompile_prep_facts();
-        function
+        SSAFunction::from_blocks_raw(blocks, Some(&arch())).expect("raw SSA builds")
     }
 
     /// The one variable some operation defines into `storage_offset` at `size`.
@@ -834,7 +831,8 @@ mod tests {
         });
         block.push(R2ILOp::Return { target: reg(16, 4) });
         let function = prepared(&[block]);
-        let facts = function.decompile_prep_facts().expect("identity facts");
+        let facts = function.prep_facts_for_test();
+        let facts = &facts;
         let high = defined(&function, 16, 4);
         let literal = crate::semantic::resolve_const_value(Some(facts), &high);
         assert_ne!(
@@ -876,7 +874,8 @@ mod tests {
         });
         merge.push(R2ILOp::Return { target: reg(32, 1) });
         let function = prepared(&[entry, left, right, merge]);
-        let facts = function.decompile_prep_facts().expect("identity facts");
+        let facts = function.prep_facts_for_test();
+        let facts = &facts;
         let merged = function
             .get_block(0x100c)
             .and_then(|block| block.phis().first())
@@ -928,7 +927,8 @@ mod tests {
         });
         block.push(R2ILOp::Return { target: reg(16, 4) });
         let function = prepared(&[block]);
-        let facts = function.decompile_prep_facts().expect("identity facts");
+        let facts = function.prep_facts_for_test();
+        let facts = &facts;
         let ops = function.blocks()[0].ops();
         let loaded = ops
             .iter()

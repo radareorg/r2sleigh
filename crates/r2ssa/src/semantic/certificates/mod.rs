@@ -731,6 +731,7 @@ pub(crate) fn collect_prepared_function_certificates(
 ) -> PreparedFunctionCertificates {
     let Body {
         function,
+        prep,
         graph,
         machine_context,
     } = body;
@@ -805,7 +806,8 @@ pub(crate) fn collect_prepared_function_certificates(
         })
         .collect();
 
-    let renderable_expressions = collect_renderable_expression_values(function, graph, structured);
+    let renderable_expressions =
+        collect_renderable_expression_values(function, prep, graph, structured);
     let expressions = graph
         .values
         .iter()
@@ -868,6 +870,7 @@ pub(crate) fn collect_prepared_function_certificates(
         .collect::<BTreeMap<_, _>>();
     let callee_stack_allocations = collect_callee_stack_allocation_certificates(
         function,
+        prep,
         graph,
         machine_context,
         objects,
@@ -912,7 +915,7 @@ pub(crate) fn collect_prepared_function_certificates(
         );
     let stack_geometry = collect_stack_geometry_certificate(
         boundaries,
-        function,
+        prep,
         graph,
         objects,
         structured,
@@ -1085,6 +1088,7 @@ pub(crate) fn collect_prepared_function_certificates(
             let (block_addr, op_index) = graph.op_site_for_inst(fact.at).unwrap_or_default();
             let stack_argument_values = collect_stack_call_argument_values(
                 function,
+                prep,
                 graph,
                 objects,
                 structured,
@@ -1238,8 +1242,7 @@ pub(crate) fn collect_prepared_function_certificates(
     let (call_results, call_results_by_inst, call_results_by_callsite) =
         collect_call_result_certificates(body, derived);
     let stack_reloads = collect_stack_reload_source_certificates(
-        function,
-        graph,
+        body,
         objects,
         memory,
         &structured.memory_accesses,

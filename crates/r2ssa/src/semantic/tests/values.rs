@@ -1116,6 +1116,7 @@ fn return_boundary_without_typed_machine_roles_carries_values_but_no_exit_state(
     );
     let walked = super::super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5000,

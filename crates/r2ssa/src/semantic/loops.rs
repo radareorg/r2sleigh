@@ -201,6 +201,7 @@ pub(crate) fn loop_carrier_facts(
         function,
         graph,
         machine_context,
+        ..
     } = body;
     let NaturalLoop {
         id: loop_id,

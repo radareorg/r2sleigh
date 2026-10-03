@@ -22,7 +22,7 @@ fn advisory_call_site(
 fn test_switch_selector(function: &SSAFunction, block_addr: u64) -> String {
     let graph = crate::graph::SsaGraph::from_function(function);
     let predicates = crate::semantic::collect_predicate_facts_for_test(function, &graph);
-    let values = crate::values::solve_value_ranges(&graph, function, &predicates);
+    let values = crate::values::solve_value_ranges(&graph, function, None, &predicates);
     let selector = crate::indirect::dispatch_selectors(function, &graph, &values)
         .remove(&block_addr)
         .expect("the analysis names a selector");
@@ -1093,7 +1093,7 @@ fn variadic_format_call_artifact_formed(
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    SsaArtifact::new_with_context(function, machine_context)
+    SsaArtifact::from_prepared(function, machine_context)
 }
 
 /// A call whose format argument is a merge of two literals.
@@ -1224,7 +1224,7 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    SsaArtifact::new_with_context(function, machine_context)
+    SsaArtifact::from_prepared(function, machine_context)
         .sole_callsite_certificate_in_block(0x1014)
         .expect("callsite certificate")
         .clone()
@@ -1391,7 +1391,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    let artifact = SsaArtifact::new_with_context(function, machine_context);
+    let artifact = SsaArtifact::from_prepared(function, machine_context);
 
     let calls = artifact
         .certificates()
@@ -1672,7 +1672,7 @@ fn projected_peer_loop_artifact(
     let mut function =
         SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw peer loop should build");
     function
-        .get_block_mut(0x1b10)
+        .edit_block(0x1b10)
         .expect("loop header")
         .replace_phis(
             crate::Pass::Fixture,
@@ -1682,7 +1682,7 @@ fn projected_peer_loop_artifact(
                 .collect(),
         );
     function
-        .get_block_mut(0x1b10)
+        .edit_block(0x1b10)
         .expect("loop header")
         .replace_ops(
             crate::Pass::Fixture,
@@ -1697,7 +1697,7 @@ fn projected_peer_loop_artifact(
     // which is what lets the three be one object. The latch also reads `ax`
     // before the write, so every width is carried.
     function
-        .get_block_mut(0x1b20)
+        .edit_block(0x1b20)
         .expect("loop latch")
         .replace_ops(
             crate::Pass::Fixture,
@@ -1750,15 +1750,12 @@ fn projected_peer_loop_artifact(
                 ]
             },
         );
-    function
-        .get_block_mut(0x1b30)
-        .expect("loop exit")
-        .replace_ops(
-            crate::Pass::Fixture,
-            vec![SSAOp::Return {
-                target: phis[0].clone(),
-            }],
-        );
+    function.edit_block(0x1b30).expect("loop exit").replace_ops(
+        crate::Pass::Fixture,
+        vec![SSAOp::Return {
+            target: phis[0].clone(),
+        }],
+    );
     for (index, width) in widths.iter().copied().enumerate() {
         for value in [&entries[index], &phis[index], &updates[index]] {
             function
@@ -2709,13 +2706,13 @@ fn an_operation_keeps_its_id_and_instruction_while_the_block_around_it_changes()
     assert_eq!(graph.inst_for_op(before[1].0), None);
 }
 
-/// Prep facts answer only for the blocks they were collected from: a rewrite
-/// that opens the blocks without collecting them again leaves facts that
-/// describe an IR which no longer exists, and reading them stops rather than
-/// answering -- the engine's isolation boundary makes that the function's
-/// refusal. Collecting again makes them readable at the new revision.
+/// A sealed function's prep facts describe the blocks it keeps: sealing
+/// rewrites the blocks and collects the facts once, after the last rewrite,
+/// and nothing changes the blocks after. Collecting again from the sealed
+/// blocks gives the same identity facts, and the copy forwarding sealing ran
+/// is in the blocks those facts were read from.
 #[test]
-fn prep_facts_read_after_an_unrefreshed_rewrite_stop_rather_than_answer() {
+fn a_sealed_function_s_prep_facts_describe_its_own_blocks() {
     let mut block = R2ILBlock::new(0x1000, 4);
     block.push(R2ILOp::Copy {
         dst: Varnode::register(0, 8),
@@ -2724,19 +2721,20 @@ fn prep_facts_read_after_an_unrefreshed_rewrite_stop_rather_than_answer() {
     block.push(R2ILOp::Return {
         target: Varnode::register(16, 8),
     });
-    let mut func = SSAFunction::from_blocks_raw(&[block], None).expect("a function");
-    func.refresh_decompile_prep_facts();
-    assert!(func.decompile_prep_facts().is_some());
-
-    func.blocks.edit();
-    let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        func.decompile_prep_facts().is_some()
-    }));
-    assert!(stale.is_err(), "stale prep facts were handed out");
-
-    func.recollect_decompile_prep_facts();
-    let facts = func
-        .decompile_prep_facts()
-        .expect("facts at the new revision");
-    assert_eq!(facts.revision, func.blocks.revision());
+    let func = SSAFunction::from_blocks_raw(&[block.clone()], None).expect("a function");
+    let sealed = Lifted::new(func)
+        .validate()
+        .expect("a raw function validates")
+        .seal(&SourceMachineContext::from_blocks(&[block], None));
+    let again = sealed.function().prep_facts_for_test();
+    assert_eq!(sealed.decompile_prep_facts().views, again.views);
+    assert_eq!(
+        sealed.decompile_prep_facts().stack_address_roots,
+        again.stack_address_roots
+    );
+    assert_eq!(
+        sealed.graph(),
+        &SsaGraph::from_function_with_storage(sealed.function()),
+        "the graph was built from the sealed blocks"
+    );
 }

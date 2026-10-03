@@ -1183,6 +1183,7 @@ fn return_boundary_recovery_accepts_identical_fanin_and_phi_free_cycles() {
     .expect("fanin boundary artifact");
     let converged = super::reaching_abi_value_in_block(
         fanin.function(),
+        Some(fanin.decompile_prep_facts()),
         fanin.graph(),
         fanin.machine_context(),
         0x3030,
@@ -1215,6 +1216,7 @@ fn return_boundary_recovery_accepts_identical_fanin_and_phi_free_cycles() {
     // unchanged; the back edge adds no definition and no merge.
     let round_the_loop = super::reaching_abi_value_in_block(
         cycle.function(),
+        Some(cycle.decompile_prep_facts()),
         cycle.graph(),
         cycle.machine_context(),
         0x4000,
@@ -1259,6 +1261,7 @@ fn reaching_abi_value_crosses_a_loop_that_defines_nothing_of_it() {
     .expect("loop artifact");
     let reaching = super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5008,
@@ -1279,6 +1282,7 @@ fn reaching_abi_value_crosses_a_loop_that_defines_nothing_of_it() {
     // reaches the exit.
     let written = super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5008,
@@ -1341,6 +1345,7 @@ fn reaching_abi_value_walks_a_diamond_chain_once() {
     .expect("diamond chain artifact");
     let reaching = super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x8010 + diamonds * 0x40,

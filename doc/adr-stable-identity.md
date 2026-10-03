@@ -85,7 +85,7 @@ Each step keeps every gate green and deletes what it replaces.
 |------|--------|---------|
 | 0 | The memory space of an access is read from the access, which carries the op's own space | `memory_spaces_by_op`, `memory_space_at`, `remap_memory_sites_to_prepared` and its comment — **done** |
 | 1 | `OpId` arena, private `ops`/`ids`, `OpOrigin`, graph `OpId`↔`InstId` maps, `EditPlan` | `op_instruction_addrs`, the index shifting in `insert_ops`, the graph's site BTreeMaps — **done** |
-| 2 | Stage types; `seal` replaces `prepare_graph`; optimize and demand through `EditPlan` | `get_block_mut`, `op_mut`, `cfg_mut`, public `remove_*`, `optimize()`, `Blocks::edit`, `IrRevision`, the revision assert, `recollect_*` |
+| 2 | Stage types; `seal` replaces `prepare_graph`; optimize and demand through `EditPlan` | `get_block_mut`, `op_mut`, `cfg_mut`, public `remove_*`, `optimize()`, `Blocks::edit`, `IrRevision`, the revision assert, `recollect_*` — **done** |
 | 3 | Certificates, obligations and downstream maps keyed by `OpId` | every `op_index` field in r2ssa/r2types, `op_site_for_inst`, `inst_id_for_op_site`, `rendered_site` |
 | 4 | With P1.7: `ValueDef::{LiveIn, Unspecified}`, formals as views | version-0 definitions; the sealed validator check switches on |
 
@@ -109,6 +109,53 @@ Step 1 as landed:
   above it.
 - The CFG's per-operation instruction addresses stay: they are the lift's own
   record, read once to mint `OpOrigin::Lifted`.
+
+Step 2 as landed:
+
+- `Lifted`, `Prepared` and `Sealed` are in `function/stage.rs`, each wrapping
+  the `SSAFunction` the rest of the crate already reads (the ADR's `Ir`).
+  `Lifted::prepare` optimises and validates; `Lifted::validate` is the raw
+  route, with no optimisation; `Prepared::seal` consumes the function and runs
+  the fixed sequence; `Sealed::into_artifact`, private to the stage module,
+  collects liveness and the semantic facts and makes the one addition they
+  make to the prep facts (the formals the address facts prove) before
+  consuming itself into `SsaArtifact`, which holds the `Sealed`.
+- The order inside `seal` is boundary constants, entry lanes, copy
+  forwarding, a graph, the demand plan over it (applied, and the graph built
+  again, only where a base is released), then the one prep collection. The
+  ADR listed the collection before the graph; the prep facts are read by
+  nothing the graph or the demand pass computes, so collecting after the
+  demand plan is the only order with one collection and no stale fact.
+- `EditPlan` grew `ShapeEdit`s (replace a phi, drop the sources a predecessor
+  fed, remove an edge, set a terminator, remove a block) and an explicit
+  reorder, applied after the operation edits in the order stated. SCCP is four
+  plans applied in the order the in-place pass made its edits; inst_combine,
+  the condition-code fold, chain fusion and the demand pass are one plan each
+  (fusion one per chain).
+- `SSAFunction` holds no prep facts, so `DecompilePrepFacts` has no
+  revision and is not an `Option` on an artifact. The semantic collectors read
+  them from `CollectionOver::prep`, threaded to the twenty-odd helpers that
+  used to ask the function; a collection over a function that was never
+  prepared passes `None`.
+- Interface recovery analyses a provisional function it never seals, so it
+  collects that function's prep facts itself (`Prepared::provisional_prep_facts`)
+  rather than reading a copy the build left on the function.
+- Every artifact constructor seals, so the raw and symbolic routes now carry
+  prep facts collected under the context's frame geometry, where before the
+  raw route had none. No production route takes either; the decompile routes
+  collect under the same interface as before.
+- Editing a block is a `Lifted` capability (`Lifted::edit_block`), used by
+  r2dec's fixtures; r2ssa's own fixtures use a `#[cfg(test)]` `edit_block`,
+  and validator tests corrupt through `#[cfg(test)]` `corrupt_cfg` and
+  `corrupt_remove_block`. No test seals an IR the validator refuses, so
+  `Prepared::unchecked` was not needed and is not added.
+- `compile_fail` doctests on `Prepared` and `Sealed` state that a prepared
+  function seals once and that an artifact's blocks are not writable.
+- The query index stays a lazily built cache on `SSAFunction`, not a field of
+  `Sealed`; the ADR's `ir: Arc<Ir>` is a plain owned field, since nothing
+  shares a sealed function's blocks without its facts.
+- `def_use_graph` seals a raw function to take its graph, and so now pays for
+  one prep collection it discards.
 
 ## Consequences and risks
 

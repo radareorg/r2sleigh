@@ -83,9 +83,10 @@ impl ValueRanges {
 pub fn solve_value_ranges(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
 ) -> ValueRanges {
-    solve_counted(graph, function, predicates).0
+    solve_counted(graph, function, prep, predicates).0
 }
 
 /// What one instruction alone makes of the value it leaves in a storage.
@@ -167,16 +168,14 @@ fn literal_or_top(graph: &SsaGraph, value: ValueId) -> StridedInterval {
 fn solve_counted(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
 ) -> (ValueRanges, usize) {
     let (mut by_value, transfers) = ascend(graph, &widening_set(function));
     // What a branch proves about a value it compares holds of every value
     // with the same bits: the narrowing is keyed by copy class, so a copy or
     // a lane read of the compared value read further on is narrowed too.
-    let class = crate::view::class_values(
-        graph,
-        function.decompile_prep_facts().map(|facts| &facts.views),
-    );
+    let class = crate::view::class_values(graph, prep.map(|facts| &facts.views));
     narrow_where_defined(graph, function, predicates, &class, &mut by_value);
     (ValueRanges { by_value }, transfers)
 }
@@ -836,7 +835,7 @@ mod tests {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg);
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let (ranges, transfers) = solve_counted(&graph, &function, &predicates);
+        let (ranges, transfers) = solve_counted(&graph, &function, None, &predicates);
         (ranges, graph, transfers)
     }
 
@@ -1287,12 +1286,11 @@ mod tests {
                 (exit, BlockTerminator::Return),
             ],
         );
-        let mut function =
-            SSAFunction::from_exact_test_blocks(&[head, body_block, exit_block], cfg);
-        function.refresh_decompile_prep_facts();
+        let function = SSAFunction::from_exact_test_blocks(&[head, body_block, exit_block], cfg);
+        let prep = function.prep_facts_for_test();
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let ranges = solve_value_ranges(&graph, &function, &predicates);
+        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
         assert_eq!(range_of(&ranges, &graph, &index).bounds(), Some((0, 7)));
         assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
     }

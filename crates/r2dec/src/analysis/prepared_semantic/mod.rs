@@ -267,10 +267,7 @@ impl PreparedSemanticView {
         prepared: &SsaArtifact,
         var: &SSAVar,
     ) -> Option<crate::symbol::SymbolId> {
-        let slot = prepared
-            .function()
-            .decompile_prep_facts()?
-            .formal_parameter_of(var)?;
+        let slot = prepared.decompile_prep_facts().formal_parameter_of(var)?;
         let slot = u32::try_from(slot).ok()?;
         let disposition = match self.binding_names.as_ref()?.require_parameter_slot(slot) {
             Ok(disposition) => disposition,
@@ -377,13 +374,14 @@ fn preflight_rendered_identities(
                 .map(|parameter| parameter.index()),
         );
     }
-    if let Some(prep) = inputs.prepared.function().decompile_prep_facts() {
-        parameter_slots.extend(
-            prep.formal_parameters
-                .values()
-                .filter_map(|slot| u32::try_from(*slot).ok()),
-        );
-    }
+    parameter_slots.extend(
+        inputs
+            .prepared
+            .decompile_prep_facts()
+            .formal_parameters
+            .values()
+            .filter_map(|slot| u32::try_from(*slot).ok()),
+    );
     if let Some(render) = inputs.function_facts.render() {
         for entity in render.certified_entities.values() {
             match entity {
@@ -676,9 +674,7 @@ fn populate_authorized_stack_owner_names(
 }
 
 fn populate_stack_offsets(view: &mut PreparedSemanticView, prepared: &SsaArtifact) {
-    let Some(prep) = prepared.function().decompile_prep_facts() else {
-        return;
-    };
+    let prep = prepared.decompile_prep_facts();
     for var in prep.stack_address_roots.keys() {
         if let Some(offset) = prep.stack_address_root_of(var).map(|root| root.offset) {
             view.insert_stack_offset(prepared, var, offset);
@@ -1232,9 +1228,8 @@ fn prepared_direct_stack_load_offset(
         .stack_offset_for_var(prepared, addr)
         .or_else(|| stack_offset_for_value(prepared, addr))?;
     prepared
-        .function()
         .decompile_prep_facts()
-        .and_then(|facts| facts.stack_address_root_of(addr))
+        .stack_address_root_of(addr)
         .map(|_| offset)
         .or_else(|| {
             view.owner_expr_for_var(prepared, addr)
@@ -2206,12 +2201,10 @@ fn prepared_stack_object_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option
     prepared
         .object_for_var(var, r2il::SpaceId::Ram)
         .or_else(|| {
-            prepared
-                .function()
-                .decompile_prep_facts()
-                .and_then(|facts| {
-                    prepared.object_for_var(facts.canonical_root(var), r2il::SpaceId::Ram)
-                })
+            prepared.object_for_var(
+                prepared.decompile_prep_facts().canonical_root(var),
+                r2il::SpaceId::Ram,
+            )
         })
 }
 
@@ -2274,12 +2267,10 @@ fn stack_offset_for_value(prepared: &SsaArtifact, value: &SSAVar) -> Option<i64>
     let object = prepared
         .object_for_var(value, r2il::SpaceId::Ram)
         .or_else(|| {
-            prepared
-                .function()
-                .decompile_prep_facts()
-                .and_then(|facts| {
-                    prepared.object_for_var(facts.canonical_root(value), r2il::SpaceId::Ram)
-                })
+            prepared.object_for_var(
+                prepared.decompile_prep_facts().canonical_root(value),
+                r2il::SpaceId::Ram,
+            )
         })?;
     let fact = prepared.objects().object(object)?;
     stack_offset_for_object_kind(&fact.kind)
@@ -2323,10 +2314,9 @@ fn expr_for_compare_operand_with_width(
 
     let root = inputs
         .prepared
-        .function()
         .decompile_prep_facts()
-        .map(|facts| facts.canonical_root(&var).clone())
-        .unwrap_or_else(|| var.clone());
+        .canonical_root(&var)
+        .clone();
     if let Some(expr) = compare_style_operand_expr(inputs.prepared, &root, compare_width) {
         return Some(expr);
     }
@@ -2870,9 +2860,8 @@ fn prepared_scaled_index_owner_expr(
 
 fn is_prepared_stack_address_carrier(prepared: &SsaArtifact, value: &SSAVar) -> bool {
     if prepared
-        .function()
         .decompile_prep_facts()
-        .and_then(|facts| facts.stack_address_root_of(value))
+        .stack_address_root_of(value)
         .is_some()
     {
         return true;

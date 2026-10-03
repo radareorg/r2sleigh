@@ -280,7 +280,7 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
     assert_eq!(
         source
             .decompile_prep_facts()
-            .and_then(|facts| facts.formal_parameter_of(parameter_var)),
+            .formal_parameter_of(parameter_var),
         Some(0),
         "SSA preparation must consume the same exact boundary slot"
     );

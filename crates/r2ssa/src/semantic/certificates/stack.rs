@@ -120,7 +120,7 @@ pub struct StackCallArgumentCertificate {
 }
 
 pub(crate) fn exact_stack_pointer_offset(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     state: ReachingStorageState,
 ) -> Option<i64> {
@@ -128,7 +128,7 @@ pub(crate) fn exact_stack_pointer_offset(
         ReachingStorageState::PreservedEntry => Some(0),
         ReachingStorageState::Value(value) => graph
             .value(value)
-            .and_then(|value| resolve_entry_stack_root(function.decompile_prep_facts(), &value.var))
+            .and_then(|value| resolve_entry_stack_root(prep, &value.var))
             .filter(|root| root.base == StackAddressBase::StackPointer)
             .map(|root| root.offset),
         ReachingStorageState::Unknown | ReachingStorageState::Conflict => None,
@@ -152,6 +152,7 @@ pub(crate) fn checked_ranges_overlap(
 
 pub(crate) fn collect_callee_stack_allocation_certificates(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
     objects: &ObjectModel,
@@ -260,7 +261,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
             let Some(active_sp_offset) = active_stack_pointer_states
                 .get(&access.id.inst)
                 .copied()
-                .and_then(|state| exact_stack_pointer_offset(function, graph, state))
+                .and_then(|state| exact_stack_pointer_offset(prep, graph, state))
             else {
                 complete = false;
                 break;
@@ -429,6 +430,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
         function,
         graph,
         machine_context,
+        ..
     } = body;
     let (boundaries, structured) = (derived.boundaries, derived.structured);
     let mut certificates = BTreeMap::new();
@@ -697,7 +699,7 @@ pub(crate) struct StackGeometryContext<'a> {
 
 pub(crate) fn collect_stack_geometry_certificate(
     boundaries: &SourceBoundaryFacts,
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -710,7 +712,7 @@ pub(crate) fn collect_stack_geometry_certificate(
         machine_context,
         declared_slots,
     } = answered;
-    let Some(prep) = function.decompile_prep_facts() else {
+    let Some(prep) = prep else {
         return StackGeometryCertificate::default();
     };
     let stack_root = |value: ValueId| {
@@ -1156,13 +1158,18 @@ pub(crate) struct AllocationSizing<'a> {
 }
 
 pub(crate) fn collect_stack_reload_source_certificates(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+    body: Body<'_>,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<ValueId, StackReloadSourceCertificate> {
-    let store_sources = collect_stack_store_sources(function, graph, objects, memory, accesses);
+    let Body {
+        function,
+        prep,
+        graph,
+        ..
+    } = body;
+    let store_sources = collect_stack_store_sources(body, objects, memory, accesses);
     let mut certificates = BTreeMap::new();
     let mut ready = VecDeque::new();
 
@@ -1208,7 +1215,7 @@ pub(crate) fn collect_stack_reload_source_certificates(
 
     // Whether a value computed from the reload is the reload's bits is the
     // view's answer; no operation is assumed to preserve them.
-    let views = function.decompile_prep_facts().map(|facts| &facts.views);
+    let views = prep.map(|facts| &facts.views);
     let relation_to_reload = |output: ValueId, reload: ValueId| {
         let (Some(output), Some(reload)) = (graph.value(output), graph.value(reload)) else {
             return ViewRelation::Derived;
@@ -1263,12 +1270,17 @@ pub(crate) struct StackStoreSource {
 }
 
 pub(crate) fn collect_stack_store_sources(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+    body: Body<'_>,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<MemoryVersion, StackStoreSource> {
+    let Body {
+        function,
+        prep,
+        graph,
+        ..
+    } = body;
     let mut sources = BTreeMap::new();
     for access in accesses.values().filter(|access| {
         access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
@@ -1286,7 +1298,7 @@ pub(crate) fn collect_stack_store_sources(
             def_fact.next_version,
             StackStoreSource {
                 value,
-                canonical_source: canonical_stack_source_value(function, graph, value),
+                canonical_source: canonical_stack_source_value(prep, graph, value),
                 object: access.object,
                 memory_width: access.width,
                 access: access.id,
@@ -1367,19 +1379,20 @@ pub(crate) fn unique_memory_use_for_access<'a>(
 }
 
 pub(crate) fn canonical_stack_source_value(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     source: ValueId,
 ) -> ValueId {
     let Some(var) = graph.value(source).map(|value| &value.var) else {
         return source;
     };
-    let root = canonical_value_root(function.decompile_prep_facts(), var);
+    let root = canonical_value_root(prep, var);
     graph.value_id_for_var(root).unwrap_or(source)
 }
 
 pub(crate) fn collect_stack_call_argument_values(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -1397,13 +1410,16 @@ pub(crate) fn collect_stack_call_argument_values(
     // instruction finds it. Objects are keyed by their position in a frame, so
     // the boundary is that pointer's position in the same frame: anything
     // below it is this function's own, not an argument.
-    let Some((entering, _)) = call_entering_stack_pointer_offset(
-        function,
-        graph,
-        block,
-        op_idx,
-        calls_move_stack_pointer,
-    ) else {
+    let Some((entering, _)) =
+        call_entering_stack_pointer_offset(super::super::boundaries::CallPosition {
+            function,
+            prep,
+            graph,
+            block_addr,
+            op_index: op_idx,
+            calls_move_stack_pointer,
+        })
+    else {
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();

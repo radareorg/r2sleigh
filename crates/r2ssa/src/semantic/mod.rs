@@ -90,6 +90,9 @@ pub struct PreparedFunctionFacts {
 /// What one collection reads, so the phases take one name rather than six.
 pub(crate) struct CollectionOver<'a> {
     pub(crate) function: &'a SSAFunction,
+    /// The prep facts of `function`, where it was prepared: the sealed
+    /// function's, or a provisional function's own.
+    pub(crate) prep: Option<&'a crate::function::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) storage_spans: &'a StorageSpans,
     pub(crate) assumptions: &'a AssumptionSet,
@@ -170,6 +173,7 @@ impl PreparedFunctionFacts {
         Self::collect_inner(
             CollectionOver {
                 function,
+                prep: None,
                 graph,
                 storage_spans: &storage_spans,
                 assumptions: &AssumptionSet::default(),
@@ -195,6 +199,7 @@ impl PreparedFunctionFacts {
         Self::collect_inner(
             CollectionOver {
                 function,
+                prep: None,
                 graph,
                 storage_spans: &storage_spans,
                 assumptions,
@@ -208,6 +213,7 @@ impl PreparedFunctionFacts {
 
     pub(crate) fn collect_with_context(
         function: &SSAFunction,
+        prep: Option<&crate::function::DecompilePrepFacts>,
         graph: &SsaGraph,
         storage_spans: &StorageSpans,
         assumptions: &AssumptionSet,
@@ -217,6 +223,7 @@ impl PreparedFunctionFacts {
         Self::collect_inner(
             CollectionOver {
                 function,
+                prep,
                 graph,
                 storage_spans,
                 assumptions,
@@ -246,6 +253,7 @@ impl PreparedFunctionFacts {
     ) -> Result<Self, crate::SsaExecutionStopReason> {
         let CollectionOver {
             function,
+            prep,
             graph,
             storage_spans,
             assumptions,
@@ -264,7 +272,16 @@ impl PreparedFunctionFacts {
             memory,
             memory_accesses,
             member_run_stores,
-        } = MemoryPrefix::collect(function, graph, machine_context, &mut phases, control)?;
+        } = MemoryPrefix::collect(
+            Body {
+                function,
+                prep,
+                graph,
+                machine_context,
+            },
+            &mut phases,
+            control,
+        )?;
         macro_rules! phase {
             ($name:literal, $size:expr) => {{
                 phases.mark($name, $size);
@@ -280,6 +297,7 @@ impl PreparedFunctionFacts {
         let (loops, inductions) = collect_structured_loop_facts(
             Body {
                 function,
+                prep,
                 graph,
                 machine_context,
             },
@@ -292,8 +310,16 @@ impl PreparedFunctionFacts {
             storage_spans,
         );
         phase!("loops", loops.len());
-        let boundaries =
-            collect_source_boundary_facts(function, graph, &call_sites, machine_context, &live_out);
+        let boundaries = collect_source_boundary_facts(
+            Body {
+                function,
+                prep,
+                graph,
+                machine_context,
+            },
+            &call_sites,
+            &live_out,
+        );
         phase!("boundaries", boundaries.calls.len());
         let structured = StructuredDataflowFacts {
             unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
@@ -330,6 +356,7 @@ impl PreparedFunctionFacts {
             crate::deadphi::DeadPhis::find_from(graph, &live_out, &obligations, &boundaries);
         let body = Body {
             function,
+            prep,
             graph,
             machine_context,
         };
@@ -450,6 +477,7 @@ pub fn value_reaching(
 ) -> Option<ValueId> {
     match reaching_abi_value_in_block_with_policy(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         block_addr,
@@ -471,5 +499,5 @@ pub(crate) fn collect_predicate_facts_for_test(
     function: &SSAFunction,
     graph: &SsaGraph,
 ) -> PredicateFacts {
-    collect_predicate_facts(function, graph)
+    collect_predicate_facts(function, None, graph)
 }
