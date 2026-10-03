@@ -13,13 +13,15 @@ Fixture: `tests/fixtures/rv_O0g` (`tests/gold/review.c`, gcc -O0 -g).
 |---|---|---|---|
 | `agf` | missing | the layered graph, the same painting as the `VV` pane (`r2s-tui/src/graph`) | r2s-tui |
 | `afb` | missing | radare2's lines: start, end, size, then `j`/`f`/`s`; identical on `classify` and `sum_array` | r2s over `function_graph` |
+| `afl` | a header; `vaddr confidence name` | radare2's layout with no header: `addr nbbs size name`. Size is the bytes of the blocks, not the span (padding between blocks is not counted); confidence moved to `aflj`. 25 of 27 rows on `rv_O0g` are now identical to radare2's | r2s over the survey's `TraceExtent` |
 | `classify` -O0 switch | the walk stopped at `jmp rax`; radare2 lists 8 arms | 8 arms, and `pdd` renders the switch. The guard compares the parameter's home and the dispatch reloads it, so the home is now promoted (R4) | r2ssa `promote.rs` |
 
 ## Open
 
 | Command | radare2 | r2s | Judgement | Owner |
 |---|---|---|---|---|
-| `afl` | no header; `addr nbbs size name` | a header; `vaddr confidence name` | radare2's spelling is binding (decision 8). Confidence moves to `aflj`. `nbbs` needs one walk per function; the survey already walks every body, so the count should come from there, not from re-running `function_graph` | r2engine survey, then r2s |
+| `afl` nbbs of a jump table | `classify` 11 blocks, 109 bytes | 3 blocks, 60 bytes | radare2 is right. The survey walk follows no dispatch table, so the arms are not counted (`pdd`, `afb` and `agf` do count them). P6, one resolved body for every consumer, closes this | r2engine survey (P6) |
+| `afl` `_start` | 1 block, 37 bytes | 2 blocks, 38 bytes | radare2 is right. The `call [__libc_start_main]` does not return, and the walk decodes the `hlt` after it. The noreturn fact for an import called through its relocation slot is missing | r2engine noreturn facts |
 | `afl` names | `entry0`, `entry.fini0`, `dbg.classify` | `sym._start`, `sym.__do_global_dtors_aux`, `sym.classify` | radare2 prefers the entry and DWARF flag spaces. Both are aliases of one address; ordering aliases by occupancy is P11a | r2engine naming |
 | `afi` edges | `edges: 10`, `cyclomatic-complexity: 19` on `classify` | `edges: 18`, `cyclomatic-complexity: 9` | **radare2 is inconsistent here.** Its `edges` leaves out the 8 switch edges, while its complexity counts them twice. Ours is E − N + 2 = 18 − 11 + 2 on the graph `afb` lists. Keep ours | — |
 | `afi` end-bbs | 2 | 1 | radare2 counts the `ja` default block (which ends in a jump to the return) as an end. We count blocks with no successor in the body. Keep ours | — |

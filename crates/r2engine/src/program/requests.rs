@@ -162,6 +162,8 @@ impl Rendering {
 pub(super) struct Survey {
     functions: Vec<Discovered>,
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
+    /// Each walked body's blocks and their bytes, as the walk traced them.
+    extents: BTreeMap<u64, r2ssa::body::TraceExtent>,
 }
 
 /// The one decoder a body was walked with, whatever the address.
@@ -450,6 +452,16 @@ impl<S: Source> OpenProgram<S> {
         Ok(self.surveyed()?.functions)
     }
 
+    /// Every function's basic blocks and their bytes, from the walk discovery
+    /// already made, keyed by entry. A body the walk refused has none.
+    ///
+    /// The walk follows no dispatch table, so a jump table's arms are not
+    /// counted; one resolved body for every consumer is P6.
+    pub fn function_extents(&mut self) -> Result<BTreeMap<u64, r2ssa::body::TraceExtent>, String> {
+        self.start_request();
+        Ok(self.surveyed()?.extents)
+    }
+
     /// Every reference the program makes, from every function discovery
     /// believes, with the coverage it was read over; read once per state of the program.
     ///
@@ -521,6 +533,7 @@ impl<S: Source> OpenProgram<S> {
             return Ok(Survey {
                 functions: Vec::new(),
                 walked: BTreeMap::new(),
+                extents: BTreeMap::new(),
             });
         };
         // Both instruction sets share one convention and one compiler
@@ -529,6 +542,11 @@ impl<S: Source> OpenProgram<S> {
         let program = &*self;
         let walker = super::returns::Walking::new(program, true)?;
         let found = crate::discovery::functions(program, seeds, &walker);
+        let extents = found
+            .walks
+            .iter()
+            .filter_map(|(entry, walk)| Some((*entry, walk.as_ref().ok()?.extent())))
+            .collect();
         let walked = found
             .walks
             .into_iter()
@@ -549,6 +567,7 @@ impl<S: Source> OpenProgram<S> {
         Ok(Survey {
             functions: found.functions,
             walked,
+            extents,
         })
     }
 

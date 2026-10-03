@@ -23,6 +23,13 @@ pub(super) struct BodyWalk {
     pub(super) thumb: bool,
 }
 
+impl BodyWalk {
+    /// The blocks the walk traced, and their bytes.
+    pub(super) fn extent(&self) -> r2ssa::body::TraceExtent {
+        self.trace.extent()
+    }
+}
+
 /// Discovery's walker over one open program.
 pub(super) struct Walking<'p, S: Source> {
     program: &'p OpenProgram<S>,

@@ -67,19 +67,20 @@ fn a_grep_suffix_keeps_only_matching_lines() {
 
 #[test]
 fn every_discovered_address_says_why_it_is_believed() {
-    let run = r2s("afl");
+    // `afl` is radare2's layout; how sure discovery is lives in `aflj`.
+    let run = r2s("aflj");
     assert!(run.ok, "{}", run.out);
-    let reasons = ["stated", "called", "reached"];
-    let rows: Vec<&str> = run
-        .out
-        .lines()
-        .filter(|line| line.trim_start().starts_with("0x"))
-        .collect();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(run.out.trim()).expect("aflj is JSON");
     assert!(!rows.is_empty(), "{}", run.out);
     for row in &rows {
+        let confidence = row["confidence"].as_str().unwrap_or_default();
         assert!(
-            reasons.iter().any(|reason| row.contains(reason)),
+            ["stated", "called", "handed", "reached"].contains(&confidence),
             "no confidence on {row}"
+        );
+        assert!(
+            row["addr"].is_u64() && row["nbbs"].is_u64() && row["size"].is_u64(),
+            "{row}"
         );
     }
     // Discovery may not lose a function the format states outright.
@@ -88,6 +89,33 @@ fn every_discovered_address_says_why_it_is_believed() {
         "{}",
         run.out
     );
+}
+
+/// `afl` is radare2's: no header, then `addr nbbs size name`, the size being
+/// the bytes of the blocks and not the span with the padding between them.
+/// gcc's `deregister_tm_clones` ends in a `jmp rax` with its `ret` eight
+/// bytes on: four blocks, 34 bytes, which is exactly radare2's row.
+#[test]
+fn afl_lists_functions_in_radare2s_columns() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let run = on(fixture, "afl");
+    assert!(run.ok, "{}", run.out);
+    assert!(
+        run.out.lines().all(|row| row.starts_with("0x")),
+        "{}",
+        run.out
+    );
+    for row in [
+        "0x000010f0    4     34 sym.deregister_tm_clones",
+        "0x000011c1    4     73 sym.sum_array",
+        "0x00001549    6    640 sym.main",
+    ] {
+        assert!(
+            run.out.lines().any(|line| line == row),
+            "{row}\n{}",
+            run.out
+        );
+    }
 }
 
 #[test]
@@ -806,16 +834,17 @@ mod stripped {
 
     #[test]
     fn main_is_found_because_a_declaration_says_that_parameter_is_a_function() {
-        let run = r2s("afl");
+        let run = r2s("aflj");
         assert!(run.ok, "{}", run.out);
         // `main` is at 0x401050 in this build, and nothing calls it directly.
-        let handed: Vec<&str> = run
-            .out
-            .lines()
-            .filter(|line| line.contains("handed"))
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(run.out.trim()).expect("aflj is JSON");
+        let handed: Vec<u64> = rows
+            .iter()
+            .filter(|row| row["confidence"] == "handed")
+            .filter_map(|row| row["addr"].as_u64())
             .collect();
-        assert_eq!(handed.len(), 1, "{}", run.out);
-        assert!(handed[0].contains("0x00401050"), "{}", run.out);
+        assert_eq!(handed, [0x401050], "{}", run.out);
     }
 
     #[test]

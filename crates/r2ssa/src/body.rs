@@ -281,6 +281,34 @@ impl Trace {
     pub const fn loads(&self) -> &BTreeSet<u64> {
         &self.0.loads
     }
+
+    /// How many basic blocks the walk reached and how many bytes their
+    /// instructions occupy.
+    ///
+    /// A block begins at each leader the walk decoded; padding between
+    /// blocks is no instruction of the body and is not counted. A dispatch
+    /// the walk could not follow reaches nothing, so its arms are not
+    /// counted either. O(instructions).
+    pub fn extent(&self) -> TraceExtent {
+        let decoded = &self.0.decoded;
+        TraceExtent {
+            blocks: self
+                .0
+                .leaders
+                .iter()
+                .filter(|leader| decoded.contains_key(leader))
+                .count(),
+            bytes: decoded.values().map(|one| u64::from(one.size)).sum(),
+        }
+    }
+}
+
+/// The shape of one traced body: its basic blocks and the bytes of its
+/// instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceExtent {
+    pub blocks: usize,
+    pub bytes: u64,
 }
 
 /// One walk of a body, lifting it or only tracing it.

@@ -81,6 +81,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "pdd" => decompile(session, argument),
         "pddj" => decompile_json(session, argument),
         "afl" => discovered(session),
+        "aflj" => discovered_json(session),
         "afi" => crate::function::info(session, argument),
         "afb" => crate::function::blocks(session, argument),
         "afv" => crate::function::variables(session, argument),
@@ -198,32 +199,78 @@ fn entries(session: &Session) -> Result<String, String> {
 /// already parsed and only the program entry was read. Discovery starts from
 /// all of them and closes over what the bodies call.
 fn discovered(session: &mut Session) -> Result<String, String> {
+    let rows = listed_functions(session)?;
+    // radare2's layout, with no header: `addr nbbs size name`, so the two
+    // diff line for line. How sure discovery is moved to `aflj`.
+    Ok(rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{:#010x} {:>4} {:>6} {}",
+                row.address, row.blocks, row.size, row.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// `aflj`: the same rows as JSON objects, with radare2's keys and the reason
+/// discovery believes each one.
+fn discovered_json(session: &mut Session) -> Result<String, String> {
+    let rows = listed_functions(session)?
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "addr": row.address,
+                "name": row.name,
+                "size": row.size,
+                "nbbs": row.blocks,
+                "confidence": row.confidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&rows).map_err(|error| error.to_string())
+}
+
+/// One row of `afl`.
+struct ListedFunction {
+    address: u64,
+    blocks: usize,
+    size: u64,
+    name: String,
+    confidence: &'static str,
+}
+
+/// Every function discovery found, with the blocks and span its walk traced.
+fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String> {
     let found = session.program.functions()?;
-    let mut out = String::from("vaddr      confidence name\n");
-    out.push_str(&"-".repeat(46));
-    for one in &found {
-        // Spelled as a listing spells it, which is how radare2 writes it and
-        // what makes the two comparable. The engine keeps the plain name.
-        let name = session
-            .program
-            .names()
-            .of(one.address)
-            .map(r2engine::names::Name::spelled)
-            .or_else(|| one.name.clone())
-            .unwrap_or_else(|| "-".to_owned());
-        out.push_str(&format!(
-            "\n{:#010x} {:<10} {name}",
-            one.address,
-            match one.confidence {
-                r2engine::discovery::Confidence::Stated => "stated",
-                r2engine::discovery::Confidence::Called => "called",
-                r2engine::discovery::Confidence::Handed => "handed",
-                r2engine::discovery::Confidence::Reached => "reached",
-            },
-        ));
-    }
-    out.push_str(&format!("\n\n{} functions", found.len()));
-    Ok(out)
+    let extents = session.program.function_extents()?;
+    Ok(found
+        .iter()
+        .map(|one| {
+            let extent = extents.get(&one.address);
+            ListedFunction {
+                address: one.address,
+                blocks: extent.map_or(0, |extent| extent.blocks),
+                size: extent.map_or(0, |extent| extent.bytes),
+                // Spelled as a listing spells it, which is how radare2 writes
+                // it and what makes the two comparable.
+                name: session
+                    .program
+                    .names()
+                    .of(one.address)
+                    .map(r2engine::names::Name::spelled)
+                    .or_else(|| one.name.clone())
+                    .unwrap_or_else(|| format!("fcn.{:08x}", one.address)),
+                confidence: match one.confidence {
+                    r2engine::discovery::Confidence::Stated => "stated",
+                    r2engine::discovery::Confidence::Called => "called",
+                    r2engine::discovery::Confidence::Handed => "handed",
+                    r2engine::discovery::Confidence::Reached => "reached",
+                },
+            }
+        })
+        .collect())
 }
 
 /// Write text at the cursor, as `w` read it. radare2 writes nothing, and says
