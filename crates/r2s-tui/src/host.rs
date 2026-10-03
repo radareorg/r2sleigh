@@ -81,7 +81,7 @@ impl Graph {
 }
 
 /// The lists the visual mode shows, each the shell's command of that name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ListKind {
     /// `afl`
     Functions,
@@ -123,6 +123,11 @@ impl ListKind {
 ///
 /// Every answer is already spelled: the shell owns the spelling, and the
 /// visual mode only lays it out.
+///
+/// Only the engine's thread asks a host anything -- the thread the host
+/// lives on, since an engine need not be `Send`. The thread that reads keys
+/// and draws never calls it, so an answer that takes seconds never freezes
+/// the screen.
 pub trait Host {
     /// What the title bar names: the file, its format and machine.
     fn title(&self) -> String;
