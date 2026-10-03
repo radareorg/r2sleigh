@@ -75,7 +75,8 @@ struct LaneState {
 pub struct CallBoundaryConfig {
     /// Registers a call leaves changed in this body, which it defines afresh; empty in a body that never calls.
     pub clobbered: Vec<CanonicalStorageId>,
-    /// Registers the convention says a call leaves as it found them, sorted.
+    /// Registers a call leaves as it found them, sorted: the ones the
+    /// convention preserves and the ones the platform reserves to the system.
     pub preserved: Vec<CanonicalStorageId>,
     /// The carrier the callee puts back where it found it.
     ///

@@ -616,7 +616,13 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
         .collect()
 }
 
-/// What a call in this body may leave changed: the clobber list, and every register it touches unpreserved.
+/// What a call in this body may leave changed: the clobber list, and every
+/// register it touches that the call neither preserves nor finds reserved to
+/// the system.
+///
+/// A reserved register is not a definition any call makes, so it is never
+/// here: the thread pointer a body read before a call is the one it reads
+/// after it.
 fn clobbered_by_a_call(
     effect: &SourceCallEffect,
     observed: &BTreeSet<RegisterStorage>,
