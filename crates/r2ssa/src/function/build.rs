@@ -5,15 +5,23 @@ use super::*;
 impl SSAFunction {
     #[cfg(test)]
     pub(crate) fn from_exact_test_blocks(blocks: &[SSABlock], cfg: CFG) -> Self {
-        let entry = cfg
-            .entry_block()
-            .map(|block| block.addr)
-            .unwrap_or_default();
+        let entry = cfg.entered_at();
         let domtree = DomTree::compute(&cfg);
         let block_order = cfg.reverse_postorder();
+        // The entry-edge block is the graph's own, not one of the program's:
+        // a test that writes the program's blocks gets it from the graph.
         let ordered = block_order
             .iter()
-            .filter_map(|addr| blocks.iter().find(|block| block.addr == *addr).cloned())
+            .filter_map(|addr| {
+                blocks
+                    .iter()
+                    .find(|block| block.addr == *addr)
+                    .cloned()
+                    .or_else(|| {
+                        (*addr == crate::cfg::ENTRY_EDGE)
+                            .then(|| SSABlock::new(crate::cfg::ENTRY_EDGE, 0))
+                    })
+            })
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
@@ -163,20 +171,39 @@ impl SSAFunction {
             }))
             .collect::<Vec<_>>();
 
+        let cfg = lifted_cfg(blocks, declared_successors)?;
         // Which frame slots behave like variables. Asked of the lifted text,
         // before construction, because construction is what decides which
         // value each read of a variable sees.
         // A home is proven by the entry value it spills, not by which
         // carriers the convention names: the result register among them
         // made `call f; mov [rbp-4], eax` a parameter's home.
-        let promoted = crate::promote::promote_private_stack_slots(
-            blocks,
-            stack_pointer_carrier,
-            questions.interface,
-            machine_context.call_effect(),
-            stack_pointer_restored_by_callee.is_some(),
-        )
-        .unwrap_or_default();
+        //
+        // Promotion reads the entry block as run once, on the way in, with
+        // the stack pointer where the caller left it: its prologue opens the
+        // frame every place is named from. A branch in the body back to the
+        // entry arrives with the frame open -- a block that closed it would
+        // move the stack pointer without leaving, which promotion refuses --
+        // so the prologue would open a second frame under the first, and no
+        // displacement would name one slot on both arrivals. The graph says
+        // whether that happens: it is rooted at the entry edge exactly then.
+        let promoted = if cfg.has_entry_edge() {
+            r2il::refusal_evidence!(
+                "promote-stack-slot",
+                "{:#x} is also a branch target, so its block does not run once",
+                cfg.entered_at()
+            );
+            crate::phi::PromotedStackSlots::default()
+        } else {
+            crate::promote::promote_private_stack_slots(
+                blocks,
+                stack_pointer_carrier,
+                questions.interface,
+                machine_context.call_effect(),
+                stack_pointer_restored_by_callee.is_some(),
+            )
+            .unwrap_or_default()
+        };
         // The same phase report the semantic collector gives, for the half of
         // a decompile's bytes that are already held before the collector runs.
         // Construction is three passes over the same body and they do not cost
@@ -197,11 +224,11 @@ impl SSAFunction {
         };
         let mut func = Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
+            cfg,
             arch,
             machine_context,
             stack_pointer_restored_by_callee,
             callees,
-            declared_successors,
             &abi_carriers,
             &promoted,
             control,
@@ -250,9 +277,8 @@ impl SSAFunction {
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let mut func = Self::from_blocks_raw_with_policy_and_control(
-            blocks,
+            lifted_cfg(blocks, None)?,
             arch,
-            None,
             None,
             &[],
             &Default::default(),
@@ -296,9 +322,8 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         Self::from_blocks_raw_with_policy_and_control(
-            blocks,
+            lifted_cfg(blocks, None)?,
             arch,
-            None,
             None,
             &[],
             &Default::default(),
@@ -323,11 +348,11 @@ impl SSAFunction {
     ) -> Result<Self, SsaPrepareError> {
         Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
+            lifted_cfg(blocks, None)?,
             arch,
             &SourceMachineContext::from_blocks(blocks, arch),
             None,
             &CalleeBoundaries::default(),
-            None,
             &[],
             &Default::default(),
             control,
@@ -338,11 +363,11 @@ impl SSAFunction {
     #[allow(clippy::too_many_arguments)]
     fn from_blocks_raw_for_decompile_with_carriers_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
+        cfg: CFG,
         arch: Option<&ArchSpec>,
         machine_context: &SourceMachineContext,
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
         callees: &CalleeBoundaries,
-        declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
         promoted: &crate::phi::PromotedStackSlots,
         control: &C,
@@ -355,35 +380,28 @@ impl SSAFunction {
             callees.clone(),
         )?;
         Self::from_blocks_raw_with_policy_and_control(
-            blocks,
+            cfg,
             arch,
             policy.as_ref(),
-            declared_successors,
             abi_carriers,
             promoted,
             control,
         )
     }
 
+    /// Construct SSA over the graph `lifted_cfg` built from the lifted blocks.
     fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
-        blocks: &[R2ILBlock],
+        cfg: CFG,
         arch: Option<&ArchSpec>,
         call_boundaries: Option<&CallBoundaryConfig>,
-        declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
         promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        if blocks.is_empty() {
-            return Err(malformed_ssa_input());
-        }
-
-        // Build CFG
-        let cfg = CFG::from_blocks_with_declared_successors(blocks, declared_successors)
-            .ok_or_else(malformed_ssa_input)?;
-        control.poll()?;
-        let entry = cfg.entry;
+        // The function is named by the address it is entered at; the graph
+        // may be rooted in front of it (`cfg::ENTRY_EDGE`).
+        let entry = cfg.entered_at();
 
         // Compute dominator tree
         let domtree = DomTree::compute_with_control(&cfg, control)?;
@@ -750,4 +768,15 @@ impl SSAFunction {
         self.prep_interface = function_interface.cloned();
         Ok(())
     }
+}
+
+/// The graph of the lifted blocks, rooted where control enters
+/// (`cfg::ENTRY_EDGE`). Built once per construction: promotion asks it whether
+/// the entry block runs once, and construction renames over it.
+fn lifted_cfg(
+    blocks: &[R2ILBlock],
+    declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
+) -> Result<CFG, SsaPrepareError> {
+    CFG::from_blocks_with_declared_successors(blocks, declared_successors)
+        .ok_or_else(malformed_ssa_input)
 }

@@ -112,7 +112,7 @@ impl TestCfg {
 }
 
 impl PlacementControlFlow for TestCfg {
-    fn entry(&self) -> u64 {
+    fn root(&self) -> u64 {
         self.entry
     }
 

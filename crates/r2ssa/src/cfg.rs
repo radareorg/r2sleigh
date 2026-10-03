@@ -520,6 +520,24 @@ fn split_internal_control_flow_targets(block: &R2ILBlock) -> Vec<R2ILBlock> {
         .collect()
 }
 
+/// The key of the block standing for the edge control enters a function by.
+///
+/// SSA construction needs a root with no predecessor: the values a function
+/// is entered with are defined on the way in, and a block that control also
+/// reaches from inside the body -- a loop whose header is the first
+/// instruction, or mutual tail recursion walked into one body -- is a merge
+/// of that way in and its other predecessors. Without a block for the way
+/// in, dominance frontiers never name the entry, no merge is placed there,
+/// and every pass reads the entry values as if the latch had written nothing.
+/// So where the entry is also a branch target, the graph is rooted at an
+/// empty block keyed here, whose one successor is the entry; this is Cytron's
+/// entry node, and the ordinary frontier rule then places the merges.
+///
+/// No lifted block can take this key: a block holds at least one byte, so one
+/// starting at the last address of the space would end past it, and the graph
+/// refuses a lifted block that claims it.
+pub const ENTRY_EDGE: u64 = u64::MAX;
+
 /// A Control Flow Graph for a function.
 #[derive(Debug, Clone)]
 pub struct CFG {
@@ -527,8 +545,12 @@ pub struct CFG {
     graph: DiGraph<BasicBlock, CFGEdge>,
     /// Map from block address to node index.
     addr_to_node: HashMap<u64, NodeIndex>,
-    /// The entry block address.
+    /// The root: the block control enters the graph by, which no edge
+    /// reaches. It is the block at `entered_at`, or [`ENTRY_EDGE`] where a
+    /// branch in the body also targets that address.
     pub entry: u64,
+    /// The address control enters the function at.
+    entered_at: u64,
 }
 
 /// Edge type in the CFG.
@@ -579,7 +601,19 @@ impl CFG {
             graph: DiGraph::new(),
             addr_to_node: HashMap::new(),
             entry,
+            entered_at: entry,
         }
+    }
+
+    /// The address control enters the function at, which is the root's own
+    /// address unless the root is the [`ENTRY_EDGE`] block in front of it.
+    pub const fn entered_at(&self) -> u64 {
+        self.entered_at
+    }
+
+    /// Whether the root is the synthetic [`ENTRY_EDGE`] block.
+    pub const fn has_entry_edge(&self) -> bool {
+        self.entry == ENTRY_EDGE && self.entered_at != ENTRY_EDGE
     }
 
     /// Build a CFG from a sequence of r2il blocks.
@@ -599,7 +633,7 @@ impl CFG {
         blocks: &[R2ILBlock],
         declared: Option<&DeclaredSuccessors>,
     ) -> Option<Self> {
-        if blocks.is_empty() {
+        if blocks.is_empty() || blocks.iter().any(|block| block.addr == ENTRY_EDGE) {
             return None;
         }
 
@@ -653,12 +687,34 @@ impl CFG {
     /// Edges are a function of the terminators, so a caller that assembles
     /// blocks itself gets the same graph the block reader builds rather than a
     /// second way of connecting them.
+    ///
+    /// The graph is then rooted: where some block branches back to the entry,
+    /// the [`ENTRY_EDGE`] block is put in front of it.
     pub fn rebuild_edges(&mut self) {
         let mut addrs: Vec<u64> = self.addr_to_node.keys().copied().collect();
         addrs.sort_unstable();
         for addr in addrs {
             self.add_edges_for_block(addr);
         }
+        self.root_at_entry_edge();
+    }
+
+    /// Put the [`ENTRY_EDGE`] block in front of an entry that some edge
+    /// reaches, so the root has no predecessor. One predecessor query.
+    fn root_at_entry_edge(&mut self) {
+        if self.entry == ENTRY_EDGE
+            || !self.addr_to_node.contains_key(&self.entry)
+            || self.predecessors(self.entry).is_empty()
+        {
+            return;
+        }
+        let entered_at = self.entry;
+        let mut edge = BasicBlock::new(ENTRY_EDGE);
+        edge.terminator = BlockTerminator::Fallthrough { next: entered_at };
+        self.add_block(edge);
+        self.add_edges_for_block(ENTRY_EDGE);
+        self.entry = ENTRY_EDGE;
+        self.entered_at = entered_at;
     }
 
     /// Add edges for a block based on its terminator.
@@ -895,7 +951,8 @@ impl CFG {
         }
 
         CFGRiskSummary {
-            block_count: self.num_blocks(),
+            // The program's blocks: the entry-edge block is the graph's own.
+            block_count: self.num_blocks() - usize::from(self.has_entry_edge()),
             loop_count: back_edges.len(),
             back_edge_count: back_edges.values().map(Vec::len).sum(),
             switch_block_count,
@@ -1109,6 +1166,60 @@ mod tests {
         };
         assert_eq!(cases.len(), 8);
         assert_eq!(*default, Some(0x4020u64));
+    }
+
+    /// A branch back to the first instruction makes it a merge of that branch
+    /// and the way in, so the graph is rooted at an entry edge no edge
+    /// reaches; a function nothing branches back into keeps its entry as root.
+    #[test]
+    fn a_branch_back_to_the_entry_roots_the_graph_at_the_entry_edge() {
+        let looping = [
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1000, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let cfg = CFG::from_blocks(&looping).expect("cfg");
+        assert_eq!(cfg.entry, ENTRY_EDGE);
+        assert_eq!(cfg.entered_at(), 0x1000);
+        assert!(cfg.has_entry_edge());
+        assert!(cfg.predecessors(ENTRY_EDGE).is_empty());
+        assert_eq!(cfg.successors(ENTRY_EDGE), vec![0x1000]);
+        assert_eq!(cfg.predecessors(0x1000), vec![0x1000, ENTRY_EDGE]);
+        assert_eq!(cfg.reverse_postorder(), vec![ENTRY_EDGE, 0x1000, 0x1004]);
+        assert_eq!(cfg.risk_summary().block_count, 2);
+
+        let straight = [looping[1].clone()];
+        let cfg = CFG::from_blocks(&straight).expect("cfg");
+        assert_eq!(cfg.entry, 0x1004);
+        assert_eq!(cfg.entered_at(), 0x1004);
+        assert!(!cfg.has_entry_edge());
+        assert!(cfg.get_block(ENTRY_EDGE).is_none());
+
+        // No lifted block may claim the key the entry edge is kept under.
+        let claimed = [R2ILBlock {
+            addr: ENTRY_EDGE,
+            size: 0,
+            ops: vec![R2ILOp::Nop],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }];
+        assert!(CFG::from_blocks(&claimed).is_none());
     }
 
     #[test]

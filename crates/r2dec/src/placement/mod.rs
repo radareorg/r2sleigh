@@ -4009,7 +4009,8 @@ pub(crate) fn derive_placement_decisions(
 }
 
 trait PlacementControlFlow {
-    fn entry(&self) -> u64;
+    /// The block control enters by, which no edge reaches.
+    fn root(&self) -> u64;
     fn block_addrs(&self) -> Vec<u64>;
     fn predecessors(&self, block: u64) -> Vec<u64>;
     fn successors(&self, block: u64) -> Vec<u64>;
@@ -4017,8 +4018,8 @@ trait PlacementControlFlow {
 }
 
 impl PlacementControlFlow for SSAFunction {
-    fn entry(&self) -> u64 {
-        self.entry
+    fn root(&self) -> u64 {
+        SSAFunction::root(self)
     }
 
     fn block_addrs(&self) -> Vec<u64> {
@@ -4667,7 +4668,7 @@ fn must_assignment_inputs<C: PlacementControlFlow + ?Sized>(
         let mut predecessors = cfg.predecessors(block);
         predecessors.sort_unstable();
         predecessors.dedup();
-        let next_input = if block == cfg.entry() {
+        let next_input = if block == cfg.root() {
             DenseBindingSet::from_bindings(binding_count, externally_declared)?
         } else if predecessors.is_empty() {
             DenseBindingSet::empty(binding_count)

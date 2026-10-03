@@ -34,6 +34,19 @@ pub enum SsaIntegrityError {
     EntryOutsideBlockDomain {
         entry: u64,
     },
+    /// The root is reached by an edge, so the values the function is
+    /// entered with would have no block of their own to be defined in.
+    RootHasPredecessors {
+        root: u64,
+        predecessors: Vec<u64>,
+    },
+    /// The root is neither the entry nor the entry-edge block leading only
+    /// to it.
+    RootDoesNotEnter {
+        root: u64,
+        entry: u64,
+        successors: Vec<u64>,
+    },
     PredecessorOutsideBlockDomain {
         block_addr: u64,
         predecessor: u64,
@@ -120,6 +133,17 @@ impl fmt::Display for SsaIntegrityError {
             Self::EntryOutsideBlockDomain { entry } => write!(
                 f,
                 "SSA entry 0x{entry:x} is not present in the stored block domain"
+            ),
+            Self::RootHasPredecessors { root, predecessors } => {
+                write!(f, "SSA root 0x{root:x} is reached from {predecessors:x?}")
+            }
+            Self::RootDoesNotEnter {
+                root,
+                entry,
+                successors,
+            } => write!(
+                f,
+                "SSA root 0x{root:x} does not lead to the entry 0x{entry:x} alone: it leads to {successors:x?}"
             ),
             Self::PredecessorOutsideBlockDomain {
                 block_addr,
@@ -271,10 +295,28 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             stored_count: function.num_blocks(),
         });
     }
-    if !block_domain.contains(&function.entry) {
-        return Err(SsaIntegrityError::EntryOutsideBlockDomain {
-            entry: function.entry,
-        });
+    let root = function.root();
+    for entry in [root, function.entry] {
+        if !block_domain.contains(&entry) {
+            return Err(SsaIntegrityError::EntryOutsideBlockDomain { entry });
+        }
+    }
+    // The root is where the entry values are defined, so nothing may reach
+    // it; where it is not the entry itself it is the entry-edge block, which
+    // does nothing but lead there.
+    let predecessors = function.predecessors(root);
+    if !predecessors.is_empty() {
+        return Err(SsaIntegrityError::RootHasPredecessors { root, predecessors });
+    }
+    if root != function.entry {
+        let successors = function.successors(root);
+        if root != crate::cfg::ENTRY_EDGE || successors != [function.entry] {
+            return Err(SsaIntegrityError::RootDoesNotEnter {
+                root,
+                entry: function.entry,
+                successors,
+            });
+        }
     }
 
     // `SsaGraph` stores only `block_order`, so every retained CFG edge must be
@@ -622,6 +664,22 @@ mod tests {
         assert_eq!(
             validate_ssa_function(&function),
             Err(SsaIntegrityError::EntryOutsideBlockDomain { entry: 0x1000 })
+        );
+    }
+
+    /// The entry values are defined at the root, so an edge into it is refused.
+    #[test]
+    fn rejects_a_root_that_an_edge_reaches() {
+        let mut function = diamond();
+        function
+            .cfg_mut()
+            .set_terminator(0x100c, BlockTerminator::Branch { target: 0x1000 });
+        assert_eq!(
+            validate_ssa_function(&function),
+            Err(SsaIntegrityError::RootHasPredecessors {
+                root: 0x1000,
+                predecessors: vec![0x100c],
+            })
         );
     }
 

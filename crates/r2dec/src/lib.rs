@@ -3472,7 +3472,7 @@ impl Decompiler {
             let certificate = structure::certify::certify(
                 structured_body.stmt(),
                 func.cfg(),
-                func.entry(),
+                func.root(),
                 &|id| journal.observation_block(id),
                 &label_block,
                 &|stmt| {

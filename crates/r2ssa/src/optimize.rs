@@ -401,7 +401,8 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
         block.for_each_source(|src| init_if_input(src.var, &mut lattice));
     }
 
-    cfg_worklist.push_back((u64::MAX, func.entry));
+    // The pseudo-edge into the root; nothing names it as a merge source.
+    cfg_worklist.push_back((u64::MAX, func.root()));
 
     while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
         control.poll()?;
@@ -794,7 +795,7 @@ fn apply_sccp_results(
 
     let mut reachable = HashSet::new();
     let mut queue = VecDeque::new();
-    queue.push_back(func.entry);
+    queue.push_back(func.root());
     while let Some(addr) = queue.pop_front() {
         if !reachable.insert(addr) {
             continue;

@@ -152,7 +152,7 @@ impl SSAFunction {
             }
         }
         self.insert_ops(
-            self.entry,
+            self.root(),
             0,
             minted.into_iter().map(|op| (op, None)).collect(),
         );
@@ -504,7 +504,7 @@ impl SSAFunction {
             }
         }
         self.insert_ops(
-            self.entry,
+            self.root(),
             0,
             minted.into_iter().map(|op| (op, None)).collect(),
         );

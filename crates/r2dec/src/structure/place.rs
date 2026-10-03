@@ -48,7 +48,7 @@ pub(crate) struct Placement {
 impl Placement {
     pub(crate) fn compute(func: &r2ssa::RewrittenFunction<'_>) -> Self {
         let cfg = func.cfg();
-        let entry = func.entry();
+        let entry = func.root();
         let dom = DomTree::compute(cfg);
         let rpo: HashMap<u64, usize> = cfg
             .reverse_postorder()
