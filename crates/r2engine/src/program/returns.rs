@@ -28,6 +28,11 @@ impl BodyWalk {
     pub(super) fn extent(&self) -> r2ssa::body::TraceExtent {
         self.trace.extent()
     }
+
+    /// The instructions the walk reached that enter the supervisor.
+    pub(super) fn supervisor_calls(&self) -> &std::collections::BTreeSet<u64> {
+        self.trace.supervisor_calls()
+    }
 }
 
 /// Discovery's walker over one open program.

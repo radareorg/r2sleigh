@@ -15,6 +15,7 @@ pub mod source;
 
 pub use requests::{
     AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge, Rendering,
+    Syscall,
 };
 
 pub use source::*;
@@ -340,20 +341,11 @@ impl<S: Source> OpenProgram<S> {
         let bits = container.arch.bits;
         let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
             .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
-        // The format says which processor ABI applies beyond the convention:
-        // which register it reserves for the thread pointer, and which control
-        // registers it makes callee-saved. A psABI fact, so a static ELF that
-        // names no C library has it too; which library's declarations apply
-        // is `platform`'s question, not this one.
-        let psabi = match container.format {
-            Format::Elf => r2abi::Platform::Linux,
-            Format::MachO => r2abi::Platform::Darwin,
-            // Windows' x64 ABI and the others are tables r2abi does not keep:
-            // no register is reserved beyond what the convention says.
-            Format::Pe | Format::Coff | Format::Wasm | Format::Xcoff | Format::Other => {
-                r2abi::Platform::Unknown
-            }
-        };
+        // The system's ABI says which register it reserves for the thread
+        // pointer and which control registers it makes callee-saved. A system
+        // fact, so a static ELF that names no C library has it too; which
+        // library's declarations apply is `platform`'s question.
+        let psabi = kernel(container);
         let call_effect = conventions.default_convention().and_then(|convention| {
             crate::native::call_effect(&machine.arch, bits, psabi, convention)
         });
@@ -830,6 +822,29 @@ fn platform(container: &Container) -> r2abi::Platform {
     match (named.next(), named.next()) {
         (Some(Libc::Glibc), None) => Platform::Linux,
         (Some(Libc::Bionic), None) => Platform::Android,
+        _ => Platform::Unknown,
+    }
+}
+
+/// Which kernel a program's system calls go to, as its container states it.
+///
+/// A kernel question, not a C library one: a static ELF names no library and
+/// still traps into Linux. Mach-O runs on Darwin's. An ELF runs on Linux
+/// unless its `EI_OSABI` names another system; one that states nothing is
+/// Linux's convention, which is what every Linux toolchain writes.
+pub(super) fn kernel(container: &Container) -> r2abi::Platform {
+    use r2abi::Platform;
+    match container.format {
+        Format::MachO => Platform::Darwin,
+        Format::Elf => {
+            let other = container.platform.iter().any(
+                |evidence| matches!(evidence, PlatformEvidence::OsAbi(abi) if *abi != ELFOSABI_GNU),
+            );
+            match other {
+                true => Platform::Unknown,
+                false => Platform::Linux,
+            }
+        }
         _ => Platform::Unknown,
     }
 }

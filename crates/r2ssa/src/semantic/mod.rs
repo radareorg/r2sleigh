@@ -18,9 +18,12 @@ mod prefix;
 mod private_objects;
 mod shared;
 mod structured;
+mod supervisor;
 #[cfg(test)]
 mod tests;
 mod trips;
+
+pub use supervisor::SupervisorCall;
 
 pub(crate) use assumptions::*;
 pub(crate) use boundaries::*;

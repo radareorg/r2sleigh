@@ -995,3 +995,27 @@ fn pdim_states_which_frame_objects_outside_code_can_reach() {
         run.out
     );
 }
+
+/// `/as` lists every instruction Sleigh says enters the kernel, in a body the
+/// walk reached, with the call its number register proves. A number that
+/// comes from a parameter is not proven here, and is listed as `?` rather
+/// than dropped; `0f 05` inside `mov $0x50f, %eax` is an immediate, not a
+/// call. The binary is stripped, static and links no C library.
+#[test]
+fn syscalls_are_the_kernel_calls_the_bodies_make() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/syscalls_static_O2");
+    let run = on(fixture, "/as");
+    assert!(run.ok, "{}", run.out);
+    assert_eq!(
+        run.out.lines().collect::<Vec<_>>(),
+        [
+            "0x00401009 ?",
+            "0x00401020 getpid",
+            "0x00401047 getpid",
+            "0x00401089 exit_group",
+        ],
+        "{}",
+        run.out
+    );
+}

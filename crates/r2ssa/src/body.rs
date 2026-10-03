@@ -297,6 +297,11 @@ impl Trace {
     /// blocks is no instruction of the body and is not counted. A dispatch
     /// the walk could not follow reaches nothing, so its arms are not
     /// counted either. O(instructions).
+    /// The instructions the walk reached that enter the supervisor.
+    pub fn supervisor_calls(&self) -> &BTreeSet<u64> {
+        &self.0.supervisor
+    }
+
     pub fn extent(&self) -> TraceExtent {
         let decoded = &self.0.decoded;
         TraceExtent {
@@ -309,6 +314,14 @@ impl Trace {
             bytes: decoded.values().map(|one| u64::from(one.size)).sum(),
         }
     }
+}
+
+/// Whether an instruction's p-code enters the supervisor: a user operation the
+/// language declares as one (`ArchSpec::supervisor_calls`).
+fn enters_supervisor(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> bool {
+    ops.iter().any(|op| {
+        matches!(op, r2il::R2ILOp::CallOther { userop, .. } if arch.supervisor_calls.contains(userop))
+    })
 }
 
 /// The shape of one traced body: its basic blocks and the bytes of its
@@ -342,6 +355,9 @@ struct Walk {
     unresolved: Vec<Unresolved>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
+    /// The instructions that enter the supervisor, as the language's own
+    /// user-operation table says.
+    supervisor: BTreeSet<u64>,
     /// Where the last decode left the decoder's context, which the lifter keeps for the next one where it follows on.
     context: Option<Continuation>,
     reached: Reached,
@@ -371,6 +387,7 @@ impl Walk {
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
             gated: BTreeMap::new(),
+            supervisor: BTreeSet::new(),
             context: None,
             reached: Reached::default(),
         };
@@ -400,6 +417,8 @@ impl Walk {
                 continue;
             }
             if let Some(instruction) = self.decode(addr, disasm, program) {
+                let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());
+                self.supervisor.extend(enters.then_some(addr));
                 pending.extend(self.record(instruction, program));
             }
         }

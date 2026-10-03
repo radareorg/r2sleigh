@@ -685,14 +685,14 @@ pub(crate) fn promote_private_stack_slots(
                             return None;
                         };
                         widths.entry(displacement).or_default().insert(val.size);
-                        if index == 0
-                            && let Some(root) = spills_an_incoming_value(block, at, val)
-                        {
-                            match is_save(&root) {
-                                true => saves.insert(displacement),
-                                false => homes.insert(displacement),
-                            };
-                        }
+                        let spilled = (index == 0)
+                            .then(|| spills_an_incoming_value(block, at, val))
+                            .flatten();
+                        let _ = match spilled.map(|root| is_save(&root)) {
+                            Some(true) => saves.insert(displacement),
+                            Some(false) => homes.insert(displacement),
+                            None => false,
+                        };
                         accesses.push(SlotAccess {
                             block: index,
                             op: at,

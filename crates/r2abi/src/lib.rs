@@ -17,6 +17,7 @@ pub mod platform;
 pub mod prototypes;
 mod spelling;
 pub mod statement;
+pub mod syscalls;
 pub mod types;
 
 pub use compiler_spec::CompilerSpec;
@@ -26,6 +27,7 @@ pub use prototypes::{
     Arrival, FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
     dwarf_frame_register, dwarf_register,
 };
+pub use syscalls::Syscalls;
 pub use types::{
     DataModel, Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind,
     Signature, Type, TypeGraph, TypeId, Width,

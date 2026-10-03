@@ -91,6 +91,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "axt" => references_to(session, argument),
         "iz" => strings(session),
         "izz" => every_string(session),
+        "/as" => syscalls(session),
         "wx" => write_hex(session, argument),
         "wc" => patches(session),
         "wcr" => revert(session),
@@ -100,6 +101,27 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "pddo" => obligations(session, argument),
         other => Err(format!("unknown command '{}'", other)),
     }
+}
+
+/// `/as`: every instruction that enters the kernel, and the call it makes,
+/// one per line as radare2 writes them: `0x00401016 write`. A number the
+/// kernel's table does not name is written as the number, and one the body
+/// does not prove as `?`, rather than as a guess.
+fn syscalls(session: &mut Session) -> Result<String, String> {
+    Ok(session
+        .program
+        .syscalls()?
+        .into_iter()
+        .map(|call| {
+            let what = match (call.name, call.number) {
+                (Some(name), _) => name,
+                (None, Some(number)) => number.to_string(),
+                (None, None) => "?".to_owned(),
+            };
+            format!("{:#010x} {what}", call.address)
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// An address as radare2 reads one: hex, decimal, or a name `f` lists.

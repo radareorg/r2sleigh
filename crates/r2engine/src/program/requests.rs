@@ -164,6 +164,20 @@ pub(super) struct Survey {
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
     /// Each walked body's blocks and their bytes, as the walk traced them.
     extents: BTreeMap<u64, r2ssa::body::TraceExtent>,
+    /// Each walked body's instructions that enter the supervisor, where it has any.
+    supervisor: BTreeMap<u64, std::collections::BTreeSet<u64>>,
+}
+
+/// One instruction that enters the kernel, with the call it makes where the
+/// body proves which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Syscall {
+    pub address: u64,
+    /// The number, where every path to the instruction leaves the platform's
+    /// number register holding one proven value.
+    pub number: Option<u64>,
+    /// The kernel's name for the number, where its table gives one.
+    pub name: Option<String>,
 }
 
 /// The one decoder a body was walked with, whatever the address.
@@ -462,6 +476,72 @@ impl<S: Source> OpenProgram<S> {
         Ok(self.surveyed()?.extents)
     }
 
+    /// Every instruction in a believed body that enters the kernel, with the
+    /// call it makes: radare2's `/as`.
+    ///
+    /// The sites are the ones the survey's walk decoded, so an instruction is
+    /// one Sleigh says enters the supervisor and lies in a body control
+    /// reaches. Only a body holding one is prepared, and the number is the
+    /// value the platform's number register holds there, proven or not given.
+    /// A site two bodies share takes their number where they agree.
+    pub fn syscalls(&mut self) -> Result<Vec<Syscall>, String> {
+        self.start_request();
+        let sites = self.surveyed()?.supervisor;
+        let container = self.source.container();
+        let table = r2abi::Syscalls::for_platform(
+            super::kernel(container),
+            &container.arch.name,
+            container.arch.bits,
+        );
+        let mut found = BTreeMap::<u64, Option<u64>>::new();
+        for (entry, calls) in sites {
+            let numbers = match &table {
+                Some(table) => self.syscall_numbers(entry, table)?,
+                None => BTreeMap::new(),
+            };
+            for site in calls {
+                let number = numbers.get(&site).copied().flatten();
+                // Two bodies that disagree prove neither number.
+                let held = found.entry(site).or_insert(number);
+                *held = held.filter(|_| *held == number);
+            }
+        }
+        Ok(found
+            .into_iter()
+            .map(|(address, number)| Syscall {
+                address,
+                number,
+                name: number
+                    .zip(table.as_ref())
+                    .and_then(|(number, table)| table.name(number).map(str::to_owned)),
+            })
+            .collect())
+    }
+
+    /// The number each supervisor call in one body proves, by instruction; a
+    /// body that does not prepare proves none.
+    fn syscall_numbers(
+        &mut self,
+        entry: u64,
+        table: &r2abi::Syscalls,
+    ) -> Result<BTreeMap<u64, Option<u64>>, String> {
+        let Ok(prepared) = self.prepare(entry) else {
+            return Ok(BTreeMap::new());
+        };
+        let arch = self.target(entry)?.arch;
+        let Some(storage) = r2sleigh_lift::lifted_register_storage(arch, table.number_register())
+        else {
+            return Ok(BTreeMap::new());
+        };
+        Ok(prepared
+            .artifact()
+            .shared_artifact()
+            .supervisor_calls(storage)
+            .into_iter()
+            .map(|call| (call.address, call.number))
+            .collect())
+    }
+
     /// Every reference the program makes, from every function discovery
     /// believes, with the coverage it was read over; read once per state of the program.
     ///
@@ -535,6 +615,7 @@ impl<S: Source> OpenProgram<S> {
                 functions: Vec::new(),
                 walked: BTreeMap::new(),
                 extents: BTreeMap::new(),
+                supervisor: BTreeMap::new(),
             });
         };
         // Both instruction sets share one convention and one compiler
@@ -547,6 +628,14 @@ impl<S: Source> OpenProgram<S> {
             .walks
             .iter()
             .filter_map(|(entry, walk)| Some((*entry, walk.as_ref().ok()?.extent())))
+            .collect();
+        let supervisor = found
+            .walks
+            .iter()
+            .filter_map(|(entry, walk)| {
+                let calls = walk.as_ref().ok()?.supervisor_calls();
+                (!calls.is_empty()).then(|| (*entry, calls.clone()))
+            })
             .collect();
         let walked = found
             .walks
@@ -569,6 +658,7 @@ impl<S: Source> OpenProgram<S> {
             functions: found.functions,
             walked,
             extents,
+            supervisor,
         })
     }
 
