@@ -1423,7 +1423,13 @@ fn mint_recovered_interface_inner(
     .with_return_address_storage(return_address_storage)
     .ok()?
     .with_stack_pointer_storage(stack_pointer_storage)
-    .ok()?;
+    .ok()?
+    // The carriers as the roles spell them: the trusted lift restates every
+    // carrier in its own architecture's numbering by looking it up by name,
+    // and an interface naming none had both storages cleared there while its
+    // stacked return still stood -- a mechanism with no carriers, refused as
+    // a conflict with the machine.
+    .with_role_register_names(roles.role_register_names());
     let interface = if recovered.result_is_return_address() {
         interface.with_body_proven_return_address().ok()?
     } else {
@@ -1815,11 +1821,16 @@ mod tests {
         assert_eq!(result.slot(), register(0, 8));
         assert_eq!(result.observed(), register(0, 4));
 
+        let names = r2source::SourceRoleRegisterNames::new(Some("x30"), Some("sp"), None);
         let roles = SourceMachineRoles::new(Some(register(0x80, 8)), Some(register(0x88, 8)))
-            .expect("machine roles");
+            .expect("machine roles")
+            .with_role_register_names(names);
         let interface =
             mint_recovered_interface(&recovered, &roles, b"narrow-return-revision", "aapcs64")
                 .expect("minted narrow return interface");
+        // The lift restates carriers by name; an interface minted without the
+        // roles' names had its carriers cleared there.
+        assert_eq!(interface.role_register_names(), names);
         assert_eq!(
             interface.return_kind(),
             SourceFunctionReturn::Register {
