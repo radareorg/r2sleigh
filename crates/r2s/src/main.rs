@@ -5,11 +5,12 @@ mod function;
 mod grep;
 mod line;
 mod listing;
+mod prompt;
 mod session;
 mod visual;
 
 use clap::Parser;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 #[derive(Parser)]
 #[command(
@@ -72,6 +73,12 @@ fn main() {
     }
 
     let stdin = std::io::stdin();
+    // A person at a terminal gets line editing and history; anything else
+    // reads lines as they come.
+    if !cli.quiet && stdin.is_terminal() && std::io::stdout().is_terminal() {
+        prompt::interactive(&mut session, &mut reader);
+        return;
+    }
     let mut line = String::new();
     loop {
         if !cli.quiet {
