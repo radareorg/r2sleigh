@@ -2731,7 +2731,7 @@ fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usiz
         return Some((index, None));
     }
     let view = facts.view(var);
-    let index = facts.formal_parameter_of(&view.root)?;
+    let index = facts.formal_parameter_of_view(&view)?;
     match view.extension {
         crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
         crate::view::ViewExtension::Sign => Some((index, Some(view.prefix_bits))),

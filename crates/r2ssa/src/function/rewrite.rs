@@ -509,6 +509,15 @@ impl SSAFunction {
             0,
             minted.into_iter().map(|op| (op, None)).collect(),
         );
+        // The lanes and the composed roots are new definitions, so the view
+        // the facts were collected with names none of them: `esi` minted from
+        // `rsi` read as its own root while `zext(esi)` read as `rsi`'s, and
+        // one bit identity had two answers. The view is solved again over the
+        // rewritten body, once, O(V + E).
+        let views = crate::view::ValueViews::compute(self);
+        if let Some(facts) = self.decompile_prep_facts.as_mut() {
+            facts.views = views;
+        }
     }
 
     pub(crate) fn collect_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(

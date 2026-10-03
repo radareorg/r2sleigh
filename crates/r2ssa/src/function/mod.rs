@@ -2386,6 +2386,21 @@ impl DecompilePrepFacts {
     pub fn formal_parameter_of(&self, var: &SSAVar) -> Option<usize> {
         self.formal_parameters.get(var).copied()
     }
+
+    /// The formal whose bits a view names: the root itself, or a formal that
+    /// is exactly those bits of the root -- `esi` of `rsi`, which a widening
+    /// of `esi` views as `rsi`'s low 32 bits. O(formals).
+    pub fn formal_parameter_of_view(&self, view: &crate::view::ValueView) -> Option<usize> {
+        self.formal_parameter_of(&view.root).or_else(|| {
+            self.formal_parameters.iter().find_map(|(formal, index)| {
+                let lane = self.views.view(formal);
+                (lane.root == view.root
+                    && lane.prefix_bits == view.prefix_bits
+                    && lane.extension == crate::view::ViewExtension::Exact)
+                    .then_some(*index)
+            })
+        })
+    }
 }
 
 /// A function in SSA form.

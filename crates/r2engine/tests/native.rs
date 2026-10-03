@@ -3227,3 +3227,77 @@ fn a_buffer_an_unknown_call_is_handed_runs_to_the_nearest_save_slot() {
     assert_eq!(first, second, "{:#?}", objects.stack_objects);
     assert_ne!(first, save, "{:#?}", objects.stack_objects);
 }
+
+/// clang -O0's `return *rows[index];`: both formals are spilled to their homes
+/// and reloaded, and `index` is the `esi` lane of `rsi`.
+///
+/// ```text
+///   1000  push rbp ; mov rbp, rsp
+///   1004  mov [rbp - 8], rdi ; mov [rbp - 0xc], esi
+///   100b  mov rax, [rbp - 8] ; mov ecx, [rbp - 0xc]
+///   1012  mov rax, [rax + rcx*8] ; mov rax, [rax]
+///   1019  pop rbp ; ret
+/// ```
+const INDEXED_THROUGH_HOMES: &[u8] = &[
+    0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0x7d, 0xf8, 0x89, 0x75, 0xf4, 0x48, 0x8b, 0x45, 0xf8, 0x8b,
+    0x4d, 0xf4, 0x48, 0x8b, 0x04, 0xc8, 0x48, 0x8b, 0x00, 0x5d, 0xc3,
+];
+
+/// Once the homes are promoted, the index is `zext(esi)`. The formal is the
+/// `esi` lane, minted after the value view was first solved, so the view must
+/// name the lane by the bits of `rsi` it is -- otherwise the reach through
+/// `rows` loses its stride and becomes unbounded, and every caller merges its
+/// frame into one object.
+#[test]
+fn a_reach_indexed_by_a_lane_formal_keeps_its_stride() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: INDEXED_THROUGH_HOMES.to_vec(),
+        name: "indirect_load",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let shared = prepared.shared_artifact();
+    let summary = r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(BASE), &shared)
+        .expect("a summary");
+    let reach = summary.argument_touch_reach();
+    let rows = reach.get(&0).expect("a reach through rows");
+    assert!(!rows.is_unbounded(), "{reach:?}");
+    assert!(
+        rows.terms().any(|term| matches!(
+            term,
+            r2ssa::SummaryArgumentReach::Scaled {
+                argument: 1,
+                stride: 8,
+                ..
+            }
+        )),
+        "{reach:?}"
+    );
+}
+
+/// clang -O0's `static int zero_of(int q) { return q ^ q; }`: the home is
+/// promoted, so both reads are the parameter and `q ^ q` rewrites to `0`.
+/// Nothing reads the parameter by name any more; its declaration is its one
+/// occurrence, and the function renders rather than refusing.
+#[test]
+fn a_parameter_every_read_of_which_is_rewritten_away_is_still_declared() {
+    // push rbp; mov rbp, rsp; mov [rbp-4], edi; mov eax, [rbp-4];
+    // xor eax, [rbp-4]; pop rbp; ret
+    const ZERO_OF: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x89, 0x7d, 0xfc, 0x8b, 0x45, 0xfc, 0x33, 0x45, 0xfc, 0x5d, 0xc3,
+        0x00,
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: ZERO_OF.to_vec(),
+        name: "zero_of",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}",
+        response.render_refusal
+    );
+    let output = response.output.text();
+    assert!(output.contains("return 0;"), "{output}");
+}

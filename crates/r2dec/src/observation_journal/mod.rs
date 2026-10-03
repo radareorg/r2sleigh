@@ -2758,6 +2758,7 @@ impl LegacyObservationJournal {
     ) -> Result<(), LegacyObservationJournalError> {
         self.account_removed_occurrences();
         self.account_values_rendered_by_binding(symbol_bindings)?;
+        self.account_parameters_declared_by_the_signature(symbol_bindings);
         self.account_coalesced_copy_outputs(symbol_bindings)
     }
 
@@ -2772,6 +2773,51 @@ impl LegacyObservationJournal {
         graph.def_inst(value).is_none()
             && !uses.is_empty()
             && uses.iter().all(|site| silence.contains(site.inst))
+    }
+
+    /// Close the cell of a formal's entry value that the header spells.
+    ///
+    /// A formal's entry value -- nothing defines it, or it is the entry-lane
+    /// projection of the register it arrived in -- whose binding is the one
+    /// the signature declares for its slot is named where the parameter is
+    /// declared, even when no statement reads it by name: `x ^ x` is
+    /// rewritten to `0`, which discharges both reads and leaves the
+    /// declaration as the formal's one occurrence. Any other value sharing
+    /// the binding is a later assignment and still needs a statement, and a
+    /// binding the function does not declare closes nothing.
+    fn account_parameters_declared_by_the_signature(
+        &mut self,
+        symbol_bindings: &BTreeMap<SymbolId, LegacyBindingId>,
+    ) {
+        let graph = self.source.graph();
+        for slot in 0..self.values.len() {
+            if self.values[slot].is_some() {
+                continue;
+            }
+            let value = ValueId(slot as u32);
+            let entry =
+                graph.def_inst(value).is_none() || graph.formal_projection_storage(value).is_some();
+            let Some(ValueDisposition::Bound { binding }) = self.plan.disposition(value) else {
+                continue;
+            };
+            let Some(crate::binding_plan::BindingRole::Parameter { slot: formal }) =
+                self.plan.binding_role(*binding)
+            else {
+                continue;
+            };
+            let declared = matches!(
+                self.plan.parameter_disposition(formal),
+                Some(crate::binding_plan::ParameterDisposition::Bound { binding: declared, .. })
+                    if declared == *binding
+            );
+            let legacy = self
+                .names
+                .symbol_for_binding(*binding)
+                .and_then(|symbol| symbol_bindings.get(&symbol).copied());
+            if let (true, true, Some(legacy)) = (entry, declared, legacy) {
+                self.values[slot] = Some(LegacyValueObservation::Bound { binding: legacy });
+            }
+        }
     }
 
     /// Name every cell and reader of an unaccounted value, under the trace
