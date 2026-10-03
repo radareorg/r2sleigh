@@ -1281,6 +1281,58 @@ impl SourceFunctionInterface {
         })
     }
 
+    /// The same interface over other stack slots, stated against `revision`.
+    ///
+    /// Every other fact it states is kept: carriers, return mechanism, role
+    /// names, the types and what they are read from, the variadic tail and
+    /// its format parameter, a body-proven return address. The slots are
+    /// checked as an exact interface checks them, and the carriers and the
+    /// mechanism are placed on them again in the order their own checks
+    /// need: carriers first, since one refuses to move once a mechanism is
+    /// bound.
+    pub fn restated(
+        &self,
+        stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
+        revision_identity: impl Into<Vec<u8>>,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        let mut rebuilt = Self::new_exact_with_logical_types(
+            revision_identity,
+            self.calling_convention.clone(),
+            self.parameters.iter().cloned(),
+            self.return_kind,
+            stack_slots,
+            self.parameter_logical_values.iter().cloned(),
+            self.return_logical_value,
+            self.type_graph.clone(),
+        )?
+        .with_role_register_names(self.role_register_names);
+        if let Some(storage) = self.return_address_storage {
+            rebuilt = rebuilt.with_return_address_storage(storage)?;
+        }
+        if let Some(storage) = self.stack_pointer_storage {
+            rebuilt = rebuilt.with_stack_pointer_storage(storage)?;
+        }
+        if let Some(storage) = self.frame_pointer_storage {
+            rebuilt = rebuilt.with_frame_pointer_storage(storage)?;
+        }
+        if let Some(mechanism) = self.return_mechanism {
+            rebuilt = rebuilt.with_exact_stacked_return(
+                mechanism.stack_offset(),
+                mechanism.slot_size_bytes(),
+                mechanism.stack_pointer_delta_bytes(),
+                mechanism.address_size_bytes(),
+            )?;
+        }
+        Ok(Self {
+            body_proven_format_parameter: self.body_proven_format_parameter,
+            variadic: self.variadic,
+            declared_format_parameter: self.declared_format_parameter,
+            body_proven_return_address: self.body_proven_return_address,
+            types: self.types.clone(),
+            ..rebuilt
+        })
+    }
+
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -2500,6 +2552,42 @@ mod tests {
             both.format_parameter_rule(),
             Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
+    }
+
+    /// Restating an interface over other slots changes the slots and the
+    /// revision it is stated against, and nothing else it says.
+    #[test]
+    fn a_restated_interface_keeps_every_fact_but_its_slots() {
+        let interface = SourceFunctionInterface::new_exact(
+            b"variadic-function".to_vec(),
+            "sysv-amd64",
+            [
+                SourceAbiParameterSpec::new(0, register_storage(0x38, 8)),
+                SourceAbiParameterSpec::new(1, register_storage(0x30, 8)),
+            ],
+            SourceFunctionReturn::Register {
+                storage: register_storage(0, 8),
+            },
+            [],
+        )
+        .expect("interface")
+        .with_declared_variadic(Some(1))
+        .expect("the second parameter is the format")
+        .with_body_proven_format_parameter(1)
+        .expect("the body forwards it")
+        .with_body_proven_return_address()
+        .expect("a register result")
+        .with_types(crate::Confidence::of(crate::Basis::DebugInfo));
+        let restated = interface
+            .restated([], b"other-revision".to_vec())
+            .expect("restates");
+        assert_eq!(restated.revision_identity(), b"other-revision");
+        assert!(restated.is_variadic());
+        assert_eq!(restated.declared_format_parameter(), Some(1));
+        assert_eq!(restated.body_proven_format_parameter(), Some(1));
+        assert!(restated.body_proven_return_address());
+        assert_eq!(restated.types(), interface.types());
+        assert_eq!(restated.parameters(), interface.parameters());
     }
 
     #[test]
