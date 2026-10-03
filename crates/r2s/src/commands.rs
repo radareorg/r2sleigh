@@ -1313,7 +1313,17 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr, RenderTier::C)?;
-    let mut out = rendering.response.output.into_text();
+    let roles = match (&rendering.response.output, session.color) {
+        (r2engine::EngineRendering::Function(rendered), true) => {
+            Some(crate::listing::c_roles(rendered.emission().roles()))
+        }
+        _ => None,
+    };
+    let text = rendering.response.output.into_text();
+    let mut out = match roles {
+        Some(roles) => r2s_tui::theme::ansi(&text, &roles),
+        None => text,
+    };
     // A callee whose analysis panicked is a defect in the engine, not a fact
     // about the program, so it is printed with the rendering it degraded
     // rather than only in the ledger `pddo` prints.

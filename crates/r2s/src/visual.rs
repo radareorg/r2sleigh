@@ -184,6 +184,15 @@ impl Host for Visual<'_> {
             r2engine::names::Name::spelled,
         );
         let answer = rendering.answer(&name, entry);
+        // What each part of the unit is, as the renderer wrote it, cut at its
+        // lines: the code is the emission's unit.
+        let roles = match &rendering.response.output {
+            r2engine::EngineRendering::Function(rendered) => {
+                let unit = rendered.emission().unit_roles();
+                r2s_tui::theme::by_line(&answer.code, &crate::listing::c_roles(&unit))
+            }
+            r2engine::EngineRendering::Listing(_) => Vec::new(),
+        };
         let mut addresses = vec![Vec::new(); answer.code.lines().count()];
         for line in &answer.lines {
             if let Some(slot) = line
@@ -200,8 +209,10 @@ impl Host for Visual<'_> {
             .code
             .lines()
             .zip(addresses)
-            .map(|(text, addresses)| DecompiledLine {
+            .enumerate()
+            .map(|(row, (text, addresses))| DecompiledLine {
                 text: text.to_owned(),
+                roles: roles.get(row).cloned().unwrap_or_default(),
                 addresses,
             })
             .collect())

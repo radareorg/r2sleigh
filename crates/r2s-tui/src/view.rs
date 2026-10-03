@@ -179,18 +179,13 @@ fn decompiled_rows(
     cursor: Option<usize>,
     lit: impl Fn(&DecompiledLine) -> bool,
 ) -> Vec<Line<'static>> {
-    // Whether a comment opened above the window is still open at its top.
-    let mut in_comment = false;
-    for line in &lines[..skip.min(lines.len())] {
-        crate::highlight::classify(&line.text, &mut in_comment);
-    }
     lines
         .iter()
         .enumerate()
         .skip(skip)
         .take(rows)
         .map(|(row, line)| {
-            let text = Line::from(crate::highlight::spans(&line.text, &mut in_comment));
+            let text = Line::from(painted(&line.text, &line.roles));
             if cursor == Some(row) {
                 text.style(CURSOR)
             } else if lit(line) {

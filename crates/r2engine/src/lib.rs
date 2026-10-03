@@ -46,7 +46,7 @@ mod route;
 
 pub use r2dec::{
     BindingMachineProjectionFailure, BindingObservationAudit, BindingObservationDomainAudit,
-    BindingObservationJournalFailure, BindingShadowAuditFailure, DecompileRenderRefusal,
+    BindingObservationJournalFailure, BindingShadowAuditFailure, CRole, DecompileRenderRefusal,
     EffectObligationAudit, EffectObligationDisposition, PlacementAudit, PlacementAuditRefusal,
 };
 use route::decompile_route_decision;

@@ -140,18 +140,22 @@ impl Host for Program {
         Ok(vec![
             DecompiledLine {
                 text: "void main(void)".to_owned(),
+                roles: vec![(0..4, Role::Type), (10..14, Role::Type)],
                 addresses: vec![],
             },
             DecompiledLine {
                 text: "{".to_owned(),
+                roles: vec![],
                 addresses: vec![],
             },
             DecompiledLine {
                 text: "    fcn_2000();".to_owned(),
+                roles: vec![(4..12, Role::Function)],
                 addresses: vec![0x1000],
             },
             DecompiledLine {
                 text: "}".to_owned(),
+                roles: vec![],
                 addresses: vec![0x1004],
             },
         ])

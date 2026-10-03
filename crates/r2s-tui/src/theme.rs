@@ -28,6 +28,20 @@ pub enum Role {
     Number,
     /// A name the table gives an address an operand uses.
     Name,
+    /// C: a keyword the renderer wrote.
+    Keyword,
+    /// C: a type.
+    Type,
+    /// C: a string or character literal.
+    String,
+    /// C: a comment, the proof line among them.
+    Comment,
+    /// C: the function a call calls.
+    Function,
+    /// C: a name outside the function.
+    External,
+    /// C: a construct the rendering could not prove, which traps.
+    Residual,
 }
 
 impl Role {
@@ -43,7 +57,13 @@ impl Role {
             Self::Trap | Self::Invalid => Color::LightRed,
             Self::Register => Color::Cyan,
             Self::Number => Color::Yellow,
-            Self::Name => Color::LightCyan,
+            Self::Name | Self::External => Color::LightCyan,
+            Self::Keyword => Color::Magenta,
+            Self::Type => Color::Blue,
+            Self::String => Color::LightYellow,
+            Self::Comment => Color::DarkGray,
+            Self::Function => Color::LightGreen,
+            Self::Residual => Color::LightRed,
         })
     }
 
@@ -52,7 +72,7 @@ impl Role {
             .color()
             .map_or_else(Style::new, |color| Style::new().fg(color));
         match self {
-            Self::Trap | Self::Invalid => style.add_modifier(Modifier::BOLD),
+            Self::Trap | Self::Invalid | Self::Residual => style.add_modifier(Modifier::BOLD),
             _ => style,
         }
     }
@@ -69,6 +89,9 @@ impl Role {
             Color::LightRed => "\x1b[1;91m",
             Color::LightGreen => "\x1b[92m",
             Color::LightCyan => "\x1b[96m",
+            Color::Magenta => "\x1b[35m",
+            Color::LightYellow => "\x1b[93m",
+            Color::DarkGray => "\x1b[90m",
             _ => return None,
         })
     }
@@ -76,6 +99,33 @@ impl Role {
 
 /// Spans of `text` in a role, in order and not overlapping.
 pub type Roles = Vec<(std::ops::Range<usize>, Role)>;
+
+/// Roles over a whole text, cut at its lines: one list per line, each with
+/// offsets into that line. A span crossing a line break is cut there.
+pub fn by_line(text: &str, roles: &[(std::ops::Range<usize>, Role)]) -> Vec<Roles> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut next = 0;
+    for line in text.split('\n') {
+        let end = start + line.len();
+        let mut own = Roles::new();
+        while next < roles.len() && roles[next].0.start < end {
+            let (range, role) = &roles[next];
+            let from = range.start.max(start) - start;
+            let to = range.end.min(end) - start;
+            if from < to {
+                own.push((from..to, *role));
+            }
+            if range.end > end {
+                break;
+            }
+            next += 1;
+        }
+        lines.push(own);
+        start = end + 1;
+    }
+    lines
+}
 
 /// `text` with every role span wrapped in its escape, for a terminal.
 pub fn ansi(text: &str, roles: &[(std::ops::Range<usize>, Role)]) -> String {

@@ -37,7 +37,6 @@ pub mod control;
 pub(crate) mod debug;
 mod effect_ledger;
 pub(crate) mod fold;
-pub mod highlight;
 pub mod ledger;
 pub(crate) mod normalize;
 mod observation_journal;
@@ -53,8 +52,8 @@ pub mod symbol;
 pub(crate) mod unrendered;
 mod variable;
 
+pub use crate::codegen::{CRole, CRoles, Emission, ResidualSite, SourceLine};
 use crate::codegen::{CodeGenerator, EmissionReadyFunction, prepare_function_for_emission};
-pub use crate::codegen::{Emission, ResidualSite, SourceLine};
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
 use crate::observation_journal::{
@@ -65,7 +64,6 @@ pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::CodeGenConfig;
 pub use control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 pub use fold::lower_ssa_ops_to_stmts;
-pub use highlight::highlight_c_ansi;
 use r2ssa::SSAFunction;
 #[cfg(test)]
 use r2ssa::SSAOp;

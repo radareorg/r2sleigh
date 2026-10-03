@@ -19,6 +19,8 @@ pub struct ListedLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecompiledLine {
     pub text: String,
+    /// What each part of `text` is, as the renderer wrote it.
+    pub roles: crate::theme::Roles,
     /// Sorted instruction addresses; empty for a line no instruction produced
     /// (a brace, a declaration).
     pub addresses: Vec<u64>,

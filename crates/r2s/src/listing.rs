@@ -502,6 +502,27 @@ pub(crate) fn rung(support: r2engine::query::Support) -> &'static str {
     }
 }
 
+/// The renderer's roles in the palette's terms.
+pub(crate) fn c_roles(roles: &[(std::ops::Range<usize>, r2engine::CRole)]) -> Roles {
+    use r2engine::CRole;
+    roles
+        .iter()
+        .map(|(range, role)| {
+            let role = match role {
+                CRole::Keyword => Role::Keyword,
+                CRole::Type => Role::Type,
+                CRole::Number => Role::Number,
+                CRole::String => Role::String,
+                CRole::Comment => Role::Comment,
+                CRole::Function => Role::Function,
+                CRole::External => Role::External,
+                CRole::Residual => Role::Residual,
+            };
+            (range.clone(), role)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{spelled, stopped};
