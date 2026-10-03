@@ -891,7 +891,7 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
     let mut return_count = 0usize;
     for &block_addr in source.function().block_addrs() {
         let block = source.function().get_block(block_addr)?;
-        for (op_index, op) in block.ops.iter().enumerate() {
+        for (op_index, op) in block.ops().iter().enumerate() {
             if !matches!(op, r2ssa::SSAOp::Return { .. }) {
                 continue;
             }

@@ -26,7 +26,7 @@ pub(crate) fn collect_call_sites(
             _ => None,
         };
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             let id = CallSiteId(next_id);
             // The transfer names the instruction it was lifted from, and the
             // raw input names which of its instructions are call sites; that
@@ -102,7 +102,7 @@ pub(crate) fn collect_call_sites(
                     direct_target,
                     fallthrough: if transfer == CallSiteTransfer::TailCall {
                         None
-                    } else if op_idx + 1 == block.ops.len() {
+                    } else if op_idx + 1 == block.ops().len() {
                         fallthrough
                     } else {
                         None

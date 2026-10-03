@@ -244,7 +244,7 @@ impl<'a> EvidenceBuilder<'a> {
                 .function()
                 .blocks()
                 .iter()
-                .flat_map(|block| block.ops.iter()),
+                .flat_map(|block| block.ops().iter()),
             std::iter::empty(),
             crate::prepare::prepared_arch_display_name(self.source),
         );

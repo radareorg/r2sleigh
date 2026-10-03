@@ -710,7 +710,7 @@ pub(crate) fn movable_for_clause_value(
         && function.get_block(block_addr).is_some_and(|block| {
             let Some(suffix) = op_index
                 .checked_add(1)
-                .and_then(|start| block.ops.get(start..))
+                .and_then(|start| block.ops().get(start..))
             else {
                 return false;
             };

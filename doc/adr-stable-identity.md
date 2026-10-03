@@ -84,13 +84,31 @@ Each step keeps every gate green and deletes what it replaces.
 | Step | Change | Deletes |
 |------|--------|---------|
 | 0 | The memory space of an access is read from the access, which carries the op's own space | `memory_spaces_by_op`, `memory_space_at`, `remap_memory_sites_to_prepared` and its comment — **done** |
-| 1 | `OpId` arena, private `ops`/`ids`, `OpOrigin`, graph `OpId`↔`InstId` maps, `EditPlan` | `op_instruction_addrs`, the index shifting in `insert_ops`, the graph's site BTreeMaps |
+| 1 | `OpId` arena, private `ops`/`ids`, `OpOrigin`, graph `OpId`↔`InstId` maps, `EditPlan` | `op_instruction_addrs`, the index shifting in `insert_ops`, the graph's site BTreeMaps — **done** |
 | 2 | Stage types; `seal` replaces `prepare_graph`; optimize and demand through `EditPlan` | `get_block_mut`, `op_mut`, `cfg_mut`, public `remove_*`, `optimize()`, `Blocks::edit`, `IrRevision`, the revision assert, `recollect_*` |
 | 3 | Certificates, obligations and downstream maps keyed by `OpId` | every `op_index` field in r2ssa/r2types, `op_site_for_inst`, `inst_id_for_op_site`, `rendered_site` |
 | 4 | With P1.7: `ValueDef::{LiveIn, Unspecified}`, formals as views | version-0 definitions; the sealed validator check switches on |
 
 Positions survive only as an ordering view of an IR that can no longer
 change.
+
+Step 1 as landed:
+
+- A phi, an entry lane, a scratch zero and a fixture's operation stand for no
+  operation of the program, so `OpOrigin::Derived` names its source as
+  `from: Option<OpId>`; the instruction an operation executes for is its own
+  when lifted and its source's otherwise (`OpArena::instruction`).
+- A block built outside a function (`to_ssa`, a test's
+  `SSABlock::from_parts`) numbers its operations itself until a function
+  adopts it, which mints in block order.
+- Shape changes need the arena, so `get_block_mut` returns a `BlockMut`
+  carrying it; a test that writes a block by hand calls
+  `replace_ops(Pass::Fixture, …)`. Rewriting an operation in place
+  (`ops_mut`) keeps its id.
+- r2dec's `RewrittenFunction` holds a copy of its source's arena and mints
+  above it.
+- The CFG's per-operation instruction addresses stay: they are the lift's own
+  record, read once to mint `OpOrigin::Lifted`.
 
 ## Consequences and risks
 

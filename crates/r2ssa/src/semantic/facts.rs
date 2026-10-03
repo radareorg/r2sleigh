@@ -1573,7 +1573,7 @@ impl<'a> ObjectModelBuilder<'a> {
         }
 
         for block in function.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 match op {
                     SSAOp::Load { addr, space, .. }
                     | SSAOp::Store { addr, space, .. }

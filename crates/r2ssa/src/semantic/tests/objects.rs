@@ -62,7 +62,7 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
     let stack_addr = stack
         .get_block(0x1000)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
+            block.ops().iter().find_map(|op| match op {
                 crate::SSAOp::Load { addr, .. } => Some(addr.clone()),
                 _ => None,
             })

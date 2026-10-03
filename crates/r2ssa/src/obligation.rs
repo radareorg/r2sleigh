@@ -2579,7 +2579,7 @@ mod tests {
             .function()
             .get_block(0x3180)
             .expect("loop block")
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .find_map(|(index, op)| {
@@ -2827,8 +2827,8 @@ mod tests {
         graph.values.clear();
         graph.def_of.clear();
         graph.clear_use_sites();
-        graph.op_inst_by_site.clear();
-        graph.op_site_by_inst.clear();
+        graph.inst_by_op.clear();
+        graph.op_by_inst.clear();
         for block in &mut graph.blocks {
             block.insts.clear();
         }

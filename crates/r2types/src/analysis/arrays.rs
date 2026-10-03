@@ -131,7 +131,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
         .iter()
         .map(|block| {
             let ops = block
-                .ops
+                .ops()
                 .iter()
                 .filter_map(|op| {
                     op.dst()
@@ -145,7 +145,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
         .iter()
         .flat_map(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .filter_map(|op| op.dst().map(|dst| (dst.display_name(), op.clone())))
         })
@@ -156,7 +156,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
     for _ in 0..6 {
         let mut changed = false;
         for block in ssa_blocks {
-            for op in &block.ops {
+            for op in block.ops() {
                 match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
@@ -470,7 +470,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
     }
 
     for block in ssa_blocks {
-        for (op_index, op) in block.ops.iter().enumerate() {
+        for (op_index, op) in block.ops().iter().enumerate() {
             match op {
                 SSAOp::Load {
                     dst,

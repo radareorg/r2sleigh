@@ -190,7 +190,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
     // Every restore the boundary states, in order. Three calls, three of
     // them, and the last one is what the return sees.
     let restored = block
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| match op {
             SSAOp::CallRestore { dst, .. } => Some(dst.clone()),
@@ -201,7 +201,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
         restored.len(),
         3,
         "each call restores the carrier once: {:?}",
-        block.ops
+        block.ops()
     );
 
     for (index, dst) in restored.iter().enumerate() {
@@ -218,7 +218,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
     // And nothing in the function ever offers a slot at the drifted
     // addresses the un-refunded pushes used to leave behind.
     let drifted = block
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| op.dst())
         .filter_map(|dst| facts.entry_stack_address_root_of(dst).copied())
@@ -616,7 +616,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .get_block(0x1600)
         .and_then(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .position(|op| matches!(op, SSAOp::Return { .. }))
         })
@@ -632,7 +632,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .get_block(0x1600)
         .and_then(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .enumerate()
                 .find_map(|(op_idx, op)| match op {

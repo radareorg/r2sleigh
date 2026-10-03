@@ -37,14 +37,14 @@ impl SSAFunction {
         }
         let mut uses = BTreeMap::<SSAVar, Vec<(ScratchUse, SSAVar)>>::new();
         for block in self.blocks.iter() {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 for (_, src) in &phi.sources {
                     uses.entry(src.clone())
                         .or_default()
                         .push((ScratchUse::Carried, phi.dst.clone()));
                 }
             }
-            for op in &block.ops {
+            for op in block.ops() {
                 if let SSAOp::Insert(insert) = op {
                     let (src, value, position) = (&insert.src, &insert.value, &insert.position);
                     uses.entry(src.clone())
@@ -136,14 +136,14 @@ impl SSAFunction {
             })
             .collect::<BTreeMap<_, _>>();
         for block in self.blocks.edit().iter_mut() {
-            for phi in &mut block.phis {
+            for phi in block.phis_mut() {
                 for (_, src) in &mut phi.sources {
                     if let Some(zero) = zeros.get(src) {
                         *src = zero.clone();
                     }
                 }
             }
-            for op in &mut block.ops {
+            for op in block.ops_mut() {
                 if let SSAOp::Insert(insert) = op
                     && let Some(zero) = zeros.get(&insert.src)
                 {
@@ -151,11 +151,13 @@ impl SSAFunction {
                 }
             }
         }
-        self.insert_ops(
-            self.root(),
-            0,
-            minted.into_iter().map(|op| (op, None)).collect(),
+        let mut plan = EditPlan::new();
+        plan.insert(
+            Anchor::Start(self.root()),
+            Pass::ScratchZero,
+            minted.into_iter().map(|op| (op, None)),
         );
+        self.apply_edits(plan);
     }
 
     /// Replace the values a boundary states: the processor specification's
@@ -203,7 +205,7 @@ impl SSAFunction {
             .chain(
                 self.blocks
                     .iter()
-                    .flat_map(|block| &block.ops)
+                    .flat_map(|block| block.ops())
                     .filter_map(|op| match op {
                         SSAOp::CallDefine { dst }
                             if cleared_flag.is_some() && storage_of(dst) == cleared_flag =>
@@ -227,12 +229,12 @@ impl SSAFunction {
             None => var.clone(),
         };
         for block in self.blocks.edit().iter_mut() {
-            for phi in &mut block.phis {
+            for phi in block.phis_mut() {
                 for (_, src) in &mut phi.sources {
                     *src = substitute(src);
                 }
             }
-            for op in &mut block.ops {
+            for op in block.ops_mut() {
                 *op = crate::optimize::map_sources_in_op(op, &substitute);
             }
         }
@@ -307,7 +309,7 @@ impl SSAFunction {
             let Some(block) = self.get_block(addr) else {
                 continue;
             };
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (op_index, op) in block.ops().iter().enumerate() {
                 let SSAOp::Subpiece { dst, src, offset } = op else {
                     continue;
                 };
@@ -375,10 +377,10 @@ impl SSAFunction {
                 .insert(projection.clone(), lane_storage);
             for (addr, op_index, inside) in reads {
                 if let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), addr)
-                    && let Some(SSAOp::Subpiece { dst, .. }) = block.ops.get(op_index)
+                    && let Some(SSAOp::Subpiece { dst, .. }) = block.ops().get(op_index)
                 {
                     let dst = dst.clone();
-                    block.ops[op_index] = if inside == 0 && dst.size == width {
+                    block.ops_mut()[op_index] = if inside == 0 && dst.size == width {
                         SSAOp::Copy {
                             dst,
                             src: projection.clone(),
@@ -420,10 +422,10 @@ impl SSAFunction {
         // as many times over.
         let mut read_anywhere = BTreeSet::<SSAVar>::new();
         for block in self.blocks.iter() {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 read_anywhere.extend(phi.sources.iter().map(|(_, src)| src.clone()));
             }
-            for op in &block.ops {
+            for op in block.ops() {
                 read_anywhere.extend(op.sources().into_iter().cloned());
             }
         }
@@ -493,21 +495,23 @@ impl SSAFunction {
                     .unwrap_or_else(|| var.clone())
             };
             for block in self.blocks.edit().iter_mut() {
-                for phi in &mut block.phis {
+                for phi in block.phis_mut() {
                     for (_, src) in &mut phi.sources {
                         *src = replace(src);
                     }
                 }
-                for op in &mut block.ops {
+                for op in block.ops_mut() {
                     *op = crate::optimize::map_sources_in_op(op, &replace);
                 }
             }
         }
-        self.insert_ops(
-            self.root(),
-            0,
-            minted.into_iter().map(|op| (op, None)).collect(),
+        let mut plan = EditPlan::new();
+        plan.insert(
+            Anchor::Start(self.root()),
+            Pass::EntryLanes,
+            minted.into_iter().map(|op| (op, None)),
         );
+        self.apply_edits(plan);
     }
 
     pub(crate) fn collect_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(
@@ -543,7 +547,7 @@ impl SSAFunction {
             })
         };
         let entry_stack_roots_are_stable = self.blocks().iter().all(|block| {
-            block.ops.iter().all(|op| match op {
+            block.ops().iter().all(|op| match op {
                 SSAOp::Call { .. }
                 | SSAOp::CallInd { .. }
                 | SSAOp::CallDefine { .. }
@@ -670,7 +674,7 @@ impl SSAFunction {
             let Some(block) = self.get_block(addr) else {
                 continue;
             };
-            for phi in &block.phis {
+            for phi in block.phis() {
                 if rejected.contains(&phi.dst) {
                     continue;
                 }
@@ -727,7 +731,7 @@ impl SSAFunction {
                     continue;
                 };
 
-                for phi in &block.phis {
+                for phi in block.phis() {
                     control.poll()?;
                     // Resolve each source's representative once; both
                     // questions below read it.
@@ -770,7 +774,7 @@ impl SSAFunction {
                         );
                     }
                 }
-                for op in &block.ops {
+                for op in block.ops() {
                     control.poll()?;
                     // Each operand's representative is resolved once for the
                     // questions below; a sum asks six.

@@ -135,7 +135,7 @@ impl MachineBuilder {
                 let prepared_op = artifact
                     .function()
                     .get_block(access.block_addr)
-                    .and_then(|block| block.ops.get(access.op_index));
+                    .and_then(|block| block.ops().get(access.op_index));
                 if !access.provenance_complete
                     || access.is_write
                     || access.id.ordinal != 0

@@ -207,7 +207,7 @@ fn export_ssa(
     format: ExportFormat,
 ) -> Result<String, ExportError> {
     let ssa_block = r2ssa::block::to_ssa(input.block, input.disasm);
-    let ops_info: Vec<SSAOpInfo> = ssa_block.ops.iter().map(ssa_op_to_info).collect();
+    let ops_info: Vec<SSAOpInfo> = ssa_block.ops().iter().map(ssa_op_to_info).collect();
 
     match format {
         ExportFormat::Json => serde_json::to_string_pretty(&SSAJsonDocument {
@@ -294,7 +294,7 @@ fn export_dec(
 ) -> Result<String, ExportError> {
     let ssa_block = r2ssa::block::to_ssa(input.block, input.disasm);
     let residuals = ssa_block
-        .ops
+        .ops()
         .iter()
         .enumerate()
         .map(|(op_index, op)| DecResidualJson {

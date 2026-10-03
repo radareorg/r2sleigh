@@ -89,7 +89,7 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         .function()
         .get_block(0x401000)
         .expect("block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
         .expect("indexed load");
@@ -105,7 +105,7 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         .function()
         .get_block(0x401000)
         .expect("block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, r2ssa::SSAOp::Load { space, .. } if *space == r2il::SpaceId::Custom(7)))
         .expect("custom-space load");
@@ -171,10 +171,10 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
             source_reg: Some("rsi".to_string()),
         },
     );
-    let ssa_blocks = [SSABlock {
-        addr: 0x4013b1,
-        size: 32,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x4013b1,
+        32,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("buf_slot_addr", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -206,8 +206,8 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
                 val: SSAVar::constant(0, 1),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.alloc_and_copy",
@@ -308,10 +308,10 @@ fn typed_pointer_induction_access_certifies_scalar_array_index() {
         }),
         ..ParsedExternalContext::default()
     };
-    let ssa_blocks = [SSABlock {
-        addr: 0x401500,
-        size: 32,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x401500,
+        32,
+        vec![
             SSAOp::Phi {
                 dst: SSAVar::new("RDI", 2, 8),
                 sources: vec![SSAVar::new("RDI", 0, 8), SSAVar::new("RDI", 1, 8)],
@@ -327,8 +327,8 @@ fn typed_pointer_induction_access_certifies_scalar_array_index() {
                 addr: SSAVar::new("RDI", 2, 8),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.pointer_induction",
@@ -399,16 +399,16 @@ fn typed_argument_phi_livein_access_certifies_scalar_array_index() {
         }),
         ..ParsedExternalContext::default()
     };
-    let ssa_blocks = [SSABlock {
-        addr: 0x401500,
-        size: 8,
-        ops: vec![SSAOp::Load {
+    let ssa_blocks = [SSABlock::from_parts(
+        0x401500,
+        8,
+        vec![SSAOp::Load {
             dst: SSAVar::new("byte", 1, 1),
             space: r2il::SpaceId::Ram,
             addr: SSAVar::new("RDI", 1, 8),
         }],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.pointer_livein",

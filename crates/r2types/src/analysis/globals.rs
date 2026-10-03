@@ -160,7 +160,7 @@ pub(crate) fn infer_global_field_profiles(
     for _ in 0..6 {
         let mut changed = false;
         for block in ssa_blocks {
-            for op in &block.ops {
+            for op in block.ops() {
                 let addr_of = |var: &SSAVar, map: &HashMap<(u64, SSAVar), GlobalAddrExpr>| {
                     var.constant_bits()
                         .filter(|base| extents.holds(*base))
@@ -341,7 +341,7 @@ pub(crate) fn infer_global_field_profiles(
     }
 
     for block in ssa_blocks {
-        for op in &block.ops {
+        for op in block.ops() {
             let resolve_addr = |addr: &SSAVar| -> Option<GlobalAddrExpr> {
                 addr.constant_bits()
                     .filter(|base| extents.holds(*base))

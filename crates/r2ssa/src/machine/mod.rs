@@ -330,7 +330,7 @@ impl MachineValueUse {
         let prepared_op = artifact
             .function()
             .get_block(fact.block_addr)
-            .and_then(|block| block.ops.get(fact.op_index))
+            .and_then(|block| block.ops().get(fact.op_index))
             .ok_or_else(|| {
                 r2il::refusal_evidence!(
                     "memory-access-entity",
@@ -3256,7 +3256,7 @@ impl MachineFunction {
         let prepared_op = artifact
             .function()
             .get_block(fact.block_addr)
-            .and_then(|block| block.ops.get(fact.op_index))
+            .and_then(|block| block.ops().get(fact.op_index))
             .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
         let source_model = artifact.machine_context().memory_model();
         let source_space_model = source_model
@@ -3473,7 +3473,7 @@ impl MachineBuilder {
         let prepared_op = artifact
             .function()
             .get_block(access.block_addr)
-            .and_then(|block| block.ops.get(access.op_index));
+            .and_then(|block| block.ops().get(access.op_index));
         if !access.provenance_complete
             || !access.is_write
             || access.id.ordinal != 0

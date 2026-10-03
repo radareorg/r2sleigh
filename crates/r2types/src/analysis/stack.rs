@@ -17,7 +17,7 @@ pub(crate) fn canonicalize_param_home_stack_slots(
     let trivial_value_sources = collect_trivial_value_sources(ssa_blocks);
     let mut slot_addr_by_var = HashMap::<String, StackSlotKey>::new();
     for block in ssa_blocks {
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::IntAdd { dst, .. } => {
                     let slot_key = prep_facts
@@ -113,7 +113,7 @@ pub(crate) fn canonicalize_param_home_stack_slots(
 pub(crate) fn collect_trivial_value_sources(ssa_blocks: &[SSABlock]) -> HashMap<SSAVar, SSAVar> {
     let mut trivial_value_sources = HashMap::new();
     for block in ssa_blocks {
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::Copy { dst, src }
                 | SSAOp::IntZExt { dst, src }

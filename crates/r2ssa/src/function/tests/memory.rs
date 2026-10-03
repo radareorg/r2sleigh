@@ -128,7 +128,7 @@ fn a_switch_on_a_field_selects_the_loaded_value_not_the_pointer() {
     let read_state = function
         .get_block(0x1000)
         .expect("the fixture block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Load { dst, .. } if dst.size == state.size => Some(dst.name().to_string()),
@@ -400,7 +400,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .function()
         .get_block(0x1780)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
+            block.ops().iter().find_map(|op| match op {
                 SSAOp::Copy { dst, .. } if dst.name() == "tmp:1798" => Some(dst.clone()),
                 _ => None,
             })
@@ -419,7 +419,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .function()
         .get_block(0x1780)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
+            block.ops().iter().find_map(|op| match op {
                 SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst),
                 _ => None,
             })

@@ -96,7 +96,7 @@ fn dual_space_exact_parameter_artifact(arch: &ArchSpec) -> SsaArtifact {
 fn dual_space_locations(artifact: &SsaArtifact) -> (MemoryLocation, MemoryLocation) {
     let block = artifact.get_block(0x1000).expect("dual-space block");
     let mut loads = block
-        .ops
+        .ops()
         .iter()
         .enumerate()
         .filter(|(_, op)| matches!(op, crate::SSAOp::Load { .. }));
@@ -158,7 +158,7 @@ fn calls_clobber_every_present_typed_memory_space() {
     let call_index = artifact
         .get_block(0x1000)
         .expect("call block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, crate::SSAOp::Call { .. }))
         .expect("call op");
@@ -2560,7 +2560,7 @@ fn a_convention_result_read_only_by_the_return_is_the_call_result() {
     let call_index = function
         .get_block(0x1000)
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, SSAOp::Call { .. }))
         .expect("the call survives");

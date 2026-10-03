@@ -1940,7 +1940,7 @@ fn canonical_stack_access_widths(
         return BTreeMap::new();
     };
     let mut widths = BTreeMap::<StackSlotKey, BTreeSet<u32>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| &block.ops) {
+    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
         let (addr, size) = match op {
             SSAOp::Load {
                 dst,
@@ -1974,12 +1974,12 @@ fn canonical_stack_access_signedness(
         return BTreeMap::new();
     };
     let scalar_signedness = infer_scalar_signedness(
-        ssa_blocks.iter().flat_map(|block| block.ops.iter()),
+        ssa_blocks.iter().flat_map(|block| block.ops().iter()),
         std::iter::empty(),
         arch_name,
     );
     let mut signedness = BTreeMap::<StackSlotKey, BTreeSet<ScalarSignednessEvidence>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| &block.ops) {
+    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
         let (addr, value) = match op {
             SSAOp::Load {
                 dst,

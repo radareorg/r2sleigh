@@ -1391,7 +1391,7 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         .function()
         .get_block(0x401000)
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             r2ssa::SSAOp::Store { val, .. } => prepared.graph().value_id_for_var(val),
@@ -2246,7 +2246,7 @@ fn prepared_render_facts_certify_branch_guarded_phi() {
     let phi = prepared
         .function()
         .get_block(0x40100c)
-        .and_then(|block| block.phis.iter().find(|phi| phi.dst.name() == "rdi"))
+        .and_then(|block| block.phis().iter().find(|phi| phi.dst.name() == "rdi"))
         .and_then(|phi| prepared.graph().value_id_for_var(&phi.dst))
         .expect("return phi");
     let render = FunctionRenderFacts::from_prepared(&prepared);
@@ -2547,7 +2547,7 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
         .function()
         .get_block(0x401000)
         .expect("block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
         .expect("array load");

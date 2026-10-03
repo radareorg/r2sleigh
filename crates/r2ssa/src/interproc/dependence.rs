@@ -229,7 +229,7 @@ impl FormalDependence {
         let mut changed = exposed != self.exposed;
         self.exposed = exposed;
         for block in prepared.function().blocks() {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 let inputs = phi
                     .sources
                     .iter()
@@ -248,7 +248,7 @@ impl FormalDependence {
         // What the last call in this block was handed: the definitions that
         // follow it are what it left, and may be any of it.
         let mut last_call = 0u64;
-        for (index, op) in block.ops.iter().enumerate() {
+        for (index, op) in block.ops().iter().enumerate() {
             if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
                 last_call = prepared
                     .graph()
@@ -355,7 +355,7 @@ impl FrameTraffic {
         let mut loads = Vec::<(ValueId, FramePlace)>::new();
         let mut stores = Vec::<(InstId, ValueId, FramePlace)>::new();
         for block in prepared.function().blocks() {
-            for (index, op) in block.ops.iter().enumerate() {
+            for (index, op) in block.ops().iter().enumerate() {
                 let Some(inst) = graph.inst_id_for_op_site(block.addr, index) else {
                     continue;
                 };
@@ -475,7 +475,7 @@ fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId>
         .function()
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(SSAOp::dst)
         .filter_map(move |dst| {
             let value = graph.value_id_for_var(dst)?;

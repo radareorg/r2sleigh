@@ -396,7 +396,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // no successor, and it is resolved: its callsite fact renders the
         // terminal return. Only a dispatch nothing certified is unresolved.
         let certified_terminal_call = self.func.get_block(addr).is_some_and(|block| {
-            block.ops.iter().enumerate().any(|(op_idx, _)| {
+            block.ops().iter().enumerate().any(|(op_idx, _)| {
                 self.fold_ctx
                     .certified_call_render_fact_for_op(addr, op_idx)
                     .is_some_and(|fact| fact.disposition.is_terminal_return())
@@ -424,10 +424,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             // instruction leaves standing before the transfer rather than
             // last. One statement renders both, so it owns both.
             let Some(transfer) = block
-                .ops
+                .ops()
                 .iter()
                 .rposition(|op| op.is_control_flow())
-                .or_else(|| block.ops.len().checked_sub(1))
+                .or_else(|| block.ops().len().checked_sub(1))
             else {
                 continue;
             };
@@ -446,7 +446,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 r2il::refusal_evidence!(
                     "control-ownership",
                     "{anchor:#x} op {op_idx} {:?} owns {} obligations",
-                    block.ops[op_idx],
+                    block.ops()[op_idx],
                     owned.len()
                 );
                 obligations.extend(owned);
@@ -591,7 +591,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // taking the last op then found one of those and declined, which is one
         // of the two reasons no real jump table has ever structured.
         let mut dispatches = block
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .filter_map(|(index, op)| match op {
@@ -636,7 +636,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         };
         // A fused comparison chain reads its selector as an operand, so the
         // plan spells it exactly as it spells an `if` condition.
-        if matches!(block.ops.get(op_idx), Some(SSAOp::Switch { .. })) {
+        if matches!(block.ops().get(op_idx), Some(SSAOp::Switch { .. })) {
             let expr = self.fold_ctx.with_current_block(switch_addr, || {
                 self.fold_ctx.planned_input_expr_at(switch_addr, op_idx, 0)
             });
@@ -707,7 +707,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             return Ok(Vec::new());
         };
         let mut writes = Vec::new();
-        for phi in &block.phis {
+        for phi in block.phis() {
             let Some(value) = phi
                 .sources
                 .iter()

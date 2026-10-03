@@ -1362,14 +1362,17 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
         let mut func = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("ssa");
-        func.get_block_mut(0x1000).expect("block").ops = entries
-            .iter()
-            .enumerate()
-            .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
-                dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
-                src: entry.clone(),
-            })
-            .collect();
+        func.get_block_mut(0x1000).expect("block").replace_ops(
+            crate::Pass::Fixture,
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
+                    dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
+                    src: entry.clone(),
+                })
+                .collect(),
+        );
         let mut graph = SsaGraph::from_function(&func);
         for value in &mut graph.values {
             if let Some((_, at)) = entries.iter().find(|(entry, _)| *entry == value.var) {

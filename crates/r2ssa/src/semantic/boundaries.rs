@@ -238,12 +238,12 @@ impl FormatForwardingLookup<'_> {
         }
         let (block_addr, op_index) = graph.op_site_for_inst(definition)?;
         let block = function.get_block(block_addr)?;
-        if !matches!(block.ops.get(op_index)?, SSAOp::CallDefine { .. }) {
+        if !matches!(block.ops().get(op_index)?, SSAOp::CallDefine { .. }) {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
                 "{definition:?} at {block_addr:#x}:{op_index} defines the format but the block spells it {}, while the graph spells it {}",
                 block
-                    .ops
+                    .ops()
                     .get(op_index)
                     .map_or("nothing".to_string(), |op| format!("{op:?}")
                         .chars()
@@ -261,7 +261,7 @@ impl FormatForwardingLookup<'_> {
         let mut index = op_index;
         while index > 0 {
             index -= 1;
-            if !matches!(block.ops.get(index)?, SSAOp::CallDefine { .. }) {
+            if !matches!(block.ops().get(index)?, SSAOp::CallDefine { .. }) {
                 let inst = graph.inst_id_for_op_site(block_addr, index)?;
                 let site = self.call_sites.by_inst.get(&inst).copied();
                 if site.is_none() {
@@ -665,7 +665,7 @@ pub(crate) fn reaching_stack_slot_value(
         return None;
     }
     let block = function.get_block(block_addr)?;
-    for op in block.ops.get(..boundary)?.iter().rev() {
+    for op in block.ops().get(..boundary)?.iter().rev() {
         match op {
             SSAOp::Copy { dst, src } if query.promoted && dst.name() == query.slot_name => {
                 if dst.size != query.size_bytes {
@@ -725,7 +725,7 @@ pub(crate) fn reaching_stack_slot_value(
     }
     if query.promoted
         && let Some(phi) = block
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name() == query.slot_name && phi.dst.size == query.size_bytes)
     {
@@ -743,7 +743,7 @@ pub(crate) fn reaching_stack_slot_value(
     }
     let mut agreed = None;
     for predecessor in predecessors {
-        let boundary = function.get_block(predecessor)?.ops.len();
+        let boundary = function.get_block(predecessor)?.ops().len();
         let value =
             reaching_stack_slot_value(function, graph, predecessor, boundary, query, visited)?;
         match agreed {
@@ -1736,7 +1736,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
         let Some(block) = function.get_block(candidate_addr) else {
             return false;
         };
-        let Some(ops) = block.ops.get(..end_op_index) else {
+        let Some(ops) = block.ops().get(..end_op_index) else {
             return false;
         };
         for (op_index, op) in ops.iter().enumerate() {
@@ -1777,7 +1777,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
         pending.extend(predecessors.into_iter().filter_map(|predecessor| {
             function
                 .get_block(predecessor)
-                .map(|block| (predecessor, block.ops.len()))
+                .map(|block| (predecessor, block.ops().len()))
         }));
     }
     reached_entry
@@ -1799,7 +1799,7 @@ pub(crate) fn call_result_values_after_call(
 ) -> Option<Vec<CallBoundaryValueFact>> {
     let block = function.get_block(block_addr)?;
     let call_defines = block
-        .ops
+        .ops()
         .get(call_op_index.checked_add(1)?..)?
         .iter()
         .enumerate()

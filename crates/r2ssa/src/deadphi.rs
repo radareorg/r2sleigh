@@ -686,7 +686,7 @@ mod tests {
 
         let exit = func.get_block(0x100c).expect("exit block");
         let zf = exit
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name().eq_ignore_ascii_case("zf"))
             .and_then(|phi| graph.value_id_for_var(&phi.dst));
@@ -724,7 +724,7 @@ mod tests {
 
         let exit = func.get_block(0x100c).expect("exit block");
         let rax = exit
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name().eq_ignore_ascii_case("rax"))
             .and_then(|phi| graph.value_id_for_var(&phi.dst))
@@ -915,7 +915,7 @@ mod tests {
         // about merging flags elsewhere may reach back and call it unobserved.
         let entry = func.get_block(0x1000).expect("entry block");
         let tested = entry
-            .ops
+            .ops()
             .iter()
             .find_map(|op| op.dst())
             .and_then(|dst| graph.value_id_for_var(dst))

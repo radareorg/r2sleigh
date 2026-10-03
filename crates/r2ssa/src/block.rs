@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::Disassembler;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
+use crate::arena::{OpArena, OpId, OpOrigin, Pass, local_id};
 use crate::function::PhiNode;
 use crate::name::{InternedName, intern_ascii_lowercase, intern_fmt};
 use crate::op::SSAOp;
@@ -42,17 +43,29 @@ pub fn branch_condition(block: &SSABlock) -> Option<(usize, &SSAVar)> {
 ///
 /// Lifting produces one with no phis and renaming fills them in, so the two
 /// stages share a type and a function's blocks can be read without copying.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Every operation and every phi carries an [`OpId`] beside it, in a vector
+/// kept in step with it. Both are private to this module: reading is a slice,
+/// rewriting an operation in place keeps its id, and the only paths that
+/// change how many operations a block has mint an id for what they insert and
+/// tombstone the id of what they remove.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SSABlock {
     /// The address of the instruction.
     pub addr: u64,
     /// The size of the instruction in bytes.
     pub size: u32,
     /// The SSA operations.
-    pub ops: Vec<SSAOp>,
+    ops: Vec<SSAOp>,
+    /// Each operation's identity, at the operation's index.
+    #[serde(skip)]
+    ids: Vec<OpId>,
     /// Phi nodes at the start of this block.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub phis: Vec<PhiNode>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    phis: Vec<PhiNode>,
+    /// Each phi's identity, at the phi's index.
+    #[serde(skip)]
+    phi_ids: Vec<OpId>,
 }
 
 /// Context for SSA conversion, tracking variable versions.
@@ -120,17 +133,127 @@ impl SSAContext {
 impl SSABlock {
     /// Create a new empty SSA block.
     pub fn new(addr: u64, size: u32) -> Self {
+        Self::from_parts(addr, size, Vec::new(), Vec::new())
+    }
+
+    /// A block holding these operations and phis, numbered by itself until a
+    /// function adopts it ([`crate::arena`]).
+    pub fn from_parts(addr: u64, size: u32, ops: Vec<SSAOp>, phis: Vec<PhiNode>) -> Self {
         Self {
             addr,
             size,
-            ops: Vec::new(),
-            phis: Vec::new(),
+            ids: (0..ops.len()).map(local_id).collect(),
+            ops,
+            phi_ids: (0..phis.len()).map(local_id).collect(),
+            phis,
         }
     }
 
-    /// Add an operation to this block.
-    pub fn push(&mut self, op: SSAOp) {
+    /// A block of operations a function has already minted ids for.
+    pub(crate) fn from_sited(
+        addr: u64,
+        size: u32,
+        ops: Vec<(OpId, SSAOp)>,
+        phis: Vec<(OpId, PhiNode)>,
+    ) -> Self {
+        let (ids, ops) = ops.into_iter().unzip();
+        let (phi_ids, phis) = phis.into_iter().unzip();
+        Self {
+            addr,
+            size,
+            ops,
+            ids,
+            phis,
+            phi_ids,
+        }
+    }
+
+    /// Give every phi and operation an id from a function's arena: a block
+    /// built outside a function, adopted as though the lift emitted it.
+    #[cfg(test)]
+    pub(crate) fn adopt(&mut self, arena: &mut OpArena) {
+        self.phi_ids = self
+            .phis
+            .iter()
+            .map(|_| {
+                arena.mint(OpOrigin::Derived {
+                    from: None,
+                    pass: Pass::PhiPlacement,
+                })
+            })
+            .collect();
+        let block = self.addr;
+        self.ids = (0..self.ops.len())
+            .map(|index| {
+                arena.mint(OpOrigin::Lifted {
+                    block,
+                    index,
+                    instruction: None,
+                })
+            })
+            .collect();
+    }
+
+    /// The operations, in order.
+    pub fn ops(&self) -> &[SSAOp] {
+        &self.ops
+    }
+
+    /// The phis, in order.
+    pub fn phis(&self) -> &[PhiNode] {
+        &self.phis
+    }
+
+    /// Each operation with its identity, in order.
+    pub fn sited(&self) -> impl DoubleEndedIterator<Item = (OpId, &SSAOp)> + ExactSizeIterator {
+        self.ids.iter().copied().zip(&self.ops)
+    }
+
+    /// Each phi with its identity, in order.
+    pub fn sited_phis(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (OpId, &PhiNode)> + ExactSizeIterator {
+        self.phi_ids.iter().copied().zip(&self.phis)
+    }
+
+    /// The identity of the operation at `index`.
+    pub fn op_id(&self, index: usize) -> Option<OpId> {
+        self.ids.get(index).copied()
+    }
+
+    /// The identity of the phi at `index`.
+    pub fn phi_id(&self, index: usize) -> Option<OpId> {
+        self.phi_ids.get(index).copied()
+    }
+
+    /// Where an operation sits in this block, by a scan of the block.
+    pub fn position(&self, id: OpId) -> Option<usize> {
+        self.ids.iter().position(|held| *held == id)
+    }
+
+    /// The operations, to be rewritten in place: each keeps its id.
+    pub fn ops_mut(&mut self) -> &mut [SSAOp] {
+        &mut self.ops
+    }
+
+    /// The phis, to be rewritten in place: each keeps its id.
+    pub fn phis_mut(&mut self) -> &mut [PhiNode] {
+        &mut self.phis
+    }
+
+    /// Add an operation to a block being built one instruction at a time,
+    /// numbered by the block itself.
+    pub(crate) fn push(&mut self, op: SSAOp) {
+        self.ids.push(local_id(self.ops.len()));
         self.ops.push(op);
+    }
+
+    /// Add a phi to a block being built by hand, numbered by the block
+    /// itself.
+    #[cfg(test)]
+    pub(crate) fn push_phi(&mut self, phi: PhiNode) {
+        self.phi_ids.push(local_id(self.phis.len()));
+        self.phis.push(phi);
     }
 
     /// Get the number of operations.
@@ -141,6 +264,199 @@ impl SSABlock {
     /// Check if the block is empty.
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    /// Insert operations at `at`, minting each an id derived by `pass` from
+    /// the operation named beside it.
+    pub(crate) fn insert_ops(
+        &mut self,
+        arena: &mut OpArena,
+        at: usize,
+        pass: Pass,
+        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+    ) {
+        let at = at.min(self.ops.len());
+        let (ops, ids): (Vec<_>, Vec<_>) = ops
+            .into_iter()
+            .map(|(op, from)| (op, arena.mint(OpOrigin::Derived { from, pass })))
+            .unzip();
+        self.ops.splice(at..at, ops);
+        self.ids.splice(at..at, ids);
+    }
+
+    /// Remove the operation at `at`, tombstoning its id.
+    pub(crate) fn remove_op(&mut self, arena: &mut OpArena, at: usize, pass: Pass) -> SSAOp {
+        arena.kill(self.ids.remove(at), pass);
+        self.ops.remove(at)
+    }
+
+    /// Keep the phis `keep` accepts, tombstoning the rest.
+    pub(crate) fn retain_phis(
+        &mut self,
+        arena: &mut OpArena,
+        pass: Pass,
+        mut keep: impl FnMut(&PhiNode) -> bool,
+    ) {
+        let mut index = 0;
+        while index < self.phis.len() {
+            if keep(&self.phis[index]) {
+                index += 1;
+            } else {
+                self.phis.remove(index);
+                arena.kill(self.phi_ids.remove(index), pass);
+            }
+        }
+    }
+
+    /// Tombstone every phi and operation of a block leaving the function.
+    pub(crate) fn kill_all(&self, arena: &mut OpArena, pass: Pass) {
+        for id in self.phi_ids.iter().chain(&self.ids) {
+            arena.kill(*id, pass);
+        }
+    }
+
+    /// Replace every operation, tombstoning the old ones and minting the new
+    /// ones as derived by `pass` from nothing.
+    pub(crate) fn replace_ops(&mut self, arena: &mut OpArena, pass: Pass, ops: Vec<SSAOp>) {
+        for id in self.ids.drain(..) {
+            arena.kill(id, pass);
+        }
+        self.ids = ops
+            .iter()
+            .map(|_| arena.mint(OpOrigin::Derived { from: None, pass }))
+            .collect();
+        self.ops = ops;
+    }
+
+    /// Apply one block's share of an [`crate::function::EditPlan`] in a single
+    /// walk of its operations, minting what it inserts in the order the
+    /// insertions end up in the block.
+    pub(crate) fn apply(&mut self, arena: &mut OpArena, edits: crate::function::BlockEdits) {
+        let crate::function::BlockEdits { start, mut at } = edits;
+        let old_ops = std::mem::take(&mut self.ops);
+        let old_ids = std::mem::take(&mut self.ids);
+        let mut ops = Vec::with_capacity(old_ops.len());
+        let mut ids = Vec::with_capacity(old_ids.len());
+        let place = |ops: &mut Vec<SSAOp>,
+                     ids: &mut Vec<OpId>,
+                     arena: &mut OpArena,
+                     runs: Vec<crate::function::Insertion>| {
+            let flat = runs
+                .into_iter()
+                .flat_map(|(pass, run)| run.into_iter().map(move |(op, from)| (pass, op, from)));
+            for (pass, op, from) in flat {
+                ids.push(arena.mint(OpOrigin::Derived { from, pass }));
+                ops.push(op);
+            }
+        };
+        place(&mut ops, &mut ids, arena, start);
+        for (id, op) in old_ids.into_iter().zip(old_ops) {
+            let Some(edit) = at.remove(&id) else {
+                ids.push(id);
+                ops.push(op);
+                continue;
+            };
+            place(&mut ops, &mut ids, arena, edit.before);
+            if let Some(pass) = edit.kill {
+                arena.kill(id, pass);
+            } else {
+                ids.push(id);
+                ops.push(edit.replace.unwrap_or(op));
+            }
+            place(&mut ops, &mut ids, arena, edit.after);
+        }
+        self.ops = ops;
+        self.ids = ids;
+    }
+
+    /// Replace every phi, as [`Self::replace_ops`] does operations.
+    pub(crate) fn replace_phis(&mut self, arena: &mut OpArena, pass: Pass, phis: Vec<PhiNode>) {
+        for id in self.phi_ids.drain(..) {
+            arena.kill(id, pass);
+        }
+        self.phi_ids = phis
+            .iter()
+            .map(|_| arena.mint(OpOrigin::Derived { from: None, pass }))
+            .collect();
+        self.phis = phis;
+    }
+}
+
+/// One block of a function, open for change together with the function's
+/// arena, so that whatever changes the block's shape mints or tombstones ids
+/// as it does. Reading goes through [`SSABlock`].
+pub struct BlockMut<'a> {
+    block: &'a mut SSABlock,
+    arena: &'a mut OpArena,
+}
+
+impl<'a> BlockMut<'a> {
+    /// Open `block` for change. Every id the block holds must have been
+    /// minted from `arena`: a block the function owns gets its own arena from
+    /// the function, and a detached block numbered by itself pairs with an
+    /// empty one.
+    pub fn new(block: &'a mut SSABlock, arena: &'a mut OpArena) -> Self {
+        Self { block, arena }
+    }
+
+    /// The operations, to be rewritten in place: each keeps its id.
+    pub fn ops_mut(&mut self) -> &mut [SSAOp] {
+        self.block.ops_mut()
+    }
+
+    /// The phis, to be rewritten in place: each keeps its id.
+    pub fn phis_mut(&mut self) -> &mut [PhiNode] {
+        self.block.phis_mut()
+    }
+
+    /// Insert one operation at `at`, derived by `pass` from `from`.
+    pub fn insert_op(&mut self, at: usize, op: SSAOp, from: Option<OpId>, pass: Pass) {
+        self.block.insert_ops(self.arena, at, pass, [(op, from)]);
+    }
+
+    /// Append one operation, derived by `pass` from `from`.
+    pub fn push_op(&mut self, op: SSAOp, from: Option<OpId>, pass: Pass) {
+        let end = self.block.len();
+        self.insert_op(end, op, from, pass);
+    }
+
+    /// Insert operations at `at`, each derived by `pass` from the operation
+    /// named beside it.
+    pub fn insert_ops(
+        &mut self,
+        at: usize,
+        pass: Pass,
+        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+    ) {
+        self.block.insert_ops(self.arena, at, pass, ops);
+    }
+
+    /// Remove the operation at `at`, tombstoning its id.
+    pub fn remove_op(&mut self, at: usize, pass: Pass) -> SSAOp {
+        self.block.remove_op(self.arena, at, pass)
+    }
+
+    /// Keep the phis `keep` accepts, tombstoning the rest.
+    pub fn retain_phis(&mut self, pass: Pass, keep: impl FnMut(&PhiNode) -> bool) {
+        self.block.retain_phis(self.arena, pass, keep);
+    }
+
+    /// Replace every operation: the old ids die, the new ones are minted.
+    pub fn replace_ops(&mut self, pass: Pass, ops: Vec<SSAOp>) {
+        self.block.replace_ops(self.arena, pass, ops);
+    }
+
+    /// Replace every phi: the old ids die, the new ones are minted.
+    pub fn replace_phis(&mut self, pass: Pass, phis: Vec<PhiNode>) {
+        self.block.replace_phis(self.arena, pass, phis);
+    }
+}
+
+impl std::ops::Deref for BlockMut<'_> {
+    type Target = SSABlock;
+
+    fn deref(&self) -> &SSABlock {
+        self.block
     }
 }
 

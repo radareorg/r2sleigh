@@ -281,7 +281,7 @@ fn call_reaches(
         .map_or(0, |placement| placement.first_offset().max(0));
     let states = reaching_storage_states_before(function, graph, stack_pointer);
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             let instruction = match op {
                 SSAOp::Call { instruction, .. } | SSAOp::CallInd { instruction, .. } => {
                     *instruction

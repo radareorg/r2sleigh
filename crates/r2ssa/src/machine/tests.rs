@@ -524,8 +524,8 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         ],
         block_by_addr: [(0x1000, BlockId(0))].into(),
         value_index: crate::graph::value_index_of(&values),
-        op_inst_by_site: [((0x1000, 0), InstId(0))].into(),
-        op_site_by_inst: [(InstId(0), (0x1000, 0))].into(),
+        inst_by_op: vec![Some(InstId(0))],
+        op_by_inst: vec![crate::arena::local_id(0)],
         instruction_by_inst: [(InstId(0), 0x1000)].into(),
         insts_by_instruction: [(0x1000, vec![InstId(0)])].into(),
         formal_projections: BTreeMap::new(),
@@ -2422,7 +2422,7 @@ fn dense_write_projections_cover_full_and_zero_extension() {
         .function()
         .get_block(0x1000)
         .expect("block")
-        .ops;
+        .ops();
     let extension = ops
         .iter()
         .position(|op| matches!(op, SSAOp::IntZExt { .. }))
@@ -2484,7 +2484,7 @@ fn register_uses_read_the_root_whole() {
         ],
         &arch,
     );
-    let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+    let ops = artifact.function().get_block(0x1000).expect("block").ops();
     let subpieces = ops
         .iter()
         .enumerate()
@@ -2555,7 +2555,7 @@ fn big_endian_lane_positions_count_from_the_least_significant_byte() {
         ],
         &arch,
     );
-    let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+    let ops = artifact.function().get_block(0x1000).expect("block").ops();
     assert!(
         ops.iter().any(|op| matches!(
             op,
@@ -2700,7 +2700,7 @@ fn unnamed_vector_lanes_insert_into_their_root() {
         &arch,
     );
     let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
-    let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+    let ops = artifact.function().get_block(0x1000).expect("block").ops();
     let inserts = ops
         .iter()
         .enumerate()

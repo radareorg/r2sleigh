@@ -614,7 +614,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
     calls_move_stack_pointer: bool,
 ) -> Option<(StackAddressRoot, bool)> {
     let recorded = block
-        .ops
+        .ops()
         .get(call_op_index.checked_add(1)?..)?
         .iter()
         .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
@@ -679,7 +679,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                     .iter()
                     .flat_map(|block| {
                         block
-                            .phis
+                            .phis()
                             .iter()
                             .map(|phi| {
                                 (
@@ -697,7 +697,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                                         .collect::<Vec<_>>(),
                                 )
                             })
-                            .chain(block.ops.iter().filter_map(|op| {
+                            .chain(block.ops().iter().filter_map(|op| {
                                 op.dst().map(|dst| {
                                     (
                                         dst.clone(),
@@ -808,7 +808,7 @@ pub(crate) fn preserved_call_carriers(
         if !function.successors(block.addr).is_empty() {
             continue;
         }
-        match terminal_past_call_boundary(&block.ops) {
+        match terminal_past_call_boundary(block.ops()) {
             Some(SSAOp::Return { .. }) => saw_return = true,
             Some(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {}
             _ => return BTreeSet::new(),
@@ -977,7 +977,7 @@ pub(crate) fn reaching_abi_value_at_end(
     visited: &BTreeMap<u64, usize>,
     memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
-    let boundary = search.function.get_block(block_addr)?.ops.len();
+    let boundary = search.function.get_block(block_addr)?.ops().len();
     if visited.contains_key(&block_addr) {
         return reaching_abi_value_before(search, block_addr, boundary, visited, memo);
     }
@@ -1017,10 +1017,10 @@ pub(crate) fn reaching_abi_value_before(
     r2il::refusal_evidence!(
         "reaching-abi-value",
         "walk ({block_addr:#x}, {scan_start}..{boundary_op_index}) of {} ops for {storage:?}",
-        block.ops.len()
+        block.ops().len()
     );
     for (op_index, op) in block
-        .ops
+        .ops()
         .get(scan_start..boundary_op_index)?
         .iter()
         .enumerate()
@@ -1127,7 +1127,7 @@ pub(crate) fn reaching_abi_value_before(
         return Some(ReachingAbiPath::Cycle);
     }
     let phi_insts = block
-        .phis
+        .phis()
         .iter()
         .filter(|phi| phi.canonical_storage == Some(storage))
         .filter_map(|phi| graph.value_id_for_var(&phi.dst))
@@ -1309,7 +1309,7 @@ pub(crate) fn observed_convention_call_result_after_call(
 ) -> Option<CallBoundaryValueFact> {
     let block = function.get_block(block_addr)?;
     let candidates = block
-        .ops
+        .ops()
         .get(call_op_index.checked_add(1)?..)?
         .iter()
         .enumerate()
@@ -1384,7 +1384,7 @@ pub(crate) fn storage_phi_value(
 ) -> Result<Option<ValueId>, ()> {
     let block = function.get_block(block_addr).ok_or(())?;
     let values = block
-        .phis
+        .phis()
         .iter()
         .filter(|phi| phi.canonical_storage == Some(storage))
         .filter_map(|phi| graph.value_id_for_var(&phi.dst))
@@ -1486,7 +1486,7 @@ pub(crate) fn reaching_storage_states_before(
             exits.insert(block_addr, ReachingStorageState::Conflict);
             continue;
         };
-        for op_index in 0..block.ops.len() {
+        for op_index in 0..block.ops().len() {
             state = transfer_storage_state(graph, block_addr, op_index, storage, state);
         }
         if exits.get(&block_addr).copied() == Some(state) {
@@ -1502,7 +1502,7 @@ pub(crate) fn reaching_storage_states_before(
         let Some(block) = function.get_block(block_addr) else {
             continue;
         };
-        for op_index in 0..block.ops.len() {
+        for op_index in 0..block.ops().len() {
             if let Some(inst) = graph.inst_id_for_op_site(block_addr, op_index) {
                 before.insert(inst, state);
             }
@@ -1548,7 +1548,7 @@ pub(crate) fn callee_write_spans(
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             let (target, instruction) = match op {
                 SSAOp::Call {
                     target,
@@ -1777,7 +1777,7 @@ impl FrameBoundaries {
         let saves = function
             .blocks()
             .iter()
-            .flat_map(|block| &block.ops)
+            .flat_map(|block| block.ops())
             .filter_map(|op| {
                 structural_save(facts, graph, op, |storage| {
                     Some(storage) != stack_pointer && effect.preserves(storage)
@@ -1936,7 +1936,7 @@ pub(crate) fn evidenced_stack_roots(
         displaced_from(var).is_some_and(|parent| graph.canonical_storage_for_var(&parent).is_none())
     };
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
                     if stack_pointer_carrier.is_some()
@@ -1993,7 +1993,7 @@ pub(crate) fn evidenced_stack_roots(
         });
     }
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             let addr = match op {
                 SSAOp::Load { addr, space, .. }
                 | SSAOp::Store { addr, space, .. }
@@ -2020,7 +2020,7 @@ pub(crate) fn evidenced_stack_roots(
     // offsets into fragments nothing is proven to write.
     let mut spans = BTreeMap::<StackAddressRoot, i64>::new();
     for block in function.blocks() {
-        for (at, op) in block.ops.iter().enumerate() {
+        for (at, op) in block.ops().iter().enumerate() {
             let (addr, width) = match op {
                 SSAOp::Load {
                     addr, dst, space, ..

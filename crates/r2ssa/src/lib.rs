@@ -18,6 +18,7 @@
 pub(crate) mod abi;
 pub(crate) mod address;
 pub(crate) mod aggregate_access;
+pub mod arena;
 pub(crate) mod assumption;
 pub mod block;
 pub mod body;
@@ -70,11 +71,12 @@ pub use aggregate_access::{
     AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION, AggregateAccessBinding, AggregateAccessProjection,
     AggregateAccessProjectionFacts, AggregateElementIndexProjection,
 };
+pub use arena::{OpArena, OpId, OpOrigin, OpSlot, Pass};
 pub use assumption::{
     AnalysisAssumption, AnalysisAssumptionConflict, AssumptionProvenance, AssumptionScope,
     AssumptionSet, AssumptionSubject, AssumptionUsageReport, AssumptionValue,
 };
-pub use block::{SSABlock, branch_condition};
+pub use block::{BlockMut, SSABlock, branch_condition};
 pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge, DeclaredSuccessors};
 pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,

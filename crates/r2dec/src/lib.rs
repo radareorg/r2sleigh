@@ -3248,7 +3248,7 @@ impl Decompiler {
             let graph = prepared.graph();
             let live = prepared.live_out();
             let dead = prepared.unobserved_merges();
-            let total: usize = func.blocks().iter().map(|b| b.phis.len()).sum();
+            let total: usize = func.blocks().iter().map(|b| b.phis().len()).sum();
             eprintln!(
                 "MERGES fn={:#x} phis={} unobserved={} live_out={} unresolved={}",
                 func.entry,
@@ -3262,7 +3262,7 @@ impl Decompiler {
             // merge names the value that is lost rather than the layer that lost it.
             let render_facts = self.context.function_facts.render();
             for block in func.blocks() {
-                for phi in &block.phis {
+                for phi in block.phis() {
                     let value = graph.value_id_for_var(&phi.dst);
                     let carrier = value.is_some_and(|value| {
                         render_facts
@@ -3608,7 +3608,7 @@ impl Decompiler {
             // What materialisation left behind, so a carrier update that renders
             // more than once shows which ops the fold was handed.
             for block in normalized_func.blocks() {
-                for (index, op) in block.ops.iter().enumerate() {
+                for (index, op) in block.ops().iter().enumerate() {
                     let op: &r2ssa::SSAOp = op;
                     let kind = format!("{op:?}");
                     let kind = kind.split([' ', '{']).next().unwrap_or("?");

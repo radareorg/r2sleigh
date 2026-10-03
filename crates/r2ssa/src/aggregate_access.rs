@@ -463,7 +463,7 @@ mod tests {
     ) -> crate::InstId {
         let block = artifact.function().get_block(block_addr).expect("block");
         let index = block
-            .ops
+            .ops()
             .iter()
             .position(matches)
             .expect("an operation of the requested kind");

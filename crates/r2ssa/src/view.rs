@@ -413,13 +413,13 @@ impl<'a> Solver<'a> {
         let mut nodes = Vec::new();
         let mut definitions = Vec::new();
         for block in function.blocks() {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 nodes.push(&phi.dst);
                 definitions.push(Definition::Phi(
                     phi.sources.iter().map(|(_, source)| source).collect(),
                 ));
             }
-            for (dst, src, step) in block.ops.iter().filter_map(step_of) {
+            for (dst, src, step) in block.ops().iter().filter_map(step_of) {
                 nodes.push(dst);
                 definitions.push(Definition::Step(src, step));
             }
@@ -809,7 +809,7 @@ mod tests {
         function
             .blocks()
             .iter()
-            .flat_map(|block| &block.ops)
+            .flat_map(|block| block.ops())
             .filter_map(SSAOp::dst)
             .find(|dst| {
                 function
@@ -879,7 +879,7 @@ mod tests {
         let facts = function.decompile_prep_facts().expect("identity facts");
         let merged = function
             .get_block(0x100c)
-            .and_then(|block| block.phis.first())
+            .and_then(|block| block.phis().first())
             .map(|phi| phi.dst.clone())
             .expect("the two copies merge");
         // The merge is the constant: both arms agree on it.
@@ -929,7 +929,7 @@ mod tests {
         block.push(R2ILOp::Return { target: reg(16, 4) });
         let function = prepared(&[block]);
         let facts = function.decompile_prep_facts().expect("identity facts");
-        let ops = &function.blocks()[0].ops;
+        let ops = function.blocks()[0].ops();
         let loaded = ops
             .iter()
             .filter_map(|op| match op {

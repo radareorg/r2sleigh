@@ -196,7 +196,7 @@ pub(crate) fn collect_structured_memory_access_facts(
     let mut access_facts = BTreeMap::new();
     let mut member_run_stores = BTreeMap::new();
     for block in function.blocks() {
-        for (op_index, op) in block.ops.iter().enumerate() {
+        for (op_index, op) in block.ops().iter().enumerate() {
             let Some(inst) = graph.inst_id_for_op_site(block.addr, op_index) else {
                 continue;
             };

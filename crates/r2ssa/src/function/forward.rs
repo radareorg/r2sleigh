@@ -32,13 +32,13 @@ impl SSAFunction {
     pub(crate) fn forward_copies(&mut self) -> Forwarding {
         let mut merge_sources = std::collections::HashSet::<SSAVar>::new();
         for block in &self.blocks {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 merge_sources.extend(phi.sources.iter().map(|(_, source)| source.clone()));
             }
         }
         let mut forwarded = HashMap::<SSAVar, SSAVar>::new();
         for block in &self.blocks {
-            for op in &block.ops {
+            for op in block.ops() {
                 if let SSAOp::Copy { dst, src } = op
                     && dst.size == src.size
                     && dst != src
@@ -62,7 +62,7 @@ impl SSAFunction {
         for block in self.blocks.edit().iter_mut() {
             // A merge reads each source on its edge; the read moves the same
             // way, and the merge's own definition stays its own.
-            for phi in &mut block.phis {
+            for phi in block.phis_mut() {
                 for (_, source) in &mut phi.sources {
                     let mapped = map(source);
                     if mapped != *source {
@@ -71,7 +71,7 @@ impl SSAFunction {
                     }
                 }
             }
-            for op in &mut block.ops {
+            for op in block.ops_mut() {
                 let mapped = map_sources_in_op(op, &map);
                 if mapped != *op {
                     stats.reads_forwarded += moved_reads(op, &mapped);
@@ -113,7 +113,7 @@ impl SSAFunction {
         for block in &self.blocks {
             let mut pushed: Option<&SSAVar> = None;
             let mut carrier = None;
-            for op in &block.ops {
+            for op in block.ops() {
                 match op {
                     SSAOp::Store { addr, val, .. } if val.is_const() => {
                         pushed = self
@@ -248,7 +248,7 @@ mod tests {
     }
 
     fn op_at(func: &SSAFunction, addr: u64, index: usize) -> &SSAOp {
-        &func.get_block(addr).expect("block").ops[index]
+        &func.get_block(addr).expect("block").ops()[index]
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
         let before = func
             .get_block(0x1004)
             .expect("header")
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name() == "RAX")
             .expect("merge of RAX")
@@ -355,7 +355,7 @@ mod tests {
         let after = func
             .get_block(0x1004)
             .expect("header")
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name() == "RAX")
             .expect("merge of RAX")
@@ -380,10 +380,10 @@ mod tests {
                 target: reg(0x288, 8),
             },
         ]);
-        let before = func.get_block(0x1000).expect("block").ops.clone();
+        let before = func.get_block(0x1000).expect("block").ops().to_vec();
         let stats = func.forward_copies();
         assert_eq!(stats.reads_forwarded, 0);
-        assert_eq!(func.get_block(0x1000).expect("block").ops, before);
+        assert_eq!(func.get_block(0x1000).expect("block").ops(), before);
     }
 
     #[test]
@@ -410,10 +410,10 @@ mod tests {
         let reads_source = func
             .get_block(0x1000)
             .expect("block")
-            .ops
+            .ops()
             .iter()
             .any(|op| matches!(op, SSAOp::CallUse { src } if *src == source));
-        let reads_copy = func.get_block(0x1000).expect("block").ops.iter().any(
+        let reads_copy = func.get_block(0x1000).expect("block").ops().iter().any(
             |op| matches!(op, SSAOp::CallUse { src } if src.name() == "RDI" && src.version > 0),
         );
         assert!(
