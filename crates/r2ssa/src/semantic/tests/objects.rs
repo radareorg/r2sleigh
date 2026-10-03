@@ -718,3 +718,113 @@ fn a_stack_position_nothing_accesses_or_passes_on_has_no_extent() {
         "the same position is a buffer once its address is handed on, and the frame's gap is its extent"
     );
 }
+
+/// `local = 1; [&local escapes;] p = *0x5000; *p = 2; return local;`
+fn unknown_pointer_block(escape: bool) -> R2ILBlock {
+    let sp = Varnode::register(0, 8);
+    let local = Varnode::unique(0x100, 8);
+    let pointer = Varnode::unique(0x110, 8);
+    let mut block = R2ILBlock::new(0x3800, 4);
+    block.push(R2ILOp::IntSub {
+        dst: local.clone(),
+        a: sp,
+        b: Varnode::constant(16, 8),
+    });
+    block.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: local.clone(),
+        val: Varnode::constant(1, 4),
+    });
+    if escape {
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x5008, 8),
+            val: local.clone(),
+        });
+    }
+    block.push(R2ILOp::Load {
+        dst: pointer.clone(),
+        space: SpaceId::Ram,
+        addr: Varnode::constant(0x5000, 8),
+    });
+    block.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: pointer,
+        val: Varnode::constant(2, 4),
+    });
+    block.push(R2ILOp::Load {
+        dst: Varnode::unique(0x120, 4),
+        space: SpaceId::Ram,
+        addr: local,
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    block
+}
+
+/// The version the local's store makes, and the versions its reload reads.
+fn unknown_pointer_versions(escape: bool) -> (MemoryVersion, Vec<MemoryVersion>) {
+    let mut arch = ArchSpec::new("unknown-pointer-test");
+    arch.addr_size = 8;
+    arch.add_register(RegisterDef::new("sp", 0, 8));
+    arch.add_register(RegisterDef::new("ra", 16, 8));
+    arch.add_space(r2il::AddressSpace::ram(8));
+    let storage = |offset| CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    };
+    // Declared, so it stays a memory object rather than a promoted variable.
+    let interface = SourceFunctionInterface::new_exact(
+        b"unknown-pointer-revision-1".to_vec(),
+        "test-abi",
+        [],
+        SourceFunctionReturn::Void,
+        [SourceStackSlotSpec::new_local(
+            StackAddressBase::StackPointer,
+            storage(0),
+            -16,
+            4,
+        )],
+    )
+    .and_then(|interface| interface.with_return_address_storage(storage(16)))
+    .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
+    .expect("exact interface");
+    let block = unknown_pointer_block(escape);
+    let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+        .expect("artifact");
+    let [store] = artifact
+        .memory_defs_for_op_site(0x3800, 1)
+        .expect("the local's store")
+    else {
+        panic!("one definition of the local")
+    };
+    let reload = artifact
+        .memory_uses_for_op_site(0x3800, 4 + usize::from(escape))
+        .expect("the local's reload");
+    (
+        store.next_version,
+        reload.iter().map(|used| used.version).collect(),
+    )
+}
+
+/// `p` loaded from memory is unknown memory, and unknown memory is only what
+/// outside code can reach. A frame slot whose address never left the function
+/// is not among it, so the store through `p` does not redefine it and the
+/// reload reads the local's own store. Once the slot's address is stored where
+/// `p` could have come from, the store through `p` may be to it.
+#[test]
+fn a_store_through_an_unknown_pointer_redefines_only_escaped_frame_objects() {
+    let (stored, read) = unknown_pointer_versions(false);
+    assert_eq!(
+        read,
+        [stored],
+        "a private local was redefined through an unknown pointer"
+    );
+    let (stored, read) = unknown_pointer_versions(true);
+    assert!(
+        read.iter().any(|version| *version != stored),
+        "an escaped local was not redefined through the pointer it escaped to: {read:?}"
+    );
+}

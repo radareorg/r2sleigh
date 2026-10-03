@@ -304,6 +304,9 @@ pub struct ObjectModel {
     /// write any of their bytes: the object's own contents are then defined
     /// by the call as much as by any store this body makes.
     pub callee_reached: BTreeSet<ObjectId>,
+    /// Which frame objects outside code can touch: those whose address
+    /// escapes, and each call's argument area (`frame_reach`).
+    pub frame_reach: FrameReach,
 }
 
 impl ObjectModel {
@@ -1613,6 +1616,7 @@ impl<'a> ObjectModelBuilder<'a> {
             callee_write_reach,
             escaping_addresses,
             callee_reached,
+            frame_reach: FrameReach::default(),
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,

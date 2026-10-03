@@ -18,7 +18,8 @@ pub(crate) fn collect_object_and_memory_facts(
 ) -> (ObjectModel, MemorySSAFacts) {
     let facts = function.decompile_prep_facts();
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    let object_model = builder.build(function, graph, values);
+    let mut object_model = builder.build(function, graph, values);
+    object_model.frame_reach = FrameReach::of(function, graph, &object_model, machine_context);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
@@ -106,19 +107,9 @@ pub(crate) fn collect_access_summaries(
                 // know is no less a call. Leaving it out made two reads of an
                 // escaped object on either side of it one memory version.
                 SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                    for space in object_model.memory_spaces() {
-                        let Some(object) = object_model.escaped_unknown_object(space) else {
-                            continue;
-                        };
-                        let location = MemoryLocation {
-                            space,
-                            object,
-                            address: RelativeMemoryAddress::Unknown,
-                            size: 0,
-                        };
-                        uses.push(location.clone());
-                        defs.push(location);
-                    }
+                    let locations = call_locations(object_model, inst_id);
+                    uses.extend(locations.iter().cloned());
+                    defs.extend(locations);
                 }
                 _ => {}
             }
@@ -129,6 +120,39 @@ pub(crate) fn collect_access_summaries(
     }
 
     summaries
+}
+
+/// What a call reads and writes: the escaped memory of every space, and the
+/// frame the callee finds above its stack pointer -- this call's argument
+/// area, or the whole frame where nothing bounds it -- as whole objects. What
+/// has escaped, the escaped memory already covers.
+fn call_locations(object_model: &ObjectModel, call: InstId) -> Vec<MemoryLocation> {
+    let escaped = object_model.memory_spaces().filter_map(|space| {
+        Some(MemoryLocation {
+            space,
+            object: object_model.escaped_unknown_object(space)?,
+            address: RelativeMemoryAddress::Unknown,
+            size: 0,
+        })
+    });
+    let reach = object_model.frame_reach.call(call);
+    let frame = object_model.objects.iter().filter_map(|(id, fact)| {
+        let space = match fact.kind {
+            ObjectKind::StackSlot { space, .. } | ObjectKind::FrameObject { space, .. } => space,
+            _ => return None,
+        };
+        let reached = match reach {
+            CallFrameReach::Whole => true,
+            CallFrameReach::Objects(objects) => objects.contains(id),
+        };
+        (reached && !object_model.frame_reach.escaped(*id)).then_some(MemoryLocation {
+            space,
+            object: *id,
+            address: RelativeMemoryAddress::Unknown,
+            size: 0,
+        })
+    });
+    escaped.chain(frame).collect()
 }
 
 pub(crate) fn build_memory_ssa(

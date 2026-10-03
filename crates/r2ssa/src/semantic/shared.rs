@@ -199,6 +199,16 @@ pub(crate) fn memory_locations_may_alias(
         );
     }
     match (&left_object.kind, &right_object.kind) {
+        // Unknown memory is what outside code can reach, which of the frame
+        // is only what has escaped; the rest of the frame is private.
+        (
+            ObjectKind::EscapedUnknown { .. },
+            ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. },
+        ) => objects.frame_reach.escaped(right.object),
+        (
+            ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. },
+            ObjectKind::EscapedUnknown { .. },
+        ) => objects.frame_reach.escaped(left.object),
         (ObjectKind::EscapedUnknown { .. }, _) | (_, ObjectKind::EscapedUnknown { .. }) => true,
         (
             ObjectKind::Parameter { .. },
