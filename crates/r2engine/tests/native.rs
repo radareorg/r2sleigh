@@ -3731,3 +3731,48 @@ fn a_register_saved_beside_an_indexed_buffer_is_no_store_of_the_program() {
     assert!(!text.contains("RBX_0"), "{text}");
     assert!(text.contains("= SIL_0;"), "{text}");
 }
+
+/// gcc -O1 `bool_relay(m, n)`: `setg al` writes one byte of RAX, and the
+/// only reader keeps that byte (`or %ecx,%eax` then `movzbl %al`).
+const SETCC_INTO_AN_ENTRY_REGISTER: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0x85, 0xff, // 1004 test edi, edi
+    0x0f, 0x9f, 0xc0, // 1006 setg al
+    0x85, 0xf6, // 1009 test esi, esi
+    0x0f, 0x9f, 0xc1, // 100b setg cl
+    0x84, 0xc0, // 100e test al, al
+    0x74, 0x09, // 1010 je 0x101b
+    0xba, 0x02, 0x00, 0x00, 0x00, // 1012 mov edx, 2
+    0x84, 0xc9, // 1017 test cl, cl
+    0x75, 0x05, // 1019 jne 0x1020
+    0x09, 0xc8, // 101b or eax, ecx
+    0x0f, 0xb6, 0xd0, // 101d movzx edx, al
+    0x89, 0xd0, // 1020 mov eax, edx
+    0xc3, // 1022 ret
+];
+
+/// The seven bytes `setg al` leaves in RAX are the caller's, and nothing
+/// reads them: the demanded-bytes fact says the INSERT reads none of its
+/// base, so the entry value of RAX is no input and nothing renders a read of
+/// a value no statement assigned. Before, it rendered as a residual trap.
+#[test]
+fn a_lane_write_whose_other_bytes_nobody_reads_does_not_read_them() {
+    let text = rendered(SETCC_INTO_AN_ENTRY_REGISTER, "bool_relay");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    run_rendered(
+        "bool_relay",
+        &text,
+        r#"int main(void) {
+    const int cases[][2] = {{1, 1}, {1, 0}, {0, 1}, {0, 0}, {-3, 4}, {5, -2}};
+    for (int i = 0; i < 6; i++) {
+        int m = cases[i][0], n = cases[i][1];
+        int a = m > 0, b = n > 0;
+        int want = (a && b) ? 2 : (a || b) ? 1 : 0;
+        if ((int)bool_relay(m, n) != want) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}

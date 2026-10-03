@@ -480,6 +480,7 @@ impl Image {
                     vsize: section.size(),
                     file_offset,
                     file_size,
+                    align: section.align(),
                     role: located.role(&section, states_instructions(&section)),
                     loaded,
                 }

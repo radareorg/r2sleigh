@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master]
 
+# The jobs read the repository and nothing else: no job writes through the
+# token, so it is granted read access to the contents alone.
+permissions:
+  contents: read
+
 # Cancel in-progress runs for the same branch/PR
 concurrency:
   group: ci-${{ github.ref }}

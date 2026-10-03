@@ -421,7 +421,8 @@ fn section_stubs(
             return Vec::new();
         }
         if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
-            readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
+            let start = stub_start(&run, &starts, section.align);
+            readers.push((leaving_at, start, (*found).to_owned()));
         }
         run = fresh_run(pc);
         starts.clear();
@@ -497,7 +498,15 @@ fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
 /// that stores, or writes what the transfer never reads, is not part of that:
 /// on x86 the zero pad after PLT0 decodes as `add byte [eax], al`. One that
 /// writes nothing stays, so a landing pad at the stub's head is its own.
-fn stub_start(run: &r2il::R2ILBlock, starts: &[(u64, usize)]) -> u64 {
+///
+/// What writes nothing does not say which side of a cell boundary it is on:
+/// `endbr64` heading a stub and the `nopl` padding PLT0 out to sixteen bytes
+/// both lift to no operation. The section's stated alignment does: every cell
+/// starts on it, so a leading run of such instructions that begins off it is
+/// the header's padding, and the stub starts at the first aligned boundary.
+/// (Only a lone stub reads this; two or more measure their cells from each
+/// other.)
+fn stub_start(run: &r2il::R2ILBlock, starts: &[(u64, usize)], align: u64) -> u64 {
     let register = |varnode: &&r2il::Varnode| {
         !matches!(varnode.space, r2il::SpaceId::Unique | r2il::SpaceId::Const)
     };
@@ -537,7 +546,17 @@ fn stub_start(run: &r2il::R2ILBlock, starts: &[(u64, usize)]) -> u64 {
         );
         start = *pc;
     }
-    start
+    if align <= 1 {
+        return start;
+    }
+    // Step over the instructions that do nothing at all until a boundary
+    // the section's alignment allows; one that does anything -- the transfer
+    // among them -- is the stub's, wherever it sits.
+    instructions
+        .iter()
+        .skip_while(|(pc, _)| *pc < start)
+        .find(|(pc, ops)| pc % align == 0 || !ops.is_empty())
+        .map_or(start, |(pc, _)| *pc)
 }
 
 /// An empty run beginning here.

@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause.",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -166,8 +166,8 @@
    "status": "refused"
   },
   "tests/corpus/branchy.c::clang-O1::main": {
-   "cause": "[PE (exact Insert transfer + forward definedness; covered insert chains projected root-free), deleting the one-shot zero_scratch_insert_roots heuristic] [G-LANES] `xorps xmm0,xmm0` (0x401431) lifts as four lane writes `XMM0_Dx = XMM0_Dx ^ XMM0_Dx`, which rename turns into INSERT^4 over entry XMM0_0 covering all 16 bytes. optimize.rs:1796 folds each x^x to 0 (pdim: `XMM0_1 = INSERT(XMM0_0, const:0, const:0)` .. `XMM0_4 = INSERT(XMM0_3, const:0, const:60)`), but nothing then removes the chain root once the windows cover it. deadphi.rs observed_input_bytes has no Insert arm (:251 `_ => whole`), and the machine projection has no rule that an insert whose root contributes no observed byte is its lane (the known gap of critique:lowering#4 and #1(...",
-   "reason": "r2sleigh_residual_u128",
+   "cause": "printf@plt is named at its stub again (a lone PLT stub starts on the section's stated alignment, not at PLT0's nopl padding), so the six-argument printf calls get the format-proven count and the stack-passed argument they cannot yet place is a visible residual; the u128 XMM-zeroing residual before it is gone with the demanded-bytes release",
+   "reason": "r2sleigh_residual_void",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O1::mask_probe": {
@@ -281,8 +281,8 @@
    "status": "refused"
   },
   "tests/corpus/branchy.c::clang-O2::main": {
-   "cause": "[PE (exact Insert transfer + forward definedness; covered insert chains projected root-free), deleting the one-shot zero_scratch_insert_roots heuristic] [G-LANES] `xorps xmm0,xmm0` (0x40141f) lifts as four lane writes `XMM0_Dx = XMM0_Dx ^ XMM0_Dx`, which rename turns into INSERT^4 over entry XMM0_0 covering all 16 bytes. optimize.rs:1796 folds each x^x to 0, but nothing removes the covered chain root. deadphi.rs:251 has no Insert arm, and the projection has no rule for a root that contributes no observed byte (the known gap of critique:lowering#4 and #1). zero_scratch_insert_roots (r2ssa/src/function/rewrite.rs:26) runs once at build (r2ssa/src/function/build.rs:576), before the fold, while the lane Subpiece reads still count as Observed. T...",
-   "reason": "r2sleigh_residual_u128",
+   "cause": "printf@plt is named at its stub again (a lone PLT stub starts on the section's stated alignment, not at PLT0's nopl padding), so the six-argument printf calls get the format-proven count and the stack-passed argument they cannot yet place is a visible residual; the u128 XMM-zeroing residual before it is gone with the demanded-bytes release",
+   "reason": "r2sleigh_residual_void",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O2::mask_probe": {
@@ -462,9 +462,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::bool_relay": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::bounded_fetch": {
    "status": "equal"
@@ -534,9 +532,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::sign_xor": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::slot_eq_guard": {
    "status": "equal"
@@ -569,9 +565,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::bool_relay": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::bounded_fetch": {
    "status": "equal"
@@ -641,9 +635,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::sign_xor": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::slot_eq_guard": {
    "status": "equal"

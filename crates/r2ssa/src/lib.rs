@@ -26,6 +26,7 @@ pub(crate) mod constant;
 pub(crate) mod control;
 pub(crate) mod deadphi;
 pub(crate) mod defuse;
+pub(crate) mod demand;
 pub mod domtree;
 pub mod fate;
 pub mod function;

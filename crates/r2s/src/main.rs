@@ -54,8 +54,9 @@ fn main() {
         std::process::exit(0);
     }
     if let Some(script) = cli.command {
-        let failed = run_script(&mut session, &mut reader, &script);
-        std::process::exit(if failed { 1 } else { 0 });
+        // A quit is how a script ends, not a failure of it.
+        let run = run_script(&mut session, &mut reader, &script);
+        std::process::exit(if run.failed { 1 } else { 0 });
     }
 
     if !cli.quiet {
@@ -86,21 +87,22 @@ fn main() {
                 break;
             }
         }
-        if run_script(&mut session, &mut reader, &line) && line.trim() == "q" {
+        // Whichever spelling quit, and wherever on the line it stood.
+        if run_script(&mut session, &mut reader, &line).quit {
             break;
         }
     }
 }
 
-/// Run a script line by line, reporting whether any statement failed or
-/// quit.
+/// Run a script line by line, reporting whether any statement failed and
+/// whether one quit.
 ///
 /// Every line is cut and every statement's grep parsed before the first one
 /// runs; a statement that was refused runs nothing, and the rest still run. A
 /// quit ends its line: radare2 goes on with the next (cmd.c:6997-7003). After
 /// a line that failed or quit, the first statement that fails ends the script
 /// ([`line::UNSETTLED`]).
-fn run_script(session: &mut session::Session, reader: &mut line::Reader, script: &str) -> bool {
+fn run_script(session: &mut session::Session, reader: &mut line::Reader, script: &str) -> Run {
     let lines = reader.script(script);
     let total = lines.len();
     let mut run = Run::default();
@@ -109,7 +111,7 @@ fn run_script(session: &mut session::Session, reader: &mut line::Reader, script:
             break;
         }
     }
-    run.failed || run.quit
+    run
 }
 
 /// What running a script has come to so far.

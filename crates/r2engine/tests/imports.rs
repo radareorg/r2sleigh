@@ -31,6 +31,22 @@ fn a_lone_stub_begins_at_its_transfer_not_at_the_pad_before_it() {
     assert_eq!(size, Some(BASE + 0x20 - PLT_STUB));
 }
 
+/// PLT0's padding and a stub's landing pad both lift to nothing, so what
+/// does nothing does not say where the stub begins; the section's stated
+/// alignment does. (`printf@plt` in a clang -O2 build was named four bytes
+/// early, and the calls to it found no prototype.)
+#[test]
+fn a_lone_stub_begins_on_its_section_alignment_not_at_padding_that_does_nothing() {
+    let mut program = OpenProgram::of(Literal::plt_nop_padded());
+    program.ensure_current().expect("it is current");
+    let imports: Vec<(u64, &str, u64)> = program
+        .imports()
+        .iter()
+        .map(|(at, stub)| (*at, stub.symbol.as_str(), stub.size))
+        .collect();
+    assert_eq!(imports, [(PLT_STUB, "_Exit", BASE + 0x20 - PLT_STUB)]);
+}
+
 #[test]
 fn a_section_of_stubs_is_known_by_what_it_holds_not_by_its_name() {
     // The same `.plt` under another name still holds nothing but a resolver

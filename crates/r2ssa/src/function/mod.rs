@@ -444,11 +444,58 @@ pub(crate) fn prepare_graph(
     function.recollect_decompile_prep_facts();
     machine_context.remap_memory_sites_to_prepared(function);
     let mut graph = SsaGraph::from_function_with_storage(function);
+    // A lane write whose untouched bytes nothing reads does not read the
+    // value it was written into (`demand`); releasing those bases changes an
+    // operand, so the facts and the graph are taken once more where it did.
+    // No operation moves and none touches memory, so the memory sites the
+    // context already maps onto these blocks stand (remapping is not
+    // idempotent: it reads its own map as the lifted one).
+    if release_undemanded_bytes(function, machine_context, &graph) {
+        function.recollect_decompile_prep_facts();
+        graph = SsaGraph::from_function_with_storage(function);
+    }
     crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
     let formal_parameters =
         crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
     function.install_exact_formal_parameters(&graph, &formal_parameters);
     Ok(graph)
+}
+
+/// Release the base of every INSERT whose demanded bytes lie in its lane.
+///
+/// The demand is rooted at what leaves through the return registers, so it
+/// is computed over the graph of the function as prepared. Only a function
+/// with an INSERT into a value that is not a constant can release anything,
+/// and only one pays for the pass.
+fn release_undemanded_bytes(
+    function: &mut SSAFunction,
+    machine_context: &SourceMachineContext,
+    graph: &SsaGraph,
+) -> bool {
+    let inserts = function
+        .blocks()
+        .iter()
+        .flat_map(|block| &block.ops)
+        .any(|op| matches!(op, SSAOp::Insert(insert) if insert.src.constant_bits().is_none()));
+    if !inserts {
+        return false;
+    }
+    let return_storages = machine_context
+        .abi_model()
+        .return_registers()
+        .iter()
+        .map(|slot| slot.storage())
+        .collect::<Vec<_>>();
+    let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+    if !crate::demand::exits_are_named(function, &live_out) {
+        r2il::refusal_evidence!(
+            "demanded-bytes",
+            "an exit hands registers to code outside the graph; no base is released"
+        );
+        return false;
+    }
+    let demand = crate::demand::Demand::of(graph, &live_out);
+    function.release_undemanded_insert_bases(graph, &demand)
 }
 
 /// The def-use of one body as it was lifted, with no pass that folds a use away.
@@ -3178,6 +3225,17 @@ impl SSAFunction {
     /// Get a block by address.
     pub fn get_block(&self, addr: u64) -> Option<&SSABlock> {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
+    }
+
+    /// One operation, to be rewritten in place.
+    ///
+    /// The blocks' revision moves, so the decompile-prep facts no longer
+    /// answer for them until they are collected again; unlike
+    /// [`Self::get_block_mut`] they are kept, for that collection to refresh.
+    pub(crate) fn op_mut(&mut self, block: u64, index: usize) -> Option<&mut SSAOp> {
+        let position = *self.block_index.get(&block)? as usize;
+        self.invalidate_query_index();
+        self.blocks.edit().get_mut(position)?.ops.get_mut(index)
     }
 
     /// Get a mutable block by address.

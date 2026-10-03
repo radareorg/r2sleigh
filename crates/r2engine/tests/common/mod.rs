@@ -163,6 +163,17 @@ const PLT: [u8; 0x26] = [
     0xc3, // ret
 ];
 
+/// The same `.plt` as ld lays it out: PLT0 padded to its sixteen bytes with
+/// `nopl 0x0(%rax)`, which lifts to no operation at all, as `endbr64` does.
+const PLT_NOP_PADDED: [u8; 0x26] = {
+    let mut bytes = PLT;
+    bytes[12] = 0x0f;
+    bytes[13] = 0x1f;
+    bytes[14] = 0x40;
+    bytes[15] = 0x00;
+    bytes
+};
+
 /// `cmp rdi, 10; jae L; mov esi, 0; L: mov rax, rdi; ret`: L is entered with rdi below ten and above.
 pub const GUARDED_JOIN: &[u8] = &[
     0x48, 0x83, 0xff, 0x0a, // cmp rdi, 10
@@ -493,6 +504,17 @@ impl Literal {
     /// A `.plt` holding PLT0, the zero pad after it, and one stub for `_Exit`, then a caller.
     pub fn plt() -> Self {
         Self::plt_importing("_Exit")
+    }
+
+    /// The same `.plt` padded as ld pads it, its sections aligned as ld
+    /// states them.
+    pub fn plt_nop_padded() -> Self {
+        let mut program = Self::plt();
+        program.code = &PLT_NOP_PADDED;
+        for section in &mut program.container.sections {
+            section.align = 16;
+        }
+        program
     }
 
     /// The same `.plt`, its one stub standing for `import`.

@@ -286,6 +286,10 @@ pub struct Section {
     pub vsize: u64,
     pub file_offset: u64,
     pub file_size: u64,
+    /// The alignment the format states for the section's start: ELF's
+    /// `sh_addralign`, Mach-O's `align` as a power, COFF's from its
+    /// characteristics. Zero or one, where nothing is stated.
+    pub align: u64,
     /// What the container states the section holds.
     pub role: SectionRole,
     /// Whether the loader maps this section, so `vaddr` is an address at all.

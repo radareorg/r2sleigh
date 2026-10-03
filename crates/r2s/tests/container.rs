@@ -23,7 +23,7 @@ fn run(name: &str, script: &str) -> String {
         .output()
         .expect("the shell runs");
     assert!(
-        done.status.success() || script == "q",
+        done.status.success(),
         "`{script}` on {name}: {}",
         String::from_utf8_lossy(&done.stderr)
     );

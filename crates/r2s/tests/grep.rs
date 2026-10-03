@@ -599,9 +599,40 @@ fn a_script_is_cut_at_every_line_feed_before_anything_else() {
     assert!(!run.ok);
     assert_eq!(run.stdout, "");
     assert_eq!(run.stderr.matches("r2s: line: an unterminated").count(), 2);
-    // A quit ends its line; radare2 goes on with the next.
-    let run = r2s("?e a;q;?e b\n?e c");
-    assert_eq!(run.stdout, "a\nc\n");
+    // A quit ends its line; radare2 goes on with the next. Quitting is how a
+    // script ends, not a failure of it, so the shell still exits with 0.
+    for quit in ["q", "quit", "exit"] {
+        let run = r2s(&format!("?e a;{quit};?e b\n?e c"));
+        assert!(run.ok, "{quit}: {}", run.stderr);
+        assert_eq!(run.stdout, "a\nc\n", "{quit}");
+    }
+}
+
+/// At the prompt, every spelling of quit ends the shell, wherever on its
+/// line it stands.
+#[test]
+fn every_spelling_of_quit_ends_the_prompt() {
+    use std::io::Write;
+    for quit in ["q", "quit", "exit", "?e a;quit"] {
+        let mut shell = Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .arg("-q")
+            .arg(fixture())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the shell runs");
+        shell
+            .stdin
+            .take()
+            .expect("a prompt")
+            .write_all(format!("{quit}\n?e after\n").as_bytes())
+            .expect("the lines are read");
+        let done = shell.wait_with_output().expect("the shell ends");
+        let stdout = String::from_utf8_lossy(&done.stdout);
+        assert!(!stdout.contains("after"), "{quit}: {stdout}");
+        assert!(done.status.success(), "{quit}");
+    }
 }
 
 /// A line radare2 reads whole before it looks for statements is refused
