@@ -33,6 +33,8 @@
 //! function, so the bound has to be the request in hand rather than a number
 //! chosen to look large enough.
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::native::NativeRefusal;
@@ -49,6 +51,10 @@ pub struct MemoStats {
     pub replacements: u64,
     /// Type analyses run, a refused one included.
     pub sealed: u64,
+    /// Callee reads served from what an earlier root's analysis derived.
+    pub callee_hits: u64,
+    /// Callee reads derived, whether or not they were then held.
+    pub callees_read: u64,
 }
 
 /// What deriving one analysis consulted of the program.
@@ -204,6 +210,92 @@ impl<T, S> std::fmt::Debug for Memo<T, S> {
         f.debug_struct("Memo")
             .field("stats", &self.stats())
             .finish()
+    }
+}
+
+/// What one function proves on its own, held for every function that asks about it.
+///
+/// Holds what is derived against the program alone -- a callee is prepared
+/// against its imports and against no other body -- so one state of the
+/// program has one answer per function, and every root that calls it reads
+/// that answer rather than preparing the callee again.
+///
+/// **The key is the whole revision, exactly.** Unlike the one analysis
+/// [`Memo`] holds, nothing here outlives a write: a patch session pays the
+/// derivation again, a sweep pays it once per callee. Each answer keeps what
+/// deriving it consulted, so an analysis that reads a held answer can still say
+/// what it depended on, and the analysis memo's own survival across a write
+/// stays exact.
+///
+/// **Only answers are held**, for the reason [`Memo`] gives: a refusal can be
+/// the request's deadline.
+///
+/// **What bounds it.** One small fact per function of the program -- an
+/// interface and a summary, never a body -- and the state of one program.
+pub struct PerRevision<T> {
+    held: Mutex<Answers<T>>,
+    hits: AtomicU64,
+    derived: AtomicU64,
+}
+
+/// The answers held, and the one state of the program they are about.
+type Answers<T> = (Option<Revision>, BTreeMap<u64, HeldAnswer<T>>);
+
+struct HeldAnswer<T> {
+    answer: Arc<T>,
+    consulted: Consulted,
+}
+
+impl<T> Default for PerRevision<T> {
+    fn default() -> Self {
+        Self {
+            held: Mutex::new((None, BTreeMap::new())),
+            hits: AtomicU64::new(0),
+            derived: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<T> PerRevision<T> {
+    /// The answer held for this function at exactly this revision, with what deriving it consulted.
+    pub fn get(&self, revision: Revision, address: u64) -> Option<(Arc<T>, Consulted)> {
+        let held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+        if held.0 != Some(revision) {
+            return None;
+        }
+        let found = held
+            .1
+            .get(&address)
+            .map(|held| (Arc::clone(&held.answer), held.consulted.clone()));
+        if found.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
+        found
+    }
+
+    /// Count one derivation, held or not.
+    pub fn derived(&self) {
+        self.derived.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Answers served from what was held, and answers derived.
+    pub fn counts(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.derived.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Hold an answer derived at this revision, dropping every answer about an older one.
+    pub fn hold(&self, revision: Revision, address: u64, answer: Arc<T>, mut consulted: Consulted) {
+        consulted.read = coalesced(consulted.read);
+        consulted.returns.sort_unstable();
+        consulted.returns.dedup();
+        let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+        if held.0 != Some(revision) {
+            *held = (Some(revision), BTreeMap::new());
+        }
+        held.1.insert(address, HeldAnswer { answer, consulted });
     }
 }
 

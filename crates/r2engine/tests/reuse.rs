@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{ARM_ENTRY, CALLER, Literal, ONE, STUB, TEXT, THUMB_CALLED, THUMB_LEAF, TWO, opened};
+use common::{
+    ARM_ENTRY, CALLER, Literal, ONE, PASSES, STUB, TEXT, THUMB_CALLED, THUMB_LEAF, TWO, opened,
+};
 use r2engine::program::OpenProgram;
 
 #[test]
@@ -313,4 +315,30 @@ fn a_patch_that_stops_a_callee_s_callee_returning_makes_the_caller_stale() {
     assert_eq!(ends(&mut program), Some(CALLER + 5));
     let stats = program.memo_stats();
     assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
+}
+
+#[test]
+fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
+    // `caller` and `passes` both call `one`. The callee is prepared against
+    // the program alone, so the second root reads what the first derived --
+    // and with it the bytes that derivation read, or a write to the callee
+    // would leave the second root's analysis standing on the old callee.
+    let mut program = opened();
+    program.prepared(CALLER).expect("it prepares");
+    program.prepared(PASSES).expect("it prepares");
+    let stats = program.memo_stats();
+    assert_eq!(
+        (stats.callees_read, stats.callee_hits),
+        (1, 1),
+        "the second caller prepared the shared callee again"
+    );
+    // `mov eax, 1` becomes `mov eax, 3` in the callee alone.
+    program.source_mut().write(ONE + 1, &[0x03]);
+    program.prepared(PASSES).expect("it prepares");
+    let stats = program.memo_stats();
+    assert_eq!(
+        (stats.replacements, stats.callees_read),
+        (1, 2),
+        "a root that read a held callee did not see a write to that callee"
+    );
 }

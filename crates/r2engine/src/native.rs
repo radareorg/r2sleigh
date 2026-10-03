@@ -82,6 +82,25 @@ pub trait Program: r2ssa::body::Program {
     fn frame_saves(&self, _entry: u64) -> Vec<r2source::SourceFrameSave> {
         Vec::new()
     }
+
+    /// What one callee's body proves, as `read` derives it.
+    ///
+    /// A callee is prepared against the program and its imports alone, never
+    /// against a body of its own callees or of whichever root calls it, so
+    /// what it proves is a fact about the callee and the state of the program,
+    /// and a program that holds one per state need derive it only once.
+    fn read_callee(&self, _address: u64, read: &mut dyn FnMut() -> CalleeRead) -> Arc<CalleeRead> {
+        Arc::new(read())
+    }
+}
+
+/// What reading one callee's body gave a caller.
+#[derive(Debug)]
+pub struct CalleeRead {
+    /// What the body proves about its boundary, which a callee whose
+    /// preparation cannot be certified still proved.
+    pub interface: Option<r2ssa::SourceFunctionInterface>,
+    pub facts: Result<CalleeFacts, Unreadable>,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -691,6 +710,38 @@ pub(crate) fn callee_summary(
     r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared).ok()
 }
 
+/// What one callee's body proves, read under the same isolation boundary as its preparation.
+fn read_callee(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+    ptr_bits: u32,
+) -> CalleeRead {
+    let artifact = match prepared_callee(native, target, address, ptr_bits) {
+        Ok(artifact) => artifact,
+        Err(reason) => {
+            return CalleeRead {
+                interface: None,
+                facts: Err(reason),
+            };
+        }
+    };
+    // The interface is what the callee's body proves about its boundary,
+    // and a callee whose whole preparation cannot be certified still
+    // proved that much.
+    let interface = artifact
+        .shared_artifact()
+        .machine_context()
+        .function_interface()
+        .cloned();
+    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact, ptr_bits)) {
+        Ok(Some(derived)) => Ok(derived),
+        Ok(None) => Err(Unreadable::NothingProved),
+        Err(panicked) => Err(Unreadable::Panicked(panicked)),
+    };
+    CalleeRead { interface, facts }
+}
+
 fn read_callees(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
@@ -727,47 +778,23 @@ fn read_callees(
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        let artifact = match prepared_callee(native, target, *address, ptr_bits) {
-            Ok(artifact) => artifact,
-            Err(reason) => {
-                unread.push(Unread {
-                    address: *address,
-                    reason,
-                });
-                continue;
-            }
-        };
-        // The interface is what the callee's body proves about its boundary,
-        // and a callee whose whole preparation cannot be certified still
-        // proved that much. Taking it keeps the call rendered as a call.
-        if let Some(interface) = artifact
-            .shared_artifact()
-            .machine_context()
-            .function_interface()
-        {
+        let read = native.program.read_callee(*address, &mut || {
+            read_callee(native, target, *address, ptr_bits)
+        });
+        // Taking the interface keeps the call rendered as a call.
+        if let Some(interface) = &read.interface {
             callees.interfaces.insert(*address, interface.clone());
         }
-        // What the callee proves is read under the same boundary as its preparation.
-        let derived = crate::isolation::isolated(|| CalleeFacts::derive(&artifact, ptr_bits));
-        let derived = match derived {
-            Ok(Some(derived)) => derived,
-            Ok(None) => {
-                unread.push(Unread {
-                    address: *address,
-                    reason: Unreadable::NothingProved,
-                });
-                continue;
+        match &read.facts {
+            Ok(derived) => {
+                callees.record(*address, derived);
+                facts.push(derived.clone());
             }
-            Err(panicked) => {
-                unread.push(Unread {
-                    address: *address,
-                    reason: Unreadable::Panicked(panicked),
-                });
-                continue;
-            }
-        };
-        callees.record(*address, &derived);
-        facts.push(derived);
+            Err(reason) => unread.push(Unread {
+                address: *address,
+                reason: reason.clone(),
+            }),
+        }
     }
 
     Read {

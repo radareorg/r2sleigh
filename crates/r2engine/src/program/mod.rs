@@ -118,6 +118,8 @@ pub struct OpenProgram<S: Source> {
     pointers: std::sync::Mutex<pointers::Pointers>,
     /// Whether control comes back from each function, derived on first use per state of the bytes.
     returns: std::sync::Mutex<returns::Returns>,
+    /// What each callee's body proves, read once per callee and state of the program.
+    callee_reads: crate::query::PerRevision<crate::native::CalleeRead>,
     /// The reference index, and the state of the program it was read at.
     references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
 }
@@ -175,6 +177,7 @@ impl<S: Source> OpenProgram<S> {
             thumb_machine: None,
             pointers: std::sync::Mutex::default(),
             returns: std::sync::Mutex::default(),
+            callee_reads: crate::query::PerRevision::default(),
             references: None,
         }
     }
@@ -473,7 +476,12 @@ impl<S: Source> OpenProgram<S> {
 
     /// What the memo has been asked and what it holds.
     pub fn memo_stats(&self) -> crate::query::MemoStats {
-        self.memo.stats()
+        let (callee_hits, callees_read) = self.callee_reads.counts();
+        crate::query::MemoStats {
+            callee_hits,
+            callees_read,
+            ..self.memo.stats()
+        }
     }
 
     /// Which state of this program every answer is about.
@@ -710,6 +718,39 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
         crate::native::Program::frame_saves(self.program, entry)
+    }
+
+    /// Held per state of the program, with what deriving it read: a root that
+    /// reads a held callee consulted those bytes and returns as surely as the
+    /// root that derived it did, and its own memo has to know.
+    fn read_callee(
+        &self,
+        address: u64,
+        read: &mut dyn FnMut() -> crate::native::CalleeRead,
+    ) -> std::sync::Arc<crate::native::CalleeRead> {
+        let revision = self.program.revision();
+        let cache = &self.program.callee_reads;
+        if let Some((answer, consulted)) = cache.get(revision, address) {
+            let mut own = self.consulted.borrow_mut();
+            own.read.extend(consulted.read);
+            own.returns.extend(consulted.returns);
+            return answer;
+        }
+        let (reads, returns) = {
+            let own = self.consulted.borrow();
+            (own.read.len(), own.returns.len())
+        };
+        let answer = std::sync::Arc::new(read());
+        cache.derived();
+        if answer.facts.is_ok() {
+            let own = self.consulted.borrow();
+            let consulted = Consulted {
+                read: own.read[reads..].to_vec(),
+                returns: own.returns[returns..].to_vec(),
+            };
+            cache.hold(revision, address, std::sync::Arc::clone(&answer), consulted);
+        }
+        answer
     }
 }
 

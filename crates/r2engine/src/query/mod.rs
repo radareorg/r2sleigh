@@ -21,7 +21,7 @@ pub mod records;
 pub mod references;
 
 pub use decode::listing;
-pub use memo::{Consulted, Memo, MemoStats, Moved};
+pub use memo::{Consulted, Memo, MemoStats, Moved, PerRevision};
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
 pub use records::{
