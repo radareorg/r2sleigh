@@ -111,6 +111,17 @@ pub enum SsaIntegrityError {
         site: SsaValueSite,
         var: SSAVar,
     },
+    /// A read whose definition does not dominate it: an operation reading a
+    /// value defined later in its block or in a block that does not dominate
+    /// its own, or a phi input defined where it does not dominate the edge's
+    /// predecessor.
+    UseNotDominated {
+        block_addr: u64,
+        site: SourceSite,
+        var: SSAVar,
+        def_block_addr: u64,
+        def_site: DefSite,
+    },
 }
 
 /// Exact site at which a zero-width SSA value was observed.
@@ -249,6 +260,17 @@ impl fmt::Display for SsaIntegrityError {
             } => write!(
                 f,
                 "SSA value {var} at {site:?} in block 0x{block_addr:x} has zero width"
+            ),
+            Self::UseNotDominated {
+                block_addr,
+                site,
+                var,
+                def_block_addr,
+                def_site,
+            } => write!(
+                f,
+                "SSA value {var} read at {site:?} in block 0x{block_addr:x} is defined at \
+                 {def_site:?} in block 0x{def_block_addr:x}, which does not dominate the read"
             ),
         }
     }
@@ -426,6 +448,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
         }
     }
 
+    let domtree = function.domtree();
     for block in function.blocks() {
         // Query once per block so the full validator remains linear in CFG
         // edges even when a merge block carries several phi values.
@@ -530,11 +553,36 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 });
                 return;
             }
-            if source.var.version != 0 && !definitions.contains_key(source.var) {
+            if source.var.version == 0 {
+                return;
+            }
+            let Some(definition) = definitions.get(source.var) else {
                 failure = Some(SsaIntegrityError::MissingDefinition {
                     block_addr: block.addr,
                     site: source.site,
                     var: source.var.clone(),
+                });
+                return;
+            };
+            // Where the read happens: an operation reads at its own position,
+            // a phi input at the end of the edge's predecessor.
+            let dominated = match source.site {
+                SourceSite::Phi { pred_addr, .. } => domtree.dominates(definition.block_addr, pred_addr),
+                SourceSite::Op { op_idx, .. } if definition.block_addr == block.addr => {
+                    match definition.site {
+                        DefSite::Phi { .. } => true,
+                        DefSite::Op { op_idx: def_idx } => def_idx < op_idx,
+                    }
+                }
+                SourceSite::Op { .. } => domtree.strictly_dominates(definition.block_addr, block.addr),
+            };
+            if !dominated {
+                failure = Some(SsaIntegrityError::UseNotDominated {
+                    block_addr: block.addr,
+                    site: source.site,
+                    var: source.var.clone(),
+                    def_block_addr: definition.block_addr,
+                    def_site: definition.site,
                 });
             }
         });
@@ -830,6 +878,54 @@ mod tests {
                     op_idx: 0,
                     src_idx: 0
                 },
+                ..
+            })
+        ));
+    }
+
+    /// A value one arm defines is not available after the join: the merge
+    /// reads it through a phi, never directly.
+    #[test]
+    fn rejects_a_read_its_definition_does_not_dominate() {
+        let mut function = diamond();
+        let left = function.get_block(0x1004).expect("left block");
+        let defined_in_left = left.ops[0].dst().expect("copy destination").clone();
+        let merge = function.get_block_mut(0x100c).expect("merge block");
+        let SSAOp::IntAdd { a, .. } = &mut merge.ops[0] else {
+            panic!("expected merge use");
+        };
+        *a = defined_in_left;
+
+        assert!(matches!(
+            validate_ssa_function(&function),
+            Err(SsaIntegrityError::UseNotDominated {
+                block_addr: 0x100c,
+                def_block_addr: 0x1004,
+                site: SourceSite::Op {
+                    op_idx: 0,
+                    src_idx: 0
+                },
+                ..
+            })
+        ));
+    }
+
+    /// Inside one block a read must come after the operation that defines it.
+    #[test]
+    fn rejects_a_read_before_its_definition_in_the_same_block() {
+        let mut function = diamond();
+        let left = function.get_block_mut(0x1004).expect("left block");
+        let defined = left.ops[0].dst().expect("copy destination").clone();
+        let SSAOp::Copy { src, .. } = &mut left.ops[0] else {
+            panic!("expected the copy");
+        };
+        *src = defined;
+
+        assert!(matches!(
+            validate_ssa_function(&function),
+            Err(SsaIntegrityError::UseNotDominated {
+                block_addr: 0x1004,
+                def_block_addr: 0x1004,
                 ..
             })
         ));

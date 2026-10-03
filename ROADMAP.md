@@ -168,7 +168,7 @@ and V (visual mode and shell experience).
 | Queued-run alert; pinned containers for gcc 13, clang 18 and the macOS coverage compiler; compiled coverage cells replaced by pinned bytes | A gate result does not depend on the runner |
 | Diagnose the equivalence `PipelineTests`/`SelfTestSuite` stall on hosted runners. From unittest a driver run never returns, and the step outlives even a step-level timeout, so some process is in an uninterruptible wait (the runtime's guard install is the first suspect); the same self-tests pass inside every equivalence shard. Reproduce on x86-64 Linux: `tests/equiv/bounded.sh 240 test_equiv.SelfTestSuite`. The two classes are out of CI until then | Both classes pass from `bounded.sh` and gate again in the harness job |
 | arm64 equivalence under qemu-user (D6) | `tests/equiv` reports both architectures |
-| SSA integrity check in CI: one definition per value, every use dominated | Fails on the duplicate `tmp:2c200_1` definition seen in #56, or proves it a display artefact |
+| SSA integrity: one definition per value, every use dominated | **Partly done.** The validator now checks dominance and holds over the whole corpus at construction. #56's "duplicate" is a display artefact: `pdim` prints `tmp:2c200` at two widths alike, and width is part of SSA identity. Validating the *sealed* function fails 626 times on one cause, P1.7's entry lanes (version-0 values given definitions), so the seal check lands with P1.7 inside F1 |
 | Split PR #66 into reviewable pieces and merge | `master` carries the program |
 | Close the issues fixed since August; update the partial ones; one tracking issue per item below | The issue board is the roadmap |
 
@@ -185,7 +185,7 @@ and V (visual mode and shell experience).
 | Item | Depends on | Exit |
 |------|-----------|------|
 | **PE** Byte-dependency relation; result width from the written-lane lattice; `narrow_zero_extend_input_size` deleted | F1 | `main` returns `int`-width, `gt` is not `uint8_t`, `fnv1a32` returns 32 bits (#58, #63) |
-| **P1.7** `Unspecified(width)` leaf for partial entry-lane writes | PE | The rotl listing makes no false claim |
+| **P1.7** Entry lanes rewritten: `mint_entry_lane_projections` defines version-0 values (a live-in with a definition) and rebuilds a whole-register read from the declared lanes "with zero above them", which invents the caller's upper bytes. A formal becomes a view of a lane of its live-in (`ValueView`), and the bytes no declaration covers an `Unspecified(width)` leaf that renders as a residual | PE, F1 | The rotl listing makes no false claim; the sealed function validates |
 | **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted |
 | **P4** Memory model: frame partition (P4.1 in part), MemorySSA on stable ids, stack-protector elision, `afv`/`afi` from sealed entities | F1, C | The canary traps in #61 are gone; one owner of frame objects |
 | **Q** Demand-driven query database; `memo.rs` and the eight caches deleted | F1 | A random-write session equals a fresh open |
