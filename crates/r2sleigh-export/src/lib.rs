@@ -1,7 +1,7 @@
 //! Unified instruction export pipeline for r2sleigh.
 
 use r2il::{ArchSpec, R2ILBlock, R2ILOp, SpaceId, Varnode, validate_block_full};
-use r2sleigh_lift::{Disassembler, block_to_esil, format_op, op_to_esil};
+use r2sleigh_lift::{Disassembler, format_op};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -43,9 +43,7 @@ impl fmt::Display for InstructionAction {
 pub enum ExportFormat {
     Json,
     Text,
-    Esil,
     CLike,
-    R2Cmd,
 }
 
 impl ExportFormat {
@@ -53,9 +51,7 @@ impl ExportFormat {
         match self {
             Self::Json => "json",
             Self::Text => "text",
-            Self::Esil => "esil",
             Self::CLike => "c_like",
-            Self::R2Cmd => "r2cmd",
         }
     }
 }
@@ -137,7 +133,7 @@ fn ensure_supported(action: InstructionAction, format: ExportFormat) -> Result<(
 fn supported_formats(action: InstructionAction) -> &'static [ExportFormat] {
     use ExportFormat::*;
     match action {
-        InstructionAction::Lift => &[Json, Text, Esil, R2Cmd],
+        InstructionAction::Lift => &[Json, Text],
         InstructionAction::Ssa => &[Json, Text],
         InstructionAction::Defuse => &[Json, Text],
         InstructionAction::Dec => {
@@ -176,36 +172,10 @@ fn export_lift(
             }
             Ok(out)
         }
-        ExportFormat::Esil => Ok(block_to_esil(input.disasm, input.block)),
-        ExportFormat::R2Cmd => {
-            let mut out = Vec::new();
-            for (idx, op) in input.block.ops.iter().enumerate() {
-                let op_json = op_json_named(input.disasm, op)?;
-                let op_value: Value = serde_json::from_str(&op_json)
-                    .map_err(|e| ExportError::SerializeError(e.to_string()))?;
-
-                let op_name =
-                    op_name_from_value(&op_value).unwrap_or_else(|| "unknown".to_string());
-                let mut sidecar = serde_json::Map::new();
-                sidecar.insert("op_index".to_string(), serde_json::json!(idx));
-                sidecar.insert("op".to_string(), Value::String(op_name));
-                sidecar.insert("op_json".to_string(), op_value);
-                if let Some(meta) = input.block.op_metadata.get(&idx) {
-                    sidecar.insert(
-                        "meta".to_string(),
-                        serde_json::to_value(meta)
-                            .map_err(|e| ExportError::SerializeError(e.to_string()))?,
-                    );
-                }
-                out.push(format!("# {}", Value::Object(sidecar)));
-                out.push(format!("ae {}", op_to_esil(input.disasm, op)));
-            }
-            Ok(out.join("\n"))
-        }
         ExportFormat::CLike => Err(ExportError::UnsupportedCombination {
             action: InstructionAction::Lift,
             format,
-            supported: "json, text, esil, r2cmd".to_string(),
+            supported: "json, text".to_string(),
         }),
     }
 }
@@ -344,11 +314,6 @@ fn export_dec(
             .map(|residual| format!("/* {} */", residual.comment))
             .collect::<Vec<_>>()
             .join("\n")),
-        _ => Err(ExportError::UnsupportedCombination {
-            action: InstructionAction::Dec,
-            format,
-            supported: "c_like, json, text".to_string(),
-        }),
     }
 }
 
@@ -631,30 +596,6 @@ mod tests {
         lines.join("\n")
     }
 
-    fn normalize_r2cmd_output(output: &str) -> String {
-        let text = output.replace("\r\n", "\n");
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(!lines.is_empty(), "r2cmd output must not be empty");
-        assert!(
-            lines.len().is_multiple_of(2),
-            "r2cmd output must be line-paired"
-        );
-        let mut normalized = Vec::new();
-        for (idx, line) in lines.iter().enumerate() {
-            let line = line.trim_end();
-            if idx.is_multiple_of(2) {
-                assert!(line.starts_with("# "), "expected sidecar at index {}", idx);
-                let sidecar: Value =
-                    serde_json::from_str(line.trim_start_matches("# ")).expect("sidecar json");
-                normalized.push(format!("# {}", canonicalize_json(&sidecar)));
-            } else {
-                assert!(line.starts_with("ae "), "expected ae line at index {}", idx);
-                normalized.push(line.to_string());
-            }
-        }
-        normalized.join("\n")
-    }
-
     fn assert_export_deterministic(
         bytes_hex: &str,
         action: InstructionAction,
@@ -718,23 +659,6 @@ mod tests {
             parsed.to_string().contains("\"meta\""),
             "expected varnode metadata in output: {}",
             parsed
-        );
-    }
-
-    #[test]
-    fn lift_r2cmd_emits_comment_then_ae_per_op() {
-        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
-        let out = export_instruction(&input, InstructionAction::Lift, ExportFormat::R2Cmd)
-            .expect("lift r2cmd");
-        let lines: Vec<&str> = out.lines().collect();
-        assert!(!lines.is_empty(), "expected output lines");
-        assert!(
-            lines[0].starts_with("# "),
-            "first line must be sidecar comment"
-        );
-        assert!(
-            lines.get(1).is_some_and(|l| l.starts_with("ae ")),
-            "second line must be an ae replay line"
         );
     }
 
@@ -813,7 +737,7 @@ mod tests {
     #[test]
     fn unsupported_combo_returns_error() {
         let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
-        let err = export_instruction(&input, InstructionAction::Ssa, ExportFormat::Esil)
+        let err = export_instruction(&input, InstructionAction::Ssa, ExportFormat::CLike)
             .expect_err("unsupported combo must fail");
         assert!(
             matches!(err, ExportError::UnsupportedCombination { .. }),
@@ -935,20 +859,14 @@ mod tests {
 
     #[test]
     fn deterministic_matrix_for_supported_pairs() {
-        for format in [
-            ExportFormat::Json,
-            ExportFormat::Text,
-            ExportFormat::Esil,
-            ExportFormat::R2Cmd,
-        ] {
+        for format in [ExportFormat::Json, ExportFormat::Text] {
             let normalized = assert_export_deterministic(
                 X86_BYTES_MINIMAL,
                 InstructionAction::Lift,
                 format,
                 match format {
                     ExportFormat::Json => normalize_json_output,
-                    ExportFormat::Text | ExportFormat::Esil => normalize_text_output,
-                    ExportFormat::R2Cmd => normalize_r2cmd_output,
+                    ExportFormat::Text => normalize_text_output,
                     ExportFormat::CLike => unreachable!("not in lift matrix"),
                 },
             );
@@ -1003,7 +921,6 @@ mod tests {
                         ExportFormat::CLike => normalize_c_like_output,
                         ExportFormat::Json => normalize_json_output,
                         ExportFormat::Text => normalize_text_output,
-                        _ => unreachable!("dec supports c_like/json/text"),
                     },
                 );
                 assert!(
@@ -1025,25 +942,6 @@ mod tests {
         assert_eq!(
             lift_text,
             "0x1000  MOV RAX,RAX  (size=3)\nP-code (1 ops):\n  0: Copy { dst: RAX, src: RAX }"
-        );
-
-        let lift_esil = assert_export_deterministic(
-            X86_BYTES_MINIMAL,
-            InstructionAction::Lift,
-            ExportFormat::Esil,
-            normalize_text_output,
-        );
-        assert_eq!(lift_esil, "rax,rax,=");
-
-        let lift_r2cmd = assert_export_deterministic(
-            X86_BYTES_MINIMAL,
-            InstructionAction::Lift,
-            ExportFormat::R2Cmd,
-            normalize_r2cmd_output,
-        );
-        assert_eq!(
-            lift_r2cmd,
-            "# {\"op\":\"Copy\",\"op_index\":0,\"op_json\":{\"Copy\":{\"dst\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"},\"src\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"}}}}\nae rax,rax,="
         );
 
         let ssa_text = assert_export_deterministic(
@@ -1107,10 +1005,6 @@ mod tests {
         assert_eq!(callother["userop"], 73);
         assert_eq!(callother["inputs"].as_array().map(Vec::len), Some(2));
         assert!(callother.get("userop_name").is_none());
-
-        let esil = export_instruction(&input, InstructionAction::Lift, ExportFormat::Esil)
-            .expect("CallOther ESIL");
-        assert_eq!(esil, "0x1,0x2,CALLOTHER(73),rax,=");
     }
 
     #[test]

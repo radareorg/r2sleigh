@@ -143,7 +143,7 @@ R2IL format
   `StoreConditional`, `AtomicCAS`, `LoadGuarded` / `StoreGuarded`.
 
 Export action and format pairs are strict and fail explicitly rather than
-falling back: `lift` takes `json`, `text`, `esil`, `r2cmd`; `ssa` and `defuse`
+falling back: `lift` takes `json` and `text`; `ssa` and `defuse`
 take `json` and `text`; `dec` takes `c_like`, `json` and `text`.
 
 Requirements

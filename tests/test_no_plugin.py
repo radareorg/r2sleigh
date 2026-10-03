@@ -39,11 +39,7 @@ PLUGIN_SPELLINGS = (
 # Where radare2 itself is run, and why that is allowed.
 RADARE2_ORACLES = {
     "scripts/diff_r2.py": "the differential gate: radare2 is the target r2s is graded against",
-    "scripts/esil_differential.py": "radare2's own lift is the reference the r2sleigh CLI's "
-    "ESIL is stepped beside",
     "scripts/setup-runner.sh": "installs radare2 on a CI runner for its test binaries",
-    "scripts/test_esil_differential.py": "puts a stand-in `r2` on PATH to test the ESIL "
-    "differential without radare2",
 }
 
 # What follows the program's name when it is run: a flag, a quoted or

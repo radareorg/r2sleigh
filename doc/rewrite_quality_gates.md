@@ -40,7 +40,6 @@ The current phases are:
 6. Targeted mutation testing for `crates/r2ssa/src/var.rs`.
 7. The harness contracts (`tests/equiv`, `tests/decbench`, and
    `tests/test_no_plugin.py`).
-8. Optional ESIL differential testing when `R2SLEIGH_ESIL_DIFF_BINARY` is set.
 9. The equivalence gate, last: every corpus and gold function rendered from
    its stripped build and run beside its original, held to
    `tests/equiv/baseline.json` (no function leaves `equal`; a new `differs`,

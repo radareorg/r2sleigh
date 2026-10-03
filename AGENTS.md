@@ -232,7 +232,6 @@ Use this map by default:
   - Sleigh/P-code lifting
   - register naming
   - disassembly formatting
-  - ESIL formatting
 - `crates/r2ssa`
   - SSA construction
   - phi handling
@@ -669,7 +668,7 @@ There are two different block types in `r2ssa`:
 |------|--------------------|
 | `crates/r2il/src/opcode.rs` | adding or changing IL ops |
 | `crates/r2sleigh-lift/src/disasm.rs` | changing P-code lifting or register naming |
-| `crates/r2sleigh-lift/src/esil.rs` | changing text or ESIL rendering |
+| `crates/r2sleigh-lift/src/text.rs` | changing P-code text rendering |
 | `crates/r2ssa/src/` | changing SSA construction, def-use, prepared facts |
 | `crates/r2ssa/src/semantic.rs` | changing prepared facts, certificates, or refusal evidence |
 | `crates/r2source/src/` | changing the facts a capture owns, or their contracts |
@@ -701,21 +700,20 @@ control flow, fix the benchmark gate before using it to guide more work.
 ## Gotchas
 
 1. x86/x86-64 lifting still expects 16 bytes minimum.
-2. ESIL subtraction must use ASCII `-`, not Unicode minus.
-3. `Const` means literal; `Unique` means temporary SSA-like storage, not memory.
-4. Width mismatches usually need explicit sign/zero extension.
-5. Register aliasing must stay deterministic.
-6. `#[no_mangle]` is now `#[unsafe(no_mangle)]` under Rust 2024.
-7. Plugin, CLI, and export feature matrices are not identical.
-8. If output stability matters, hash-order nondeterminism is a bug.
-9. On the `r2dec` lowering path, resolve call targets through
+2. `Const` means literal; `Unique` means temporary SSA-like storage, not memory.
+3. Width mismatches usually need explicit sign/zero extension.
+4. Register aliasing must stay deterministic.
+5. `#[no_mangle]` is now `#[unsafe(no_mangle)]` under Rust 2024.
+6. Plugin, CLI, and export feature matrices are not identical.
+7. If output stability matters, hash-order nondeterminism is a bug.
+8. On the `r2dec` lowering path, resolve call targets through
    `r2types::CalleeResolutionFacts` rather than parsing `const:` / `ram:`
    names locally; `tools/dylints/r2sleigh_lints` enforces this.
-10. On the decompiler/type path, do not reintroduce `r2dec` type ownership just
+9. On the decompiler/type path, do not reintroduce `r2dec` type ownership just
     to make an old test compile.
-11. Summary-driven output must remain visibly summary-driven until real
+10. Summary-driven output must remain visibly summary-driven until real
     loop/control reconstruction is backed by canonical facts.
-12. Do not invent switch case values, stack locals, call args, or signatures to
+11. Do not invent switch case values, stack locals, call args, or signatures to
     make output look cleaner.
 
 ## Useful References
@@ -725,6 +723,5 @@ control flow, fix the benchmark gate before using it to guide more work.
 - `doc/engine-vision.md` for where this is going and why
 - `doc/rewrite_quality_gates.md` for the local rewrite quality gate and tooling
 - `doc/testing.md` for where a new test goes
-- `doc/` for IL, SSA, ESIL, decompiler, taint and type-system notes
-- radare2 ESIL docs: <https://book.rada.re/disassembling/esil.html>
+- `doc/` for IL, SSA, decompiler, taint and type-system notes
 - Ghidra P-code reference: <https://ghidra.re/courses/languages/html/pcoderef.html>

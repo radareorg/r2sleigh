@@ -16,7 +16,7 @@ crates/
 ├── r2il/             Core IL types (Varnode, SpaceId, R2ILOp, R2ILBlock)
 ├── r2image/          ELF and Mach-O parsing; DWARF through gimli
 ├── r2abi/            Calling conventions and library prototypes
-├── r2sleigh-lift/    Sleigh/P-code → r2il translation, ESIL formatting
+├── r2sleigh-lift/    Sleigh/P-code → r2il translation, P-code text
 ├── r2sleigh-export/  Instruction exporter (lift/ssa/defuse/dec)
 ├── r2sleigh-cli/     Sleigh toolchain (compile, disasm, info)
 ├── r2ssa/            SSA: CFG, domtree, phi, liveness, slicing, value ranges
@@ -66,11 +66,11 @@ Machine code bytes
         │                                      │
         ▼                                      ▼
    [r2sleigh-lift]                        [r2ssa]
-   op_to_esil()                           SSAFunction::from_blocks()
+   format_op()                            SSAFunction::from_blocks()
         │                                      │
         ▼                                      ▼
-   ESIL string                            SSAFunction { cfg, blocks, phis }
-   (radare2 compat)                            │
+   P-code text                            SSAFunction { cfg, blocks, phis }
+   (r2sleigh CLI)                              │
                                                ├───── optimize_function()
                                                │
                                                ▼
@@ -124,19 +124,13 @@ How to Add a New Opcode
    OpCode::Int(IntOp::Foo) => R2ILOp::IntFoo { dst, a, b },
    ```
 
-3. **Add ESIL output** in `crates/r2sleigh-lift/src/esil.rs`:
-
-   ```rust
-   IntFoo { dst, a, b } => format!("{},{},FOO,{},=", vn(a), vn(b), vn(dst)),
-   ```
-
-4. **Add format_op arm** in `crates/r2sleigh-lift/src/esil.rs`:
+3. **Add format_op arm** in `crates/r2sleigh-lift/src/text.rs`:
 
    ```rust
    IntFoo { dst, a, b } => format!("IntFoo {{ dst: {}, a: {}, b: {} }}", vn(dst), vn(a), vn(b)),
    ```
 
-5. **Add SSAOp variant** in `crates/r2ssa/src/op.rs` and update `dst()`,
+4. **Add SSAOp variant** in `crates/r2ssa/src/op.rs` and update `dst()`,
    `sources()`, and `convert_op()`.
 
 6. **Add decompiler support** in `crates/r2dec/src/fold.rs`:
@@ -251,7 +245,6 @@ Per-Topic Documentation
 | Intermediate language | [doc/r2il.md](doc/r2il.md) |
 | SSA and optimization | [doc/ssa.md](doc/ssa.md) |
 | Decompiler pipeline | [doc/decompiler.md](doc/decompiler.md) |
-| ESIL generation | [doc/esil.md](doc/esil.md) |
 | Taint analysis | [doc/taint.md](doc/taint.md) |
 | Certification and refusal | [doc/certifying_decompiler.md](doc/certifying_decompiler.md) |
 | Where this is going | [doc/engine-vision.md](doc/engine-vision.md) |

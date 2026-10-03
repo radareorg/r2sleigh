@@ -25,9 +25,9 @@
 
 pub mod context;
 pub mod disasm;
-pub mod esil;
 mod internal_control;
 pub mod sleigh;
+pub mod text;
 pub mod translate;
 
 use thiserror::Error;
@@ -43,10 +43,10 @@ pub use disasm::{
     EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
     lifted_register_storage,
 };
-pub use esil::{OpEsil, block_to_esil, format_op, op_esil, op_to_esil};
 use r2il::ArchSpec;
 use r2il::Endianness;
 pub use sleigh::{SleighInfo, build_arch_spec, extract_arch_spec, get_sleigh_info};
+pub use text::format_op;
 
 /// Errors that can occur during lifting.
 #[derive(Debug, Error)]

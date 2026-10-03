@@ -111,7 +111,7 @@ enum Commands {
         #[arg(short = 'n', long, default_value_t = 1)]
         count: usize,
 
-        /// Output format: text, json, esil, or r2cmd
+        /// Output format: text or json
         #[arg(short, long, default_value = "text")]
         format: String,
     },
@@ -169,12 +169,9 @@ impl From<RunActionArg> for InstructionAction {
 enum RunFormatArg {
     Json,
     Text,
-    Esil,
     #[cfg(feature = "decompile")]
     #[value(name = "c_like")]
     CLike,
-    #[value(name = "r2cmd")]
-    R2Cmd,
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -183,10 +180,8 @@ impl From<RunFormatArg> for ExportFormat {
         match value {
             RunFormatArg::Json => ExportFormat::Json,
             RunFormatArg::Text => ExportFormat::Text,
-            RunFormatArg::Esil => ExportFormat::Esil,
             #[cfg(feature = "decompile")]
             RunFormatArg::CLike => ExportFormat::CLike,
-            RunFormatArg::R2Cmd => ExportFormat::R2Cmd,
         }
     }
 }
@@ -595,60 +590,6 @@ fn build_disasm_json(
     serde_json::from_str(&output).map_err(|e| format!("Failed to parse exporter JSON: {}", e))
 }
 
-#[cfg(feature = "sleigh-config")]
-fn render_esil_lines(
-    disasm: &Disassembler,
-    arch_spec: &r2il::ArchSpec,
-    bytes: &[u8],
-    addr: u64,
-) -> Result<Vec<String>, String> {
-    const MIN_BYTES: usize = 16;
-    let mut lines = Vec::new();
-    let mut offset = 0usize;
-
-    while offset < bytes.len() {
-        let remaining = &bytes[offset..];
-        if remaining.is_empty() {
-            break;
-        }
-
-        let instr_addr = addr + offset as u64;
-        let mut lift_bytes = remaining.to_vec();
-        if lift_bytes.len() < MIN_BYTES {
-            lift_bytes.resize(MIN_BYTES, 0);
-        }
-
-        let (mnemonic, _) = match disasm.disasm_native(&lift_bytes, instr_addr) {
-            Ok(result) => result,
-            Err(_) => break,
-        };
-        let block = match disasm.lift(&lift_bytes, instr_addr) {
-            Ok(result) => result,
-            Err(_) => break,
-        };
-        let instr_size = block.size as usize;
-        if instr_size == 0 {
-            break;
-        }
-
-        let input =
-            make_instruction_input(disasm, arch_spec, &block, instr_addr, &mnemonic, instr_size);
-        let exported =
-            export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Esil)?;
-        lines.push(format!(
-            "# 0x{:x}: {} (size={})",
-            instr_addr, mnemonic, instr_size
-        ));
-        if !exported.is_empty() {
-            lines.extend(exported.lines().map(ToString::to_string));
-        }
-
-        offset += instr_size;
-    }
-
-    Ok(lines)
-}
-
 /// Where instruction bytes come from: hex on the command line, or a binary.
 #[cfg(feature = "sleigh-config")]
 enum ByteSource {
@@ -757,21 +698,6 @@ fn cmd_disasm(
                 let json = build_disasm_json(&disasm, &arch_spec, &block, &mnemonic, size)?;
                 let output = serde_json::to_string_pretty(&json)
                     .map_err(|e| format!("Failed to render JSON: {}", e))?;
-                println!("{}", output);
-            }
-            "esil" => {
-                for line in render_esil_lines(&disasm, &arch_spec, &fetch, pc)? {
-                    println!("{}", line);
-                }
-            }
-            "r2cmd" => {
-                let input =
-                    make_instruction_input(&disasm, &arch_spec, &block, pc, &mnemonic, size);
-                let output = export_single_instruction(
-                    &input,
-                    InstructionAction::Lift,
-                    ExportFormat::R2Cmd,
-                )?;
                 println!("{}", output);
             }
             _ => {
@@ -1091,38 +1017,6 @@ mod tests {
         lines.join("\n")
     }
 
-    fn normalize_r2cmd_output(output: &str) -> String {
-        let text = output.replace("\r\n", "\n");
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(!lines.is_empty(), "r2cmd output must not be empty");
-        assert!(
-            lines.len().is_multiple_of(2),
-            "r2cmd output must be line-paired"
-        );
-        let mut normalized = Vec::new();
-        for (idx, line) in lines.iter().enumerate() {
-            let line = line.trim_end();
-            if idx.is_multiple_of(2) {
-                assert!(
-                    line.starts_with("# "),
-                    "expected sidecar comment line at index {}",
-                    idx
-                );
-                let sidecar: serde_json::Value =
-                    serde_json::from_str(line.trim_start_matches("# ")).expect("sidecar json");
-                normalized.push(format!("# {}", canonicalize_json(&sidecar)));
-            } else {
-                assert!(
-                    line.starts_with("ae "),
-                    "expected ae replay line at index {}",
-                    idx
-                );
-                normalized.push(line.to_string());
-            }
-        }
-        normalized.join("\n")
-    }
-
     fn assert_deterministic_output(
         arch: &str,
         bytes_hex: &str,
@@ -1201,12 +1095,7 @@ mod tests {
         #[cfg(not(feature = "decompile"))]
         let _ = dec_bytes_hex;
 
-        for format in [
-            ExportFormat::Json,
-            ExportFormat::Text,
-            ExportFormat::Esil,
-            ExportFormat::R2Cmd,
-        ] {
+        for format in [ExportFormat::Json, ExportFormat::Text] {
             let normalized = assert_deterministic_output(
                 arch,
                 bytes_hex,
@@ -1214,8 +1103,7 @@ mod tests {
                 format,
                 match format {
                     ExportFormat::Json => normalize_json_output,
-                    ExportFormat::Text | ExportFormat::Esil => normalize_text_output,
-                    ExportFormat::R2Cmd => normalize_r2cmd_output,
+                    ExportFormat::Text => normalize_text_output,
                     ExportFormat::CLike => unreachable!("not part of lift matrix"),
                 },
             );
@@ -1223,7 +1111,7 @@ mod tests {
                 ExportFormat::Json => {
                     assert_json_shape_for_action(InstructionAction::Lift, &normalized)
                 }
-                ExportFormat::Text | ExportFormat::Esil | ExportFormat::R2Cmd => {
+                ExportFormat::Text => {
                     assert!(
                         !normalized.trim().is_empty(),
                         "lift output must be non-empty"
@@ -1294,7 +1182,6 @@ mod tests {
                         ExportFormat::CLike => normalize_c_like_output,
                         ExportFormat::Json => normalize_json_output,
                         ExportFormat::Text => normalize_text_output,
-                        _ => unreachable!("dec supports c_like/json/text"),
                     },
                 );
                 match format {
@@ -1307,7 +1194,6 @@ mod tests {
                             "dec output must be non-empty"
                         )
                     }
-                    _ => unreachable!("dec supports c_like/json/text"),
                 }
             }
         }
@@ -1357,31 +1243,6 @@ mod tests {
     }
 
     #[test]
-    fn disasm_esil_keeps_numeric_callother_across_instructions() {
-        let (disasm, arch_spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
-        let bytes = hex::decode("31c00fa2c3ffffffffffffffffffffffff").expect("bytes");
-        let lines = render_esil_lines(&disasm, &arch_spec, &bytes, 0x1000).expect("render esil");
-        let callothers = lines
-            .iter()
-            .filter_map(|line| line.split_once("CALLOTHER(").map(|(_, rest)| rest))
-            .map(|rest| rest.split_once(')').expect("closed CALLOTHER").0)
-            .collect::<Vec<_>>();
-        assert!(
-            !callothers.is_empty(),
-            "CPUID must retain CallOther evidence"
-        );
-        assert!(
-            callothers
-                .iter()
-                .all(|userop| userop.parse::<u32>().is_ok()),
-            "CallOther labels must remain numeric: {callothers:?}"
-        );
-        let repeated =
-            render_esil_lines(&disasm, &arch_spec, &bytes, 0x1000).expect("repeat render esil");
-        assert_eq!(lines, repeated, "numeric ESIL output must be deterministic");
-    }
-
-    #[test]
     fn ambient_userop_fixture_child() {
         if std::env::var_os("R2SLEIGH_AMBIENT_CHILD").is_none() {
             return;
@@ -1391,7 +1252,7 @@ mod tests {
             "0fa2c3ffffffffffffffffffffffffffff",
             "0x1000",
             InstructionAction::Lift,
-            ExportFormat::Esil,
+            ExportFormat::Text,
         )
         .expect("ambient-independent output");
         println!("R2SLEIGH_AMBIENT_OUTPUT={output:?}");
@@ -1438,7 +1299,7 @@ mod tests {
         let first = run_with_fixture("first", "ambient_first_name");
         let second = run_with_fixture("second", "ambient_second_name");
         assert_eq!(first, second);
-        assert!(first.contains("CALLOTHER(") && !first.contains("ambient_"));
+        assert!(first.contains("CallOther {") && !first.contains("ambient_"));
     }
 
     #[test]
@@ -1560,55 +1421,6 @@ mod tests {
     }
 
     #[test]
-    fn run_lift_r2cmd_success() {
-        let out = run_action_output(
-            "x86-64",
-            "31c00000000000000000000000000000",
-            "0x1000",
-            InstructionAction::Lift,
-            ExportFormat::R2Cmd,
-        )
-        .expect("run output");
-        let lines: Vec<&str> = out.lines().collect();
-        assert!(
-            lines.first().is_some_and(|l| l.starts_with("# ")),
-            "r2cmd must start with sidecar line"
-        );
-        assert!(
-            lines.get(1).is_some_and(|l| l.starts_with("ae ")),
-            "r2cmd must include ae replay line"
-        );
-    }
-
-    #[test]
-    fn storeconditional_esil_uses_zero_success_code() {
-        let (disasm, _) = get_disassembler_with_spec("x86-64").expect("disassembler");
-        // Register operands, because a unique has no ESIL spelling on its own:
-        // it only exists once `block_to_esil` has spliced it into a reader.
-        let op = r2il::R2ILOp::StoreConditional {
-            result: Some(r2il::Varnode::register(0x00, 8)),
-            space: r2il::SpaceId::Ram,
-            addr: r2il::Varnode::register(0x08, 8),
-            val: r2il::Varnode::register(0x10, 8),
-            ordering: r2il::MemoryOrdering::Relaxed,
-        };
-        let esil = r2sleigh_lift::op_to_esil(&disasm, &op);
-        assert_eq!(esil, "rdx,rcx,=[8],0,rax,=");
-    }
-
-    #[test]
-    fn lone_op_refuses_to_spell_a_unique() {
-        let (disasm, _) = get_disassembler_with_spec("x86-64").expect("disassembler");
-        // `tmp:0x30` is neither a number nor a register, so radare2 classifies
-        // it as invalid and drops the operation. Saying so beats printing it.
-        let op = r2il::R2ILOp::Copy {
-            dst: r2il::Varnode::register(0x00, 8),
-            src: r2il::Varnode::new(r2il::SpaceId::Unique, 0x30, 8),
-        };
-        assert_eq!(r2sleigh_lift::op_to_esil(&disasm, &op), "TODO,rax,=");
-    }
-
-    #[test]
     fn run_ssa_text_success() {
         let out = run_action_output(
             "x86-64",
@@ -1670,13 +1482,13 @@ mod tests {
             "31c00000000000000000000000000000",
             "0x1000",
             InstructionAction::Ssa,
-            ExportFormat::Esil,
+            ExportFormat::CLike,
         )
         .expect_err("unsupported combo should fail");
         assert!(
             err.contains("unsupported action/format combination")
                 && err.contains("action=ssa")
-                && err.contains("format=esil"),
+                && err.contains("format=c_like"),
             "unexpected error: {}",
             err
         );

@@ -13,8 +13,9 @@ analysis difficult.
 r2il is a strongly-typed intermediate language based on Ghidra's P-code
 operations. Every operation has explicit input and output varnodes with known
 sizes and address spaces. This makes it suitable for SSA transformation,
-symbolic execution, type inference, and decompilation -- while still being
-convertible back to ESIL for backward compatibility with radare2.
+symbolic execution, type inference, and decompilation. Nothing is translated
+to ESIL: r2s does not run inside radare2, and an untyped stack string would
+lose exactly what r2il exists to keep.
 
 ### Comparison to Other ILs
 
@@ -392,19 +393,12 @@ r2sleigh run --arch x86-64 --bytes "31c00000000000000000000000000000" --action l
 
 Strict action/format matrix:
 
-1. `lift`: `json`, `text`, `esil`, `r2cmd`
+1. `lift`: `json`, `text`
 2. `ssa`: `json`, `text`
 3. `defuse`: `json`, `text`
 4. `dec`: `c_like`, `json`, `text`
 
 Unsupported combinations return explicit `UnsupportedCombination` errors.
-
-`r2cmd` output contract:
-
-1. One sidecar comment plus one replay line per op.
-2. Sidecar prefix is `# ` and payload is compact single-line JSON.
-3. Replay line uses `ae <esil_expression>`.
-4. When op metadata exists, sidecar includes `"meta"`; otherwise it is omitted.
 
 Example:
 
@@ -506,12 +500,6 @@ tmp:1000_1 = rbp_0 + const:fffffffffffffff8_0
 rax_1 = *[ram] tmp:1000_1
 ```
 
-**ESIL**:
-
-```
-rbp,0xfffffffffffffff8,+,[8],rax,=
-```
-
 **Decompiled C**:
 
 ```c
@@ -536,7 +524,7 @@ Compatibility Guarantees
 1. The reader accepts exactly the `R2PSTC07` postcard representation.
 2. The writer always emits that representation; older artifacts must be regenerated from their source authority.
 3. Instruction exporter action/format compatibility is strict:
-   - `lift`: `json`, `text`, `esil`, `r2cmd`
+   - `lift`: `json`, `text`
    - `ssa`: `json`, `text`
    - `defuse`: `json`, `text`
    - `dec`: `c_like`, `json`, `text`
