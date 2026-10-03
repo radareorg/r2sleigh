@@ -43,6 +43,23 @@ fn on(binary: PathBuf, script: &str) -> Run {
     }
 }
 
+/// An import stub is the import's declaration: its jump through the slot
+/// the loader fills reaches the import exactly as a call to the stub does,
+/// so it is declared by the same prototype. It used to refuse, saying
+/// nothing stated one, because only direct calls were declared.
+#[test]
+fn an_import_stub_renders_as_the_import_it_jumps_to() {
+    let run = r2s("pdd @ sym.imp.__printf_chk");
+    assert!(run.ok, "{}", run.out);
+    assert!(
+        run.out
+            .contains("extern int32_t __printf_chk(int32_t, const int8_t*, ...);"),
+        "{}",
+        run.out
+    );
+    assert!(!run.out.contains("refused"), "{}", run.out);
+}
+
 #[test]
 fn symbols_are_listed_with_their_kind() {
     let run = r2s("is");

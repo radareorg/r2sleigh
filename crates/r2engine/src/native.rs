@@ -696,15 +696,7 @@ fn prepare_callee(
     // then the call site renders it as returning nothing.
     let declared = native.declaration(address);
     // An import's prototype is a declaration, not a body, so what the callee returns through one is known.
-    let targets = walked
-        .body
-        .calls
-        .iter()
-        .chain(walked.body.tail_calls.iter())
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let targets = reached(&walked.body, native.program);
     let mut imports = Callees::default();
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     native
@@ -774,19 +766,7 @@ fn read_callees(
     // A callee that cannot be walked leaves its call unproven rather than
     // failing the root.
     let mut callees = Callees::default();
-    // A tail jump reaches another function exactly as a call does; the only
-    // difference is that its result is this function's own. One callee reached
-    // both ways is still one callee: declaring it twice makes the type
-    // analysis reject the whole capture as holding a duplicate address.
-    let targets: Vec<u64> = root
-        .body
-        .calls
-        .iter()
-        .chain(root.body.tail_calls.iter())
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let targets = reached(&root.body, native.program);
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
     // A stub is not a body: walking one recovers an interface with no
@@ -1168,7 +1148,7 @@ impl TableBytes {
 struct Walked {
     name: String,
     body: r2ssa::body::Body,
-    /// Each function this one calls, and what it is called.
+    /// Each function this one reaches, and what it is called.
     callees: Vec<Callee>,
 }
 
@@ -1229,8 +1209,10 @@ impl Native<'_> {
 
     /// One walked body, with what the program calls it and each function it calls.
     fn walked(&self, body: r2ssa::body::Body) -> Walked {
-        let callees = body
-            .calls
+        // Everything the body reaches, as the preparation reaches it: a
+        // callee reached by a tail jump, or by a jump through an import's
+        // slot, is declared by the same prototype as one reached by a call.
+        let callees = reached(&body, self.program)
             .iter()
             .filter_map(|address| {
                 Some(Callee {
@@ -1633,6 +1615,31 @@ impl Native<'_> {
         .map_err(|error| NativeRefusal::Prepare(format!("{error:?}")))?;
         Ok(Arc::new(artifact))
     }
+}
+
+/// Every function this body reaches, each once, in address order.
+///
+/// A tail jump reaches another function exactly as a call does; the only
+/// difference is that its result is this function's own. So does a jump
+/// through a slot the loader fills, which is how an import stub reaches its
+/// import: the slot is what the call site names, so it is what the import's
+/// declaration is placed at. One callee reached two ways is still one
+/// callee: declaring it twice makes the type analysis reject the whole
+/// capture as holding a duplicate address.
+fn reached(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<u64> {
+    body.calls
+        .iter()
+        .chain(body.tail_calls.iter())
+        .copied()
+        .chain(
+            call_sites(body, program)
+                .into_iter()
+                .filter(|site| site.transfer == r2source::AdvisoryCallTransfer::TailSlot)
+                .map(|site| site.target),
+        )
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Where each direct call is made and what it reaches.

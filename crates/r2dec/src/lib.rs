@@ -4219,7 +4219,21 @@ impl Decompiler {
             .or(identity.raw_name.as_deref())?;
         let name = crate::ast::c_identifier(name);
         let entry = prepared.function().entry;
-        let Some(signature) = identity.signature.as_ref() else {
+        // The signature certified for this call site is the one a caller's
+        // call renders with: the import's declaration, placed at the slot
+        // the stub jumps through. The identity's own is a by-name lookup,
+        // which a capture that states no names has nothing in.
+        let key = r2types::CallsiteKey {
+            block_addr: callsite.block_addr,
+            op_index: callsite.op_index,
+        };
+        let certified = self
+            .context
+            .function_facts
+            .callsites()
+            .and_then(|facts| facts.by_callsite.get(&key))
+            .and_then(|fact| fact.callee_signature.as_ref());
+        let Some(signature) = certified.or(identity.signature.as_ref()) else {
             r2il::refusal_evidence!(
                 "import-stub-declaration",
                 "tail transfer at {:#x}:{} resolves to {name}, which has no prototype",
