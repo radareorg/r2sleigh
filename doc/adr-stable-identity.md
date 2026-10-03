@@ -86,7 +86,7 @@ Each step keeps every gate green and deletes what it replaces.
 | 0 | The memory space of an access is read from the access, which carries the op's own space | `memory_spaces_by_op`, `memory_space_at`, `remap_memory_sites_to_prepared` and its comment — **done** |
 | 1 | `OpId` arena, private `ops`/`ids`, `OpOrigin`, graph `OpId`↔`InstId` maps, `EditPlan` | `op_instruction_addrs`, the index shifting in `insert_ops`, the graph's site BTreeMaps — **done** |
 | 2 | Stage types; `seal` replaces `prepare_graph`; optimize and demand through `EditPlan` | `get_block_mut`, `op_mut`, `cfg_mut`, public `remove_*`, `optimize()`, `Blocks::edit`, `IrRevision`, the revision assert, `recollect_*` — **done** |
-| 3 | Certificates, obligations and downstream maps keyed by `OpId` | every `op_index` field in r2ssa/r2types, `op_site_for_inst`, `inst_id_for_op_site`, `rendered_site` |
+| 3 | Certificates, obligations and downstream maps keyed by `OpId` | every `op_index` field in r2ssa/r2types, `op_site_for_inst`, `inst_id_for_op_site`, `rendered_site` — **done** |
 | 4 | With P1.7: `ValueDef::{LiveIn, Unspecified}`, formals as views | version-0 definitions; the sealed validator check switches on |
 
 Positions survive only as an ordering view of an IR that can no longer
@@ -173,6 +173,56 @@ Step 2 as landed:
   shares a sealed function's blocks without its facts.
 - `def_use_graph` seals a raw function to take its graph, and so now pays for
   one prep collection it discards.
+
+Step 3 as landed:
+
+A fact names the operation it is about by its `InstId` where it is a graph
+fact and by its `OpId` where it is an operation's, and the graph's dense
+`inst_for_op`/`op_for_inst` translate. Nothing a fact holds is a position.
+The census, with what became of each:
+
+| Where | Was keyed by position | Now |
+|-------|-----------------------|-----|
+| `SsaGraph` | `inst_id_for_op_site`, `op_site_for_inst` | deleted; `inst_for_op`, `op_for_inst`, `block_addr_of` |
+| `SsaArtifact` | `inst_op_site`; `{callsite,return,call_result,stack_reload}_certificate_for_op`, `memory_certificate(s)_for_op_site`, `memory_{uses,defs}_for_op_site` | `inst_op_site` deleted; the rest `_for_inst(InstId)` |
+| `PreparedFunctionCertificates` | `memory_accesses_by_op: (u64, usize, bool)` | `memory_accesses_by_inst: (InstId, bool)` |
+| r2ssa facts | `op_index` (and the `block_addr` beside it) on `StructuredMemoryAccessFact`, `StructuredRecursiveCallFact`, `MemberRunStoreCertificate`, `MemoryAccessCertificate`, `CallsiteCertificate`, `CallResultCertificate`, `ReturnValueCertificate`, `DispatchTableRead`; `MemoryRoundTripCertificate`'s three index fields; `AccessSite`, `StackMemoryAccessInput` | deleted; each already carried its `InstId`, `StructuredAccessId` or `at`, and `StructuredRecursiveCallFact` gained `at` |
+| r2ssa readers | three checks that "the instruction stands where the access says" (machine projection, aggregate access, RAM-access match) | deleted: with one identity there is nothing to agree |
+| `value_reaching` | `(block_addr, op_index)` | `OpId` |
+| obligations | `CanonicalInstructionSite::Op(u64)`, schema 7 | `Op(OpId)`, schema 8; `Display` replaced by `spelled(&SsaGraph)` |
+| r2types | `CallsiteKey { block_addr, op_index }`; `OpSiteKey`, `MemoryOpSiteKey`; `FunctionRenderFacts::*_by_op`; site fields on the memory, member, array and return render facts; `*_for_op(block, index, ..)` lookups; `ScalarArrayRenderCandidate`'s site; `LocalMemoryVersionFacts::{stores,loads}_by_site` | `CallsiteKey { at }`; `MemoryEffectKey = (InstId, bool)`; `*_by_inst`; the site fields deleted (`ReturnValueRenderFact` gained `at`); `*_for_inst(InstId, ..)`; `op: OpId`; `*_by_op: OpId` |
+| r2dec ledger | `rendered_site`; `Outcome::{Rendered, Gapped} { block_addr, op_idx }` | deleted; the outcome is keyed by the obligation, which names its instruction |
+| r2dec fold | `source_op_site_for_normalized_op`, `current_source_op_site`; `LowerFrame::source_call_site: (u64, usize)`; every call-site helper in `calls.rs`, `implementation.rs`, `lowering.rs`; `CExpr::Call::site` | deleted; the call's `InstId` throughout; the operation being lowered carries its source instruction (`current_source`, set once per operation) |
+| r2dec analysis | `call_view_by_site`, `call_result_source_by_value`, `UseInfo::call_result_exprs` keyed by `(u64, usize)`; `prepared_call_site_tuple` | keyed by `InstId`; the tuple translation deleted |
+| r2dec binding plan, placement, journal | `certified_dead_frame_slot_accesses: (u64, usize)` and the graph scans that resolved it back to instructions; the round-trip site scan; `coalesced_store_sites`; `BlockAnswerParts` sites; `single_evaluation::CallSite` | `InstId` sets read directly; `coalesced_stores: OpId`; the alias deleted |
+
+- Positions survive as views of a sealed function, never as keys:
+  `SsaGraph::op_ordinal` spells `0x{block}:op:{n}` and orders what is
+  spelled; the crate-private `walk_start` is where a walk over a block's
+  operations before or after an instruction starts, and `inst_spelled_at`
+  reads back a site a person typed (`pdil` slice seeds, fixtures). The
+  walkers in `semantic/boundaries.rs` and `semantic/shared.rs` still carry a
+  `(block, index)` cursor between their own helpers; it is never stored.
+- The obligation ledger orders itself as the spelling reads, taken from the
+  graph once when it opens, so `pddo`'s `refused-ids` and the engine's
+  "first refused/unaccounted/conflicting" name the same obligations in the
+  same order as before; `EffectObligationAudit` carries them spelled.
+- Six readers in r2dec looked a fact up by the *normalized* function's
+  position as if it were the source's (call targets, call-result
+  definitions, a member-run store, the switch dispatch, a coalesced store,
+  the terminal tail-call check). They now ask by the source instruction, and
+  where a source instruction has to be found in the normalized function, its
+  own block's origin rows are read (`NormalizationOrigins::original_site`).
+  The census below shows none of them fired on the corpus.
+- Not re-keyed here: `NormalizedOpSite` and `NormalizationOrigins`' rows.
+  They are positions in the normalized copy, which normalization still
+  edits, and the rows carry phi-edge and relocated-initializer provenance
+  as well as translating; keying them by the copy's `OpId` is the next step
+  for r2dec. `GapMarker`'s `op_idx` is the normalized position the output
+  prints, and stays.
+- Evidence: every function of the four pinned binaries, the twelve coverage
+  binaries and the nine `eqloc` binaries renders byte-identical `pdd`
+  before and after; `pddo` is unchanged (the schema number is not printed).
 
 ## Consequences and risks
 
