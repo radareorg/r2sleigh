@@ -1,8 +1,8 @@
 # Engine Vision
 
 > What r2sleigh is becoming, and why. This document sits above `ROADMAP.md`:
-> the roadmap is the ordered execution list for the current decompiler work,
-> this is the shape the whole subsystem is aiming at.
+> the roadmap owns the order, the status and the decisions; this is the shape
+> the whole subsystem is aiming at.
 
 ## Thesis
 
@@ -12,11 +12,12 @@ happens to ship a decompiler, and it is built agent-first.
 Two statements follow from that, and everything in this document is a
 consequence of one of them.
 
-The first is that the engine owns its facts. Today radare2 finds the functions,
-collects a typed snapshot, and hands it down for r2sleigh to render. The
-dependency runs the wrong way for an engine: whoever discovers the work owns the
-program, and whoever owns the program decides what is analysed next and what
-gets invalidated when a byte changes. The engine has to be the owner.
+The first is that the engine owns its facts. radare2 used to find the
+functions, collect a typed snapshot, and hand it down for r2sleigh to render.
+That dependency ran the wrong way for an engine: whoever discovers the work owns
+the program, and whoever owns the program decides what is analysed next and what
+gets invalidated when a byte changes. The plugin is deleted and the engine is
+the owner.
 
 The second is that the primary consumer is an agent, not a human at a terminal.
 Agents fail on binary analysis tools for reasons that are structural rather than
@@ -457,56 +458,13 @@ Violating any of these costs more than the work it saves.
 
 ## Sequencing
 
-Dependency order, and each step ships something.
-
-1. **Native body lift at a given address.** Recursive descent over direct
-   branches, refusing at indirect transfers. Nothing below this is callable
-   without it. *Done: `r2ssa::body`.*
-2. **The sdb type and convention import.** A dependency of a useful `pdd`
-   through `callee_facts`, not an independent win. *Done: `r2abi` reads the
-   conventions and the five hundred library prototypes.*
-3. **Native request construction**, and `pdd` end to end in `r2s`. *Done, on
-   x86-64, aarch64 and ARM 32-bit.*
-4. **Printable IL tiers.** Every tier inspectable from a command, so a defect
-   belongs to exactly one lowering. *Done: `pdil`, `pdim`, `pdih`.*
-5. **Discovery**, with confidence attached. *Done as a fixed point over direct
-   transfers; it does not yet cross an indirect handoff.*
-6. **Delete the plugin and the bridge**, and rebuild the gate natively. The
-   plugin is not ported and not preserved.
-7. **The name database, cross-references and strings.** One address-to-name
-   table with a kind, a size and a confidence, plus a reverse index, replacing
-   every rival naming rule in the tree. Queries over the IL, not separate
-   scanners.
-8. **Discovery across a typed handoff.** A constant argument counts as a
-   function where the callee's declared prototype says that parameter is one.
-9. **Write and patch mode**, with incremental invalidation, which is the first
-   thing that actually exercises demand-driven analysis.
-10. **Value-set analysis and the memory model.** One project. Partly landed:
-    `values.rs` carries strided intervals with widening and `indirect.rs`
-    consumes them, and what remains is the memory model and the rest of the
-    consumers.
-11. **Interprocedural control-flow graph to fixpoint.** Callees are walked one
-    level deep today.
-12. **Exception-handler recovery**, and structure and array recovery over the
-    memory model.
-13. **Binary diffing.** Independent of the above and high value.
-14. **Solver escalation**, with verification and value-set analysis as its
-    consumers, so it does not repeat the deleted symbolic crate's fate.
-15. **Equivalence checking**, which makes every later claim mechanical rather
-    than hand-checked.
-16. **The rest of the command language and r2pipe compatibility.** Begun: `r2s`
-    already spells its commands as radare2 spells them so the two can be diffed.
-17. **The agent surface**, at the merge: the stateless typed query API in
-    `r2engine`, confidence carried through `r2source`'s contracts, explain over
-    the existing ledger, a protocol of about a dozen tools plus function
-    resources, and budget-aware rendering with elision reported and fetchable.
-    The query API is the real work; the protocol is a wrapper.
-18. **Trace recording and query.**
-
-Step seventeen is small and makes this the best agent-facing binary analysis
-tool in existence, because nothing else ships confidence and nothing else can
-explain itself. It is late because it is worth more over an engine that owns its
-facts than over a bridge into someone else's.
+The order lives in [`ROADMAP.md`](../ROADMAP.md) and nowhere else. The first
+nine steps this section used to list — body lift, the sdb import, native `pdd`,
+printable tiers, discovery, deleting the plugin, the name database, discovery
+across a typed handoff, and write mode — are done. The rest are in the roadmap,
+reordered after the 2026-10-03 review: gates first, then stable identity and
+provenance under the engine, then the memory model and the renderer as a
+printer, with the shell and the visual mode as a parallel track.
 
 ## Open questions
 
