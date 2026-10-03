@@ -25,6 +25,7 @@
 
 pub mod context;
 pub mod disasm;
+pub mod flow;
 mod internal_control;
 pub mod sleigh;
 pub mod text;

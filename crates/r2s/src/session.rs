@@ -13,6 +13,9 @@ pub struct Session {
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
+    /// Whether listings are painted: only for a terminal, never under
+    /// `NO_COLOR`, and never for a statement whose output a grep reads.
+    pub color: bool,
 }
 
 impl Session {
@@ -20,6 +23,7 @@ impl Session {
         let image = Image::open(path).map_err(|error| error.to_string())?;
         let program = OpenProgram::of(Opened::of(image));
         Ok(Self {
+            color: false,
             addr: program.start().unwrap_or(0),
             program,
             path: path.to_owned(),

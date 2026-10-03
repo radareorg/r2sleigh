@@ -116,6 +116,26 @@ fn pane(title: String, pending: bool) -> Block<'static> {
     Block::default().borders(Borders::ALL).title(title)
 }
 
+/// A listing line's text as spans, each in its role's style.
+fn painted(text: &str, roles: &crate::theme::Roles) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(roles.len() * 2 + 1);
+    let mut at = 0;
+    for (range, role) in roles {
+        if range.start < at || range.end > text.len() {
+            continue;
+        }
+        if range.start > at {
+            spans.push(Span::raw(text[at..range.start].to_owned()));
+        }
+        spans.push(Span::styled(text[range.clone()].to_owned(), role.style()));
+        at = range.end;
+    }
+    if at < text.len() {
+        spans.push(Span::raw(text[at..].to_owned()));
+    }
+    spans
+}
+
 fn disassembly(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let shown = app.shown_lines();
     let cursor = app.cursor.min(shown.len().saturating_sub(1));
@@ -124,7 +144,7 @@ fn disassembly(app: &App, frame: &mut Frame<'_>, area: Rect) {
         .enumerate()
         .map(|(row, line)| {
             let mut spans = vec![Span::styled(format!("{:#010x}  ", line.address), ADDRESS)];
-            spans.push(Span::raw(line.text.clone()));
+            spans.extend(painted(&line.text, &line.roles));
             if let Some(target) = line.target {
                 spans.push(Span::styled(format!("  -> {target:#x}"), DIM));
             }

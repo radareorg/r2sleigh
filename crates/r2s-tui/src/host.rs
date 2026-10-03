@@ -8,6 +8,8 @@ pub struct ListedLine {
     /// moves forward.
     pub size: u64,
     pub text: String,
+    /// What each part of `text` is, as the shell paints `pd`.
+    pub roles: crate::theme::Roles,
     /// Where the instruction transfers control, where it encodes one: what
     /// following the line jumps to.
     pub target: Option<u64>,

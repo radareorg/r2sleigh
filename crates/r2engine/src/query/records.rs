@@ -191,6 +191,9 @@ pub struct Line {
     pub bytes: Vec<u8>,
     /// How the decoder spells it. Absent where the bytes are not an instruction.
     pub syntax: Option<Syntax>,
+    /// Where control goes after it, read from its lift. Absent where it did
+    /// not lift, or was only spelled.
+    pub flow: Option<r2sleigh_lift::flow::Flow>,
     pub annotations: Vec<Annotation>,
 }
 

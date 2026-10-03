@@ -20,6 +20,7 @@ mod app;
 pub mod graph;
 pub mod highlight;
 mod host;
+pub mod theme;
 mod view;
 mod worker;
 

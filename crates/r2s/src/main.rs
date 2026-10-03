@@ -44,6 +44,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Colour is for a person: a terminal, and nobody who asked for none
+    // (https://no-color.org). Anything a program reads gets plain text.
+    session.color = std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
 
     let mut reader = line::Reader::default();
     if cli.visual {

@@ -140,17 +140,21 @@ impl Host for Visual<'_> {
         answer
             .value
             .iter()
-            .map(|line| ListedLine {
-                address: line.address,
-                size: (line.bytes.len() as u64).max(1),
-                text: crate::listing::instruction_text(self.session, line),
-                target: line
-                    .annotations
-                    .iter()
-                    .find_map(|annotation| match annotation.kind {
-                        AnnotationKind::Target { address, .. } => Some(address),
-                        _ => None,
-                    }),
+            .map(|line| {
+                let (text, roles) = crate::listing::instruction_painted(self.session, line);
+                ListedLine {
+                    address: line.address,
+                    size: (line.bytes.len() as u64).max(1),
+                    text,
+                    roles,
+                    target: line
+                        .annotations
+                        .iter()
+                        .find_map(|annotation| match annotation.kind {
+                            AnnotationKind::Target { address, .. } => Some(address),
+                            _ => None,
+                        }),
+                }
             })
             .collect()
     }

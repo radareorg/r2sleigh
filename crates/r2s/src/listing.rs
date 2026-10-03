@@ -6,7 +6,9 @@
 
 use crate::commands::{parse_count, parse_number};
 use crate::session::Session;
+use r2engine::Flow;
 use r2engine::query::{Completion, Listing, Stop};
+use r2s_tui::theme::{Role, Roles};
 
 pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> {
     let count = parse_count(argument, 16)?;
@@ -30,11 +32,20 @@ pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<Strin
 /// spells it and what it was proven to hold. The visual mode lays this out in
 /// its own columns, so a pane says what `pd` says.
 pub(crate) fn instruction_text(session: &Session, line: &r2engine::query::Line) -> String {
-    let text = match line.decoded() {
-        false => "invalid".to_owned(),
-        true => spelled(line, session.program.names()),
+    instruction_painted(session, line).0
+}
+
+/// [`instruction_text`], with what each part of it is.
+pub(crate) fn instruction_painted(
+    session: &Session,
+    line: &r2engine::query::Line,
+) -> (String, Roles) {
+    let (mut text, roles) = match line.decoded() {
+        false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
+        true => painted(line, session.program.names()),
     };
-    format!("{text}{}", held(session, line))
+    text.push_str(&held(session, line));
+    (text, roles)
 }
 
 /// One listing line, in the columns radare2 writes them in.
@@ -45,16 +56,22 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
         hex.truncate(10);
         hex.push_str("..");
     }
-    let text = match line.decoded() {
-        false => "invalid".to_owned(),
-        true => spelled(line, session.program.names()),
+    let (text, roles) = match line.decoded() {
+        false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
+        true => painted(line, session.program.names()),
+    };
+    let offset = format!("{:#010x}", line.address);
+    let (offset, text) = match session.color {
+        true => (
+            r2s_tui::theme::ansi(&offset, &[(0..offset.len(), Role::Offset)]),
+            r2s_tui::theme::ansi(&text, &roles),
+        ),
+        false => (offset, text),
     };
     format!(
-        "{}            {:#010x}      {:<14} {}{}\n",
+        "{}            {offset}      {:<14} {text}{}\n",
         labels(line),
-        line.address,
         hex,
-        text,
         held(session, line)
     )
 }
@@ -109,31 +126,79 @@ fn runs(values: &[u64]) -> Vec<(u64, u64)> {
 /// was written with is part of it: a negative literal names no address however
 /// well its magnitude matches.
 pub(crate) fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> String {
+    painted(line, names).0
+}
+
+/// [`spelled`], with what each part of it is: the mnemonic by where the
+/// instruction sends control, each register the decoder named, each number,
+/// and each name written over one.
+pub(crate) fn painted(
+    line: &r2engine::query::Line,
+    names: &r2engine::names::NameDb,
+) -> (String, Roles) {
     let Some(syntax) = &line.syntax else {
-        return String::new();
+        return (String::new(), Vec::new());
     };
-    let mut body = syntax.body.clone();
-    // Rewritten from the end, so an earlier span's offsets stay true.
-    for number in syntax.numbers.iter().rev() {
-        let Ok(value) = u64::try_from(number.value) else {
-            continue;
-        };
-        // Only where the engine says the instruction uses that number as an
-        // address. Naming every number the table happens to know spelled
-        // `adrp x17, reloc.humanize_number` over a page base the next
-        // instruction was about to move fifty bytes past.
-        if claim(line, *number).is_none() {
+    let flow = match line.flow {
+        Some(Flow::Call) => Role::Call,
+        Some(Flow::Jump) => Role::Jump,
+        Some(Flow::ConditionalJump) => Role::ConditionalJump,
+        Some(Flow::Return) => Role::Return,
+        Some(Flow::Nop) => Role::Nop,
+        Some(Flow::Trap) => Role::Trap,
+        Some(Flow::Fall) | None => Role::Mnemonic,
+    };
+    let mut text = syntax.mnemonic.clone();
+    let mut roles = vec![(0..text.len(), flow)];
+    if syntax.body.is_empty() {
+        return (text, roles);
+    }
+    text.push(' ');
+    // The body's tokens in the order they are written: numbers, each spelled
+    // as the name the table gives it where the engine says the instruction
+    // uses it as an address, and registers. The two never overlap: a number
+    // starts with a digit and a register with a letter.
+    let mut tokens = syntax
+        .numbers
+        .iter()
+        .map(|number| {
+            // Only where the engine says the instruction uses that number as
+            // an address. Naming every number the table happens to know
+            // spelled `adrp x17, reloc.humanize_number` over a page base the
+            // next instruction was about to move fifty bytes past.
+            let named = u64::try_from(number.value)
+                .ok()
+                .filter(|_| claim(line, *number).is_some())
+                .and_then(|value| names.of(value))
+                .map(|name| name.spelled());
+            let role = if named.is_some() {
+                Role::Name
+            } else {
+                Role::Number
+            };
+            (number.start, number.end, named, role)
+        })
+        .chain(
+            syntax
+                .registers
+                .iter()
+                .map(|span| (span.start, span.end, None, Role::Register)),
+        )
+        .collect::<Vec<_>>();
+    tokens.sort_by_key(|(start, ..)| *start);
+    let mut at = 0;
+    for (start, end, named, role) in tokens {
+        if start < at || end > syntax.body.len() {
             continue;
         }
-        let Some(name) = names.of(value) else {
-            continue;
-        };
-        body.replace_range(number.start..number.end, &name.spelled());
+        text.push_str(&syntax.body[at..start]);
+        let from = text.len();
+        text.push_str(named.as_deref().unwrap_or(&syntax.body[start..end]));
+        roles.push((from..text.len(), role));
+        at = end;
     }
-    match body.is_empty() {
-        true => syntax.mnemonic.clone(),
-        false => format!("{} {}", syntax.mnemonic, body),
-    }
+    text.push_str(&syntax.body[at..]);
+    (text, roles)
 }
 
 /// `pdf`: the function at the cursor, listed with what the engine proved.
@@ -501,7 +566,9 @@ mod tests {
                 body: body.to_owned(),
                 size: 1,
                 numbers,
+                registers: Vec::new(),
             }),
+            flow: None,
             annotations,
         }
     }

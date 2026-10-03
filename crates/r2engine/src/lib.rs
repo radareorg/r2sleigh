@@ -39,6 +39,7 @@ pub use json::{
     RenderedResidualJson, RenderedVariableJson,
 };
 pub use r2sleigh_lift::disasm::syntax::number_spans;
+pub use r2sleigh_lift::flow::Flow;
 pub use r2sleigh_lift::{NumberSpan, Syntax};
 
 mod route;

@@ -25,10 +25,15 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
         Some(Suffix::Filter(grep)) => Some(grep),
         None => None,
     };
+    // A grep reads the text, and an escape in it would split what it matches.
+    let painting = session.color;
+    session.color = painting && grep.is_none();
     let output = match &statement.at {
-        Some(address) => elsewhere(session, address, &statement.command)?,
-        None => dispatch(session, &statement.command)?,
+        Some(address) => elsewhere(session, address, &statement.command),
+        None => dispatch(session, &statement.command),
     };
+    session.color = painting;
+    let output = output?;
     Ok(match grep {
         Some(grep) => grep.apply(&output)?,
         None => output,

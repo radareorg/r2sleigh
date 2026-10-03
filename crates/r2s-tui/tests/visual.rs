@@ -8,6 +8,7 @@
 //! The host checks every call is made off the thread that draws.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use r2s_tui::theme::Role;
 use r2s_tui::{
     DecompiledLine, Driver, EdgeKind, Entry, Graph, GraphEdge, GraphNode, Host, ListKind,
     ListedLine, Msg, PENDING, View,
@@ -98,6 +99,11 @@ impl Host for Program {
                     "call fcn.00002000".to_owned()
                 } else {
                     "nop".to_owned()
+                },
+                roles: if at == 0x1000 {
+                    vec![(0..4, Role::Call), (5..17, Role::Name)]
+                } else {
+                    vec![(0..3, Role::Nop)]
                 },
                 target: (at == 0x1000).then_some(0x2000),
             })
@@ -382,6 +388,28 @@ fn hex_edit_writes_two_nibbles_as_one_byte_and_moves_on() {
         assert_eq!(ui.seek(), 0x1001);
         let shown = ui.screen();
         assert!(shown.contains("0x00001000  ab 01"), "{shown}");
+    });
+}
+
+/// The disassembly pane paints each part of a line in its role's colour,
+/// from the roles the shell hands over with the text.
+#[test]
+fn the_disassembly_paints_a_call_and_its_target_name_in_their_roles() {
+    run(|ui| {
+        let drawn = ui.drawn();
+        let at = |needle: &str| {
+            (0..drawn.area.height)
+                .find_map(|y| {
+                    let row = (0..drawn.area.width)
+                        .map(|x| drawn[(x, y)].symbol().to_owned())
+                        .collect::<String>();
+                    row.find(needle).map(|x| (x as u16, y))
+                })
+                .unwrap_or_else(|| panic!("{needle} not drawn"))
+        };
+        let (x, y) = at("call fcn");
+        assert_eq!(drawn[(x, y)].fg, Role::Call.color().unwrap());
+        assert_eq!(drawn[(x + 5, y)].fg, Role::Name.color().unwrap());
     });
 }
 
