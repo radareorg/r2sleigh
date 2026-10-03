@@ -346,6 +346,12 @@ fn note_unproven_constructs(
             if closure.gapped > 0 {
                 let _ = write!(&mut line, ", {} residual", closure.gapped);
             }
+            // Rendered, and through a variable split out of a shared one so
+            // that every read sees the value it stands for.
+            let split = ledger.map_or(0, crate::ledger::ObligationLedger::split_rendered);
+            if split > 0 {
+                let _ = write!(&mut line, " ({split} through a split variable)");
+            }
             // The column that used to have no name. Saying nothing here is what let a
             // gutted body report as clean, so it is spelled out whenever it is not zero.
             if closure.unattributed > 0 {
@@ -1892,39 +1898,6 @@ impl BindingObservationJournalFailure {
     pub const fn kind(self) -> &'static str {
         match self {
             Self::SourceAuthority => "source_authority",
-            Self::BindingPlanAuthority => "binding_plan_authority",
-            Self::BindingPlanMachineProjection(failure) => failure.kind(),
-            Self::BindingPlanValueTopology { .. } => "binding_plan_value_topology",
-            Self::BindingPlanDispositionCount { .. } => "binding_plan_disposition_count",
-            Self::BindingPlanBindingCount { .. } => "binding_plan_binding_count",
-            Self::BindingPlanInvalidBindingReference { .. } => {
-                "binding_plan_invalid_binding_reference"
-            }
-            Self::BindingPlanCertificateMembership { .. } => "binding_plan_certificate_membership",
-            Self::BindingPlanDeclarationWidth { .. } => "binding_plan_declaration_width",
-            Self::BindingPlanInvalidLiteralInline { .. } => "binding_plan_invalid_literal_inline",
-            Self::BindingPlanInvalidElisionProof { .. } => "binding_plan_invalid_elision_proof",
-            Self::BindingPlanUnexpectedValueDisposition { .. } => {
-                "binding_plan_unexpected_value_disposition"
-            }
-            Self::BindingPlanStackObjectCount { .. } => "binding_plan_stack_object_count",
-            Self::BindingPlanUnexpectedStackObjectDisposition { .. } => {
-                "binding_plan_unexpected_stack_object_disposition"
-            }
-            Self::BindingPlanStackObjectCertificate { .. } => {
-                "binding_plan_stack_object_certificate"
-            }
-            Self::BindingPlanStackObjectDeclarationWidth { .. } => {
-                "binding_plan_stack_object_declaration_width"
-            }
-            Self::BindingPlanParameterCount { .. } => "binding_plan_parameter_count",
-            Self::BindingPlanUnexpectedParameterDisposition { .. } => {
-                "binding_plan_unexpected_parameter_disposition"
-            }
-            Self::BindingPlanParameterCertificate { .. } => "binding_plan_parameter_certificate",
-            Self::BindingPlanParameterDeclarationWidth { .. } => {
-                "binding_plan_parameter_declaration_width"
-            }
             Self::NormalizationSourceAuthority => "normalization_source_authority",
             Self::NormalizationBlockTopology => "normalization_block_topology",
             Self::NormalizationRowCount { .. } => "normalization_row_count",
@@ -1973,7 +1946,53 @@ impl BindingObservationJournalFailure {
             Self::ObservationOutOfRange { .. } => "observation_out_of_range",
             Self::DuplicateObservation { .. } => "duplicate_observation",
             Self::NestedObservation { .. } => "nested_observation",
+            // The plan's own refusals, a family of their own.
+            plan => match plan.binding_plan_kind() {
+                Some(kind) => kind,
+                None => "uncategorized",
+            },
         }
+    }
+
+    /// The category of a binding plan's own refusal, which the plan's seal
+    /// raised before any observation was made.
+    const fn binding_plan_kind(self) -> Option<&'static str> {
+        Some(match self {
+            Self::BindingPlanAuthority => "binding_plan_authority",
+            Self::BindingPlanMachineProjection(failure) => failure.kind(),
+            Self::BindingPlanValueTopology { .. } => "binding_plan_value_topology",
+            Self::BindingPlanDispositionCount { .. } => "binding_plan_disposition_count",
+            Self::BindingPlanBindingCount { .. } => "binding_plan_binding_count",
+            Self::BindingPlanInvalidBindingReference { .. } => {
+                "binding_plan_invalid_binding_reference"
+            }
+            Self::BindingPlanCertificateMembership { .. } => "binding_plan_certificate_membership",
+            Self::BindingPlanDeclarationWidth { .. } => "binding_plan_declaration_width",
+            Self::BindingPlanInvalidLiteralInline { .. } => "binding_plan_invalid_literal_inline",
+            Self::BindingPlanInvalidElisionProof { .. } => "binding_plan_invalid_elision_proof",
+            Self::BindingPlanUnexpectedValueDisposition { .. } => {
+                "binding_plan_unexpected_value_disposition"
+            }
+            Self::BindingPlanStackObjectCount { .. } => "binding_plan_stack_object_count",
+            Self::BindingPlanUnexpectedStackObjectDisposition { .. } => {
+                "binding_plan_unexpected_stack_object_disposition"
+            }
+            Self::BindingPlanStackObjectCertificate { .. } => {
+                "binding_plan_stack_object_certificate"
+            }
+            Self::BindingPlanStackObjectDeclarationWidth { .. } => {
+                "binding_plan_stack_object_declaration_width"
+            }
+            Self::BindingPlanParameterCount { .. } => "binding_plan_parameter_count",
+            Self::BindingPlanUnexpectedParameterDisposition { .. } => {
+                "binding_plan_unexpected_parameter_disposition"
+            }
+            Self::BindingPlanParameterCertificate { .. } => "binding_plan_parameter_certificate",
+            Self::BindingPlanParameterDeclarationWidth { .. } => {
+                "binding_plan_parameter_declaration_width"
+            }
+            _ => return None,
+        })
     }
 }
 
@@ -1988,6 +2007,41 @@ pub enum BindingShadowAuditFailure {
     NonQualityObservations {
         observations: BindingObservationAudit,
     },
+}
+
+/// Plan the next rendering for reads that did not see their values: split
+/// the values out of their variables, or, where nothing can be split, plan a
+/// gap at the read. Whether anything new was planned.
+fn replan_stale_reads(
+    repair: &binding_plan::ReachingRepair,
+    splits: &mut binding_plan::BindingSplits,
+    seed_gaps: &mut std::collections::BTreeMap<r2ssa::InstId, String>,
+) -> bool {
+    if let Some(partition) = repair.partition.clone()
+        && splits.split(partition, &repair.evict)
+    {
+        r2il::refusal_evidence!(
+            "split",
+            "{:?} leave their variables; rendering again",
+            repair.evict
+        );
+        return true;
+    }
+    let Some(anchor) = repair
+        .unsplittable
+        .iter()
+        .filter_map(|stale| stale.read.at)
+        .find(|anchor| !seed_gaps.contains_key(anchor))
+    else {
+        return false;
+    };
+    r2il::refusal_evidence!(
+        "gap",
+        "a read at {anchor:?} sees another value and cannot be split; \
+         planning a gap and rendering again"
+    );
+    seed_gaps.insert(anchor, "stale_read".to_string());
+    true
 }
 
 /// The instruction a native render failure names, when it names a cell.
@@ -2268,6 +2322,10 @@ pub enum PlacementAuditRefusal {
     UndeclaredNames {
         count: usize,
     },
+    /// A rendered read does not see the SSA value it stands for.
+    StaleRead {
+        value_index: usize,
+    },
 }
 
 impl PlacementAuditRefusal {
@@ -2326,6 +2384,7 @@ impl PlacementAuditRefusal {
             Self::DuplicateInlineWrite { .. } => "duplicate_inline_write",
             Self::MissingBindingRole { .. } => "missing_binding_role",
             Self::UndeclaredNames { .. } => "undeclared_names",
+            Self::StaleRead { .. } => "stale_read",
         }
     }
 }
@@ -2787,6 +2846,9 @@ enum InternalBuildProduct {
         /// admitted and then failed to seal.
         failure: Option<BindingShadowAuditFailure>,
         placement_audit: PlacementAudit,
+        /// How to split the plan's variables where a rendered read did not
+        /// see its value.
+        repair: Option<Box<binding_plan::ReachingRepair>>,
     },
 }
 
@@ -2797,12 +2859,14 @@ impl InternalBuildProduct {
             refusal,
             failure: None,
             placement_audit: PlacementAudit::NotRun,
+            repair: None,
         }
     }
 
     fn refused_after_native_admission(
         function: CFunction,
         failure: BindingShadowAuditFailure,
+        repair: Option<Box<binding_plan::ReachingRepair>>,
     ) -> Self {
         let refusal = DecompileRenderRefusal::from(failure);
         let placement_audit = match failure {
@@ -2815,6 +2879,16 @@ impl InternalBuildProduct {
             refusal,
             failure: Some(failure),
             placement_audit,
+            repair,
+        }
+    }
+
+    /// How to split the plan's variables so that every rendered read sees
+    /// its value, when that is why this product was refused.
+    fn reaching_repair(&self) -> Option<&binding_plan::ReachingRepair> {
+        match self {
+            Self::Refused { repair, .. } => repair.as_deref(),
+            Self::Native(_) | Self::Residual(_) => None,
         }
     }
 
@@ -2986,7 +3060,11 @@ impl Decompiler {
         // refusal names the value or the object it could not decide, which is
         // exactly what the reader is here to see.
         Ok(
-            match crate::binding_plan::BindingPlan::build_shadow_with_control(facts, control) {
+            match crate::binding_plan::BindingPlan::build_shadow_with_control(
+                facts,
+                &crate::binding_plan::BindingSplits::default(),
+                control,
+            ) {
                 Ok(plan) => crate::binding_plan::dump(facts.source(), &plan),
                 Err(error) => format!("the binding plan refused: {error:?}\n"),
             },
@@ -3093,11 +3171,22 @@ impl Decompiler {
         // and the anchors are instructions, so the loop terminates on a finite
         // set without being counted.
         let mut seed_gaps = std::collections::BTreeMap::new();
+        // A rendered read that does not see its value splits the value out of
+        // the variable it shares, and the whole rendering runs again over the
+        // finer partition; a read nothing can split is planned as a gap. Each
+        // attempt evicts a value or plans an anchor no earlier one did, both
+        // finite, so this ends as the gap loop does.
+        let mut splits = binding_plan::BindingSplits::default();
         loop {
             let decompiler =
                 Self::new(self.config.clone()).with_context(input.context_projection());
-            let product =
-                decompiler.build_function_internal_with_control(input, work, &seed_gaps)?;
+            let product = decompiler
+                .build_function_internal_with_control(input, work, &seed_gaps, &splits)?;
+            if let Some(repair) = product.reaching_repair()
+                && replan_stale_reads(repair, &mut splits, &mut seed_gaps)
+            {
+                continue;
+            }
             if let Some(failure) = product.native_failure()
                 && let Some(anchor) = gap_anchor_for_native_failure(&failure, input.prepared_ssa())
                 && !seed_gaps.contains_key(&anchor)
@@ -3141,6 +3230,7 @@ impl Decompiler {
         input: &'a DecompilerInput,
         work: DecompileWorkControl<'a>,
         seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, String>,
+        splits: &binding_plan::BindingSplits,
     ) -> Result<InternalBuildProduct, DecompileExecutionStop> {
         crate::stage_timing::begin(input.prepared_ssa().graph().insts.len());
         // The names this rendering declares, from the first pass that mints one.
@@ -3350,6 +3440,7 @@ impl Decompiler {
         crate::stage_timing::mark("prepare");
         let binding_plan = match crate::binding_plan::BindingPlan::build_shadow_with_control(
             input.source_owned_facts(),
+            splits,
             work.work(),
         ) {
             Ok(plan) => {
@@ -3918,17 +4009,18 @@ impl Decompiler {
             structured_regions,
             Rc::clone(&binding_names),
         );
-        let mut native = match draft.finish_enforcing(input.source_owned_facts(), observation_error)
+        let mut native = match draft.finish_splitting(input.source_owned_facts(), observation_error)
         {
             Ok(native) => native,
-            Err(failure) => {
-                let refusal = DecompileRenderRefusal::from(failure);
+            Err(refused) => {
+                let refusal = DecompileRenderRefusal::from(refused.failure);
                 return Ok(InternalBuildProduct::refused_after_native_admission(
                     residual_function_for_render_boundary(
                         &func_name,
                         &format!("native render refusal: {}", refusal.kind()),
                     ),
-                    failure,
+                    refused.failure,
+                    refused.repair,
                 ));
             }
         };
@@ -3944,12 +4036,13 @@ impl Decompiler {
         // obligation to produce it is answered by the residual its reads are.
         let mut residual = native.obligations_under_residuals();
         residual.extend(obligations_defining(prepared, &residualized.values));
-        let ledger = effect_ledger::build_obligation_ledger(
+        let mut ledger = effect_ledger::build_obligation_ledger(
             prepared,
             &normalization_origins,
             native.effect_observations(),
             &residual,
         );
+        ledger.mark_split(obligations_defining(prepared, splits.evicted_values()));
         debug_log_ledger(prepared, &ledger);
         let radare2_variadic_format_counts = self
             .context

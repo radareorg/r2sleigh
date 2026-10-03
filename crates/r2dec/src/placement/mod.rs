@@ -726,6 +726,315 @@ pub(crate) fn collect_final_placement_occurrences(
     })
 }
 
+/// Whether every read the final text makes of a variable sees the SSA value
+/// it stands for, and how to split the variables where one does not
+/// (`binding_plan::stale_reads`).
+///
+/// The reads and writes are the ones that survived every rewrite, ordered as
+/// the text orders them. A read of a version C has no value for is a residual
+/// already, and a stack access or an object's address reads the object's
+/// storage rather than an SSA value bound to it, so none of those is asked.
+/// The merges and the entry values come from the graph, and what a value
+/// re-expresses from its own defining operation: a copy, an extension, a
+/// restore.
+pub(crate) fn reaching_values(
+    source: &r2ssa::SsaArtifact,
+    regions: &SealedStructuredRegionArtifact,
+    names: &BindingNameResolution,
+    occurrences: &FinalPlacementOccurrences,
+) -> crate::binding_plan::ReachingRepair {
+    use crate::binding_plan::{ReachingFacts, reaching_repair, stale_reads};
+    let plan = names.plan();
+    let graph = source.graph();
+    let binding_of = |value: r2ssa::ValueId| match plan.disposition(value) {
+        Some(ValueDisposition::Bound { binding }) => Some(*binding),
+        _ => None,
+    };
+    let reads = rendered_reads(occurrences);
+    let writes = rendered_writes(graph, occurrences);
+    let elided = elided_definitions(source, names, occurrences);
+    let merges = bound_merges(graph, &binding_of);
+    // What a variable holds on entry. A version C has no value for is held
+    // here too: whether a read of a merge of it is assigned on every path is
+    // must-assignment's question, which placement answers and refuses.
+    let entry_values = graph
+        .values
+        .iter()
+        .filter(|value| value.var.constant_bits().is_none() && !graph.written_by_body(value.id))
+        .map(|value| value.id)
+        .collect::<BTreeSet<_>>();
+    let re_expresses = |value: r2ssa::ValueId| re_expressed(graph, value);
+    let region_ids = occurrences
+        .reads()
+        .iter()
+        .map(|read| read.region)
+        .chain(occurrences.writes().iter().map(|write| write.region))
+        .map(|region| (region.index(), region))
+        .collect::<BTreeMap<_, _>>();
+    let exclusive = |left: usize, right: usize| {
+        region_ids
+            .get(&left)
+            .zip(region_ids.get(&right))
+            .is_some_and(|(left, right)| regions.regions_are_exclusive(*left, *right))
+    };
+    let facts = ReachingFacts {
+        reads: &reads,
+        writes: &writes,
+        elided: &elided,
+        merges: &merges,
+        binding_of: &binding_of,
+        re_expresses: &re_expresses,
+        entry_values: &entry_values,
+        exclusive: &exclusive,
+    };
+    let stale = stale_reads(source.function(), &facts);
+    trace_stale_reads(graph, &stale, &writes);
+    let mut members = vec![0_usize; plan.binding_count()];
+    for index in 0..plan.value_count() {
+        if let Some(binding) = binding_of(r2ssa::ValueId(index as u32)) {
+            members[binding.index()] += 1;
+        }
+    }
+    let mut repair = reaching_repair(stale, &facts, &|binding| {
+        members.get(binding.index()).copied().unwrap_or(0)
+    });
+    if !repair.is_empty() {
+        repair.partition = Some(plan.partition_classes());
+    }
+    repair
+}
+
+/// The reads the check asks about: spelled, of a value some statement could
+/// assign, and not of what the reading statement itself defines.
+fn rendered_reads(
+    occurrences: &FinalPlacementOccurrences,
+) -> Vec<crate::binding_plan::RenderedRead> {
+    let defined_in_statement = occurrences
+        .writes()
+        .iter()
+        .filter_map(|write| write.defines.map(|value| (write.top, write.block, value)))
+        .collect::<BTreeSet<_>>();
+    occurrences
+        .reads()
+        .iter()
+        .filter(|read| read.spelled && !read.unspecified)
+        .filter_map(|read| {
+            let value = read.value?;
+            // What its own statement defines, it reads after writing it.
+            if defined_in_statement.contains(&(read.top, read.block, value)) {
+                return None;
+            }
+            let at = match read.source {
+                PlacementRead::Use(site) => site.inst,
+                PlacementRead::CertifiedValue { at, .. } => at,
+                PlacementRead::ArrayIndex { access, .. } => access.inst,
+                PlacementRead::StackAccess(_)
+                | PlacementRead::IndexedStackAccess(_)
+                | PlacementRead::ObjectAddress { .. } => return None,
+            };
+            Some(crate::binding_plan::RenderedRead {
+                binding: read.binding,
+                value,
+                block: read.block,
+                order: read.order.0,
+                region: read.region.index(),
+                at: Some(at),
+            })
+        })
+        .collect()
+}
+
+/// Every write that survived, with what it leaves its variable holding and
+/// where its instruction sits in the block it is rendered in.
+fn rendered_writes(
+    graph: &r2ssa::SsaGraph,
+    occurrences: &FinalPlacementOccurrences,
+) -> Vec<crate::binding_plan::RenderedWrite> {
+    occurrences
+        .writes()
+        .iter()
+        .map(|write| crate::binding_plan::RenderedWrite {
+            binding: write.binding,
+            // A store into a frame object holds what it stored.
+            value: write.defines.or_else(|| stored_value(graph, write.inst)),
+            block: write.block,
+            order: write.order.0,
+            region: write.region.index(),
+            ordinal: graph
+                .inst(write.inst)
+                .filter(|inst| {
+                    graph
+                        .block(inst.block)
+                        .is_some_and(|block| block.addr == write.block)
+                })
+                .map(|inst| inst.ordinal),
+        })
+        .collect()
+}
+
+/// Every merge whose output is bound, with the value each edge supplies.
+fn bound_merges(
+    graph: &r2ssa::SsaGraph,
+    binding_of: &dyn Fn(r2ssa::ValueId) -> Option<BindingId>,
+) -> Vec<crate::binding_plan::ReachingMerge> {
+    graph
+        .insts
+        .iter()
+        .filter_map(|inst| {
+            let r2ssa::InstPayload::Phi { predecessors } = &inst.payload else {
+                return None;
+            };
+            let output = inst.output.filter(|output| binding_of(*output).is_some())?;
+            let block = graph.block(inst.block)?.addr;
+            let incoming = predecessors
+                .iter()
+                .zip(&inst.inputs)
+                .filter_map(|(pred, value)| Some((graph.block(*pred)?.addr, *value)))
+                .collect();
+            Some(crate::binding_plan::ReachingMerge {
+                block,
+                output,
+                incoming,
+            })
+        })
+        .collect()
+}
+
+/// The value whose low bits `value` is by its own definition: the source of
+/// a copy, an extension or a restore.
+fn re_expressed(graph: &r2ssa::SsaGraph, value: r2ssa::ValueId) -> Option<r2ssa::ValueId> {
+    let inst = graph.inst(graph.def_inst(value)?)?;
+    match &inst.payload {
+        r2ssa::InstPayload::Op(
+            r2ssa::SSAOp::Copy { .. }
+            | r2ssa::SSAOp::IntZExt { .. }
+            | r2ssa::SSAOp::IntSExt { .. }
+            | r2ssa::SSAOp::CallRestore { .. },
+        ) => inst.inputs.first().copied(),
+        _ => None,
+    }
+}
+
+/// A stale read names a value, a variable and a place; which program values
+/// those are, and what the variable was written with, is what an
+/// investigation starts from.
+fn trace_stale_reads(
+    graph: &r2ssa::SsaGraph,
+    stale: &[crate::binding_plan::StaleRead],
+    writes: &[crate::binding_plan::RenderedWrite],
+) {
+    if !r2il::refusal_evidence::tracing() {
+        return;
+    }
+    let name = |value: r2ssa::ValueId| {
+        graph
+            .value(value)
+            .map_or_else(|| format!("{value:?}"), |value| value.var.display_name())
+    };
+    for read in stale {
+        r2il::refusal_evidence!(
+            "stale-read",
+            "{} through {:?} at {:#x}/{} may hold {:?} instead; writes of the variable {:?}",
+            name(read.read.value),
+            read.read.binding,
+            read.read.block,
+            read.read.order,
+            read.instead
+                .iter()
+                .map(|value| name(*value))
+                .collect::<Vec<_>>(),
+            writes
+                .iter()
+                .filter(|write| write.binding == read.read.binding)
+                .map(|write| (write.block, write.order, write.value.map(name)))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The bound values whose definitions the text does not spell because they
+/// say nothing: a copy, extension or restore whose source shares the
+/// variable, and a reload of the variable's own frame object.
+///
+/// Every bound value some statement body wrote and no surviving write
+/// defines is one of these or is never read; a merge is answered by the
+/// merges, and a value of any other kind is left out, so a read of it sees
+/// nothing and is stale.
+fn elided_definitions(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    occurrences: &FinalPlacementOccurrences,
+) -> Vec<crate::binding_plan::ElidedDefinition> {
+    use crate::binding_plan::{ElidedDefinition, ElidedSource, StackObjectDisposition};
+    let plan = names.plan();
+    let graph = source.graph();
+    let written = occurrences
+        .writes()
+        .iter()
+        .filter_map(|write| write.defines)
+        .collect::<BTreeSet<_>>();
+    graph
+        .values
+        .iter()
+        .filter(|value| graph.written_by_body(value.id) && !written.contains(&value.id))
+        .filter_map(|value| {
+            let Some(ValueDisposition::Bound { binding }) = plan.disposition(value.id) else {
+                return None;
+            };
+            let inst = graph.inst(graph.def_inst(value.id)?)?;
+            let source = match &inst.payload {
+                r2ssa::InstPayload::Op(
+                    r2ssa::SSAOp::Copy { .. }
+                    | r2ssa::SSAOp::IntZExt { .. }
+                    | r2ssa::SSAOp::IntSExt { .. }
+                    | r2ssa::SSAOp::CallRestore { .. },
+                ) => ElidedSource::Value(*inst.inputs.first()?),
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::Load { .. }) => {
+                    let object = loaded_frame_object(source, graph, inst.id)?;
+                    (plan.stack_object_disposition(object)
+                        == Some(StackObjectDisposition::Bound { binding: *binding }))
+                    .then_some(ElidedSource::Content)?
+                }
+                _ => return None,
+            };
+            Some(ElidedDefinition {
+                binding: *binding,
+                value: value.id,
+                block: graph.block(inst.block)?.addr,
+                ordinal: inst.ordinal,
+                source,
+            })
+        })
+        .collect()
+}
+
+/// The one frame object a load reads, by its op site.
+fn loaded_frame_object(
+    source: &r2ssa::SsaArtifact,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> Option<r2ssa::ObjectId> {
+    let (block_addr, op_idx) = graph.op_site_for_inst(inst)?;
+    let accesses = source
+        .certificates()
+        .memory_accesses_by_op
+        .get(&(block_addr, op_idx, false))?;
+    let [access] = accesses.as_slice() else {
+        return None;
+    };
+    let access = source.certificates().memory_accesses.get(access)?;
+    (access.space == r2il::SpaceId::Ram).then_some(access.object)
+}
+
+/// The value a store puts into memory.
+fn stored_value(graph: &r2ssa::SsaGraph, inst: InstId) -> Option<r2ssa::ValueId> {
+    let inst = graph.inst(inst)?;
+    match &inst.payload {
+        r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { val, .. }) => graph.value_id_for_var(val),
+        _ => None,
+    }
+}
+
 /// Whether removing this instruction's statement would lose an effect.
 ///
 /// A dead store drops the statements that write an object nothing reads, and

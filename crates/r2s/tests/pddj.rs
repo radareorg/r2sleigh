@@ -440,11 +440,10 @@ fn the_review_fixtures_are_units_that_compile() {
                 failures.extend(unassigned_reads_at_o2(definition, &answer));
             }
             // `dispatch`, where nothing declares what its pointer returns.
-            if build == "rv_O0g_stripped" && addr == DISPATCH_AT_O0 {
-                dispatch_at_o0 = true;
-                if !dispatch_marks_its_unproven_return(&answer) {
-                    failures.push(format!("{build} dispatch: {answer}"));
-                }
+            let dispatch = build == "rv_O0g_stripped" && addr == DISPATCH_AT_O0;
+            dispatch_at_o0 |= dispatch;
+            if dispatch && !dispatch_marks_its_unproven_return(&answer) {
+                failures.push(format!("{build} dispatch: {answer}"));
             }
         }
     }

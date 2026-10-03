@@ -260,6 +260,10 @@ struct AddressCollector<'a> {
     views: Option<&'a ValueViews>,
     definitions: HashMap<SSAVar, SSAOp>,
     expressions: BTreeMap<ValueId, AddressExpression>,
+    /// The values whose expression is the formal they are, placed before any
+    /// block is read; every other expression is derived by the block that
+    /// defines its value, from what that block is entered with.
+    seeded: BTreeSet<ValueId>,
     scalar_memo: HashMap<ValueId, Option<AffineScalar>>,
     scalar_visiting: HashSet<ValueId>,
     stack_in: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
@@ -328,6 +332,7 @@ impl<'a> AddressCollector<'a> {
             graph,
             views: function.decompile_prep_facts().map(|prep| &prep.views),
             definitions,
+            seeded: expressions.keys().copied().collect(),
             expressions,
             scalar_memo: HashMap::new(),
             scalar_visiting: HashSet::new(),
@@ -432,7 +437,39 @@ impl<'a> AddressCollector<'a> {
         let Some(block) = self.function.get_block(block_addr) else {
             return (stack, false);
         };
-        let mut changed = false;
+        // What this block derived the last time it was read was derived from
+        // the input it had then. The fixpoint starts from the predecessors it
+        // has seen, so a loop header is first read before its latch, under a
+        // spill the latch overwrites; keeping what was derived then would
+        // leave a reload of an overwritten home naming the formal for ever.
+        // So the block's own values are derived again from this input alone,
+        // and it has changed exactly where one of them came out different.
+        let defined = block
+            .phis
+            .iter()
+            .map(|phi| &phi.dst)
+            .chain(block.ops.iter().filter_map(SSAOp::dst))
+            .filter_map(|var| self.graph.value_id_for_var(var))
+            .filter(|value| !self.seeded.contains(value))
+            .collect::<Vec<_>>();
+        let before = defined
+            .iter()
+            .filter_map(|value| Some((*value, self.expressions.remove(value)?)))
+            .collect::<BTreeMap<_, _>>();
+        self.transfer_ops(block, &mut stack);
+        let changed = defined
+            .iter()
+            .any(|value| self.expressions.get(value) != before.get(value));
+        (stack, changed)
+    }
+
+    /// Derive the expressions of one block's values and its stack state, in
+    /// program order, from `stack` as the block is entered.
+    fn transfer_ops(
+        &mut self,
+        block: &crate::block::SSABlock,
+        stack: &mut BTreeMap<SpillSlotKey, AddressExpression>,
+    ) {
         for phi in &block.phis {
             let expressions = phi
                 .sources
@@ -447,7 +484,7 @@ impl<'a> AddressCollector<'a> {
                     .then_some(first)
             });
             if let Some(expression) = expression {
-                changed |= self.insert_expression(&phi.dst, expression);
+                self.insert_expression(&phi.dst, expression);
             }
         }
         for op in &block.ops {
@@ -486,7 +523,7 @@ impl<'a> AddressCollector<'a> {
                             })
                             .cloned()
                     }) {
-                        changed |= self.insert_expression(dst, expression);
+                        self.insert_expression(dst, expression);
                     } else if *space == SpaceId::Ram
                         && let Some(expression) = self.expression_for_var(addr)
                         && expression.path_len() < self.load_count
@@ -495,16 +532,15 @@ impl<'a> AddressCollector<'a> {
                         // The value read at a known address, taken as a
                         // pointer: its own address is one step further along
                         // the chain from the parameter.
-                        changed |= self.insert_expression(dst, pointee);
+                        self.insert_expression(dst, pointee);
                     }
                 }
                 _ => {}
             }
             if let Some((dst, expression)) = self.derive_op_expression(op) {
-                changed |= self.insert_expression(dst, expression);
+                self.insert_expression(dst, expression);
             }
         }
-        (stack, changed)
     }
 
     fn derive_op_expression<'b>(

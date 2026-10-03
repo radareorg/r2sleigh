@@ -638,12 +638,6 @@ fn unread_defined_value_is_elided_before_it_can_become_a_binding() {
             .iter()
             .all(|component| !component.members.contains(&dead))
     );
-    assert!(
-        seal_binding_components(&source_owned, &test_projection(&source_owned))
-            .expect("independent components")
-            .iter()
-            .all(|component| !component.members.contains(&dead))
-    );
     assert!(plan.validate_seal(&source_owned).is_ok());
 }
 
@@ -682,12 +676,6 @@ fn exact_source_return_address_fact_alone_authorizes_control_target_elision() {
     assert!(
         binding_components(&source_owned, &test_projection(&source_owned))
             .expect("construction components")
-            .iter()
-            .all(|component| !component.members.contains(&return_control))
-    );
-    assert!(
-        seal_binding_components(&source_owned, &test_projection(&source_owned))
-            .expect("independent components")
             .iter()
             .all(|component| !component.members.contains(&return_control))
     );
@@ -920,12 +908,6 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
     assert!(
         binding_components(&source_owned, &test_projection(&source_owned))
             .expect("construction components")
-            .iter()
-            .all(|component| !component.members.contains(&dead))
-    );
-    assert!(
-        seal_binding_components(&source_owned, &test_projection(&source_owned))
-            .expect("independent components")
             .iter()
             .all(|component| !component.members.contains(&dead))
     );
@@ -1274,6 +1256,90 @@ fn seal_rejects_foreign_authority_and_inverse_membership_drift() {
     ));
 }
 
+/// A split takes one value out of the variable it shared and leaves every
+/// other pair of values that shared a variable sharing one: the partition
+/// only gets finer, and splitting the same value again splits nothing.
+#[test]
+fn a_split_value_leaves_its_variable_and_the_partition_only_gets_finer() {
+    let version = Varnode::register(0x10, 8);
+    // Two versions of one register, the second computed from the first,
+    // each read twice so that neither folds into its reader.
+    let source_owned = source_owned([
+        R2ILOp::IntAdd {
+            dst: version.clone(),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(3, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2000, 8),
+            val: version.clone(),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2008, 8),
+            val: version.clone(),
+        },
+        R2ILOp::IntAdd {
+            dst: version.clone(),
+            a: version.clone(),
+            b: Varnode::constant(1, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2010, 8),
+            val: version.clone(),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2018, 8),
+            val: version,
+        },
+    ]);
+    let plan = BindingPlan::build_shadow(&source_owned).expect("plan");
+    let classes = plan.partition_classes();
+    let shared = (0..classes.len())
+        .find_map(|left| {
+            let right = (left + 1..classes.len())
+                .find(|right| classes[left] != u32::MAX && classes[*right] == classes[left])?;
+            Some((ValueId(left as u32), ValueId(right as u32)))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "two values sharing a variable:\n{}",
+                super::dump(source_owned.source(), &plan)
+            )
+        });
+    let evict = BTreeSet::from([shared.0]);
+    let mut splits = BindingSplits::default();
+    assert!(splits.split(plan.partition_classes(), &evict));
+
+    let split = BindingPlan::build_shadow_with_control(
+        &source_owned,
+        &splits,
+        &r2ssa::SsaExecutionControl::default(),
+    )
+    .expect("split plan");
+    assert!(split.validate_seal(&source_owned).is_ok());
+    let finer = split.partition_classes();
+    assert_ne!(
+        split.disposition(shared.0),
+        split.disposition(shared.1),
+        "the evicted value still shares its variable"
+    );
+    for left in 0..finer.len() {
+        for right in left + 1..finer.len() {
+            if finer[left] != u32::MAX && finer[left] == finer[right] {
+                assert_eq!(
+                    classes[left], classes[right],
+                    "values {left} and {right} share a variable only after the split"
+                );
+            }
+        }
+    }
+    assert!(!splits.split(finer, &evict), "a second split of one value");
+}
+
 #[test]
 fn seal_resolves_certificate_sources_instead_of_trusting_stored_witnesses() {
     let first = Varnode::unique(0x10, 8);
@@ -1447,15 +1513,6 @@ fn overlapping_parameter_and_span_certificates_close_transitively_in_canonical_o
             .iter()
             .any(|source| matches!(source, BindingCertificateSource::StorageSpan(_)))
     );
-
-    let sealed = seal_binding_components(&source_owned, &test_projection(&source_owned))
-        .expect("independent BFS components");
-    let sealed_component = sealed
-        .iter()
-        .find(|component| component.sources.contains(&parameter))
-        .expect("independently resolved parameter component");
-    assert_eq!(sealed_component.members, component.members);
-    assert_eq!(sealed_component.sources, component.sources);
 
     let plan = BindingPlan::build_shadow(&source_owned).expect("sealed overlap plan");
     let binding = plan

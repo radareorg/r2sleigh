@@ -1358,7 +1358,12 @@ fn native_standard_path_renders_its_internal_build() {
     let execution = r2ssa::SsaExecutionControl::default();
     let work = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
     let built = internal_decompiler
-        .build_function_internal_with_control(&input, work, &Default::default())
+        .build_function_internal_with_control(
+            &input,
+            work,
+            &Default::default(),
+            &Default::default(),
+        )
         .expect("native production build");
 
     let internal_output = CodeGenerator::new(config.codegen).generate_function(built.emission());

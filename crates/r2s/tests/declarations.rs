@@ -43,8 +43,14 @@ fn a_struct_parameter_costs_the_function_none_of_its_types() {
     assert!(out.contains("int32_t c;"), "{out}");
     assert!(out.contains("return c;"), "{out}");
     assert!(!out.contains("(uint64_t)c"), "{out}");
-    // The layout reached the graph, so the member has a name.
-    assert!(out.contains("n->next"), "{out}");
+    // `n` is one variable that walks the list: its home is written in the
+    // loop, so no read inside it is the value `n` was entered with. (`n->next`
+    // used to appear through exactly that stale identity -- the reload taken
+    // for the parameter -- and comes back when a load is typed by the
+    // declared pointee of the variable it reads through.)
+    assert!(out.contains("while ((uint64_t)n != 0)"), "{out}");
+    assert!(out.contains("n = (const struct node*)"), "{out}");
+    assert!(!out.contains("r2sleigh_residual"), "{out}");
     assert!(
         out.contains("struct node {"),
         "the rendering defines what it reads through:\n{out}"

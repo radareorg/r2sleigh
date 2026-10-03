@@ -11,7 +11,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::and_chain_effect": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/branchy.c::clang-O0::bool_relay": {
    "status": "equal"
@@ -47,7 +49,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::inverted_void": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/branchy.c::clang-O0::main": {
    "cause": "[P7] The run reaches a counted residual (r2sleigh_residual_void). Was ub.",
@@ -157,7 +161,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::inverted_void": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/branchy.c::clang-O1::main": {
    "cause": "[PE (exact Insert transfer + forward definedness; covered insert chains projected root-free), deleting the one-shot zero_scratch_insert_roots heuristic] [G-LANES] `xorps xmm0,xmm0` (0x401431) lifts as four lane writes `XMM0_Dx = XMM0_Dx ^ XMM0_Dx`, which rename turns into INSERT^4 over entry XMM0_0 covering all 16 bytes. optimize.rs:1796 folds each x^x to 0 (pdim: `XMM0_1 = INSERT(XMM0_0, const:0, const:0)` .. `XMM0_4 = INSERT(XMM0_3, const:0, const:60)`), but nothing then removes the chain root once the windows cover it. deadphi.rs observed_input_bytes has no Insert arm (:251 `_ => whole`), and the machine projection has no rule that an insert whose root contributes no observed byte is its lane (the known gap of critique:lowering#4 and #1(...",
@@ -270,7 +276,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::inverted_void": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/branchy.c::clang-O2::main": {
    "cause": "[PE (exact Insert transfer + forward definedness; covered insert chains projected root-free), deleting the one-shot zero_scratch_insert_roots heuristic] [G-LANES] `xorps xmm0,xmm0` (0x40141f) lifts as four lane writes `XMM0_Dx = XMM0_Dx ^ XMM0_Dx`, which rename turns into INSERT^4 over entry XMM0_0 covering all 16 bytes. optimize.rs:1796 folds each x^x to 0, but nothing removes the covered chain root. deadphi.rs:251 has no Insert arm, and the projection has no rule for a root that contributes no observed byte (the known gap of critique:lowering#4 and #1). zero_scratch_insert_roots (r2ssa/src/function/rewrite.rs:26) runs once at build (r2ssa/src/function/build.rs:576), before the fold, while the lane Subpiece reads still count as Observed. T...",
@@ -341,7 +349,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O0::and_chain_effect": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/branchy.c::gcc-O0::bool_relay": {
    "status": "equal"
@@ -377,11 +387,13 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O0::inverted_void": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/branchy.c::gcc-O0::main": {
-   "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_ptr",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::mask_probe": {
@@ -450,7 +462,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::bool_relay": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O1::bounded_fetch": {
    "status": "equal"
@@ -468,7 +482,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::gate_three": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O1::global_eq_guard": {
    "status": "equal"
@@ -518,7 +534,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::sign_xor": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O1::slot_eq_guard": {
    "status": "equal"
@@ -551,7 +569,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::bool_relay": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O2::bounded_fetch": {
    "status": "equal"
@@ -569,7 +589,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::gate_three": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O2::global_eq_guard": {
    "status": "equal"
@@ -619,7 +641,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::sign_xor": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O2::slot_eq_guard": {
    "status": "equal"
@@ -649,7 +673,9 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::clang-O0::crc32_init": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/hashes.c::clang-O0::crc32_table": {
    "status": "equal"
@@ -802,7 +828,9 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O0::crc32_init": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/corpus/hashes.c::gcc-O0::crc32_table": {
    "status": "equal"
@@ -1237,7 +1265,9 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_pointer_to_pointer": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_ptr",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::shape_recurse_direct": {
    "status": "equal"
@@ -2149,13 +2179,17 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::state_machine": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
+   "status": "refused"
   },
   "tests/gold/manual_limits.c::clang-O1::struct_nested_array": {
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::table_walk": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
+   "status": "refused"
   },
   "tests/gold/manual_limits.c::clang-O2::fnv_fold": {
    "status": "equal"
@@ -2316,9 +2350,9 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::avg": {
-   "cause": "[P7 calls (float result class; the result must be defined on every return path and demanded), plus P1 reads (an entry read of a non-argument register must be a residual)] The recovered interface has no floating-point result class, so the double result in XMM0 cannot be represented and the addsd/divsd chain is dropped as unobserved. The result is claimed as Register(RAX). The value live in RAX at the return is a phi of the caller's unspecified entry RAX (on the n<=0 path) and ZEXT(ESI) (the loop bound). The rendering returns `RAX_1`, which is uninitialized on one path (-Wmaybe-uninitialized), and never writes XMM0.",
-   "reason": "return",
-   "status": "differs"
+   "cause": "[P7 float result; p1-reads merged] avg returns its double in XMM0, which the recovered interface does not carry, and the read of the never-assigned float result is now refused instead of rendered as the wrong integer (was differs). Fixed by the float result class.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/gold/review.c::clang-O1::bit_count": {
    "status": "equal"
@@ -2371,9 +2405,9 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::avg": {
-   "cause": "[P7 calls (+P1 reads)] Same as clang-O1 avg. The interface has no float result, so the vectorised FP accumulation and the XMM0 return are dropped. RAX is claimed as the result although it holds an entry value on the n<=0 path (`return RAX_2;`, possibly uninitialized). Vector n=0: the original returns 0.0 in xmm0, and the rendering leaves garbage there.",
-   "reason": "return",
-   "status": "differs"
+   "cause": "[P7 float result; p1-reads merged] avg returns its double in XMM0, which the recovered interface does not carry, and the read of the never-assigned float result is now refused instead of rendered as the wrong integer (was differs). Fixed by the float result class.",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
+   "status": "refused"
   },
   "tests/gold/review.c::clang-O2::bit_count": {
    "status": "equal"
@@ -2527,7 +2561,9 @@
    "status": "ub"
   },
   "tests/gold/review.c::gcc-O1::sext": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::sum_array": {
    "status": "equal"
@@ -2582,7 +2618,9 @@
    "status": "ub"
   },
   "tests/gold/review.c::gcc-O2::sext": {
-   "status": "equal"
+   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::sum_array": {
    "status": "equal"
