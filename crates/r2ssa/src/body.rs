@@ -59,6 +59,14 @@ pub trait Program {
         true
     }
 
+    /// Whether control comes back from a call through the pointer held at
+    /// `slot` -- `call [slot]` -- where the program says what the slot holds:
+    /// an import the loader binds there, declared as never returning.
+    /// Unproven, it does.
+    fn returns_through(&self, _slot: u64) -> bool {
+        true
+    }
+
     /// The register a call leaves the return address in, where the machine
     /// names one. The compiler specification states it; the walk reads the
     /// bytes and cannot know it, which is why it is asked for here.
@@ -550,9 +558,14 @@ impl Walk {
                     (false, None) => {}
                 }
             }
-            // A call through a register is opaque, so it is assumed to come back.
+            // A call through a register is opaque, so it is assumed to come
+            // back -- unless it calls through a slot whose pointer the
+            // program states, and what it states there never returns.
             BlockTerminator::IndirectCall { fallthrough } => {
-                self.continues(fallthrough, &mut successors, program)
+                let through = called_slot(&instruction.lifted.ops);
+                if through.is_none_or(|slot| program.returns_through(slot)) {
+                    self.continues(fallthrough, &mut successors, program)
+                }
             }
             // A switch is an indirect branch through a table, so it is one
             // case rather than two: both go wherever a previous pass proved
@@ -653,6 +666,33 @@ impl Walk {
             unresolved: self.unresolved,
         }
     }
+}
+
+/// The constant address an indirect call reads its target from, where the
+/// call's target is exactly a load of one: `call [slot]`.
+fn called_slot(ops: &[r2il::R2ILOp]) -> Option<u64> {
+    let target = ops.iter().rev().find_map(|op| match op {
+        r2il::R2ILOp::CallInd { target } => Some(target),
+        _ => None,
+    })?;
+    // The last write of the target before the call is what it calls.
+    let at = ops
+        .iter()
+        .position(|op| matches!(op, r2il::R2ILOp::CallInd { .. }))?;
+    ops[..at].iter().rev().find_map(|op| {
+        let written = op.output()?;
+        if written != target {
+            return None;
+        }
+        Some(match op {
+            r2il::R2ILOp::Load { space, addr, .. }
+                if *space == r2il::SpaceId::Ram && addr.space == r2il::SpaceId::Const =>
+            {
+                Some(addr.offset)
+            }
+            _ => None,
+        })
+    })?
 }
 
 /// Every address a load reads that the operations state as a constant.

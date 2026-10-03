@@ -559,6 +559,10 @@ impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
         self.comes_back(callee)
     }
 
+    fn returns_through(&self, slot: u64) -> bool {
+        self.returns_through_slot(slot)
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.assembled.as_ref().and_then(|held| held.link.clone())
     }
@@ -658,6 +662,12 @@ impl<S: Source> r2ssa::body::Program for Recording<'_, S> {
         let answer = self.program.comes_back(callee);
         self.consulted.borrow_mut().returns.push((callee, answer));
         answer
+    }
+
+    // What a slot holds is the container's statement, fixed for the revision
+    // the derivation is keyed by, so it is not a consulted answer.
+    fn returns_through(&self, slot: u64) -> bool {
+        self.program.returns_through_slot(slot)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

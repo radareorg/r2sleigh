@@ -62,6 +62,10 @@ impl r2ssa::body::Program for Knowing<'_> {
         (self.returns)(callee)
     }
 
+    fn returns_through(&self, slot: u64) -> bool {
+        self.program.returns_through(slot)
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.program.return_address_register()
     }
@@ -217,6 +221,15 @@ impl<S: Source> OpenProgram<S> {
         let answer = found.get(&callee).copied().unwrap_or(true);
         self.hold_returns(at, found);
         answer
+    }
+
+    /// Whether a call through `slot` comes back: false only where the import
+    /// the loader binds there is declared never to return.
+    pub(super) fn returns_through_slot(&self, slot: u64) -> bool {
+        Walking::new(self, false)
+            .ok()
+            .and_then(|walker| walker.declared(slot))
+            .unwrap_or(true)
     }
 
     /// The answer held for these bytes, the table dropped where they have moved.

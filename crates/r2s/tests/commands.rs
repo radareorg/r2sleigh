@@ -94,7 +94,9 @@ fn every_discovered_address_says_why_it_is_believed() {
 /// `afl` is radare2's: no header, then `addr nbbs size name`, the size being
 /// the bytes of the blocks and not the span with the padding between them.
 /// gcc's `deregister_tm_clones` ends in a `jmp rax` with its `ret` eight
-/// bytes on: four blocks, 34 bytes, which is exactly radare2's row.
+/// bytes on: four blocks, 34 bytes, which is exactly radare2's row. `_start`
+/// ends at `call [__libc_start_main]`: the slot's import is declared never to
+/// return, so the `hlt` after it is no block of the body.
 #[test]
 fn afl_lists_functions_in_radare2s_columns() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
@@ -106,6 +108,7 @@ fn afl_lists_functions_in_radare2s_columns() {
         run.out
     );
     for row in [
+        "0x000010c0    1     37 sym._start",
         "0x000010f0    4     34 sym.deregister_tm_clones",
         "0x000011c1    4     73 sym.sum_array",
         "0x00001549    6    640 sym.main",
