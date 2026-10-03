@@ -255,8 +255,17 @@ impl CTypeLike {
     ///
     /// `Unknown` is admitted: nothing has said the value is not a pointer, and
     /// refusing on no evidence is not a claim this model makes.
+    ///
+    /// The element has to be a complete object type: `p[i]` through a
+    /// `void *` or a pointer to code is not C.
     pub fn may_be_subscripted(&self) -> bool {
-        self.subscript_element().is_some() || matches!(self.unaliased(), CTypeLike::Unknown)
+        match self.subscript_element() {
+            Some(element) => !matches!(
+                element.unaliased(),
+                CTypeLike::Void | CTypeLike::Function { .. }
+            ),
+            None => matches!(self.unaliased(), CTypeLike::Unknown),
+        }
     }
 
     pub fn bits(&self, ptr_bits: u32) -> Option<u32> {
@@ -740,6 +749,20 @@ fn named_integer_bits(spelling: &str, ptr_bits: u32) -> Option<(u32, Signedness)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `p[i]` needs a complete element: through `void *` it is not C, and a
+    /// recovered pointer whose accesses read several widths is `void *`.
+    #[test]
+    fn only_a_pointer_to_a_complete_object_is_subscripted() {
+        let byte = CTypeLike::Int {
+            bits: 8,
+            signedness: Signedness::Unsigned,
+        };
+        assert!(CTypeLike::Pointer(Box::new(byte)).may_be_subscripted());
+        assert!(!CTypeLike::Pointer(Box::new(CTypeLike::Void)).may_be_subscripted());
+        assert!(CTypeLike::Unknown.may_be_subscripted());
+        assert!(!CTypeLike::Void.may_be_subscripted());
+    }
     /// C says the order of type specifiers is immaterial, and the debug
     /// information takes it at its word: GCC writes `long unsigned int`.
     #[test]

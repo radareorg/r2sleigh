@@ -227,6 +227,14 @@ fn param_array(
         None if array.field_offset == 0 => None,
         _ => return None,
     };
+    // `base[index]` scales by the declared element, and `.field` needs an
+    // aggregate there. The certificate proves a stride; a base declared as a
+    // pointer to something of another size, or to a scalar where a field is
+    // named, spells a different address or no C at all: `Rec *` recovered as
+    // `uint32_t *` rendered `v[i].f_4`.
+    if !declared_element_spells(inputs, base, array.element_stride, field.is_some()) {
+        return None;
+    }
     Some(AccessSyntax::ParamArray { base, index, field })
 }
 
@@ -392,6 +400,35 @@ fn name_may_be_subscripted(inputs: &AccessSyntaxInputs<'_>, value: ValueId) -> b
         }
         _ => true,
     }
+}
+
+/// Whether the base's declared element is what the certified array proves:
+/// an aggregate where a field is named, otherwise an object as wide as the
+/// stride. A base with no declaration spells its own element and is not
+/// refused here.
+fn declared_element_spells(
+    inputs: &AccessSyntaxInputs<'_>,
+    base: ValueId,
+    stride: u64,
+    field: bool,
+) -> bool {
+    let Some(ValueDisposition::Bound { binding }) = inputs.dispositions.get(base.0 as usize) else {
+        return true;
+    };
+    let Some(binding) = inputs.bindings.get(binding.index()) else {
+        return true;
+    };
+    let declared = binding.declaration_type();
+    let Some(element) = declared.subscript_element() else {
+        return true;
+    };
+    if field {
+        return element.is_aggregate();
+    }
+    !element.is_aggregate()
+        && element
+            .bits(inputs.ptr_bits)
+            .is_some_and(|bits| u64::from(bits) == stride.saturating_mul(8))
 }
 
 fn value_has_expression(inputs: &AccessSyntaxInputs<'_>, value: ValueId) -> bool {

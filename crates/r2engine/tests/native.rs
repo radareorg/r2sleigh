@@ -1118,6 +1118,59 @@ fn marks_an_unproven_return(output: &str) -> bool {
     output.starts_with("uint64_t ") && output.contains("return r2sleigh_residual_u64(")
 }
 
+/// A field of an element of a struct array, through a pointer the certified
+/// accesses type by the width they read.
+///
+/// `v[i].beta = q; return v[i].beta + v[i].alpha;` over a 16-byte `Rec` is two
+/// four-byte accesses at `v + 16 i + 4` and `v + 16 i`, so the parameter is
+/// `uint32_t *`. Spelled `v[i].f_4` the rendering named a field of a scalar,
+/// and spelled `v[i]` it would scale by four, not sixteen: the subscript
+/// stands only where the declared element is the proven stride, and the C has
+/// to compile and compute the original's answer.
+#[test]
+fn a_struct_stride_through_a_scalar_pointer_is_not_subscripted_by_the_scalar() {
+    // clang -O0: every operand goes through its frame slot, and each access
+    // recomputes `v + 16 i` from the reloaded parameter.
+    const REC_INDEX: &[u8] = &[
+        0x55, // push rbp
+        0x48, 0x89, 0xe5, // mov rbp, rsp
+        0x48, 0x89, 0x7d, 0xf8, // mov [rbp - 8], rdi
+        0x89, 0x75, 0xf4, // mov [rbp - 12], esi
+        0x89, 0x55, 0xf0, // mov [rbp - 16], edx
+        0x8b, 0x4d, 0xf0, // mov ecx, [rbp - 16]
+        0x48, 0x8b, 0x45, 0xf8, // mov rax, [rbp - 8]
+        0x48, 0x63, 0x55, 0xf4, // movsxd rdx, [rbp - 12]
+        0x48, 0xc1, 0xe2, 0x04, // shl rdx, 4
+        0x48, 0x01, 0xd0, // add rax, rdx
+        0x89, 0x48, 0x04, // mov [rax + 4], ecx
+        0x48, 0x8b, 0x45, 0xf8, // mov rax, [rbp - 8]
+        0x48, 0x63, 0x4d, 0xf4, // movsxd rcx, [rbp - 12]
+        0x48, 0xc1, 0xe1, 0x04, // shl rcx, 4
+        0x48, 0x01, 0xc8, // add rax, rcx
+        0x8b, 0x40, 0x04, // mov eax, [rax + 4]
+        0x48, 0x8b, 0x4d, 0xf8, // mov rcx, [rbp - 8]
+        0x48, 0x63, 0x55, 0xf4, // movsxd rdx, [rbp - 12]
+        0x48, 0xc1, 0xe2, 0x04, // shl rdx, 4
+        0x48, 0x01, 0xd1, // add rcx, rdx
+        0x03, 0x01, // add eax, [rcx]
+        0x5d, // pop rbp
+        0xc3, // ret
+    ];
+    let text = rendered(REC_INDEX, "rec_index");
+    assert!(!text.contains(".f_"), "{text}");
+    run_rendered(
+        "rec_index",
+        &text,
+        r#"int main(void) {
+    int32_t recs[4][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}, {13, 14, 15, 16}};
+    if ((int32_t)rec_index((void*)recs, 2, 100) != 109) {
+        return 2;
+    }
+    return recs[2][1] != 100;
+}"#,
+    );
+}
+
 /// A result register filled on one path and holding the caller's on the other.
 ///
 /// The caller never fills `rax` on x86-64, so the arm that skips the `mov`

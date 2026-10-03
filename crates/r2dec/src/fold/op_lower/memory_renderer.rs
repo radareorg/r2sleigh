@@ -413,7 +413,7 @@ impl<'a> FoldingContext<'a> {
             // one that is absent says nothing and is not a refusal.
             Some(declared) => declared
                 .as_type()
-                .is_none_or(|ty| ty.subscript_element().is_some()),
+                .is_none_or(|ty| ty.subscript_element().is_some() && ty.may_be_subscripted()),
             None => true,
         }
     }
