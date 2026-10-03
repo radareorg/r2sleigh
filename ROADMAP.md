@@ -176,7 +176,7 @@ and V (visual mode and shell experience).
 
 | Item | Depends on | Exit |
 |------|-----------|------|
-| **F1** Stable op and value ids; every `(block, op index)` map re-keyed; stage types (D2, D3). Design and five-step migration: [doc/adr-stable-identity.md](doc/adr-stable-identity.md); step 0 (the remap) and step 1 (the `OpId` arena) done | G | `get_block_mut`, `op_mut`, the revision asserts and the remap comment are gone |
+| **F1** Stable op and value ids; every `(block, op index)` map re-keyed; stage types (D2, D3). Design and five-step migration: [doc/adr-stable-identity.md](doc/adr-stable-identity.md); step 0 (the remap), step 1 (the `OpId` arena) and step 2 (`Lifted -> Prepared -> Sealed`; passes edit through plans; prep facts only on `Sealed`) done | G | `get_block_mut`, `op_mut`, the revision asserts and the remap comment are gone |
 | **F2** One IR with views: blocks, graph and value views built once at seal; the machine projection and term arena become indexes; one liveness model over locations; flag and temporary phis pruned by liveness | F1, P4 | No rebuild after seal; closes #47, #50, #56 |
 | **K** One fixpoint driver: lattice height, widening and a visible budget for every iterative pass, Kani on the lattice laws (the rest of track K) | F1 | No bare `loop` until unchanged; `objects.rs:196` first |
 
