@@ -55,6 +55,20 @@ pub(crate) fn candidates(line: &str, cursor: usize, names: &[String]) -> (usize,
             .collect();
         return (start, found);
     }
+    let verb = leading.split_whitespace().next().unwrap_or("");
+    if crate::commands::find(verb).is_some_and(|verb| verb.arguments == Arguments::Key)
+        && !word.contains('=')
+    {
+        let found = crate::config::KEYS
+            .iter()
+            .filter(|key| key.name.starts_with(word))
+            .map(|key| Candidate {
+                value: key.name.to_owned(),
+                description: Some(key.summary.to_owned()),
+            })
+            .collect();
+        return (start, found);
+    }
     if !leading.is_empty() {
         return (cursor, Vec::new());
     }
@@ -127,6 +141,14 @@ mod tests {
             ["afl", "aflj", "afi", "afb", "afv"]
         );
         assert_eq!(values("s 0x10; af", &[]).0, 8);
+    }
+
+    #[test]
+    fn a_configuration_key_completes_from_the_key_table() {
+        assert_eq!(values("e asm.b", &[]), (2, vec!["asm.bytes".to_owned()]));
+        assert_eq!(values("e s", &[]), (2, vec!["scr.color".to_owned()]));
+        // The value is not a key.
+        assert!(values("e scr.color=", &[]).1.is_empty());
     }
 
     #[test]

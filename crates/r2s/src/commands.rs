@@ -26,13 +26,12 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
         None => None,
     };
     // A grep reads the text, and an escape in it would split what it matches.
-    let painting = session.color;
-    session.color = painting && grep.is_none();
+    session.grepped = grep.is_some();
     let output = match &statement.at {
         Some(address) => elsewhere(session, address, &statement.command),
         None => dispatch(session, &statement.command),
     };
-    session.color = painting;
+    session.grepped = false;
     let output = output?;
     Ok(match grep {
         Some(grep) => grep.apply(&output)?,
@@ -87,6 +86,8 @@ pub(crate) enum Arguments {
     Text,
     /// Hex bytes.
     Bytes,
+    /// A configuration key, and the value to set it to.
+    Key,
 }
 
 impl Arguments {
@@ -97,6 +98,7 @@ impl Arguments {
             Self::Count => "[n]",
             Self::Text => "<text>",
             Self::Bytes => "<hex>",
+            Self::Key => "[key[=value]]",
         }
     }
 }
@@ -161,6 +163,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Public,
         "seek to an address, or print the seek",
         Some(seek)
+    ),
+    verb!(
+        ["e"],
+        Key,
+        Public,
+        "read or set a configuration key",
+        Some(crate::config::run)
     ),
     verb!(
         ["i"],
@@ -1380,7 +1389,7 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr, RenderTier::C)?;
-    let roles = match (&rendering.response.output, session.color) {
+    let roles = match (&rendering.response.output, session.paints()) {
         (r2engine::EngineRendering::Function(rendered), true) => {
             Some(crate::listing::c_roles(rendered.emission().roles()))
         }

@@ -2,6 +2,7 @@
 
 mod commands;
 mod complete;
+mod config;
 mod function;
 mod grep;
 mod line;
@@ -33,6 +34,10 @@ struct Cli {
     /// Open the visual mode, as radare2's `V`
     #[arg(short = 'V', long)]
     visual: bool,
+
+    /// Set a configuration key before anything runs, as `e key=value` would
+    #[arg(short = 'e', value_name = "key=value")]
+    config: Vec<String>,
 }
 
 fn main() {
@@ -48,6 +53,12 @@ fn main() {
     // (https://no-color.org). Anything a program reads gets plain text.
     session.color = std::io::stdout().is_terminal()
         && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+    for setting in &cli.config {
+        if let Err(message) = config::run(&mut session, setting) {
+            eprintln!("r2s: {message}");
+            std::process::exit(1);
+        }
+    }
 
     let mut reader = line::Reader::default();
     if cli.visual {

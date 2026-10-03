@@ -362,6 +362,48 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// `e` reads and sets the keys the shell acts on, by radare2's names: a key
+/// it lacks and a value it cannot read are refused, and the value stays.
+#[test]
+fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
+    let run = r2s("e; e asm.bytes=false; pd 1 @ 0x401330; e asm.bytes=maybe; e asm.bytes");
+    assert_eq!(
+        run.out,
+        "asm.bytes = true\n\
+         scr.color = 0\n\
+         \x20           0x00401330      endbr64\n\
+         false\n\
+         r2s: asm.bytes takes true or false, not 'maybe'\n",
+    );
+    assert!(
+        on(fixture(), "e nosuch.key")
+            .out
+            .contains("Invalid config key nosuch.key")
+    );
+
+    // Colour is a setting a grep does not reset: the grep only keeps escapes
+    // out of the statement it reads.
+    let colour = r2s("e scr.color=1; pd 1 @ 0x401330~endbr; e scr.color");
+    assert_eq!(
+        colour.out,
+        "            0x00401330      f30f1efa       endbr64\n1\n"
+    );
+
+    // `-e` sets a key before the script runs, and a bad one ends the shell.
+    let flagged = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .args(["-q", "-e", "scr.color=1", "-c", "pd 1 @ 0x401330"])
+        .arg(fixture())
+        .output()
+        .expect("the shell runs");
+    assert!(String::from_utf8_lossy(&flagged.stdout).contains("\x1b["));
+    let refused = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .args(["-q", "-e", "asm.byte=1", "-c", "q"])
+        .arg(fixture())
+        .output()
+        .expect("the shell runs");
+    assert!(!refused.status.success());
+}
+
 /// Discovery's walk is held per state of the bytes, so a patch that ends a
 /// body early is walked again: the second `afl` of one session sees the `ret`.
 #[test]

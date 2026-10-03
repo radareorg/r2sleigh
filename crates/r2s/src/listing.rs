@@ -61,17 +61,21 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
         true => painted(line, session.program.names()),
     };
     let offset = format!("{:#010x}", line.address);
-    let (offset, text) = match session.color {
+    let (offset, text) = match session.paints() {
         true => (
             r2s_tui::theme::ansi(&offset, &[(0..offset.len(), Role::Offset)]),
             r2s_tui::theme::ansi(&text, &roles),
         ),
         false => (offset, text),
     };
+    // Without the bytes, the text takes the column they stood in.
+    let hex = match session.bytes {
+        true => format!("{hex:<14} "),
+        false => String::new(),
+    };
     format!(
-        "{}            {offset}      {:<14} {text}{}\n",
+        "{}            {offset}      {hex}{text}{}\n",
         labels(line),
-        hex,
         held(session, line)
     )
 }

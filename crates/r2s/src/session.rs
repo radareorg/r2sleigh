@@ -13,9 +13,14 @@ pub struct Session {
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
-    /// Whether listings are painted: only for a terminal, never under
-    /// `NO_COLOR`, and never for a statement whose output a grep reads.
+    /// Whether listings are painted, `scr.color`: on for a terminal unless
+    /// `NO_COLOR` says otherwise.
     pub color: bool,
+    /// Whether a grep reads the output of the statement running, which an
+    /// escape would split. Set for one statement, never a setting.
+    pub grepped: bool,
+    /// Whether a listing shows each instruction's bytes: `asm.bytes`.
+    pub bytes: bool,
 }
 
 impl Session {
@@ -24,10 +29,17 @@ impl Session {
         let program = OpenProgram::of(Opened::of(image));
         Ok(Self {
             color: false,
+            grepped: false,
+            bytes: true,
             addr: program.start().unwrap_or(0),
             program,
             path: path.to_owned(),
         })
+    }
+
+    /// Whether what the running statement prints is painted.
+    pub const fn paints(&self) -> bool {
+        self.color && !self.grepped
     }
 
     /// The binary as the container states it.
