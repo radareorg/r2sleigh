@@ -7,12 +7,14 @@
 use crate::line::Reader;
 use crate::session::Session;
 use reedline::{
-    FileBackedHistory, Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus,
-    Reedline, Signal,
+    ColumnarMenu, Emacs, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Prompt,
+    PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// How many lines the history keeps.
 const HISTORY: usize = 1000;
@@ -23,9 +25,12 @@ fn history_file(home: Option<&OsStr>) -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".r2s_history"))
 }
 
+/// The name of the menu Tab opens.
+const COMPLETIONS: &str = "completions";
+
 /// The line editor, its history read from the file where there is one and
-/// held in memory otherwise.
-fn editor() -> Reedline {
+/// held in memory otherwise, and Tab completing verbs and names.
+fn editor(names: Arc<Mutex<Vec<String>>>) -> Reedline {
     let file = history_file(std::env::var_os("HOME").as_deref());
     let history = match file {
         Some(file) => FileBackedHistory::with_file(HISTORY, file.clone()).map_err(|error| {
@@ -37,7 +42,21 @@ fn editor() -> Reedline {
         None => Err(()),
     }
     .or_else(|()| FileBackedHistory::new(HISTORY).map_err(|_| ()));
-    let editor = Reedline::create();
+    let mut keys = default_emacs_keybindings();
+    keys.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu(COMPLETIONS.to_owned()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    let editor = Reedline::create()
+        .with_completer(Box::new(crate::complete::Completer { names }))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+            ColumnarMenu::default().with_name(COMPLETIONS),
+        )))
+        .with_edit_mode(Box::new(Emacs::new(keys)));
     match history {
         Ok(history) => editor.with_history(Box::new(history)),
         Err(()) => editor,
@@ -86,8 +105,22 @@ pub(crate) enum Ended {
 /// Read lines at the terminal and run each, until one quits, the user leaves
 /// with `Ctrl-D`, or the editor cannot drive the terminal.
 pub(crate) fn interactive(session: &mut Session, reader: &mut Reader) -> Ended {
-    let mut editor = editor();
+    let names = Arc::new(Mutex::new(Vec::new()));
+    let mut editor = editor(Arc::clone(&names));
     loop {
+        // The names `f` lists, which a command can have added to. The table
+        // is complete once there is a decoder to name the linkage stubs
+        // with, as `f` knows; without one there is nothing to offer.
+        if session.program.ensure_current().is_ok()
+            && let Ok(mut held) = names.lock()
+        {
+            *held = session
+                .program
+                .names()
+                .iter()
+                .map(|(_, name)| name.spelled().to_string())
+                .collect();
+        }
         match editor.read_line(&Seek(session.addr)) {
             Ok(Signal::Success(line)) => {
                 // Whichever spelling quit, and wherever on the line it stood.
