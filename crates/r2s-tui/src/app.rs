@@ -590,8 +590,13 @@ impl App {
                 match result {
                     Ok(()) => self.invalidate(),
                     Err(error) => {
+                        // The edit moved on when the byte was typed; a write
+                        // refused puts the cursor back on the byte it names.
                         self.editing = None;
                         self.message = Message::Error(format!("write at {at:#x}: {error}"));
+                        if self.view == View::Hex {
+                            self.cursor_to_byte(at);
+                        }
                     }
                 }
             }
@@ -864,6 +869,17 @@ impl App {
     }
 
     /// Move the cursor `delta` rows (bytes, in hex), scrolling the pane.
+    /// Put the hex cursor on `at`, scrolling by whole rows only if it is off
+    /// the page.
+    fn cursor_to_byte(&mut self, at: u64) {
+        let page = self.rows.max(1) as u64 * 16;
+        if at < self.top || at >= self.top.saturating_add(page) {
+            self.top = at & !0xf;
+        }
+        self.cursor = (at - self.top) as usize;
+        self.seek = at;
+    }
+
     fn step(&mut self, delta: isize) {
         match self.view {
             View::Disassembly | View::Split => self.step_lines(delta),

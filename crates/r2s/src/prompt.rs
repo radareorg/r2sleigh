@@ -73,24 +73,34 @@ impl Prompt for Seek {
     }
 }
 
-/// Read lines at the terminal and run each, until one quits or the user
-/// leaves with `Ctrl-D`.
-pub(crate) fn interactive(session: &mut Session, reader: &mut Reader) {
+/// How the line editor stopped.
+pub(crate) enum Ended {
+    /// A quit, or `Ctrl-D`: the shell is done.
+    Left,
+    /// The editor could not drive this terminal -- one that never answers a
+    /// cursor-position query, for instance. The session goes on, read the
+    /// plain way.
+    EditorFailed,
+}
+
+/// Read lines at the terminal and run each, until one quits, the user leaves
+/// with `Ctrl-D`, or the editor cannot drive the terminal.
+pub(crate) fn interactive(session: &mut Session, reader: &mut Reader) -> Ended {
     let mut editor = editor();
     loop {
         match editor.read_line(&Seek(session.addr)) {
             Ok(Signal::Success(line)) => {
                 // Whichever spelling quit, and wherever on the line it stood.
                 if crate::run_script(session, reader, &line).quit {
-                    break;
+                    return Ended::Left;
                 }
             }
             // A line given up, as a shell gives it up.
             Ok(Signal::CtrlC) => {}
-            Ok(Signal::CtrlD) => break,
+            Ok(Signal::CtrlD) => return Ended::Left,
             Err(error) => {
-                eprintln!("r2s: {error}");
-                break;
+                eprintln!("r2s: line editing is unavailable here ({error}); reading lines plainly");
+                return Ended::EditorFailed;
             }
         }
     }

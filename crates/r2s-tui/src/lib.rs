@@ -50,6 +50,9 @@ pub struct Driver {
     app: App,
     requests: Sender<Request>,
     answers: Receiver<Answer>,
+    /// How many requests the state has asked for, so a settle can tell a
+    /// round that asked nothing new.
+    asked: u64,
 }
 
 /// The two ends of the visual mode: the [`Driver`] for the thread that
@@ -62,6 +65,7 @@ pub fn connect() -> (Driver, Engine) {
         app: App::new(),
         requests,
         answers,
+        asked: 0,
     };
     let engine = Engine {
         requests: asked,
@@ -83,7 +87,10 @@ impl Driver {
     pub fn handle(&mut self, msg: Msg) -> io::Result<bool> {
         for effect in self.app.update(msg) {
             match effect {
-                Effect::Request(request) => self.requests.send(request).map_err(|_| gone())?,
+                Effect::Request(request) => {
+                    self.asked += 1;
+                    self.requests.send(request).map_err(|_| gone())?;
+                }
                 Effect::Quit => return Ok(false),
             }
         }
@@ -112,10 +119,16 @@ impl Driver {
     /// For a scripted caller (a test) that wants the state settled before it
     /// looks; the event loop never waits. Requests are served in order, so
     /// once a flush sent last is answered, everything before it is.
+    ///
+    /// Handling an answer can ask for more -- a refused write moves the
+    /// cursor back, which tells the shell the seek -- and that request lands
+    /// behind the flush being answered, so a round that asked anything is
+    /// followed by another.
     pub fn settle(&mut self) -> io::Result<()> {
         loop {
+            let asked = self.asked;
             self.flush()?;
-            if !self.app.waiting() {
+            if !self.app.waiting() && self.asked == asked {
                 return Ok(());
             }
         }

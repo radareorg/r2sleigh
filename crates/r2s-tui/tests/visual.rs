@@ -24,6 +24,8 @@ use std::thread::ThreadId;
 struct Seen {
     seek: u64,
     patches: BTreeMap<u64, u8>,
+    /// Bytes a write is refused at.
+    read_only: std::collections::BTreeSet<u64>,
     commands: Vec<String>,
     /// Every thread that called the host.
     threads: Vec<ThreadId>,
@@ -109,6 +111,9 @@ impl Host for Program {
     }
     fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), String> {
         let mut seen = self.seen();
+        if (address..address + bytes.len() as u64).any(|at| seen.read_only.contains(&at)) {
+            return Err("the byte is read-only".to_owned());
+        }
         for (offset, byte) in bytes.iter().enumerate() {
             seen.patches.insert(address + offset as u64, *byte);
         }
@@ -377,6 +382,24 @@ fn hex_edit_writes_two_nibbles_as_one_byte_and_moves_on() {
         assert_eq!(ui.seek(), 0x1001);
         let shown = ui.screen();
         assert!(shown.contains("0x00001000  ab 01"), "{shown}");
+    });
+}
+
+#[test]
+fn a_refused_hex_write_puts_the_cursor_back_on_its_byte_and_says_why() {
+    run(|ui| {
+        ui.seen.lock().unwrap().read_only.insert(0x1000);
+        ui.press("pp");
+        assert_eq!(ui.view(), View::Hex);
+        ui.press("iab");
+        ui.settle();
+        assert_eq!(ui.seen.lock().unwrap().patches.get(&0x1000), None);
+        assert_eq!(ui.seek(), 0x1000);
+        let shown = ui.screen();
+        assert!(
+            shown.contains("write at 0x1000: the byte is read-only"),
+            "{shown}"
+        );
     });
 }
 

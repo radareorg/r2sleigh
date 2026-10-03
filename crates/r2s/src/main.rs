@@ -75,8 +75,14 @@ fn main() {
     let stdin = std::io::stdin();
     // A person at a terminal gets line editing and history; anything else
     // reads lines as they come.
-    if !cli.quiet && stdin.is_terminal() && std::io::stdout().is_terminal() {
-        prompt::interactive(&mut session, &mut reader);
+    if !cli.quiet
+        && stdin.is_terminal()
+        && std::io::stdout().is_terminal()
+        && matches!(
+            prompt::interactive(&mut session, &mut reader),
+            prompt::Ended::Left
+        )
+    {
         return;
     }
     let mut line = String::new();
