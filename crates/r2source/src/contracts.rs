@@ -806,19 +806,19 @@ pub struct SourceFunctionInterface {
     return_logical_value: Option<SourceLogicalValue>,
     type_graph: Option<SourceTypeGraph>,
     stack_slot_roles_complete: bool,
-    /// Which of this function's own parameters its body proves is a format
-    /// string, for callers whose prototype for it names none. A property of
-    /// the function, unlike the per-callsite count rule a literal decides.
-    body_proven_format_parameter: Option<u32>,
+    /// Which of this function's own parameters is the format string that
+    /// counts a variadic call's tail, and what says so: the declaration
+    /// (its basis is the types'), or the body forwarding it to a callee's
+    /// format (`Certified`), which only fills a gap a declaration left. A
+    /// property of the function, unlike the per-callsite count rule a
+    /// literal decides.
+    format_parameter: Option<crate::confidence::Fact<u32>>,
     /// Whether the declaration says arguments continue past the fixed ones.
     ///
     /// A fact of the callee's contract: a caller of a variadic function hands
     /// it a tail the fixed parameters do not describe, and only a proven count
     /// (a literal format string's conversions) says how long that tail is.
     variadic: bool,
-    /// Which fixed parameter the declaration names as the format string, for
-    /// a variadic function whose tail that format counts.
-    declared_format_parameter: Option<u32>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
@@ -1273,9 +1273,8 @@ impl SourceFunctionInterface {
             return_logical_value,
             type_graph,
             stack_slot_roles_complete: require_exact_stack_slot_roles,
-            body_proven_format_parameter: None,
+            format_parameter: None,
             variadic: false,
-            declared_format_parameter: None,
             body_proven_return_address: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
@@ -1324,9 +1323,8 @@ impl SourceFunctionInterface {
             )?;
         }
         Ok(Self {
-            body_proven_format_parameter: self.body_proven_format_parameter,
+            format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
-            declared_format_parameter: self.declared_format_parameter,
             body_proven_return_address: self.body_proven_return_address,
             types: self.types.clone(),
             ..rebuilt
@@ -1433,12 +1431,27 @@ impl SourceFunctionInterface {
         {
             return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
         }
-        self.body_proven_format_parameter = Some(parameter_index);
+        // A declaration's format is the contract; a body proof fills a gap.
+        if self.declared_format_parameter().is_none() {
+            self.format_parameter = Some(crate::confidence::Fact::new(
+                parameter_index,
+                crate::confidence::Basis::Certified,
+            ));
+        }
         Ok(self)
     }
 
-    pub const fn body_proven_format_parameter(&self) -> Option<u32> {
-        self.body_proven_format_parameter
+    /// Which parameter is the format string, and what says so.
+    pub const fn format_parameter(&self) -> Option<&crate::confidence::Fact<u32>> {
+        self.format_parameter.as_ref()
+    }
+
+    /// The format parameter where this function's body proved it.
+    pub fn body_proven_format_parameter(&self) -> Option<u32> {
+        self.format_parameter
+            .as_ref()
+            .filter(|fact| fact.confidence.basis == crate::confidence::Basis::Certified)
+            .map(|fact| fact.value)
     }
 
     /// Record that the declaration is variadic, and which fixed parameter it
@@ -1455,7 +1468,8 @@ impl SourceFunctionInterface {
             return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
         }
         self.variadic = true;
-        self.declared_format_parameter = format_parameter;
+        self.format_parameter =
+            format_parameter.map(|index| crate::confidence::Fact::new(index, self.types.clone()));
         Ok(self)
     }
 
@@ -1465,8 +1479,11 @@ impl SourceFunctionInterface {
     }
 
     /// The fixed parameter the declaration names as the format string.
-    pub const fn declared_format_parameter(&self) -> Option<u32> {
-        self.declared_format_parameter
+    pub fn declared_format_parameter(&self) -> Option<u32> {
+        self.format_parameter
+            .as_ref()
+            .filter(|fact| fact.confidence.basis != crate::confidence::Basis::Certified)
+            .map(|fact| fact.value)
     }
 
     /// Record that the body hands its caller back the return address it was
@@ -2583,8 +2600,11 @@ mod tests {
             .expect("restates");
         assert_eq!(restated.revision_identity(), b"other-revision");
         assert!(restated.is_variadic());
+        // The declaration's format is the contract; the body's proof of the
+        // same parameter fills no gap and is not recorded over it.
         assert_eq!(restated.declared_format_parameter(), Some(1));
-        assert_eq!(restated.body_proven_format_parameter(), Some(1));
+        assert_eq!(restated.body_proven_format_parameter(), None);
+        assert_eq!(restated.format_parameter(), interface.format_parameter());
         assert!(restated.body_proven_return_address());
         assert_eq!(restated.types(), interface.types());
         assert_eq!(restated.parameters(), interface.parameters());

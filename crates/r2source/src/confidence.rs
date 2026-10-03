@@ -236,7 +236,7 @@ impl std::fmt::Display for Confidence {
 }
 
 /// A value the engine derived, with why it is believed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Fact<T> {
     pub value: T,
     pub confidence: Confidence,

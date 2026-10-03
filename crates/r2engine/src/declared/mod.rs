@@ -359,8 +359,12 @@ impl Placement<'_> {
             );
         })
         .ok()?;
-        let interface = variadic(declared.prototype, interface)?
-            .with_types(r2source::Confidence::of(declared.basis));
+        // Typed first: a declared format parameter is believed on what the
+        // declaration's types are.
+        let interface = variadic(
+            declared.prototype,
+            interface.with_types(r2source::Confidence::of(declared.basis)),
+        )?;
         self.carriers(name, interface, frame.frame_pointer)
     }
 
