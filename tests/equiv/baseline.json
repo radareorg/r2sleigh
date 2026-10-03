@@ -11,9 +11,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::and_chain_effect": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O0::bool_relay": {
    "status": "equal"
@@ -49,9 +49,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::inverted_void": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O0::main": {
    "cause": "[P7] The run reaches a counted residual (r2sleigh_residual_void). Was ub.",
@@ -161,9 +161,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::inverted_void": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O1::main": {
    "cause": "printf@plt is named at its stub again (a lone PLT stub starts on the section's stated alignment, not at PLT0's nopl padding), so the six-argument printf calls get the format-proven count and the stack-passed argument they cannot yet place is a visible residual; the u128 XMM-zeroing residual before it is gone with the demanded-bytes release",
@@ -276,9 +276,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::inverted_void": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O2::main": {
    "cause": "printf@plt is named at its stub again (a lone PLT stub starts on the section's stated alignment, not at PLT0's nopl padding), so the six-argument printf calls get the format-proven count and the stack-passed argument they cannot yet place is a visible residual; the u128 XMM-zeroing residual before it is gone with the demanded-bytes release",
@@ -349,9 +349,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O0::and_chain_effect": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::bool_relay": {
    "status": "equal"
@@ -387,9 +387,9 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O0::inverted_void": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::main": {
    "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
@@ -665,9 +665,9 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::clang-O0::crc32_init": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/hashes.c::clang-O0::crc32_table": {
    "status": "equal"
@@ -820,9 +820,9 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O0::crc32_init": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O0::crc32_table": {
    "status": "equal"
@@ -2342,9 +2342,9 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::avg": {
-   "cause": "[P7 float result; p1-reads merged] avg returns its double in XMM0, which the recovered interface does not carry, and the read of the never-assigned float result is now refused instead of rendered as the wrong integer (was differs). Fixed by the float result class.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The result is a double in xmm0; interface recovery knows only the integer result carrier, finds rax written on some paths only, and marks the return unproven, so it traps. Owner: P7, the ABI classifier's float result rule.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O1::bit_count": {
    "status": "equal"
@@ -2397,9 +2397,9 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::avg": {
-   "cause": "[P7 float result; p1-reads merged] avg returns its double in XMM0, which the recovered interface does not carry, and the read of the never-assigned float result is now refused instead of rendered as the wrong integer (was differs). Fixed by the float result class.",
-   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: certified_value_read_before_assignment",
-   "status": "refused"
+   "cause": "The result is a double in xmm0; interface recovery knows only the integer result carrier, finds rax written on some paths only, and marks the return unproven, so it traps. Owner: P7, the ABI classifier's float result rule.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O2::bit_count": {
    "status": "equal"
