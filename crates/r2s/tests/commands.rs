@@ -1036,3 +1036,48 @@ fn syscalls_are_the_kernel_calls_the_bodies_make() {
         run.out
     );
 }
+
+/// `?` is generated from the one verb table dispatch reads, so every verb it
+/// lists answers `verb?` with its own usage, public verbs come before the
+/// maintainer tier, and a name the table does not hold is still unknown.
+#[test]
+fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
+    let help = r2s("?");
+    assert!(help.ok, "{}", help.out);
+    assert!(
+        help.out.starts_with("Usage: [cmd][~grep][@addr]"),
+        "{}",
+        help.out
+    );
+    let listed = help
+        .out
+        .lines()
+        .filter_map(|line| line.strip_prefix("| "))
+        .map(|row| row.split_whitespace().next().expect("a verb").to_owned())
+        .collect::<Vec<_>>();
+    for verb in ["s", "pd", "pdd", "afl", "axt", "wx", "V", "?e", "w", "pdim"] {
+        assert!(
+            listed.iter().any(|name| name == verb),
+            "{verb} missing from:\n{}",
+            help.out
+        );
+    }
+    let maintainer = help
+        .out
+        .find("\nMaintainer:")
+        .expect("a maintainer section");
+    assert!(help.out[..maintainer].contains("| pdd "));
+    assert!(help.out[maintainer..].contains("| pdim "));
+    for verb in &listed {
+        let usage = r2s(&format!("{verb}?"));
+        assert!(usage.ok, "{verb}?: {}", usage.out);
+        assert!(
+            usage.out.starts_with(&format!("Usage: {verb}")),
+            "{verb}?: {}",
+            usage.out
+        );
+    }
+    assert!(r2s("q?").out.contains("aliases: quit exit"));
+    let unknown = r2s("zz");
+    assert!(!unknown.ok);
+}

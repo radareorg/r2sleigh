@@ -61,45 +61,368 @@ fn dispatch(session: &mut Session, command: &Command) -> Result<String, String> 
     })
 }
 
+/// Who a verb is for. Maintainer verbs print the engine's tiers and are
+/// listed apart, as AGENTS.md's command surface says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tier {
+    Public,
+    Maintainer,
+}
+
+/// What a verb is given past its name: help spells it, and a completer will
+/// offer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arguments {
+    None,
+    /// An address or a name `f` lists, the seek when absent.
+    Address,
+    /// How many, from the seek.
+    Count,
+    /// Text the line reads with its quotes and escapes (`?e`, `w`).
+    Text,
+    /// Hex bytes.
+    Bytes,
+}
+
+impl Arguments {
+    const fn spelled(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Address => "[addr]",
+            Self::Count => "[n]",
+            Self::Text => "<text>",
+            Self::Bytes => "<hex>",
+        }
+    }
+}
+
+type Handler = fn(&mut Session, &str) -> Result<String, String>;
+
+/// One verb of the command surface: every name it answers to, what it takes,
+/// what it does, and the function that does it.
+///
+/// The table below is the surface. Dispatch reads it, `?` and `verb?` print
+/// it, and a completer offers it, so none of the three can name a verb the
+/// others do not know. `?e` and `w` read their argument as the line does and
+/// are parsed there; they are here so help lists them, with no handler.
+pub(crate) struct Verb {
+    pub names: &'static [&'static str],
+    pub arguments: Arguments,
+    pub summary: &'static str,
+    pub tier: Tier,
+    run: Option<Handler>,
+}
+
+impl Verb {
+    pub(crate) fn name(&self) -> &'static str {
+        self.names[0]
+    }
+
+    fn usage(&self) -> String {
+        let arguments = self.arguments.spelled();
+        if arguments.is_empty() {
+            self.name().to_owned()
+        } else {
+            format!("{} {arguments}", self.name())
+        }
+    }
+}
+
+macro_rules! verb {
+    ([$($name:literal),+], $arguments:ident, $tier:ident, $summary:literal, $run:expr) => {
+        Verb {
+            names: &[$($name),+],
+            arguments: Arguments::$arguments,
+            summary: $summary,
+            tier: Tier::$tier,
+            run: $run,
+        }
+    };
+}
+
+/// Every verb, in the order help lists them.
+pub(crate) const VERBS: &[Verb] = &[
+    verb!(
+        ["q", "quit", "exit"],
+        None,
+        Public,
+        "quit",
+        Some(|_, _| Err("quit".to_owned()))
+    ),
+    verb!(["?e"], Text, Public, "print the text", None),
+    verb!(
+        ["s"],
+        Address,
+        Public,
+        "seek to an address, or print the seek",
+        Some(seek)
+    ),
+    verb!(
+        ["i"],
+        None,
+        Public,
+        "what the binary is",
+        Some(|session, _| info(session))
+    ),
+    verb!(
+        ["ie"],
+        None,
+        Public,
+        "entry points",
+        Some(|session, _| entries(session, false))
+    ),
+    verb!(
+        ["iee"],
+        None,
+        Public,
+        "entry points and initialisers",
+        Some(|session, _| entries(session, true))
+    ),
+    verb!(
+        ["iS"],
+        None,
+        Public,
+        "sections",
+        Some(|session, _| sections(session))
+    ),
+    verb!(
+        ["is"],
+        None,
+        Public,
+        "symbols",
+        Some(|session, _| symbols(session))
+    ),
+    verb!(
+        ["ir"],
+        None,
+        Public,
+        "relocations",
+        Some(|session, _| relocations(session))
+    ),
+    verb!(
+        ["iz"],
+        None,
+        Public,
+        "strings in data sections",
+        Some(|session, _| strings(session))
+    ),
+    verb!(
+        ["izz"],
+        None,
+        Public,
+        "strings anywhere in the file",
+        Some(|session, _| every_string(session))
+    ),
+    verb!(
+        ["px"],
+        Count,
+        Public,
+        "hexdump",
+        Some(|session, argument| hexdump(session, argument))
+    ),
+    verb!(
+        ["pd"],
+        Count,
+        Public,
+        "disassemble",
+        Some(crate::listing::disassemble)
+    ),
+    verb!(
+        ["pdf"],
+        Address,
+        Public,
+        "disassemble a function",
+        Some(crate::listing::disassemble_function)
+    ),
+    verb!(
+        ["pdd"],
+        Address,
+        Public,
+        "decompile a function",
+        Some(decompile)
+    ),
+    verb!(
+        ["pddj"],
+        Address,
+        Public,
+        "decompile a function as JSON",
+        Some(decompile_json)
+    ),
+    verb!(
+        ["afl"],
+        None,
+        Public,
+        "list functions",
+        Some(|session, _| discovered(session))
+    ),
+    verb!(
+        ["aflj"],
+        None,
+        Public,
+        "list functions as JSON",
+        Some(|session, _| discovered_json(session))
+    ),
+    verb!(
+        ["afi"],
+        Address,
+        Public,
+        "what a function is",
+        Some(crate::function::info)
+    ),
+    verb!(
+        ["afb"],
+        Address,
+        Public,
+        "a function's basic blocks",
+        Some(crate::function::blocks)
+    ),
+    verb!(
+        ["afv"],
+        Address,
+        Public,
+        "a function's arguments and variables",
+        Some(crate::function::variables)
+    ),
+    verb!(
+        ["agf"],
+        Address,
+        Public,
+        "a function's control-flow graph",
+        Some(crate::visual::agf)
+    ),
+    verb!(
+        ["f"],
+        None,
+        Public,
+        "flags",
+        Some(|session, _| flags(session))
+    ),
+    verb!(
+        ["ax"],
+        Address,
+        Public,
+        "references from an address",
+        Some(cross_references)
+    ),
+    verb!(
+        ["axt"],
+        Address,
+        Public,
+        "references to an address",
+        Some(references_to)
+    ),
+    verb!(
+        ["/as"],
+        None,
+        Public,
+        "system calls",
+        Some(|session, _| syscalls(session))
+    ),
+    verb!(["w"], Text, Public, "write text at the seek", None),
+    verb!(
+        ["wx"],
+        Bytes,
+        Public,
+        "write hex bytes at the seek",
+        Some(write_hex)
+    ),
+    verb!(
+        ["wc"],
+        None,
+        Public,
+        "list the writes",
+        Some(|session, _| patches(session))
+    ),
+    verb!(
+        ["wcr"],
+        None,
+        Public,
+        "revert every write",
+        Some(|session, _| revert(session))
+    ),
+    verb!(
+        ["V"],
+        None,
+        Public,
+        "visual mode",
+        Some(|session, _| crate::visual::open(session))
+    ),
+    verb!(
+        ["pdil"],
+        Address,
+        Maintainer,
+        "the low IL tier",
+        Some(low_tier)
+    ),
+    verb!(
+        ["pdim"],
+        Address,
+        Maintainer,
+        "the medium IL tier",
+        Some(medium_tier)
+    ),
+    verb!(
+        ["pdih"],
+        Address,
+        Maintainer,
+        "the high IL tier",
+        Some(high_tier)
+    ),
+    verb!(
+        ["pddo"],
+        Address,
+        Maintainer,
+        "a function's source obligations",
+        Some(obligations)
+    ),
+];
+
+/// The verb a name names.
+pub(crate) fn find(name: &str) -> Option<&'static Verb> {
+    VERBS.iter().find(|verb| verb.names.contains(&name))
+}
+
+/// `?`: every verb, public ones first, as radare2 lays out its help.
+fn help() -> String {
+    let width = VERBS
+        .iter()
+        .map(|verb| verb.usage().len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::from("Usage: [cmd][~grep][@addr]  append ? to a command for its usage");
+    for (tier, heading) in [(Tier::Public, ""), (Tier::Maintainer, "\nMaintainer:")] {
+        out.push_str(heading);
+        for verb in VERBS.iter().filter(|verb| verb.tier == tier) {
+            out.push_str(&format!("\n| {:width$}  {}", verb.usage(), verb.summary));
+        }
+    }
+    out
+}
+
+/// `verb?`: one verb's usage, and the other names it answers to.
+fn usage(verb: &Verb) -> String {
+    let mut out = format!("Usage: {}  {}", verb.usage(), verb.summary);
+    if verb.names.len() > 1 {
+        out.push_str(&format!("\naliases: {}", verb.names[1..].join(" ")));
+    }
+    out
+}
+
 /// A command whose argument is plain text: `?e` and `w` read theirs as the
-/// line does, so they are not here.
+/// line does, so they never reach here.
 fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, String> {
-    match verb {
-        "" => Ok(String::new()),
-        "q" | "quit" | "exit" => Err("quit".to_owned()),
-        "s" => seek(session, argument),
-        "i" => info(session),
-        "ie" => entries(session, false),
-        "iee" => entries(session, true),
-        "iS" => sections(session),
-        "is" => symbols(session),
-        "ir" => relocations(session),
-        "px" => hexdump(session, argument),
-        "V" => crate::visual::open(session),
-        "agf" => crate::visual::agf(session, argument),
-        "pd" => crate::listing::disassemble(session, argument),
-        "pdf" => crate::listing::disassemble_function(session, argument),
-        "pdd" => decompile(session, argument),
-        "pddj" => decompile_json(session, argument),
-        "afl" => discovered(session),
-        "aflj" => discovered_json(session),
-        "afi" => crate::function::info(session, argument),
-        "afb" => crate::function::blocks(session, argument),
-        "afv" => crate::function::variables(session, argument),
-        "f" => flags(session),
-        "ax" => cross_references(session, argument),
-        "axt" => references_to(session, argument),
-        "iz" => strings(session),
-        "izz" => every_string(session),
-        "/as" => syscalls(session),
-        "wx" => write_hex(session, argument),
-        "wc" => patches(session),
-        "wcr" => revert(session),
-        "pdil" => low_tier(session, argument),
-        "pdim" => medium_tier(session, argument),
-        "pdih" => high_tier(session, argument),
-        "pddo" => obligations(session, argument),
-        other => Err(format!("unknown command '{}'", other)),
+    if verb.is_empty() {
+        return Ok(String::new());
+    }
+    if verb == "?" {
+        return Ok(help());
+    }
+    if let Some(named) = verb.strip_suffix('?').and_then(find) {
+        return Ok(usage(named));
+    }
+    match find(verb).and_then(|verb| verb.run) {
+        Some(run) => run(session, argument),
+        None => Err(format!("unknown command '{verb}'")),
     }
 }
 
