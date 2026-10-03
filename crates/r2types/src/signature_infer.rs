@@ -156,12 +156,7 @@ fn certified_memory_parameter(
     prepared: &SsaArtifact,
     access: &r2ssa::MemoryAccessCertificate,
 ) -> Option<usize> {
-    if access.space != r2il::SpaceId::Ram
-        || prepared
-            .machine_context()
-            .memory_space_at(access.block_addr, access.op_index)
-            != Some(access.space)
-    {
+    if access.space != r2il::SpaceId::Ram {
         return None;
     }
     prepared

@@ -309,13 +309,7 @@ fn source_parameter_has_certified_memory_use(prepared: &r2ssa::SsaArtifact, inde
         .certificates()
         .memory_accesses
         .values()
-        .filter(|access| {
-            access.space == r2il::SpaceId::Ram
-                && prepared
-                    .machine_context()
-                    .memory_space_at(access.block_addr, access.op_index)
-                    == Some(access.space)
-        })
+        .filter(|access| access.space == r2il::SpaceId::Ram)
         .any(|access| {
             prepared
                 .addresses()

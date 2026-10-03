@@ -567,14 +567,18 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             // Where the read happens: an operation reads at its own position,
             // a phi input at the end of the edge's predecessor.
             let dominated = match source.site {
-                SourceSite::Phi { pred_addr, .. } => domtree.dominates(definition.block_addr, pred_addr),
+                SourceSite::Phi { pred_addr, .. } => {
+                    domtree.dominates(definition.block_addr, pred_addr)
+                }
                 SourceSite::Op { op_idx, .. } if definition.block_addr == block.addr => {
                     match definition.site {
                         DefSite::Phi { .. } => true,
                         DefSite::Op { op_idx: def_idx } => def_idx < op_idx,
                     }
                 }
-                SourceSite::Op { .. } => domtree.strictly_dominates(definition.block_addr, block.addr),
+                SourceSite::Op { .. } => {
+                    domtree.strictly_dominates(definition.block_addr, block.addr)
+                }
             };
             if !dominated {
                 failure = Some(SsaIntegrityError::UseNotDominated {

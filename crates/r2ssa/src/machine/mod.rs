@@ -317,10 +317,7 @@ impl MachineValueUse {
                 );
                 MachineBuildError::EntityMismatch(access.inst)
             })?;
-        let source_space = artifact
-            .machine_context()
-            .memory_space_at(fact.block_addr, fact.op_index)
-            .ok_or(MachineBuildError::MachineContextMismatch)?;
+        let source_space = fact.space;
         let source_op = match &artifact
             .graph()
             .inst(access.inst)
@@ -2726,10 +2723,7 @@ impl MachineFunction {
                         && inst.inputs.first() == Some(&fact.address)
                 })
                 .ok_or(MachineBuildError::EntityMismatch(access.inst))?;
-            let source_space = artifact
-                .machine_context()
-                .memory_space_at(fact.block_addr, fact.op_index)
-                .ok_or(MachineBuildError::MachineContextMismatch)?;
+            let source_space = fact.space;
             let source_model = artifact.machine_context().memory_model();
             let space_model = source_model
                 .space(source_space)
@@ -3244,10 +3238,7 @@ impl MachineFunction {
                     && read_operands_are_exact(source_op_of(inst), &inst.inputs, fact.address)
             })
             .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
-        let source_space = artifact
-            .machine_context()
-            .memory_space_at(fact.block_addr, fact.op_index)
-            .ok_or(MachineBuildError::MachineContextMismatch)?;
+        let source_space = fact.space;
         let source_op = match &inst.payload {
             InstPayload::Op(
                 op @ (SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }),
@@ -3476,11 +3467,9 @@ impl MachineBuilder {
         let [access] = accesses.as_slice() else {
             return Ok(());
         };
-        let source_space = artifact
-            .machine_context()
-            .memory_space_at(access.block_addr, access.op_index);
+        let source_space = access.space;
         let model = artifact.machine_context().memory_model();
-        let space_model = source_space.and_then(|space| model.space(space));
+        let space_model = model.space(source_space);
         let prepared_op = artifact
             .function()
             .get_block(access.block_addr)
@@ -3489,21 +3478,19 @@ impl MachineBuilder {
             || !access.is_write
             || access.id.ordinal != 0
             || prepared_op.is_none_or(|prepared_op| {
-                source_space.is_none_or(|source_space| {
-                    !memory_access_authorities_match(
-                        graph,
-                        artifact.objects(),
-                        op,
-                        prepared_op,
-                        source_space,
-                        access,
-                        artifact
-                            .facts()
-                            .structured
-                            .member_run_stores
-                            .get(&access.id.inst),
-                    )
-                })
+                !memory_access_authorities_match(
+                    graph,
+                    artifact.objects(),
+                    op,
+                    prepared_op,
+                    source_space,
+                    access,
+                    artifact
+                        .facts()
+                        .structured
+                        .member_run_stores
+                        .get(&access.id.inst),
+                )
             })
             || inst.inputs.first() != Some(&access.address)
             || !model.is_available()

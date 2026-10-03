@@ -172,10 +172,7 @@ pub(crate) fn collect_aggregate_access_projections(
     let revision = interface.revision_identity().to_vec().into_boxed_slice();
     let mut projections = BTreeMap::new();
     for (access_id, access) in accesses {
-        let Some(space) = machine_context.memory_space_at(access.block_addr, access.op_index)
-        else {
-            continue;
-        };
+        let space = access.space;
         if *access_id != access.id || !access.provenance_complete || space != SpaceId::Ram {
             continue;
         }

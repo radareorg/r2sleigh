@@ -442,14 +442,10 @@ pub(crate) fn prepare_graph(
     // from; they are collected once more, over the blocks every later stage
     // reads.
     function.recollect_decompile_prep_facts();
-    machine_context.remap_memory_sites_to_prepared(function);
     let mut graph = SsaGraph::from_function_with_storage(function);
     // A lane write whose untouched bytes nothing reads does not read the
     // value it was written into (`demand`); releasing those bases changes an
     // operand, so the facts and the graph are taken once more where it did.
-    // No operation moves and none touches memory, so the memory sites the
-    // context already maps onto these blocks stand (remapping is not
-    // idempotent: it reads its own map as the lifted one).
     if release_undemanded_bytes(function, machine_context, &graph) {
         function.recollect_decompile_prep_facts();
         graph = SsaGraph::from_function_with_storage(function);
