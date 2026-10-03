@@ -59,7 +59,7 @@ impl SSAFunction {
         }
         let resolved = resolve_chains(forwarded);
         let map = |var: &SSAVar| resolved.get(var).cloned().unwrap_or_else(|| var.clone());
-        for block in &mut self.blocks {
+        for block in self.blocks.edit().iter_mut() {
             // A merge reads each source on its edge; the read moves the same
             // way, and the merge's own definition stays its own.
             for phi in &mut block.phis {

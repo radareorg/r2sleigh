@@ -82,7 +82,7 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use function::{
     CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
-    GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
+    GenuineNativeInstructionSpan, IrRevision, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
     RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction,
     SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
     StackAddressBase, StackAddressRoot, TrustedSsaArtifact, def_use_graph,

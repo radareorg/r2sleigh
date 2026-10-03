@@ -25,13 +25,14 @@ impl SSAFunction {
             cfg,
             domtree,
             block_index: block_index_of(&ordered),
-            blocks: ordered,
+            blocks: Blocks::new(ordered),
             block_order,
             op_instruction_addrs: BTreeMap::new(),
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
             decompile_prep_facts: None,
+            prep_interface: None,
             query_index: RwLock::new(None),
         }
     }
@@ -568,12 +569,13 @@ impl SSAFunction {
             domtree,
             block_index: block_index_of(&ssa_blocks),
             block_order: renamed_block_order,
-            blocks: ssa_blocks,
+            blocks: Blocks::new(ssa_blocks),
             op_instruction_addrs,
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
             decompile_prep_facts: None,
+            prep_interface: None,
             query_index: RwLock::new(None),
         };
         function.zero_scratch_insert_roots(abi_carriers);
@@ -600,6 +602,7 @@ impl SSAFunction {
 
     pub fn refresh_after_cfg_mutation(&mut self) {
         self.blocks
+            .edit()
             .retain(|block| self.cfg.get_block(block.addr).is_some());
         self.block_order = self.cfg.reverse_postorder();
         self.reorder_blocks();
@@ -732,14 +735,19 @@ impl SSAFunction {
         self.refresh_decompile_prep_facts_with_interface_and_control(None, control)
     }
 
-    fn refresh_decompile_prep_facts_with_interface_and_control<C: SsaWorkControl + ?Sized>(
+    pub(crate) fn refresh_decompile_prep_facts_with_interface_and_control<
+        C: SsaWorkControl + ?Sized,
+    >(
         &mut self,
         function_interface: Option<&SourceFunctionInterface>,
         control: &C,
     ) -> Result<(), SsaExecutionStopReason> {
-        let facts = self.collect_decompile_prep_facts_with_control(function_interface, control)?;
+        let mut facts =
+            self.collect_decompile_prep_facts_with_control(function_interface, control)?;
         control.poll()?;
+        facts.revision = self.blocks.revision();
         self.decompile_prep_facts = Some(facts);
+        self.prep_interface = function_interface.cloned();
         Ok(())
     }
 }

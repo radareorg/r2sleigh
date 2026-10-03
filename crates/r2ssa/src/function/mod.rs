@@ -4,6 +4,7 @@
 //! components for a complete function: CFG, dominator tree, phi nodes,
 //! and renamed operations.
 
+mod blocks;
 mod build;
 mod rewrite;
 
@@ -47,6 +48,8 @@ use crate::semantic::{
 use crate::span::StorageSpans;
 use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
+use blocks::Blocks;
+pub use blocks::IrRevision;
 
 /// Query-only CFG risk summary for decompilation preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +96,9 @@ pub struct StackAddressRoot {
 /// Decompiler-prep analysis facts derived from SSA.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
+    /// The revision of the blocks these facts were computed from: they are
+    /// handed out only while the blocks are still at it.
+    pub revision: IrRevision,
     /// Which values carry the same bits, and each value's representative.
     ///
     /// The one identity fact every stage builds on (`crate::view`): a value
@@ -432,6 +438,10 @@ pub(crate) fn prepare_graph(
     // reads to variables the validated function already defines, so the
     // validation above still holds; the minted lanes could not pass it.
     function.forward_copies();
+    // Each rewrite above changed the blocks the prep facts were collected
+    // from; they are collected once more, over the blocks every later stage
+    // reads.
+    function.recollect_decompile_prep_facts();
     machine_context.remap_memory_sites_to_prepared(function);
     let mut graph = SsaGraph::from_function_with_storage(function);
     crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
@@ -2439,8 +2449,9 @@ pub struct SSAFunction {
     ///
     /// Dense and ordered rather than a hash map beside a separate order, so
     /// that reading the blocks is a slice rather than a walk of one container
-    /// looking each address up in another.
-    blocks: Vec<SSABlock>,
+    /// looking each address up in another. Every mutable path advances its
+    /// revision, which the prep facts are stamped with.
+    blocks: Blocks,
     /// Where each block address sits in `blocks`.
     block_index: BTreeMap<u64, u32>,
     /// The same addresses as `blocks`, in the same order, for readers that want
@@ -2472,6 +2483,9 @@ pub struct SSAFunction {
     formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
     /// Optional decompiler-prep fact snapshot for the current SSA state.
     decompile_prep_facts: Option<DecompilePrepFacts>,
+    /// The interface the prep facts were last collected with, to collect them
+    /// again after a rewrite.
+    prep_interface: Option<SourceFunctionInterface>,
     /// Structural def/use index for repeated SSA queries.
     query_index: RwLock<Option<SsaQueryIndex>>,
 }
@@ -2617,7 +2631,7 @@ impl SSAFunction {
         at: usize,
         ops: Vec<(SSAOp, Option<u64>)>,
     ) {
-        let Some(block) = block_at_mut(&self.block_index, &mut self.blocks, block_addr) else {
+        let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), block_addr) else {
             return;
         };
         let at = at.min(block.ops.len());
@@ -2675,6 +2689,7 @@ impl Clone for SSAFunction {
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
             decompile_prep_facts: self.decompile_prep_facts.clone(),
+            prep_interface: self.prep_interface.clone(),
             query_index: RwLock::new(None),
         }
     }
@@ -3131,7 +3146,7 @@ impl SSAFunction {
         let index = *self.block_index.get(&addr)? as usize;
         self.invalidate_query_index();
         self.decompile_prep_facts = None;
-        self.blocks.get_mut(index)
+        self.blocks.edit().get_mut(index)
     }
 
     /// All blocks in reverse postorder.
@@ -3233,7 +3248,7 @@ impl SSAFunction {
 
     /// Remove a block from SSA and CFG.
     pub fn remove_block(&mut self, addr: u64) {
-        self.blocks.retain(|block| block.addr != addr);
+        self.blocks.edit().retain(|block| block.addr != addr);
         self.block_order.retain(|&a| a != addr);
         self.block_index = block_index_of(&self.blocks);
         self.cfg.remove_block(addr);
@@ -3258,10 +3273,10 @@ impl SSAFunction {
         let mut ordered = Vec::with_capacity(self.block_order.len());
         for &addr in &self.block_order {
             if let Some(position) = self.blocks.iter().position(|block| block.addr == addr) {
-                ordered.push(self.blocks.swap_remove(position));
+                ordered.push(self.blocks.edit().swap_remove(position));
             }
         }
-        self.blocks = ordered;
+        *self.blocks.edit() = ordered;
         self.block_index = block_index_of(&self.blocks);
     }
 
@@ -3410,8 +3425,43 @@ impl SSAFunction {
     }
 
     /// Snapshot the current decompiler-prep fact view, if available.
+    ///
+    /// Facts computed from blocks that have since been rewritten describe an
+    /// IR that no longer exists, and answering with them is how one value
+    /// came to have two identities. That is a defect in whichever rewrite did
+    /// not refresh them, so it stops here, loudly: the engine's isolation
+    /// boundary turns the panic into this function's refusal, naming where.
     pub fn decompile_prep_facts(&self) -> Option<&DecompilePrepFacts> {
-        self.decompile_prep_facts.as_ref()
+        let facts = self.decompile_prep_facts.as_ref()?;
+        assert_eq!(
+            facts.revision,
+            self.blocks.revision(),
+            "the prep facts of {:#x} were collected at IR revision {:?} and read at {:?}: \
+             a rewrite did not refresh them",
+            self.entry,
+            facts.revision,
+            self.blocks.revision()
+        );
+        Some(facts)
+    }
+
+    /// Collect the prep facts again over the blocks as they now are, with the
+    /// interface they were first collected with; nothing where none were.
+    ///
+    /// The rewrites after preparation -- boundary constants, entry lanes,
+    /// forwarded copies -- each change the blocks the facts describe, and the
+    /// facts are collected once after the last of them rather than patched by
+    /// each. O(collection), once per prepared function.
+    pub(crate) fn recollect_decompile_prep_facts(&mut self) {
+        if self.decompile_prep_facts.is_none() {
+            return;
+        }
+        let interface = self.prep_interface.clone();
+        self.refresh_decompile_prep_facts_with_interface_and_control(
+            interface.as_ref(),
+            &UncheckedSsaWorkControl,
+        )
+        .expect("unchecked decompiler fact collection cannot stop");
     }
 
     /// Install the canonical source-boundary parameter projection into the

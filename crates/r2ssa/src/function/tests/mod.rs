@@ -2597,3 +2597,35 @@ fn operations_inserted_ahead_of_a_block_leave_every_later_operation_on_its_instr
     assert_eq!(function.instruction_at(entry, 0), None);
     assert_eq!(attributed(&function, 1), before);
 }
+
+/// Prep facts answer only for the blocks they were collected from: a rewrite
+/// that opens the blocks without collecting them again leaves facts that
+/// describe an IR which no longer exists, and reading them stops rather than
+/// answering -- the engine's isolation boundary makes that the function's
+/// refusal. Collecting again makes them readable at the new revision.
+#[test]
+fn prep_facts_read_after_an_unrefreshed_rewrite_stop_rather_than_answer() {
+    let mut block = R2ILBlock::new(0x1000, 4);
+    block.push(R2ILOp::Copy {
+        dst: Varnode::register(0, 8),
+        src: Varnode::register(8, 8),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    let mut func = SSAFunction::from_blocks_raw(&[block], None).expect("a function");
+    func.refresh_decompile_prep_facts();
+    assert!(func.decompile_prep_facts().is_some());
+
+    func.blocks.edit();
+    let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        func.decompile_prep_facts().is_some()
+    }));
+    assert!(stale.is_err(), "stale prep facts were handed out");
+
+    func.recollect_decompile_prep_facts();
+    let facts = func
+        .decompile_prep_facts()
+        .expect("facts at the new revision");
+    assert_eq!(facts.revision, func.blocks.revision());
+}

@@ -135,7 +135,7 @@ impl SSAFunction {
                 (var.clone(), zero)
             })
             .collect::<BTreeMap<_, _>>();
-        for block in self.blocks.iter_mut() {
+        for block in self.blocks.edit().iter_mut() {
             for phi in &mut block.phis {
                 for (_, src) in &mut phi.sources {
                     if let Some(zero) = zeros.get(src) {
@@ -156,7 +156,6 @@ impl SSAFunction {
             0,
             minted.into_iter().map(|op| (op, None)).collect(),
         );
-        self.decompile_prep_facts = None;
     }
 
     /// Replace the values a boundary states: the processor specification's
@@ -227,7 +226,7 @@ impl SSAFunction {
             Some(value) => SSAVar::constant(*value, var.size),
             None => var.clone(),
         };
-        for block in self.blocks.iter_mut() {
+        for block in self.blocks.edit().iter_mut() {
             for phi in &mut block.phis {
                 for (_, src) in &mut phi.sources {
                     *src = substitute(src);
@@ -375,7 +374,7 @@ impl SSAFunction {
             self.formal_projections
                 .insert(projection.clone(), lane_storage);
             for (addr, op_index, inside) in reads {
-                if let Some(block) = block_at_mut(&self.block_index, &mut self.blocks, addr)
+                if let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), addr)
                     && let Some(SSAOp::Subpiece { dst, .. }) = block.ops.get(op_index)
                 {
                     let dst = dst.clone();
@@ -493,7 +492,7 @@ impl SSAFunction {
                     .cloned()
                     .unwrap_or_else(|| var.clone())
             };
-            for block in self.blocks.iter_mut() {
+            for block in self.blocks.edit().iter_mut() {
                 for phi in &mut block.phis {
                     for (_, src) in &mut phi.sources {
                         *src = replace(src);
@@ -509,15 +508,6 @@ impl SSAFunction {
             0,
             minted.into_iter().map(|op| (op, None)).collect(),
         );
-        // The lanes and the composed roots are new definitions, so the view
-        // the facts were collected with names none of them: `esi` minted from
-        // `rsi` read as its own root while `zext(esi)` read as `rsi`'s, and
-        // one bit identity had two answers. The view is solved again over the
-        // rewritten body, once, O(V + E).
-        let views = crate::view::ValueViews::compute(self);
-        if let Some(facts) = self.decompile_prep_facts.as_mut() {
-            facts.views = views;
-        }
     }
 
     pub(crate) fn collect_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(
