@@ -16,6 +16,10 @@ is a merge that keeps them rather than a copy that drops them.
 - `types-android.sdb.txt`: what bionic, Android's C library, declares for
   itself.
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
+- `syscalls-linux-*.txt`: the Linux kernel's system call numbers, generated
+  from its UAPI headers by `scripts/gen_syscalls.py` and never edited by
+  hand. These are not radare2's `libr/syscall/d/` tables, which are kept by
+  hand and carry the OABI numbering for arm-32.
 
 radare2 is LGPL-3.0, as is this tree.
 
