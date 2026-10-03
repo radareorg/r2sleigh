@@ -188,28 +188,28 @@ pub(crate) const VERBS: &[Verb] = &[
         None,
         Public,
         "sections",
-        Some(|session, _| sections(session))
+        Some(|session, _| Ok(sections(session).spelled()))
     ),
     verb!(
         ["is"],
         None,
         Public,
         "symbols",
-        Some(|session, _| symbols(session))
+        Some(|session, _| symbols(session).map(|table| table.spelled()))
     ),
     verb!(
         ["ir"],
         None,
         Public,
         "relocations",
-        Some(|session, _| relocations(session))
+        Some(|session, _| Ok(relocations(session).spelled()))
     ),
     verb!(
         ["iz"],
         None,
         Public,
         "strings in data sections",
-        Some(|session, _| strings(session))
+        Some(|session, _| strings(session).map(|table| table.spelled()))
     ),
     verb!(
         ["izz"],
@@ -258,7 +258,7 @@ pub(crate) const VERBS: &[Verb] = &[
         None,
         Public,
         "list functions",
-        Some(|session, _| discovered(session))
+        Some(|session, _| discovered(session).map(|table| table.spelled()))
     ),
     verb!(
         ["aflj"],
@@ -552,20 +552,20 @@ fn entries(session: &Session, initialisers: bool) -> Result<String, String> {
 /// entry point, its initialiser array and a linkage stub per import were
 /// already parsed and only the program entry was read. Discovery starts from
 /// all of them and closes over what the bodies call.
-fn discovered(session: &mut Session) -> Result<String, String> {
-    let rows = listed_functions(session)?;
+pub(crate) fn discovered(session: &mut Session) -> Result<Table, String> {
     // radare2's layout, with no header: `addr nbbs size name`, so the two
     // diff line for line. How sure discovery is moved to `aflj`.
-    Ok(rows
-        .iter()
-        .map(|row| {
+    let mut table = Table::default();
+    for row in listed_functions(session)? {
+        table.row(
+            Some(row.address),
             format!(
                 "{:#010x} {:>4} {:>6} {}",
                 row.address, row.blocks, row.size, row.name
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n"))
+            ),
+        );
+    }
+    Ok(table)
 }
 
 /// `aflj`: the same rows as JSON objects, with radare2's keys and the reason
@@ -748,9 +748,15 @@ fn role(role: Role) -> &'static str {
 /// Every place one address is named from, one line per function holding it, as radare2 lays `axt` out.
 fn references_to(session: &mut Session, argument: &str) -> Result<String, String> {
     let wanted = parse_number(session, argument)?;
+    Ok(references_table(session, wanted)?.spelled())
+}
+
+/// Every reference to `wanted`, a row per referring function, each about the
+/// address the reference is made from.
+pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Table, String> {
     let index = session.program.references()?.value;
     let names = session.program.names();
-    let mut out = String::new();
+    let mut table = Table::default();
     let mut count = 0usize;
     for (fact, source) in index.to(wanted) {
         count += 1;
@@ -769,21 +775,59 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
                 .collect(),
         };
         for owner in owners {
-            out.push_str(&format!(
-                "{owner} {:#x} [{}] {text}\n",
-                fact.from,
-                role(fact.role)
-            ));
+            table.row(
+                Some(fact.from),
+                format!("{owner} {:#x} [{}] {text}", fact.from, role(fact.role)),
+            );
         }
     }
-    out.push_str(&format!("\n{count} references to {wanted:#x}"));
+    // A blank line between the rows and the count, where there are rows.
+    if !table.rows.is_empty() {
+        table.foot.push('\n');
+    }
+    table
+        .foot
+        .push_str(&format!("\n{count} references to {wanted:#x}"));
     if count == 0 {
-        out.push_str(&format!(
+        table.foot.push_str(&format!(
             "\n; none within the functions read, which is not proof {wanted:#x} is unreferenced"
         ));
     }
-    out.push_str(&coverage(&index.coverage));
-    Ok(out)
+    table.foot.push_str(&coverage(&index.coverage));
+    Ok(table)
+}
+
+/// A listing as a command prints it: header lines, then a row per thing
+/// listed with the address the row is about, where it is about one, then
+/// whatever follows the rows. The visual mode lists the same rows and seeks
+/// to their addresses, so it reads no address back out of the text.
+#[derive(Debug, Default)]
+pub(crate) struct Table {
+    head: Vec<String>,
+    pub(crate) rows: Vec<(Option<u64>, String)>,
+    foot: String,
+}
+
+impl Table {
+    fn headed(head: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            head: head.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    fn row(&mut self, address: Option<u64>, text: String) {
+        self.rows.push((address, text));
+    }
+
+    /// The text the command prints.
+    pub(crate) fn spelled(&self) -> String {
+        let mut lines = self.head.iter().map(String::as_str).collect::<Vec<_>>();
+        lines.extend(self.rows.iter().map(|(_, text)| text.as_str()));
+        let mut out = lines.join("\n");
+        out.push_str(&self.foot);
+        out
+    }
 }
 
 /// How radare2 spells a pointer-sized datum: `.qword` or `.dword` by the program's width.
@@ -830,7 +874,7 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
 /// The strings the name table holds, which it reads only out of sections the
 /// container states hold the program's data, and only where the loader
 /// leaves the bytes alone. Spelled with escapes, one per line.
-fn strings(session: &mut Session) -> Result<String, String> {
+pub(crate) fn strings(session: &mut Session) -> Result<Table, String> {
     // The strings are read out of the image, so a patched image has other ones.
     session.program.ensure_current()?;
     let found: Vec<(u64, String)> = session
@@ -892,24 +936,29 @@ fn every_string(session: &Session) -> Result<String, String> {
 }
 
 /// The rows of a string listing, as radare2's `iz` lays them out.
-fn string_table(session: &Session, found: &[(u64, String)]) -> String {
-    let mut out = String::from("nth paddr      vaddr      len size section type  string\n");
-    out.push_str(&"-".repeat(55));
+fn string_table(session: &Session, found: &[(u64, String)]) -> Table {
+    let mut table = Table::headed([
+        "nth paddr      vaddr      len size section type  string".to_owned(),
+        "-".repeat(55),
+    ]);
     for (nth, (vaddr, text)) in found.iter().enumerate() {
         let paddr = file_offset_of(session, *vaddr).map_or_else(
             || "----------".to_owned(),
             |offset| format!("{offset:#010x}"),
         );
-        out.push_str(&format!(
-            "\n{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
-            text.chars().count(),
-            text.len() + 1,
-            section_of(session, *vaddr, false),
-            text_type(text),
-            escaped(text)
-        ));
+        table.row(
+            Some(*vaddr),
+            format!(
+                "{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
+                text.chars().count(),
+                text.len() + 1,
+                section_of(session, *vaddr, false),
+                text_type(text),
+                escaped(text)
+            ),
+        );
     }
-    out
+    table
 }
 
 /// The name of the section holding an address, or a file offset where `file` is set.
@@ -974,10 +1023,11 @@ fn flags(session: &mut Session) -> Result<String, String> {
 /// radare2 numbers ELF sections by their header index and Mach-O ones from
 /// zero; a Mach-O section is named with its segment, which is half its
 /// identity. An unloaded section permits nothing, whatever its address says.
-fn sections(session: &Session) -> Result<String, String> {
-    let mut out =
-        String::from("nth paddr        size vaddr       vsize perm flags type        name\n");
-    out.push_str(&"-".repeat(67));
+pub(crate) fn sections(session: &Session) -> Table {
+    let mut table = Table::headed([
+        "nth paddr        size vaddr       vsize perm flags type        name".to_owned(),
+        "-".repeat(67),
+    ]);
     for section in session.image().sections() {
         let permissions = section.permissions;
         let (nth, flags, kind, name) = match section.stated {
@@ -1006,19 +1056,23 @@ fn sections(session: &Session) -> Result<String, String> {
                 (section.index, 0, String::new(), section.name.clone())
             }
         };
-        out.push_str(&format!(
-            "\n{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
-            section.file_offset,
-            format!("{:#x}", section.file_size),
-            section.vaddr,
-            format!("{:#x}", section.vsize),
-            if permissions.read { 'r' } else { '-' },
-            if permissions.write { 'w' } else { '-' },
-            if permissions.execute { 'x' } else { '-' },
-            format!("{flags:#x}"),
-        ));
+        // A section the loader does not map is at no address to seek to.
+        table.row(
+            section.loaded.then_some(section.vaddr),
+            format!(
+                "{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
+                section.file_offset,
+                format!("{:#x}", section.file_size),
+                section.vaddr,
+                format!("{:#x}", section.vsize),
+                if permissions.read { 'r' } else { '-' },
+                if permissions.write { 'w' } else { '-' },
+                if permissions.execute { 'x' } else { '-' },
+                format!("{flags:#x}"),
+            ),
+        );
     }
-    Ok(out)
+    table
 }
 
 /// An ELF section type, as radare2 spells it.
@@ -1092,11 +1146,13 @@ fn macho_section_type(kind: u32) -> String {
 /// is the address a call to it names; the dynamic table states the imports
 /// where there is one, since the static table repeats them under versioned
 /// names.
-fn symbols(session: &mut Session) -> Result<String, String> {
+pub(crate) fn symbols(session: &mut Session) -> Result<Table, String> {
     // The stubs are read out of the code, so there must be a decoder first.
     session.program.ensure_current()?;
-    let mut out = String::from("nth paddr      vaddr      bind   type   size lib name\n");
-    out.push_str(&"-".repeat(60));
+    let mut table = Table::headed([
+        "nth paddr      vaddr      bind   type   size lib name".to_owned(),
+        "-".repeat(60),
+    ]);
     let spelled = |value: Option<u64>| {
         value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
     };
@@ -1116,16 +1172,19 @@ fn symbols(session: &mut Session) -> Result<String, String> {
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {
         let mapped = symbol.defined.then_some(symbol.vaddr);
-        out.push_str(&format!(
-            "\n{:<3} {} {} {:<6} {:<6} {:<4}     {}",
-            nth(symbol).1.unwrap_or_default(),
-            spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
-            spelled(Some(symbol.vaddr)),
-            binding(symbol.binding),
-            symbol_type(symbol.kind),
-            symbol.size,
-            symbol.name
-        ));
+        table.row(
+            mapped,
+            format!(
+                "{:<3} {} {} {:<6} {:<6} {:<4}     {}",
+                nth(symbol).1.unwrap_or_default(),
+                spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
+                spelled(Some(symbol.vaddr)),
+                binding(symbol.binding),
+                symbol_type(symbol.kind),
+                symbol.size,
+                symbol.name
+            ),
+        );
     }
     let dynamic = session
         .image()
@@ -1147,19 +1206,22 @@ fn symbols(session: &mut Session) -> Result<String, String> {
     for symbol in imports {
         let stub = stubs.iter().find(|(_, stub)| stub.symbol == symbol.name);
         let at = stub.map(|(at, _)| *at);
-        out.push_str(&format!(
-            "\n{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
-            index(symbol).unwrap_or_default(),
-            spelled(at.and_then(|at| file_offset_of(session, at))),
-            spelled(at),
-            binding(symbol.binding),
-            symbol_type(symbol.kind),
-            // An import's size is the stub's, which is what a call to it reaches.
-            stub.map_or(symbol.size, |(_, stub)| stub.size),
-            symbol.name
-        ));
+        table.row(
+            at,
+            format!(
+                "{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
+                index(symbol).unwrap_or_default(),
+                spelled(at.and_then(|at| file_offset_of(session, at))),
+                spelled(at),
+                binding(symbol.binding),
+                symbol_type(symbol.kind),
+                // An import's size is the stub's, which is what a call to it reaches.
+                stub.map_or(symbol.size, |(_, stub)| stub.size),
+                symbol.name
+            ),
+        );
     }
-    Ok(out)
+    Ok(table)
 }
 
 /// A symbol's binding, as radare2 spells it.
@@ -1236,9 +1298,11 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
 /// loader adds a stated addend and `SET_` where it sets the word outright;
 /// `ntype` is the format's own number. A record naming no symbol is spelled
 /// by its addend, which for a relative relocation is the address it writes.
-fn relocations(session: &Session) -> Result<String, String> {
-    let mut out = String::from("vaddr      paddr      type   ntype name\n");
-    out.push_str(&"-".repeat(40));
+pub(crate) fn relocations(session: &Session) -> Table {
+    let mut table = Table::headed([
+        "vaddr      paddr      type   ntype name".to_owned(),
+        "-".repeat(40),
+    ]);
     // In address order, as radare2 lists them; the container keeps the order they are applied in.
     let mut records: Vec<&r2image::Relocation> = session.image().relocations().iter().collect();
     records.sort_by_key(|relocation| (relocation.vaddr, relocation.record));
@@ -1271,12 +1335,15 @@ fn relocations(session: &Session) -> Result<String, String> {
             Some(addend) if addend > 0 => name.push_str(&format!(" {addend:#010x}")),
             _ => {}
         }
-        out.push_str(&format!(
-            "\n{:#010x} {paddr} {kind:<6} {:<5} {name}",
-            relocation.vaddr, relocation.ntype
-        ));
+        table.row(
+            Some(relocation.vaddr),
+            format!(
+                "{:#010x} {paddr} {kind:<6} {:<5} {name}",
+                relocation.vaddr, relocation.ntype
+            ),
+        );
     }
-    Ok(out)
+    table
 }
 
 /// The lift tier: the operations Sleigh produced, before any analysis.

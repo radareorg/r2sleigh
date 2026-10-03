@@ -362,6 +362,20 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// Discovery's walk is held per state of the bytes, so a patch that ends a
+/// body early is walked again: the second `afl` of one session sees the `ret`.
+#[test]
+fn a_patch_is_discovered_again_in_the_same_session() {
+    let run = r2s("afl~0x00401330; wx c3 @ 0x401334; afl~0x00401330");
+    assert!(run.ok, "{}", run.out);
+    let (before, after) = run
+        .out
+        .split_once("1 bytes at")
+        .expect("the write reports what it wrote");
+    assert!(before.contains("    5     51 sym.fnv1a32"), "{}", run.out);
+    assert!(after.contains("    1      5 sym.fnv1a32"), "{}", run.out);
+}
+
 /// A patch moves what the image says about itself, not only what it reads as.
 ///
 /// The import table is *decoded*: which address is a linkage stub, and which
