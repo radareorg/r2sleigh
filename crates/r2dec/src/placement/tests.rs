@@ -263,6 +263,7 @@ fn diamond_with_both_arms_assigned_places_one_lexical_declaration() {
     let writes = [
         FinalBindingWrite {
             statement: 0,
+            top: 0,
             defines: None,
             effectful: false,
             binding,
@@ -275,6 +276,7 @@ fn diamond_with_both_arms_assigned_places_one_lexical_declaration() {
         },
         FinalBindingWrite {
             statement: 0,
+            top: 0,
             defines: None,
             effectful: false,
             binding,
@@ -288,6 +290,7 @@ fn diamond_with_both_arms_assigned_places_one_lexical_declaration() {
     ];
     let reads = [FinalBindingRead {
         statement: 0,
+        top: 0,
         value: None,
         binding,
         source: PlacementRead::Use(UseSite {
@@ -298,6 +301,7 @@ fn diamond_with_both_arms_assigned_places_one_lexical_declaration() {
         block: 0x1030,
         order: FinalOccurrenceOrder(3),
         spelled: true,
+        unspecified: false,
     }];
 
     let decisions = derive_with_cfg(
@@ -331,6 +335,7 @@ fn diamond_with_one_arm_unassigned_refuses_merge_read() {
     };
     let writes = [FinalBindingWrite {
         statement: 0,
+        top: 0,
         defines: None,
         effectful: false,
         binding,
@@ -343,6 +348,7 @@ fn diamond_with_one_arm_unassigned_refuses_merge_read() {
     }];
     let reads = [FinalBindingRead {
         statement: 0,
+        top: 0,
         value: None,
         binding,
         source: PlacementRead::Use(site),
@@ -350,6 +356,7 @@ fn diamond_with_one_arm_unassigned_refuses_merge_read() {
         block: 0x1030,
         order: FinalOccurrenceOrder(2),
         spelled: true,
+        unspecified: false,
     }];
 
     let decisions = derive_with_cfg(
@@ -404,6 +411,7 @@ fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
         FinalBindingWrite {
             defines: None,
             statement: 0x1010,
+            top: 0x1010,
             effectful: false,
             binding,
             inst: InstId(1),
@@ -416,6 +424,7 @@ fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
         FinalBindingWrite {
             defines: None,
             statement: 0x1020,
+            top: 0x1020,
             effectful: false,
             binding,
             inst: InstId(2),
@@ -430,6 +439,7 @@ fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
         FinalBindingRead {
             value: None,
             statement: 0x1030,
+            top: 0x1030,
             binding,
             source: PlacementRead::Use(UseSite {
                 inst: InstId(3),
@@ -439,10 +449,12 @@ fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
             block: 0x1030,
             order: FinalOccurrenceOrder(2),
             spelled: true,
+            unspecified: false,
         },
         FinalBindingRead {
             value: None,
             statement: 0x1030,
+            top: 0x1030,
             binding,
             source: PlacementRead::Use(UseSite {
                 inst: InstId(3),
@@ -452,6 +464,7 @@ fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
             block: 0x1030,
             order: FinalOccurrenceOrder(4),
             spelled: true,
+            unspecified: false,
         },
     ];
 
@@ -487,6 +500,7 @@ fn one_dominating_write_is_inlined_at_its_exact_assignment() {
         &BTreeSet::new(),
         &[FinalBindingRead {
             statement: 0,
+            top: 0,
             value: None,
             binding,
             source: PlacementRead::Use(UseSite {
@@ -497,9 +511,11 @@ fn one_dominating_write_is_inlined_at_its_exact_assignment() {
             block: 0x1010,
             order: FinalOccurrenceOrder(2),
             spelled: true,
+            unspecified: false,
         }],
         &[FinalBindingWrite {
             statement: 0,
+            top: 0,
             defines: None,
             effectful: false,
             binding,
@@ -534,6 +550,7 @@ fn certified_parameter_read_uses_entry_assignment_without_a_local() {
     let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
     let reads = [FinalBindingRead {
         statement: 0,
+        top: 0,
         value: None,
         binding,
         source: PlacementRead::Use(UseSite {
@@ -544,6 +561,7 @@ fn certified_parameter_read_uses_entry_assignment_without_a_local() {
         block: 0x1000,
         order: FinalOccurrenceOrder(0),
         spelled: true,
+        unspecified: false,
     }];
 
     let decisions = derive_with_cfg(
@@ -588,6 +606,7 @@ fn escaped_frame_object_address_uses_its_declaration_as_definition() {
     let value = r2ssa::ValueId(3);
     let reads = [FinalBindingRead {
         statement: 0,
+        top: 0,
         value: Some(value),
         binding,
         source: PlacementRead::ObjectAddress { value },
@@ -595,6 +614,7 @@ fn escaped_frame_object_address_uses_its_declaration_as_definition() {
         block: 0x1000,
         order: FinalOccurrenceOrder(0),
         spelled: true,
+        unspecified: false,
     }];
 
     let decisions = derive_with_cfg(

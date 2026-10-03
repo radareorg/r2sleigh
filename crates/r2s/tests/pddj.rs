@@ -276,10 +276,14 @@ fn an_unmapped_address_has_no_answer() {
     assert!(!ok, "{out}");
 }
 
-/// Whether `dispatch` at -O0 marks its return unproven as the contract says.
+/// Where `dispatch` is in both -O0 builds.
+const DISPATCH_AT_O0: u64 = 0x1521;
+
+/// Whether `dispatch` at -O0, with no debug information, marks its return
+/// unproven as the contract says.
 ///
 /// It returns what a function pointer it was handed returns, which nothing
-/// proves. Its header states the result carrier, every return is a residual
+/// proves once the declaration that types the pointer is stripped. Its header states the result carrier, every return is a residual
 /// of it whose cause is the unproven return, and the proof counts it.
 fn dispatch_marks_its_unproven_return(answer: &Value) -> bool {
     let signature = answer["signature"].as_str().unwrap_or_default();
@@ -291,7 +295,7 @@ fn dispatch_marks_its_unproven_return(answer: &Value) -> bool {
     let returns_residual = sites
         .iter()
         .any(|site| site["cause"] == "unproven-return" && site["type"] == "u64");
-    signature.starts_with("uint64_t dispatch(")
+    signature.starts_with("uint64_t ")
         && code.contains("return r2sleigh_residual_u64(")
         && returns_residual
         && answer["proof"]["residual"].as_u64() != Some(0)
@@ -306,21 +310,115 @@ fn panic_text(cause: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_default()
 }
 
-/// The review fixtures, named by `R2S_REVIEW_FIXTURES`: a directory holding
-/// `rv_O0g` (gcc -O0 -g) and `rv_O2` (gcc -O2) built from `review.c`. Skipped
-/// when unset, since the binaries are not in the tree.
+/// GCC, where it is installed. Its flow-sensitive uninitialized-read
+/// analysis is the judge of definite assignment that owes the engine nothing;
+/// clang's does not follow values through the optimizer, so it cannot stand
+/// in for it.
+fn gcc() -> Option<&'static str> {
+    ["gcc", "cc"].into_iter().find(|cc| {
+        Command::new(cc)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success() && out.stdout.starts_with(cc.as_bytes()))
+    })
+}
+
+/// Whether a unit reads no variable before assigning it, as GCC judges it
+/// with the optimizer's dataflow on: at `-O2` with every uninitialized and
+/// maybe-uninitialized read an error. A read the engine cannot prove assigned
+/// is a residual, which is a call and reads nothing; a declared name read on
+/// a path that never assigned it is an indeterminate value, and C gives that
+/// no meaning.
+fn definitely_assigned(gcc: &str, code: &str, label: &str) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!(
+        "r2s-pddj-assigned-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temporary directory");
+    let source = dir.join("unit.c");
+    std::fs::write(&source, code).expect("write the unit");
+    let done = Command::new(gcc)
+        .args([
+            "-std=c11",
+            "-O2",
+            "-c",
+            "-Wall",
+            "-Werror=implicit-function-declaration",
+            "-Werror=uninitialized",
+            "-Werror=maybe-uninitialized",
+            "-o",
+        ])
+        .arg(dir.join("unit.o"))
+        .arg(&source)
+        .output()
+        .expect("run the compiler");
+    let _ = std::fs::remove_dir_all(&dir);
+    if done.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{label} reads a name it never assigned:\n{}",
+        String::from_utf8_lossy(&done.stderr)
+    ))
+}
+
+/// The causes of an answer's residual sites, in site order.
+fn causes(answer: &Value) -> Vec<&str> {
+    answer["residuals"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|site| site["cause"].as_str())
+        .collect()
+}
+
+/// What the review fixture at -O2 must say where a read has no assignment,
+/// or `None` when it says it.
+///
+/// `sext` merges the byte it sign-extends into the entry value of `rax`, which
+/// the caller never supplied: that read is held from entry. `main` reads
+/// `avg`'s floating-point result in `xmm0` after a call whose prototype claims
+/// no such result, so nothing assigned it. Both canary loads read the one
+/// thread pointer `main` entered with, which C has no name for, and no call
+/// redefines it.
+fn unassigned_reads_at_o2(definition: &str, answer: &Value) -> Option<String> {
+    let code = answer["code"].as_str().unwrap_or_default();
+    let causes = causes(answer);
+    let (expected, said) = if definition == "sext" {
+        (
+            vec!["held-from-entry"],
+            code.contains("1 held from entry, read as residuals (RAX_0)"),
+        )
+    } else {
+        (
+            vec!["held-from-entry", "never-assigned", "held-from-entry"],
+            code.contains("1 held from entry, read as residuals (FS_OFFSET_0)")
+                && code.contains("1 never assigned, read as residuals (XMM0_4)")
+                && !code.contains("FS_OFFSET_15"),
+        )
+    };
+    (causes != expected || !said).then(|| format!("rv_O2 {definition}: {causes:?}\n{code}"))
+}
+
+/// The review fixtures the repository ships: `rv_O0g` (gcc -O0 -g), the same
+/// stripped, and `rv_O2` (gcc -O2), all built from `tests/gold/review.c`.
+///
+/// Every function is a unit that compiles, and, where GCC is installed, one
+/// that reads no name it did not assign.
 #[test]
 fn the_review_fixtures_are_units_that_compile() {
-    let Some(dir) = std::env::var_os("R2S_REVIEW_FIXTURES").map(PathBuf::from) else {
-        return;
-    };
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let cc = compiler();
+    let gcc = gcc();
     // Every function is checked and every failure reported, so one function
     // that does not answer does not hide the rest.
     let mut failures = Vec::new();
     let mut dispatch_at_o0 = false;
-    for build in ["rv_O0g", "rv_O2"] {
-        let binary = dir.join(build);
+    let mut judged_at_o2 = BTreeSet::new();
+    for build in ["rv_O0g", "rv_O0g_stripped", "rv_O2"] {
+        let binary = fixtures.join(build);
         for addr in functions(&binary) {
             let answer = match std::panic::catch_unwind(|| checked(&binary, addr, cc)) {
                 Ok(answer) => answer,
@@ -329,15 +427,32 @@ fn the_review_fixtures_are_units_that_compile() {
                     continue;
                 }
             };
-            if build != "rv_O0g" || answer["definition"] != "dispatch" {
-                continue;
+            let label = format!("{build} {addr:#x} ({})", answer["name"]);
+            let code = answer["code"].as_str().unwrap_or_default();
+            if let Some(gcc) = gcc
+                && let Err(failure) = definitely_assigned(gcc, code, &label)
+            {
+                failures.push(failure);
             }
-            dispatch_at_o0 = true;
-            if !dispatch_marks_its_unproven_return(&answer) {
-                failures.push(format!("{build} dispatch: {answer}"));
+            let definition = answer["definition"].as_str().unwrap_or_default();
+            if build == "rv_O2" && matches!(definition, "sext" | "main") {
+                judged_at_o2.insert(definition.to_owned());
+                failures.extend(unassigned_reads_at_o2(definition, &answer));
+            }
+            // `dispatch`, where nothing declares what its pointer returns.
+            if build == "rv_O0g_stripped" && addr == DISPATCH_AT_O0 {
+                dispatch_at_o0 = true;
+                if !dispatch_marks_its_unproven_return(&answer) {
+                    failures.push(format!("{build} dispatch: {answer}"));
+                }
             }
         }
     }
-    assert!(dispatch_at_o0, "rv_O0g has no dispatch");
+    assert!(dispatch_at_o0, "rv_O0g_stripped has no dispatch");
+    assert_eq!(
+        judged_at_o2,
+        BTreeSet::from(["main".to_owned(), "sext".to_owned()]),
+        "rv_O2 lacks a function whose unassigned reads are named"
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
