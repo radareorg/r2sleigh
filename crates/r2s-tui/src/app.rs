@@ -19,16 +19,20 @@ pub enum View {
     Hex,
     /// `VV`: the function's control-flow graph.
     Graph,
+    /// The disassembly beside the decompiled C, each line of C lit while
+    /// the instruction under the cursor is one it was rendered from.
+    Split,
     List(ListKind),
 }
 
 impl View {
     /// The order `p` steps through, as radare2's print modes cycle.
-    const CYCLE: [View; 5] = [
+    const CYCLE: [View; 6] = [
         View::Disassembly,
         View::Decompiler,
         View::Hex,
         View::Graph,
+        View::Split,
         View::List(ListKind::Functions),
     ];
 
@@ -50,6 +54,7 @@ impl View {
             View::Decompiler => "decompiler".to_owned(),
             View::Hex => "hex".to_owned(),
             View::Graph => "graph".to_owned(),
+            View::Split => "disassembly | decompiler".to_owned(),
             View::List(kind) => kind.title().to_owned(),
         }
     }
@@ -89,6 +94,8 @@ pub(crate) struct GraphPane {
     pub(crate) mini: bool,
     /// The next draw brings the selected block into the window.
     pub(crate) recentre: bool,
+    /// Whether the overview of the whole layout is drawn in a corner.
+    pub(crate) minimap: bool,
 }
 
 pub struct App {
@@ -188,6 +195,7 @@ impl App {
             KeyCode::Char('p') => self.switch(self.view.next(1)),
             KeyCode::Char('P') => self.switch(self.view.next(-1)),
             KeyCode::Char('V') => self.switch(View::Graph),
+            KeyCode::Char('\\') => self.switch(View::Split),
             KeyCode::Char(':') => self.prompt = Prompt::Command(String::new()),
             KeyCode::Char('g') => self.prompt = Prompt::Goto(String::new()),
             KeyCode::Char('u') => {
@@ -248,7 +256,7 @@ impl App {
     /// Move the cursor `delta` rows (bytes, in hex), scrolling the pane.
     fn step(&mut self, host: &mut dyn Host, delta: isize) {
         match self.view {
-            View::Disassembly => self.step_lines(host, delta),
+            View::Disassembly | View::Split => self.step_lines(host, delta),
             View::Hex => {
                 // The cursor is a byte; the pane scrolls by whole rows.
                 let page = self.rows.max(1) as isize * 16;
@@ -313,7 +321,7 @@ impl App {
     /// `Enter`: follow the line's transfer, or open the chosen row.
     fn follow(&mut self, host: &mut dyn Host) {
         match self.view {
-            View::Disassembly => {
+            View::Disassembly | View::Split => {
                 let target = self.listed.get(self.cursor).and_then(|line| line.target);
                 match target {
                     Some(target) => {
@@ -518,6 +526,7 @@ impl App {
             KeyCode::Char('K') | KeyCode::PageUp => pan(pane, 0, -page),
             KeyCode::Char('J') | KeyCode::PageDown => pan(pane, 0, page),
             KeyCode::Char('.') => pane.recentre = true,
+            KeyCode::Char('m') => pane.minimap = !pane.minimap,
             KeyCode::Char('-') | KeyCode::Char('+') => {
                 let mini = key.code == KeyCode::Char('-');
                 if let Ok((graph, layout)) = &mut pane.drawn

@@ -308,3 +308,56 @@ fn the_graph_follows_edges_and_blocks_and_keeps_the_seek_in_step() {
     let shown = screen(&mut app, &mut host);
     assert!(shown.contains("no function at 0x2000"), "{shown}");
 }
+
+/// The cells of one draw, for the tests that read a style.
+fn drawn(app: &mut App, host: &mut Program) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("a terminal");
+    terminal
+        .draw(|frame| app.draw(frame, host))
+        .expect("a draw");
+    terminal.backend().buffer().clone()
+}
+
+/// Whether the first cell of `needle` on the screen has the lit background.
+fn lit(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+    let width = buffer.area.width;
+    for y in 0..buffer.area.height {
+        let row: String = (0..width)
+            .map(|x| buffer[(x, y)].symbol().to_owned())
+            .collect();
+        if let Some(at) = row.find(needle) {
+            let x = row[..at].chars().count() as u16;
+            return buffer[(x, y)].bg == ratatui::style::Color::DarkGray;
+        }
+    }
+    panic!("{needle} is not on the screen");
+}
+
+#[test]
+fn the_split_lights_the_c_the_instruction_under_the_cursor_was_rendered_into() {
+    let mut host = Program::new();
+    let mut app = App::new(&host);
+    press(&mut app, &mut host, "\\");
+    assert_eq!(app.view(), View::Split);
+    let buffer = drawn(&mut app, &mut host);
+    // The call at 0x1000 is under the cursor, and it is what the call statement was rendered from.
+    assert!(lit(&buffer, "fcn_2000();"));
+    assert!(!lit(&buffer, "void main(void)"));
+    // One line down is 0x1004, which only the closing brace was rendered from.
+    press(&mut app, &mut host, "j");
+    assert_eq!(host.seek, 0x1004);
+    let buffer = drawn(&mut app, &mut host);
+    assert!(!lit(&buffer, "fcn_2000();"));
+    // Moving inside the function asked for no second rendering.
+    assert!(screen(&mut app, &mut host).contains("call fcn.00002000"));
+}
+
+#[test]
+fn the_graph_shows_a_map_of_a_layout_larger_than_its_window_and_m_hides_it() {
+    let mut host = Program::new();
+    let mut app = App::new(&host);
+    press(&mut app, &mut host, "V");
+    assert!(screen(&mut app, &mut host).contains('▪'));
+    press(&mut app, &mut host, "m");
+    assert!(!screen(&mut app, &mut host).contains('▪'));
+}

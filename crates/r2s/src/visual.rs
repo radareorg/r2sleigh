@@ -79,6 +79,31 @@ fn graph_of(session: &mut Session, entry: u64) -> Result<Graph, String> {
     })
 }
 
+/// The entry of the function an address is in: an entry is its own; inside
+/// a body, the nearest entry below whose blocks hold it; otherwise the
+/// address itself, which the engine then answers for as an entry.
+fn containing_entry(session: &mut Session, address: u64) -> Result<u64, String> {
+    let entries = session
+        .program
+        .functions()?
+        .into_iter()
+        .map(|function| function.address)
+        .collect::<std::collections::BTreeSet<_>>();
+    if entries.contains(&address) {
+        return Ok(address);
+    }
+    let Some(&below) = entries.range(..address).next_back() else {
+        return Ok(address);
+    };
+    let holds = session.program.function_graph(below).is_ok_and(|graph| {
+        graph
+            .blocks
+            .iter()
+            .any(|block| (block.address..block.address + block.size).contains(&address))
+    });
+    Ok(if holds { below } else { address })
+}
+
 /// The shell and the line reader a command typed in the visual mode runs with.
 pub struct Visual<'a> {
     pub session: &'a mut Session,
@@ -146,8 +171,9 @@ impl Host for Visual<'_> {
     }
 
     fn decompile(&mut self, address: u64) -> Result<Vec<DecompiledLine>, String> {
-        // As `pdd` asks: the function the engine finds at this address.
-        let entry = address;
+        // The function the address is in, so a cursor inside a body renders
+        // that body rather than one starting where the cursor is.
+        let entry = containing_entry(self.session, address)?;
         let rendering = self.session.program.rendered(entry, RenderTier::C)?;
         let name = self.session.program.names().of(entry).map_or_else(
             || format!("fcn.{entry:08x}"),
@@ -178,23 +204,8 @@ impl Host for Visual<'_> {
     }
 
     fn graph(&mut self, address: u64) -> Result<Graph, String> {
-        // The function the address is in: an entry is its own; inside a body,
-        // the nearest entry below whose graph holds it.
-        let entries = self
-            .session
-            .program
-            .functions()?
-            .into_iter()
-            .map(|function| function.address)
-            .collect::<std::collections::BTreeSet<_>>();
-        if !entries.contains(&address)
-            && let Some(&below) = entries.range(..address).next_back()
-            && let Ok(graph) = graph_of(self.session, below)
-            && graph.node_at(address).is_some()
-        {
-            return Ok(graph);
-        }
-        graph_of(self.session, address)
+        let entry = containing_entry(self.session, address)?;
+        graph_of(self.session, entry)
     }
 
     fn list(&mut self, kind: ListKind) -> Vec<Entry> {
@@ -312,6 +323,15 @@ mod tests {
             Some(0x11e0)
         );
         assert_eq!(graph.nodes.len(), 4, "{graph:?}");
+        // So is the rendering: the cursor inside the loop renders the
+        // function the loop is in, not one starting at the cursor.
+        let inside = host.decompile(0x11e5).expect("sum_array renders");
+        let from_entry = host.decompile(0x11c1).expect("sum_array renders");
+        assert_eq!(inside, from_entry);
+        assert!(
+            inside.iter().any(|line| line.text.contains("sum_array(")),
+            "{inside:?}"
+        );
         let functions = host.list(r2s_tui::ListKind::Functions);
         assert!(
             functions.iter().any(|entry| entry.address == 0x1549),

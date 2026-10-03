@@ -2,7 +2,7 @@
 
 use crate::app::{App, GraphPane, Message, Prompt, View, matches_filter};
 use crate::graph::{Canvas, Ink};
-use crate::host::{EdgeKind, Host, ListKind};
+use crate::host::{DecompiledLine, EdgeKind, Host, ListKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,6 +14,8 @@ const DIM: Style = Style::new().fg(Color::DarkGray);
 const ADDRESS: Style = Style::new().fg(Color::Green);
 const ERROR: Style = Style::new().fg(Color::Red);
 const TITLE: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
+const LIT: Style = Style::new().bg(Color::DarkGray);
+const VIEWPORT: Style = Style::new().fg(Color::Yellow);
 
 pub(crate) fn draw(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host) {
     let [title, main, status] = Layout::vertical([
@@ -40,6 +42,7 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host) {
         View::Decompiler => decompiler(app, frame, host, main),
         View::Hex => hex(app, frame, host, main),
         View::Graph => graph(app, frame, host, main),
+        View::Split => split(app, frame, host, main),
         View::List(kind) => list(app, frame, host, main, kind),
     }
 
@@ -79,8 +82,9 @@ fn help(view: View) -> &'static str {
         View::Decompiler => "j/k move (seeks)  u back  g goto  p/P pane  : cmd  q quit",
         View::Hex => "arrows move  i edit (esc ends)  g goto  p/P pane  : cmd  q quit",
         View::Graph => {
-            "hjkl pan  tab block  t/f true/false  . centre  -/+ zoom  enter disasm  u back  q quit"
+            "hjkl pan  tab block  t/f true/false  . centre  -/+ zoom  m map  enter disasm  q quit"
         }
+        View::Split => "j/k move  enter follow  u back  g goto  p/P pane  : cmd  q quit",
         View::List(_) => "j/k move  enter seek  / filter  l next list  p/P pane  : cmd  q quit",
     }
 }
@@ -121,59 +125,133 @@ fn disassembly(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: 
     );
 }
 
-fn decompiler(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+/// Make the held rendering the function's at the seek; whether it was asked
+/// for now.
+///
+/// The rendering is the function's, so it is kept while the seek stays
+/// between the lowest and highest instruction its lines were rendered from --
+/// an instruction no line names (a prologue's push) is still the function's --
+/// and asked for again only when the seek leaves that span. O(lines) per draw.
+fn decompiled(app: &mut App, host: &mut dyn Host) -> bool {
     let seek = host.seek();
-    // The rendering is the function's, so it is kept while the cursor stays
-    // in the lines it covers and asked for again only when it leaves them.
-    let covers = |lines: &[crate::host::DecompiledLine]| {
-        lines
-            .iter()
-            .any(|line| line.addresses.binary_search(&seek).is_ok())
+    let inside = |lines: &[DecompiledLine]| {
+        let addresses = || lines.iter().flat_map(|line| line.addresses.iter().copied());
+        match (addresses().min(), addresses().max()) {
+            (Some(low), Some(high)) => (low..=high).contains(&seek),
+            _ => false,
+        }
     };
     let stale = match &app.decompiled {
-        Some((_, Ok(lines))) => !covers(lines),
+        Some((_, Ok(lines))) => !inside(lines),
         Some((at, Err(_))) => *at != seek,
         None => true,
     };
     if stale {
         app.decompiled = Some((seek, host.decompile(seek)));
-        // Land on the line the seek was rendered into.
-        if let Some((_, Ok(lines))) = &app.decompiled {
-            app.cursor = lines
-                .iter()
-                .position(|line| line.addresses.binary_search(&seek).is_ok())
-                .unwrap_or(0);
-        }
     }
-    let body = match &app.decompiled {
+    stale
+}
+
+/// The rows of a rendering from `skip`, highlighted as C, with `lit` lines
+/// marked and the line at `cursor` reversed.
+fn decompiled_rows(
+    lines: &[DecompiledLine],
+    skip: usize,
+    rows: usize,
+    cursor: Option<usize>,
+    lit: impl Fn(&DecompiledLine) -> bool,
+) -> Vec<Line<'static>> {
+    // Whether a comment opened above the window is still open at its top.
+    let mut in_comment = false;
+    for line in &lines[..skip.min(lines.len())] {
+        crate::highlight::classify(&line.text, &mut in_comment);
+    }
+    lines
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .take(rows)
+        .map(|(row, line)| {
+            let text = Line::from(crate::highlight::spans(&line.text, &mut in_comment));
+            if cursor == Some(row) {
+                text.style(CURSOR)
+            } else if lit(line) {
+                text.style(LIT)
+            } else {
+                text
+            }
+        })
+        .collect()
+}
+
+/// The pane's title: what the proof comment says, where the rendering has one.
+fn decompiler_title(lines: &[DecompiledLine]) -> String {
+    match lines
+        .iter()
+        .find_map(|line| crate::highlight::proof(&line.text))
+    {
+        Some(proof) => format!(" decompiler -- {proof} "),
+        None => " decompiler ".to_owned(),
+    }
+}
+
+fn decompiler(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+    let seek = host.seek();
+    if decompiled(app, host)
+        && let Some((_, Ok(lines))) = &app.decompiled
+    {
+        // Land on the line the seek was rendered into.
+        app.cursor = lines
+            .iter()
+            .position(|line| line.addresses.binary_search(&seek).is_ok())
+            .unwrap_or(0);
+    }
+    let (body, title) = match &app.decompiled {
         Some((_, Ok(lines))) => {
             let skip = app.cursor.saturating_sub(app.rows.saturating_sub(1));
-            lines
-                .iter()
-                .enumerate()
-                .skip(skip)
-                .take(app.rows)
-                .map(|(row, line)| {
-                    let style = if row == app.cursor {
-                        CURSOR
-                    } else if line.text.contains("r2sleigh_residual") {
-                        ERROR
-                    } else if line.text.trim_start().starts_with("/*") {
-                        DIM
-                    } else {
-                        Style::new()
-                    };
-                    Line::styled(line.text.clone(), style)
-                })
-                .collect::<Vec<_>>()
+            let body = decompiled_rows(lines, skip, app.rows, Some(app.cursor), |_| false);
+            (body, decompiler_title(lines))
         }
-        Some((_, Err(error))) => vec![Line::styled(error.clone(), ERROR)],
-        None => Vec::new(),
+        Some((_, Err(error))) => (
+            vec![Line::styled(error.clone(), ERROR)],
+            " decompiler ".to_owned(),
+        ),
+        None => (Vec::new(), " decompiler ".to_owned()),
     };
-    frame.render_widget(
-        Paragraph::new(body).block(pane(" decompiler ".to_owned())),
-        area,
-    );
+    frame.render_widget(Paragraph::new(body).block(pane(title)), area);
+}
+
+/// The disassembly beside the C: the cursor moves in the disassembly, and
+/// every line of C rendered from the instruction under it is lit, the first
+/// of them kept in view.
+fn split(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+    disassembly(app, frame, host, left);
+    // The disassembly seeks the line under its cursor as it moves; this
+    // reads the same line, so the two never disagree by a draw.
+    let under = app.listed.get(app.cursor).map(|line| line.address);
+    decompiled(app, host);
+    let rows = usize::from(right.height.saturating_sub(2)).max(1);
+    let (body, title) = match &app.decompiled {
+        Some((_, Ok(lines))) => {
+            let lit = |line: &DecompiledLine| {
+                under.is_some_and(|address| line.addresses.binary_search(&address).is_ok())
+            };
+            let first = lines.iter().position(lit).unwrap_or(0);
+            let skip = first.saturating_sub(rows / 3);
+            (
+                decompiled_rows(lines, skip, rows, None, lit),
+                decompiler_title(lines),
+            )
+        }
+        Some((_, Err(error))) => (
+            vec![Line::styled(error.clone(), ERROR)],
+            " decompiler ".to_owned(),
+        ),
+        None => (Vec::new(), " decompiler ".to_owned()),
+    };
+    frame.render_widget(Paragraph::new(body).block(pane(title)), right);
 }
 
 fn hex(app: &App, frame: &mut Frame<'_>, host: &dyn Host, area: Rect) {
@@ -266,7 +344,9 @@ fn inset(area: Rect, x: u16, y: u16) -> Rect {
 
 /// The graph pane: the function holding the seek, laid out once and painted
 /// through the window.
-fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+/// Make the held graph the function's at the seek, selecting the block the
+/// seek is in; laid out only when the seek leaves the held function.
+fn held_graph(app: &mut App, host: &mut dyn Host) {
     let seek = host.seek();
     let held = app.graph.as_ref().map(|pane| match &pane.drawn {
         Ok((graph, _)) => graph.node_at(seek),
@@ -302,9 +382,14 @@ fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) 
                 scroll: (0, 0),
                 mini: false,
                 recentre: true,
+                minimap: true,
             });
         }
     }
+}
+
+fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) {
+    held_graph(app, host);
     let Some(pane) = &mut app.graph else {
         return;
     };
@@ -346,6 +431,75 @@ fn graph(app: &mut App, frame: &mut Frame<'_>, host: &mut dyn Host, area: Rect) 
             cell.set_char(glyph);
             cell.set_style(ink_style(ink));
         }
+    }
+    if pane.minimap {
+        minimap(frame, inner, layout, pane);
+    }
+}
+
+/// The whole layout scaled into a corner, with the window drawn on it.
+///
+/// Drawn only where the layout does not already fit the window; each block
+/// is a run of `▪` at its scaled place, the selected one bright.
+fn minimap(frame: &mut Frame<'_>, inner: Rect, layout: &crate::graph::Layout, pane: &GraphPane) {
+    let (width, height) = (i64::from(layout.width), i64::from(layout.height));
+    let fits = width <= i64::from(inner.width) && height <= i64::from(inner.height);
+    let map_w = (inner.width / 4).clamp(8, 32);
+    let map_h = (inner.height / 3).clamp(4, 12);
+    if fits || inner.width < map_w + 4 || inner.height < map_h + 2 {
+        return;
+    }
+    let area = Rect {
+        x: inner.x + inner.width - map_w - 2,
+        y: inner.y + inner.height - map_h - 2,
+        width: map_w + 2,
+        height: map_h + 2,
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).border_style(DIM),
+        area,
+    );
+    let (map_w, map_h) = (i64::from(map_w), i64::from(map_h));
+    // One cell of the map is `scale` cells of the layout, the same on both axes
+    // so the shape is kept; rounded up so the whole layout fits.
+    let scale = ((width + map_w - 1) / map_w)
+        .max((height + map_h - 1) / map_h)
+        .max(1);
+    let buffer = frame.buffer_mut();
+    let mut put = |x: i64, y: i64, glyph: char, style: Style| {
+        if (0..map_w).contains(&x) && (0..map_h).contains(&y) {
+            let cell = &mut buffer[(area.x + 1 + x as u16, area.y + 1 + y as u16)];
+            cell.set_char(glyph);
+            cell.set_style(style);
+        }
+    };
+    for (index, placed) in layout.boxes.iter().enumerate() {
+        let style = if index == pane.selected {
+            VIEWPORT
+        } else {
+            DIM
+        };
+        let (x0, y0) = (i64::from(placed.x) / scale, i64::from(placed.y) / scale);
+        let x1 = (i64::from(placed.x + placed.width) / scale).max(x0 + 1);
+        let y1 = (i64::from(placed.y + placed.height) / scale).max(y0 + 1);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                put(x, y, '▪', style);
+            }
+        }
+    }
+    // The window's outline.
+    let (wx0, wy0) = (pane.scroll.0 / scale, pane.scroll.1 / scale);
+    let wx1 = (pane.scroll.0 + i64::from(inner.width)) / scale;
+    let wy1 = (pane.scroll.1 + i64::from(inner.height)) / scale;
+    for x in wx0..=wx1 {
+        put(x, wy0, '─', VIEWPORT);
+        put(x, wy1, '─', VIEWPORT);
+    }
+    for y in wy0..=wy1 {
+        put(wx0, y, '│', VIEWPORT);
+        put(wx1, y, '│', VIEWPORT);
     }
 }
 

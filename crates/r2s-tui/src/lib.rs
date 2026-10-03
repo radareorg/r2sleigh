@@ -12,6 +12,7 @@
 
 mod app;
 pub mod graph;
+pub mod highlight;
 mod host;
 mod view;
 
