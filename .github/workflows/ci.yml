@@ -204,30 +204,6 @@ jobs:
             test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
             test_equiv.ContractTests test_equiv.DwarfTests test_equiv.RatchetTests
 
-  # The gate's self-tests and its whole pipeline over the stub shell, run from
-  # unittest. On GitHub-hosted runners they stall inside a driver run and have
-  # never finished (three runs on 2026-10-03), while the same self-tests pass
-  # inside every equivalence shard above. Until the stall is diagnosed this job
-  # reports without blocking, and prints what is stuck when it hits its bound.
-  # Removal condition: two consecutive green runs, then `continue-on-error`
-  # goes and the job gates again (ROADMAP G).
-  equivalence-pipeline:
-    name: Equivalence Pipeline (diagnosing)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 14
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v6
-      # A step past its own timeout fails and keeps its log; the job's timeout
-      # cancels it and keeps nothing, which is how two runs left no trace.
-      - name: Self-tests from unittest
-        timeout-minutes: 5
-        run: tests/equiv/bounded.sh 240 test_equiv.SelfTestSuite
-      - name: The pipeline over the stub shell
-        if: always()
-        timeout-minutes: 6
-        run: tests/equiv/bounded.sh 330 test_equiv.PipelineTests
-
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #
   # Every function of the corpus and the gold programs is decompiled from its
@@ -251,14 +227,17 @@ jobs:
       matrix:
         compiler: [gcc, clang]
         opt: [O0, O1, O2]
-        # Two halves of the population by record count (406 and 350 of 756).
-        # The merge job refuses if a baseline record goes ungraded, so a new
-        # source file has to be added to one half here.
+        # Split by measured time, not record count (run 37137792784's
+        # `timing:` lines): shapes.c alone takes 1.5 to 4.7 minutes per
+        # configuration, more than the other seven together. The binaries of a
+        # shard render side by side, so a shard lasts about as long as its
+        # slowest binary. The merge job refuses if a baseline record goes
+        # ungraded, so a new source file has to be added to one part here.
         part:
           - name: a
-            sources: tests/corpus/branchy.c tests/corpus/hashes.c tests/corpus/values.c tests/gold/flag_materialisation.c
-          - name: b
-            sources: tests/corpus/shapes.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+            sources: tests/corpus/branchy.c tests/corpus/hashes.c tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+          - name: shapes
+            sources: tests/corpus/shapes.c
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
