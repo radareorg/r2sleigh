@@ -141,7 +141,7 @@ pub use obligation::{
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite,
 };
 pub use op::{AtomicCasOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
-pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, optimize_function};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
 pub use promote::promoted_slot_offset;
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,

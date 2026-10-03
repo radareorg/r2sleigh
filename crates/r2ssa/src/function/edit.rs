@@ -13,7 +13,10 @@
 use std::collections::BTreeMap;
 
 use crate::arena::{OpId, Pass};
+use crate::cfg::BlockTerminator;
 use crate::op::SSAOp;
+
+use super::PhiNode;
 
 /// Where an insertion goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,7 +30,7 @@ pub(crate) enum Anchor {
         not(test),
         expect(
             dead_code,
-            reason = "no pass outside tests kills or appends yet; optimize and the demand pass do in step 2 of doc/adr-stable-identity.md"
+            reason = "no pass appends after an operation yet; the anchor is the plan's, not a pass's"
         )
     )]
     After(OpId),
@@ -49,10 +52,34 @@ enum Edit {
     Kill { id: OpId, pass: Pass },
 }
 
+/// A change to a function's merges or its control flow, applied after the
+/// plan's operation edits and in the order the pass stated it.
+#[derive(Debug, Clone)]
+pub(crate) enum ShapeEdit {
+    /// Rewrite the phi `id` of `block` in place: it keeps its id.
+    ReplacePhi { block: u64, id: OpId, phi: PhiNode },
+    /// Drop from every phi of `block` the source arriving from `pred`.
+    DropPhiSources { block: u64, pred: u64 },
+    /// Remove the control-flow edge `from -> to`.
+    RemoveEdge { from: u64, to: u64 },
+    /// State how `block` leaves.
+    SetTerminator {
+        block: u64,
+        terminator: BlockTerminator,
+    },
+    /// Remove a block from the control-flow graph. Its operations stay until
+    /// the plan reorders, which keeps the blocks the graph still has.
+    RemoveBlock(u64),
+}
+
 /// What a pass wants changed, in the order it found it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EditPlan {
     edits: Vec<Edit>,
+    shape: Vec<ShapeEdit>,
+    /// Recompute the block order and the dominators from the control-flow
+    /// graph once every edit is applied, keeping only the blocks it has.
+    reorder: bool,
 }
 
 impl EditPlan {
@@ -61,7 +88,31 @@ impl EditPlan {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
+        self.edits.is_empty() && self.shape.is_empty() && !self.reorder
+    }
+
+    /// Whether the plan edits no operation.
+    pub(crate) fn edits_no_operation(&self) -> bool {
         self.edits.is_empty()
+    }
+
+    /// Change a merge or the control flow; see [`ShapeEdit`].
+    pub(crate) fn reshape(&mut self, edit: ShapeEdit) {
+        self.shape.push(edit);
+    }
+
+    /// Recompute order and dominators after the plan; see [`Self::reorder`].
+    pub(crate) fn reorder(&mut self) {
+        self.reorder = true;
+    }
+
+    /// The merge and control-flow edits, and whether to reorder, leaving the
+    /// operation edits.
+    pub(crate) fn take_shape(&mut self) -> (Vec<ShapeEdit>, bool) {
+        (
+            std::mem::take(&mut self.shape),
+            std::mem::take(&mut self.reorder),
+        )
     }
 
     pub(crate) fn replace(&mut self, id: OpId, op: SSAOp) {
@@ -84,7 +135,7 @@ impl EditPlan {
         not(test),
         expect(
             dead_code,
-            reason = "no pass outside tests kills or appends yet; optimize and the demand pass do in step 2 of doc/adr-stable-identity.md"
+            reason = "no pass kills an operation yet: SCCP rewrites a decided branch to a Nop in place"
         )
     )]
     pub(crate) fn kill(&mut self, id: OpId, pass: Pass) {

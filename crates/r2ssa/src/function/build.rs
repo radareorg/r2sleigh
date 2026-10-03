@@ -59,7 +59,7 @@ impl SSAFunction {
             enable_inst_combine: false,
             preserve_memory_reads: false,
         };
-        func.optimize(&cfg);
+        crate::optimize::optimize_function(&mut func, &cfg);
         validate_ssa_function(&func).ok()?;
         Some(func)
     }
@@ -602,18 +602,6 @@ impl SSAFunction {
     /// Build raw SSA without architecture metadata.
     pub fn from_blocks_raw_no_arch(blocks: &[R2ILBlock]) -> Option<Self> {
         Self::from_blocks_raw(blocks, None)
-    }
-
-    pub fn refresh_after_cfg_mutation(&mut self) {
-        let cfg = &self.cfg;
-        self.blocks.retain(Pass::RemoveBlock, |block| {
-            cfg.get_block(block.addr).is_some()
-        });
-        self.block_order = self.cfg.reverse_postorder();
-        self.reorder_blocks();
-        self.domtree = DomTree::compute(&self.cfg);
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
     }
 
     /// Prepare SSA for decompilation using provenance-preserving defaults.

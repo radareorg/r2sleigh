@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn rejects_entry_outside_the_stored_block_domain() {
         let mut function = diamond();
-        function.remove_block(function.entry);
+        function.corrupt_remove_block(function.entry);
 
         assert_eq!(
             validate_ssa_function(&function),
@@ -724,7 +724,7 @@ mod tests {
     fn rejects_a_root_that_an_edge_reaches() {
         let mut function = diamond();
         function
-            .cfg_mut()
+            .corrupt_cfg()
             .set_terminator(0x100c, BlockTerminator::Branch { target: 0x1000 });
         assert_eq!(
             validate_ssa_function(&function),
@@ -740,8 +740,8 @@ mod tests {
         let mut predecessor = diamond();
         let mut orphan = BasicBlock::new(0x3000);
         orphan.terminator = BlockTerminator::Branch { target: 0x100c };
-        predecessor.cfg_mut().add_block(orphan);
-        predecessor.cfg_mut().rebuild_edges();
+        predecessor.corrupt_cfg().add_block(orphan);
+        predecessor.corrupt_cfg().rebuild_edges();
         assert_eq!(
             validate_ssa_function(&predecessor),
             Err(SsaIntegrityError::PredecessorOutsideBlockDomain {
@@ -753,9 +753,9 @@ mod tests {
         let mut successor = diamond();
         let mut orphan = BasicBlock::new(0x3000);
         orphan.terminator = BlockTerminator::Return;
-        successor.cfg_mut().add_block(orphan);
+        successor.corrupt_cfg().add_block(orphan);
         successor
-            .cfg_mut()
+            .corrupt_cfg()
             .set_terminator(0x1004, BlockTerminator::Branch { target: 0x3000 });
         assert_eq!(
             validate_ssa_function(&successor),
@@ -772,7 +772,7 @@ mod tests {
         // A duplicate CFG address makes the address index name the new node,
         // while existing edges still target the old node. The public topology
         // queries then disagree even though every reported address is stored.
-        function.cfg_mut().add_block(BasicBlock::new(0x1008));
+        function.corrupt_cfg().add_block(BasicBlock::new(0x1008));
 
         assert_eq!(
             validate_ssa_function(&function),

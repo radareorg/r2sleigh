@@ -1287,7 +1287,7 @@ fn test_from_blocks_default_runs_optimization() {
 }
 
 #[test]
-fn test_refresh_after_cfg_mutation_recomputes_order_and_domtree() {
+fn a_plan_that_removes_a_block_and_reorders_recomputes_order_and_domtree() {
     let blocks = vec![
         R2ILBlock {
             addr: 0x1000,
@@ -1329,8 +1329,10 @@ fn test_refresh_after_cfg_mutation_recomputes_order_and_domtree() {
     ];
 
     let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    func.remove_block(0x1004);
-    func.refresh_after_cfg_mutation();
+    let mut plan = crate::function::EditPlan::new();
+    plan.reshape(crate::function::ShapeEdit::RemoveBlock(0x1004));
+    plan.reorder();
+    func.apply_edits(plan);
 
     assert!(!func.block_addrs().contains(&0x1004));
     assert!(func.get_block(0x1004).is_none());

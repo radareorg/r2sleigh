@@ -53,7 +53,7 @@ use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 use blocks::Blocks;
 pub use blocks::IrRevision;
-pub(crate) use edit::{Anchor, BlockEdits, EditPlan, Insertion};
+pub(crate) use edit::{Anchor, BlockEdits, EditPlan, Insertion, ShapeEdit};
 
 /// Query-only CFG risk summary for decompilation preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,7 +450,9 @@ pub(crate) fn prepare_graph(
     // A lane write whose untouched bytes nothing reads does not read the
     // value it was written into (`demand`); releasing those bases changes an
     // operand, so the facts and the graph are taken once more where it did.
-    if release_undemanded_bytes(function, machine_context, &graph) {
+    let released = release_undemanded_bytes(function, machine_context, &graph);
+    if !released.is_empty() {
+        function.apply_edits(released);
         function.recollect_decompile_prep_facts();
         graph = SsaGraph::from_function_with_storage(function);
     }
@@ -468,17 +470,17 @@ pub(crate) fn prepare_graph(
 /// with an INSERT into a value that is not a constant can release anything,
 /// and only one pays for the pass.
 fn release_undemanded_bytes(
-    function: &mut SSAFunction,
+    function: &SSAFunction,
     machine_context: &SourceMachineContext,
     graph: &SsaGraph,
-) -> bool {
+) -> EditPlan {
     let inserts = function
         .blocks()
         .iter()
         .flat_map(|block| block.ops())
         .any(|op| matches!(op, SSAOp::Insert(insert) if insert.src.constant_bits().is_none()));
     if !inserts {
-        return false;
+        return EditPlan::new();
     }
     let return_storages = machine_context
         .abi_model()
@@ -492,7 +494,7 @@ fn release_undemanded_bytes(
             "demanded-bytes",
             "an exit hands registers to code outside the graph; no base is released"
         );
-        return false;
+        return EditPlan::new();
     }
     let demand = crate::demand::Demand::of(graph, &live_out);
     function.release_undemanded_insert_bases(graph, &demand)
@@ -2681,12 +2683,86 @@ impl SSAFunction {
         self.blocks.arena().id_limit()
     }
 
-    /// Apply a pass's plan, minting what it inserts in IR order.
-    pub(crate) fn apply_edits(&mut self, plan: EditPlan) {
+    /// Apply a pass's plan: its operation edits in IR order, minting what
+    /// they insert, then its merge and control-flow edits in the order the
+    /// pass stated them, then the reorder it asked for.
+    ///
+    /// The one path by which a pass changes a function. `O(n)` in the
+    /// operations for the operation edits, one block lookup per merge edit,
+    /// and one reverse postorder and dominator computation for a reorder.
+    pub(crate) fn apply_edits(&mut self, mut plan: EditPlan) {
         if plan.is_empty() {
             return;
         }
+        let (shape, reorder) = plan.take_shape();
         self.blocks.apply(plan);
+        for edit in shape {
+            match edit {
+                ShapeEdit::ReplacePhi { block, id, phi } => {
+                    if let Some(mut block) = self.block_for_change(block) {
+                        let index = block.sited_phis().position(|(held, _)| held == id);
+                        if let Some(index) = index {
+                            block.phis_mut()[index] = phi;
+                        }
+                    }
+                }
+                ShapeEdit::DropPhiSources { block, pred } => {
+                    if let Some(mut block) = self.block_for_change(block) {
+                        for phi in block.phis_mut() {
+                            phi.sources.retain(|(source, _)| *source != pred);
+                        }
+                    }
+                }
+                ShapeEdit::RemoveEdge { from, to } => self.cfg.remove_edge(from, to),
+                ShapeEdit::SetTerminator { block, terminator } => {
+                    self.cfg.set_terminator(block, terminator);
+                }
+                ShapeEdit::RemoveBlock(addr) => self.cfg.remove_block(addr),
+            }
+        }
+        if reorder {
+            self.reorder_from_cfg();
+        }
+        self.invalidate_query_index();
+    }
+
+    /// One block, open for change with the arena; for applying a plan.
+    fn block_for_change(&mut self, addr: u64) -> Option<BlockMut<'_>> {
+        let index = *self.block_index.get(&addr)? as usize;
+        self.blocks.block_mut(index)
+    }
+
+    /// Keep the blocks the control-flow graph still has, in its reverse
+    /// postorder, and recompute the dominators.
+    fn reorder_from_cfg(&mut self) {
+        let cfg = &self.cfg;
+        self.blocks.retain(Pass::RemoveBlock, |block| {
+            cfg.get_block(block.addr).is_some()
+        });
+        self.block_order = self.cfg.reverse_postorder();
+        self.reorder_blocks();
+        self.domtree = DomTree::compute(&self.cfg);
+        self.decompile_prep_facts = None;
+    }
+}
+
+#[cfg(test)]
+impl SSAFunction {
+    /// The control-flow graph, open for a test that corrupts it to show the
+    /// validator refuses what follows.
+    pub(crate) fn corrupt_cfg(&mut self) -> &mut CFG {
+        self.invalidate_query_index();
+        &mut self.cfg
+    }
+
+    /// Drop a block from the blocks and the graph and repair nothing that
+    /// named it, for a test that shows the validator refuses what follows.
+    pub(crate) fn corrupt_remove_block(&mut self, addr: u64) {
+        self.blocks
+            .retain(Pass::RemoveBlock, |block| block.addr != addr);
+        self.block_order.retain(|&a| a != addr);
+        self.block_index = block_index_of(&self.blocks);
+        self.cfg.remove_block(addr);
         self.invalidate_query_index();
     }
 }
@@ -3267,21 +3343,6 @@ impl SSAFunction {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
-    /// One operation, to be rewritten in place.
-    ///
-    /// The blocks' revision moves, so the decompile-prep facts no longer
-    /// answer for them until they are collected again; unlike
-    /// [`Self::get_block_mut`] they are kept, for that collection to refresh.
-    pub(crate) fn op_mut(&mut self, block: u64, index: usize) -> Option<&mut SSAOp> {
-        let position = *self.block_index.get(&block)? as usize;
-        self.invalidate_query_index();
-        self.blocks
-            .edit()
-            .get_mut(position)?
-            .ops_mut()
-            .get_mut(index)
-    }
-
     /// Get a mutable block by address.
     ///
     /// What the block gains is minted an id and what it loses is
@@ -3317,13 +3378,6 @@ impl SSAFunction {
     /// Get the CFG.
     pub fn cfg(&self) -> &CFG {
         &self.cfg
-    }
-
-    /// Get mutable access to the CFG.
-    pub fn cfg_mut(&mut self) -> &mut CFG {
-        self.invalidate_query_index();
-        self.decompile_prep_facts = None;
-        &mut self.cfg
     }
 
     /// Get the dominator tree.
@@ -3392,29 +3446,6 @@ impl SSAFunction {
         self.cfg.edge_type(from, to)
     }
 
-    /// Remove a block from SSA and CFG.
-    pub fn remove_block(&mut self, addr: u64) {
-        self.blocks
-            .retain(Pass::RemoveBlock, |block| block.addr != addr);
-        self.block_order.retain(|&a| a != addr);
-        self.block_index = block_index_of(&self.blocks);
-        self.cfg.remove_block(addr);
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-    }
-
-    /// Remove phi sources for a specific predecessor edge.
-    pub fn remove_phi_source(&mut self, block_addr: u64, pred_addr: u64) {
-        if let Some(mut block) = self.get_block_mut(block_addr) {
-            for phi in block.phis_mut() {
-                phi.sources.retain(|(pred, _)| *pred != pred_addr);
-            }
-        }
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-    }
-
-    /// Recompute cached metadata after CFG mutation.
     /// Put the blocks back in the order `block_order` states, and reindex.
     fn reorder_blocks(&mut self) {
         self.blocks.reorder(&self.block_order);
@@ -3553,16 +3584,6 @@ impl SSAFunction {
     )]
     pub fn validate_integrity(&self) -> Result<(), SsaIntegrityError> {
         validate_ssa_function(self)
-    }
-
-    /// Run SSA optimizations on this function.
-    pub fn optimize(
-        &mut self,
-        config: &crate::optimize::OptimizationConfig,
-    ) -> crate::optimize::OptimizationStats {
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-        crate::optimize::optimize_function(self, config)
     }
 
     /// Snapshot the current decompiler-prep fact view, if available.
