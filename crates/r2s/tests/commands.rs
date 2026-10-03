@@ -948,3 +948,25 @@ fn the_blocks_of_a_switch_on_a_spilled_parameter_reach_every_arm() {
     assert_eq!(arms, 8, "{}", run.out);
     assert_eq!(lines.len(), 11, "{}", run.out);
 }
+
+/// `pdim` states the frame partition: gcc -O0's `copy_name` hands no frame
+/// address out, so every object is private, and both of its calls have a
+/// complete interface whose argument area holds none of them.
+#[test]
+fn pdim_states_which_frame_objects_outside_code_can_reach() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let run = on(fixture, "pdim @ 0x13e3");
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.contains("Frame: 6 objects, 0 escaped"), "{}", run.out);
+    let calls = run
+        .out
+        .lines()
+        .filter(|line| line.trim_start().starts_with("call "))
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2, "{}", run.out);
+    assert!(
+        calls.iter().all(|line| line.ends_with("reaches no private object")),
+        "{}",
+        run.out
+    );
+}

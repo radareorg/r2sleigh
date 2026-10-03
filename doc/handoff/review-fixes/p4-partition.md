@@ -119,3 +119,16 @@ All go through `crates/r2engine/tests/native.rs` with in-memory programs:
 Plus the equivalence ratchet on the whole population, with the records
 review.c `main` and `shape_call_chain`, `shape_struct_pointer` and
 `shape_pointer_to_pointer` (P4 `differs`) expected to move.
+
+## P4.3 status (2026-10-03)
+
+**Landed.** `FrameReach` (`r2ssa/src/semantic/frame_reach.rs`):
+- A frame object is reachable from outside only once its address escapes. Escape is a forward taint over the SSA graph; an escaping address that names no object escapes the whole frame.
+- A call also reaches the objects in its own argument area, from its complete, non-variadic interface; any other call reaches the whole frame.
+- The one alias rule, `memory_locations_may_alias`, lets unknown memory alias a frame object only once that object escapes.
+- `pdim` prints the partition.
+
+**Deferred, by measurement.** Rewriting MemorySSA's state per object, to replace the per-access scan over every live location, was measured first:
+- On the largest function of `/bin/ls` (292 blocks), the objects + MemorySSA phase is 205 ms of a 25 s `pdd` (debug build).
+- 22 s of that run is preparing the root and 42 callees in full, at about 0.5 s each.
+- The scan rewrite would buy under 1% of the run, so it waits until a profile says otherwise. Callee preparation is the cost (review finding Q1), and it comes next.

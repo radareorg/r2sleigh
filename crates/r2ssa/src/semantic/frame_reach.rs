@@ -50,6 +50,17 @@ impl FrameReach {
         self.whole || self.escaped.contains(&object)
     }
 
+    /// Whether an escaping frame address named no object, so every frame
+    /// object is reachable.
+    pub const fn whole(&self) -> bool {
+        self.whole
+    }
+
+    /// Every call this fact bounds or does not, in instruction order.
+    pub fn calls(&self) -> impl Iterator<Item = (InstId, &CallFrameReach)> {
+        self.by_call.iter().map(|(call, reach)| (*call, reach))
+    }
+
     /// The frame objects this call reaches through its argument area, beyond
     /// those that have escaped. A call this fact does not know reaches all.
     pub fn call(&self, call: InstId) -> &CallFrameReach {

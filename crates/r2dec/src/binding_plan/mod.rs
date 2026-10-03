@@ -1660,6 +1660,78 @@ impl BindingPlan {
 #[cfg(test)]
 mod tests;
 
+/// The frame partition, as r2ssa states it: each frame object, where it
+/// starts in the entry frame and whether outside code can reach it, then what
+/// each call reaches of the rest through its argument area.
+fn frame_partition(out: &mut String, source: &r2ssa::SsaArtifact) {
+    use std::fmt::Write as _;
+    let objects = source.objects();
+    let reach = &objects.frame_reach;
+    let frame = objects
+        .objects
+        .iter()
+        .filter(|(_, fact)| {
+            matches!(
+                fact.kind,
+                r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let escaped = frame.iter().filter(|(id, _)| reach.escaped(**id)).count();
+    let _ = writeln!(
+        out,
+        "Frame: {} objects, {escaped} escaped{}",
+        frame.len(),
+        if reach.whole() {
+            " (an escaping address names no object: the whole frame)"
+        } else {
+            ""
+        }
+    );
+    for (id, fact) in &frame {
+        let at = objects.entry_stack_roots.get(id).map_or_else(
+            || "unplaced".to_owned(),
+            |root| match root.offset {
+                offset if offset < 0 => format!("sp-{:#x}", offset.unsigned_abs()),
+                offset => format!("sp+{offset:#x}"),
+            },
+        );
+        let kind = match fact.kind {
+            r2ssa::ObjectKind::StackSlot { .. } => "slot",
+            _ => "object",
+        };
+        let reached = if reach.escaped(**id) {
+            "escaped"
+        } else {
+            "private"
+        };
+        let _ = writeln!(out, "  o{} {kind} {at} {reached}", id.0);
+    }
+    for (call, reached) in reach.calls() {
+        let at = source
+            .graph()
+            .instruction_for_inst(call)
+            .map_or_else(|| format!("{call:?}"), |address| format!("{address:#x}"));
+        // What the escaped memory does not already cover.
+        let what = match reached {
+            r2ssa::CallFrameReach::Whole => "the whole frame".to_owned(),
+            r2ssa::CallFrameReach::Objects(set) => {
+                let private = set
+                    .iter()
+                    .filter(|id| !reach.escaped(**id))
+                    .map(|id| format!("o{}", id.0))
+                    .collect::<Vec<_>>();
+                if private.is_empty() {
+                    "no private object".to_owned()
+                } else {
+                    private.join(" ")
+                }
+            }
+        };
+        let _ = writeln!(out, "  call {at} reaches {what}");
+    }
+}
+
 /// The value tier's dispositions, as text.
 ///
 /// The engine has three tiers and only the last could be read from a command,
@@ -1704,6 +1776,7 @@ pub(crate) fn dump(source: &r2ssa::SsaArtifact, plan: &BindingPlan) -> String {
             }
         );
     }
+    frame_partition(&mut out, source);
     let _ = writeln!(&mut out, "Values:");
     for index in 0..source.graph().values.len() {
         let value = ValueId(index as u32);
