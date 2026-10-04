@@ -1638,14 +1638,14 @@ impl SsaArtifact {
     pub fn memory_uses_for_inst(&self, inst: crate::graph::InstId) -> Option<&[MemoryUseFact]> {
         self.memory()
             .uses_by_inst
-            .get(&inst)
+            .get(inst)
             .map(|facts| facts.as_slice())
     }
 
     pub fn memory_defs_for_inst(&self, inst: crate::graph::InstId) -> Option<&[MemoryDefFact]> {
         self.memory()
             .defs_by_inst
-            .get(&inst)
+            .get(inst)
             .map(|facts| facts.as_slice())
     }
 
@@ -2582,7 +2582,7 @@ pub(crate) fn same_content_reads(
         };
         let versions = memory
             .uses_by_inst
-            .get(&access.id.inst)
+            .get(access.id.inst)
             .into_iter()
             .flatten()
             .filter(|reached| {

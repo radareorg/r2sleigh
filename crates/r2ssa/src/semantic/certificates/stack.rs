@@ -1349,7 +1349,7 @@ pub(crate) fn unique_memory_def_for_access<'a>(
 ) -> Option<&'a MemoryDefFact> {
     let mut matches = memory
         .defs_by_inst
-        .get(&access.id.inst)
+        .get(access.id.inst)
         .into_iter()
         .flatten()
         .filter(|def| {
@@ -1367,7 +1367,7 @@ pub(crate) fn unique_memory_use_for_access<'a>(
 ) -> Option<&'a MemoryUseFact> {
     let mut matches = memory
         .uses_by_inst
-        .get(&access.id.inst)
+        .get(access.id.inst)
         .into_iter()
         .flatten()
         .filter(|use_fact| {

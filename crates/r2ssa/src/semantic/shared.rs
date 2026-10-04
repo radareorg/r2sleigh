@@ -2713,7 +2713,7 @@ pub(crate) fn raw_memory_subeffect_provenance(
     let annotations = if is_write {
         memory
             .defs_by_inst
-            .get(&inst)
+            .get(inst)
             .into_iter()
             .flatten()
             .map(|fact| &fact.location)
@@ -2721,7 +2721,7 @@ pub(crate) fn raw_memory_subeffect_provenance(
     } else {
         memory
             .uses_by_inst
-            .get(&inst)
+            .get(inst)
             .into_iter()
             .flatten()
             .map(|fact| &fact.location)

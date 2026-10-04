@@ -630,7 +630,7 @@ pub(crate) fn counted_for_loop_certificate(
     let lhs_reads = dependence_cone(graph, comparison.lhs);
     let rhs_reads = dependence_cone(graph, comparison.rhs);
     let (carrier, induction) = loop_fact.carriers.iter().find_map(|carrier| {
-        let induction = structured.inductions.get(&carrier.phi)?;
+        let induction = structured.inductions.get(carrier.phi)?;
         (lhs_reads.contains(&carrier.phi) != rhs_reads.contains(&carrier.phi))
             .then_some((carrier, induction))
     })?;

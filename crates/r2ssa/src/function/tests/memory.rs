@@ -250,12 +250,12 @@ fn prepared_function_ssa_collects_call_sites_and_memory_effects() {
     let uses = prepared
         .memory()
         .uses_by_inst
-        .get(&call_ref)
+        .get(call_ref)
         .expect("call memory use fact");
     let defs = prepared
         .memory()
         .defs_by_inst
-        .get(&call_ref)
+        .get(call_ref)
         .expect("call memory def fact");
     assert_eq!(uses.len(), 1);
     assert_eq!(defs.len(), 1);
@@ -345,7 +345,7 @@ fn prepared_function_ssa_builds_memory_phis_per_object() {
     let load_use = prepared
         .memory()
         .uses_by_inst
-        .get(&load_inst)
+        .get(load_inst)
         .and_then(|facts| facts.first())
         .expect("load use");
     assert_eq!(load_use.version, phis[0].output_version);
@@ -404,9 +404,9 @@ fn a_loop_merges_a_location_only_where_it_stores_to_it() {
         ];
         let prepared = SsaArtifact::raw(&blocks, None).expect("prepared SSA should build");
         let entry_store = prepared.graph().inst_spelled_at(0x1400, 0).expect("store");
-        let stored = prepared.memory().defs_by_inst[&entry_store][0].next_version;
+        let stored = prepared.memory().defs_by_inst[entry_store][0].next_version;
         let load = prepared.graph().inst_spelled_at(0x1404, 0).expect("load");
-        let loaded = prepared.memory().uses_by_inst[&load][0].version;
+        let loaded = prepared.memory().uses_by_inst[load][0].version;
         let merged = prepared.memory().phis_by_block.get(&0x1404).cloned();
         (stored, loaded, merged)
     };

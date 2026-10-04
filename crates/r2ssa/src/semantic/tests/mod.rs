@@ -1764,7 +1764,7 @@ fn every_recovered_induction_proves_itself_against_its_graph() {
     let inductions = &artifact.facts().structured.inductions;
     assert!(!inductions.is_empty(), "the fixture has an induction");
     for (phi, fact) in inductions {
-        assert_eq!(*phi, fact.phi, "keyed by the merge it describes");
+        assert_eq!(phi, fact.phi, "keyed by the merge it describes");
         assert!(fact.validate(graph), "{fact:?} must prove itself");
     }
 }
@@ -1893,7 +1893,7 @@ fn rewrites_while_to_for_with_two_step_alias_update_chain() {
         .facts()
         .structured
         .inductions
-        .get(&certificate.induction_phi)
+        .get(certificate.induction_phi)
         .expect("aliased induction fact");
     assert_eq!(induction.step, InductionStep::AddConst(1));
     assert!(induction.validate(artifact.graph()));

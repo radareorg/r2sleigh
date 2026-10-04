@@ -57,7 +57,7 @@ pub(crate) fn collect_structured_loop_facts(
     storage_spans: &StorageSpans,
 ) -> (
     BTreeMap<LoopId, StructuredLoopFact>,
-    BTreeMap<ValueId, InductionFact>,
+    crate::dense::IdMap<ValueId, InductionFact>,
 ) {
     let Body {
         function, graph, ..
@@ -65,7 +65,7 @@ pub(crate) fn collect_structured_loop_facts(
     let LoopEvidence { predicates, values } = evidence;
     let mut counter = TripCounter::new(function, graph, predicates, values);
     let mut loops = BTreeMap::new();
-    let mut inductions = BTreeMap::new();
+    let mut inductions = crate::dense::IdMap::default();
     for (idx, natural) in function.natural_loops().iter().enumerate() {
         let id = LoopId(idx as u32);
         let header = natural.header;

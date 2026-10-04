@@ -1364,7 +1364,7 @@ impl Importer<'_> {
 
     fn derive_walk(&mut self, value: ValueId) -> Option<PointerWalk> {
         let inductions = &self.artifact.structured().inductions;
-        let fact = inductions.get(&value)?;
+        let fact = inductions.get(value)?;
         let InductionStep::AddConst(stride) = fact.step else {
             return None;
         };

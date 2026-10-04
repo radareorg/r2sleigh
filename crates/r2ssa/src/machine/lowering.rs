@@ -146,7 +146,7 @@ impl MachineBuilder {
                                 .facts()
                                 .structured
                                 .member_run_stores
-                                .get(&access.id.inst),
+                                .get(access.id.inst),
                         ))
                     // A guarded read states its condition beside the
                     // address; every other read names the address alone.

@@ -1103,7 +1103,7 @@ impl<'a> FoldingContext<'a> {
         let address = self.prepared_value_id_for_var(addr)?;
         let value = self.prepared_value_id_for_var(val)?;
         let prepared = self.prepared_ssa()?;
-        let certificate = prepared.structured().member_run_stores.get(&inst)?;
+        let certificate = prepared.structured().member_run_stores.get(inst)?;
         if certificate.address != address || certificate.value != value {
             return None;
         }

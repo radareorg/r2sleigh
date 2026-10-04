@@ -129,7 +129,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let mut mismatched_memory = artifact.facts().memory.clone();
     for use_fact in mismatched_memory
         .uses_by_inst
-        .get_mut(&access.id.inst)
+        .get_mut(access.id.inst)
         .expect("RAM memory use")
     {
         use_fact.location.space = SpaceId::Custom(7);

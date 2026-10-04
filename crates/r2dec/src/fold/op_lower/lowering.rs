@@ -332,7 +332,7 @@ impl<'a> FoldingContext<'a> {
                 self.prepared_ssa()?
                     .structured()
                     .member_run_stores
-                    .get(&inst)
+                    .get(inst)
             })
         {
             for member in &run.members {

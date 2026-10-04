@@ -325,7 +325,7 @@ impl MachineValueUse {
                 .facts()
                 .structured
                 .member_run_stores
-                .get(&access.inst),
+                .get(access.inst),
         ) {
             r2il::refusal_evidence!(
                 "memory-access-entity",
@@ -3250,7 +3250,7 @@ impl MachineFunction {
                 .facts()
                 .structured
                 .member_run_stores
-                .get(&fact.id.inst),
+                .get(fact.id.inst),
         ) || *object != fact.object
             || *space != MachineAddressSpace::from(source_space)
             || *endianness != source_space_model.endianness()
@@ -3449,7 +3449,7 @@ impl MachineBuilder {
                     .facts()
                     .structured
                     .member_run_stores
-                    .get(&access.id.inst),
+                    .get(access.id.inst),
             )
             || inst.inputs.first() != Some(&access.address)
             || !model.is_available()

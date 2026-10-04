@@ -30,7 +30,7 @@ pub(crate) fn collect_machine_return_control_certificates(
         let Some(return_address) = boundary.return_address else {
             continue;
         };
-        let Some(return_inst) = graph.inst(*at) else {
+        let Some(return_inst) = graph.inst(at) else {
             continue;
         };
         if return_inst.inputs.first() != Some(&return_address.value)
@@ -164,7 +164,7 @@ pub(crate) fn collect_machine_return_control_certificates(
             }
         }
         let return_use = UseSite {
-            inst: *at,
+            inst: at,
             input_idx: 0,
         };
         if !complete
@@ -200,7 +200,7 @@ pub(crate) fn collect_machine_return_control_certificates(
             })
             .collect::<BTreeSet<_>>();
         let certificate = MachineReturnControlCertificate {
-            at: *at,
+            at,
             storage: return_address.storage,
             control_value: return_address.value,
             insts,
@@ -214,9 +214,9 @@ pub(crate) fn collect_machine_return_control_certificates(
             .iter()
             .filter(|inst| !certificate.absorbed_insts.contains(inst))
         {
-            by_inst.insert(*inst, *at);
+            by_inst.insert(*inst, at);
         }
-        certificates.insert(*at, certificate);
+        certificates.insert(at, certificate);
     }
     (certificates, by_inst)
 }
@@ -234,12 +234,12 @@ pub(crate) fn collect_return_value_certificates(
     let mut returns_by_inst = crate::dense::IdMap::default();
 
     for (boundary_at, boundary) in &boundaries.returns {
-        if boundary.at != *boundary_at || !boundary.complete {
+        if boundary.at != boundary_at || !boundary.complete {
             r2il::refusal_evidence!(
                 "return-certificate",
                 "{:?}: at_mismatch={} incomplete={}",
                 boundary_at,
-                boundary.at != *boundary_at,
+                boundary.at != boundary_at,
                 !boundary.complete
             );
             continue;

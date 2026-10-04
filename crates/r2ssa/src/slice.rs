@@ -166,7 +166,7 @@ pub fn backward_slice(artifact: &SsaArtifact, seed: SliceSeed) -> Slice {
         for def in definitions {
             defs.entry(def.next_version)
                 .or_default()
-                .insert((*inst, &def.location));
+                .insert((inst, &def.location));
         }
     }
     let mut phis = BTreeMap::<_, Vec<_>>::new();
@@ -197,7 +197,7 @@ pub fn backward_slice(artifact: &SsaArtifact, seed: SliceSeed) -> Slice {
                         break;
                     };
                     dependencies.extend(inst.inputs.iter().map(|value| value_node(graph, *value)));
-                    if let Some(uses) = facts.memory.uses_by_inst.get(&id) {
+                    if let Some(uses) = facts.memory.uses_by_inst.get(id) {
                         dependencies.extend(uses.iter().map(|use_fact| {
                             Node::Memory(use_fact.version, use_fact.location.clone())
                         }));

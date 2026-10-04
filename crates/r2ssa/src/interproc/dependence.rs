@@ -407,7 +407,7 @@ impl FrameTraffic {
                     Some(location)
                 };
                 if let Some(value) = loaded.and_then(|dst| graph.value_id_for_var(dst)) {
-                    let uses = prepared.memory().uses_by_inst.get(&inst).map(|uses| {
+                    let uses = prepared.memory().uses_by_inst.get(inst).map(|uses| {
                         uses.iter()
                             .map(|fact| fact.location.clone())
                             .collect::<Vec<_>>()
@@ -415,7 +415,7 @@ impl FrameTraffic {
                     loads.push((value, place(uses.as_deref())));
                 }
                 if let Some(value) = stored.and_then(|val| graph.value_id_for_var(val)) {
-                    let defs = prepared.memory().defs_by_inst.get(&inst).map(|defs| {
+                    let defs = prepared.memory().defs_by_inst.get(inst).map(|defs| {
                         defs.iter()
                             .map(|fact| fact.location.clone())
                             .collect::<Vec<_>>()

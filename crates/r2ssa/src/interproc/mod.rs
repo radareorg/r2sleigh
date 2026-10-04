@@ -3342,7 +3342,7 @@ fn exact_return_address_use(
 ) -> Option<crate::graph::InstId> {
     let graph = prepared.graph();
     let inst = graph.inst_for_op(return_op)?;
-    let boundary = prepared.facts().boundaries.returns.get(&inst)?;
+    let boundary = prepared.facts().boundaries.returns.get(inst)?;
     let return_address = boundary.return_address?;
     let target_value = graph.value_id_for_var(target)?;
     let use_site = UseSite { inst, input_idx: 0 };
@@ -3361,7 +3361,7 @@ fn exact_return_boundary_observation(
     calls: &BTreeMap<CallSiteId, CallObservation>,
 ) -> Option<SummaryValueObservation> {
     let expected_storage = exact_function_return_storage(prepared)?;
-    let boundary = prepared.facts().boundaries.returns.get(&return_inst)?;
+    let boundary = prepared.facts().boundaries.returns.get(return_inst)?;
     if !boundary.complete {
         return None;
     }

@@ -333,11 +333,11 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
         .inst_spelled_at(0x1100, 2)
         .expect("store inst");
     assert!(
-        prepared.memory().uses_by_inst.contains_key(&load_inst),
+        prepared.memory().uses_by_inst.contains(load_inst),
         "load should read through MemorySSA facts"
     );
     assert!(
-        prepared.memory().defs_by_inst.contains_key(&store_inst),
+        prepared.memory().defs_by_inst.contains(store_inst),
         "store should define a new memory version"
     );
     // The flag is a lane of `rbx`: its write inserts into the root and

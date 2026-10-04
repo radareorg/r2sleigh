@@ -12,7 +12,7 @@ pub(crate) struct MemoryPrefix {
     pub(crate) objects: ObjectModel,
     pub(crate) memory: MemorySSAFacts,
     pub(crate) memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-    pub(crate) member_run_stores: BTreeMap<InstId, MemberRunStoreCertificate>,
+    pub(crate) member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
 }
 
 impl MemoryPrefix {

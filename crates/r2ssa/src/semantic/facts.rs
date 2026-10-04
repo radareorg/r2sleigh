@@ -285,17 +285,17 @@ pub struct ObjectModel {
     /// it is not known, which is the difference between an array element and a
     /// scalar slot. Every stage that would otherwise assume an access sits at
     /// its object's own offset has to ask this first.
-    pub indexed_addresses: BTreeMap<ValueId, ValueId>,
+    pub indexed_addresses: crate::dense::IdMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
     /// aggregate or an address displaced from an object's base. Absent means
     /// the address is the object's own base.
-    pub interior_offsets: BTreeMap<ValueId, i64>,
+    pub interior_offsets: crate::dense::IdMap<ValueId, i64>,
     /// Indexed addresses whose base is displaced from the object's base, so
     /// the index alone does not say where in the object the element is.
-    pub displaced_indexed_addresses: BTreeSet<ValueId>,
+    pub displaced_indexed_addresses: crate::dense::IdSet<ValueId>,
     /// How far each of those starts from the object's base: `table[i].high`
     /// is the table's base plus four, indexed.
-    pub indexed_displacements: BTreeMap<ValueId, i64>,
+    pub indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
     /// Stack objects whose address leaves this body as a value.
@@ -318,28 +318,28 @@ pub struct ObjectModel {
 impl ObjectModel {
     /// Whether this indexed address starts from a displaced base.
     pub fn indexed_base_is_displaced(&self, value: ValueId) -> bool {
-        self.displaced_indexed_addresses.contains(&value)
+        self.displaced_indexed_addresses.contains(value)
     }
 
     /// Whether this address reaches its object at a computed offset.
     pub fn address_is_indexed(&self, value: ValueId) -> bool {
-        self.indexed_addresses.contains_key(&value)
+        self.indexed_addresses.contains(value)
     }
 
     /// How far into its object this address sits, for a declared aggregate's
     /// member. Absent means the address is the object's own base.
     pub fn interior_offset(&self, value: ValueId) -> Option<i64> {
-        self.interior_offsets.get(&value).copied()
+        self.interior_offsets.get(value).copied()
     }
 
     /// The value that supplies a computed offset into an object.
     pub fn index_for_address(&self, value: ValueId) -> Option<ValueId> {
-        self.indexed_addresses.get(&value).copied()
+        self.indexed_addresses.get(value).copied()
     }
 
     /// How far an indexed address starts from its object's base.
     pub fn indexed_displacement(&self, value: ValueId) -> i64 {
-        self.indexed_displacements.get(&value).copied().unwrap_or(0)
+        self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
     pub fn object_for_value(&self, value: ValueId, space: SpaceId) -> Option<ObjectId> {
@@ -491,8 +491,8 @@ pub struct MemoryPhiFact {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemorySSAFacts {
-    pub uses_by_inst: BTreeMap<InstId, Vec<MemoryUseFact>>,
-    pub defs_by_inst: BTreeMap<InstId, Vec<MemoryDefFact>>,
+    pub uses_by_inst: crate::dense::IdMap<InstId, Vec<MemoryUseFact>>,
+    pub defs_by_inst: crate::dense::IdMap<InstId, Vec<MemoryDefFact>>,
     pub phis_by_block: BTreeMap<u64, Vec<MemoryPhiFact>>,
 }
 
@@ -792,7 +792,7 @@ pub struct SourceFormalParameterFact {
 pub struct SourceBoundaryFacts {
     pub parameters: BTreeMap<u32, SourceFormalParameterFact>,
     pub calls: BTreeMap<CallSiteId, SourceCallBoundaryFact>,
-    pub returns: BTreeMap<InstId, SourceReturnBoundaryFact>,
+    pub returns: crate::dense::IdMap<InstId, SourceReturnBoundaryFact>,
     /// Convention-clobbered registers this body leaves exactly as it found
     /// them at every exit. A caller that reads one of these after calling
     /// here is reading its own value, not a clobber; see
@@ -1329,12 +1329,12 @@ pub struct StructuredDataflowFacts {
     pub loops: BTreeMap<LoopId, StructuredLoopFact>,
     /// Loop-carried values whose motion round the latch is known exactly,
     /// keyed by the header merge that carries them.
-    pub inductions: BTreeMap<ValueId, InductionFact>,
+    pub inductions: crate::dense::IdMap<ValueId, InductionFact>,
     /// Cyclic CFG blocks not represented by a structured loop fact.
     pub unstructured_cycle_blocks: BTreeSet<u64>,
     pub memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
     /// Wide constant stores written out one declared member at a time.
-    pub member_run_stores: BTreeMap<InstId, MemberRunStoreCertificate>,
+    pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
 }
 
@@ -1378,12 +1378,12 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) declared_slots: &'a DeclaredStackSlots,
     pub(crate) objects: BTreeMap<ObjectId, ObjectFact>,
     pub(crate) value_objects: BTreeMap<MemoryObjectKey, ObjectId>,
-    pub(crate) indexed_addresses: BTreeMap<ValueId, ValueId>,
+    pub(crate) indexed_addresses: crate::dense::IdMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
     /// aggregate or an address displaced from an object's base.
-    pub(crate) interior_offsets: BTreeMap<ValueId, i64>,
-    pub(crate) displaced_indexed_addresses: BTreeSet<ValueId>,
-    pub(crate) indexed_displacements: BTreeMap<ValueId, i64>,
+    pub(crate) interior_offsets: crate::dense::IdMap<ValueId, i64>,
+    pub(crate) displaced_indexed_addresses: crate::dense::IdSet<ValueId>,
+    pub(crate) indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// Frame positions something proves an object starts at: a declared slot,
     /// a direct access, or an address that leaves as a value.
     pub(crate) evidenced_roots: BTreeSet<StackAddressRoot>,
@@ -1400,7 +1400,7 @@ pub(crate) struct ObjectModelBuilder<'a> {
     /// What every value can be, for an index's lower bound.
     pub(crate) values: &'a crate::values::ValueRanges,
     /// Addresses whose displaced parent is being resolved, against a cycle.
-    pub(crate) resolving: BTreeSet<ValueId>,
+    pub(crate) resolving: crate::dense::IdSet<ValueId>,
     pub(crate) stack_pointer_carrier: Option<CanonicalStorageId>,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     pub(crate) stack_objects: BTreeMap<StackObjectKey, ObjectId>,
@@ -1452,10 +1452,10 @@ impl<'a> ObjectModelBuilder<'a> {
             declared_slots,
             objects,
             value_objects: BTreeMap::new(),
-            indexed_addresses: BTreeMap::new(),
-            interior_offsets: BTreeMap::new(),
-            displaced_indexed_addresses: BTreeSet::new(),
-            indexed_displacements: BTreeMap::new(),
+            indexed_addresses: crate::dense::IdMap::default(),
+            interior_offsets: crate::dense::IdMap::default(),
+            displaced_indexed_addresses: crate::dense::IdSet::default(),
+            indexed_displacements: crate::dense::IdMap::default(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
             escaping_roots: BTreeSet::new(),
@@ -1463,7 +1463,7 @@ impl<'a> ObjectModelBuilder<'a> {
             frame_boundaries: FrameBoundaries::default(),
             callee_handed_roots: BTreeSet::new(),
             values: empty_value_ranges(),
-            resolving: BTreeSet::new(),
+            resolving: crate::dense::IdSet::default(),
             stack_pointer_carrier: machine_context
                 .and_then(SourceMachineContext::stack_pointer_carrier),
             machine_context,
@@ -1481,7 +1481,7 @@ impl<'a> ObjectModelBuilder<'a> {
 
     /// The displacement already recorded for an indexed address.
     fn indexed_displacement_of(&self, value: ValueId) -> i64 {
-        self.indexed_displacements.get(&value).copied().unwrap_or(0)
+        self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
     pub(crate) fn build(
@@ -1758,13 +1758,13 @@ impl<'a> ObjectModelBuilder<'a> {
                 ) {
                     return None;
                 }
-                let offset = self.interior_offsets.get(&parent).copied().unwrap_or(0) + delta;
+                let offset = self.interior_offsets.get(parent).copied().unwrap_or(0) + delta;
                 if offset != 0 {
                     self.interior_offsets.insert(value_id, offset);
                 }
                 Some(object)
             });
-        self.resolving.remove(&value_id);
+        self.resolving.remove(value_id);
         result
     }
 
@@ -1893,18 +1893,18 @@ impl<'a> ObjectModelBuilder<'a> {
             // into its addressing mode spells the second half of a pair.
             let folded_constant = index
                 .and_then(|index| crate::constant::signed_value_of(graph, index))
-                .filter(|_| self.indexed_addresses.contains_key(&base));
+                .filter(|_| self.indexed_addresses.contains(base));
             let inherited = index.is_none() || folded_constant.is_some();
             let index = folded_constant
-                .and(self.indexed_addresses.get(&base).copied())
+                .and(self.indexed_addresses.get(base).copied())
                 .or(index)
-                .or_else(|| self.indexed_addresses.get(&base).copied())?;
+                .or_else(|| self.indexed_addresses.get(base).copied())?;
             self.indexed_addresses.insert(value_id, index);
             // Where the address starts, when it is not the object's own base:
             // the index measures from there, so the reach does too.
             let displacement = self
                 .interior_offsets
-                .get(&base)
+                .get(base)
                 .copied()
                 .unwrap_or_else(|| self.indexed_displacement_of(base))
                 .saturating_add(folded_constant.unwrap_or(0));
@@ -1916,15 +1916,15 @@ impl<'a> ObjectModelBuilder<'a> {
             if inherited
                 || self
                     .interior_offsets
-                    .get(&base)
+                    .get(base)
                     .is_some_and(|offset| *offset != 0)
-                || self.displaced_indexed_addresses.contains(&base)
+                || self.displaced_indexed_addresses.contains(base)
             {
                 self.displaced_indexed_addresses.insert(value_id);
             }
             Some(object)
         })();
-        self.resolving.remove(&value_id);
+        self.resolving.remove(value_id);
         result
     }
 

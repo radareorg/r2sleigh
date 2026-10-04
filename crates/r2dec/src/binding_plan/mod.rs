@@ -433,7 +433,7 @@ pub(crate) fn certified_lane_read(
         && source
             .structured()
             .member_run_stores
-            .get(&access.inst)
+            .get(access.inst)
             .is_some_and(|run| {
                 run.members.iter().any(|member| {
                     member.access == access && member.source == r2ssa::MemberRunSource::Lane(value)
@@ -457,11 +457,11 @@ fn certified_return_transfer_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseS
         .filter_map(|(at, boundary)| {
             let fact = boundary.return_address?;
             let site = UseSite {
-                inst: *at,
+                inst: at,
                 input_idx: 0,
             };
-            (boundary.at == *at
-                && graph.inst(*at).is_some_and(|inst| {
+            (boundary.at == at
+                && graph.inst(at).is_some_and(|inst| {
                     matches!(
                         inst.payload,
                         r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. })

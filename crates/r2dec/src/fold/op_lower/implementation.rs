@@ -118,7 +118,7 @@ impl<'a> FoldingContext<'a> {
             .facts()
             .boundaries
             .returns
-            .get(&source_inst)?;
+            .get(source_inst)?;
         Some((source_inst, boundary))
     }
 

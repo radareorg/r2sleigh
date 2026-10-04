@@ -190,7 +190,7 @@ fn return_address_object(
         let object = facts
             .certificates
             .machine_return_controls
-            .get(*at)?
+            .get(at)?
             .reload_object?;
         if found.is_some_and(|known| known != object) {
             return None;
@@ -265,7 +265,7 @@ fn recovered_return_mechanism(
             );
             return None;
         };
-        let Some(certificate) = facts.certificates.machine_return_controls.get(*at) else {
+        let Some(certificate) = facts.certificates.machine_return_controls.get(at) else {
             r2il::refusal_evidence!(
                 "interface-recovery",
                 "return {at:?} has no certified control chain, so no return mechanism"

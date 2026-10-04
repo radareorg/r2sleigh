@@ -343,8 +343,8 @@ pub(crate) fn build_memory_ssa(
         versions
     };
 
-    let mut uses_by_inst = BTreeMap::<InstId, Vec<MemoryUseFact>>::new();
-    let mut defs_by_inst = BTreeMap::<InstId, Vec<MemoryDefFact>>::new();
+    let mut uses_by_inst = crate::dense::IdMap::<InstId, Vec<MemoryUseFact>>::default();
+    let mut defs_by_inst = crate::dense::IdMap::<InstId, Vec<MemoryDefFact>>::default();
     for &block_addr in function.block_addrs() {
         let Some(entry) = solved.entry.get(&block_addr) else {
             continue;
@@ -353,8 +353,7 @@ pub(crate) fn build_memory_ssa(
             Access::Use(location, reached) => {
                 for version in named(reached, location) {
                     uses_by_inst
-                        .entry(inst_id)
-                        .or_default()
+                        .get_or_insert_with(inst_id, Vec::new)
                         .push(MemoryUseFact {
                             location: location.clone(),
                             version,
@@ -364,8 +363,7 @@ pub(crate) fn build_memory_ssa(
             Access::Def(location, reached, next) => {
                 for previous_version in named(reached, location) {
                     defs_by_inst
-                        .entry(inst_id)
-                        .or_default()
+                        .get_or_insert_with(inst_id, Vec::new)
                         .push(MemoryDefFact {
                             location: location.clone(),
                             previous_version,

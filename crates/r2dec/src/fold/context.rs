@@ -1583,7 +1583,7 @@ impl<'a> FoldingContext<'a> {
                 .facts()
                 .boundaries
                 .returns
-                .get(&source_inst)
+                .get(source_inst)
                 .is_some_and(|boundary| {
                     boundary.at == source_inst && boundary.complete && boundary.values.is_empty()
                 });

@@ -38,7 +38,7 @@ fn return_certificate_requires_one_complete_source_boundary_value() {
     let mut ambiguous = artifact.facts().boundaries.clone();
     ambiguous
         .returns
-        .get_mut(&boundary.at)
+        .get_mut(boundary.at)
         .expect("return boundary")
         .values
         .push(*boundary_value);
@@ -536,7 +536,7 @@ fn counted_for_certificate_joins_condition_phi_initializer_and_latch_by_identity
         .facts()
         .structured
         .inductions
-        .get(&certificate.induction_phi)
+        .get(certificate.induction_phi)
         .expect("certificate induction fact");
 
     assert_eq!(certificate.induction_init, induction.init);
