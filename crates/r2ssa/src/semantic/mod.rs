@@ -95,7 +95,6 @@ pub(crate) struct CollectionOver<'a> {
     /// function's, or a provisional function's own.
     pub(crate) prep: Option<&'a crate::function::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
-    pub(crate) storage_spans: &'a StorageSpans,
     pub(crate) assumptions: &'a AssumptionSet,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     /// Which caller asked, so a trace says which of the three collections it is.
@@ -165,18 +164,11 @@ impl PhaseRecorder {
 
 impl PreparedFunctionFacts {
     pub fn collect(function: &SSAFunction, graph: &SsaGraph) -> Self {
-        let liveness = crate::liveness::ValueLiveness::compute(
-            graph,
-            &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(graph, None),
-        );
-        let storage_spans = StorageSpans::compute(graph, &liveness);
         Self::collect_inner(
             CollectionOver {
                 function,
                 prep: None,
                 graph,
-                storage_spans: &storage_spans,
                 assumptions: &AssumptionSet::default(),
                 machine_context: None,
                 site: "collect",
@@ -184,13 +176,13 @@ impl PreparedFunctionFacts {
             &crate::control::UncheckedSsaWorkControl,
         )
         .expect("an unchecked control never stops")
+        .0
     }
 
     pub(crate) fn collect_with_context(
         function: &SSAFunction,
         prep: Option<&crate::function::DecompilePrepFacts>,
         graph: &SsaGraph,
-        storage_spans: &StorageSpans,
         assumptions: &AssumptionSet,
         machine_context: &SourceMachineContext,
         site: &'static str,
@@ -200,7 +192,6 @@ impl PreparedFunctionFacts {
                 function,
                 prep,
                 graph,
-                storage_spans,
                 assumptions,
                 machine_context: Some(machine_context),
                 site,
@@ -208,6 +199,7 @@ impl PreparedFunctionFacts {
             &crate::control::UncheckedSsaWorkControl,
         )
         .expect("an unchecked control never stops")
+        .0
     }
 
     /// The same collection, stopping between phases when the run is cancelled.
@@ -218,19 +210,18 @@ impl PreparedFunctionFacts {
     pub(crate) fn collect_with_context_and_control<C: crate::SsaWorkControl + ?Sized>(
         over: CollectionOver<'_>,
         control: &C,
-    ) -> Result<Self, crate::SsaExecutionStopReason> {
+    ) -> Result<(Self, CollectedLiveness), crate::SsaExecutionStopReason> {
         Self::collect_inner(over, control)
     }
 
     fn collect_inner<C: crate::SsaWorkControl + ?Sized>(
         over: CollectionOver<'_>,
         control: &C,
-    ) -> Result<Self, crate::SsaExecutionStopReason> {
+    ) -> Result<(Self, CollectedLiveness), crate::SsaExecutionStopReason> {
         let CollectionOver {
             function,
             prep,
             graph,
-            storage_spans,
             assumptions,
             machine_context,
             site,
@@ -268,6 +259,41 @@ impl PreparedFunctionFacts {
             .map(|slot| slot.storage())
             .collect::<Vec<_>>();
         let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+        let boundaries = collect_source_boundary_facts(
+            Body {
+                function,
+                prep,
+                graph,
+                machine_context,
+            },
+            &call_sites,
+            &live_out,
+        );
+        phase!("boundaries", boundaries.calls.len());
+        // The one liveness of this function. A call's conventional read of a
+        // register its certified boundary does not pass is no read the text
+        // performs, and two reads of the same bytes the same memory versions
+        // reach hold one content; both are known here, before anything reads
+        // a span, so liveness is computed once, with them.
+        let ignored_reads = crate::function::uncertified_call_reads(
+            graph,
+            prep.map(|facts| &facts.views),
+            &boundaries,
+        );
+        let mut content = crate::liveness::ValueContent::of(graph, machine_context);
+        content.declare_same_content(&crate::function::same_content_reads(
+            &memory_accesses,
+            &memory,
+        ));
+        let live_values = crate::liveness::ValueLiveness::compute_with_relocations(
+            graph,
+            &live_out,
+            &BTreeMap::new(),
+            content,
+            &ignored_reads,
+        );
+        let storage_spans = StorageSpans::compute(graph, &live_values);
+        phase!("liveness", 0);
         let (loops, inductions) = collect_structured_loop_facts(
             Body {
                 function,
@@ -280,20 +306,9 @@ impl PreparedFunctionFacts {
                 values: &values,
             },
             &live_out,
-            storage_spans,
+            &storage_spans,
         );
         phase!("loops", loops.len());
-        let boundaries = collect_source_boundary_facts(
-            Body {
-                function,
-                prep,
-                graph,
-                machine_context,
-            },
-            &call_sites,
-            &live_out,
-        );
-        phase!("boundaries", boundaries.calls.len());
         let structured = StructuredDataflowFacts {
             unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
             inductions,
@@ -360,7 +375,7 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase!("assumptions", 0);
-        Ok(Self {
+        let facts = Self {
             addresses,
             values,
             objects,
@@ -376,8 +391,28 @@ impl PreparedFunctionFacts {
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
             assumption_usage,
-        })
+        };
+        Ok((
+            facts,
+            CollectedLiveness {
+                live_out,
+                values: live_values,
+                storage_spans,
+                ignored_reads,
+            },
+        ))
     }
+}
+
+/// The liveness a collection computed and read: one model, which the sealed
+/// artifact keeps.
+pub(crate) struct CollectedLiveness {
+    pub(crate) live_out: crate::liveout::FunctionLiveOut,
+    pub(crate) values: crate::liveness::ValueLiveness,
+    pub(crate) storage_spans: StorageSpans,
+    /// Reads the text never performs: a call's conventional read of a
+    /// register the certified call does not pass.
+    pub(crate) ignored_reads: std::collections::BTreeSet<crate::graph::UseSite>,
 }
 
 /// Add the entry carriers that implicit call reads alone expose.

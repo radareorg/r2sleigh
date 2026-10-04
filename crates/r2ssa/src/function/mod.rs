@@ -1183,7 +1183,6 @@ impl SsaArtifact {
             self.function(),
             Some(self.decompile_prep_facts()),
             self.graph(),
-            self.liveness.storage_spans(),
             assumptions,
             &self.machine_context,
             "assume",
@@ -2542,8 +2541,11 @@ pub struct SSAFunction {
 /// reaches therefore read the same bytes as last written by the same writes.
 /// A read with no exact offset, or annotated by more than one location, says
 /// nothing. `O(A log A)` in the reads.
-fn same_content_reads(
-    structured: &crate::semantic::StructuredDataflowFacts,
+pub(crate) fn same_content_reads(
+    memory_accesses: &BTreeMap<
+        crate::semantic::StructuredAccessId,
+        crate::semantic::StructuredMemoryAccessFact,
+    >,
     memory: &crate::semantic::MemorySSAFacts,
 ) -> Vec<(crate::graph::ValueId, crate::graph::ValueId)> {
     type ReadKey = (
@@ -2554,7 +2556,7 @@ fn same_content_reads(
     );
     let mut first_read = BTreeMap::<ReadKey, crate::graph::ValueId>::new();
     let mut pairs = Vec::new();
-    for access in structured.memory_accesses.values() {
+    for access in memory_accesses.values() {
         if access.is_write || !access.provenance_complete {
             continue;
         }
@@ -2598,15 +2600,23 @@ fn same_content_reads(
 /// pass. The graph states a read of every register the convention lets a
 /// callee read, so that liveness before the facts exist errs safe; once the
 /// call boundary says which values are arguments, the rest are not reads.
-fn uncertified_call_reads(
+///
+/// A read is passed when it has the bits of a passed argument, not only its
+/// id: the boundary names the value that reached the argument register, and
+/// copy forwarding may have left the call reading the value that copy
+/// carried. Both are one class (`view::class_values`), and the text reads it.
+pub(crate) fn uncertified_call_reads(
     graph: &SsaGraph,
+    views: Option<&crate::view::ValueViews>,
     boundaries: &crate::semantic::SourceBoundaryFacts,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
+    let class = crate::view::class_values(graph, views);
+    let class_of = |value: crate::graph::ValueId| class.get(value.0 as usize).copied();
     let mut passed = std::collections::BTreeSet::new();
     for boundary in boundaries.calls.values() {
         for argument in &boundary.arguments {
             if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
-                passed.insert(value);
+                passed.insert(class_of(value).unwrap_or(value));
             }
         }
     }
@@ -2623,7 +2633,7 @@ fn uncertified_call_reads(
             inst.inputs
                 .iter()
                 .enumerate()
-                .filter(|(_, input)| !passed.contains(input))
+                .filter(|(_, input)| !passed.contains(&class_of(**input).unwrap_or(**input)))
                 .map(move |(input_idx, _)| crate::graph::UseSite {
                     inst: inst.id,
                     input_idx,

@@ -22,7 +22,6 @@ use r2source::{
 
 use crate::function::SSAFunction;
 use crate::graph::SsaGraph;
-use crate::span::StorageSpans;
 use crate::var::SSAVar;
 
 /// One argument slot the machine code proves the function reads.
@@ -968,17 +967,10 @@ fn recover_interface_inner(
     // scan cannot distinguish program inputs from preserved machine state.
     let graph = SsaGraph::from_function(func);
     let facts = if let Some(machine_context) = machine_context {
-        let liveness = crate::liveness::ValueLiveness::compute(
-            &graph,
-            &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(&graph, Some(machine_context)),
-        );
-        let storage_spans = StorageSpans::compute(&graph, &liveness);
         crate::semantic::PreparedFunctionFacts::collect_with_context(
             func,
             prep,
             &graph,
-            &storage_spans,
             &crate::AssumptionSet::default(),
             machine_context,
             "recover",

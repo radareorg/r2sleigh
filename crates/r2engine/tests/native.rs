@@ -3896,3 +3896,62 @@ fn a_lane_write_whose_other_bytes_nobody_reads_does_not_read_them() {
 }"#,
     );
 }
+
+/// `mov rdi, rsi; call 0x1010; ret`, and at 0x1010 `mov rax, rdi; ret`.
+const COPY_INTO_AN_ARGUMENT: &[u8] = &[
+    0x48, 0x89, 0xf7, // 0x1000 mov rdi, rsi
+    0xe8, 0x08, 0x00, 0x00, 0x00, // 0x1003 call 0x1010
+    0xc3, // 0x1008 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1010
+    0x48, 0x89, 0xf8, // 0x1010 mov rax, rdi
+    0xc3, // 0x1013 ret
+];
+
+/// The boundary passes the value that reached `rdi`, the copy; copy
+/// forwarding leaves the call reading `rsi`, the value the copy carried. The
+/// two have one class of bits, so the call's read of `rsi` is a read the text
+/// performs, and liveness must not ignore it.
+#[test]
+fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: COPY_INTO_AN_ARGUMENT,
+        stub: 0x1010,
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    let calls = &artifact.facts().boundaries.calls;
+    let call = calls.values().next().expect("the call");
+    let r2ssa::SourceCallArgumentValue::Value(passed) = call
+        .arguments
+        .first()
+        .unwrap_or_else(|| panic!("{call:#?}\n{}", artifact.function().dump()))
+        .value
+    else {
+        panic!("the first argument is a value: {call:#?}");
+    };
+    let passed = &graph.value(passed).expect("a value").var;
+    let Some(SSAOp::Copy { src, .. }) = graph.defining_op(passed) else {
+        panic!("the argument is the copy: {passed:?}");
+    };
+    let carried = graph.value_id_for_var(src).expect("the copied value");
+    let call_reads = graph
+        .use_sites(carried)
+        .iter()
+        .filter(|site| {
+            matches!(
+                graph.inst(site.inst).map(|inst| &inst.payload),
+                Some(InstPayload::Op(SSAOp::CallUse { .. }))
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(!call_reads.is_empty(), "{}", artifact.function().dump());
+    for site in call_reads {
+        assert!(
+            !artifact.ignored_reads().contains(site),
+            "{site:?} is the argument's read\n{}",
+            artifact.function().dump()
+        );
+    }
+}

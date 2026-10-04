@@ -297,32 +297,19 @@ impl Sealed {
         control: &C,
         prepare_entry_bytes: usize,
     ) -> Result<super::SsaArtifact, SsaPrepareError> {
-        use crate::span::StorageSpans;
-        let return_storages = machine_context
-            .abi_model()
-            .return_registers()
-            .iter()
-            .map(|slot| slot.storage())
-            .collect::<Vec<_>>();
-        let live_out =
-            crate::liveout::FunctionLiveOut::compute(&self.ir, &self.graph, &return_storages);
-        let mut content = crate::liveness::ValueContent::of(&self.graph, Some(&machine_context));
-        let mut liveness =
-            crate::liveness::ValueLiveness::compute(&self.graph, &live_out, content.clone());
-        let storage_spans = StorageSpans::compute(&self.graph, &liveness);
-        let graph_built_bytes = r2il::allocation::live_bytes();
-        let mut facts = crate::semantic::PreparedFunctionFacts::collect_with_context_and_control(
-            crate::semantic::CollectionOver {
-                function: &self.ir,
-                prep: Some(&self.prep),
-                graph: &self.graph,
-                storage_spans: &storage_spans,
-                assumptions: &crate::AssumptionSet::default(),
-                machine_context: Some(&machine_context),
-                site: "prepare",
-            },
-            control,
-        )?;
+        let prepared_bytes = r2il::allocation::live_bytes();
+        let (mut facts, liveness) =
+            crate::semantic::PreparedFunctionFacts::collect_with_context_and_control(
+                crate::semantic::CollectionOver {
+                    function: &self.ir,
+                    prep: Some(&self.prep),
+                    graph: &self.graph,
+                    assumptions: &crate::AssumptionSet::default(),
+                    machine_context: Some(&machine_context),
+                    site: "prepare",
+                },
+                control,
+            )?;
         // What one prepared function holds is the space every later stage has
         // to work above, so it is reported beside the phases that built it.
         r2il::refusal_evidence!(
@@ -331,25 +318,15 @@ impl Sealed {
             self.ir.entry,
             self.ir.num_blocks(),
             r2il::allocation::live_bytes().saturating_sub(prepare_entry_bytes),
-            graph_built_bytes.saturating_sub(prepare_entry_bytes),
-            r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
+            prepared_bytes.saturating_sub(prepare_entry_bytes),
+            r2il::allocation::live_bytes().saturating_sub(prepared_bytes)
         );
-        // Two reads of the same bytes that the same memory reaches are one
-        // content, which the graph cannot see and the memory facts can. The
-        // spans above were judged without this and are at worst finer.
-        content.declare_same_content(&super::same_content_reads(&facts.structured, &facts.memory));
-        // A call's conventional read of a register the certified call does
-        // not pass is not a read the text performs, and held values live
-        // across every call that the machine merely might have read. The
-        // spans above were judged with those reads and are at worst finer.
-        let ignored_reads = super::uncertified_call_reads(&self.graph, &facts.boundaries);
-        liveness = crate::liveness::ValueLiveness::compute_with_relocations(
-            &self.graph,
-            &live_out,
-            &std::collections::BTreeMap::new(),
-            content,
-            &ignored_reads,
-        );
+        let crate::semantic::CollectedLiveness {
+            live_out,
+            values,
+            storage_spans,
+            ignored_reads,
+        } = liveness;
         let unobserved_merges = crate::deadphi::DeadPhis::find(&self.graph, &live_out, &facts);
         let aggregate_accesses = crate::aggregate_access::collect_aggregate_access_projections(
             &self.graph,
@@ -373,7 +350,7 @@ impl Sealed {
             liveness: super::ArtifactLiveness {
                 storage_spans,
                 live_out,
-                values: liveness,
+                values,
                 ignored_reads,
             },
             unobserved_merges,
