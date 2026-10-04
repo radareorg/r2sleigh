@@ -14,6 +14,7 @@
 //! in one view can describe different programs.
 
 pub mod annotate;
+pub mod db;
 pub mod decode;
 pub mod memo;
 pub mod proved;

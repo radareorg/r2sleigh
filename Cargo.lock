@@ -964,6 +964,7 @@ dependencies = [
 name = "r2engine"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "r2abi",
  "r2dec",
  "r2il",
