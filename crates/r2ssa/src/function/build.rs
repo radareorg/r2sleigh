@@ -457,8 +457,10 @@ impl SSAFunction {
             let live_in = crate::phi::live_in_by_block(
                 &cfg,
                 call_boundaries,
-                reg_names_ref,
-                families_ref,
+                crate::phi::IdentityNaming {
+                    reg_names: reg_names_ref,
+                    families: families_ref,
+                },
                 promoted,
                 &defs,
             );

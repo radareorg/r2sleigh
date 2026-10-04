@@ -389,11 +389,14 @@ pub fn add_call_boundary_def_sites(
 pub fn live_in_by_block(
     cfg: &CFG,
     call_boundaries: &crate::rename::CallBoundaryConfig,
-    reg_names: Option<&RegisterNameMap>,
-    families: Option<&RegisterFamilyInfo>,
+    naming: IdentityNaming<'_>,
     promoted: &PromotedStackSlots,
     defs: &DefinitionSitesByIdentity,
 ) -> HashMap<u64, BTreeSet<RenameIdentity>> {
+    let IdentityNaming {
+        reg_names,
+        families,
+    } = naming;
     let resolve = |regs: &[crate::rename::CallBoundaryDef]| {
         regs.iter()
             .flat_map(|reg| call_boundary_identities(defs, reg, reg_names, families))
@@ -418,18 +421,10 @@ pub fn live_in_by_block(
     // of identities a function can name is fixed before the walk starts. So
     // the identities are numbered once, each operation's effect on them is
     // recorded once, and the fixed point is bitwise.
-    let mut identities: Vec<RenameIdentity> = Vec::new();
-    let mut numbers: HashMap<RenameIdentity, u32> = HashMap::new();
-    let number_of = |identity: RenameIdentity,
-                     identities: &mut Vec<RenameIdentity>,
-                     numbers: &mut HashMap<RenameIdentity, u32>| {
-        if let Some(number) = numbers.get(&identity) {
-            return *number;
-        }
-        let number = identities.len() as u32;
-        identities.push(identity.clone());
-        numbers.insert(identity, number);
-        number
+    let mut numbering = IdentityNumbers {
+        naming,
+        identities: Vec::new(),
+        numbers: HashMap::new(),
     };
 
     let addrs = cfg.block_addrs().collect::<Vec<_>>();
@@ -442,74 +437,19 @@ pub fn live_in_by_block(
             continue;
         };
         present.push(true);
-        let mut rows = Vec::with_capacity(block.ops.len());
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            // A promoted access is a copy of the slot, exactly as renaming
-            // writes it: a load reads the slot and not the address, a store
-            // reads its value and defines the slot.
-            if let Some(slot) = promoted.get(&(block.addr, op_idx))
-                && let Some((read, written)) = match op {
-                    r2il::R2ILOp::Load { dst, .. } => Some((slot, dst)),
-                    r2il::R2ILOp::Store { val, .. } => Some((val, slot)),
-                    _ => None,
-                }
-            {
-                let mut number = |varnode: &r2il::Varnode| {
-                    number_of(
-                        RenameIdentity::for_varnode(varnode, reg_names, families),
-                        &mut identities,
-                        &mut numbers,
-                    )
-                };
-                let reads = if matches!(read.space, r2il::SpaceId::Const) {
-                    Vec::new()
-                } else {
-                    vec![number(read)]
-                };
-                let kill =
-                    (register_root_slot(written, families).is_none()).then(|| number(written));
-                rows.push(LivenessOpEffect {
-                    boundary: LivenessBoundary::None,
-                    kill,
-                    reads,
-                });
-                continue;
-            }
-            let kill = get_op_output_varnode(op)
-                .filter(|varnode| register_root_slot(varnode, families).is_none())
-                .map(|varnode| {
-                    number_of(
-                        RenameIdentity::for_varnode(varnode, reg_names, families),
-                        &mut identities,
-                        &mut numbers,
-                    )
-                });
-            let reads = op
-                .inputs()
-                .into_iter()
-                .filter(|varnode| !matches!(varnode.space, r2il::SpaceId::Const))
-                .map(|varnode| {
-                    number_of(
-                        RenameIdentity::for_varnode(varnode, reg_names, families),
-                        &mut identities,
-                        &mut numbers,
-                    )
-                })
-                .collect::<Vec<_>>();
-            rows.push(LivenessOpEffect {
-                boundary: match op {
-                    r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => {
-                        LivenessBoundary::Call
-                    }
-                    r2il::R2ILOp::Return { .. } => LivenessBoundary::Return,
-                    _ => LivenessBoundary::None,
-                },
-                kill,
-                reads,
-            });
-        }
+        let rows = block
+            .ops
+            .iter()
+            .enumerate()
+            .map(|(op_idx, op)| numbering.effect(op, promoted.get(&(block.addr, op_idx))))
+            .collect();
         effects.push(rows);
     }
+    let IdentityNumbers {
+        identities,
+        numbers,
+        ..
+    } = numbering;
     let numbers_of_set = |set: &BTreeSet<RenameIdentity>,
                           numbers: &HashMap<RenameIdentity, u32>| {
         set.iter()
@@ -606,6 +546,81 @@ pub fn live_in_by_block(
         live_in.insert(*addr, set);
     }
     live_in
+}
+
+/// How a varnode is named as a rename identity: the register names and the
+/// register families that put a lane inside its root.
+#[derive(Debug, Clone, Copy)]
+pub struct IdentityNaming<'a> {
+    pub reg_names: Option<&'a RegisterNameMap>,
+    pub families: Option<&'a RegisterFamilyInfo>,
+}
+
+/// Every identity a walk names, numbered in the order first met.
+struct IdentityNumbers<'a> {
+    naming: IdentityNaming<'a>,
+    identities: Vec<RenameIdentity>,
+    numbers: HashMap<RenameIdentity, u32>,
+}
+
+impl IdentityNumbers<'_> {
+    fn number(&mut self, varnode: &r2il::Varnode) -> u32 {
+        let identity =
+            RenameIdentity::for_varnode(varnode, self.naming.reg_names, self.naming.families);
+        if let Some(number) = self.numbers.get(&identity) {
+            return *number;
+        }
+        let number = self.identities.len() as u32;
+        self.identities.push(identity.clone());
+        self.numbers.insert(identity, number);
+        number
+    }
+
+    /// The number of what `written` defines whole; a lane written in place
+    /// does not end its root's liveness.
+    fn kill(&mut self, written: &r2il::Varnode) -> Option<u32> {
+        register_root_slot(written, self.naming.families)
+            .is_none()
+            .then(|| self.number(written))
+    }
+
+    /// What one operation reads and defines, as renaming writes it. A
+    /// promoted access is a copy of the slot: a load reads the slot and not
+    /// the address, a store reads its value and defines the slot.
+    fn effect(&mut self, op: &r2il::R2ILOp, promoted: Option<&r2il::Varnode>) -> LivenessOpEffect {
+        let copied = promoted.and_then(|slot| match op {
+            r2il::R2ILOp::Load { dst, .. } => Some((slot, dst)),
+            r2il::R2ILOp::Store { val, .. } => Some((val, slot)),
+            _ => None,
+        });
+        if let Some((read, written)) = copied {
+            let reads = (!matches!(read.space, r2il::SpaceId::Const))
+                .then(|| self.number(read))
+                .into_iter()
+                .collect();
+            return LivenessOpEffect {
+                boundary: LivenessBoundary::None,
+                kill: self.kill(written),
+                reads,
+            };
+        }
+        let kill = get_op_output_varnode(op).and_then(|varnode| self.kill(varnode));
+        let reads = op
+            .inputs()
+            .into_iter()
+            .filter(|varnode| !matches!(varnode.space, r2il::SpaceId::Const))
+            .map(|varnode| self.number(varnode))
+            .collect();
+        LivenessOpEffect {
+            boundary: match op {
+                r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => LivenessBoundary::Call,
+                r2il::R2ILOp::Return { .. } => LivenessBoundary::Return,
+                _ => LivenessBoundary::None,
+            },
+            kill,
+            reads,
+        }
+    }
 }
 
 /// What one operation does to the liveness of the numbered identities.
