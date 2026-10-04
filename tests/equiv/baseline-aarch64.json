@@ -1,0 +1,2690 @@
+{
+ "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed.",
+ "records": {
+  "tests/corpus/branchy.c::aarch64-clang-O0::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::inverted_void": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::main": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::narrow64": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::narrow8": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O0::zero_of": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::addr_chain": {
+   "cause": "[P4 memory] The volatile locals' frame slot is read back as the caller's entry stack word (held from entry: stack_p0): the store to the slot is not connected to its load, so the compared value is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::inverted_void": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::narrow64": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint32_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::narrow8": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint8_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O1::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::addr_chain": {
+   "cause": "[P4 memory] The volatile locals' frame slot is read back as the caller's entry stack word (held from entry: stack_p0): the store to the slot is not connected to its load, so the compared value is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::inverted_goto": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns int; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::inverted_void": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::narrow64": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint32_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::narrow8": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint8_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-clang-O2::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::and_chain_effect": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::inverted_void": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::main": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::narrow64": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::narrow8": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::pure_zero_guard": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O0::zero_of": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::inverted_void": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::narrow64": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint32_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::narrow8": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint8_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O1::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::inverted_void": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::narrow64": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint32_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::narrow8": {
+   "cause": "[r2ssa recover_interface, arm64 result width] The source returns uint8_t; AAPCS64 leaves a narrow result's upper bits to the callee, and on some path x0 is returned as the entry value or a narrower write (narrow8 at -O1/-O2 is a bare `ret`), so the engine does not prove the result and the rendered return is a counted residual (ROADMAP D6).",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::aarch64-gcc-O2::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::combined": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::crc32_init": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::main": {
+   "cause": "[effects] r2s refuses: one effect obligation is refused at a trap instruction, so main is not rendered.",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 1 refused (trap at 0x), 0 unaccounted, 0 conflicts",
+   "status": "refused"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::rotl32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::unaligned_words": {
+   "cause": "[P10 lowering] An unaligned 4-byte machine load (AArch64 `ldr w` at p + 1, which the machine allows) is spelled as a typed `*(uint32_t*)` dereference, which C requires to be 4-byte aligned; UBSan reports it. This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O0::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::combined": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::crc32_init": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::unaligned_words": {
+   "cause": "[P10 lowering] An unaligned 4-byte machine load (AArch64 `ldr w` at p + 1, which the machine allows) is spelled as a typed `*(uint32_t*)` dereference, which C requires to be 4-byte aligned; UBSan reports it. This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O1::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::combined": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::crc32_init": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::unaligned_words": {
+   "cause": "[P10 lowering] An unaligned 4-byte machine load (AArch64 `ldr w` at p + 1, which the machine allows) is spelled as a typed `*(uint32_t*)` dereference, which C requires to be 4-byte aligned; UBSan reports it. This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-clang-O2::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::combined": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::crc32_init": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::main": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::rotl32": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::unaligned_words": {
+   "cause": "[P10 lowering] An unaligned 4-byte machine load (AArch64 `ldr w` at p + 1, which the machine allows) is spelled as a typed `*(uint32_t*)` dereference, which C requires to be 4-byte aligned; UBSan reports it. This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O0::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::combined": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::crc32_init": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::unaligned_words": {
+   "cause": "[P10 lowering] An unaligned 4-byte machine load (AArch64 `ldr w` at p + 1, which the machine allows) is spelled as a typed `*(uint32_t*)` dereference, which C requires to be 4-byte aligned; UBSan reports it. This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O1::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::combined": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::crc32_init": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::main": {
+   "cause": "[not located] The rendering of main faults (SIGSEGV) inside the original image where the original returns: a call it makes passes or receives a wrong value; not yet located.",
+   "reason": "exit",
+   "status": "differs"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::unaligned_words": {
+   "cause": "[P10 lowering] An unaligned 4-byte machine load (AArch64 `ldr w` at p + 1, which the machine allows) is spelled as a typed `*(uint32_t*)` dereference, which C requires to be 4-byte aligned; UBSan reports it. This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/hashes.c::aarch64-gcc-O2::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::indirect_store": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::main": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::mixed_from": {
+   "cause": "[gate-limitation] An aggregate return: `struct mixed` (16 bytes) comes back in x0:x1; spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::mixed_touch": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_bool_caller": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_byte_indexed_buffer": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (r2dec gap: rendered_value_required); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_void",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_function_pointer": {
+   "cause": "[P4 memory] A frame object (an array the source indexes) is split into separate 8-byte locals, and the rendering then reads or writes past the one it addresses (UBSan: insufficient space for an object of type uint64_t).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_multiword_return": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_pointer_to_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_recurse_mutual": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_stash": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_struct_array": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_struct_pointer": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_struct_value": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_variadic": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::shape_variadic_local": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::vfold": {
+   "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O0::wide_make": {
+   "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct wide)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::indirect_store": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::main": {
+   "cause": "[not located] main prints different values on some of its lines (the first and the eleventh at least): a callee computed inside main is wrong; not yet located in the first AArch64 bless.",
+   "reason": "stdout",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::mixed_touch": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_bool_caller": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_byte_indexed_buffer": {
+   "cause": "[r2rewrite projection] r2s refuses: the operation's lowering is not authorised by the machine projection (missing machine projection authorization: OpLowering(lowering.rs)).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: missing machine projection authorization: OpLowering(lowering.rs)",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_function_pointer": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_multiword_return": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_pointer_to_pointer": {
+   "cause": "[P4 memory] A frame array is split into separate 8-byte locals (stack_m80, stack_m72, ...) and then indexed from the first one's address, so the rendering reads past it and calls or dereferences what it finds there: SIGSEGV where the original returns.",
+   "reason": "exit",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_recurse_mutual": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_stash": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_struct_array": {
+   "cause": "[P4 memory] An indexed frame access whose index has no solved bound is spelled as pointer arithmetic from a scalar frame object, and the pointer index expression overflows (UBSan). This function's x86-64 ub record carries the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_struct_value": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_variadic": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::shape_variadic_local": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::vfold": {
+   "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O1::wide_make": {
+   "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct wide)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::indirect_store": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::main": {
+   "cause": "[not located] main prints different values on some of its lines (the first and the eleventh at least): a callee computed inside main is wrong; not yet located in the first AArch64 bless.",
+   "reason": "stdout",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::mixed_touch": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_bool_caller": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_byte_indexed_buffer": {
+   "cause": "[P4 memory] r2s refuses: a frame slot is read before any write the engine sees (declaration placement: read_before_assignment).",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_function_pointer": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: ExactUseRequiresRenderedOccurrence.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_multiword_return": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_pointer_to_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_recurse_mutual": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_stash": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_struct_array": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_struct_value": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_variadic": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::shape_variadic_local": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::vfold": {
+   "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-clang-O2::wide_make": {
+   "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct wide)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::indirect_store": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::main": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (stdout): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree stdout",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_from": {
+   "cause": "[gate-limitation] An aggregate return: `struct mixed` (16 bytes) comes back in x0:x1; spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_touch": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_bool_caller": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_byte_indexed_buffer": {
+   "cause": "[P4 memory] r2s refuses: a frame slot is read before any write the engine sees (declaration placement: stack_access_read_before_assignment).",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: stack_access_read_before_assignment",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_function_pointer": {
+   "cause": "[P4 memory] A frame object (an array the source indexes) is split into separate 8-byte locals, and the rendering then reads or writes past the one it addresses (UBSan: insufficient space for an object of type uint64_t).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_multiword_return": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_mutual_even": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_mutual_odd": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_pointer_to_pointer": {
+   "cause": "[P4 memory] A frame array is split into separate 8-byte locals (stack_m80, stack_m72, ...) and then indexed from the first one's address, so the rendering reads past it and calls or dereferences what it finds there: SIGSEGV where the original returns.",
+   "reason": "exit",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_recurse_direct": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: ConflictingValue.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ConflictingValue",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_recurse_mutual": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_stash": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_struct_array": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_struct_pointer": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_struct_value": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_variadic": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::shape_variadic_local": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::vfold": {
+   "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O0::wide_make": {
+   "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct wide)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::indirect_store": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::main": {
+   "cause": "[not located] main prints different values on some of its lines (the first and the eleventh at least): a callee computed inside main is wrong; not yet located in the first AArch64 bless.",
+   "reason": "stdout",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::mixed_touch": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_bool_caller": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_byte_indexed_buffer": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (exit): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree exit",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_function_pointer": {
+   "cause": "[P4 memory] A frame object (an array the source indexes) is split into separate 8-byte locals, and the rendering then reads or writes past the one it addresses (UBSan: insufficient space for an object of type uint64_t).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_multiword_return": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_mutual_even": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_mutual_odd": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_pointer_to_pointer": {
+   "cause": "[P4 memory] A frame array is split into separate 8-byte locals (stack_m80, stack_m72, ...) and then indexed from the first one's address, so the rendering reads past it and calls or dereferences what it finds there: SIGSEGV where the original returns.",
+   "reason": "exit",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_recurse_mutual": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_stash": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_struct_array": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer and link register; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (SP_0, X29_0, X30_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_struct_value": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_variadic": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::shape_variadic_local": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::vfold": {
+   "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O1::wide_make": {
+   "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct wide)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::indirect_store": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::main": {
+   "cause": "[not located] main prints different values on some of its lines (the first and the eleventh at least): a callee computed inside main is wrong; not yet located in the first AArch64 bless.",
+   "reason": "stdout",
+   "status": "differs"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::mixed_touch": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_bool_caller": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_byte_indexed_buffer": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer and link register; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (SP_0, X29_0, X30_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_function_pointer": {
+   "cause": "[P4 memory] A frame object (an array the source indexes) is split into separate 8-byte locals, and the rendering then reads or writes past the one it addresses (UBSan: insufficient space for an object of type uint64_t).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_multiword_return": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_pointer_to_pointer": {
+   "cause": "[P4 memory] A frame object (an array the source indexes) is split into separate 8-byte locals, and the rendering then reads or writes past the one it addresses (UBSan: insufficient space for an object of type uint64_t).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_recurse_direct": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer and link register; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0, X30_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_recurse_mutual": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_stack_buffer": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_stash": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_struct_array": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: RenderedValueRequired.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: RenderedValueRequired",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_struct_value": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_variadic": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::shape_variadic_local": {
+   "cause": "[r2rewrite projection] r2s refuses: the operation's lowering is not authorised by the machine projection (missing machine projection authorization: OpLowering(calls.rs)).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: missing machine projection authorization: OpLowering(calls.rs)",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::vfold": {
+   "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::aarch64-gcc-O2::wide_make": {
+   "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "reason": "an aggregate return (struct wide)",
+   "status": "unsupported"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_count_bits": {
+   "cause": "[lift] r2s refuses: NEON `uaddlv` (the popcount reduction) is an unmodelled machine operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unmodelled machine operation NEON_uaddlv at 0x",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_mul_high": {
+   "cause": "[r2dec carrier types] The rendering mixes the 256-bit carrier `struct r2sleigh_bits_256` (the AArch64 vector register file) with `__uint128_t` values, which C rejects: incompatible types when initializing type \u2018__int128 unsigned\u2019 using type \u2018struct r2sleigh_bits_256\u2019.",
+   "reason": "incompatible types when initializing type \u2018__int128 unsigned\u2019 using type \u2018struct r2sleigh_bits_256\u2019",
+   "status": "compile-error"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_rotate": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O0::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_count_bits": {
+   "cause": "[r2dec lowering] r2s refuses: an AArch64 operation with no C spelling yet (unrepresentable operation).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_rotate": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O1::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_count_bits": {
+   "cause": "[r2dec lowering] r2s refuses: an AArch64 operation with no C spelling yet (unrepresentable operation).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_rotate": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_count_bits": {
+   "cause": "[r2dec lowering] r2s refuses: an AArch64 operation with no C spelling yet (unrepresentable operation).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_rotate": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O0::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_count_bits": {
+   "cause": "[r2dec lowering] r2s refuses: an AArch64 operation with no C spelling yet (unrepresentable operation).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_rotate": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O1::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_count_bits": {
+   "cause": "[r2dec lowering] r2s refuses: an AArch64 operation with no C spelling yet (unrepresentable operation).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_rotate": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-gcc-O2::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O0::main": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_dispatch": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O1::main": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_dispatch": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::main": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_dispatch": {
+   "cause": "[r2rewrite projection] r2s refuses: the operation's lowering is not authorised by the machine projection (missing machine projection authorization: OpLowering(implementation.rs)).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: missing machine projection authorization: OpLowering(implementation.rs)",
+   "status": "refused"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O0::main": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O0::table_dispatch": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O0::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O0::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O0::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O1::main": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O1::table_dispatch": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O1::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O1::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O1::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O2::main": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O2::table_dispatch": {
+   "cause": "[P4 memory] A frame array is split into separate 8-byte locals (stack_m80, stack_m72, ...) and then indexed from the first one's address, so the rendering reads past it and calls or dereferences what it finds there: SIGSEGV where the original returns.",
+   "reason": "exit",
+   "status": "differs"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O2::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O2::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-gcc-O2::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O0::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O0::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O0::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O0::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O1::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O1::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O1::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O1::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O0::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O0::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O0::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O0::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O1::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O1::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O1::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O1::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O2::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O2::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O2::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-gcc-O2::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::main": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O0::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::main": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::state_machine": {
+   "cause": "[P4 memory] r2s refuses: a frame slot is read before any write the engine sees (declaration placement: read_before_assignment).",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
+   "status": "refused"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O1::table_walk": {
+   "cause": "[P4 memory] r2s refuses: a frame slot is read before any write the engine sees (declaration placement: read_before_assignment).",
+   "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
+   "status": "refused"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::main": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::main": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O0::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::main": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::sparse_switch": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O1::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::main": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-gcc-O2::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The interface recovers no floating result: the rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, here as a counted residual; the double result is in v0.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::bit_count": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::classify": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::copy_name": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::dispatch": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::fact": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::fill": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::main": {
+   "cause": "[r2dec carrier types] The rendering mixes the 256-bit carrier `struct r2sleigh_bits_256` (the AArch64 vector register file) with `__uint128_t` values, which C rejects: incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019.",
+   "reason": "incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019",
+   "status": "compile-error"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::rotl": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O0::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, so v0 keeps the caller's value: the double result differs on every vector.",
+   "reason": "return",
+   "status": "differs"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::bit_count": {
+   "cause": "[lift] r2s refuses: NEON `uaddlv` (the popcount reduction) is an unmodelled machine operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unmodelled machine operation NEON_uaddlv at 0x",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::classify": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::copy_name": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::dispatch": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: ExactUseRequiresRenderedOccurrence.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::fact": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::fill": {
+   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::main": {
+   "cause": "[r2dec carrier types] The rendering mixes the 256-bit carrier `struct r2sleigh_bits_256` (the AArch64 vector register file) with `__uint128_t` values, which C rejects: incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019.",
+   "reason": "incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019",
+   "status": "compile-error"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::rotl": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O1::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The interface recovers no floating result: the rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, here as a counted residual; the double result is in v0.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::bit_count": {
+   "cause": "[lift] r2s refuses: NEON `uaddlv` (the popcount reduction) is an unmodelled machine operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unmodelled machine operation NEON_uaddlv at 0x",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::classify": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::copy_name": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::dispatch": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: ExactUseRequiresRenderedOccurrence.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::fact": {
+   "cause": "[gate-limitation, as on x86-64] The -O0 build of the rendering overruns its budget (four times the original's) at n near 2^31. Clang vectorised the loop into four NEON lanes, which the rendering spells lane by lane through the 256-bit carrier helpers; the original and the -O2 build return. The original needs about 3.3 s of its 5 s there under qemu (1 s natively), so how many such vectors are graded depends on the host's load; the status does not. The x86-64 record of this function is slow for the same reason.",
+   "reason": "O0",
+   "status": "slow"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::fill": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::main": {
+   "cause": "[r2dec carrier types] The rendering mixes the 256-bit carrier `struct r2sleigh_bits_256` (the AArch64 vector register file) with `__uint128_t` values, which C rejects: incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019.",
+   "reason": "incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019",
+   "status": "compile-error"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::rotl": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, so v0 keeps the caller's value: the double result differs on every vector.",
+   "reason": "return",
+   "status": "differs"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::bit_count": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::classify": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::copy_name": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::dispatch": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::fact": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::fill": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::main": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::rotl": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O0::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, so v0 keeps the caller's value: the double result differs on every vector.",
+   "reason": "return",
+   "status": "differs"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::bit_count": {
+   "cause": "[lift: AArch64 scalar SIMD writes] `addv b0, v0.8b` writes byte 0 and zeroes the rest of the vector register, but the rendering inserts the byte into the carrier and keeps the lanes `cnt` left (8, 8, 8 for 0xffffffff), so `fmov w0, s0` returns 0x08080820 instead of 32.",
+   "reason": "return",
+   "status": "differs"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::classify": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::copy_name": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::dispatch": {
+   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::fact": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::fill": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::find": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::main": {
+   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::rotl": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O1::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The interface recovers no floating result: the rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, here as a counted residual; the double result is in v0.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::bit_count": {
+   "cause": "[lift: AArch64 scalar SIMD writes] `addv b0, v0.8b` writes byte 0 and zeroes the rest of the vector register, but the rendering inserts the byte into the carrier and keeps the lanes `cnt` left (8, 8, 8 for 0xffffffff), so `fmov w0, s0` returns 0x08080820 instead of 32.",
+   "reason": "return",
+   "status": "differs"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::classify": {
+   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
+   "reason": "-O0 and -O2 builds disagree return",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::copy_name": {
+   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::dispatch": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: ExactUseRequiresRenderedOccurrence.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::fact": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::fill": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::main": {
+   "cause": "[r2dec carrier types] The rendering mixes the 256-bit carrier `struct r2sleigh_bits_256` (the AArch64 vector register file) with `__uint128_t` values, which C rejects: incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019.",
+   "reason": "incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019",
+   "status": "compile-error"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::rotl": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-gcc-O2::sum_array": {
+   "status": "equal"
+  }
+ },
+ "schema": 1,
+ "toolchain": {
+  "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+  "gcc": "aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+ }
+}
