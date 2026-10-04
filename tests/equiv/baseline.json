@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal.",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal. Re-blessed after 63e6300e and fec919f7 (run at fec919f7 on contabo, 604 equal): classify clang-O1/O2 and gcc-O2 equal (a number an operation computes with is no string literal), shape_call_chain clang-O1/O2 equal (a frame base survives every call and ends at its block's rewrite); no other record moved.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -1100,9 +1100,7 @@
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O1::shape_call_chain": {
-   "cause": "[P4 memory (promote.rs escape and frame-pointer facts; needs an immediate soundness guard)] The `second` and `third` locals ([rsp+0x10] and [rsp+0x8]) have their addresses passed to shape_stash, yet they are promoted to SSA registers, so the reload after each stash folds to the initial 0. The rendering has `fcn_4013b0(0)` twice, and second*3 and third*7 vanish from the return. The cause is in promote.rs. In this frameless function, the first register Copy of an SP-derived address after the first prologue step is pdil op 45 `RDI = COPY uniq:0x4e00` (= rsp+0x18, the outgoing argument &first), and it is taken as 'the frame pointer'. At op 45 itself (at == established), RDI is derived...",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_function_pointer": {
    "cause": "[P7 calls (Exact/AtLeast arity; an assumed arity is a residual; target-set join, fed by P5's folding of loads from immutable memory)] The indirect call `call QWORD PTR [r15+rax]` (chosen(accumulator, b+index)) renders as `((uint64_t(*)(void))tmp_11f80_2)()`: no arguments, marked complete. The call has no callee contract, so it falls back to caller writes. That fallback stops at argument slot 0, because RDI is a loop phi of the entry value and the previous call's result, not written_by_body. It reports arity 0 and sets arguments_complete=true. As a result, the function's own interface drops parameter b, since RSI only feeds `lea rsi,[rbx+r12]` for the call: `fcn_4019e0(uint64_t RDI_0)`. The targets come from a 24-byte tabl...",
@@ -1212,9 +1210,7 @@
    "status": "refused"
   },
   "tests/corpus/shapes.c::clang-O2::shape_call_chain": {
-   "cause": "[P4 memory] Same as clang-O1. `lea rdi,[rsp+0x18]` is misidentified as the frame pointer in promote.rs, so the later escaping `lea rdi,[rsp+0x10]` and `lea rdi,[rsp+0x8]` are not recorded as escapes. Slots 56 and 64 are promoted, and the reloads after each stash fold to 0 (`fcn_401430(0)` twice).",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_function_pointer": {
    "cause": "[P7 calls (with P2 immutability and P5 table folding)] VERIFIED: clang folded `table[3]` into a read-only .rodata table at 0x402080 = {0x401b60 op_add, 0x401b70 op_xor, 0x401b80 op_mul} and unrolled the loop. Five iterations are `call [rcx+0x402080]`. The sixth is a tail jump `jmp [rax+0x402080]` at 0x401c6a, taken after `pop rbx; pop r14; pop r15` with the stack at entry height. r2ssa does not classify this terminal BranchInd as a tail call. transfer() (r2engine native.rs:2263-2281) only announces TailSlot for a relocated slot, and the call-site gate (machine_context.rs:2146 'loads no slot') names no call site. It is not a dispatch either: dis...",
@@ -2316,9 +2312,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::classify": {
-   "cause": "[P8 data] The switch lookup table (int[8] {10,21,32,43,54,65,-1,87} in .rodata at 0x402068) is symbolised as the string literal \"\\n\" from its first bytes 0a 00: `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). This reads past a 2-byte literal in the rendering's own image, at a misaligned address. The machine is `mov eax,[rax*4+0x402068]`. The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::clang-O1::copy_name": {
    "status": "equal"
@@ -2371,9 +2365,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::classify": {
-   "cause": "[P8 data] The same as clang-O1: the lookup table is mis-symbolised as \"\\n\" (rendering.c:10). The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::clang-O2::copy_name": {
    "status": "equal"
@@ -2538,9 +2530,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O2::classify": {
-   "cause": "[P8 data] gcc's CSWTCH.12 int[8] table is rendered as the string literal \"\\n\": `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::gcc-O2::copy_name": {
    "status": "equal"
