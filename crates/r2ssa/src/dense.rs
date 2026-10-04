@@ -104,78 +104,122 @@ impl<I: DenseId, T> std::ops::IndexMut<I> for IdVec<I, T> {
 }
 
 /// A value for some of the ids below a bound.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Most facts hold for a few ids of many, and their values are large, so the
+/// map does not keep a value cell per id: each id has a four-byte slot naming
+/// its entry, entries are packed, and a bitset of the ids present makes
+/// iteration in id order cost `O(bound / 64 + entries)`. A lookup is two
+/// indexed loads; insertion and removal are `O(1)`.
+#[derive(Debug, Clone)]
 pub struct IdMap<I, T> {
-    cells: Vec<Option<T>>,
-    count: usize,
-    ids: PhantomData<fn(I) -> I>,
+    slots: Vec<u32>,
+    entries: Vec<(I, T)>,
+    present: IdSet<I>,
 }
+
+/// A slot no entry fills.
+const VACANT: u32 = u32::MAX;
 
 impl<I: DenseId, T> IdMap<I, T> {
     /// An empty map over ids below `len`.
     pub fn new(len: usize) -> Self {
         Self {
-            cells: std::iter::repeat_with(|| None).take(len).collect(),
-            count: 0,
-            ids: PhantomData,
+            slots: vec![VACANT; len],
+            entries: Vec::new(),
+            present: IdSet::new(len),
         }
     }
 
     /// How many ids have a value.
     pub fn len(&self) -> usize {
-        self.count
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.entries.is_empty()
+    }
+
+    fn slot(&self, id: I) -> Option<usize> {
+        match self.slots.get(id.index()) {
+            Some(&slot) if slot != VACANT => Some(slot as usize),
+            _ => None,
+        }
     }
 
     pub fn get(&self, id: I) -> Option<&T> {
-        self.cells.get(id.index())?.as_ref()
+        self.slot(id).map(|slot| &self.entries[slot].1)
     }
 
     pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
-        self.cells.get_mut(id.index())?.as_mut()
+        let slot = self.slot(id)?;
+        Some(&mut self.entries[slot].1)
     }
 
     pub fn contains(&self, id: I) -> bool {
-        self.get(id).is_some()
+        self.slot(id).is_some()
     }
 
     /// Set `id`'s value, returning the one it replaces. An id at or past
     /// the bound grows the map to hold it.
     pub fn insert(&mut self, id: I, value: T) -> Option<T> {
+        if let Some(slot) = self.slot(id) {
+            return Some(std::mem::replace(&mut self.entries[slot].1, value));
+        }
         let index = id.index();
-        if index >= self.cells.len() {
-            self.cells.resize_with(index + 1, || None);
+        if index >= self.slots.len() {
+            self.slots.resize(index + 1, VACANT);
         }
-        let previous = self.cells[index].replace(value);
-        if previous.is_none() {
-            self.count += 1;
+        self.slots[index] = u32::try_from(self.entries.len()).expect("fewer than 2^32 entries");
+        self.entries.push((id, value));
+        self.present.insert(id);
+        None
+    }
+
+    /// `id`'s value, inserting `value()` first where it has none.
+    pub fn get_or_insert_with(&mut self, id: I, value: impl FnOnce() -> T) -> &mut T {
+        if self.slot(id).is_none() {
+            self.insert(id, value());
         }
-        previous
+        self.get_mut(id).expect("inserted above")
     }
 
     pub fn remove(&mut self, id: I) -> Option<T> {
-        let previous = self.cells.get_mut(id.index())?.take();
-        if previous.is_some() {
-            self.count -= 1;
+        let slot = self.slot(id)?;
+        self.slots[id.index()] = VACANT;
+        self.present.remove(id);
+        let (_, value) = self.entries.swap_remove(slot);
+        if let Some((moved, _)) = self.entries.get(slot) {
+            self.slots[moved.index()] = slot as u32;
         }
-        previous
+        Some(value)
     }
 
     /// Every id with a value, in id order.
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
-        self.cells
+        self.present
             .iter()
-            .enumerate()
-            .filter_map(|(index, cell)| Some((I::from_index(index), cell.as_ref()?)))
+            .map(|id| (id, &self.entries[self.slots[id.index()] as usize].1))
     }
 
     pub fn keys(&self) -> impl Iterator<Item = I> + '_ {
-        self.iter().map(|(id, _)| id)
+        self.present.iter()
+    }
+
+    /// The values, in id order.
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.iter().map(|(_, value)| value)
     }
 }
+
+/// Two maps are equal when they hold the same values for the same ids,
+/// whatever order the values were inserted in.
+impl<I: DenseId, T: PartialEq> PartialEq for IdMap<I, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<I: DenseId, T: Eq> Eq for IdMap<I, T> {}
 
 impl<I: DenseId, T> std::ops::Index<I> for IdMap<I, T> {
     type Output = T;
@@ -392,5 +436,35 @@ mod tests {
         assert_eq!(csr.get(ValueId(2)), [20, 21]);
         assert!(csr.get(ValueId(3)).is_empty());
         assert!(csr.get(ValueId(9)).is_empty());
+    }
+
+    proptest::proptest! {
+        /// An `IdMap` is the map its operations describe: the same values,
+        /// the same length, and iteration in id order, whatever order the
+        /// ids were inserted and removed in.
+        #[test]
+        fn an_id_map_behaves_as_an_ordered_map(
+            operations in proptest::collection::vec((0u32..200, proptest::option::of(0u32..1000)), 0..400)
+        ) {
+            let mut map = IdMap::<ValueId, u32>::new(64);
+            let mut model = std::collections::BTreeMap::new();
+            for (id, value) in operations {
+                match value {
+                    Some(value) => {
+                        proptest::prop_assert_eq!(map.insert(ValueId(id), value), model.insert(id, value));
+                    }
+                    None => {
+                        proptest::prop_assert_eq!(map.remove(ValueId(id)), model.remove(&id));
+                    }
+                }
+                proptest::prop_assert_eq!(map.len(), model.len());
+            }
+            let held = map.iter().map(|(id, value)| (id.0, *value)).collect::<Vec<_>>();
+            let expected = model.iter().map(|(id, value)| (*id, *value)).collect::<Vec<_>>();
+            proptest::prop_assert_eq!(held, expected);
+            for id in 0..200 {
+                proptest::prop_assert_eq!(map.get(ValueId(id)), model.get(&id));
+            }
+        }
     }
 }
