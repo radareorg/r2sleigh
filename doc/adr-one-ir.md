@@ -252,3 +252,26 @@ byte-identical, and deletes what it replaces:
     graph in production and from a map in its own tests. r2dec's prepared
     semantics asks through `value_of` and `canonical_root_var` until the
     printer reads values (doc/adr-renderer-printer.md).
+  - 5d, the certificate and fact maps (`074b464d`, `e95ed4be`,
+    `d03f2a46`, `5c746e2f`, `d5332f02`): every function-wide map or set
+    in r2ssa keyed by a `ValueId` or `InstId` is an `IdMap`/`IdSet`. That
+    covers the certificates, the object model's address facts, memory
+    SSA, the boundary returns, inductions and member runs, the
+    dead-merge and observation closures, address provenance, the
+    renderable-expression closure, the graph's instruction and formal
+    maps, the obligation inventory, live-out, frame reach and the
+    dependence sources. Their count in r2ssa's library code fell from 149
+    to 61, and the census stayed byte-identical through every step.
+    `CallSiteFacts::by_inst` is the one map from a call instruction to its
+    site; the certificates' copy and the call-result collector's rebuild
+    are deleted. `IdSet` equality is by members, `IdMap` has `retain`
+    (asked in id order), consuming iteration in id order, and serde in an
+    ordered map's shape.
+  - Ordered maps that stay, and why:
+    - a certificate's own member sets, a return block's values, a
+      component's per-block liveness segments and an affine form's terms
+      are a few ids attached to one entity, where a dense map costs
+      O(values) per entity;
+    - the renaming, lane and value-table index maps keyed by `SSAVar` run
+      before the value table exists, or are the table's interning index;
+    - the per-block value-range maps are P5's to rebuild as an index.
