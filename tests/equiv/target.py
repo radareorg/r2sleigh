@@ -227,8 +227,14 @@ class Target:
     call_asm: Path
     # The host machine (os.uname) that runs this target's programs natively.
     native_machines: tuple[str, ...]
-    # The emulator that runs them elsewhere, given the sysroot.
+    # The emulator that runs them elsewhere, and its arguments before the
+    # program's own.
     emulator: str | None
+    emulator_args: tuple[str, ...]
+    # How many times slower than native the emulator runs this corpus's code.
+    # qemu-aarch64 (TCG, 8.2) ran a bitwise CRC over 2 MiB 3.5 times slower
+    # than x86-64 natively at -O2 and 5 times at -O0; the larger is taken.
+    emulator_slowdown: int
     trap_signal: int
     asm: Assembly
     # GNU ld for AArch64 (2.42; gold too) resolves the GOT entry of an
@@ -279,6 +285,17 @@ class Target:
     def emulated(self) -> bool:
         return os.uname().machine not in self.native_machines
 
+    def time_scale(self) -> int:
+        """The factor every per-call time budget is multiplied by on this host.
+
+        The budgets (``--timeout-ms``: the original's, four times it for a
+        rendering) are native wall-clock time. Under an emulator the same code
+        takes longer, and a budget that is not scaled leaves a rendering
+        a fraction of its native margin, so a loaded host turns an equal
+        record slow on one run and not the next.
+        """
+        return self.emulator_slowdown if self.emulated() else 1
+
     def run_argv(self, program: Path, environment: list[str]) -> list[str]:
         """The command that runs ``program`` of this target with ``environment`` set in it.
 
@@ -291,9 +308,7 @@ class Target:
         """
         if not self.emulated():
             return ["/usr/bin/env", *environment, str(program)]
-        argv = [str(self.emulator)]
-        if self.sysroot is not None:
-            argv += ["-L", str(self.sysroot)]
+        argv = [str(self.emulator), *self.emulator_args]
         for assignment in environment:
             if "," in assignment:
                 raise ValueError(f"qemu -E cannot pass a value with a comma: {assignment}")
@@ -333,6 +348,8 @@ X86_64 = Target(
     call_asm=HERE / "rt" / "call_x86_64.S",
     native_machines=("x86_64", "amd64"),
     emulator=None,
+    emulator_args=(),
+    emulator_slowdown=1,
     trap_signal=signal.SIGILL,  # ud2
     asm=X86_64Assembly(),
 )
@@ -353,6 +370,12 @@ AARCH64 = Target(
     call_asm=HERE / "rt" / "call_aarch64.S",
     native_machines=("aarch64", "arm64"),
     emulator="qemu-aarch64",
+    # -L: the guest's loader and libraries come from the sysroot. -seed: the
+    # 16 bytes qemu gives the guest as AT_RANDOM, from which glibc derives the
+    # stack-protector canary, are the same on every run, so a record that
+    # shows stack memory (a UBSan report does) is the same on every run too.
+    emulator_args=("-L", str(_AARCH64_SYSROOT), "-seed", "1"),
+    emulator_slowdown=5,
     trap_signal=signal.SIGTRAP,  # brk
     asm=AArch64Assembly(),
     objects_through_loader=True,
