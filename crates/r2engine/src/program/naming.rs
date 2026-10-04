@@ -153,27 +153,28 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
     // One bar for the whole listing, because that is what a reader reads: a
     // short section must not get a lower bar than the binary it is part of.
     let floor = chance_run_length(&runs);
+    // Zero-terminated segment by segment: in each, the text is the first
+    // start whose suffix reads as text, which is what asking at every offset
+    // found, in one pass over the segment rather than one per offset.
     for (start, bytes) in runs {
         let mut at = 0usize;
-        while at < bytes.len() {
-            let Some(text) = crate::names::text_in(&bytes[at..]) else {
-                at += 1;
-                continue;
-            };
-            let run = text.len();
-            if run >= floor {
+        while let Some(end) = bytes[at..].iter().position(|byte| *byte == 0) {
+            let segment = &bytes[at..at + end];
+            if let Some((offset, text)) = crate::names::first_text_in(segment)
+                && text.len() >= floor
+            {
                 db.insert(
-                    start + at as u64,
+                    start + (at + offset) as u64,
                     Name {
                         text: text.to_owned(),
                         namespace: Namespace::String,
                         // The terminator belongs to the string: it is what a
                         // reader has to step over to reach the next one.
-                        size: run as u64 + 1,
+                        size: text.len() as u64 + 1,
                     },
                 );
             }
-            at += run + 1;
+            at += end + 1;
         }
     }
 }

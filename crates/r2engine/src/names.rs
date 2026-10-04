@@ -38,6 +38,35 @@ pub fn text_in(bytes: &[u8]) -> Option<&str> {
         .then_some(text)
 }
 
+/// The first start in `segment`, a run of bytes with no zero, whose suffix
+/// is text as [`text_in`] reads it, and that text.
+///
+/// One forward pass. A suffix from any start at or before an invalid UTF-8
+/// sequence decodes into it -- UTF-8 resynchronises, so no other start skips
+/// it -- and so does one from any start at or before a control character
+/// that is not a newline or a tab: the next start worth asking is just past
+/// either. Validation stops at the first error, so the jumps cost what they
+/// skip, and a suffix that validates is scanned at most twice.
+pub fn first_text_in(segment: &[u8]) -> Option<(usize, &str)> {
+    let mut start = 0usize;
+    while start < segment.len() {
+        match std::str::from_utf8(&segment[start..]) {
+            Err(error) => start += error.valid_up_to() + 1,
+            Ok(text) => {
+                match text
+                    .char_indices()
+                    .rev()
+                    .find(|(_, c)| c.is_control() && *c != '\n' && *c != '\t')
+                {
+                    None => return Some((start, text)),
+                    Some((at, c)) => start += at + c.len_utf8(),
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Which vocabulary a name belongs to, spelled the way radare2 spells it.
 ///
 /// This is presentation and provenance at once: `sym.imp.` says the address is
@@ -245,6 +274,35 @@ impl NameDb {
 
 #[cfg(test)]
 mod tests {
+    /// The text the scan finds in a segment is the text asking at every
+    /// offset finds: the first offset whose suffix reads as text.
+    fn first_by_every_offset(segment: &[u8]) -> Option<(usize, String)> {
+        let mut terminated = segment.to_vec();
+        terminated.push(0);
+        (0..segment.len()).find_map(|offset| {
+            super::text_in(&terminated[offset..]).map(|text| (offset, text.to_owned()))
+        })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_first_text_in_a_segment_is_the_first_offset_that_reads_as_text(
+            segment in proptest::collection::vec(
+                proptest::prop_oneof![
+                    1u8..0x20,
+                    0x20u8..0x7f,
+                    0x7fu8..=0xff,
+                    proptest::strategy::Just(b'\n'),
+                    proptest::sample::select(vec![0xc2u8, 0x80, 0x9f, 0xe2, 0x82, 0xac, 0xf0, 0x9f]),
+                ],
+                0..64,
+            )
+        ) {
+            let found = super::first_text_in(&segment).map(|(offset, text)| (offset, text.to_owned()));
+            proptest::prop_assert_eq!(found, first_by_every_offset(&segment));
+        }
+    }
+
     use super::*;
 
     fn named(text: &str, namespace: Namespace, size: u64) -> Name {

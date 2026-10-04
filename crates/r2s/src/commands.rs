@@ -895,19 +895,18 @@ fn every_string(session: &Session) -> Result<String, String> {
             continue;
         };
         let mut at = 0usize;
-        while at < bytes.len() {
-            let Some(text) = r2engine::names::text_in(&bytes[at..]) else {
-                at += 1;
-                continue;
-            };
-            if text.chars().count() >= RADARE2_IZZ_MINIMUM {
+        while let Some(end) = bytes[at..].iter().position(|byte| *byte == 0) {
+            if let Some((offset, text)) = r2engine::names::first_text_in(&bytes[at..at + end])
+                && text.chars().count() >= RADARE2_IZZ_MINIMUM
+            {
+                let place = (at + offset) as u64;
                 let vaddr = match section.loaded {
-                    true => section.vaddr + at as u64,
+                    true => section.vaddr + place,
                     false => 0,
                 };
-                found.push((section.file_offset + at as u64, vaddr, text.to_owned()));
+                found.push((section.file_offset + place, vaddr, text.to_owned()));
             }
-            at += text.len() + 1;
+            at += end + 1;
         }
     }
     let mut out = String::from("nth paddr      vaddr      len size section         type  string\n");
