@@ -1124,7 +1124,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if stack_geometry_values.contains(&graph_value.id) {
+            } else if stack_geometry_values.contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: crate::ledger::ElisionReason::DeadStackBase,
                     proof: ValueElisionProof {
@@ -1154,7 +1154,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if structural_unused.contains(&graph_value.id) {
+            } else if structural_unused.contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,

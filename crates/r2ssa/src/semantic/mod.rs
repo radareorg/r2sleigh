@@ -288,7 +288,7 @@ impl PreparedFunctionFacts {
         let live_values = crate::liveness::ValueLiveness::compute_with_relocations(
             graph,
             &live_out,
-            &BTreeMap::new(),
+            &crate::dense::IdMap::default(),
             content,
             &ignored_reads,
         );

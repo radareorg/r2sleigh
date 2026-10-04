@@ -107,8 +107,8 @@ pub struct StackFrameRoundTripCertificate {
 /// removes the value and every dependent computation from this certificate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StackGeometryCertificate {
-    pub insts: BTreeSet<InstId>,
-    pub values: BTreeSet<ValueId>,
+    pub insts: crate::dense::IdSet<InstId>,
+    pub values: crate::dense::IdSet<ValueId>,
     pub uses: BTreeSet<UseSite>,
 }
 
@@ -259,7 +259,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         let mut complete = true;
         for access in &accesses {
             let Some(active_sp_offset) = active_stack_pointer_states
-                .get(&access.id.inst)
+                .get(access.id.inst)
                 .copied()
                 .and_then(|state| exact_stack_pointer_offset(prep, graph, state))
             else {
@@ -867,7 +867,7 @@ pub(crate) fn collect_stack_geometry_certificate(
     let frame_values = frame_round_trips
         .values()
         .flat_map(|certificate| certificate.values.iter().copied())
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
     let return_control_uses = return_controls
         .values()
         .flat_map(|certificate| certificate.uses.iter().copied())
@@ -875,13 +875,13 @@ pub(crate) fn collect_stack_geometry_certificate(
     let return_control_values = return_controls
         .values()
         .flat_map(|certificate| certificate.values.iter().copied())
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
 
     let mut program_values = boundaries
         .parameters
         .values()
         .map(|parameter| parameter.value)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
     for boundary in boundaries.calls.values() {
         program_values.extend(boundary.arguments.iter().filter_map(
             |argument| match argument.value {
@@ -899,23 +899,23 @@ pub(crate) fn collect_stack_geometry_certificate(
         .values
         .iter()
         .filter(|value| {
-            !program_values.contains(&value.id)
-                && !frame_values.contains(&value.id)
-                && !return_control_values.contains(&value.id)
+            !program_values.contains(value.id)
+                && !frame_values.contains(value.id)
+                && !return_control_values.contains(value.id)
                 && (stack_root(value.id).is_some() || geometry_inputs.contains(value.id))
                 && graph
                     .def_inst(value.id)
                     .is_none_or(|inst| geometry_outputs.get(inst).copied() == Some(value.id))
         })
         .map(|value| value.id)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
     // The greatest set whose every use stays inside the geometry: a worklist
     // from the whole candidate set. A value that leaves can only make the
     // operands of the instruction defining it leave, so those are what it
     // re-checks.
-    let mut pending = values.iter().copied().collect::<Vec<_>>();
+    let mut pending = values.iter().collect::<Vec<_>>();
     while let Some(value) = pending.pop() {
-        if !values.contains(&value) {
+        if !values.contains(value) {
             continue;
         }
         let Some(site) = graph.use_sites(value).iter().copied().find(|site| {
@@ -932,7 +932,7 @@ pub(crate) fn collect_stack_geometry_certificate(
                 && !unobserved.unobserved_uses().contains(site)
                 && !geometry_outputs
                     .get(site.inst)
-                    .is_some_and(|output| values.contains(output))
+                    .is_some_and(|output| values.contains(*output))
         }) else {
             continue;
         };
@@ -952,33 +952,30 @@ pub(crate) fn collect_stack_geometry_certificate(
                 .and_then(|inst| inst.output)
                 .map(stack_root)
         );
-        values.remove(&value);
+        values.remove(value);
         if let Some(inputs) = graph
             .def_inst(value)
             .and_then(|inst| graph.inst(inst))
             .map(|inst| inst.inputs.clone())
         {
-            pending.extend(inputs.into_iter().filter(|input| values.contains(input)));
+            pending.extend(inputs.into_iter().filter(|input| values.contains(*input)));
         }
     }
 
     let insts = geometry_outputs
         .into_iter()
-        .filter_map(|(inst, output)| values.contains(&output).then_some(inst))
-        .collect::<BTreeSet<_>>();
+        .filter_map(|(inst, output)| values.contains(output).then_some(inst))
+        .collect::<crate::dense::IdSet<_>>();
     let mut uses = stack_address_uses
         .difference(&frame_uses)
         .copied()
         .filter(|site| !return_control_uses.contains(site))
         .collect::<BTreeSet<_>>();
     for inst in &insts {
-        let Some(definition) = graph.inst(*inst) else {
+        let Some(definition) = graph.inst(inst) else {
             continue;
         };
-        uses.extend((0..definition.inputs.len()).map(|input_idx| UseSite {
-            inst: *inst,
-            input_idx,
-        }));
+        uses.extend((0..definition.inputs.len()).map(|input_idx| UseSite { inst, input_idx }));
     }
     StackGeometryCertificate {
         insts,

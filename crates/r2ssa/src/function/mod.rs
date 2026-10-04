@@ -286,7 +286,7 @@ impl ArtifactLiveness {
     pub fn with_relocations(
         &self,
         graph: &SsaGraph,
-        relocations: &std::collections::BTreeMap<crate::graph::InstId, crate::graph::InstId>,
+        relocations: &crate::dense::IdMap<crate::graph::InstId, crate::graph::InstId>,
     ) -> crate::liveness::ValueLiveness {
         if relocations.is_empty() {
             return self.values.clone();

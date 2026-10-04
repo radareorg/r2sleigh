@@ -212,17 +212,17 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
         .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
         .filter(|inst| block_addr(graph, inst).is_some_and(|addr| widen_at.contains(&addr)))
         .map(|inst| inst.id)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
 
     let mut queued = graph
         .insts
         .iter()
         .map(|inst| inst.id)
-        .collect::<BTreeSet<_>>();
-    let mut ready = queued.iter().copied().collect::<VecDeque<_>>();
+        .collect::<crate::dense::IdSet<_>>();
+    let mut ready = queued.iter().collect::<VecDeque<_>>();
     let mut transfers = 0usize;
     while let Some(inst_id) = ready.pop_front() {
-        queued.remove(&inst_id);
+        queued.remove(inst_id);
         let Some(inst) = graph.inst(inst_id) else {
             continue;
         };
@@ -239,7 +239,7 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
                 .copied()
                 .unwrap_or_else(|| StridedInterval::top(64))
         });
-        let next = match widen_insts.contains(&inst_id) {
+        let next = match widen_insts.contains(inst_id) {
             true => slot.widen(&slot.join(&computed)),
             false => slot.join(&computed),
         };
@@ -763,10 +763,10 @@ fn narrow_where_defined(
                 .inst(*inst)
                 .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
         })
-        .collect::<BTreeSet<_>>();
-    let mut ready = queued.iter().copied().collect::<VecDeque<_>>();
+        .collect::<crate::dense::IdSet<_>>();
+    let mut ready = queued.iter().collect::<VecDeque<_>>();
     while let Some(inst_id) = ready.pop_front() {
-        queued.remove(&inst_id);
+        queued.remove(inst_id);
         let Some(inst) = graph.inst(inst_id) else {
             continue;
         };

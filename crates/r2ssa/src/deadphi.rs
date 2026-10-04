@@ -391,7 +391,7 @@ impl DeadPhis {
         if !obligations.is_complete() {
             return Self::default();
         }
-        let mut roots = BTreeSet::from_iter(live_out.iter());
+        let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
         for obligation in obligations.obligations().values() {
             roots.extend(obligation.inputs.iter().copied());
         }

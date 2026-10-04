@@ -265,8 +265,8 @@ impl BindingPlan {
                         && !direct_control_targets.contains(&value)
                         && !direct_call_targets.contains(&value)
                         && !stack_frame_values.contains(&value)
-                        && !stack_geometry_values.contains(&value)
-                        && !structural_unused.contains(&value)
+                        && !stack_geometry_values.contains(value)
+                        && !structural_unused.contains(value)
                         && !unread.contains(&value)
                         && !unrendered.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
@@ -309,12 +309,12 @@ impl BindingPlan {
                     if *reason == crate::ledger::ElisionReason::DeadStackBase
                         && proof.authority == *source.authority()
                         && proof.value == value
-                        && stack_geometry_values.contains(&value) => {}
+                        && stack_geometry_values.contains(value) => {}
                 ValueDisposition::Elided { reason, proof }
                     if *reason == crate::ledger::ElisionReason::UnusedStructuralValue
                         && proof.authority == *source.authority()
                         && proof.value == value
-                        && structural_unused.contains(&value) => {}
+                        && structural_unused.contains(value) => {}
                 ValueDisposition::Elided { reason, proof }
                     if *reason == crate::ledger::ElisionReason::DeadUnusedTemporary
                         && proof.authority == *source.authority()
@@ -330,7 +330,7 @@ impl BindingPlan {
                         && effectful.contains(&value)
                         && (unread.contains(&value)
                             || unrendered.contains(&value)
-                            || structural_unused.contains(&value)
+                            || structural_unused.contains(value)
                             || unobserved_values.contains(value)
                             || unobserved_merges.contains(value)) => {}
                 ValueDisposition::Elided { .. } => {

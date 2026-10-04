@@ -429,12 +429,73 @@ impl<I: DenseId> Extend<I> for IdSet<I> {
     }
 }
 
+/// The members, in id order.
+impl<I: DenseId> IntoIterator for IdSet<I> {
+    type Item = I;
+    type IntoIter = std::vec::IntoIter<I>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter().collect::<Vec<_>>().into_iter()
+    }
+}
+
 impl<'a, I: DenseId> IntoIterator for &'a IdSet<I> {
     type Item = I;
     type IntoIter = Box<dyn Iterator<Item = I> + 'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
+    }
+}
+
+/// A worklist of ids that hands back the least one queued, each id at most
+/// once while it waits: an ordered set used only through `insert` and
+/// `pop_first`, at `O(log n)` per operation.
+#[derive(Debug, Clone)]
+pub struct IdWorklist<I> {
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<usize>>,
+    queued: IdSet<I>,
+}
+
+impl<I: DenseId> Default for IdWorklist<I> {
+    fn default() -> Self {
+        Self {
+            heap: std::collections::BinaryHeap::new(),
+            queued: IdSet::default(),
+        }
+    }
+}
+
+impl<I: DenseId> IdWorklist<I> {
+    /// Queue `id`; whether it was not already waiting.
+    pub fn insert(&mut self, id: I) -> bool {
+        let fresh = self.queued.insert(id);
+        if fresh {
+            self.heap.push(std::cmp::Reverse(id.index()));
+        }
+        fresh
+    }
+
+    /// The least id waiting, taken off the list.
+    pub fn pop_first(&mut self) -> Option<I> {
+        let std::cmp::Reverse(index) = self.heap.pop()?;
+        let id = I::from_index(index);
+        self.queued.remove(id);
+        Some(id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+}
+
+impl<I: DenseId> FromIterator<I> for IdWorklist<I> {
+    fn from_iter<T: IntoIterator<Item = I>>(ids: T) -> Self {
+        let mut list = Self::default();
+        for id in ids {
+            list.insert(id);
+        }
+        list
     }
 }
 
@@ -607,6 +668,27 @@ mod tests {
             // Collected afresh, from bound zero, it is the same map.
             let rebuilt = map.iter().map(|(id, value)| (id, *value)).collect::<IdMap<_, _>>();
             proptest::prop_assert!(rebuilt == map);
+        }
+
+        /// An `IdWorklist` hands back what an ordered set used as a worklist
+        /// would: the least waiting id, each at most once while it waits.
+        #[test]
+        fn an_id_worklist_behaves_as_an_ordered_set_worklist(
+            operations in proptest::collection::vec(proptest::option::of(0u32..100), 0..400)
+        ) {
+            let mut list = IdWorklist::<ValueId>::default();
+            let mut model = std::collections::BTreeSet::new();
+            for operation in operations {
+                match operation {
+                    Some(id) => {
+                        proptest::prop_assert_eq!(list.insert(ValueId(id)), model.insert(id));
+                    }
+                    None => {
+                        proptest::prop_assert_eq!(list.pop_first().map(|id| id.0), model.pop_first());
+                    }
+                }
+                proptest::prop_assert_eq!(list.is_empty(), model.is_empty());
+            }
         }
 
         /// An `IdSet` is the set its operations describe, and two sets are

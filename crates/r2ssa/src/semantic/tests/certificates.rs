@@ -207,7 +207,7 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
         .stack_geometry
         .insts
         .iter()
-        .filter_map(|inst| artifact.graph().walk_start(*inst))
+        .filter_map(|inst| artifact.graph().walk_start(inst))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         geometry_sites,
@@ -410,14 +410,14 @@ fn stack_geometry_certificate_closes_equal_root_merge_phi() {
             offset: -16,
         })
     );
-    assert!(geometry.values.contains(&phi_value));
-    assert!(geometry.insts.contains(&phi_inst));
+    assert!(geometry.values.contains(phi_value));
+    assert!(geometry.insts.contains(phi_inst));
     assert!(artifact.graph().inst(phi_inst).is_some_and(|inst| {
         matches!(inst.payload, InstPayload::Phi { .. })
             && inst
                 .inputs
                 .iter()
-                .all(|input| geometry.values.contains(input))
+                .all(|input| geometry.values.contains(*input))
     }));
 }
 
@@ -491,9 +491,9 @@ fn stack_geometry_certificate_closes_the_call_restore() {
             offset: -16,
         })
     );
-    assert!(geometry.insts.contains(&restore.id));
-    assert!(geometry.values.contains(&output));
-    assert!(geometry.values.contains(&restore.inputs[0]));
+    assert!(geometry.insts.contains(restore.id));
+    assert!(geometry.values.contains(output));
+    assert!(geometry.values.contains(restore.inputs[0]));
 }
 
 #[test]

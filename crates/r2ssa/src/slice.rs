@@ -20,7 +20,8 @@ pub enum SliceError {
     NotFound(String),
     AmbiguousName {
         name: String,
-        values: BTreeSet<ValueId>,
+        /// In id order.
+        values: Vec<ValueId>,
     },
 }
 
@@ -65,7 +66,7 @@ pub fn resolve_slice_seed(artifact: &SsaArtifact, text: &str) -> Result<SliceSee
             .map(|_| SliceSeed::Value(id))
             .ok_or(SliceError::InvalidValue(id));
     }
-    let values: BTreeSet<_> = graph
+    let values: Vec<_> = graph
         .values
         .iter()
         .filter(|value| value.var.display_name() == text)

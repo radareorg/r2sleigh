@@ -1933,7 +1933,7 @@ fn exact_frame_round_trip_is_elided_without_a_program_binding() {
             .values
             .iter()
             .all(|value| matches!(
-                plan.disposition(*value),
+                plan.disposition(value),
                 Some(ValueDisposition::Elided {
                     reason: crate::ledger::ElisionReason::DeadStackBase,
                     ..

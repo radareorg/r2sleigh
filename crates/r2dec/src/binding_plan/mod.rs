@@ -910,7 +910,7 @@ impl CertifiedSilence {
         // only about exclusive claims left it to be rendered as a store to a
         // slot the plan had already elided.
         insts.extend(certified_return_control_insts(source));
-        insts.extend(certificates.stack_geometry.insts.iter().copied());
+        insts.extend(certificates.stack_geometry.insts.iter());
         // The copy that puts a callee's address in a temporary before the
         // call. The call spells the callee's name, so this assigns an object
         // the plan has elided and no statement can name.
@@ -996,7 +996,7 @@ pub(super) fn certified_elided_read_instructions(
                 .values()
                 .flat_map(|certificate| certificate.insts.iter().copied()),
         )
-        .chain(certificates.stack_geometry.insts.iter().copied())
+        .chain(certificates.stack_geometry.insts.iter())
         .chain(certified_return_control_insts(source))
         .chain(certified_call_return_address_insts(source))
         .chain(certified_direct_call_target_insts(source))
@@ -1022,7 +1022,9 @@ pub(super) fn certified_elided_read_instructions(
         .collect()
 }
 
-pub(super) fn certified_stack_geometry_values(source: &r2ssa::SsaArtifact) -> &BTreeSet<ValueId> {
+pub(super) fn certified_stack_geometry_values(
+    source: &r2ssa::SsaArtifact,
+) -> &r2ssa::dense::IdSet<ValueId> {
     &source.certificates().stack_geometry.values
 }
 

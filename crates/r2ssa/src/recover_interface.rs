@@ -336,13 +336,13 @@ fn recovered_stack_parameters(
         .machine_return_controls
         .values()
         .flat_map(|certificate| certificate.insts.iter().copied())
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
     let mut observed: BTreeMap<u64, Option<u32>> = BTreeMap::new();
     for access in facts.structured.memory_accesses.values() {
         if access.is_write
             || !access.provenance_complete
             || access.space != SpaceId::Ram
-            || control.contains(&access.id.inst)
+            || control.contains(access.id.inst)
         {
             continue;
         }
@@ -744,7 +744,7 @@ fn returns_the_callers_value(
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
 ) -> bool {
-    let mut seen = BTreeSet::new();
+    let mut seen = crate::dense::IdSet::default();
     let mut pending = live_out.iter().collect::<Vec<_>>();
     while let Some(value) = pending.pop() {
         if !seen.insert(value) {

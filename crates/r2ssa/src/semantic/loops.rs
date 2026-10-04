@@ -303,7 +303,7 @@ pub(crate) fn loop_carrier_facts(
                     .is_some_and(|block| block.addr != header)
         })
         .map(|inst| inst.id)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdWorklist<_>>();
     while let Some(phi_inst) = pending.pop_first() {
         let Some(inst) = graph.inst(phi_inst) else {
             continue;

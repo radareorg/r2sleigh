@@ -161,7 +161,7 @@ fn escaped_objects(
                 || facts.indexed_stack_address_root_of(value.id).is_some()
         })
     };
-    let mut tainted = BTreeSet::new();
+    let mut tainted = crate::dense::IdSet::default();
     let mut pending = Vec::new();
     for value in graph.values.iter().map(|value| value.id) {
         if frame_address(value) && tainted.insert(value) {
@@ -292,7 +292,7 @@ fn call_reaches(
             let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
-            let sp = match states.get(&call) {
+            let sp = match states.get(call) {
                 Some(ReachingStorageState::Value(value)) => graph
                     .value(*value)
                     .and_then(|value| entry_offset(facts, value.id)),

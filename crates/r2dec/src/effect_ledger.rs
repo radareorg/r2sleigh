@@ -186,8 +186,7 @@ fn certified_instruction_elision(
     }) {
         return Some(ElisionReason::DirectCallTarget);
     }
-    if source_inst.is_some_and(|inst| prepared.certificates().stack_geometry.insts.contains(&inst))
-    {
+    if source_inst.is_some_and(|inst| prepared.certificates().stack_geometry.insts.contains(inst)) {
         return Some(ElisionReason::DeadStackBase);
     }
     None

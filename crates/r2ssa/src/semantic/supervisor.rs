@@ -49,7 +49,7 @@ impl crate::SsaArtifact {
             .into_iter()
             .filter_map(|site| {
                 let address = graph.instruction_for_inst(site)?;
-                let number = match reaching.get(&site) {
+                let number = match reaching.get(site) {
                     Some(ReachingStorageState::Value(value)) => self.proven_constant(*value),
                     _ => None,
                 };

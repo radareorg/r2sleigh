@@ -1012,14 +1012,14 @@ impl SemanticObligationInventory {
         &self,
         graph: &SsaGraph,
         unobserved_uses: &BTreeSet<crate::UseSite>,
-    ) -> Option<BTreeSet<ValueId>> {
+    ) -> Option<crate::dense::IdSet<ValueId>> {
         if !self.is_complete()
             || self.source_instruction_count != graph.insts.len()
             || self.by_inst.iter().flatten().count() != graph.insts.len()
         {
             return None;
         }
-        let mut values = BTreeSet::new();
+        let mut values = crate::dense::IdSet::default();
         for instruction in self.dispositions() {
             if instruction.state != SemanticInstructionState::StructuralControlOnly
                 || !instruction.obligations.is_empty()
@@ -1420,7 +1420,7 @@ fn block_can_reenter(graph: &SsaGraph, start: crate::graph::BlockId) -> bool {
         return false;
     };
     let mut ready = VecDeque::from_iter(block.successors.iter().copied());
-    let mut visited = BTreeSet::new();
+    let mut visited = crate::dense::IdSet::default();
     while let Some(block_id) = ready.pop_front() {
         if block_id == start {
             return true;
@@ -1696,7 +1696,7 @@ fn seed_value_definition(
 
 fn propagate_live_dependencies(graph: &SsaGraph, required: &mut ObligationSeeds) {
     let mut ready = required.keys().collect::<VecDeque<_>>();
-    let mut visited = BTreeSet::new();
+    let mut visited = crate::dense::IdSet::default();
     while let Some(inst_id) = ready.pop_front() {
         if !visited.insert(inst_id) {
             continue;
@@ -2283,7 +2283,7 @@ mod tests {
             .iter()
             .filter(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. })))
             .filter_map(|inst| inst.output)
-            .collect::<BTreeSet<_>>();
+            .collect::<crate::dense::IdSet<_>>();
         assert!(!call_defines.is_empty());
         assert_eq!(unused_values, call_defines);
 
@@ -2335,7 +2335,7 @@ mod tests {
                 .map(|inst| &inst.payload),
             Some(InstPayload::Op(SSAOp::CallDefine { .. }))
         ));
-        assert!(!used_values.contains(&observed_call_result));
+        assert!(!used_values.contains(observed_call_result));
     }
 
     #[test]

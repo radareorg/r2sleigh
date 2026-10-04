@@ -1464,7 +1464,7 @@ pub(crate) fn reaching_storage_states_before(
     function: &SSAFunction,
     graph: &SsaGraph,
     storage: CanonicalStorageId,
-) -> BTreeMap<InstId, ReachingStorageState> {
+) -> crate::dense::IdMap<InstId, ReachingStorageState> {
     let block_addrs = function.block_addrs().to_vec();
     let mut exits = block_addrs
         .iter()
@@ -1488,7 +1488,7 @@ pub(crate) fn reaching_storage_states_before(
         pending.extend(function.successors(block_addr));
     }
 
-    let mut before = BTreeMap::new();
+    let mut before = crate::dense::IdMap::new(graph.insts.len());
     for block_addr in block_addrs {
         let mut state = block_entry_storage_state(function, graph, &exits, block_addr, storage);
         let Some(block) = function.get_block(block_addr) else {
@@ -1536,7 +1536,7 @@ pub(crate) fn callee_write_spans(
         .map(r2source::SourceConventionSlots::argument_slots)
         .unwrap_or_default();
     let mut reaching =
-        BTreeMap::<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>::new();
+        BTreeMap::<CanonicalStorageId, crate::dense::IdMap<InstId, ReachingStorageState>>::new();
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
     for block in function.blocks() {
@@ -1574,7 +1574,7 @@ pub(crate) fn callee_write_spans(
                 let states = reaching
                     .entry(storage)
                     .or_insert_with(|| reaching_storage_states_before(function, graph, storage));
-                match states.get(&call)? {
+                match states.get(call)? {
                     ReachingStorageState::Value(value) => Some(*value),
                     _ => None,
                 }

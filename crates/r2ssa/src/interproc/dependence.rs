@@ -71,7 +71,7 @@ pub(crate) struct FormalDependence {
     unseen: u64,
     /// What each argument register holds before each instruction, for the
     /// calls no callee states the arity of: only computed where one exists.
-    carriers: BTreeMap<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>,
+    carriers: BTreeMap<CanonicalStorageId, crate::dense::IdMap<InstId, ReachingStorageState>>,
     /// What the frame carries from the stores into it to the loads out of it.
     frame: FrameTraffic,
     /// The formals stored at an exposed frame place, as of the last pass.
@@ -178,7 +178,7 @@ impl FormalDependence {
         self.carriers
             .iter()
             .filter(|(storage, _)| !named.contains(storage))
-            .map(|(storage, states)| match states.get(&boundary.at) {
+            .map(|(storage, states)| match states.get(boundary.at) {
                 Some(ReachingStorageState::Value(value)) => self.handed(prepared, *value),
                 Some(ReachingStorageState::PreservedEntry) => self.entry_bits(prepared, *storage),
                 Some(ReachingStorageState::Unknown | ReachingStorageState::Conflict) | None => {

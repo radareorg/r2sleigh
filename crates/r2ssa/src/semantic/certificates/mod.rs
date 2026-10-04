@@ -1050,7 +1050,8 @@ pub(crate) fn collect_prepared_function_certificates(
     let stack_pointer = machine_context
         .filter(|context| context.call_moves_stack_pointer())
         .and_then(SourceMachineContext::stack_pointer_carrier);
-    let mut constant_stack_stores: BTreeMap<crate::BlockId, Vec<(usize, InstId)>> = BTreeMap::new();
+    let mut constant_stack_stores =
+        crate::dense::IdMap::<crate::BlockId, Vec<(usize, InstId)>>::default();
     if let Some(stack_pointer) = stack_pointer {
         for inst in &graph.insts {
             let InstPayload::Op(SSAOp::Store { val, .. }) = &inst.payload else {
@@ -1064,8 +1065,7 @@ pub(crate) fn collect_prepared_function_certificates(
             });
             if graph.var(*val).constant_bits().is_some() && through_stack_pointer {
                 constant_stack_stores
-                    .entry(inst.block)
-                    .or_default()
+                    .get_or_insert_with(inst.block, Default::default)
                     .push((inst.ordinal, inst.id));
             }
         }
@@ -1073,7 +1073,7 @@ pub(crate) fn collect_prepared_function_certificates(
     let return_address_store_before = |call: InstId| {
         let call = graph.inst(call)?;
         constant_stack_stores
-            .get(&call.block)?
+            .get(call.block)?
             .iter()
             .filter(|(ordinal, _)| *ordinal < call.ordinal)
             .max_by_key(|(ordinal, _)| *ordinal)

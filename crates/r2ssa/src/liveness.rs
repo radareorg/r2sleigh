@@ -373,7 +373,13 @@ struct BlockScratch {
 
 impl ValueLiveness {
     pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut, content: ValueContent) -> Self {
-        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), content, &BTreeSet::new())
+        Self::compute_with_relocations(
+            graph,
+            live_out,
+            &crate::dense::IdMap::default(),
+            content,
+            &BTreeSet::new(),
+        )
     }
 
     /// Which values hold one content, as this liveness judges it.
@@ -392,13 +398,13 @@ impl ValueLiveness {
     pub fn compute_with_relocations(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
-        relocations: &BTreeMap<InstId, InstId>,
+        relocations: &crate::dense::IdMap<InstId, InstId>,
         content: ValueContent,
         ignored_reads: &BTreeSet<UseSite>,
     ) -> Self {
         let relocate = |mut inst: InstId| {
             let mut steps = 0;
-            while let Some(next) = relocations.get(&inst) {
+            while let Some(next) = relocations.get(inst) {
                 inst = *next;
                 steps += 1;
                 if steps > relocations.len() {

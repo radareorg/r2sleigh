@@ -486,7 +486,7 @@ fn an_unused_restored_stack_pointer_renders() {
     assert!(
         restore_outputs
             .iter()
-            .all(|value| structural_unused.contains(value)),
+            .all(|value| structural_unused.contains(*value)),
         "the regression requires an unused restore output"
     );
 

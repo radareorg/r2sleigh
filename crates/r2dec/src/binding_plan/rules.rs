@@ -432,8 +432,8 @@ pub(super) fn component_eligible_with(
                 && !direct_control_targets.contains(&value.id)
                 && !direct_call_targets.contains(&value.id)
                 && !stack_frame_values.contains(&value.id)
-                && !stack_geometry_values.contains(&value.id)
-                && !structural_unused.contains(&value.id)
+                && !stack_geometry_values.contains(value.id)
+                && !structural_unused.contains(value.id)
                 && !unread.contains(&value.id)
         })
         .collect())
@@ -750,7 +750,7 @@ pub(super) fn frame_objects_with_escaped_address(
         };
         let escapes = boundary_readers.any(value.id)
             || graph.use_sites(value.id).iter().any(|site| {
-                !geometry.contains(&site.inst)
+                !geometry.contains(site.inst)
                     && !matches!(
                         projection.use_disposition(*site),
                         Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
@@ -1200,7 +1200,7 @@ pub(super) fn rewrite_inlining_partition(
         let relocations = inlined
             .iter()
             .filter_map(|value| Some((graph.def_inst(*value)?, *readers.get(value)?)))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<r2ssa::dense::IdMap<_, _>>();
         let liveness = source.liveness().with_relocations(graph, &relocations);
         let round_eligible = eligible
             .iter()
@@ -2535,10 +2535,10 @@ pub(crate) fn certificate_elided_cells(
     }
     for inst in &certificates.stack_geometry.insts {
         let definition = graph
-            .inst(*inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(*inst))?;
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
         if definition.output.is_some() {
-            insert_elided_write(&mut writes, *inst, ElisionReason::DeadStackBase)?;
+            insert_elided_write(&mut writes, inst, ElisionReason::DeadStackBase)?;
         }
     }
     // The SSA liveness owner publishes the complete pure domain outside the
