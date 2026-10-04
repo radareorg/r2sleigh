@@ -126,7 +126,7 @@ fn a_switch_on_a_field_selects_the_loaded_value_not_the_pointer() {
     let function = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("raw SSA should build");
     let selector = test_switch_selector(&function, 0x1000);
     let read_state = function
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("the fixture block")
         .ops()
         .iter()
@@ -479,7 +479,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .expect("prepared SSA should build");
     let alias_var = prepared
         .function()
-        .get_block(0x1780)
+        .named_block(0x1780)
         .and_then(|block| {
             block.ops().iter().find_map(|op| match op {
                 SSAOp::Copy { dst, .. } if dst.name() == "tmp:1798" => Some(dst.clone()),
@@ -498,10 +498,10 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
     );
     let truncated_var = prepared
         .function()
-        .get_block(0x1780)
+        .named_block(0x1780)
         .and_then(|block| {
             block.ops().iter().find_map(|op| match op {
-                SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst),
+                SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst.clone()),
                 _ => None,
             })
         })
@@ -509,7 +509,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
     assert!(
         prepared
             .graph()
-            .value_id_for_var(truncated_var)
+            .value_id_for_var(&truncated_var)
             .and_then(|value| prepared.call_result_certificate_for_value(value))
             .is_none()
     );

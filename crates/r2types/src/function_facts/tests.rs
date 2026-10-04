@@ -18,7 +18,7 @@ fn inst_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ss
 fn op_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ssa::OpId {
     prepared
         .function()
-        .get_block(block_addr)
+        .named_block(block_addr)
         .and_then(|block| block.op_id(index))
         .expect("the fixture's operation")
 }
@@ -1396,7 +1396,7 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
 
     let store_value = prepared
         .function()
-        .get_block(0x401000)
+        .named_block(0x401000)
         .expect("entry block")
         .ops()
         .iter()
@@ -2262,8 +2262,14 @@ fn prepared_render_facts_certify_branch_guarded_phi() {
     .expect("prepared");
     let phi = prepared
         .function()
-        .get_block(0x40100c)
-        .and_then(|block| block.phis().iter().find(|phi| phi.dst.name() == "rdi"))
+        .named_block(0x40100c)
+        .and_then(|block| {
+            block
+                .phis()
+                .iter()
+                .find(|phi| phi.dst.name() == "rdi")
+                .cloned()
+        })
         .and_then(|phi| prepared.graph().value_id_for_var(&phi.dst))
         .expect("return phi");
     let render = FunctionRenderFacts::from_prepared(&prepared);
@@ -2562,7 +2568,7 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
     let prepared = x86_stack_home_prepared(&[block]);
     let load_index = prepared
         .function()
-        .get_block(0x401000)
+        .named_block(0x401000)
         .expect("block")
         .ops()
         .iter()

@@ -1,5 +1,10 @@
 # Debugger build plan
 
+Superseded on 2026-10-04 by `doc/debugger.md`, whose section 16 lists what
+was kept from this plan. The ownership below (radare2's `libr/debug`, the
+plugin, `OwnedFunctionSnapshot`, a supervised service and SDK) is the plugin
+era's and no longer applies.
+
 Proposed design, 2026-09-13. This document specifies future implementation;
 it does not claim that the debugger described here already exists.
 

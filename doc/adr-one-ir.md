@@ -178,3 +178,29 @@ byte-identical, and deletes what it replaces:
     every reader sees whole defines the register (the `RDX` merge in
     `fnv1a32`); r2dec's relocated liveness folded into the one model; #47
     and #50.
+- **F2.3, in stages**:
+  - Stage 1 (`94bc999f`): `SSAOp<V = SSAVar>` with one `map` over operands
+    in field order, replacing the hand-written source mapper.
+  - Stage 2 (`39f44fec`): the graph's payload is `SSAOp<ValueId>`. Graph
+    readers resolve a name only to print it.
+  - Stage 3a (`3aaaca78`): `SSABlock<V>` and `PhiNode<V>` are generic, as an
+    operation is.
+  - Stage 3b: the function's blocks hold `SSAOp<VarId>` over one
+    `ValueTable` that construction and renaming fill. `VarId` is the
+    function's own id, not the graph's `ValueId`: a function is edited
+    before it is sealed and mints values as it goes, while the graph numbers
+    the sealed function's values in first-seen order so that every
+    `ValueId` the census prints is unchanged. The two are distinct types,
+    so mixing them does not compile, and the graph maps one to the other
+    through a dense vector, O(1) per lookup. Forwarding and the boundary
+    rewrites run on ids with `IdMap`/`IdSet`. Fixtures still write programs
+    by name through `NamedBlockMut`, which interns as it writes. Passes edit
+    ids through `BlockMut` directly.
+  - Transitional, and stage 4 and 5 work rather than a resting state:
+    `SSAFunction::named`, `named_block`, `named_blocks`, `named_ops` and
+    `SsaGraph::named_op` clone a block or an operation with its operands
+    spelled as variables, for readers still keyed by name. At stage 3b
+    there were 126 such reads in r2ssa's library code, 23 in r2dec and 4
+    in r2types. Each one is a reader whose facts are keyed by `SSAVar`. It
+    is deleted when its maps are re-keyed by id in stage 4, for the
+    optimiser and the demand pass, or in stage 5, for the certificates.

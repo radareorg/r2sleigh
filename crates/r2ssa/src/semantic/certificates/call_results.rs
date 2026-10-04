@@ -62,13 +62,13 @@ pub(crate) fn collect_call_result_certificates(
         height,
         CallResultFlowState::default(),
         |block_addr, input| {
-            let Some(block) = function.get_block(block_addr) else {
+            let Some(block) = function.named_block(block_addr) else {
                 return input.clone();
             };
             process_call_result_flow_block(
                 body,
                 derived,
-                block,
+                &block,
                 &callsites_by_inst,
                 input.clone(),
                 CallResultSink {
@@ -89,7 +89,7 @@ pub(crate) fn collect_call_result_certificates(
     // Then the certificates, once, from each block's settled entry state.
     for &block_addr in function.block_addrs() {
         let (Some(block), Some(input)) = (
-            function.get_block(block_addr),
+            function.named_block(block_addr),
             solved.entry.get(&block_addr),
         ) else {
             continue;
@@ -97,7 +97,7 @@ pub(crate) fn collect_call_result_certificates(
         process_call_result_flow_block(
             body,
             derived,
-            block,
+            &block,
             &callsites_by_inst,
             input.clone(),
             CallResultSink {

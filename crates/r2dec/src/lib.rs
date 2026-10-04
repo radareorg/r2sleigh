@@ -87,7 +87,7 @@ pub(crate) fn inst_at(
     block_addr: u64,
     index: usize,
 ) -> Option<r2ssa::InstId> {
-    let op = artifact.function().get_block(block_addr)?.op_id(index)?;
+    let op = artifact.function().named_block(block_addr)?.op_id(index)?;
     artifact.graph().inst_for_op(op)
 }
 
@@ -3258,7 +3258,7 @@ impl Decompiler {
             let graph = prepared.graph();
             let live = prepared.live_out();
             let dead = prepared.unobserved_merges();
-            let total: usize = func.blocks().iter().map(|b| b.phis().len()).sum();
+            let total: usize = func.named_blocks().iter().map(|b| b.phis().len()).sum();
             eprintln!(
                 "MERGES fn={:#x} phis={} unobserved={} live_out={} unresolved={}",
                 func.entry,
@@ -3271,7 +3271,7 @@ impl Decompiler {
             // gate is one question asked per phi, so printing its answer beside the
             // merge names the value that is lost rather than the layer that lost it.
             let render_facts = self.context.function_facts.render();
-            for block in func.blocks() {
+            for block in func.named_blocks() {
                 for phi in block.phis() {
                     let value = graph.value_id_for_var(&phi.dst);
                     let carrier = value.is_some_and(|value| {
@@ -3372,7 +3372,7 @@ impl Decompiler {
                 }
             } else {
                 (
-                    r2ssa::RewrittenFunction::new(func, func.blocks().to_vec()),
+                    r2ssa::RewrittenFunction::new(func, func.named_blocks()),
                     normalize::NormalizationOrigins::for_unchanged(func, prepared),
                 )
             };

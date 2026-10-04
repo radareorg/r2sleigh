@@ -695,7 +695,7 @@ mod tests {
         let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
         let dead = DeadPhis::find(&graph, &live, &facts);
 
-        let exit = func.get_block(0x100c).expect("exit block");
+        let exit = func.named_block(0x100c).expect("exit block");
         let zf = exit
             .phis()
             .iter()
@@ -733,7 +733,7 @@ mod tests {
         let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
         let dead = DeadPhis::find(&graph, &live, &facts);
 
-        let exit = func.get_block(0x100c).expect("exit block");
+        let exit = func.named_block(0x100c).expect("exit block");
         let rax = exit
             .phis()
             .iter()
@@ -924,7 +924,7 @@ mod tests {
 
         // The entry block's condition is tested by its own CBranch, so nothing
         // about merging flags elsewhere may reach back and call it unobserved.
-        let entry = func.get_block(0x1000).expect("entry block");
+        let entry = func.named_block(0x1000).expect("entry block");
         let tested = entry
             .ops()
             .iter()

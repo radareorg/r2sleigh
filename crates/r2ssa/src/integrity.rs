@@ -310,7 +310,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
         || block_domain.len() != ordered.len()
         || ordered
             .iter()
-            .any(|addr| function.get_block(*addr).is_none())
+            .any(|addr| function.named_block(*addr).is_none())
     {
         return Err(SsaIntegrityError::BlockOrderMismatch {
             ordered: ordered.to_vec(),
@@ -406,7 +406,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
 
     // Complete the definition table before checking uses: a legal SSA use can
     // precede its textual definition through a loop-carried phi edge.
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         let mut failure = None;
         block.for_each_def(|definition| {
             if failure.is_some() {
@@ -449,7 +449,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
     }
 
     let domtree = function.domtree();
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         // Query once per block so the full validator remains linear in CFG
         // edges even when a merge block carries several phi values.
         let expected_predecessors = topology
@@ -869,10 +869,12 @@ mod tests {
     fn rejects_a_nonzero_use_without_an_exact_definition() {
         let mut function = diamond();
         let mut merge = function.edit_block(0x100c).expect("merge block");
-        let SSAOp::IntAdd { a, .. } = &mut merge.ops_mut()[0] else {
-            panic!("expected merge use");
-        };
-        *a = SSAVar::new("reg:dead", 7, 8);
+        merge.edit_op(0, |op| {
+            let SSAOp::IntAdd { a, .. } = op else {
+                panic!("expected merge use");
+            };
+            *a = SSAVar::new("reg:dead", 7, 8);
+        });
 
         assert!(matches!(
             validate_ssa_function(&function),
@@ -892,13 +894,15 @@ mod tests {
     #[test]
     fn rejects_a_read_its_definition_does_not_dominate() {
         let mut function = diamond();
-        let left = function.get_block(0x1004).expect("left block");
+        let left = function.named_block(0x1004).expect("left block");
         let defined_in_left = left.ops()[0].dst().expect("copy destination").clone();
         let mut merge = function.edit_block(0x100c).expect("merge block");
-        let SSAOp::IntAdd { a, .. } = &mut merge.ops_mut()[0] else {
-            panic!("expected merge use");
-        };
-        *a = defined_in_left;
+        merge.edit_op(0, |op| {
+            let SSAOp::IntAdd { a, .. } = op else {
+                panic!("expected merge use");
+            };
+            *a = defined_in_left;
+        });
 
         assert!(matches!(
             validate_ssa_function(&function),
@@ -920,10 +924,12 @@ mod tests {
         let mut function = diamond();
         let mut left = function.edit_block(0x1004).expect("left block");
         let defined = left.ops()[0].dst().expect("copy destination").clone();
-        let SSAOp::Copy { src, .. } = &mut left.ops_mut()[0] else {
-            panic!("expected the copy");
-        };
-        *src = defined;
+        left.edit_op(0, |op| {
+            let SSAOp::Copy { src, .. } = op else {
+                panic!("expected the copy");
+            };
+            *src = defined;
+        });
 
         assert!(matches!(
             validate_ssa_function(&function),
@@ -956,10 +962,12 @@ mod tests {
         let mut zero = diamond();
         let mut block = zero.edit_block(0x1004).expect("left block");
         let dst = block.ops()[0].dst().expect("copy destination").clone();
-        let SSAOp::Copy { dst: written, .. } = &mut block.ops_mut()[0] else {
-            unreachable!();
-        };
-        *written = SSAVar::new(dst.name(), 0, dst.size);
+        block.edit_op(0, |op| {
+            let SSAOp::Copy { dst: written, .. } = op else {
+                unreachable!();
+            };
+            *written = SSAVar::new(dst.name(), 0, dst.size);
+        });
         assert!(matches!(
             validate_ssa_function(&zero),
             Err(SsaIntegrityError::DefinitionAtVersionZero { .. })
@@ -972,9 +980,9 @@ mod tests {
         predecessor
             .edit_block(0x100c)
             .expect("merge block")
-            .phis_mut()[0]
-            .sources
-            .pop();
+            .edit_phi(0, |phi| {
+                phi.sources.pop();
+            });
         assert!(matches!(
             validate_ssa_function(&predecessor),
             Err(SsaIntegrityError::PhiPredecessorMismatch { .. })
@@ -982,9 +990,10 @@ mod tests {
 
         let mut width = diamond();
         let mut merge_block = width.edit_block(0x100c).expect("merge block");
-        let phi = &mut merge_block.phis_mut()[0];
-        let old = phi.sources[0].1.clone();
-        phi.sources[0].1 = SSAVar::new(old.name(), old.version, 4);
+        merge_block.edit_phi(0, |phi| {
+            let old = phi.sources[0].1.clone();
+            phi.sources[0].1 = SSAVar::new(old.name(), old.version, 4);
+        });
         assert!(matches!(
             validate_ssa_function(&width),
             Err(SsaIntegrityError::PhiWidthMismatch { .. })
@@ -992,10 +1001,11 @@ mod tests {
 
         let mut storage = diamond();
         let mut merge_block = storage.edit_block(0x100c).expect("merge block");
-        let phi = &mut merge_block.phis_mut()[0];
-        let mut declared = phi.canonical_storage.expect("lifted phi storage");
-        declared.offset += 1;
-        phi.canonical_storage = Some(declared);
+        merge_block.edit_phi(0, |phi| {
+            let mut declared = phi.canonical_storage.expect("lifted phi storage");
+            declared.offset += 1;
+            phi.canonical_storage = Some(declared);
+        });
         assert!(matches!(
             validate_ssa_function(&storage),
             Err(SsaIntegrityError::PhiStorageMismatch { .. })
@@ -1007,10 +1017,12 @@ mod tests {
         let mut scalar = diamond();
         let mut merge = scalar.edit_block(0x100c).expect("merge block");
         let dst = merge.ops()[0].dst().expect("merge destination").clone();
-        merge.ops_mut()[0] = SSAOp::Copy {
-            dst,
-            src: SSAVar::constant(3, 4),
-        };
+        merge.edit_op(0, |op| {
+            *op = SSAOp::Copy {
+                dst,
+                src: SSAVar::constant(3, 4),
+            };
+        });
         assert!(matches!(
             validate_ssa_function(&scalar),
             Err(SsaIntegrityError::ScalarWidthMismatch {
@@ -1021,10 +1033,12 @@ mod tests {
 
         let mut zero = diamond();
         let mut merge = zero.edit_block(0x100c).expect("merge block");
-        let SSAOp::IntAdd { b, .. } = &mut merge.ops_mut()[0] else {
-            unreachable!();
-        };
-        *b = SSAVar::constant(3, 0);
+        merge.edit_op(0, |op| {
+            let SSAOp::IntAdd { b, .. } = op else {
+                unreachable!();
+            };
+            *b = SSAVar::constant(3, 0);
+        });
         assert!(matches!(
             validate_ssa_function(&zero),
             Err(SsaIntegrityError::ZeroWidthValue {
@@ -1040,31 +1054,38 @@ mod tests {
     #[test]
     fn accepts_constant_and_cross_name_phi_sources_with_exact_provenance() {
         let mut function = diamond();
-        let source = function.get_block(0x1004).expect("left block").ops()[0]
+        let source = function.named_block(0x1004).expect("left block").ops()[0]
             .dst()
             .expect("left definition")
             .clone();
         let alias = SSAVar::new("tmp:regalias:phi", source.version, source.size);
-        function.edit_block(0x1004).expect("left block").ops_mut()[0] = SSAOp::Subpiece {
-            dst: alias.clone(),
-            src: SSAVar::initial("tmp:regalias:wide", 16),
-            offset: 0,
-        };
+        function
+            .edit_block(0x1004)
+            .expect("left block")
+            .edit_op(0, |op| {
+                *op = SSAOp::Subpiece {
+                    dst: alias.clone(),
+                    src: SSAVar::initial("tmp:regalias:wide", 16),
+                    offset: 0,
+                };
+            });
 
         let mut merge_block = function.edit_block(0x100c).expect("merge block");
-        let phi = &mut merge_block.phis_mut()[0];
-        let left_source = phi
-            .sources
-            .iter_mut()
-            .find(|(predecessor, _)| *predecessor == 0x1004)
-            .expect("left phi source");
-        left_source.1 = alias;
-        let right_source = phi
-            .sources
-            .iter_mut()
-            .find(|(predecessor, _)| *predecessor == 0x1008)
-            .expect("right phi source");
-        right_source.1 = SSAVar::constant(2, phi.dst.size);
+        merge_block.edit_phi(0, |phi| {
+            let size = phi.dst.size;
+            let left_source = phi
+                .sources
+                .iter_mut()
+                .find(|(predecessor, _)| *predecessor == 0x1004)
+                .expect("left phi source");
+            left_source.1 = alias;
+            let right_source = phi
+                .sources
+                .iter_mut()
+                .find(|(predecessor, _)| *predecessor == 0x1008)
+                .expect("right phi source");
+            right_source.1 = SSAVar::constant(2, size);
+        });
 
         validate_ssa_function(&function)
             .expect("phi inputs need exact definitions and widths, not matching names");
@@ -1073,9 +1094,10 @@ mod tests {
     #[test]
     fn predecessor_order_is_part_of_the_phi_contract() {
         let mut function = diamond();
-        function.edit_block(0x100c).expect("merge block").phis_mut()[0]
-            .sources
-            .swap(0, 1);
+        function
+            .edit_block(0x100c)
+            .expect("merge block")
+            .edit_phi(0, |phi| phi.sources.swap(0, 1));
 
         assert!(matches!(
             validate_ssa_function(&function),
@@ -1087,12 +1109,13 @@ mod tests {
     fn public_phi_shape_remains_accepted_without_storage_provenance() {
         let mut function = diamond();
         let mut merge_block = function.edit_block(0x100c).expect("merge block");
-        let phi = &mut merge_block.phis_mut()[0];
-        *phi = PhiNode {
-            dst: phi.dst.clone(),
-            sources: phi.sources.clone(),
-            canonical_storage: None,
-        };
+        merge_block.edit_phi(0, |phi| {
+            *phi = PhiNode {
+                dst: phi.dst.clone(),
+                sources: phi.sources.clone(),
+                canonical_storage: None,
+            };
+        });
 
         validate_ssa_function(&function).expect("absent provenance is not fabricated");
     }

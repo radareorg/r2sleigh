@@ -13,7 +13,7 @@ pub(crate) fn collect_call_sites(
     let mut next_id = 0u32;
 
     for &block_addr in function.block_addrs() {
-        let Some(block) = function.get_block(block_addr) else {
+        let Some(block) = function.named_block(block_addr) else {
             continue;
         };
         let fallthrough = match function

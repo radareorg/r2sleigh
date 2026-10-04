@@ -58,7 +58,7 @@ impl FunctionLiveOut {
         return_storages: &[CanonicalStorageId],
     ) -> Self {
         let mut live = Self::default();
-        for block in func.blocks() {
+        for block in func.named_blocks() {
             // A predicated return (`bxeq lr`) ends its block in a return the terminator does not name.
             let returns = func
                 .cfg()
@@ -120,7 +120,7 @@ impl FunctionLiveOut {
             if !seen.insert(addr) {
                 continue;
             }
-            let Some(block) = func.get_block(addr) else {
+            let Some(block) = func.named_block(addr) else {
                 continue;
             };
             let mut defined_here = false;
@@ -458,7 +458,7 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&x86_64_arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let returned = func.blocks().iter().next().expect("one block").ops()[1]
+        let returned = func.named_blocks().iter().next().expect("one block").ops()[1]
             .dst()
             .and_then(|value| graph.value_id_for_var(value))
             .expect("last return-register definition");
@@ -766,7 +766,7 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &[storage(0, 8)]);
         let merge = func
-            .get_block(0x100c)
+            .named_block(0x100c)
             .expect("merge block")
             .phis()
             .iter()
@@ -780,7 +780,7 @@ mod tests {
         );
         for arm in [0x1004, 0x1008] {
             let defined = func
-                .get_block(arm)
+                .named_block(arm)
                 .expect("arm block")
                 .ops()
                 .iter()
@@ -803,7 +803,7 @@ mod tests {
             let graph = SsaGraph::from_function(&func);
             let live = FunctionLiveOut::compute(&func, &graph, &[storage(0, 8)]);
             let roots = func
-                .get_block(0x1000)
+                .named_block(0x1000)
                 .expect("return block")
                 .ops()
                 .iter()

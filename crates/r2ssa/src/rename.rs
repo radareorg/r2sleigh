@@ -2204,7 +2204,11 @@ mod tests {
 
         let function = crate::function::SSAFunction::from_blocks_raw(&blocks, Some(&arch))
             .expect("raw SSA with colliding register spellings");
-        let ops = function.get_block(0x2000).expect("entry block").ops();
+        let ops = function
+            .named_block(0x2000)
+            .expect("entry block")
+            .ops()
+            .to_vec();
         let (
             SSAOp::Copy {
                 src: first_live_in, ..

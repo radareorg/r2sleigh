@@ -1400,7 +1400,7 @@ fn materialize_phis_where_with_control<'f>(
 ) -> Result<(r2ssa::RewrittenFunction<'f>, NormalizationOrigins), NormalizationFailure> {
     control.poll()?;
     // Only the operations change, so only the operations are copied.
-    let mut normalized = r2ssa::RewrittenFunction::new(func, func.blocks().to_vec());
+    let mut normalized = r2ssa::RewrittenFunction::new(func, func.named_blocks());
     crate::stage_timing::mark("normalize_operations");
     let mut origins = NormalizationOrigins::from_source(func, graph, authority);
     crate::stage_timing::mark("normalize_origins");
@@ -1412,7 +1412,7 @@ fn materialize_phis_where_with_control<'f>(
     // counting its sources live there refused the plain back-edge copy of a
     // loop whose dead temporaries merge the carrier.
     let materialized = func
-        .blocks()
+        .named_blocks()
         .iter()
         .flat_map(|block| block.phis().iter())
         .filter(|phi| eligible(phi))
@@ -1423,7 +1423,7 @@ fn materialize_phis_where_with_control<'f>(
     let mut copies_by_pred = BTreeMap::<u64, Vec<PhiMove>>::new();
     let mut materialized_by_block = BTreeMap::<u64, BTreeSet<r2ssa::SSAVar>>::new();
 
-    for block in func.blocks() {
+    for block in func.named_blocks() {
         control.poll()?;
         let mut moves_by_pred = HashMap::<u64, Vec<PhiMove>>::new();
         let mut complete = true;
@@ -1676,7 +1676,7 @@ fn guarded_loop_backedge_phi_op(
     if successors.len() != 2 || !successors.contains(&target) || !func.dominates(target, pred) {
         return None;
     }
-    let source_block = func.get_block(pred)?;
+    let source_block = func.named_block(pred)?;
     let terminator_idx = source_block.ops().len().checked_sub(1)?;
     let cond = match source_block.ops().get(terminator_idx)? {
         SSAOp::CBranch { cond, .. } if cond != dst => cond.clone(),
@@ -1804,7 +1804,7 @@ impl PhiEdgeLiveness {
         // The universe is what a placed merge names: its destination, and the
         // values its edges carry. Nothing else is ever asked about.
         let mut numbering = HashMap::<r2ssa::SSAVar, u32>::new();
-        for block in func.blocks() {
+        for block in func.named_blocks() {
             control.poll()?;
             for phi in block
                 .phis()
@@ -1827,7 +1827,7 @@ impl PhiEdgeLiveness {
         let mut phi_defs = HashMap::<u64, VarSet>::new();
         let mut edge_phi_uses = HashMap::<(u64, u64), VarSet>::new();
 
-        for block in func.blocks() {
+        for block in func.named_blocks() {
             control.poll()?;
             let mut defs = VarSet::with_capacity(bits);
             let mut uses = VarSet::with_capacity(bits);
@@ -1963,10 +1963,12 @@ fn can_materialize_on_branch_edge(
     let successors = func.successors(pred);
     successors.len() > 1
         && successors.contains(&target)
-        && !func
-            .get_block(pred)
-            .and_then(|block| block.ops().last())
-            .is_some_and(|op| op.sources().contains(&dst))
+        && !func.named_block(pred).is_some_and(|block| {
+            block
+                .ops()
+                .last()
+                .is_some_and(|op| op.sources().contains(&dst))
+        })
         && successors
             .into_iter()
             .filter(|successor| *successor != target)
@@ -2327,7 +2329,7 @@ mod tests {
         });
 
         let func = SSAFunction::from_blocks_raw_no_arch(&[b0, b1, b2, b3]).expect("ssa function");
-        let with_phis = func.blocks().iter().any(|b| !b.phis().is_empty());
+        let with_phis = func.named_blocks().iter().any(|b| !b.phis().is_empty());
         assert!(with_phis, "fixture should include phi nodes");
 
         let (normalized, origins, graph) = materialize_all_phis_with_origins(&func);
@@ -2488,7 +2490,7 @@ mod tests {
         });
         let func = SSAFunction::from_blocks_raw(&[entry, header, latch, exit], Some(&arch))
             .expect("source-derived register family SSA");
-        let header = func.get_block(0x1004).expect("header");
+        let header = func.named_block(0x1004).expect("header");
         let [phi] = header.phis() else {
             panic!("one merge of the root, got {:?}", header.phis());
         };
@@ -2776,7 +2778,7 @@ mod tests {
         assert_eq!(guarded.guard.input_idx, 1, "CBranch condition use");
         assert_eq!(guarded.preserve.input_idx, 2, "false arm preserves carrier");
         let original_terminator = func
-            .get_block(0x1008)
+            .named_block(0x1008)
             .and_then(|block| block.op_id(2))
             .and_then(|op| graph.inst_for_op(op))
             .expect("source branch InstId");
@@ -3251,13 +3253,25 @@ mod tests {
         );
         let post_loop_phi = prepared
             .function()
-            .get_block(0x3010)
-            .and_then(|block| block.phis().iter().find(|phi| phi.dst.name() == "RDI"))
+            .named_block(0x3010)
+            .and_then(|block| {
+                block
+                    .phis()
+                    .iter()
+                    .find(|phi| phi.dst.name() == "RDI")
+                    .cloned()
+            })
             .expect("exit merges the skipped-loop and loop-carried pointers");
         let loop_phi = prepared
             .function()
-            .get_block(0x3008)
-            .and_then(|block| block.phis().iter().find(|phi| phi.dst.name() == "RDI"))
+            .named_block(0x3008)
+            .and_then(|block| {
+                block
+                    .phis()
+                    .iter()
+                    .find(|phi| phi.dst.name() == "RDI")
+                    .cloned()
+            })
             .expect("loop header owns the pointer carrier");
         let post_loop_value = prepared
             .graph()

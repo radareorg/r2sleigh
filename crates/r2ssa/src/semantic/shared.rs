@@ -617,7 +617,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
         op_index: call_op_index,
         calls_move_stack_pointer,
     } = at;
-    let block = function.get_block(block_addr)?;
+    let block = function.named_block(block_addr)?;
     let recorded = block
         .ops()
         .get(call_op_index.checked_add(1)?..)?
@@ -681,7 +681,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
             block.addr,
             {
                 let defs = function
-                    .blocks()
+                    .named_blocks()
                     .iter()
                     .flat_map(|block| {
                         block
@@ -803,7 +803,7 @@ pub(crate) fn preserved_call_carriers(
         return BTreeSet::new();
     }
     let mut saw_return = false;
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         if !function.successors(block.addr).is_empty() {
             continue;
         }
@@ -982,7 +982,7 @@ pub(crate) fn reaching_abi_value_at_end(
     visited: &BTreeMap<u64, usize>,
     memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
-    let boundary = search.function.get_block(block_addr)?.ops().len();
+    let boundary = search.function.named_block(block_addr)?.ops().len();
     if visited.contains_key(&block_addr) {
         return reaching_abi_value_before(search, block_addr, boundary, visited, memo);
     }
@@ -1008,7 +1008,7 @@ pub(crate) fn reaching_abi_value_before(
         storage,
         policy,
     } = search;
-    let block = function.get_block(block_addr)?;
+    let block = function.named_block(block_addr)?;
     // A block already on this path was scanned up to the boundary it was
     // entered at; a back edge asks about the rest of it. What that rest
     // defines reaches the boundary round the loop, and what it does not
@@ -1311,7 +1311,7 @@ pub(crate) fn observed_convention_call_result_after_call(
     call_op_index: usize,
     convention_storage: CanonicalStorageId,
 ) -> Option<CallBoundaryValueFact> {
-    let block = function.get_block(block_addr)?;
+    let block = function.named_block(block_addr)?;
     let candidates = block
         .ops()
         .get(call_op_index.checked_add(1)?..)?
@@ -1385,7 +1385,7 @@ pub(crate) fn storage_phi_value(
     block_addr: u64,
     storage: CanonicalStorageId,
 ) -> Result<Option<ValueId>, ()> {
-    let block = function.get_block(block_addr).ok_or(())?;
+    let block = function.named_block(block_addr).ok_or(())?;
     let values = block
         .phis()
         .iter()
@@ -1481,7 +1481,7 @@ pub(crate) fn reaching_storage_states_before(
     let mut pending = block_addrs.iter().copied().collect::<BTreeSet<_>>();
     while let Some(block_addr) = pending.pop_first() {
         let mut state = block_entry_storage_state(function, graph, &exits, block_addr, storage);
-        let Some(block) = function.get_block(block_addr) else {
+        let Some(block) = function.named_block(block_addr) else {
             exits.insert(block_addr, ReachingStorageState::Conflict);
             continue;
         };
@@ -1498,7 +1498,7 @@ pub(crate) fn reaching_storage_states_before(
     let mut before = BTreeMap::new();
     for block_addr in block_addrs {
         let mut state = block_entry_storage_state(function, graph, &exits, block_addr, storage);
-        let Some(block) = function.get_block(block_addr) else {
+        let Some(block) = function.named_block(block_addr) else {
             continue;
         };
         for (op, _) in block.sited() {
@@ -1546,7 +1546,7 @@ pub(crate) fn callee_write_spans(
         BTreeMap::<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>::new();
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for (op_id, op) in block.sited() {
             let (target, instruction) = match op {
                 SSAOp::Call {
@@ -1773,15 +1773,12 @@ impl FrameBoundaries {
             return boundaries;
         };
         let stack_pointer = machine_context.stack_pointer_carrier();
-        let saves = function
-            .blocks()
-            .iter()
-            .flat_map(|block| block.ops())
-            .filter_map(|op| {
-                structural_save(facts, graph, op, |storage| {
-                    Some(storage) != stack_pointer && effect.preserves(storage)
-                })
-            });
+        let named = function.named_ops();
+        let saves = named.iter().filter_map(|op| {
+            structural_save(facts, graph, op, |storage| {
+                Some(storage) != stack_pointer && effect.preserves(storage)
+            })
+        });
         for (root, width) in saves {
             boundaries
                 .slots
@@ -1936,7 +1933,7 @@ pub(crate) fn evidenced_stack_roots(
     let interior_position = |var: &SSAVar| {
         displaced_from(var).is_some_and(|parent| graph.canonical_storage_for_var(&parent).is_none())
     };
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             match op {
                 SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
@@ -1993,7 +1990,7 @@ pub(crate) fn evidenced_stack_roots(
             offset: slot.offset(),
         });
     }
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             let addr = match op {
                 SSAOp::Load { addr, space, .. }
@@ -2020,7 +2017,7 @@ pub(crate) fn evidenced_stack_roots(
     // and treating it as one splits a buffer a vectoriser touched at fixed
     // offsets into fragments nothing is proven to write.
     let mut spans = BTreeMap::<StackAddressRoot, i64>::new();
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for (at, op) in block.ops().iter().enumerate() {
             let (addr, width) = match op {
                 SSAOp::Load {

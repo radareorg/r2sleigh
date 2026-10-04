@@ -3997,7 +3997,7 @@ fn a_loop_header_merges_only_what_the_loop_carries() {
     let merged = header
         .phis()
         .iter()
-        .map(|phi| phi.dst.display_name())
+        .map(|phi| function.var(phi.dst).display_name())
         .collect::<Vec<_>>();
     assert_eq!(merged, ["RAX_2", "RDI_1"], "{}", function.dump());
 }

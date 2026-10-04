@@ -68,6 +68,21 @@ pub struct SSABlock<V = SSAVar> {
     phi_ids: Vec<OpId>,
 }
 
+impl<V> SSABlock<V> {
+    /// The same block over other operands, every operation and phi keeping
+    /// its id.
+    pub fn map_operands<W>(&self, f: &mut impl FnMut(&V) -> W) -> SSABlock<W> {
+        SSABlock {
+            addr: self.addr,
+            size: self.size,
+            ops: self.ops.iter().map(|op| op.map(f)).collect(),
+            ids: self.ids.clone(),
+            phis: self.phis.iter().map(|phi| phi.map(f)).collect(),
+            phi_ids: self.phi_ids.clone(),
+        }
+    }
+}
+
 impl<V> Default for SSABlock<V> {
     fn default() -> Self {
         Self {
@@ -354,43 +369,54 @@ impl<V> SSABlock<V> {
     }
 }
 
-impl SSABlock {
+impl<V> SSABlock<V> {
     /// Apply one block's share of an [`crate::function::EditPlan`] in a single
     /// walk of its operations, minting what it inserts in the order the
     /// insertions end up in the block.
-    pub(crate) fn apply(&mut self, arena: &mut OpArena, edits: crate::function::BlockEdits) {
+    ///
+    /// The plan names its operands; `convert` gives each operation it
+    /// inserts or substitutes over this block's operands.
+    pub(crate) fn apply(
+        &mut self,
+        arena: &mut OpArena,
+        edits: crate::function::BlockEdits,
+        convert: &mut impl FnMut(&SSAOp) -> SSAOp<V>,
+    ) {
         let crate::function::BlockEdits { start, mut at } = edits;
         let old_ops = std::mem::take(&mut self.ops);
         let old_ids = std::mem::take(&mut self.ids);
         let mut ops = Vec::with_capacity(old_ops.len());
         let mut ids = Vec::with_capacity(old_ids.len());
-        let place = |ops: &mut Vec<SSAOp>,
-                     ids: &mut Vec<OpId>,
-                     arena: &mut OpArena,
-                     runs: Vec<crate::function::Insertion>| {
+        fn place<V>(
+            ops: &mut Vec<SSAOp<V>>,
+            ids: &mut Vec<OpId>,
+            arena: &mut OpArena,
+            runs: Vec<crate::function::Insertion>,
+            convert: &mut impl FnMut(&SSAOp) -> SSAOp<V>,
+        ) {
             let flat = runs
                 .into_iter()
                 .flat_map(|(pass, run)| run.into_iter().map(move |(op, from)| (pass, op, from)));
             for (pass, op, from) in flat {
                 ids.push(arena.mint(OpOrigin::Derived { from, pass }));
-                ops.push(op);
+                ops.push(convert(&op));
             }
-        };
-        place(&mut ops, &mut ids, arena, start);
+        }
+        place(&mut ops, &mut ids, arena, start, convert);
         for (id, op) in old_ids.into_iter().zip(old_ops) {
             let Some(edit) = at.remove(&id) else {
                 ids.push(id);
                 ops.push(op);
                 continue;
             };
-            place(&mut ops, &mut ids, arena, edit.before);
+            place(&mut ops, &mut ids, arena, edit.before, convert);
             if let Some(pass) = edit.kill {
                 arena.kill(id, pass);
             } else {
                 ids.push(id);
-                ops.push(edit.replace.unwrap_or(op));
+                ops.push(edit.replace.map_or(op, |op| convert(&op)));
             }
-            place(&mut ops, &mut ids, arena, edit.after);
+            place(&mut ops, &mut ids, arena, edit.after, convert);
         }
         self.ops = ops;
         self.ids = ids;

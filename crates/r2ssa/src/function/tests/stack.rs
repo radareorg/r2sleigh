@@ -225,7 +225,7 @@ fn decompile_artifact_two_address_stack_updates_read_incoming_versions() {
         .expect("decompile SSA artifact");
     let updates = artifact
         .function()
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("entry block")
         .ops()
         .iter()
@@ -323,7 +323,7 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
         "constant RAM address should seed a global object"
     );
 
-    let entry = prepared.get_block(0x1100).expect("entry block");
+    let entry = prepared.named_block(0x1100).expect("entry block");
     let load_inst = prepared
         .graph()
         .inst_spelled_at(0x1100, 1)
@@ -427,7 +427,7 @@ fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
         .expect("prepared SSA should build");
     let return_op_idx = prepared
         .function()
-        .get_block(0x1890)
+        .named_block(0x1890)
         .and_then(|block| {
             block
                 .ops()
@@ -529,7 +529,7 @@ fn prepared_function_refuses_display_named_stack_merge_at_control_return() {
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     let return_op_idx = prepared
         .function()
-        .get_block(0x190c)
+        .named_block(0x190c)
         .and_then(|block| {
             block
                 .ops()
@@ -945,7 +945,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     let typed_function = typed.function();
     let typed_facts = typed.decompile_prep_facts();
     let op_roots = typed_function
-        .get_block(0x3000)
+        .named_block(0x3000)
         .expect("entry")
         .ops()
         .iter()
@@ -958,7 +958,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
         })
         .collect::<Vec<_>>();
     let entry_op_roots = typed_function
-        .get_block(0x3000)
+        .named_block(0x3000)
         .expect("entry")
         .ops()
         .iter()
@@ -1020,7 +1020,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     }));
     assert!(
         typed_function
-            .get_block(0x3000)
+            .named_block(0x3000)
             .expect("entry")
             .ops()
             .iter()
@@ -1436,7 +1436,10 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
     }];
     let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
         .expect("subregister New artifact");
-    let block = artifact.function().get_block(0x3480).expect("entry block");
+    let block = artifact
+        .function()
+        .named_block(0x3480)
+        .expect("entry block");
     let new_dst = block
         .ops()
         .iter()

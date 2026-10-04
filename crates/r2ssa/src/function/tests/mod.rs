@@ -70,7 +70,7 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
     let function = SSAFunction::from_blocks_for_decompile(&[block], None).expect("tail branch SSA");
     let artifact = SsaArtifact::new_with_context(function, context);
 
-    let prepared_block = artifact.function().get_block(0x1000).expect("tail block");
+    let prepared_block = artifact.function().named_block(0x1000).expect("tail block");
     assert!(matches!(prepared_block.ops(), [SSAOp::Branch { .. }]));
     assert!(
         !prepared_block
@@ -408,7 +408,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
             })
     };
     // The accumulator is one family, so the loop carries one merge of it.
-    let header = function.get_block(base + 4).expect("loop header");
+    let header = function.named_block(base + 4).expect("loop header");
     let accumulator_phis = header
         .phis()
         .iter()
@@ -429,7 +429,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
 
     // Each lane update reads its lane of the accumulator and of the load
     // as a subpiece and inserts the sum back at the lane's position.
-    let body = function.get_block(base + 12).expect("vector body");
+    let body = function.named_block(base + 12).expect("vector body");
     let loaded = body
         .ops()
         .iter()
@@ -468,14 +468,14 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
     assert_eq!(insert_positions, vec![0, 32, 64, 96]);
 
     // The exit reads the low lane of the merged accumulator.
-    let exit = function.get_block(base + 8).expect("loop exit");
+    let exit = function.named_block(base + 8).expect("loop exit");
     assert!(exit.ops().iter().any(|op| matches!(
         op,
         SSAOp::Subpiece { dst, src, offset: 0 } if dst.size == 4 && *src == phi.dst
     )));
     assert!(
         !function
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| block.ops())
             .any(|op| matches!(op, SSAOp::Piece { .. }))
@@ -622,7 +622,7 @@ fn test_ssa_function_linear() {
     assert_eq!(func.num_blocks(), 2);
 
     // Check that entry block has the copy operations
-    let entry = func.entry_block().unwrap();
+    let entry = func.named_block(func.entry).unwrap();
     assert_eq!(entry.num_ops(), 2);
     assert!(!entry.has_phis());
 }
@@ -652,7 +652,11 @@ fn a_lane_read_is_a_subpiece_of_the_root_it_reads() {
     }];
 
     let func = SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("raw SSA");
-    let ops = func.entry_block().expect("entry block").ops();
+    let ops = func
+        .named_block(func.entry)
+        .expect("entry block")
+        .ops()
+        .to_vec();
     let stored = ops
         .iter()
         .find_map(|op| match op {
@@ -699,22 +703,22 @@ fn a_lane_read_of_a_constant_root_is_the_constant() {
 
     let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch)).expect("decompile SSA");
     let store = func
-        .entry_block()
+        .named_block(func.entry)
         .expect("entry block")
         .ops()
         .iter()
         .find_map(|op| match op {
-            SSAOp::Store { val, .. } => Some(val),
+            SSAOp::Store { val, .. } => Some(val.clone()),
             _ => None,
         })
         .expect("observable store");
     let stored = func
-        .entry_block()
+        .named_block(func.entry)
         .expect("entry block")
         .ops()
         .iter()
         .find_map(|op| match op {
-            SSAOp::Copy { dst, src } if dst == store => Some(src.clone()),
+            SSAOp::Copy { dst, src } if *dst == store => Some(src.clone()),
             _ => None,
         })
         .unwrap_or_else(|| store.clone());
@@ -743,7 +747,7 @@ fn ssa_artifact_exposes_typed_graph_queries() {
     let artifact = SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("artifact");
     let graph = artifact.graph();
     let value = artifact
-        .blocks()
+        .named_blocks()
         .iter()
         .next()
         .and_then(|block| block.ops().first())
@@ -1978,7 +1982,7 @@ fn test_ssa_function_diamond() {
     assert_eq!(func.num_blocks(), 4);
 
     // Merge block should have a phi node
-    let merge = func.get_block(0x100c).unwrap();
+    let merge = func.named_block(0x100c).unwrap();
     assert!(merge.has_phis());
     assert_eq!(merge.num_phis(), 1);
 
@@ -2167,7 +2171,11 @@ fn a_lane_write_inserts_into_the_entry_root() {
 
     let function = SSAFunction::from_blocks_with_arch(&[block], Some(&arch))
         .expect("partial-register fixture");
-    let ops = function.get_block(0x1000).expect("entry block").ops();
+    let ops = function
+        .named_block(0x1000)
+        .expect("entry block")
+        .ops()
+        .to_vec();
     let stored = ops
         .iter()
         .filter_map(|op| match op {
@@ -2231,7 +2239,7 @@ fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
     let mut func = SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("raw SSA");
     crate::optimize::optimize_function(&mut func, &crate::optimize::OptimizationConfig::default());
     // The byte read back is the constant, so the comparison folds to true.
-    let block = func.get_block(0x1000).expect("entry block");
+    let block = func.named_block(0x1000).expect("entry block");
     let flag = block
         .ops()
         .iter()
@@ -2283,9 +2291,10 @@ fn prepared_ssa_preserves_exact_widths_when_unique_offsets_are_reused() {
     let artifact = SsaArtifact::raw(&blocks, None).expect("width-coherent prepared SSA");
     let ops = &artifact
         .function()
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("entry block")
-        .ops();
+        .ops()
+        .to_vec();
 
     assert!(matches!(
         &ops[0],
@@ -2461,7 +2470,7 @@ fn a_call_that_never_returns_ends_its_block_past_the_lanes_it_writes() {
     );
     let ends = artifact
         .function()
-        .get_block(0x1020)
+        .named_block(0x1020)
         .expect("calling block");
     assert!(
         matches!(ends.ops().last(), Some(SSAOp::Insert(_))),
@@ -2507,9 +2516,10 @@ fn a_call_keeps_the_merged_half_of_a_register_it_writes_part_of() {
         BTreeMap::new(),
     );
     let function = artifact.function();
-    let ops = || function.blocks().iter().flat_map(|block| block.ops());
+    let named = function.named_blocks();
+    let ops = || named.iter().flat_map(|block| block.ops());
     let merged = |value: &SSAVar| {
-        let mut phis = function.blocks().iter().flat_map(|block| block.phis());
+        let mut phis = named.iter().flat_map(|block| block.phis());
         phis.any(|phi| phi.dst == *value)
     };
     let mut value = ops()
@@ -2642,7 +2652,7 @@ fn building_a_function_twice_mints_the_same_ids() {
     let sited = |artifact: &SsaArtifact| {
         artifact
             .function()
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| {
                 block
@@ -2672,7 +2682,7 @@ fn an_operation_keeps_its_id_and_instruction_while_the_block_around_it_changes()
     let entry = function.entry;
     let sited = |function: &SSAFunction| {
         function
-            .get_block(entry)
+            .named_block(entry)
             .expect("entry block")
             .sited()
             .map(|(id, op)| (id, op.clone(), function.instruction_of(id)))

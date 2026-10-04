@@ -451,7 +451,7 @@ mod tests {
         block_addr: u64,
         matches: impl Fn(&crate::SSAOp) -> bool,
     ) -> crate::InstId {
-        let block = artifact.function().get_block(block_addr).expect("block");
+        let block = artifact.function().named_block(block_addr).expect("block");
         let (id, _) = block
             .sited()
             .find(|(_, op)| matches(op))

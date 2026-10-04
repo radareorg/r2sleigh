@@ -986,7 +986,7 @@ mod tests {
                 &prepared.facts,
                 &r2ssa::RewrittenFunction::new(
                     prepared.function(),
-                    prepared.function().blocks().to_vec(),
+                    prepared.function().named_blocks(),
                 ),
                 origins,
                 Rc::clone(names),
@@ -1014,7 +1014,7 @@ mod tests {
             &prepared.facts,
             &r2ssa::RewrittenFunction::new(
                 prepared.function(),
-                prepared.function().blocks().to_vec(),
+                prepared.function().named_blocks(),
             ),
             &origins,
             Rc::clone(names),
@@ -1130,7 +1130,7 @@ mod tests {
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("observed_exact_narrow_register_write");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         // The narrow addition defines a lane temporary; the root's definition
         // is the lift's extension of it, which is the write rendered here.
         let copy_idx = block
@@ -1227,7 +1227,7 @@ mod tests {
             4,
         )
         .with_name("observed_contextual_stack_load");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let load_idx = block
             .ops()
             .iter()
@@ -1323,7 +1323,7 @@ mod tests {
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("signed_borrow_projection");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         let (_plan, _names, _journal) = install_observed_lowering(&mut ctx, &prepared);
 
@@ -1375,7 +1375,7 @@ mod tests {
         }
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("canonical_literal_rule_rendering");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let SSAOp::IntSBorrow { dst: flag, .. } = &block.ops()[0] else {
             panic!("fixture must begin with signed borrow");
         };
@@ -1462,7 +1462,7 @@ mod tests {
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("population_count_projection");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         let (plan, _names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         let inst = crate::inst_at(&prepared, block.addr, 0)
@@ -1577,7 +1577,7 @@ mod tests {
             4,
         )
         .with_name("observed_contextual_stack_store");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let store_idx = block
             .ops()
             .iter()
@@ -1714,7 +1714,7 @@ mod tests {
                 "observed_direct_call_target"
             },
         );
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let op_idx = block
             .ops()
             .iter()
@@ -2535,7 +2535,7 @@ mod tests {
         });
         let prepared =
             prepared_from_r2il_blocks(&[entry], &arch).with_name("sealed_inline_admission");
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let SSAOp::Copy { src, .. } = &block.ops()[0] else {
             panic!("fixture must begin with a copy");
         };
@@ -2941,7 +2941,7 @@ mod tests {
         ]);
 
         let then_preserves_return_one =
-            func.get_block(0x1004).expect("then").ops().iter().any(|op| {
+            func.named_block(0x1004).expect("then").ops().iter().any(|op| {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
@@ -2952,7 +2952,7 @@ mod tests {
                 )
             });
         let else_preserves_return_zero =
-            func.get_block(0x1008).expect("else").ops().iter().any(|op| {
+            func.named_block(0x1008).expect("else").ops().iter().any(|op| {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
@@ -3015,7 +3015,7 @@ mod tests {
             function_facts.set_callee_resolution(callee_resolution);
         });
 
-        let block = prepared.function().get_block(0x1000).expect("entry");
+        let block = prepared.function().named_block(0x1000).expect("entry");
         let SSAOp::Call { target, .. } = &block.ops()[1] else {
             panic!("expected call op, got {:?}", block.ops()[1]);
         };
@@ -3124,7 +3124,7 @@ mod tests {
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
         ctx.set_function_names(HashMap::from([(0x401050, "sym.helper".to_string())]));
-        let block = prepared.function().get_block(0x1000).expect("entry");
+        let block = prepared.function().named_block(0x1000).expect("entry");
         let call_idx = block
             .ops()
             .iter()
@@ -3173,7 +3173,7 @@ mod tests {
         ctx.set_function_names(HashMap::from([(0x401050, "sym.helper".to_string())]));
         let call_idx = prepared
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry")
             .ops()
             .iter()
@@ -3201,7 +3201,7 @@ mod tests {
             "the fixture must expose the expression-certificate disagreement"
         );
 
-        let block = prepared.function().get_block(0x1000).expect("entry");
+        let block = prepared.function().named_block(0x1000).expect("entry");
         let (_plan, names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         for value in &argument_values {
             assert!(
@@ -3308,7 +3308,7 @@ mod tests {
 
         let prepared = prepared_from_r2il_blocks_with_call_arguments(&[entry], &arch, 1)
             .with_name("certified_frame_address_argument");
-        let block = prepared.function().get_block(0x1000).expect("entry");
+        let block = prepared.function().named_block(0x1000).expect("entry");
         let call_idx = block
             .ops()
             .iter()
@@ -3419,7 +3419,7 @@ mod tests {
 
         let prepared = prepared_from_r2il_blocks_with_call_arguments(&[entry], &arch, 1)
             .with_name("bound_frame_address_argument");
-        let block = prepared.function().get_block(0x1800).expect("entry");
+        let block = prepared.function().named_block(0x1800).expect("entry");
         let call_idx = block
             .ops()
             .iter()
@@ -3778,7 +3778,7 @@ mod tests {
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("rendered_integer_division_trap");
-        let block = prepared.function().get_block(0x1910).expect("entry");
+        let block = prepared.function().named_block(0x1910).expect("entry");
         let op_idx = block
             .ops()
             .iter()
@@ -3834,7 +3834,7 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(&[block], &arch);
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
-        let blocks = prepared.function().blocks().to_vec();
+        let blocks = prepared.function().named_blocks();
         ctx.analyze_blocks(&blocks);
         let fact = ctx
             .inputs
@@ -3942,7 +3942,7 @@ mod tests {
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         let (_plan, names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         enter_exact_test_site(&ctx, 0x1000, 1);
-        let block = prepared.function().get_block(0x1000).expect("entry block");
+        let block = prepared.function().named_block(0x1000).expect("entry block");
         let SSAOp::Load { dst, addr, .. } = &block.ops()[1] else {
             panic!("fixture load must remain at its exact source site");
         };

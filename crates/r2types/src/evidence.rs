@@ -247,12 +247,9 @@ impl<'a> EvidenceBuilder<'a> {
     /// Conflicting signed and unsigned uses are both asserted: their meet is
     /// `Bottom`, and readback refuses only that value.
     fn gather_scalar_signedness(&mut self) {
+        let named = self.source.function().named_blocks();
         let inferred = infer_scalar_signedness(
-            self.source
-                .function()
-                .blocks()
-                .iter()
-                .flat_map(|block| block.ops().iter()),
+            named.iter().flat_map(|block| block.ops().iter()),
             std::iter::empty(),
             crate::prepare::prepared_arch_display_name(self.source),
         );

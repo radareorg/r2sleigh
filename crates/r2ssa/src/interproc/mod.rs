@@ -1381,7 +1381,7 @@ impl PreparedCalleeSummary {
             architecture_family: prepared.machine_context().architecture_family(),
             blocks: prepared
                 .function()
-                .blocks()
+                .named_blocks()
                 .iter()
                 .map(|block| (block.addr, block.size))
                 .collect(),
@@ -1557,7 +1557,7 @@ fn attributable_callees(
 ) -> Vec<PreparedCalleeSummary> {
     let mut claimed: Vec<(u64, u64)> = root
         .function()
-        .blocks()
+        .named_blocks()
         .iter()
         .filter_map(|block| {
             block
@@ -1636,7 +1636,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     let callees = &attributable_callees(&root, root_id, callees);
     validate_interproc_block_ranges(
         root.function()
-            .blocks()
+            .named_blocks()
             .iter()
             .map(|block| (root_id, block.addr, block.size))
             .chain(callees.iter().flat_map(|callee| {
@@ -2479,7 +2479,7 @@ fn collect_local_summary_facts_with_obligation_authority(
         }
     }
 
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for (op_id, op) in block.sited() {
             match op {
                 SSAOp::Load { addr, dst, space }
@@ -3028,7 +3028,7 @@ fn collect_call_arg_state_of_height(
         },
         |block_addr, entry| {
             let mut state = entry.clone();
-            let Some(block) = function.get_block(block_addr) else {
+            let Some(block) = function.named_block(block_addr) else {
                 return state;
             };
             for phi in block.phis() {
@@ -3056,7 +3056,7 @@ fn collect_call_arg_state_of_height(
         else {
             continue;
         };
-        let Some(block) = function.get_block(block_addr) else {
+        let Some(block) = function.named_block(block_addr) else {
             continue;
         };
         // A block nothing reaches holds nothing known.

@@ -62,9 +62,9 @@ fn unchecked_and_controlled_decompile_builders_produce_identical_artifacts() {
     );
     for (lhs, rhs) in unchecked
         .function()
-        .blocks()
+        .named_blocks()
         .iter()
-        .zip(controlled.function().blocks())
+        .zip(controlled.function().named_blocks())
     {
         assert_eq!(lhs.addr, rhs.addr);
         assert_eq!(lhs.size, rhs.size);
@@ -110,13 +110,8 @@ fn prepared_function_ssa_tracks_mode_and_keeps_named_blocks() {
 
     assert_eq!(prepared.name.as_deref(), Some("prepared_demo"));
 
-    let local_blocks = prepared.local_ssa_blocks();
-    assert_eq!(local_blocks.len(), 1);
-    assert_eq!(local_blocks[0].addr, 0x1000);
-    assert_eq!(
-        local_blocks[0].ops(),
-        prepared.blocks().iter().next().expect("entry block").ops()
-    );
+    assert_eq!(prepared.function().named_blocks().len(), 1);
+    assert_eq!(prepared.function().named_blocks()[0].addr, 0x1000);
 
     // Every artifact is sealed, so the symbolic one carries prep facts too:
     // the type says so, where a test used to.
@@ -1284,7 +1279,7 @@ fn a_plan_that_removes_a_block_and_reorders_recomputes_order_and_domtree() {
     func.apply_edits(plan);
 
     assert!(!func.block_addrs().contains(&0x1004));
-    assert!(func.get_block(0x1004).is_none());
+    assert!(func.named_block(0x1004).is_none());
     assert_eq!(func.idom(0x1008), Some(0x1000));
 }
 
@@ -1345,7 +1340,7 @@ fn test_for_each_source_reports_phi_and_op_sites() {
     ];
 
     let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    let merge = func.get_block(0x100c).expect("merge block");
+    let merge = func.named_block(0x100c).expect("merge block");
     assert!(merge.has_phis(), "fixture should produce a merge phi");
 
     let mut seen = Vec::new();
@@ -1481,7 +1476,7 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
     let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
         .expect("prepared SSA should build");
     let facts = func.prep_facts_for_test();
-    let merge = func.get_block(0x100c).expect("merge block");
+    let merge = func.named_block(0x100c).expect("merge block");
     assert_eq!(merge.phis().len(), 1, "expected trivial merge phi");
 
     let const_root = SSAVar::constant(0x42, 8);
@@ -1493,22 +1488,22 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
     );
 
     let left_dst = func
-        .get_block(0x1004)
+        .named_block(0x1004)
         .expect("left block")
         .ops()
         .first()
-        .and_then(|op| op.dst())
+        .and_then(|op| op.dst().cloned())
         .expect("left copy dst");
     let right_dst = func
-        .get_block(0x1008)
+        .named_block(0x1008)
         .expect("right block")
         .ops()
         .first()
-        .and_then(|op| op.dst())
+        .and_then(|op| op.dst().cloned())
         .expect("right copy dst");
 
-    assert_eq!(facts.canonical_root_of(left_dst), Some(&const_root));
-    assert_eq!(facts.canonical_root_of(right_dst), Some(&const_root));
+    assert_eq!(facts.canonical_root_of(&left_dst), Some(&const_root));
+    assert_eq!(facts.canonical_root_of(&right_dst), Some(&const_root));
     // A constant is its own representative.
     assert_eq!(facts.canonical_root(&const_root), &const_root);
 }

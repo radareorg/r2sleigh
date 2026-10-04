@@ -428,7 +428,7 @@ pub(crate) fn dispatch_selectors(
     values: &crate::values::ValueRanges,
 ) -> std::collections::BTreeMap<u64, ValueId> {
     function
-        .blocks()
+        .named_blocks()
         .iter()
         .filter_map(|block| {
             let (id, op) = block
@@ -448,7 +448,7 @@ fn dispatch_table_reads_in_graph(
     values: &crate::values::ValueRanges,
 ) -> Vec<DispatchTableRead> {
     function
-        .blocks()
+        .named_blocks()
         .iter()
         .flat_map(|block| {
             block.sited().filter_map(|(id, op)| {

@@ -62,7 +62,11 @@ fn decompile_ssa_models_post_call_arm64_return_register_clobber() {
     }];
 
     let prepared = prepared_preserving(&blocks, &arch, &[]).expect("prepared SSA should build");
-    let ops = prepared.get_block(0x1400).expect("entry block").ops();
+    let ops = prepared
+        .named_block(0x1400)
+        .expect("entry block")
+        .ops()
+        .to_vec();
     let post_call_x0 = ops
         .iter()
         .find_map(|op| match op {
@@ -118,7 +122,7 @@ fn decompile_ssa_models_post_call_arm64_return_register_clobber() {
             .is_none()
     );
 
-    for op in ops {
+    for op in &ops {
         if let SSAOp::CallDefine { dst } = op
             && dst.name() == "x8"
         {
@@ -265,16 +269,16 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
     // `Subpiece` of it, certified as that result sliced.
     let eax = prepared
         .function()
-        .get_block(0x16c0)
+        .named_block(0x16c0)
         .into_iter()
-        .flat_map(|block| block.ops())
+        .flat_map(|block| block.ops().to_vec())
         .find_map(|op| match op {
             SSAOp::Subpiece {
                 dst,
                 src,
                 offset: 0,
             } if dst.size == 4 && src.name().eq_ignore_ascii_case("rax") => {
-                prepared.graph().value_id_for_var(dst)
+                prepared.graph().value_id_for_var(&dst)
             }
             _ => None,
         })
@@ -427,7 +431,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
     let call_defines = |artifact: &SsaArtifact, name: &str| {
         artifact
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry block")
             .ops()
             .iter()
@@ -444,7 +448,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
     // The store reads the value rdi held on entry, not a clobber.
     let stored = with
         .function()
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("entry block")
         .ops()
         .iter()
@@ -503,7 +507,7 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     let call_defines = |artifact: &SsaArtifact| {
         artifact
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry block")
             .ops()
             .iter()
@@ -517,7 +521,7 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     let stored = |artifact: &SsaArtifact| {
         artifact
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry block")
             .ops()
             .iter()

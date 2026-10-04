@@ -60,7 +60,7 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
 
     let stack = dual_space_artifact(Vec::new(), Varnode::unique(0x80, 8), Some(&arch));
     let stack_addr = stack
-        .get_block(0x1000)
+        .named_block(0x1000)
         .and_then(|block| {
             block.ops().iter().find_map(|op| match op {
                 crate::SSAOp::Load { addr, .. } => Some(addr.clone()),

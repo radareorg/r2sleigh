@@ -312,8 +312,7 @@ From the vision's tiers, in order, each only once its consumers exist:
   before it is built, and Retypd revisited after P9;
 - static rewriting;
 - deobfuscation;
-- trace recording and query;
-- the debugger (`doc/debugger-build-plan.md`).
+- trace recording and query.
 
 Issues
 ------
@@ -374,7 +373,6 @@ Documents
 | `doc/architecture-plan.md` | History of the binding-spine rewrite; superseded by R |
 | `doc/phase1-plan.md`, `phase1-design.md`, `handoff-engine-inversion.md`, `handoff-location-ssa.md` | Plugin era; to archive |
 | `doc/beat-angr-end-to-end.md`, `decbench-plan.md` | Kept for method, not for numbers |
-| `doc/debugger-build-plan.md` | Proposed; after the program |
 
 Ownership
 ---------

@@ -309,7 +309,7 @@ impl<'a> AddressCollector<'a> {
         _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let definitions = function
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| block.ops().iter())
             .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
@@ -346,7 +346,7 @@ impl<'a> AddressCollector<'a> {
             }
         }
         let load_count = function
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| block.ops().iter())
             .filter(|op| {
@@ -396,7 +396,7 @@ impl<'a> AddressCollector<'a> {
         let mut readers = BTreeMap::<ValueId, BTreeSet<usize>>::new();
         let mut slots = 0usize;
         for (index, &addr) in order.iter().enumerate() {
-            let Some(block) = self.function.get_block(addr) else {
+            let Some(block) = self.function.named_block(addr) else {
                 continue;
             };
             let read = block
@@ -441,13 +441,13 @@ impl<'a> AddressCollector<'a> {
                 return AddressProvenanceFacts::default();
             }
             let block_addr = order[index];
-            let Some(block) = self.function.get_block(block_addr) else {
+            let Some(block) = self.function.named_block(block_addr) else {
                 continue;
             };
             let Some(mut spills) = self.entering(block_addr) else {
                 continue;
             };
-            let moved = self.transfer_ops(block, &mut spills);
+            let moved = self.transfer_ops(&block, &mut spills);
             for value in moved {
                 work.extend(readers.get(&value).into_iter().flatten().copied());
             }
@@ -1112,7 +1112,7 @@ mod tests {
         let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
             .expect("decompile artifact");
         let loaded_values = artifact
-            .get_block(0x1100)
+            .named_block(0x1100)
             .expect("entry block")
             .ops()
             .iter()
@@ -1617,7 +1617,7 @@ mod tests {
         )
         .expect("source-bound artifact");
         let (load_index, _) = artifact
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("block")
             .ops()
             .iter()
@@ -1664,7 +1664,7 @@ mod tests {
             exact_parameter_interface(b"distinct-parameter-bases", 2),
         )
         .expect("source-bound artifact");
-        let block = artifact.get_block(0x1000).expect("block");
+        let block = artifact.named_block(0x1000).expect("block");
         let store_index = block
             .ops()
             .iter()

@@ -228,7 +228,7 @@ impl FormalDependence {
             .fold(0, |left, right| left | right);
         let mut changed = exposed != self.exposed;
         self.exposed = exposed;
-        for block in prepared.function().blocks() {
+        for block in prepared.function().named_blocks() {
             for phi in block.phis() {
                 let inputs = phi
                     .sources
@@ -237,7 +237,7 @@ impl FormalDependence {
                     .fold(0, |left, right| left | right);
                 changed |= self.raise(prepared, &phi.dst, inputs);
             }
-            changed |= self.ops_pass(prepared, block);
+            changed |= self.ops_pass(prepared, &block);
         }
         changed
     }
@@ -354,7 +354,7 @@ impl FrameTraffic {
         let objects = prepared.objects();
         let mut loads = Vec::<(ValueId, FramePlace)>::new();
         let mut stores = Vec::<(InstId, ValueId, FramePlace)>::new();
-        for block in prepared.function().blocks() {
+        for block in prepared.function().named_blocks() {
             for (id, op) in block.sited() {
                 let Some(inst) = graph.inst_for_op(id) else {
                     continue;
@@ -478,7 +478,7 @@ fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId>
         .flat_map(|block| block.ops().iter())
         .filter_map(SSAOp::dst)
         .filter_map(move |dst| {
-            let value = graph.value_id_for_var(dst)?;
+            let value = graph.value_of(*dst)?;
             graph
                 .value(value)?
                 .canonical_storage

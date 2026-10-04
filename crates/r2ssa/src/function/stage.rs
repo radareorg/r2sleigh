@@ -24,7 +24,6 @@
 
 use std::ops::Deref;
 
-use crate::block::BlockMut;
 use crate::control::{SsaExecutionStopReason, SsaPrepareError, SsaWorkControl};
 use crate::graph::SsaGraph;
 use crate::integrity::{SsaIntegrityError, validate_ssa_function};
@@ -49,11 +48,10 @@ impl Lifted {
         Self { ir }
     }
 
-    /// One block, open for any change, with the arena that change mints
-    /// from: what the block gains is minted an id and what it loses is
-    /// tombstoned.
-    pub fn edit_block(&mut self, addr: u64) -> Option<BlockMut<'_>> {
-        self.ir.block_for_change(addr)
+    /// One block, open for any change in variables by name: what the block
+    /// gains is minted an id and interned, and what it loses is tombstoned.
+    pub fn edit_block(&mut self, addr: u64) -> Option<super::NamedBlockMut<'_>> {
+        self.ir.named_block_for_change(addr)
     }
 
     /// The function, given back unprepared.

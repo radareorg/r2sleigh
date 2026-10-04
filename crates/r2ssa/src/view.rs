@@ -439,16 +439,21 @@ impl<'a> Solver<'a> {
             nodes.push(lane);
             definitions.push(Definition::Step(root, lane_step(lane, root)));
         }
+        let var = |id: &crate::VarId| function.var(*id);
         for block in function.blocks() {
             for phi in block.phis() {
-                nodes.push(&phi.dst);
+                nodes.push(var(&phi.dst));
                 definitions.push(Definition::Phi(
-                    phi.sources.iter().map(|(_, source)| source).collect(),
+                    phi.sources.iter().map(|(_, source)| var(source)).collect(),
                 ));
             }
-            for (dst, src, step) in block.ops().iter().filter_map(|op| step_of(op, var_facts)) {
-                nodes.push(dst);
-                definitions.push(Definition::Step(src, step));
+            for (dst, src, step) in block
+                .ops()
+                .iter()
+                .filter_map(|op| step_of(op, |id| var_facts(var(id))))
+            {
+                nodes.push(var(dst));
+                definitions.push(Definition::Step(var(src), step));
             }
         }
         Self::over(nodes, definitions)
@@ -841,7 +846,7 @@ mod tests {
     /// The one variable some operation defines into `storage_offset` at `size`.
     fn defined(function: &SSAFunction, offset: u64, size: u32) -> SSAVar {
         function
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| block.ops())
             .filter_map(SSAOp::dst)
@@ -914,9 +919,8 @@ mod tests {
         let facts = function.prep_facts_for_test();
         let facts = &facts;
         let merged = function
-            .get_block(0x100c)
-            .and_then(|block| block.phis().first())
-            .map(|phi| phi.dst.clone())
+            .named_block(0x100c)
+            .and_then(|block| block.phis().first().map(|phi| phi.dst.clone()))
             .expect("the two copies merge");
         // The merge is the constant: both arms agree on it.
         assert_eq!(facts.canonical_root(&merged), &SSAVar::constant(0x1234, 2));
@@ -966,7 +970,7 @@ mod tests {
         let function = prepared(&[block]);
         let facts = function.prep_facts_for_test();
         let facts = &facts;
-        let ops = function.blocks()[0].ops();
+        let ops = function.named_blocks()[0].ops().to_vec();
         let loaded = ops
             .iter()
             .filter_map(|op| match op {

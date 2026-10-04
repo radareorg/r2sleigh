@@ -99,8 +99,12 @@ impl<'a> FoldingContext<'a> {
                             .find(|predicate| predicate.id == assumption.predicate)
                     })
             })?;
-        let block = self.inputs.prepared_ssa?.function().get_block(block_addr)?;
-        self.certified_branch_condition_from_block(block)
+        let block = self
+            .inputs
+            .prepared_ssa?
+            .function()
+            .named_block(block_addr)?;
+        self.certified_branch_condition_from_block(&block)
             .filter(|(_, predicate_id, _)| *predicate_id == predicate.id)
             .map(|(expr, _, _)| expr)
     }

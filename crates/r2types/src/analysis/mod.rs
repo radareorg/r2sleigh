@@ -1355,7 +1355,8 @@ pub fn build_source_owned_type_analysis(
         .name
         .clone()
         .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
-    let ssa_blocks = source.local_ssa_blocks();
+    let named_blocks = source.function().named_blocks();
+    let ssa_blocks = named_blocks.as_slice();
     let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
     let mut diagnostics = TypeAnalysisDiagnostics::default();

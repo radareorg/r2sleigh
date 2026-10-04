@@ -232,15 +232,10 @@ fn refine_parameter_signedness(
     params: &mut [SignatureParamCandidate],
 ) {
     let parameter_home_aliases = certified_parameter_home_aliases(prepared, recovered_params);
+    let named = prepared.function().named_blocks();
     let inferred = infer_scalar_signedness(
-        prepared
-            .function()
-            .blocks()
-            .iter()
-            .flat_map(|block| block.ops().iter()),
-        prepared
-            .function()
-            .blocks()
+        named.iter().flat_map(|block| block.ops().iter()),
+        named
             .iter()
             .flat_map(|block| {
                 block

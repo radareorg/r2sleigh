@@ -16,7 +16,7 @@ pub(crate) fn collect_predicate_facts(
     let mut next_predicate_id = 0u32;
 
     for &block_addr in function.block_addrs() {
-        let Some(block) = function.get_block(block_addr) else {
+        let Some(block) = function.named_block(block_addr) else {
             continue;
         };
         let Some(cfg_block) = function.cfg().get_block(block_addr) else {
@@ -27,7 +27,7 @@ pub(crate) fn collect_predicate_facts(
                 true_target,
                 false_target,
             } => {
-                let Some((_, cond)) = crate::branch_condition(block) else {
+                let Some((_, cond)) = crate::branch_condition(&block) else {
                     continue;
                 };
                 let id = PredicateId(next_predicate_id);
@@ -112,7 +112,7 @@ pub(crate) fn collect_compare_defs(
     let mut signed_overflow_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
     let mut signed_sign_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
 
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             if let SSAOp::IntSub { dst, a, b } = op
                 && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
@@ -122,7 +122,7 @@ pub(crate) fn collect_compare_defs(
         }
     }
 
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             if let SSAOp::IntSBorrow { dst, a, b } = op
                 && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
@@ -140,7 +140,7 @@ pub(crate) fn collect_compare_defs(
     propagate_compare_source_aliases(function, &mut signed_overflow_sources);
     propagate_compare_source_aliases(function, &mut signed_sign_sources);
 
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             let Some((dst, kind, lhs, rhs)) = compare_components(op) else {
                 if let Some((dst, kind, lhs, rhs)) = signed_flag_compare_components(
@@ -213,7 +213,7 @@ pub(crate) fn propagate_compare_definitions(
     graph: &SsaGraph,
     compare_defs: &mut BTreeMap<SSAVar, CompareProvenance>,
 ) {
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             let propagated = match op {
                 SSAOp::Copy { dst, src }
@@ -262,7 +262,7 @@ pub(crate) fn propagate_compare_source_aliases(
     function: &SSAFunction,
     sources: &mut BTreeMap<SSAVar, (ValueId, ValueId)>,
 ) {
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for op in block.ops() {
             let (dst, src) = match op {
                 SSAOp::Copy { dst, src }

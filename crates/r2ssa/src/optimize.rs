@@ -238,7 +238,7 @@ impl PartialOrd for VarKey {
 
 fn build_use_map(func: &SSAFunction) -> HashMap<VarKey, Vec<UseLocation>> {
     let mut uses = HashMap::new();
-    for block in func.blocks() {
+    for block in &func.named_blocks() {
         block.for_each_source(|src| {
             let use_loc = match src.site {
                 SourceSite::Phi { phi_idx, .. } => UseLocation::Phi {
@@ -354,7 +354,7 @@ fn find_cbranch_condition(
     block_addr: u64,
     lattice: &HashMap<VarKey, LatticeValue>,
 ) -> LatticeValue {
-    let Some(block) = func.get_block(block_addr) else {
+    let Some(block) = func.named_block(block_addr) else {
         return LatticeValue::Bottom;
     };
     for op in block.ops().iter().rev() {
@@ -413,7 +413,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
     let mut ssa_worklist = VecDeque::new();
     let use_map = build_use_map(func);
 
-    for block in func.blocks() {
+    for block in &func.named_blocks() {
         control.poll()?;
         block.for_each_def(|def| init_if_input(def.var, &mut lattice));
         block.for_each_source(|src| init_if_input(src.var, &mut lattice));
@@ -430,7 +430,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
                 continue;
             }
 
-            let Some(block) = func.get_block(to) else {
+            let Some(block) = func.named_block(to) else {
                 continue;
             };
 
@@ -471,7 +471,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
                         if !block_visited.contains(block_addr) {
                             continue;
                         }
-                        let Some(block) = func.get_block(*block_addr) else {
+                        let Some(block) = func.named_block(*block_addr) else {
                             continue;
                         };
                         let Some(phi) = block.phis().get(*phi_idx) else {
@@ -486,7 +486,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
                         if !block_visited.contains(block_addr) {
                             continue;
                         }
-                        let Some(block) = func.get_block(*block_addr) else {
+                        let Some(block) = func.named_block(*block_addr) else {
                             continue;
                         };
                         let Some(op) = block.ops().get(*op_idx) else {
@@ -658,7 +658,7 @@ fn replace_sources_with_constants(
             .cfg()
             .get_block(addr)
             .is_some_and(|cfg_block| cfg_block.is_return());
-        let Some(block) = func.get_block(addr) else {
+        let Some(block) = func.named_block(addr) else {
             continue;
         };
 
@@ -740,7 +740,7 @@ fn apply_sccp_results(
 
     let mut rewrites = Vec::new();
     for &addr in func.block_addrs() {
-        let Some(block) = func.get_block(addr) else {
+        let Some(block) = func.named_block(addr) else {
             continue;
         };
         let Some(cfg_block) = func.cfg().get_block(addr) else {
@@ -785,6 +785,7 @@ fn apply_sccp_results(
                 .get_block(rw.block_addr)
                 .and_then(|block| block.position(rw.op_id))
                 .and_then(|index| func.get_block(rw.block_addr)?.ops().get(index))
+                .map(|op| func.named(op))
             {
                 // The branch that remains was never a call site the source
                 // named, so it keeps no instruction identity.
@@ -895,9 +896,8 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let mut changed = false;
     let block_addrs = func.block_addrs().to_vec();
     let mut defs = func
-        .blocks()
+        .named_ops()
         .iter()
-        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
 
@@ -909,7 +909,7 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let budget = defs.len().saturating_add(1);
     let mut combined = EditPlan::new();
     for addr in &block_addrs {
-        let Some(block) = func.get_block(*addr) else {
+        let Some(block) = func.named_block(*addr) else {
             continue;
         };
         for (id, original) in block.sited() {
@@ -974,7 +974,7 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         // copied object, not an expression read.
         let mut forwarded = EditPlan::new();
         for addr in &block_addrs {
-            let Some(block) = func.get_block(*addr) else {
+            let Some(block) = func.named_block(*addr) else {
                 continue;
             };
             for (id, op) in block.sited() {
@@ -1023,9 +1023,8 @@ struct EqualityTest {
 /// source most likely wrote.
 fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let defs = func
-        .blocks()
+        .named_ops()
         .iter()
-        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
     let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
@@ -1080,7 +1079,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         }
     };
     let test_of = |addr: u64| {
-        let block = func.get_block(addr)?;
+        let block = func.named_block(addr)?;
         let SSAOp::CBranch { cond, .. } = block.ops().last()? else {
             return None;
         };
@@ -1110,7 +1109,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     // A block that computes nothing the fused branch does not: values only,
     // no memory and no call, and it is entered from the chain alone.
     let pure_link = |addr: u64| {
-        let block = func.get_block(addr)?;
+        let block = func.named_block(addr)?;
         if !block.phis().is_empty() || func.predecessors(addr).len() != 1 {
             return None;
         }
@@ -1129,7 +1128,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                         | SSAOp::StoreConditional { .. }
                 )
         }) || body.iter().all(|op| matches!(op, SSAOp::Nop));
-        pure.then_some(last)
+        pure.then(|| last.clone())
     };
 
     struct Fusion {
@@ -1238,7 +1237,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             .chain(std::iter::once(default))
             .collect::<BTreeSet<_>>();
         let phis_agree = targets.iter().all(|target| {
-            func.get_block(*target).is_none_or(|block| {
+            func.named_block(*target).is_none_or(|block| {
                 block.phis().iter().all(|phi| {
                     let mut carried = phi
                         .sources
@@ -1286,7 +1285,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         let hoisted = fusion
             .links
             .iter()
-            .filter_map(|link| func.get_block(*link))
+            .filter_map(|link| func.named_block(*link))
             .flat_map(|block| {
                 let body = block.len().saturating_sub(1);
                 block
@@ -1321,7 +1320,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             .chain(std::iter::once(fusion.default))
             .collect::<BTreeSet<_>>();
         for target in &targets {
-            let Some(block) = func.get_block(*target) else {
+            let Some(block) = func.named_block(*target) else {
                 continue;
             };
             for (id, phi) in block.sited_phis() {
@@ -1367,18 +1366,16 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
 
 fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let defs = func
-        .blocks()
+        .named_ops()
         .iter()
-        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
     // Values a statement other than a flag test reads. A difference read only
     // by the flags of its own instruction does go unread once they fold; one a
     // register receives does not.
     let kept = func
-        .blocks()
+        .named_ops()
         .iter()
-        .flat_map(|block| block.ops().iter())
         .filter(|op| {
             !matches!(
                 op,
@@ -1399,9 +1396,8 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     // The machine copies a flag out of its scratch register before testing it,
     // so the disjunction names the copy and the fold has to look through it.
     let mut combined = func
-        .blocks()
+        .named_ops()
         .iter()
-        .flat_map(|block| block.ops().iter())
         .filter(|op| matches!(op, SSAOp::IntOr { .. } | SSAOp::BoolOr { .. }))
         .flat_map(|op| op.sources())
         .map(VarKey::from_var)
@@ -1409,9 +1405,8 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     // Back through the copies, once: each copy's source joins the set when
     // its destination is in it.
     let copied_from = func
-        .blocks()
+        .named_ops()
         .iter()
-        .flat_map(|block| block.ops().iter())
         .filter_map(|op| match op {
             SSAOp::Copy { dst, src } => Some((VarKey::from_var(dst), VarKey::from_var(src))),
             _ => None,
@@ -1431,7 +1426,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     let views = crate::view::ValueViews::compute(func);
     let mut folds = EditPlan::new();
     for &addr in func.block_addrs() {
-        let Some(block) = func.get_block(addr) else {
+        let Some(block) = func.named_block(addr) else {
             continue;
         };
         for (id, op) in block.sited() {
@@ -2346,7 +2341,7 @@ mod sccp_tests {
         let changed = apply_sccp_results(&mut func, &consts, &executable, None, &mut stats);
         assert!(changed);
         assert!(
-            func.get_block(0x1004).is_none(),
+            func.named_block(0x1004).is_none(),
             "dead branch block should be removed"
         );
         assert!(!func.cfg().has_edge(0x1000, 0x1004));
@@ -2572,16 +2567,16 @@ mod chain_tests {
             }
         );
         assert!(matches!(
-            func.get_block(0x1000).expect("head").ops().last(),
+            func.named_block(0x1000).expect("head").ops().last(),
             Some(SSAOp::Switch { .. })
         ));
-        assert!(func.get_block(0x1004).is_none());
-        assert!(func.get_block(0x1008).is_none());
+        assert!(func.named_block(0x1004).is_none());
+        assert!(func.named_block(0x1008).is_none());
         let mut successors = func.successors(0x1000);
         successors.sort_unstable();
         successors.dedup();
         assert_eq!(successors, vec![0x100c, 0x1020, 0x1030, 0x1040]);
-        let merge = func.get_block(0x1020).expect("case 2");
+        let merge = func.named_block(0x1020).expect("case 2");
         assert!(
             merge.phis().iter().all(|phi| phi
                 .sources
@@ -2599,7 +2594,7 @@ mod chain_tests {
             func.cfg().get_block(0x1000).expect("head").terminator,
             BlockTerminator::ConditionalBranch { .. }
         ));
-        assert!(func.get_block(0x1004).is_some());
+        assert!(func.named_block(0x1004).is_some());
     }
 }
 
@@ -2722,7 +2717,7 @@ mod signed_flag_tests {
     }
 
     fn condition_op(func: &SSAFunction) -> SSAOp {
-        let block = func.get_block(0x1000).expect("head");
+        let block = func.named_block(0x1000).expect("head");
         let SSAOp::CBranch { cond, .. } = block.ops().last().expect("branch") else {
             panic!("no branch");
         };
@@ -2776,7 +2771,7 @@ mod signed_flag_tests {
                 ..OptimizationConfig::default()
             },
         );
-        let block = func.get_block(0x1000).expect("block");
+        let block = func.named_block(0x1000).expect("block");
         assert!(
             block.ops().iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
             "ops: {:?}",

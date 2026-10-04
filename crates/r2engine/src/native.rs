@@ -1692,7 +1692,7 @@ impl Native<'_> {
         &self,
         prepared: &r2ssa::SsaArtifact,
         sites: &[NativeCall],
-        op: &r2ssa::SSAOp,
+        op: &r2ssa::SSAOp<r2ssa::VarId>,
     ) -> Option<(u64, String)> {
         match op {
             r2ssa::SSAOp::Call {
@@ -1707,7 +1707,7 @@ impl Native<'_> {
                 instruction: Some(instruction),
             } => {
                 let graph = prepared.graph();
-                let value = graph.value_id_for_var(target)?;
+                let value = graph.value_of(*target)?;
                 let defined = graph.inst(graph.def_inst(value)?)?;
                 let r2ssa::InstPayload::Op(r2ssa::SSAOp::Load { addr, .. }) = &defined.payload
                 else {

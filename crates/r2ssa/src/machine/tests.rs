@@ -518,6 +518,7 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         values: values.clone(),
         def_of: vec![None, None, None],
         use_offsets: vec![0, 1, 2, 2],
+        value_of_var: Vec::new(),
         use_sites: vec![
             UseSite {
                 inst: InstId(0),
@@ -2413,9 +2414,10 @@ fn dense_write_projections_cover_full_and_zero_extension() {
         MachineProjection::from_artifact(&clearing_low).expect("clearing projection");
     let ops = &clearing_low
         .function()
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("block")
-        .ops();
+        .ops()
+        .to_vec();
     let extension = ops
         .iter()
         .position(|op| matches!(op, SSAOp::IntZExt { .. }))
@@ -2477,7 +2479,12 @@ fn register_uses_read_the_root_whole() {
         ],
         &arch,
     );
-    let ops = artifact.function().get_block(0x1000).expect("block").ops();
+    let ops = artifact
+        .function()
+        .named_block(0x1000)
+        .expect("block")
+        .ops()
+        .to_vec();
     let subpieces = ops
         .iter()
         .enumerate()
@@ -2548,7 +2555,12 @@ fn big_endian_lane_positions_count_from_the_least_significant_byte() {
         ],
         &arch,
     );
-    let ops = artifact.function().get_block(0x1000).expect("block").ops();
+    let ops = artifact
+        .function()
+        .named_block(0x1000)
+        .expect("block")
+        .ops()
+        .to_vec();
     assert!(
         ops.iter().any(|op| matches!(
             op,
@@ -2693,7 +2705,12 @@ fn unnamed_vector_lanes_insert_into_their_root() {
         &arch,
     );
     let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
-    let ops = artifact.function().get_block(0x1000).expect("block").ops();
+    let ops = artifact
+        .function()
+        .named_block(0x1000)
+        .expect("block")
+        .ops()
+        .to_vec();
     let inserts = ops
         .iter()
         .enumerate()

@@ -177,6 +177,14 @@ impl<I: DenseId, T> IdMap<I, T> {
     }
 }
 
+impl<I: DenseId, T> std::ops::Index<I> for IdMap<I, T> {
+    type Output = T;
+
+    fn index(&self, id: I) -> &T {
+        self.get(id).expect("indexed an id the map holds")
+    }
+}
+
 /// A set of ids below a bound, one bit each.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdSet<I> {

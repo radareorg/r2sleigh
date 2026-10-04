@@ -62,6 +62,7 @@ pub mod span;
 mod strided;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod value_table;
 mod values;
 pub(crate) mod var;
 pub mod view;
@@ -89,7 +90,7 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use function::{
     CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
-    GenuineNativeInstructionSpan, Lifted, PhiNode, Prepared, RegisterFamilyInfo,
+    GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo,
     RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
     SSAFunction, Sealed, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
     SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedSsaArtifact,
@@ -183,6 +184,7 @@ pub use semantic::{
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
+pub use value_table::{ValueTable, VarId};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
 pub use view::{ValueView, ValueViews, ViewExtension, ViewRelation};

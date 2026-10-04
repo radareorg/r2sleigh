@@ -22,6 +22,11 @@ impl SSAFunction {
                             .then(|| SSABlock::new(crate::cfg::ENTRY_EDGE, 0))
                     })
             })
+            .collect::<Vec<SSABlock>>();
+        let mut values = crate::value_table::ValueTable::default();
+        let ordered = ordered
+            .iter()
+            .map(|block| block.map_operands(&mut |var| values.intern(var)))
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
@@ -35,6 +40,7 @@ impl SSAFunction {
             natural_loops: std::sync::OnceLock::new(),
             block_index: block_index_of(&ordered),
             blocks: Blocks::adopting(ordered),
+            values,
             block_order,
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
@@ -556,7 +562,14 @@ impl SSAFunction {
                 ops: other_ops,
             });
         }
-        let (arena, ssa_blocks) = mint_renamed_blocks(shaped);
+        let (arena, named_blocks) = mint_renamed_blocks(shaped);
+        // The operations enter the function here, so this is where each
+        // variable they name gets its id.
+        let mut values = crate::value_table::ValueTable::default();
+        let ssa_blocks = named_blocks
+            .iter()
+            .map(|block| block.map_operands(&mut |var| values.intern(var)))
+            .collect::<Vec<_>>();
         let mut cfg = cfg;
         cfg.release_operations();
         let mut function = Self {
@@ -574,6 +587,7 @@ impl SSAFunction {
             block_index: block_index_of(&ssa_blocks),
             block_order: renamed_block_order,
             blocks: Blocks::new(ssa_blocks, arena),
+            values,
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),

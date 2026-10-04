@@ -141,9 +141,13 @@ impl Written {
         let mut by_op = BTreeMap::<OpId, Bytes>::new();
         let writes = Writes::of(function);
         // Until nothing changes: a loop's phi reads a value defined below it.
-        while function.blocks().iter().fold(false, |changed, block| {
-            changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
-        }) {}
+        while function
+            .named_blocks()
+            .iter()
+            .fold(false, |changed, block| {
+                changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
+            })
+        {}
         Self { by_op }
     }
 }
@@ -220,7 +224,11 @@ impl Writes {
         let arena = function.arena();
         let mut definers = BTreeMap::new();
         let mut extended = std::collections::BTreeSet::new();
-        for (id, op) in function.blocks().iter().flat_map(|block| block.sited()) {
+        for (id, op) in function
+            .named_blocks()
+            .iter()
+            .flat_map(|block| block.sited())
+        {
             if let SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } = op
                 && let Some(definer) = definers.get(src)
                 && arena.instruction(*definer).is_some()

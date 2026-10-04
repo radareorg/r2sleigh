@@ -9,11 +9,10 @@
 //! identity keyed by position is unchanged, and a definition nothing reads is
 //! accounted as dead by the layers that already know how.
 
-use std::collections::HashMap;
-
 use super::SSAFunction;
+use crate::dense::{IdMap, IdSet};
 use crate::op::SSAOp;
-use crate::var::SSAVar;
+use crate::value_table::VarId;
 
 /// What one forwarding pass did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,21 +28,23 @@ impl SSAFunction {
     /// statement, and every other copy is the value it copied. See
     /// [`Self::copy_is_a_program_write`].
     pub(crate) fn forward_copies(&mut self) -> Forwarding {
-        let mut merge_sources = std::collections::HashSet::<SSAVar>::new();
+        let mut merge_sources = IdSet::<VarId>::new(self.values.len());
         for block in &self.blocks {
             for phi in block.phis() {
-                merge_sources.extend(phi.sources.iter().map(|(_, source)| source.clone()));
+                for (_, source) in &phi.sources {
+                    merge_sources.insert(*source);
+                }
             }
         }
-        let mut forwarded = HashMap::<SSAVar, SSAVar>::new();
+        let mut forwarded = Forwarded::new(self.values.len());
         for block in &self.blocks {
             for op in block.ops() {
                 if let SSAOp::Copy { dst, src } = op
-                    && dst.size == src.size
+                    && self.var(*dst).size == self.var(*src).size
                     && dst != src
-                    && !self.copy_is_a_program_write(dst, src, &merge_sources)
+                    && !self.copy_is_a_program_write(*dst, *src, &merge_sources)
                 {
-                    forwarded.insert(dst.clone(), src.clone());
+                    forwarded.insert(*dst, *src);
                 }
             }
         }
@@ -51,13 +52,13 @@ impl SSAFunction {
     }
 
     /// Rewrite every read of a forwarded variable to the value it names.
-    fn apply_forwarding(&mut self, forwarded: HashMap<SSAVar, SSAVar>) -> Forwarding {
+    fn apply_forwarding(&mut self, forwarded: Forwarded) -> Forwarding {
         let mut stats = Forwarding::default();
         if forwarded.is_empty() {
             return stats;
         }
         let resolved = resolve_chains(forwarded);
-        let map = |var: &SSAVar| resolved.get(var).cloned().unwrap_or_else(|| var.clone());
+        let map = |var: &VarId| resolved.get(*var).copied().unwrap_or(*var);
         for block in self.blocks.edit().iter_mut() {
             // A merge reads each source on its edge; the read moves the same
             // way, and the merge's own definition stays its own.
@@ -71,7 +72,7 @@ impl SSAFunction {
                 }
             }
             for op in block.ops_mut() {
-                let mapped = op.map_sources(&map);
+                let mapped = op.map_sources(map);
                 if mapped != *op {
                     stats.reads_forwarded += moved_reads(op, &mapped);
                     *op = mapped;
@@ -107,23 +108,20 @@ impl SSAFunction {
         if callees.return_addresses().is_empty() {
             return Forwarding::default();
         }
-        let mut forwarded = HashMap::<SSAVar, SSAVar>::new();
+        let storage = |id: VarId| self.canonical_storage_by_var.get(self.var(id)).copied();
+        let mut forwarded = Forwarded::new(self.values.len());
         for block in &self.blocks {
-            let mut pushed: Option<&SSAVar> = None;
+            let mut pushed: Option<VarId> = None;
             let mut carrier = None;
             for op in block.ops() {
                 match op {
-                    SSAOp::Store { addr, val, .. } if val.is_const() => {
-                        pushed = self
-                            .canonical_storage_by_var
-                            .get(addr)
-                            .filter(|storage| Some(**storage) == self.stack_pointer_carrier)
-                            .map(|_| val);
+                    SSAOp::Store { addr, val, .. } if self.var(*val).is_const() => {
+                        pushed = storage(*addr)
+                            .filter(|storage| Some(*storage) == self.stack_pointer_carrier)
+                            .map(|_| *val);
                     }
                     SSAOp::Call { target, .. } => {
-                        carrier = self
-                            .canonical_storage_by_var
-                            .get(target)
+                        carrier = storage(*target)
                             .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
                             .and_then(|storage| callees.return_addresses().get(&storage.offset))
                             .copied();
@@ -134,14 +132,15 @@ impl SSAFunction {
                             "{:#x}: {} defines {:?} against the proven carrier {carrier:?}, \
                              pushed {:?}",
                             block.addr,
-                            dst.display_name(),
-                            self.canonical_storage_by_var.get(dst),
-                            pushed.map(SSAVar::display_name)
+                            self.var(*dst).display_name(),
+                            storage(*dst),
+                            pushed.map(|pushed| self.var(pushed).display_name())
                         );
-                        if self.canonical_storage_by_var.get(dst) == carrier.as_ref()
-                            && let Some(pushed) = pushed.filter(|pushed| pushed.size == dst.size)
+                        if storage(*dst) == carrier
+                            && let Some(pushed) = pushed
+                                .filter(|pushed| self.var(*pushed).size == self.var(*dst).size)
                         {
-                            forwarded.insert(dst.clone(), pushed.clone());
+                            forwarded.insert(*dst, pushed);
                         }
                     }
                     // The boundary's own reads and defines are inside the run.
@@ -168,44 +167,48 @@ impl SSAFunction {
     /// decision with the partition in hand. Every other copy is a value fact.
     fn copy_is_a_program_write(
         &self,
-        dst: &SSAVar,
-        src: &SSAVar,
-        merge_sources: &std::collections::HashSet<SSAVar>,
+        dst: VarId,
+        src: VarId,
+        merge_sources: &IdSet<VarId>,
     ) -> bool {
-        src.is_const() || merge_sources.contains(dst) || self.is_memory_variable(dst)
+        self.var(src).is_const() || merge_sources.contains(dst) || self.is_memory_variable(dst)
     }
 
     /// Whether this variable is a stack slot the function proved private and
     /// treats as a variable.
-    fn is_memory_variable(&self, var: &SSAVar) -> bool {
+    fn is_memory_variable(&self, var: VarId) -> bool {
         self.canonical_storage_by_var
-            .get(var)
+            .get(self.var(var))
             .is_some_and(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
     }
 }
 
+/// Which copy each variable is forwarded to, by variable.
+type Forwarded = IdMap<VarId, VarId>;
+
 /// Follow each copy to the end of its chain, so a copy of a copy names the
 /// original. A chain that meets itself is left pointing at its immediate
-/// source, which is still correct and cannot happen in valid SSA.
-fn resolve_chains(mut forwarded: HashMap<SSAVar, SSAVar>) -> HashMap<SSAVar, SSAVar> {
-    let keys = forwarded.keys().cloned().collect::<Vec<_>>();
-    for key in keys {
-        let mut seen = vec![key.clone()];
-        let mut current = forwarded[&key].clone();
-        while let Some(next) = forwarded.get(&current) {
-            if seen.contains(next) {
+/// source, which is still correct and cannot happen in valid SSA. Each step
+/// is one index, and a chain is walked once per variable that starts it.
+fn resolve_chains(forwarded: Forwarded) -> Forwarded {
+    let mut resolved = forwarded.clone();
+    for key in forwarded.keys() {
+        let mut seen = vec![key];
+        let mut current = forwarded[key];
+        while let Some(next) = forwarded.get(current).copied() {
+            if seen.contains(&next) {
                 break;
             }
-            seen.push(current.clone());
-            current = next.clone();
+            seen.push(current);
+            current = next;
         }
-        forwarded.insert(key, current);
+        resolved.insert(key, current);
     }
-    forwarded
+    resolved
 }
 
 /// How many operands changed between an operation and its rewritten form.
-fn moved_reads(before: &SSAOp, after: &SSAOp) -> usize {
+fn moved_reads(before: &SSAOp<VarId>, after: &SSAOp<VarId>) -> usize {
     before
         .sources()
         .into_iter()
@@ -245,8 +248,8 @@ mod tests {
         SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa")
     }
 
-    fn op_at(func: &SSAFunction, addr: u64, index: usize) -> &SSAOp {
-        &func.get_block(addr).expect("block").ops()[index]
+    fn op_at(func: &SSAFunction, addr: u64, index: usize) -> SSAOp {
+        func.named_block(addr).expect("block").ops()[index].clone()
     }
 
     #[test]
@@ -275,7 +278,7 @@ mod tests {
             },
         ]);
         let original = match op_at(&func, 0x1000, 0) {
-            SSAOp::Copy { src, .. } => src.clone(),
+            SSAOp::Copy { src, .. } => src,
             other => panic!("{other:?}"),
         };
         let stats = func.forward_copies();
@@ -284,12 +287,12 @@ mod tests {
             let SSAOp::Copy { src, .. } = op_at(&func, 0x1000, index) else {
                 panic!("copy kept in place");
             };
-            assert_eq!(*src, original, "each copy now copies the original");
+            assert_eq!(src, original, "each copy now copies the original");
         }
         let SSAOp::IntAdd { a, .. } = op_at(&func, 0x1000, 3) else {
             panic!("add kept in place");
         };
-        assert_eq!(*a, original);
+        assert_eq!(a, original);
         let graph = SsaGraph::from_function(&func);
         for index in 0..=2 {
             let copy = graph
@@ -338,7 +341,7 @@ mod tests {
             SSAFunction::from_blocks_with_arch(&[entry, header, latch, exit], Some(&arch()))
                 .expect("ssa");
         let before = func
-            .get_block(0x1004)
+            .named_block(0x1004)
             .expect("header")
             .phis()
             .iter()
@@ -351,7 +354,7 @@ mod tests {
             "both copies are the merge's edge writes"
         );
         let after = func
-            .get_block(0x1004)
+            .named_block(0x1004)
             .expect("header")
             .phis()
             .iter()
@@ -378,10 +381,10 @@ mod tests {
                 target: reg(0x288, 8),
             },
         ]);
-        let before = func.get_block(0x1000).expect("block").ops().to_vec();
+        let before = func.named_block(0x1000).expect("block").ops().to_vec();
         let stats = func.forward_copies();
         assert_eq!(stats.reads_forwarded, 0);
-        assert_eq!(func.get_block(0x1000).expect("block").ops(), before);
+        assert_eq!(func.named_block(0x1000).expect("block").ops(), before);
     }
 
     #[test]
@@ -401,17 +404,17 @@ mod tests {
         });
         let mut func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
         let source = match op_at(&func, 0x1000, 0) {
-            SSAOp::Copy { src, .. } => src.clone(),
+            SSAOp::Copy { src, .. } => src,
             other => panic!("{other:?}"),
         };
         func.forward_copies();
         let reads_source = func
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("block")
             .ops()
             .iter()
             .any(|op| matches!(op, SSAOp::CallUse { src } if *src == source));
-        let reads_copy = func.get_block(0x1000).expect("block").ops().iter().any(
+        let reads_copy = func.named_block(0x1000).expect("block").ops().iter().any(
             |op| matches!(op, SSAOp::CallUse { src } if src.name() == "RDI" && src.version > 0),
         );
         assert!(

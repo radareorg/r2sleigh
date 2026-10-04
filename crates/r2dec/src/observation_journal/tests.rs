@@ -239,8 +239,7 @@ fn journal_fixture_for_source(
     let plan = BindingPlan::build_shadow(&source).expect("sealed binding plan");
     let function = CFunction::new("journal", CType::Void);
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let names = test_binding_names(&source, Rc::new(plan.clone()), Rc::clone(&function.symbols));
     let journal = LegacyObservationJournal::new(
@@ -477,8 +476,7 @@ fn mixed_use_return_control_elides_only_the_exact_return_use() {
         Some(ValueDisposition::Bound { .. })
     ));
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let function = CFunction::new("mixed_return_control", CType::Void);
     let names = test_binding_names(&source, Rc::new(plan), Rc::clone(&function.symbols));
@@ -558,8 +556,7 @@ fn certified_value_read_rejects_forged_expression_at_allocation_and_seal() {
         other => panic!("certified return must be bound, got {other:?}"),
     };
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let mut journal = LegacyObservationJournal::new(
         &source,
@@ -1009,8 +1006,7 @@ fn source_certified_dead_phi_accounts_for_value_edges_and_write() {
     let plan = Rc::new(BindingPlan::build_shadow(&source).expect("dead-merge-aware plan"));
     let function = CFunction::new("dead_phi", CType::Void);
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let names = test_binding_names(&source, plan, Rc::clone(&function.symbols));
     let journal = LegacyObservationJournal::new(
@@ -1133,8 +1129,7 @@ fn immutable_phi_coalesced_by_one_binding_accounts_for_edges_and_definition() {
         },
     );
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let names = test_binding_names(&source, plan, Rc::clone(&function.symbols));
     let journal = LegacyObservationJournal::new(

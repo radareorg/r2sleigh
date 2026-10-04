@@ -708,7 +708,7 @@ pub(crate) fn movable_for_clause_value(
         return false;
     };
     graph.block_addr_of(definition) == Some(block_addr)
-        && function.get_block(block_addr).is_some_and(|block| {
+        && function.named_block(block_addr).is_some_and(|block| {
             let Some(suffix) = block
                 .position(op)
                 .and_then(|index| index.checked_add(1))

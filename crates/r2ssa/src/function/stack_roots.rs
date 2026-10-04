@@ -101,22 +101,23 @@ impl<'a> Flow<'a> {
             rules: BTreeMap::new(),
             readers: BTreeMap::new(),
         };
+        let var = |id: &crate::VarId| function.var(*id);
         for block in function.blocks() {
             for phi in block.phis() {
-                let sources = phi.sources.iter().map(|(_, source)| source).collect();
-                flow.define(&phi.dst, Rule::Merge(sources), views);
+                let sources = phi.sources.iter().map(|(_, source)| var(source)).collect();
+                flow.define(var(&phi.dst), Rule::Merge(sources), views);
             }
             for op in block.ops() {
                 let (dst, rule) = match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
                     | SSAOp::CallRestore { dst, src }
-                        if dst.size == src.size =>
+                        if var(dst).size == var(src).size =>
                     {
-                        (dst, Rule::Copy(src))
+                        (var(dst), Rule::Copy(var(src)))
                     }
-                    SSAOp::IntAdd { dst, a, b } => (dst, Rule::Add(a, b)),
-                    SSAOp::IntSub { dst, a, b } => (dst, Rule::Sub(a, b)),
+                    SSAOp::IntAdd { dst, a, b } => (var(dst), Rule::Add(var(a), var(b))),
+                    SSAOp::IntSub { dst, a, b } => (var(dst), Rule::Sub(var(a), var(b))),
                     _ => continue,
                 };
                 flow.define(dst, rule, views);
@@ -313,15 +314,17 @@ fn realigned(
                 alignment >= 2 && alignment.unsigned_abs().is_power_of_two()
             })
     };
+    let var = |id: &crate::VarId| function.var(*id);
     let mut candidates = function
         .blocks()
         .iter()
         .flat_map(|block| block.ops())
         .filter_map(|op| match op {
             SSAOp::IntAnd { dst, a, b }
-                if entry_size == Some(dst.size) && (aligns(a, b) || aligns(b, a)) =>
+                if entry_size == Some(var(dst).size)
+                    && (aligns(var(a), var(b)) || aligns(var(b), var(a))) =>
             {
-                Some(dst.clone())
+                Some(var(dst).clone())
             }
             _ => None,
         });

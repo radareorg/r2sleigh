@@ -94,7 +94,7 @@ fn dual_space_exact_parameter_artifact(arch: &ArchSpec) -> SsaArtifact {
 }
 
 fn dual_space_locations(artifact: &SsaArtifact) -> (MemoryLocation, MemoryLocation) {
-    let block = artifact.get_block(0x1000).expect("dual-space block");
+    let block = artifact.named_block(0x1000).expect("dual-space block");
     let mut loads = block
         .ops()
         .iter()
@@ -158,7 +158,7 @@ fn calls_clobber_every_present_typed_memory_space() {
     });
     let artifact = SsaArtifact::for_symbolic(&[block], None).expect("call artifact");
     let call_index = artifact
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("call block")
         .ops()
         .iter()
@@ -2562,7 +2562,7 @@ fn a_convention_result_read_only_by_the_return_is_the_call_result() {
     let (function, graph) = (artifact.function(), artifact.graph());
     let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &[eax]);
     let call_index = function
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("entry block")
         .ops()
         .iter()

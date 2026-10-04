@@ -352,7 +352,7 @@ impl SSAFunction {
             // payload restates.
             let Some((id, SSAOp::Insert(insert))) = graph.op_for_inst(inst.id).and_then(|id| {
                 let block = self.get_block(graph.block_addr_of(inst.id)?)?;
-                Some((id, block.ops().get(block.position(id)?)?))
+                Some((id, self.named(block.ops().get(block.position(id)?)?)))
             }) else {
                 continue;
             };
@@ -419,7 +419,7 @@ mod tests {
         let function = SSAFunction::from_blocks_raw(&[block], Some(&x86_64_arch())).expect("ssa");
         assert!(
             function
-                .blocks()
+                .named_blocks()
                 .iter()
                 .flat_map(|block| block.ops())
                 .any(|op| matches!(op, SSAOp::Insert(_))),

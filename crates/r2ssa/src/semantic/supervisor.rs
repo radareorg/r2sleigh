@@ -30,7 +30,7 @@ impl crate::SsaArtifact {
         let function = self.function();
         let graph = self.graph();
         let sites = function
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| {
                 block

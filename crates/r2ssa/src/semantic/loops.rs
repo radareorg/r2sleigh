@@ -191,7 +191,7 @@ pub(crate) fn loop_carrier_facts(
         body: loop_body,
         ..
     } = loop_;
-    let Some(header_block) = function.get_block(header) else {
+    let Some(header_block) = function.named_block(header) else {
         return Vec::new();
     };
     let mut carriers = header_block

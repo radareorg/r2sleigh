@@ -354,7 +354,7 @@ fn a_restored_stack_pointer_renders() {
         .with_name("restore_demo");
     let restores = prepared
         .function()
-        .get_block(0x1008)
+        .named_block(0x1008)
         .expect("call arm")
         .ops()
         .iter()
@@ -364,7 +364,7 @@ fn a_restored_stack_pointer_renders() {
     assert!(
         prepared
             .function()
-            .get_block(0x1010)
+            .named_block(0x1010)
             .expect("join")
             .phis()
             .iter()
@@ -1294,7 +1294,10 @@ fn native_standard_path_renders_its_internal_build() {
         ],
         &arch,
     );
-    let block = prepared.function().get_block(0x1000).expect("entry block");
+    let block = prepared
+        .function()
+        .named_block(0x1000)
+        .expect("entry block");
     let copy_source = block
         .ops()
         .iter()

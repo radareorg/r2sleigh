@@ -1562,7 +1562,7 @@ impl<'a> ObjectModelBuilder<'a> {
             self.ensure_pointee_chain(root, &path);
         }
 
-        for block in function.blocks() {
+        for block in function.named_blocks() {
             for op in block.ops() {
                 match op {
                     SSAOp::Load { addr, space, .. }

@@ -233,7 +233,7 @@ impl FormatForwardingLookup<'_> {
             return Some(*call_site);
         }
         let (block_addr, op_index) = graph.walk_start(definition)?;
-        let block = function.get_block(block_addr)?;
+        let block = function.named_block(block_addr)?;
         if !matches!(block.ops().get(op_index)?, SSAOp::CallDefine { .. }) {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
@@ -666,7 +666,7 @@ pub(crate) fn reaching_stack_slot_value(
     if !visited.insert(block_addr) {
         return None;
     }
-    let block = function.get_block(block_addr)?;
+    let block = function.named_block(block_addr)?;
     for op in block.ops().get(..boundary)?.iter().rev() {
         match op {
             SSAOp::Copy { dst, src } if query.promoted && dst.name() == query.slot_name => {
@@ -744,7 +744,7 @@ pub(crate) fn reaching_stack_slot_value(
     }
     let mut agreed = None;
     for predecessor in predecessors {
-        let boundary = function.get_block(predecessor)?.ops().len();
+        let boundary = function.named_block(predecessor)?.ops().len();
         let value = reaching_stack_slot_value(
             function,
             prep,
@@ -823,7 +823,7 @@ pub(crate) fn convention_call_boundary(
         // that, an empty scan says nothing was looked at rather than that
         // nothing is there, and a call that passes arguments would be spelled
         // as one that passes none.
-        function.get_block(block_addr)?;
+        function.named_block(block_addr)?;
         if call_entering_stack_pointer_offset(CallPosition {
             function,
             prep,
@@ -1768,7 +1768,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
         if !visited.insert(candidate_addr) {
             continue;
         }
-        let Some(block) = function.get_block(candidate_addr) else {
+        let Some(block) = function.named_block(candidate_addr) else {
             return false;
         };
         let Some(ops) = block.ops().get(..end_op_index) else {
@@ -1812,7 +1812,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
         }
         pending.extend(predecessors.into_iter().filter_map(|predecessor| {
             function
-                .get_block(predecessor)
+                .named_block(predecessor)
                 .map(|block| (predecessor, block.ops().len()))
         }));
     }
@@ -1833,7 +1833,7 @@ pub(crate) fn call_result_values_after_call(
     call_op_index: usize,
     storage: CanonicalStorageId,
 ) -> Option<Vec<CallBoundaryValueFact>> {
-    let block = function.get_block(block_addr)?;
+    let block = function.named_block(block_addr)?;
     let call_defines = block
         .ops()
         .get(call_op_index.checked_add(1)?..)?

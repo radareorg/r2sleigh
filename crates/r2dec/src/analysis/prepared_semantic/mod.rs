@@ -690,8 +690,9 @@ fn populate_owner_exprs(
     inputs: &PreparedSemanticViewInputs<'_>,
 ) {
     let prepared = inputs.prepared;
+    let named_blocks = prepared.function().named_blocks();
     let mut producer_by_dst = HashMap::<SSAVar, &SSAOp>::new();
-    for block in prepared.function().blocks() {
+    for block in &named_blocks {
         for op in block.ops() {
             if let Some(dst) = op.dst() {
                 producer_by_dst.insert(dst.clone(), op);
@@ -713,7 +714,7 @@ fn populate_owner_exprs(
         view.insert_owner_expr(inputs.prepared, &value, CExpr::AddrOf(Box::new(stack_expr)));
     }
 
-    for block in prepared.function().blocks() {
+    for block in prepared.function().named_blocks() {
         for (op_idx, (op_id, op)) in block.sited().enumerate() {
             if let SSAOp::Load {
                 dst,
@@ -724,7 +725,7 @@ fn populate_owner_exprs(
                 let derived = prepared_direct_stack_load_offset(prepared, view, addr)
                     .and_then(|offset| {
                         local_store_owner_expr_for_offset(
-                            symbols, view, prepared, block, op_idx, offset,
+                            symbols, view, prepared, &block, op_idx, offset,
                         )
                         .map(|expr| (expr, Some(offset)))
                         .or_else(|| {
@@ -756,7 +757,7 @@ fn populate_owner_exprs(
                     })
                     .or_else(|| {
                         prepared_load_access_expr_for_addr(
-                            symbols, prepared, block, view, addr, dst.size,
+                            symbols, prepared, &block, view, addr, dst.size,
                         )
                         .map(|expr| (expr, None))
                     });
@@ -776,7 +777,7 @@ fn populate_owner_exprs(
     for _ in 0..4 {
         let mut changed = false;
 
-        for block in prepared.function().blocks() {
+        for block in prepared.function().named_blocks() {
             for op in block.ops() {
                 match op {
                     SSAOp::Copy { dst, src }
@@ -1081,7 +1082,7 @@ fn refine_load_owner_exprs(
     inputs: &PreparedSemanticViewInputs<'_>,
 ) {
     let prepared = inputs.prepared;
-    for block in prepared.function().blocks() {
+    for block in prepared.function().named_blocks() {
         for (op_idx, (op_id, op)) in block.sited().enumerate() {
             let SSAOp::Load {
                 dst,
@@ -1094,7 +1095,7 @@ fn refine_load_owner_exprs(
             let candidate = prepared_direct_stack_load_offset(prepared, view, addr)
                 .and_then(|offset| {
                     local_store_owner_expr_for_offset(
-                        symbols, view, prepared, block, op_idx, offset,
+                        symbols, view, prepared, &block, op_idx, offset,
                     )
                     .map(|expr| (expr, Some(offset)))
                     .or_else(|| {
@@ -1122,7 +1123,7 @@ fn refine_load_owner_exprs(
                 })
                 .or_else(|| {
                     prepared_load_access_expr_for_addr(
-                        symbols, prepared, block, view, addr, dst.size,
+                        symbols, prepared, &block, view, addr, dst.size,
                     )
                     .map(|expr| (expr, None))
                 });
@@ -1429,7 +1430,7 @@ fn populate_derived_predicates(
     for _ in 0..4 {
         let mut changed = false;
 
-        for block in inputs.prepared.function().blocks() {
+        for block in inputs.prepared.function().named_blocks() {
             for op in block.ops() {
                 let Some(dst) = op.dst() else {
                     continue;
@@ -1794,7 +1795,7 @@ fn canonical_call_authoritative_args(
     let Some(block) = prepared
         .graph()
         .block_addr_of(site)
-        .and_then(|addr| function.get_block(addr))
+        .and_then(|addr| function.named_block(addr))
     else {
         return Vec::new();
     };
@@ -1808,7 +1809,7 @@ fn canonical_call_authoritative_args(
             break;
         }
         if let Some(expr) =
-            authoritative_expr_for_prepared_value(symbols, block, prepared, view, argument.value)
+            authoritative_expr_for_prepared_value(symbols, &block, prepared, view, argument.value)
         {
             args.push((argument.value, expr));
         } else {
@@ -1827,7 +1828,7 @@ fn canonical_call_authoritative_args(
             break;
         }
         if let Some(expr) =
-            authoritative_expr_for_prepared_value(symbols, block, prepared, view, stack_arg.value)
+            authoritative_expr_for_prepared_value(symbols, &block, prepared, view, stack_arg.value)
         {
             args.push((stack_arg.value, expr));
         } else {

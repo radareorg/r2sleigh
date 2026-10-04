@@ -37,7 +37,7 @@ pub(crate) fn collect_access_summaries(
 ) -> BTreeMap<InstId, AccessSummary> {
     let mut summaries = BTreeMap::new();
 
-    for block in function.blocks() {
+    for block in function.named_blocks() {
         for (op_id, op) in block.sited() {
             let Some(inst_id) = graph.inst_for_op(op_id) else {
                 continue;
@@ -250,7 +250,7 @@ pub(crate) fn build_memory_ssa(
                     *held = Held::Merged(block_addr);
                 }
             }
-            let Some(block) = function.get_block(block_addr) else {
+            let Some(block) = function.named_block(block_addr) else {
                 return state;
             };
             for (op_id, _) in block.sited() {

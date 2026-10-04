@@ -176,9 +176,9 @@ mod tests {
             });
             let function = SSAFunction::from_blocks_raw(&[block], None).expect("it builds");
             let converted = function
-                .blocks()
-                .iter()
-                .flat_map(|block| block.ops())
+                .named_blocks()
+                .into_iter()
+                .flat_map(|block| block.ops().to_vec())
                 .find(|ssa| ssa.dst().is_some())
                 .expect("the operation defines a value");
             assert_eq!(converted.value_use(), op.value_use(), "{op:?}");

@@ -1,6 +1,7 @@
 //! The rewrites a built function applies to itself.
 
 use super::*;
+use crate::dense::{IdMap, IdSet, IdVec};
 
 impl SSAFunction {
     /// Give every lane of a register read as the function was entered with it
@@ -35,68 +36,61 @@ impl SSAFunction {
             Carried,
             Observed,
         }
-        let mut uses = BTreeMap::<SSAVar, Vec<(ScratchUse, SSAVar)>>::new();
+        let mut uses =
+            IdVec::<VarId, Vec<(ScratchUse, VarId)>>::filled(self.values.len(), Vec::new());
         for block in self.blocks.iter() {
             for phi in block.phis() {
                 for (_, src) in &phi.sources {
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((ScratchUse::Carried, phi.dst.clone()));
+                    uses[*src].push((ScratchUse::Carried, phi.dst));
                 }
             }
             for op in block.ops() {
                 if let SSAOp::Insert(insert) = op {
-                    let (src, value, position) = (&insert.src, &insert.value, &insert.position);
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((ScratchUse::InsertSource, src.clone()));
-                    for other in [value, position] {
-                        uses.entry((*other).clone())
-                            .or_default()
-                            .push((ScratchUse::Observed, (*other).clone()));
+                    uses[insert.src].push((ScratchUse::InsertSource, insert.src));
+                    for other in [insert.value, insert.position] {
+                        uses[other].push((ScratchUse::Observed, other));
                     }
                 } else {
                     for src in op.sources() {
-                        uses.entry(src.clone())
-                            .or_default()
-                            .push((ScratchUse::Observed, src.clone()));
+                        uses[*src].push((ScratchUse::Observed, *src));
                     }
                 }
             }
         }
-        let reaches_inserts_only = |start: &SSAVar| {
-            let mut pending = vec![start.clone()];
-            let mut seen = BTreeSet::new();
+        let reaches_inserts_only = |start: VarId| {
+            let mut pending = vec![start];
+            let mut seen = IdSet::<VarId>::new(uses.len());
             let mut inserted = false;
             while let Some(var) = pending.pop() {
-                if !seen.insert(var.clone()) {
+                if !seen.insert(var) {
                     continue;
                 }
-                for (kind, next) in uses.get(&var).into_iter().flatten() {
+                for (kind, next) in &uses[var] {
                     match kind {
                         ScratchUse::InsertSource => inserted = true,
-                        ScratchUse::Carried => pending.push(next.clone()),
+                        ScratchUse::Carried => pending.push(*next),
                         ScratchUse::Observed => return false,
                     }
                 }
             }
             inserted
         };
+        // In variable order, which is the order the zeros are minted in.
         let scratch = uses
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter(|var| var.version == 0 && reaches_inserts_only(var))
-            .filter_map(|var| {
-                let storage = self.canonical_storage_by_var.get(&var).copied()?;
+            .iter()
+            .filter(|(_, reads)| !reads.is_empty())
+            .map(|(id, _)| id)
+            .filter(|id| self.var(*id).version == 0 && reaches_inserts_only(*id))
+            .filter_map(|id| {
+                let var = self.var(id);
+                let storage = self.canonical_storage_by_var.get(var).copied()?;
                 (storage.space == CanonicalStorageSpace::Register
                     && !abi_carriers.iter().any(|carrier| {
                         carrier.space == storage.space
                             && carrier.offset < storage.offset + u64::from(storage.size)
                             && storage.offset < carrier.offset + u64::from(carrier.size)
                     }))
-                .then_some(var)
+                .then(|| var.clone())
             })
             .collect::<BTreeSet<_>>();
         if scratch.is_empty() {
@@ -106,48 +100,50 @@ impl SSAFunction {
         // zero-extension of a narrow one -- the same operation the prelude
         // spells for every other wide value.
         let mut minted = Vec::new();
-        let zeros = scratch
-            .iter()
-            .map(|var| {
-                let zero = if var.size <= 16 {
-                    SSAVar::constant(0, var.size)
-                } else {
-                    let disambiguator = self
-                        .canonical_storage_by_var
-                        .keys()
-                        .filter(|other| other.name() == var.name())
-                        .map(SSAVar::rename_disambiguator)
-                        .max()
-                        .map_or(1, |max| max + 1);
-                    // Version one: it is a definition, and version zero is
-                    // reserved for the value a block was entered with.
-                    let zero = SSAVar::new(var.name(), 1, var.size)
-                        .with_rename_disambiguator(disambiguator);
-                    minted.push(SSAOp::IntZExt {
-                        dst: zero.clone(),
-                        src: SSAVar::constant(0, 4),
-                    });
-                    if let Some(storage) = self.canonical_storage_by_var.get(var).copied() {
-                        self.canonical_storage_by_var.insert(zero.clone(), storage);
-                    }
-                    zero
-                };
-                (var.clone(), zero)
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut zeros = IdMap::<VarId, VarId>::new(self.values.len());
+        for var in &scratch {
+            let zero = if var.size <= 16 {
+                SSAVar::constant(0, var.size)
+            } else {
+                let disambiguator = self
+                    .canonical_storage_by_var
+                    .keys()
+                    .filter(|other| other.name() == var.name())
+                    .map(SSAVar::rename_disambiguator)
+                    .max()
+                    .map_or(1, |max| max + 1);
+                // Version one: it is a definition, and version zero is
+                // reserved for the value a block was entered with.
+                let zero =
+                    SSAVar::new(var.name(), 1, var.size).with_rename_disambiguator(disambiguator);
+                minted.push(SSAOp::IntZExt {
+                    dst: zero.clone(),
+                    src: SSAVar::constant(0, 4),
+                });
+                if let Some(storage) = self.canonical_storage_by_var.get(var).copied() {
+                    self.canonical_storage_by_var.insert(zero.clone(), storage);
+                }
+                zero
+            };
+            let held = self
+                .values
+                .id_of(var)
+                .expect("a scratch root is an operand");
+            zeros.insert(held, self.values.intern(&zero));
+        }
         for block in self.blocks.edit().iter_mut() {
             for phi in block.phis_mut() {
                 for (_, src) in &mut phi.sources {
-                    if let Some(zero) = zeros.get(src) {
-                        *src = zero.clone();
+                    if let Some(zero) = zeros.get(*src) {
+                        *src = *zero;
                     }
                 }
             }
             for op in block.ops_mut() {
                 if let SSAOp::Insert(insert) = op
-                    && let Some(zero) = zeros.get(&insert.src)
+                    && let Some(zero) = zeros.get(insert.src)
                 {
-                    insert.src = zero.clone();
+                    insert.src = *zero;
                 }
             }
         }
@@ -195,7 +191,7 @@ impl SSAFunction {
             .copied()
             .chain(cleared_flag.map(|storage| (storage, 0)))
             .collect::<BTreeMap<_, _>>();
-        let storage_of = |var: &SSAVar| self.canonical_storage_by_var.get(var).copied();
+        let storage_of = |id: VarId| self.canonical_storage_by_var.get(self.var(id)).copied();
         // The entry values, and the value each call's clobber leaves in the flag.
         let boundary_values = self
             .canonical_storage_by_var
@@ -208,9 +204,9 @@ impl SSAFunction {
                     .flat_map(|block| block.ops())
                     .filter_map(|op| match op {
                         SSAOp::CallDefine { dst }
-                            if cleared_flag.is_some() && storage_of(dst) == cleared_flag =>
+                            if cleared_flag.is_some() && storage_of(*dst) == cleared_flag =>
                         {
-                            Some((dst.clone(), 0))
+                            Some((self.var(*dst).clone(), 0))
                         }
                         _ => None,
                     }),
@@ -224,10 +220,16 @@ impl SSAFunction {
             "{} boundary values become the constants stated for them: entry {entry_constants:?}, after a call {cleared_flag:?}",
             boundary_values.len()
         );
-        let substitute = |var: &SSAVar| match boundary_values.get(var) {
-            Some(value) => SSAVar::constant(*value, var.size),
-            None => var.clone(),
-        };
+        let mut substitutes = IdMap::<VarId, VarId>::new(self.values.len());
+        for (var, value) in &boundary_values {
+            if let Some(held) = self.values.id_of(var) {
+                substitutes.insert(
+                    held,
+                    self.values.intern(&SSAVar::constant(*value, var.size)),
+                );
+            }
+        }
+        let substitute = |id: &VarId| substitutes.get(*id).copied().unwrap_or(*id);
         for block in self.blocks.edit().iter_mut() {
             for phi in block.phis_mut() {
                 for (_, src) in &mut phi.sources {
@@ -235,7 +237,7 @@ impl SSAFunction {
                 }
             }
             for op in block.ops_mut() {
-                *op = op.map_sources(&substitute);
+                *op = op.map_sources(substitute);
             }
         }
     }
@@ -312,6 +314,7 @@ impl SSAFunction {
                 let SSAOp::Subpiece { dst, src, offset } = op else {
                     continue;
                 };
+                let (dst, src) = (self.var(*dst), self.var(*src));
                 let storage = self.canonical_storage_by_var.get(src).copied();
                 if !is_root_entry(src, storage) {
                     continue;
@@ -380,20 +383,22 @@ impl SSAFunction {
                 self.entry_lanes
                     .insert(projection.clone(), root_var.clone());
             }
+            let projection_id = self.values.intern(&projection);
             for (addr, op_index, inside) in reads {
                 if let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), addr)
                     && let Some(SSAOp::Subpiece { dst, .. }) = block.ops().get(op_index)
                 {
-                    let dst = dst.clone();
-                    block.ops_mut()[op_index] = if inside == 0 && dst.size == width {
+                    let dst = *dst;
+                    block.ops_mut()[op_index] = if inside == 0 && self.values.var(dst).size == width
+                    {
                         SSAOp::Copy {
                             dst,
-                            src: projection.clone(),
+                            src: projection_id,
                         }
                     } else {
                         SSAOp::Subpiece {
                             dst,
-                            src: projection.clone(),
+                            src: projection_id,
                             offset: inside,
                         }
                     };
@@ -416,13 +421,17 @@ impl SSAFunction {
         // name carries. Both were asked once per root, and each asking walked
         // the whole function, so a body with many entry registers paid for it
         // as many times over.
-        let mut read_anywhere = BTreeSet::<SSAVar>::new();
+        let mut read_anywhere = IdSet::<VarId>::new(self.values.len());
         for block in self.blocks.iter() {
             for phi in block.phis() {
-                read_anywhere.extend(phi.sources.iter().map(|(_, src)| src.clone()));
+                for (_, src) in &phi.sources {
+                    read_anywhere.insert(*src);
+                }
             }
             for op in block.ops() {
-                read_anywhere.extend(op.sources().into_iter().cloned());
+                for src in op.sources() {
+                    read_anywhere.insert(*src);
+                }
             }
         }
         let mut highest_disambiguator = BTreeMap::<String, u32>::new();
@@ -432,16 +441,20 @@ impl SSAFunction {
                 .or_insert(0);
             *entry = (*entry).max(var.rename_disambiguator());
         }
-        let mut substitutions = BTreeMap::<SSAVar, SSAVar>::new();
+        let mut substitutions = IdMap::<VarId, VarId>::new(self.values.len());
         for (root_var, (root, lanes)) in lanes_by_root {
             // Only for a root a C integer can hold; a vector register's
             // lanes are not parameters and have no declaration to rest on.
             if root.size > 8 {
                 continue;
             }
-            if !read_anywhere.contains(&root_var) {
+            let Some(root_id) = self
+                .values
+                .id_of(&root_var)
+                .filter(|id| read_anywhere.contains(*id))
+            else {
                 continue;
-            }
+            };
             let disambiguator = highest_disambiguator
                 .get(root_var.name())
                 .map_or(1, |max| max + 1);
@@ -470,19 +483,14 @@ impl SSAFunction {
             highest_disambiguator.insert(composed.name().to_string(), disambiguator);
             self.canonical_storage_by_var.insert(composed.clone(), root);
             self.formal_roots.insert(composed.clone(), root);
-            substitutions.insert(root_var, composed);
+            substitutions.insert(root_id, self.values.intern(&composed));
         }
         // One walk for every root. Each root substitutes one variable, and
         // rewriting the body once per root read every operation R times to do
         // R independent substitutions; no root's replacement is another
         // root's key, because each composed variable is minted here.
         if !substitutions.is_empty() {
-            let replace = |var: &SSAVar| {
-                substitutions
-                    .get(var)
-                    .cloned()
-                    .unwrap_or_else(|| var.clone())
-            };
+            let replace = |var: &VarId| substitutions.get(*var).copied().unwrap_or(*var);
             for block in self.blocks.edit().iter_mut() {
                 for phi in block.phis_mut() {
                     for (_, src) in &mut phi.sources {
@@ -490,7 +498,7 @@ impl SSAFunction {
                     }
                 }
                 for op in block.ops_mut() {
-                    *op = op.map_sources(&replace);
+                    *op = op.map_sources(replace);
                 }
             }
         }
@@ -526,13 +534,14 @@ impl SSAFunction {
             self.stack_pointer_carrier(),
             function_interface.and_then(SourceFunctionInterface::frame_pointer_storage),
         ];
-        let writes_no_frame_carrier = |output: &Option<SSAVar>| {
+        let writes_no_frame_carrier = |output: &Option<VarId>| {
             output.as_ref().is_none_or(|dst| {
-                self.canonical_storage_for_var(dst).is_none_or(|storage| {
-                    !frame_carriers.iter().flatten().any(|carrier| {
-                        crate::semantic::register_storages_overlap(storage, *carrier)
+                self.canonical_storage_for_var(self.var(*dst))
+                    .is_none_or(|storage| {
+                        !frame_carriers.iter().flatten().any(|carrier| {
+                            crate::semantic::register_storages_overlap(storage, *carrier)
+                        })
                     })
-                })
             })
         };
         let entry_stack_roots_are_stable = self.blocks().iter().all(|block| {

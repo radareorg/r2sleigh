@@ -21,21 +21,30 @@ use crate::block::{BlockMut, SSABlock};
 
 use super::edit::EditPlan;
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Blocks {
-    items: Vec<SSABlock>,
+#[derive(Debug, Clone)]
+pub(crate) struct Blocks<V = crate::value_table::VarId> {
+    items: Vec<SSABlock<V>>,
     arena: OpArena,
 }
 
-impl Blocks {
-    pub(crate) fn new(items: Vec<SSABlock>, arena: OpArena) -> Self {
+impl<V> Default for Blocks<V> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            arena: OpArena::default(),
+        }
+    }
+}
+
+impl<V> Blocks<V> {
+    pub(crate) fn new(items: Vec<SSABlock<V>>, arena: OpArena) -> Self {
         Self { items, arena }
     }
 
     /// Blocks no function has numbered yet: each is adopted into a fresh
     /// arena, in order, as though the lift emitted it.
     #[cfg(test)]
-    pub(crate) fn adopting(mut items: Vec<SSABlock>) -> Self {
+    pub(crate) fn adopting(mut items: Vec<SSABlock<V>>) -> Self {
         let mut arena = OpArena::default();
         for block in &mut items {
             block.adopt(&mut arena);
@@ -45,20 +54,20 @@ impl Blocks {
 
     /// The blocks, to be rewritten in place: no block gains or loses an
     /// operation this way. For the sealing steps that rewrite operands.
-    pub(super) fn edit(&mut self) -> &mut [SSABlock] {
+    pub(super) fn edit(&mut self) -> &mut [SSABlock<V>] {
         &mut self.items
     }
 
     /// One block, open for any change, with the arena that change mints
     /// from.
-    pub(super) fn block_mut(&mut self, index: usize) -> Option<BlockMut<'_>> {
+    pub(super) fn block_mut(&mut self, index: usize) -> Option<BlockMut<'_, V>> {
         let block = self.items.get_mut(index)?;
         Some(BlockMut::new(block, &mut self.arena))
     }
 
     /// Keep the blocks `keep` accepts; every operation and phi of the others
     /// is tombstoned as removed by `pass`.
-    pub(super) fn retain(&mut self, pass: Pass, mut keep: impl FnMut(&SSABlock) -> bool) {
+    pub(super) fn retain(&mut self, pass: Pass, mut keep: impl FnMut(&SSABlock<V>) -> bool) {
         let arena = &mut self.arena;
         self.items.retain(|block| {
             let kept = keep(block);
@@ -92,7 +101,11 @@ impl Blocks {
     ///
     /// `O(n)` to find which block holds each operation, then one walk of each
     /// block the plan touches.
-    pub(super) fn apply(&mut self, plan: EditPlan) {
+    pub(super) fn apply(
+        &mut self,
+        plan: EditPlan,
+        convert: &mut impl FnMut(&crate::op::SSAOp) -> crate::op::SSAOp<V>,
+    ) {
         if plan.is_empty() {
             return;
         }
@@ -105,7 +118,7 @@ impl Blocks {
         let mut edits = plan.by_block(|id: OpId| block_of.get(id.index()).copied().flatten());
         for block in &mut self.items {
             if let Some(edits) = edits.remove(&block.addr) {
-                block.apply(&mut self.arena, edits);
+                block.apply(&mut self.arena, edits, convert);
             }
         }
     }
@@ -116,17 +129,17 @@ impl Blocks {
     }
 }
 
-impl Deref for Blocks {
-    type Target = [SSABlock];
+impl<V> Deref for Blocks<V> {
+    type Target = [SSABlock<V>];
 
-    fn deref(&self) -> &[SSABlock] {
+    fn deref(&self) -> &[SSABlock<V>] {
         &self.items
     }
 }
 
-impl<'a> IntoIterator for &'a Blocks {
-    type Item = &'a SSABlock;
-    type IntoIter = std::slice::Iter<'a, SSABlock>;
+impl<'a, V> IntoIterator for &'a Blocks<V> {
+    type Item = &'a SSABlock<V>;
+    type IntoIter = std::slice::Iter<'a, SSABlock<V>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.items.iter()

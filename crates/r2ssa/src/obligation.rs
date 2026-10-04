@@ -1749,7 +1749,7 @@ mod tests {
             site: super::CanonicalInstructionSite::Op(
                 artifact
                     .function()
-                    .get_block(block_addr)
+                    .named_block(block_addr)
                     .and_then(|block| block.op_id(index))
                     .expect("the fixture's operation"),
             ),
@@ -2658,7 +2658,7 @@ mod tests {
         // function computes and can spell.
         let (block_addr, op_index) = artifact
             .function()
-            .get_block(0x3180)
+            .named_block(0x3180)
             .expect("loop block")
             .ops()
             .iter()

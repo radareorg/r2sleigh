@@ -175,7 +175,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
             .expect("prepared SSA should build");
     let function = prepared.function();
     let facts = prepared.decompile_prep_facts();
-    let block = function.get_block(0x4000).expect("entry block");
+    let block = function.named_block(0x4000).expect("entry block");
 
     // The projection is the layer a new operation is most easily missed
     // in: three separate tables key on the operation kind, and all three
@@ -610,7 +610,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
 
     let return_idx = prepared
         .function()
-        .get_block(0x1600)
+        .named_block(0x1600)
         .and_then(|block| {
             block
                 .ops()
@@ -627,14 +627,14 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
 
     let result = prepared
         .function()
-        .get_block(0x1600)
+        .named_block(0x1600)
         .and_then(|block| {
             block
                 .ops()
                 .iter()
                 .enumerate()
                 .find_map(|(op_idx, op)| match op {
-                    SSAOp::CallDefine { dst } => Some((op_idx, dst)),
+                    SSAOp::CallDefine { dst } => Some((op_idx, dst.clone())),
                     _ => None,
                 })
         })
@@ -896,7 +896,7 @@ fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_
     .expect("the sealed function validates");
     let function = artifact.function();
     let defined = function
-        .blocks()
+        .named_blocks()
         .iter()
         .flat_map(|block| block.ops())
         .filter_map(SSAOp::dst)
@@ -908,7 +908,7 @@ fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_
     );
     // The whole register is rebuilt over the caller's register, not zero.
     let rebuilt = function
-        .blocks()
+        .named_blocks()
         .iter()
         .flat_map(|block| block.ops())
         .find_map(|op| match op {
