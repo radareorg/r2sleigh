@@ -10,6 +10,15 @@ use r2ssa::PhiNode;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The operation a fixture names by its block and its place in the block.
+fn op_at(blocks: &[SSABlock], block_addr: u64, index: usize) -> r2ssa::OpId {
+    blocks
+        .iter()
+        .find(|block| block.addr == block_addr)
+        .and_then(|block| block.op_id(index))
+        .expect("the fixture's operation")
+}
+
 fn parse_test_type(spelling: &str, ptr_bits: u32) -> CTypeLike {
     parse_c_type_like(spelling, ptr_bits).expect("test type spelling should parse")
 }
@@ -111,10 +120,10 @@ fn detached_advisory_analysis_drops_invalid_interproc_schema() {
 fn local_pointee_type_evidence_requires_exact_ram_space() {
     let ram_addr = SSAVar::new("ram_addr", 1, 8);
     let custom_addr = SSAVar::new("custom_addr", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        phis: Vec::new(),
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        0,
+        vec![
             SSAOp::Store {
                 space: r2il::SpaceId::Ram,
                 addr: ram_addr.clone(),
@@ -126,8 +135,8 @@ fn local_pointee_type_evidence_requires_exact_ram_space() {
                 val: SSAVar::new("custom_value", 1, 8),
             },
         ],
-        size: 0,
-    }];
+        Vec::new(),
+    )];
 
     let types = local_pointer_pointee_types(&blocks, 64, &HashMap::new());
     assert_eq!(

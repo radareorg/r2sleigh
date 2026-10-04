@@ -44,9 +44,6 @@ fn memory_access_authorities_match(
         r2il::refusal_evidence!("memory-access-authority", "{:?}: {why}", fact.id);
         false
     };
-    if graph.op_site_for_inst(fact.id.inst) != Some((fact.block_addr, fact.op_index)) {
-        return no("the instruction does not stand where the access says");
-    }
     // A conditional store performs two: it reads to test the monitor and
     // writes where the monitor held, and both are its own.
     let records_several = matches!(graph_op, SSAOp::StoreConditional { .. });
@@ -301,26 +298,20 @@ impl MachineValueUse {
             .filter(|fact| {
                 fact.id == access
                     && fact.provenance_complete
-                    && artifact.graph().op_site_for_inst(access.inst)
-                        == Some((fact.block_addr, fact.op_index))
                     && artifact.objects().object(fact.object).is_some()
             })
             .ok_or_else(|| {
-                // Which of the four terms failed is which layer to look at.
+                // Which of the three terms failed is which layer to look at.
                 let fact = artifact.facts().structured.memory_accesses.get(&access);
                 r2il::refusal_evidence!(
                     "memory-access-entity",
-                    "{access:?}: fact={:?} site={:?} object_known={}",
-                    fact.map(|fact| (fact.block_addr, fact.op_index, fact.provenance_complete)),
-                    artifact.graph().op_site_for_inst(access.inst),
+                    "{access:?}: provenance_complete={:?} object_known={}",
+                    fact.map(|fact| fact.provenance_complete),
                     fact.is_some_and(|fact| artifact.objects().object(fact.object).is_some())
                 );
                 MachineBuildError::EntityMismatch(access.inst)
             })?;
-        let source_space = artifact
-            .machine_context()
-            .memory_space_at(fact.block_addr, fact.op_index)
-            .ok_or(MachineBuildError::MachineContextMismatch)?;
+        let source_space = fact.space;
         let source_op = match &artifact
             .graph()
             .inst(access.inst)
@@ -331,15 +322,12 @@ impl MachineValueUse {
             _ => return Err(MachineBuildError::EntityMismatch(access.inst)),
         };
         let prepared_op = artifact
-            .function()
-            .get_block(fact.block_addr)
-            .and_then(|block| block.ops.get(fact.op_index))
+            .graph()
+            .function_op(artifact.function(), access.inst)
             .ok_or_else(|| {
                 r2il::refusal_evidence!(
                     "memory-access-entity",
-                    "{access:?}: no prepared operation at {:#x}:{}",
-                    fact.block_addr,
-                    fact.op_index
+                    "{access:?}: no prepared operation"
                 );
                 MachineBuildError::EntityMismatch(access.inst)
             })?;
@@ -358,9 +346,7 @@ impl MachineValueUse {
         ) {
             r2il::refusal_evidence!(
                 "memory-access-entity",
-                "{access:?}: {source_op:?} and the access at {:#x}:{} do not describe one another",
-                fact.block_addr,
-                fact.op_index
+                "{access:?}: {source_op:?} and the access do not describe one another"
             );
             return Err(MachineBuildError::EntityMismatch(access.inst));
         }
@@ -2726,10 +2712,7 @@ impl MachineFunction {
                         && inst.inputs.first() == Some(&fact.address)
                 })
                 .ok_or(MachineBuildError::EntityMismatch(access.inst))?;
-            let source_space = artifact
-                .machine_context()
-                .memory_space_at(fact.block_addr, fact.op_index)
-                .ok_or(MachineBuildError::MachineContextMismatch)?;
+            let source_space = fact.space;
             let source_model = artifact.machine_context().memory_model();
             let space_model = source_model
                 .space(source_space)
@@ -3244,10 +3227,7 @@ impl MachineFunction {
                     && read_operands_are_exact(source_op_of(inst), &inst.inputs, fact.address)
             })
             .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
-        let source_space = artifact
-            .machine_context()
-            .memory_space_at(fact.block_addr, fact.op_index)
-            .ok_or(MachineBuildError::MachineContextMismatch)?;
+        let source_space = fact.space;
         let source_op = match &inst.payload {
             InstPayload::Op(
                 op @ (SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }),
@@ -3263,9 +3243,8 @@ impl MachineFunction {
             }
         };
         let prepared_op = artifact
-            .function()
-            .get_block(fact.block_addr)
-            .and_then(|block| block.ops.get(fact.op_index))
+            .graph()
+            .function_op(artifact.function(), fact.id.inst)
             .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
         let source_model = artifact.machine_context().memory_model();
         let source_space_model = source_model
@@ -3476,34 +3455,29 @@ impl MachineBuilder {
         let [access] = accesses.as_slice() else {
             return Ok(());
         };
-        let source_space = artifact
-            .machine_context()
-            .memory_space_at(access.block_addr, access.op_index);
+        let source_space = access.space;
         let model = artifact.machine_context().memory_model();
-        let space_model = source_space.and_then(|space| model.space(space));
+        let space_model = model.space(source_space);
         let prepared_op = artifact
-            .function()
-            .get_block(access.block_addr)
-            .and_then(|block| block.ops.get(access.op_index));
+            .graph()
+            .function_op(artifact.function(), access.id.inst);
         if !access.provenance_complete
             || !access.is_write
             || access.id.ordinal != 0
             || prepared_op.is_none_or(|prepared_op| {
-                source_space.is_none_or(|source_space| {
-                    !memory_access_authorities_match(
-                        graph,
-                        artifact.objects(),
-                        op,
-                        prepared_op,
-                        source_space,
-                        access,
-                        artifact
-                            .facts()
-                            .structured
-                            .member_run_stores
-                            .get(&access.id.inst),
-                    )
-                })
+                !memory_access_authorities_match(
+                    graph,
+                    artifact.objects(),
+                    op,
+                    prepared_op,
+                    source_space,
+                    access,
+                    artifact
+                        .facts()
+                        .structured
+                        .member_run_stores
+                        .get(&access.id.inst),
+                )
             })
             || inst.inputs.first() != Some(&access.address)
             || !model.is_available()

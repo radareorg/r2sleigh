@@ -80,7 +80,7 @@ mod tests {
 
         // Check that we have versioned variables
         let mut found_write = false;
-        for op in &ssa_block.ops {
+        for op in ssa_block.ops() {
             if let Some(dst) = op.dst() {
                 // All writes should have version > 0
                 assert!(dst.version > 0, "Written var should have version > 0");
@@ -102,7 +102,7 @@ mod tests {
         assert!(!ssa_block.is_empty(), "SSA block should not be empty");
 
         // Find the copy operation
-        for op in &ssa_block.ops {
+        for op in ssa_block.ops() {
             if let SSAOp::Copy { dst, src } = op {
                 // RAX should be written (version > 0)
                 if dst.name().to_lowercase().contains("rax") {
@@ -128,7 +128,7 @@ mod tests {
         assert!(!ssa_block.is_empty(), "SSA block should not be empty");
 
         let add = ssa_block
-            .ops
+            .ops()
             .iter()
             .find_map(|op| match op {
                 SSAOp::IntAdd { dst, a, b } => Some((dst, a, b)),
@@ -181,14 +181,14 @@ mod tests {
         }
 
         let rax_source_versions: Vec<u32> = ssa_block
-            .ops
+            .ops()
             .iter()
             .flat_map(|op| op.sources())
             .filter(|var| is_rax_family(var.name()))
             .map(|var| var.version)
             .collect();
         let rax_dest_versions: Vec<u32> = ssa_block
-            .ops
+            .ops()
             .iter()
             .filter_map(|op| op.dst())
             .filter(|var| is_rax_family(var.name()))
@@ -198,17 +198,17 @@ mod tests {
         assert!(
             rax_source_versions.contains(&0),
             "inc rax must read the incoming RAX-family value, got ops={:?}",
-            ssa_block.ops
+            ssa_block.ops()
         );
         assert!(
             rax_dest_versions.iter().any(|version| *version > 0),
             "inc rax must define a fresh RAX-family version, got ops={:?}",
-            ssa_block.ops
+            ssa_block.ops()
         );
         assert!(
             rax_dest_versions.windows(2).all(|pair| pair[0] < pair[1]),
             "RAX-family definitions must be monotonic, got versions={rax_dest_versions:?}, ops={:?}",
-            ssa_block.ops
+            ssa_block.ops()
         );
     }
 
@@ -241,16 +241,16 @@ mod tests {
         let entry = func.get_block(0x401379).expect("entry block");
 
         assert!(
-            entry.ops.iter().any(
+            entry.ops().iter().any(
                 |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected decompile-prep SSA to materialize a post-call return-register definition, got ops={:?}",
-            entry.ops
+            entry.ops()
         );
         // `test eax, eax` reads the low lane of the return register, so the
         // compare's operand is the projection rather than the register itself.
         let lane = entry
-            .ops
+            .ops()
             .iter()
             .find_map(|op| match op {
                 SSAOp::Subpiece { dst, src, .. }
@@ -263,12 +263,12 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!(
                     "expected a lane projection of a fresh return register, got ops={:?}",
-                    entry.ops
+                    entry.ops()
                 )
             });
         assert!(
             entry
-                .ops
+                .ops()
                 .iter()
                 .any(|op| matches!(op, SSAOp::IntAnd { a, b, .. }
                 if a.name() == lane.name()
@@ -276,7 +276,7 @@ mod tests {
                     && a.version == lane.version
                     && b.version == lane.version)),
             "expected post-call compare/test to use a fresh return-register version, got ops={:?}",
-            entry.ops
+            entry.ops()
         );
     }
 
@@ -339,18 +339,18 @@ mod tests {
         let copy_arm = func.get_block(0x4022ad).expect("copy arm");
 
         assert!(
-            entry.ops.iter().any(
+            entry.ops().iter().any(
                 |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected first call boundary to materialize a fresh RAX definition even without a prior explicit RAX write, got ops={:?}",
-            entry.ops
+            entry.ops()
         );
         assert!(
-            copy_arm.ops.iter().any(
+            copy_arm.ops().iter().any(
                 |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected second call boundary to materialize a fresh RAX definition for memcpy, got ops={:?}",
-            copy_arm.ops
+            copy_arm.ops()
         );
     }
 

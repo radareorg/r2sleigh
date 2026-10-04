@@ -6,7 +6,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::control::{SsaExecutionStopReason, SsaWorkControl, UncheckedSsaWorkControl};
+use crate::control::{SsaExecutionStopReason, SsaWorkControl};
+use crate::function::{EditPlan, ShapeEdit};
 use crate::{
     BlockTerminator, CanonicalStorageId, CanonicalStorageSpace, PhiNode, SSAFunction, SSAOp,
     SSAVar, SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite,
@@ -77,8 +78,12 @@ pub struct OptimizationStats {
 }
 
 /// Run the SSA optimization pipeline on a function.
-pub fn optimize_function(func: &mut SSAFunction, config: &OptimizationConfig) -> OptimizationStats {
-    optimize_function_with_control(func, config, &UncheckedSsaWorkControl)
+#[cfg(test)]
+pub(crate) fn optimize_function(
+    func: &mut SSAFunction,
+    config: &OptimizationConfig,
+) -> OptimizationStats {
+    optimize_function_with_control(func, config, &crate::control::UncheckedSsaWorkControl)
         .expect("unchecked SSA optimization cannot stop")
 }
 
@@ -340,7 +345,7 @@ fn find_cbranch_condition(
     let Some(block) = func.get_block(block_addr) else {
         return LatticeValue::Bottom;
     };
-    for op in block.ops.iter().rev() {
+    for op in block.ops().iter().rev() {
         if let SSAOp::CBranch { cond, .. } = op {
             return get_lattice_value(cond, lattice);
         }
@@ -380,7 +385,8 @@ fn evaluate_terminator_sccp(
 
 #[cfg(test)]
 fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
-    sccp_with_control(func, &UncheckedSsaWorkControl).expect("unchecked SCCP cannot stop")
+    sccp_with_control(func, &crate::control::UncheckedSsaWorkControl)
+        .expect("unchecked SCCP cannot stop")
 }
 
 fn sccp_with_control<C: SsaWorkControl + ?Sized>(
@@ -416,7 +422,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
                 continue;
             };
 
-            for phi in &block.phis {
+            for phi in block.phis() {
                 control.poll()?;
                 let new_val = evaluate_phi_sccp(phi, &executable, &lattice, to);
                 if update_lattice(&mut lattice, &phi.dst, new_val) {
@@ -425,7 +431,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
             }
 
             if block_visited.insert(to) {
-                for op in &block.ops {
+                for op in block.ops() {
                     control.poll()?;
                     if let Some(dst) = op.dst() {
                         let new_val = evaluate_op_sccp(op, &lattice);
@@ -456,7 +462,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
                         let Some(block) = func.get_block(*block_addr) else {
                             continue;
                         };
-                        let Some(phi) = block.phis.get(*phi_idx) else {
+                        let Some(phi) = block.phis().get(*phi_idx) else {
                             continue;
                         };
                         let new_val = evaluate_phi_sccp(phi, &executable, &lattice, *block_addr);
@@ -471,7 +477,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
                         let Some(block) = func.get_block(*block_addr) else {
                             continue;
                         };
-                        let Some(op) = block.ops.get(*op_idx) else {
+                        let Some(op) = block.ops().get(*op_idx) else {
                             continue;
                         };
 
@@ -624,33 +630,35 @@ fn coherent_return_projection(
     })
 }
 
+/// The plan that reads every constant SCCP proved where its value was read.
 fn replace_sources_with_constants(
-    func: &mut SSAFunction,
+    func: &SSAFunction,
     consts: &HashMap<VarKey, u64>,
     function_interface: Option<&SourceFunctionInterface>,
     stats: &mut OptimizationStats,
-) -> bool {
-    let mut changed = false;
-    let block_addrs = func.block_addrs().to_vec();
+) -> EditPlan {
+    let mut plan = EditPlan::new();
     let return_storage =
         coherent_return_projection(function_interface).map(|projection| projection.carrier);
 
-    for addr in block_addrs {
+    for &addr in func.block_addrs() {
         let is_return_block = func
             .cfg()
             .get_block(addr)
             .is_some_and(|cfg_block| cfg_block.is_return());
-        let Some(block) = func.get_block_mut(addr) else {
+        let Some(block) = func.get_block(addr) else {
             continue;
         };
 
-        for phi in &mut block.phis {
+        for (id, phi) in block.sited_phis() {
             let preserve_phi_sources = is_return_block
                 && return_storage.is_some_and(|storage| phi.canonical_storage == Some(storage));
-            for (_, src) in &mut phi.sources {
-                if preserve_phi_sources {
-                    continue;
-                }
+            if preserve_phi_sources {
+                continue;
+            }
+            let mut replaced = phi.clone();
+            let mut changed = false;
+            for (_, src) in &mut replaced.sources {
                 let key = VarKey::from_var(src);
                 if let Some(val) = consts.get(&key).copied() {
                     let new_var = SSAVar::constant(val, src.size);
@@ -661,9 +669,16 @@ fn replace_sources_with_constants(
                     }
                 }
             }
+            if changed {
+                plan.reshape(ShapeEdit::ReplacePhi {
+                    block: addr,
+                    id,
+                    phi: replaced,
+                });
+            }
         }
 
-        for op in &mut block.ops {
+        for (id, op) in block.sited() {
             let new_op = map_sources_in_op(op, &|var| {
                 let key = VarKey::from_var(var);
                 if let Some(val) = consts.get(&key).copied() {
@@ -677,13 +692,12 @@ fn replace_sources_with_constants(
                 if delta > 0 {
                     stats.constants_propagated += delta;
                 }
-                *op = new_op;
-                changed = true;
+                plan.replace(id, new_op);
             }
         }
     }
 
-    changed
+    plan
 }
 
 fn apply_sccp_results(
@@ -696,15 +710,17 @@ fn apply_sccp_results(
     let mut changed = false;
     let mut cfg_changed = false;
 
-    if replace_sources_with_constants(func, consts, function_interface, stats) {
+    let constants = replace_sources_with_constants(func, consts, function_interface, stats);
+    if !constants.is_empty() {
         changed = true;
     }
+    func.apply_edits(constants);
     stats.sccp_constants_found = consts.len();
 
     #[derive(Debug, Clone, Copy)]
     struct BranchRewrite {
         block_addr: u64,
-        op_idx: usize,
+        op_id: crate::arena::OpId,
         keep_target: u64,
         dead_target: u64,
         take_true: bool,
@@ -726,7 +742,7 @@ fn apply_sccp_results(
             continue;
         };
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_id, op) in block.sited() {
             if let SSAOp::CBranch { cond, .. } = op
                 && let Some(value) = const_value(cond)
             {
@@ -738,7 +754,7 @@ fn apply_sccp_results(
                 };
                 rewrites.push(BranchRewrite {
                     block_addr: addr,
-                    op_idx,
+                    op_id,
                     keep_target,
                     dead_target,
                     take_true,
@@ -748,50 +764,71 @@ fn apply_sccp_results(
         }
     }
 
+    // A decided branch: the edge it no longer takes, and what each merge at
+    // the far end read along it, go with it.
+    let mut decided = EditPlan::new();
     for rw in rewrites {
-        if let Some(block) = func.get_block_mut(rw.block_addr)
-            && let Some(op) = block.ops.get_mut(rw.op_idx)
-        {
-            if rw.take_true {
-                if let SSAOp::CBranch { target, .. } = op {
-                    // The branch that remains was never a call site the source
-                    // named, so it keeps no instruction identity.
-                    *op = SSAOp::Branch {
-                        target: target.clone(),
-                        instruction: None,
-                    };
-                }
-            } else {
-                *op = SSAOp::Nop;
+        let replaced = if rw.take_true {
+            match func
+                .get_block(rw.block_addr)
+                .and_then(|block| block.position(rw.op_id))
+                .and_then(|index| func.get_block(rw.block_addr)?.ops().get(index))
+            {
+                // The branch that remains was never a call site the source
+                // named, so it keeps no instruction identity.
+                Some(SSAOp::CBranch { target, .. }) => Some(SSAOp::Branch {
+                    target: target.clone(),
+                    instruction: None,
+                }),
+                _ => None,
             }
+        } else {
+            Some(SSAOp::Nop)
+        };
+        if let Some(op) = replaced {
+            decided.replace(rw.op_id, op);
         }
-
-        func.cfg_mut().remove_edge(rw.block_addr, rw.dead_target);
-        func.cfg_mut().set_terminator(
-            rw.block_addr,
-            BlockTerminator::Branch {
+        decided.reshape(ShapeEdit::RemoveEdge {
+            from: rw.block_addr,
+            to: rw.dead_target,
+        });
+        decided.reshape(ShapeEdit::SetTerminator {
+            block: rw.block_addr,
+            terminator: BlockTerminator::Branch {
                 target: rw.keep_target,
             },
-        );
-        func.remove_phi_source(rw.dead_target, rw.block_addr);
+        });
+        decided.reshape(ShapeEdit::DropPhiSources {
+            block: rw.dead_target,
+            pred: rw.block_addr,
+        });
         stats.sccp_edges_pruned += 1;
         changed = true;
         cfg_changed = true;
     }
+    func.apply_edits(decided);
 
-    let block_addrs = func.block_addrs().to_vec();
-    for addr in block_addrs {
-        let succs = func.successors(addr);
-        for succ in succs {
+    // Every edge SCCP never found executable, read off the graph the
+    // decided branches left.
+    let mut unexecuted = EditPlan::new();
+    for &addr in func.block_addrs() {
+        for succ in func.successors(addr) {
             if !executable_edges.contains(&(addr, succ)) {
-                func.cfg_mut().remove_edge(addr, succ);
-                func.remove_phi_source(succ, addr);
+                unexecuted.reshape(ShapeEdit::RemoveEdge {
+                    from: addr,
+                    to: succ,
+                });
+                unexecuted.reshape(ShapeEdit::DropPhiSources {
+                    block: succ,
+                    pred: addr,
+                });
                 stats.sccp_edges_pruned += 1;
                 changed = true;
                 cfg_changed = true;
             }
         }
     }
+    func.apply_edits(unexecuted);
 
     let mut reachable = HashSet::new();
     let mut queue = VecDeque::new();
@@ -805,23 +842,27 @@ fn apply_sccp_results(
         }
     }
 
-    let all_addrs = func.block_addrs().to_vec();
-    for addr in all_addrs {
+    // A block no edge reaches any more goes, and the merges it fed stop
+    // reading it; the reorder then drops its operations.
+    let mut unreachable = EditPlan::new();
+    for &addr in func.block_addrs() {
         if !reachable.contains(&addr) {
-            let succs = func.successors(addr);
-            for succ in succs {
-                func.remove_phi_source(succ, addr);
+            for succ in func.successors(addr) {
+                unreachable.reshape(ShapeEdit::DropPhiSources {
+                    block: succ,
+                    pred: addr,
+                });
             }
-            func.remove_block(addr);
+            unreachable.reshape(ShapeEdit::RemoveBlock(addr));
             stats.sccp_blocks_removed += 1;
             changed = true;
             cfg_changed = true;
         }
     }
-
     if cfg_changed {
-        func.refresh_after_cfg_mutation();
+        unreachable.reorder();
     }
+    func.apply_edits(unreachable);
 
     changed
 }
@@ -844,34 +885,40 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let mut defs = func
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
 
+    let mut combined = EditPlan::new();
     for addr in &block_addrs {
-        let Some(block) = func.get_block_mut(*addr) else {
+        let Some(block) = func.get_block(*addr) else {
             continue;
         };
-        for op in &mut block.ops {
+        for (id, original) in block.sited() {
+            let mut op = original.clone();
             loop {
-                let Some(new_op) = substitute_constant_temporaries(op, &defs)
-                    .or_else(|| fold_through_definition(op, &defs))
-                    .or_else(|| simplify_op(op))
+                let Some(new_op) = substitute_constant_temporaries(&op, &defs)
+                    .or_else(|| fold_through_definition(&op, &defs))
+                    .or_else(|| simplify_op(&op))
                 else {
                     break;
                 };
-                if &new_op == op {
+                if new_op == op {
                     break;
                 }
                 if let Some(dst) = new_op.dst() {
                     defs.insert(VarKey::from_var(dst), new_op.clone());
                 }
-                *op = new_op;
+                op = new_op;
                 stats.ops_simplified += 1;
                 changed = true;
             }
+            if &op != original {
+                combined.replace(id, op);
+            }
         }
     }
+    func.apply_edits(combined);
 
     // A lane temporary that a fold made a copy of another value is that
     // value: it is the construction's own scaffolding, not a move the
@@ -899,18 +946,20 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         };
         // A merge keeps its copy: its edge assignment is a statement of the
         // copied object, not an expression read.
+        let mut forwarded = EditPlan::new();
         for addr in &block_addrs {
-            let Some(block) = func.get_block_mut(*addr) else {
+            let Some(block) = func.get_block(*addr) else {
                 continue;
             };
-            for op in &mut block.ops {
+            for (id, op) in block.sited() {
                 let new_op = map_sources_in_op(op, &resolve);
                 if &new_op != op {
-                    *op = new_op;
+                    forwarded.replace(id, new_op);
                     changed = true;
                 }
             }
         }
+        func.apply_edits(forwarded);
     }
 
     changed
@@ -950,7 +999,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     let defs = func
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
     let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
@@ -1006,7 +1055,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     };
     let test_of = |addr: u64| {
         let block = func.get_block(addr)?;
-        let SSAOp::CBranch { cond, .. } = block.ops.last()? else {
+        let SSAOp::CBranch { cond, .. } = block.ops().last()? else {
             return None;
         };
         let BlockTerminator::ConditionalBranch {
@@ -1036,10 +1085,10 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     // no memory and no call, and it is entered from the chain alone.
     let pure_link = |addr: u64| {
         let block = func.get_block(addr)?;
-        if !block.phis.is_empty() || func.predecessors(addr).len() != 1 {
+        if !block.phis().is_empty() || func.predecessors(addr).len() != 1 {
             return None;
         }
-        let (last, body) = block.ops.split_last()?;
+        let (last, body) = block.ops().split_last()?;
         let pure = body.iter().all(|op| {
             op.dst().is_some()
                 && !matches!(
@@ -1164,7 +1213,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             .collect::<BTreeSet<_>>();
         let phis_agree = targets.iter().all(|target| {
             func.get_block(*target).is_none_or(|block| {
-                block.phis.iter().all(|phi| {
+                block.phis().iter().all(|phi| {
                     let mut carried = phi
                         .sources
                         .iter()
@@ -1206,28 +1255,38 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         );
         // The links' values stay defined: they are pure, the head dominates
         // every reader, and the merges at the targets still name them.
+        // Each hoisted value is derived from the link operation it copies,
+        // and so executes for that operation's instruction.
         let hoisted = fusion
             .links
             .iter()
-            .filter_map(|link| Some((*link, func.get_block(*link)?)))
-            .flat_map(|(link, block)| {
-                block.ops[..block.ops.len().saturating_sub(1)]
-                    .iter()
-                    .enumerate()
+            .filter_map(|link| func.get_block(*link))
+            .flat_map(|block| {
+                let body = block.len().saturating_sub(1);
+                block
+                    .sited()
+                    .take(body)
                     .filter(|(_, op)| !matches!(op, SSAOp::Nop))
-                    .map(|(index, op)| (op.clone(), func.instruction_at(link, index)))
+                    .map(|(id, op)| (op.clone(), Some(id)))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let terminator = func.get_block_mut(fusion.block).map(|block| {
-            let terminator = block.ops.len() - 1;
-            block.ops[terminator] = SSAOp::Switch {
-                selector: fusion.selector.clone(),
-            };
-            terminator
-        });
-        if let Some(terminator) = terminator {
-            func.insert_ops(fusion.block, terminator, hoisted);
+        let mut plan = EditPlan::new();
+        if let Some((terminator, _)) = func
+            .get_block(fusion.block)
+            .and_then(|block| block.sited().next_back())
+        {
+            plan.insert(
+                crate::function::Anchor::Before(terminator),
+                crate::arena::Pass::FuseCompareChain,
+                hoisted,
+            );
+            plan.replace(
+                terminator,
+                SSAOp::Switch {
+                    selector: fusion.selector.clone(),
+                },
+            );
         }
         let targets = fusion
             .cases
@@ -1236,36 +1295,47 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             .chain(std::iter::once(fusion.default))
             .collect::<BTreeSet<_>>();
         for target in &targets {
-            if let Some(block) = func.get_block_mut(*target) {
-                for phi in &mut block.phis {
-                    let carried = phi
-                        .sources
-                        .iter()
-                        .find(|(pred, _)| *pred == fusion.block || fusion.links.contains(pred))
-                        .map(|(_, var)| var.clone());
-                    phi.sources
-                        .retain(|(pred, _)| *pred != fusion.block && !fusion.links.contains(pred));
-                    if let Some(var) = carried {
-                        phi.sources.push((fusion.block, var));
-                    }
-                    // A merge lists its sources in predecessor order.
-                    phi.sources.sort_by_key(|(pred, _)| *pred);
+            let Some(block) = func.get_block(*target) else {
+                continue;
+            };
+            for (id, phi) in block.sited_phis() {
+                let mut merged = phi.clone();
+                let carried = merged
+                    .sources
+                    .iter()
+                    .find(|(pred, _)| *pred == fusion.block || fusion.links.contains(pred))
+                    .map(|(_, var)| var.clone());
+                merged
+                    .sources
+                    .retain(|(pred, _)| *pred != fusion.block && !fusion.links.contains(pred));
+                if let Some(var) = carried {
+                    merged.sources.push((fusion.block, var));
                 }
+                // A merge lists its sources in predecessor order.
+                merged.sources.sort_by_key(|(pred, _)| *pred);
+                plan.reshape(ShapeEdit::ReplacePhi {
+                    block: *target,
+                    id,
+                    phi: merged,
+                });
             }
         }
         for link in &fusion.links {
-            func.cfg_mut().remove_block(*link);
+            plan.reshape(ShapeEdit::RemoveBlock(*link));
         }
-        func.cfg_mut().set_terminator(
-            fusion.block,
-            BlockTerminator::Switch {
+        plan.reshape(ShapeEdit::SetTerminator {
+            block: fusion.block,
+            terminator: BlockTerminator::Switch {
                 cases: fusion.cases.clone(),
                 default: Some(fusion.default),
             },
-        );
+        });
+        func.apply_edits(plan);
         stats.chains_fused += 1;
     }
-    func.refresh_after_cfg_mutation();
+    let mut reorder = EditPlan::new();
+    reorder.reorder();
+    func.apply_edits(reorder);
     true
 }
 
@@ -1273,7 +1343,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     let defs = func
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
     // Values a statement other than a flag test reads. A difference read only
@@ -1282,7 +1352,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     let kept = func
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter(|op| {
             !matches!(
                 op,
@@ -1305,7 +1375,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     let mut combined = func
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter(|op| matches!(op, SSAOp::IntOr { .. } | SSAOp::BoolOr { .. }))
         .flat_map(|op| op.sources())
         .map(VarKey::from_var)
@@ -1314,7 +1384,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
         let grown = func
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter())
+            .flat_map(|block| block.ops().iter())
             .filter_map(|op| match op {
                 SSAOp::Copy { dst, src } if combined.contains(&VarKey::from_var(dst)) => {
                     Some(VarKey::from_var(src))
@@ -1332,23 +1402,24 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     // the whole function. The folds below rewrite comparisons, never a copy,
     // so the view stays true while they run.
     let views = crate::view::ValueViews::compute(func);
-    let mut changed = false;
-    for addr in func.block_addrs().to_vec() {
-        let Some(block) = func.get_block_mut(addr) else {
+    let mut folds = EditPlan::new();
+    for &addr in func.block_addrs() {
+        let Some(block) = func.get_block(addr) else {
             continue;
         };
-        for op in &mut block.ops {
+        for (id, op) in block.sited() {
             let Some(folded) = fold_condition_codes(op, &defs, &views, &kept, &combined) else {
                 continue;
             };
             if &folded == op {
                 continue;
             }
-            *op = folded;
+            folds.replace(id, folded);
             stats.ops_simplified += 1;
-            changed = true;
         }
     }
+    let changed = !folds.edits_no_operation();
+    func.apply_edits(folds);
     changed
 }
 
@@ -2933,7 +3004,7 @@ mod chain_tests {
             }
         );
         assert!(matches!(
-            func.get_block(0x1000).expect("head").ops.last(),
+            func.get_block(0x1000).expect("head").ops().last(),
             Some(SSAOp::Switch { .. })
         ));
         assert!(func.get_block(0x1004).is_none());
@@ -2944,12 +3015,12 @@ mod chain_tests {
         assert_eq!(successors, vec![0x100c, 0x1020, 0x1030, 0x1040]);
         let merge = func.get_block(0x1020).expect("case 2");
         assert!(
-            merge.phis.iter().all(|phi| phi
+            merge.phis().iter().all(|phi| phi
                 .sources
                 .iter()
                 .all(|(pred, _)| *pred == 0x1000 || *pred == 0x100c)),
             "phi sources: {:?}",
-            merge.phis
+            merge.phis()
         );
     }
 
@@ -3084,11 +3155,11 @@ mod signed_flag_tests {
 
     fn condition_op(func: &SSAFunction) -> SSAOp {
         let block = func.get_block(0x1000).expect("head");
-        let SSAOp::CBranch { cond, .. } = block.ops.last().expect("branch") else {
+        let SSAOp::CBranch { cond, .. } = block.ops().last().expect("branch") else {
             panic!("no branch");
         };
         block
-            .ops
+            .ops()
             .iter()
             .find(|op| op.dst() == Some(cond))
             .cloned()
@@ -3139,9 +3210,9 @@ mod signed_flag_tests {
         );
         let block = func.get_block(0x1000).expect("block");
         assert!(
-            block.ops.iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
+            block.ops().iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
             "ops: {:?}",
-            block.ops
+            block.ops()
         );
     }
 

@@ -127,14 +127,14 @@ pub fn def_use(block: &SSABlock) -> DefUseInfo {
     let mut info = DefUseInfo::new();
 
     // First pass: record all definitions
-    for (idx, op) in block.ops.iter().enumerate() {
+    for (idx, op) in block.ops().iter().enumerate() {
         if let Some(dst) = op.dst() {
             info.exact_definitions.insert(dst.clone(), Some(idx));
         }
     }
 
     // Second pass: record all uses
-    for (idx, op) in block.ops.iter().enumerate() {
+    for (idx, op) in block.ops().iter().enumerate() {
         for src in op.sources() {
             info.exact_uses.entry(src.clone()).or_default().push(idx);
         }

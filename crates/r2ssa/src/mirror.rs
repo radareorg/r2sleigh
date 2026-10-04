@@ -49,7 +49,9 @@ pub fn carrier_mirrors_memory(
         .filter(|access| {
             !access.is_write
                 && access.provenance_complete
-                && in_loop.contains(&access.block_addr)
+                && graph
+                    .block_addr_of(access.id.inst)
+                    .is_some_and(|block_addr| in_loop.contains(&block_addr))
                 && objects
                     .object(access.object)
                     .is_some_and(|object| matches!(object.kind, ObjectKind::StackSlot { .. }))

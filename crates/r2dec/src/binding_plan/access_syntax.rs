@@ -509,10 +509,9 @@ fn member_fact<'a>(
     render: &'a FunctionRenderFacts,
     memory: &MemoryAccessRenderFact,
 ) -> Option<&'a MemberAccessRenderFact> {
-    let facts =
-        render
-            .member_accesses_by_op
-            .get(&(memory.block_addr, memory.op_index, memory.is_write))?;
+    let facts = render
+        .member_accesses_by_inst
+        .get(&(memory.access.inst, memory.is_write))?;
     let mut matching = facts.iter().filter(|fact| {
         fact.access == memory.access
             && fact.object == memory.object
@@ -526,10 +525,9 @@ fn array_fact<'a>(
     render: &'a FunctionRenderFacts,
     memory: &MemoryAccessRenderFact,
 ) -> Option<&'a ArrayAccessRenderFact> {
-    let facts =
-        render
-            .array_accesses_by_op
-            .get(&(memory.block_addr, memory.op_index, memory.is_write))?;
+    let facts = render
+        .array_accesses_by_inst
+        .get(&(memory.access.inst, memory.is_write))?;
     let mut matching = facts.iter().filter(|fact| {
         fact.access == memory.access
             && fact.object == memory.object

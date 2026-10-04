@@ -80,19 +80,35 @@ fn graph_of(session: &mut Session, entry: u64) -> Result<Graph, String> {
 }
 
 /// The entry of the function an address is in: an entry is its own; inside
-/// a body, the nearest entry below whose blocks hold it; otherwise the
-/// address itself, which the engine then answers for as an entry.
+/// bodies discovery walked, the nearest of their entries at or below it, else
+/// the first; otherwise the address itself, which the engine then answers for
+/// as an entry.
+///
+/// Discovery's walk follows no dispatch table (ROADMAP P6), so a switch arm
+/// is in no walked body; for an address no body holds, the nearest entry
+/// below is asked whether its resolved graph holds it. That check goes when
+/// every consumer reads one resolved body.
 fn containing_entry(session: &mut Session, address: u64) -> Result<u64, String> {
-    let entries = session
+    let holding = session.program.functions_holding(address)?;
+    if holding.contains(&address) {
+        return Ok(address);
+    }
+    if let Some(entry) = holding
+        .iter()
+        .rev()
+        .find(|entry| **entry <= address)
+        .or(holding.first())
+    {
+        return Ok(*entry);
+    }
+    let below = session
         .program
         .functions()?
         .into_iter()
         .map(|function| function.address)
-        .collect::<std::collections::BTreeSet<_>>();
-    if entries.contains(&address) {
-        return Ok(address);
-    }
-    let Some(&below) = entries.range(..address).next_back() else {
+        .filter(|entry| *entry < address)
+        .max();
+    let Some(below) = below else {
         return Ok(address);
     };
     let holds = session.program.function_graph(below).is_ok_and(|graph| {
@@ -140,17 +156,21 @@ impl Host for Visual<'_> {
         answer
             .value
             .iter()
-            .map(|line| ListedLine {
-                address: line.address,
-                size: (line.bytes.len() as u64).max(1),
-                text: crate::listing::instruction_text(self.session, line),
-                target: line
-                    .annotations
-                    .iter()
-                    .find_map(|annotation| match annotation.kind {
-                        AnnotationKind::Target { address, .. } => Some(address),
-                        _ => None,
-                    }),
+            .map(|line| {
+                let (text, roles) = crate::listing::instruction_painted(self.session, line);
+                ListedLine {
+                    address: line.address,
+                    size: (line.bytes.len() as u64).max(1),
+                    text,
+                    roles,
+                    target: line
+                        .annotations
+                        .iter()
+                        .find_map(|annotation| match annotation.kind {
+                            AnnotationKind::Target { address, .. } => Some(address),
+                            _ => None,
+                        }),
+                }
             })
             .collect()
     }
@@ -180,6 +200,15 @@ impl Host for Visual<'_> {
             r2engine::names::Name::spelled,
         );
         let answer = rendering.answer(&name, entry);
+        // What each part of the unit is, as the renderer wrote it, cut at its
+        // lines: the code is the emission's unit.
+        let roles = match &rendering.response.output {
+            r2engine::EngineRendering::Function(rendered) => {
+                let unit = rendered.emission().unit_roles();
+                r2s_tui::theme::by_line(&answer.code, &crate::listing::c_roles(&unit))
+            }
+            r2engine::EngineRendering::Listing(_) => Vec::new(),
+        };
         let mut addresses = vec![Vec::new(); answer.code.lines().count()];
         for line in &answer.lines {
             if let Some(slot) = line
@@ -196,8 +225,10 @@ impl Host for Visual<'_> {
             .code
             .lines()
             .zip(addresses)
-            .map(|(text, addresses)| DecompiledLine {
+            .enumerate()
+            .map(|(row, (text, addresses))| DecompiledLine {
                 text: text.to_owned(),
+                roles: roles.get(row).cloned().unwrap_or_default(),
                 addresses,
             })
             .collect())
@@ -209,32 +240,35 @@ impl Host for Visual<'_> {
     }
 
     fn list(&mut self, kind: ListKind) -> Vec<Entry> {
-        let command = match kind {
-            ListKind::Functions => "afl".to_owned(),
-            ListKind::Strings => "iz".to_owned(),
-            ListKind::Sections => "iS".to_owned(),
-            ListKind::Symbols => "is".to_owned(),
-            ListKind::Imports => "ir".to_owned(),
-            ListKind::XrefsTo => format!("axt {:#x}", self.session.addr),
+        use crate::commands as listing;
+        let session = &mut *self.session;
+        let table = match kind {
+            ListKind::Functions => listing::discovered(session),
+            ListKind::Strings => listing::strings(session),
+            ListKind::Sections => Ok(listing::sections(session)),
+            ListKind::Symbols => listing::symbols(session),
+            ListKind::Imports => Ok(listing::relocations(session)),
+            ListKind::XrefsTo => {
+                let at = session.addr;
+                listing::references_table(session, at)
+            }
         };
-        let Ok(output) = self.run(&command) else {
-            return Vec::new();
-        };
-        // Each row of these commands names its address as the first
-        // hexadecimal number on it; a row with none (a header) is not a place.
-        output
-            .lines()
-            .filter_map(|row| {
-                let address = row
-                    .split(|c: char| c.is_whitespace() || c == ',' || c == '=')
-                    .find_map(|token| token.strip_prefix("0x"))
-                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())?;
-                Some(Entry {
-                    address,
-                    text: row.trim_end().to_owned(),
-                })
+        // A row about no address (a section the loader does not map, an
+        // import with no stub) is not a place to go.
+        table
+            .map(|table| {
+                table
+                    .rows
+                    .into_iter()
+                    .filter_map(|(address, text)| {
+                        Some(Entry {
+                            address: address?,
+                            text: text.trim_end().to_owned(),
+                        })
+                    })
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default()
     }
 
     fn run(&mut self, command: &str) -> Result<String, String> {
@@ -254,7 +288,7 @@ impl Host for Visual<'_> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use r2s_tui::{App, View};
+    use r2s_tui::{Driver, Msg, View};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -265,11 +299,9 @@ mod tests {
         Session::open(path).expect("the fixture opens")
     }
 
-    fn screen(app: &mut App, host: &mut Visual<'_>) -> String {
+    fn screen(driver: &Driver) -> String {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("a terminal");
-        terminal
-            .draw(|frame| app.draw(frame, host))
-            .expect("a draw");
+        terminal.draw(|frame| driver.draw(frame)).expect("a draw");
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)
             .map(|y| {
@@ -281,14 +313,87 @@ mod tests {
             .join("\n")
     }
 
-    fn press(app: &mut App, host: &mut Visual<'_>, code: KeyCode) {
-        assert!(app.handle_key(host, KeyEvent::new(code, KeyModifiers::NONE)));
+    fn press(driver: &mut Driver, code: KeyCode) {
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(driver.handle(Msg::Key(key)).expect("the engine is there"));
+        driver.settle().expect("the engine answers");
+    }
+
+    /// From `main`, move down to the call to `add`, follow it, and look at
+    /// the C.
+    fn follow_the_call_and_decompile(mut driver: Driver, call: usize) {
+        driver
+            .handle(Msg::Resize(120, 30))
+            .expect("the engine is there");
+        driver.settle().expect("the engine answers");
+        let shown = screen(&driver);
+        assert!(shown.contains("0x00001549  endbr64"), "{shown}");
+        for _ in 0..call {
+            press(&mut driver, KeyCode::Char('j'));
+        }
+        press(&mut driver, KeyCode::Enter);
+        assert_eq!(driver.app().seek(), 0x11a9);
+        press(&mut driver, KeyCode::Char('p'));
+        assert_eq!(driver.app().view(), View::Decompiler);
+        let decompiled = screen(&driver);
+        assert!(decompiled.contains("return"), "{decompiled}");
     }
 
     /// The panes show what the commands print: the disassembly row is `pd`'s
     /// spelling, following the first call lands on `add`, the decompiler pane
     /// renders the function the cursor is in, and the function list is
-    /// `afl`'s rows with their addresses.
+    /// `afl`'s rows with their addresses. The shell is served on this thread,
+    /// where it lives, and the visual mode drawn on another, as `V` runs them.
+    /// A list goes where its row is about, which the listing records rather
+    /// than spells: in a binary whose file offsets differ from its addresses,
+    /// the first number on an `iz`, `iS` or `is` row is the offset.
+    #[test]
+    fn a_list_goes_to_the_address_each_row_is_about() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/coverage/pinned/hashes_gcc_x64_O2"
+        );
+        let mut session = Session::open(path).expect("the fixture opens");
+        let mut visual = Visual {
+            session: &mut session,
+        };
+        let at = |visual: &mut Visual<'_>, kind, text: &str| {
+            visual
+                .list(kind)
+                .into_iter()
+                .find(|entry| entry.text.ends_with(text))
+                .map(|entry| entry.address)
+        };
+        assert_eq!(
+            at(&mut visual, ListKind::Sections, " .text"),
+            Some(0x401050)
+        );
+        assert_eq!(
+            at(&mut visual, ListKind::Symbols, " fnv1a32"),
+            Some(0x401330)
+        );
+        assert_eq!(
+            at(&mut visual, ListKind::Strings, "0123456789abcdef"),
+            Some(0x402060)
+        );
+        assert_eq!(
+            at(&mut visual, ListKind::Functions, " sym.fnv1a32"),
+            Some(0x401330)
+        );
+    }
+
+    /// `classify` at 0x120a: its entry, an instruction its walked body
+    /// holds, and a switch arm only its resolved graph holds all name it;
+    /// an address in no function names itself.
+    #[test]
+    fn an_address_is_answered_for_by_the_function_holding_it() {
+        let mut session = fixture();
+        assert_eq!(containing_entry(&mut session, 0x120a), Ok(0x120a));
+        assert_eq!(containing_entry(&mut session, 0x121b), Ok(0x120a));
+        assert_eq!(containing_entry(&mut session, 0x1246), Ok(0x120a));
+        assert_eq!(containing_entry(&mut session, 0x1), Ok(0x1));
+    }
+
     #[test]
     fn the_visual_mode_over_the_real_engine_follows_a_call_and_decompiles_it() {
         let mut session = fixture();
@@ -296,24 +401,21 @@ mod tests {
         let mut host = Visual {
             session: &mut session,
         };
-        let mut app = App::new(&host);
-        let shown = screen(&mut app, &mut host);
-        assert!(shown.contains("0x00001549  endbr64"), "{shown}");
         let call = host
             .disassemble(0x1549, 64)
             .into_iter()
             .position(|line| line.target == Some(0x11a9))
             .expect("main calls add");
-        for _ in 0..call {
-            press(&mut app, &mut host, KeyCode::Char('j'));
-        }
-        screen(&mut app, &mut host);
-        press(&mut app, &mut host, KeyCode::Enter);
+        let (driver, engine) = r2s_tui::connect();
+        std::thread::scope(|scope| {
+            let ui = scope.spawn(move || follow_the_call_and_decompile(driver, call));
+            engine.serve(&mut host);
+            if let Err(panic) = ui.join() {
+                std::panic::resume_unwind(panic);
+            }
+        });
+        // The shell's cursor is where the visual mode left it.
         assert_eq!(host.seek(), 0x11a9);
-        press(&mut app, &mut host, KeyCode::Char('p'));
-        assert_eq!(app.view(), View::Decompiler);
-        let decompiled = screen(&mut app, &mut host);
-        assert!(decompiled.contains("return"), "{decompiled}");
         // The graph of the function holding an address inside its body is
         // that function's: `sum_array`'s loop body is not a function.
         let graph = host.graph(0x11e5).expect("sum_array graphs");

@@ -214,12 +214,8 @@ fn a_logical_low_byte_return_renders() {
                 value.var.size == 8 && value.canonical_storage == Some(storage(0, 8))
             })
     );
-    let (block_addr, op_index) = prepared
-        .graph()
-        .op_site_for_inst(boundary.at)
-        .expect("return op site");
     let certificate = prepared
-        .return_certificate_for_op(block_addr, op_index)
+        .return_certificate_for_inst(boundary.at)
         .expect("logical low-byte certificate");
     assert_eq!(certificate.width, 1);
     assert!(
@@ -360,7 +356,7 @@ fn a_restored_stack_pointer_renders() {
         .function()
         .get_block(0x1008)
         .expect("call arm")
-        .ops
+        .ops()
         .iter()
         .filter(|op| matches!(op, r2ssa::SSAOp::CallRestore { .. }))
         .count();
@@ -370,7 +366,7 @@ fn a_restored_stack_pointer_renders() {
             .function()
             .get_block(0x1010)
             .expect("join")
-            .phis
+            .phis()
             .iter()
             .any(|phi| phi.canonical_storage == Some(storage(0x28))),
         "the called and uncalled paths must merge their stack carriers"
@@ -1300,7 +1296,7 @@ fn native_standard_path_renders_its_internal_build() {
     );
     let block = prepared.function().get_block(0x1000).expect("entry block");
     let copy_source = block
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Copy { src, .. } => Some(src),
@@ -1312,15 +1308,18 @@ fn native_standard_path_renders_its_internal_build() {
         .value_id_for_var(copy_source)
         .expect("copy source must retain exact ValueId");
     let return_op = block
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, SSAOp::Return { .. }))
         .expect("return op");
+    let return_inst = block
+        .op_id(return_op)
+        .and_then(|op| prepared.graph().inst_for_op(op))
+        .expect("return instruction");
     let return_certificate = prepared
-        .return_certificate_for_op(0x1000, return_op)
+        .return_certificate_for_inst(return_inst)
         .expect("scalar audit fixture must retain an exact return certificate");
-    assert_eq!(return_certificate.block_addr, 0x1000);
-    assert_eq!(return_certificate.op_index, return_op);
+    assert_eq!(return_certificate.at, return_inst);
     let return_value = return_certificate.value;
     let input = source_owned_decompiler_input(
         prepared,
@@ -1347,7 +1346,7 @@ fn native_standard_path_renders_its_internal_build() {
         input
             .function_facts()
             .render()
-            .and_then(|render| render.return_for_op(0x1000, return_op))
+            .and_then(|render| render.return_for_inst(return_inst))
             .map(|fact| fact.value),
         Some(return_value)
     );

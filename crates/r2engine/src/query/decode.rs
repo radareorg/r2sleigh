@@ -130,6 +130,7 @@ fn decoded(
             |(lift, context)| (None, Some(lift), Some(context)),
         ),
     };
+    let flow = lift.as_ref().map(r2sleigh_lift::flow::of);
     let size = match (&syntax, &lift) {
         (Some(syntax), _) => syntax.size,
         (None, Some(lift)) => usize::try_from(lift.size).unwrap_or(0),
@@ -141,6 +142,7 @@ fn decoded(
                 address: pc,
                 bytes: fetch[..1].to_vec(),
                 syntax: None,
+                flow: None,
                 annotations: Vec::new(),
             },
             lift: None,
@@ -154,6 +156,7 @@ fn decoded(
             address: pc,
             bytes: fetch[..size].to_vec(),
             syntax,
+            flow,
             annotations: Vec::new(),
         },
         lift,

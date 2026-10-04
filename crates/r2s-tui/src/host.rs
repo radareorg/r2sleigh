@@ -8,6 +8,8 @@ pub struct ListedLine {
     /// moves forward.
     pub size: u64,
     pub text: String,
+    /// What each part of `text` is, as the shell paints `pd`.
+    pub roles: crate::theme::Roles,
     /// Where the instruction transfers control, where it encodes one: what
     /// following the line jumps to.
     pub target: Option<u64>,
@@ -17,6 +19,8 @@ pub struct ListedLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecompiledLine {
     pub text: String,
+    /// What each part of `text` is, as the renderer wrote it.
+    pub roles: crate::theme::Roles,
     /// Sorted instruction addresses; empty for a line no instruction produced
     /// (a brace, a declaration).
     pub addresses: Vec<u64>,
@@ -81,7 +85,7 @@ impl Graph {
 }
 
 /// The lists the visual mode shows, each the shell's command of that name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ListKind {
     /// `afl`
     Functions,
@@ -123,6 +127,11 @@ impl ListKind {
 ///
 /// Every answer is already spelled: the shell owns the spelling, and the
 /// visual mode only lays it out.
+///
+/// Only the engine's thread asks a host anything -- the thread the host
+/// lives on, since an engine need not be `Send`. The thread that reads keys
+/// and draws never calls it, so an answer that takes seconds never freezes
+/// the screen.
 pub trait Host {
     /// What the title bar names: the file, its format and machine.
     fn title(&self) -> String;

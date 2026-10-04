@@ -345,7 +345,7 @@ impl ControlFlowStructurer<'_, '_> {
         // Materialised merge copies can follow the call, so the terminating
         // operation is the last call, not the last operation.
         let last_call = block
-            .ops
+            .ops()
             .iter()
             .rposition(|op| matches!(op, SSAOp::Call { .. }));
         let Some(last) = last_call else {
@@ -454,7 +454,7 @@ impl ControlFlowStructurer<'_, '_> {
             .callsites
             .values()
             .any(|certificate| {
-                certificate.block_addr == from
+                prepared.graph().block_addr_of(certificate.at) == Some(from)
                     && certificate.transfer == r2ssa::CallSiteTransfer::TailCall
             })
     }
@@ -623,7 +623,7 @@ impl ControlFlowStructurer<'_, '_> {
     /// `switch` on the target address is exact where no selector is certified.
     fn dispatch_operand_expr(&mut self, addr: u64) -> Option<CExpr> {
         let block = self.func.get_block(addr)?;
-        let target = block.ops.iter().find_map(|op| match op {
+        let target = block.ops().iter().find_map(|op| match op {
             SSAOp::BranchInd { target, .. } => Some(target.clone()),
             _ => None,
         })?;

@@ -806,30 +806,29 @@ pub struct SourceFunctionInterface {
     return_logical_value: Option<SourceLogicalValue>,
     type_graph: Option<SourceTypeGraph>,
     stack_slot_roles_complete: bool,
-    /// Which of this function's own parameters its body proves is a format
-    /// string, for callers whose prototype for it names none. A property of
-    /// the function, unlike the per-callsite count rule a literal decides.
-    body_proven_format_parameter: Option<u32>,
+    /// Which of this function's own parameters is the format string that
+    /// counts a variadic call's tail, and what says so: the declaration
+    /// (its basis is the types'), or the body forwarding it to a callee's
+    /// format (`Certified`), which only fills a gap a declaration left. A
+    /// property of the function, unlike the per-callsite count rule a
+    /// literal decides.
+    format_parameter: Option<crate::confidence::Fact<u32>>,
     /// Whether the declaration says arguments continue past the fixed ones.
     ///
     /// A fact of the callee's contract: a caller of a variadic function hands
     /// it a tail the fixed parameters do not describe, and only a proven count
     /// (a literal format string's conversions) says how long that tail is.
     variadic: bool,
-    /// Which fixed parameter the declaration names as the format string, for
-    /// a variadic function whose tail that format counts.
-    declared_format_parameter: Option<u32>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
-    /// The prototype is radare2's, found by an import's name rather than
-    /// linked to the address or stated by debug information.
-    prototype_from_source_types: bool,
-    /// Every logical type is its carrier's width as an unsigned integer,
-    /// minted from what the body was read to use rather than stated by any
-    /// declaration. The graph places each carrier; it says nothing about
-    /// whether the value is a pointer, signed, or named.
-    types_are_carrier_widths: bool,
+    /// What the logical types are read from (doc/adr-provenance.md):
+    /// `DebugInfo` where the binary declares the body, `Declared` where a
+    /// library's prototype was found by an import's name, `CarrierWidth`
+    /// where a body recovery minted each carrier's width and declares
+    /// nothing of pointer, sign or name. An interface nothing marked claims
+    /// no more than `Convention`.
+    types: crate::confidence::Confidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1274,12 +1273,61 @@ impl SourceFunctionInterface {
             return_logical_value,
             type_graph,
             stack_slot_roles_complete: require_exact_stack_slot_roles,
-            body_proven_format_parameter: None,
+            format_parameter: None,
             variadic: false,
-            declared_format_parameter: None,
             body_proven_return_address: false,
-            prototype_from_source_types: false,
-            types_are_carrier_widths: false,
+            types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
+        })
+    }
+
+    /// The same interface over other stack slots, stated against `revision`.
+    ///
+    /// Every other fact it states is kept: carriers, return mechanism, role
+    /// names, the types and what they are read from, the variadic tail and
+    /// its format parameter, a body-proven return address. The slots are
+    /// checked as an exact interface checks them, and the carriers and the
+    /// mechanism are placed on them again in the order their own checks
+    /// need: carriers first, since one refuses to move once a mechanism is
+    /// bound.
+    pub fn restated(
+        &self,
+        stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
+        revision_identity: impl Into<Vec<u8>>,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        let mut rebuilt = Self::new_exact_with_logical_types(
+            revision_identity,
+            self.calling_convention.clone(),
+            self.parameters.iter().cloned(),
+            self.return_kind,
+            stack_slots,
+            self.parameter_logical_values.iter().cloned(),
+            self.return_logical_value,
+            self.type_graph.clone(),
+        )?
+        .with_role_register_names(self.role_register_names);
+        if let Some(storage) = self.return_address_storage {
+            rebuilt = rebuilt.with_return_address_storage(storage)?;
+        }
+        if let Some(storage) = self.stack_pointer_storage {
+            rebuilt = rebuilt.with_stack_pointer_storage(storage)?;
+        }
+        if let Some(storage) = self.frame_pointer_storage {
+            rebuilt = rebuilt.with_frame_pointer_storage(storage)?;
+        }
+        if let Some(mechanism) = self.return_mechanism {
+            rebuilt = rebuilt.with_exact_stacked_return(
+                mechanism.stack_offset(),
+                mechanism.slot_size_bytes(),
+                mechanism.stack_pointer_delta_bytes(),
+                mechanism.address_size_bytes(),
+            )?;
+        }
+        Ok(Self {
+            format_parameter: self.format_parameter.clone(),
+            variadic: self.variadic,
+            body_proven_return_address: self.body_proven_return_address,
+            types: self.types.clone(),
+            ..rebuilt
         })
     }
 
@@ -1383,12 +1431,27 @@ impl SourceFunctionInterface {
         {
             return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
         }
-        self.body_proven_format_parameter = Some(parameter_index);
+        // A declaration's format is the contract; a body proof fills a gap.
+        if self.declared_format_parameter().is_none() {
+            self.format_parameter = Some(crate::confidence::Fact::new(
+                parameter_index,
+                crate::confidence::Basis::Certified,
+            ));
+        }
         Ok(self)
     }
 
-    pub const fn body_proven_format_parameter(&self) -> Option<u32> {
-        self.body_proven_format_parameter
+    /// Which parameter is the format string, and what says so.
+    pub const fn format_parameter(&self) -> Option<&crate::confidence::Fact<u32>> {
+        self.format_parameter.as_ref()
+    }
+
+    /// The format parameter where this function's body proved it.
+    pub fn body_proven_format_parameter(&self) -> Option<u32> {
+        self.format_parameter
+            .as_ref()
+            .filter(|fact| fact.confidence.basis == crate::confidence::Basis::Certified)
+            .map(|fact| fact.value)
     }
 
     /// Record that the declaration is variadic, and which fixed parameter it
@@ -1405,7 +1468,8 @@ impl SourceFunctionInterface {
             return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
         }
         self.variadic = true;
-        self.declared_format_parameter = format_parameter;
+        self.format_parameter =
+            format_parameter.map(|index| crate::confidence::Fact::new(index, self.types.clone()));
         Ok(self)
     }
 
@@ -1415,8 +1479,11 @@ impl SourceFunctionInterface {
     }
 
     /// The fixed parameter the declaration names as the format string.
-    pub const fn declared_format_parameter(&self) -> Option<u32> {
-        self.declared_format_parameter
+    pub fn declared_format_parameter(&self) -> Option<u32> {
+        self.format_parameter
+            .as_ref()
+            .filter(|fact| fact.confidence.basis != crate::confidence::Basis::Certified)
+            .map(|fact| fact.value)
     }
 
     /// Record that the body hands its caller back the return address it was
@@ -1435,27 +1502,23 @@ impl SourceFunctionInterface {
         self.body_proven_return_address
     }
 
-    /// The same interface, with its prototype marked as radare2's by-name lookup.
-    pub const fn with_prototype_from_source_types(mut self) -> Self {
-        self.prototype_from_source_types = true;
+    /// The same interface, its logical types read from `types`.
+    #[must_use]
+    pub fn with_types(mut self, types: crate::confidence::Confidence) -> Self {
+        self.types = types;
         self
     }
 
-    pub const fn prototype_from_source_types(&self) -> bool {
-        self.prototype_from_source_types
+    /// What the logical types are read from.
+    pub const fn types(&self) -> &crate::confidence::Confidence {
+        &self.types
     }
 
-    /// The same interface, with its logical types marked as the carriers'
-    /// widths a body recovery minted rather than types anything declared.
-    pub const fn with_types_as_carrier_widths(mut self) -> Self {
-        self.types_are_carrier_widths = true;
-        self
-    }
-
-    /// Whether the logical types are only the carriers' widths, so no
-    /// declaration of the function's types is to be read from them.
-    pub const fn types_are_carrier_widths(&self) -> bool {
-        self.types_are_carrier_widths
+    /// Whether a declaration states the logical types -- the binary's debug
+    /// information or a library prototype -- rather than a recovery or a
+    /// convention.
+    pub fn types_are_declared(&self) -> bool {
+        self.types.grade() <= crate::confidence::Grade::Declared
     }
 
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {
@@ -2506,6 +2569,45 @@ mod tests {
             both.format_parameter_rule(),
             Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
+    }
+
+    /// Restating an interface over other slots changes the slots and the
+    /// revision it is stated against, and nothing else it says.
+    #[test]
+    fn a_restated_interface_keeps_every_fact_but_its_slots() {
+        let interface = SourceFunctionInterface::new_exact(
+            b"variadic-function".to_vec(),
+            "sysv-amd64",
+            [
+                SourceAbiParameterSpec::new(0, register_storage(0x38, 8)),
+                SourceAbiParameterSpec::new(1, register_storage(0x30, 8)),
+            ],
+            SourceFunctionReturn::Register {
+                storage: register_storage(0, 8),
+            },
+            [],
+        )
+        .expect("interface")
+        .with_declared_variadic(Some(1))
+        .expect("the second parameter is the format")
+        .with_body_proven_format_parameter(1)
+        .expect("the body forwards it")
+        .with_body_proven_return_address()
+        .expect("a register result")
+        .with_types(crate::Confidence::of(crate::Basis::DebugInfo));
+        let restated = interface
+            .restated([], b"other-revision".to_vec())
+            .expect("restates");
+        assert_eq!(restated.revision_identity(), b"other-revision");
+        assert!(restated.is_variadic());
+        // The declaration's format is the contract; the body's proof of the
+        // same parameter fills no gap and is not recorded over it.
+        assert_eq!(restated.declared_format_parameter(), Some(1));
+        assert_eq!(restated.body_proven_format_parameter(), None);
+        assert_eq!(restated.format_parameter(), interface.format_parameter());
+        assert!(restated.body_proven_return_address());
+        assert_eq!(restated.types(), interface.types());
+        assert_eq!(restated.parameters(), interface.parameters());
     }
 
     #[test]

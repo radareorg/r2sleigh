@@ -33,11 +33,12 @@ impl crate::SsaArtifact {
             .blocks()
             .iter()
             .flat_map(|block| {
-                let calls = block.ops.iter().enumerate();
-                calls.filter_map(|(index, op)| match function.enters_supervisor(op) {
-                    true => graph.inst_id_for_op_site(block.addr, index),
-                    false => None,
-                })
+                block
+                    .sited()
+                    .filter_map(|(id, op)| match function.enters_supervisor(op) {
+                        true => graph.inst_for_op(id),
+                        false => None,
+                    })
             })
             .collect::<Vec<_>>();
         if sites.is_empty() {

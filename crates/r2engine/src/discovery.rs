@@ -27,7 +27,7 @@ use crate::native::Program;
 ///
 /// `r2source`'s, the one type every derived fact states its trust in; the
 /// engine's answers carry it, so the shell reads it from here.
-pub use r2source::confidence::{Basis, Confidence, Premise};
+pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
 
 /// One address discovery believes is a function.
 #[derive(Debug, Clone)]
@@ -76,6 +76,57 @@ pub trait Walker {
 
     /// Whether control comes back from the import at this address, as its own declaration says; `None` for anything else.
     fn declared(&self, address: u64) -> Option<bool>;
+}
+
+/// Which believed bodies hold each address.
+///
+/// Bodies overlap where compilers share a tail, so the address space is cut
+/// wherever the set of bodies covering it changes; each piece names every
+/// entry whose walk decoded it. Built in one sweep over the bodies' spans,
+/// O(S log S) for S spans, and asked in O(log S).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Holders {
+    /// Each piece by its start: its end, and the entries holding it in
+    /// address order.
+    pieces: BTreeMap<u64, (u64, Vec<u64>)>,
+}
+
+impl Holders {
+    /// The pieces of these bodies' spans, each span with the entry it is of.
+    pub fn of(spans: impl IntoIterator<Item = (u64, std::ops::Range<u64>)>) -> Self {
+        // Where each body starts and stops covering, by address.
+        let mut edges = BTreeMap::<u64, Vec<(u64, isize)>>::new();
+        for (entry, span) in spans.into_iter().filter(|(_, span)| span.start < span.end) {
+            edges.entry(span.start).or_default().push((entry, 1));
+            edges.entry(span.end).or_default().push((entry, -1));
+        }
+        // How many of each body's spans cover the address being swept.
+        let mut covering = BTreeMap::<u64, isize>::new();
+        let mut pieces = BTreeMap::new();
+        let mut from = None;
+        for (at, changes) in edges {
+            if let Some(start) = from
+                && !covering.is_empty()
+            {
+                pieces.insert(start, (at, covering.keys().copied().collect()));
+            }
+            for (entry, step) in changes {
+                *covering.entry(entry).or_insert(0) += step;
+            }
+            covering.retain(|_, count| *count != 0);
+            from = Some(at);
+        }
+        Self { pieces }
+    }
+
+    /// The entries whose bodies hold this address, in address order.
+    pub fn at(&self, address: u64) -> &[u64] {
+        self.pieces
+            .range(..=address)
+            .next_back()
+            .filter(|(_, (end, _))| address < *end)
+            .map_or(&[], |(_, (_, entries))| entries.as_slice())
+    }
 }
 
 /// Every function in the program, whether control can come back from each, and each body as the fixpoint left it.
@@ -346,6 +397,31 @@ fn comes_back<W: Walker>(
     address: u64,
 ) -> bool {
     settled(walker, known, address).unwrap_or_else(|| returning.contains(&address))
+}
+
+#[cfg(test)]
+mod holders_tests {
+    use super::Holders;
+
+    /// A shared tail is held by both bodies, the bytes around it by one, and
+    /// the gap between them by none.
+    #[test]
+    fn each_address_is_held_by_exactly_the_bodies_covering_it() {
+        let holders = Holders::of([
+            (0x100, 0x100..0x120),
+            (0x100, 0x140..0x150),
+            (0x200, 0x200..0x210),
+            (0x200, 0x140..0x150),
+        ]);
+        assert_eq!(holders.at(0x100), [0x100]);
+        assert_eq!(holders.at(0x11f), [0x100]);
+        assert!(holders.at(0x120).is_empty());
+        assert_eq!(holders.at(0x148), [0x100, 0x200]);
+        assert!(holders.at(0x150).is_empty());
+        assert_eq!(holders.at(0x200), [0x200]);
+        assert!(holders.at(0x0).is_empty());
+        assert!(holders.at(u64::MAX).is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ fn advisory_call_site(
 fn test_switch_selector(function: &SSAFunction, block_addr: u64) -> String {
     let graph = crate::graph::SsaGraph::from_function(function);
     let predicates = crate::semantic::collect_predicate_facts_for_test(function, &graph);
-    let values = crate::values::solve_value_ranges(&graph, function, &predicates);
+    let values = crate::values::solve_value_ranges(&graph, function, None, &predicates);
     let selector = crate::indirect::dispatch_selectors(function, &graph, &values)
         .remove(&block_addr)
         .expect("the analysis names a selector");
@@ -71,18 +71,16 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
     let artifact = SsaArtifact::new_with_context(function, context);
 
     let prepared_block = artifact.function().get_block(0x1000).expect("tail block");
-    assert!(matches!(
-        prepared_block.ops.as_slice(),
-        [SSAOp::Branch { .. }]
-    ));
+    assert!(matches!(prepared_block.ops(), [SSAOp::Branch { .. }]));
     assert!(
         !prepared_block
-            .ops
+            .ops()
             .iter()
             .any(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
     );
     let call = artifact
-        .callsite_certificate_for_op(0x1000, 0)
+        .inst_at(0x1000, 0)
+        .and_then(|inst| artifact.callsite_certificate_for_inst(inst))
         .expect("tail callsite certificate");
     assert_eq!(call.transfer, crate::semantic::CallSiteTransfer::TailCall);
     assert_eq!(call.fallthrough, None);
@@ -412,12 +410,12 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
     // The accumulator is one family, so the loop carries one merge of it.
     let header = function.get_block(base + 4).expect("loop header");
     let accumulator_phis = header
-        .phis
+        .phis()
         .iter()
         .filter(|phi| accumulator(&phi.dst))
         .collect::<Vec<_>>();
     let [phi] = accumulator_phis.as_slice() else {
-        panic!("one accumulator phi, got {:?}", header.phis);
+        panic!("one accumulator phi, got {:?}", header.phis());
     };
     let graph = SsaGraph::from_function(&function);
     assert_eq!(phi.sources.len(), 2);
@@ -433,7 +431,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
     // as a subpiece and inserts the sum back at the lane's position.
     let body = function.get_block(base + 12).expect("vector body");
     let loaded = body
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Load { dst, .. } if dst.size == 16 => Some(dst.clone()),
@@ -441,7 +439,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
         })
         .expect("wide vector load");
     let lane_reads_of = |source: &dyn Fn(&SSAVar) -> bool| {
-        body.ops
+        body.ops()
             .iter()
             .filter_map(|op| match op {
                 SSAOp::Subpiece { src, offset, dst } if source(src) && dst.size == 4 => {
@@ -454,7 +452,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
     assert_eq!(lane_reads_of(&|src| *src == loaded), vec![0, 4, 8, 12]);
     assert_eq!(lane_reads_of(&accumulator), vec![0, 4, 8, 12]);
     let insert_positions = body
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| match op {
             SSAOp::Insert(insert)
@@ -471,7 +469,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
 
     // The exit reads the low lane of the merged accumulator.
     let exit = function.get_block(base + 8).expect("loop exit");
-    assert!(exit.ops.iter().any(|op| matches!(
+    assert!(exit.ops().iter().any(|op| matches!(
         op,
         SSAOp::Subpiece { dst, src, offset: 0 } if dst.size == 4 && *src == phi.dst
     )));
@@ -479,7 +477,7 @@ fn assert_vector_loop_alias_provenance(base: u64, prefix: &str) {
         !function
             .blocks()
             .iter()
-            .flat_map(|block| &block.ops)
+            .flat_map(|block| block.ops())
             .any(|op| matches!(op, SSAOp::Piece { .. }))
     );
 }
@@ -654,7 +652,7 @@ fn a_lane_read_is_a_subpiece_of_the_root_it_reads() {
     }];
 
     let func = SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("raw SSA");
-    let ops = &func.entry_block().expect("entry block").ops;
+    let ops = func.entry_block().expect("entry block").ops();
     let stored = ops
         .iter()
         .find_map(|op| match op {
@@ -703,7 +701,7 @@ fn a_lane_read_of_a_constant_root_is_the_constant() {
     let store = func
         .entry_block()
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Store { val, .. } => Some(val),
@@ -713,7 +711,7 @@ fn a_lane_read_of_a_constant_root_is_the_constant() {
     let stored = func
         .entry_block()
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Copy { dst, src } if dst == store => Some(src.clone()),
@@ -748,7 +746,7 @@ fn ssa_artifact_exposes_typed_graph_queries() {
         .blocks()
         .iter()
         .next()
-        .and_then(|block| block.ops.first())
+        .and_then(|block| block.ops().first())
         .and_then(|op| op.dst())
         .cloned()
         .expect("destination value");
@@ -831,9 +829,24 @@ fn prepared_function_refuses_return_without_source_boundary_authority() {
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1014, 0).is_none());
-    assert!(prepared.return_certificate_for_op(0x1004, 0).is_none());
-    assert!(prepared.return_certificate_for_op(0x1010, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1014, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
+    assert!(
+        prepared
+            .inst_at(0x1004, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
+    assert!(
+        prepared
+            .inst_at(0x1010, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -922,7 +935,7 @@ fn prepared_function_ssa_collects_structured_dataflow_facts() {
     assert!(loop_fact.condition.is_some());
     assert!(
         structured.memory_accesses.values().any(|access| {
-            access.block_addr == 0x1408 && access.op_index == 0 && access.is_write
+            Some(access.id.inst) == prepared.inst_at(0x1408, 0) && access.is_write
         })
     );
     let certificates = prepared.certificates();
@@ -963,7 +976,7 @@ fn prepared_function_ssa_collects_structured_dataflow_facts() {
         .next()
         .expect("recursive call fact");
     assert_eq!(recursive.structured().recursive_calls.len(), 1);
-    assert_eq!(call.block_addr, 0x1500);
+    assert_eq!(recursive.graph().block_addr_of(call.at), Some(0x1500));
     assert_eq!(call.target, 0x1500);
 }
 
@@ -1096,7 +1109,7 @@ fn variadic_format_call_artifact_formed(
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    SsaArtifact::new_with_context(function, machine_context)
+    SsaArtifact::from_prepared(function, machine_context)
 }
 
 /// A call whose format argument is a merge of two literals.
@@ -1227,7 +1240,7 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    SsaArtifact::new_with_context(function, machine_context)
+    SsaArtifact::from_prepared(function, machine_context)
         .sole_callsite_certificate_in_block(0x1014)
         .expect("callsite certificate")
         .clone()
@@ -1394,7 +1407,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    let artifact = SsaArtifact::new_with_context(function, machine_context);
+    let artifact = SsaArtifact::from_prepared(function, machine_context);
 
     let calls = artifact
         .certificates()
@@ -1468,7 +1481,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     let pure = SsaArtifact::raw(&pure_blocks, None).expect("pure SSA");
     let pure_value = pure
         .graph()
-        .inst_id_for_op_site(0x1700, 1)
+        .inst_spelled_at(0x1700, 1)
         .and_then(|inst| pure.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("pure expression output");
@@ -1499,7 +1512,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     let loaded = SsaArtifact::raw(&load_blocks, None).expect("load SSA");
     let loaded_value = loaded
         .graph()
-        .inst_id_for_op_site(0x1710, 0)
+        .inst_spelled_at(0x1710, 0)
         .and_then(|inst| loaded.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("load output");
@@ -1535,7 +1548,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     let userop = SsaArtifact::raw(&userop_blocks, None).expect("userop SSA");
     let userop_value = userop
         .graph()
-        .inst_id_for_op_site(0x1720, 0)
+        .inst_spelled_at(0x1720, 0)
         .and_then(|inst| userop.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("userop output");
@@ -1587,9 +1600,17 @@ fn prepared_return_certificates_require_complete_source_boundary() {
     let prepared = SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA");
 
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1770, 1).is_none());
     assert!(
-        prepared.return_certificate_for_op(0x1760, 0).is_none(),
+        prepared
+            .inst_at(0x1770, 1)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
+    assert!(
+        prepared
+            .inst_at(0x1760, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none(),
         "a predecessor return-register write is dataflow, not a return effect"
     );
 }
@@ -1674,70 +1695,91 @@ fn projected_peer_loop_artifact(
 
     let mut function =
         SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw peer loop should build");
-    function.get_block_mut(0x1b10).expect("loop header").phis = phi_order
-        .iter()
-        .map(|index| phi_nodes[*index].clone())
-        .collect();
-    function.get_block_mut(0x1b10).expect("loop header").ops = vec![SSAOp::CBranch {
-        target: SSAVar::new("ram:1b30", 0, 8),
-        cond: SSAVar::constant(1, 1),
-    }];
+    function
+        .edit_block(0x1b10)
+        .expect("loop header")
+        .replace_phis(
+            crate::Pass::Fixture,
+            phi_order
+                .iter()
+                .map(|index| phi_nodes[*index].clone())
+                .collect(),
+        );
+    function
+        .edit_block(0x1b10)
+        .expect("loop header")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![SSAOp::CBranch {
+                target: SSAVar::new("ram:1b30", 0, 8),
+                cond: SSAVar::constant(1, 1),
+            }],
+        );
     // A coherent run writes the register once and reads its narrower widths
     // back from what it wrote: `mov eax, eax`, then `eax` and `ax` are that
     // result's low bits. Each width's update is then the others' low bits,
     // which is what lets the three be one object. The latch also reads `ax`
     // before the write, so every width is carried.
-    function.get_block_mut(0x1b20).expect("loop latch").ops = if coherent_storage_run {
-        vec![
-            SSAOp::Copy {
-                dst: SSAVar::new(format!("{name_prefix}:read:2"), 1, 2),
-                src: phis[2].clone(),
+    function
+        .edit_block(0x1b20)
+        .expect("loop latch")
+        .replace_ops(
+            crate::Pass::Fixture,
+            if coherent_storage_run {
+                vec![
+                    SSAOp::Copy {
+                        dst: SSAVar::new(format!("{name_prefix}:read:2"), 1, 2),
+                        src: phis[2].clone(),
+                    },
+                    SSAOp::IntZExt {
+                        dst: updates[0].clone(),
+                        src: phis[1].clone(),
+                    },
+                    SSAOp::Subpiece {
+                        dst: updates[1].clone(),
+                        src: updates[0].clone(),
+                        offset: 0,
+                    },
+                    SSAOp::Subpiece {
+                        dst: updates[2].clone(),
+                        src: updates[0].clone(),
+                        offset: 0,
+                    },
+                    SSAOp::Branch {
+                        target: SSAVar::new("ram:1b10", 0, 8),
+                        instruction: None,
+                    },
+                ]
+            } else {
+                vec![
+                    SSAOp::IntAdd {
+                        dst: updates[0].clone(),
+                        a: phis[0].clone(),
+                        b: SSAVar::constant(1, 8),
+                    },
+                    SSAOp::IntAdd {
+                        dst: updates[1].clone(),
+                        a: phis[1].clone(),
+                        b: SSAVar::constant(1, 4),
+                    },
+                    SSAOp::IntAdd {
+                        dst: updates[2].clone(),
+                        a: phis[2].clone(),
+                        b: SSAVar::constant(1, 2),
+                    },
+                    SSAOp::Branch {
+                        target: SSAVar::new("ram:1b10", 0, 8),
+                        instruction: None,
+                    },
+                ]
             },
-            SSAOp::IntZExt {
-                dst: updates[0].clone(),
-                src: phis[1].clone(),
-            },
-            SSAOp::Subpiece {
-                dst: updates[1].clone(),
-                src: updates[0].clone(),
-                offset: 0,
-            },
-            SSAOp::Subpiece {
-                dst: updates[2].clone(),
-                src: updates[0].clone(),
-                offset: 0,
-            },
-            SSAOp::Branch {
-                target: SSAVar::new("ram:1b10", 0, 8),
-                instruction: None,
-            },
-        ]
-    } else {
-        vec![
-            SSAOp::IntAdd {
-                dst: updates[0].clone(),
-                a: phis[0].clone(),
-                b: SSAVar::constant(1, 8),
-            },
-            SSAOp::IntAdd {
-                dst: updates[1].clone(),
-                a: phis[1].clone(),
-                b: SSAVar::constant(1, 4),
-            },
-            SSAOp::IntAdd {
-                dst: updates[2].clone(),
-                a: phis[2].clone(),
-                b: SSAVar::constant(1, 2),
-            },
-            SSAOp::Branch {
-                target: SSAVar::new("ram:1b10", 0, 8),
-                instruction: None,
-            },
-        ]
-    };
-    function.get_block_mut(0x1b30).expect("loop exit").ops = vec![SSAOp::Return {
-        target: phis[0].clone(),
-    }];
+        );
+    function.edit_block(0x1b30).expect("loop exit").replace_ops(
+        crate::Pass::Fixture,
+        vec![SSAOp::Return {
+            target: phis[0].clone(),
+        }],
+    );
     for (index, width) in widths.iter().copied().enumerate() {
         for value in [&entries[index], &phis[index], &updates[index]] {
             function
@@ -1941,7 +1983,7 @@ fn test_ssa_function_diamond() {
     assert_eq!(merge.num_phis(), 1);
 
     // Phi should have two sources
-    let phi = &merge.phis[0];
+    let phi = &merge.phis()[0];
     assert_eq!(phi.sources.len(), 2);
 }
 
@@ -2127,7 +2169,7 @@ fn a_lane_write_inserts_into_the_entry_root() {
 
     let function = SSAFunction::from_blocks_with_arch(&[block], Some(&arch))
         .expect("partial-register fixture");
-    let ops = &function.get_block(0x1000).expect("entry block").ops;
+    let ops = function.get_block(0x1000).expect("entry block").ops();
     let stored = ops
         .iter()
         .filter_map(|op| match op {
@@ -2193,7 +2235,7 @@ fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
     // The byte read back is the constant, so the comparison folds to true.
     let block = func.get_block(0x1000).expect("entry block");
     let flag = block
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Copy { dst, src } if dst.size == 1 && dst.name() == "reg:200" => {
@@ -2206,7 +2248,7 @@ fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
     assert!(
         flag == SSAVar::constant(1, 1) || flag == SSAVar::constant(0x41, 1),
         "{:?}",
-        block.ops
+        block.ops()
     );
 }
 
@@ -2245,7 +2287,7 @@ fn prepared_ssa_preserves_exact_widths_when_unique_offsets_are_reused() {
         .function()
         .get_block(0x1000)
         .expect("entry block")
-        .ops;
+        .ops();
 
     assert!(matches!(
         &ops[0],
@@ -2424,9 +2466,9 @@ fn a_call_that_never_returns_ends_its_block_past_the_lanes_it_writes() {
         .get_block(0x1020)
         .expect("calling block");
     assert!(
-        matches!(ends.ops.last(), Some(SSAOp::Insert(_))),
+        matches!(ends.ops().last(), Some(SSAOp::Insert(_))),
         "{:?}",
-        ends.ops
+        ends.ops()
     );
     let preserved = &artifact.facts().boundaries.preserved_call_carriers;
     assert!(preserved.contains(&general[1]), "{preserved:?}");
@@ -2467,9 +2509,9 @@ fn a_call_keeps_the_merged_half_of_a_register_it_writes_part_of() {
         BTreeMap::new(),
     );
     let function = artifact.function();
-    let ops = || function.blocks().iter().flat_map(|block| &block.ops);
+    let ops = || function.blocks().iter().flat_map(|block| block.ops());
     let merged = |value: &SSAVar| {
-        let mut phis = function.blocks().iter().flat_map(|block| &block.phis);
+        let mut phis = function.blocks().iter().flat_map(|block| block.phis());
         phis.any(|phi| phi.dst == *value)
     };
     let mut value = ops()
@@ -2555,8 +2597,8 @@ fn promotion_fixture_with_argument(
     artifact.function().promoted_slot_sites().clone()
 }
 
-#[test]
-fn operations_inserted_ahead_of_a_block_leave_every_later_operation_on_its_instruction() {
+/// Three instructions, one lifted operation each, in one block.
+fn three_instruction_block() -> R2ILBlock {
     let rax = Varnode::register(0, 8);
     let rcx = Varnode::register(8, 8);
     let instructions = [
@@ -2583,28 +2625,118 @@ fn operations_inserted_ahead_of_a_block_leave_every_later_operation_on_its_instr
         };
         block.push_with_metadata(op, Some(meta));
     }
-    let mut function = SSAFunction::from_blocks(&[block]).expect("it builds");
-    let entry = function.entry;
-    let attributed = |function: &SSAFunction, from: usize| {
-        (from..from + 3)
-            .map(|index| function.instruction_at(entry, index))
-            .collect::<Vec<_>>()
-    };
-    let before = attributed(&function, 0);
-    assert_eq!(before, [Some(0x1000), Some(0x1004), Some(0x1008)]);
-    function.insert_ops(entry, 0, vec![(SSAOp::Nop, None)]);
-    // The minted operation belongs to no instruction, and each lifted one keeps its own.
-    assert_eq!(function.instruction_at(entry, 0), None);
-    assert_eq!(attributed(&function, 1), before);
+    block
 }
 
-/// Prep facts answer only for the blocks they were collected from: a rewrite
-/// that opens the blocks without collecting them again leaves facts that
-/// describe an IR which no longer exists, and reading them stops rather than
-/// answering -- the engine's isolation boundary makes that the function's
-/// refusal. Collecting again makes them readable at the new revision.
+/// Building a function twice numbers its operations the same way: ids are
+/// minted in IR order, never in the order a hash map hands blocks out. The
+/// fixture has phis, register lanes renaming adds operations for, and a loop.
 #[test]
-fn prep_facts_read_after_an_unrefreshed_rewrite_stop_rather_than_answer() {
+fn building_a_function_twice_mints_the_same_ids() {
+    let build = || {
+        SsaArtifact::for_decompile(
+            &vector_loop_alias_blocks(0x4000),
+            Some(&vector_loop_alias_arch("v")),
+        )
+        .expect("vector loop artifact")
+    };
+    let (first, second) = (build(), build());
+    let sited = |artifact: &SsaArtifact| {
+        artifact
+            .function()
+            .blocks()
+            .iter()
+            .flat_map(|block| {
+                block
+                    .sited_phis()
+                    .map(|(id, _)| id)
+                    .chain(block.sited().map(|(id, _)| id))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(first.function().arena(), second.function().arena());
+    assert_eq!(sited(&first), sited(&second));
+    let derived = first
+        .function()
+        .arena()
+        .slots()
+        .filter(|(_, slot)| matches!(slot.origin(), crate::OpOrigin::Derived { .. }))
+        .count();
+    assert!(derived > 0, "the fixture exercises minting past the lift");
+}
+
+/// An operation's id is its identity for the function's life
+/// (doc/adr-stable-identity.md): inserting in front of it moves its position
+/// and nothing else, and a removed operation's id is never handed out again.
+#[test]
+fn an_operation_keeps_its_id_and_instruction_while_the_block_around_it_changes() {
+    let mut function = SSAFunction::from_blocks(&[three_instruction_block()]).expect("it builds");
+    let entry = function.entry;
+    let sited = |function: &SSAFunction| {
+        function
+            .get_block(entry)
+            .expect("entry block")
+            .sited()
+            .map(|(id, op)| (id, op.clone(), function.instruction_of(id)))
+            .collect::<Vec<_>>()
+    };
+    let before = sited(&function);
+    assert_eq!(
+        before.iter().map(|(_, _, at)| *at).collect::<Vec<_>>(),
+        [Some(0x1000), Some(0x1004), Some(0x1008)]
+    );
+    // The lift's own operations hold the first ids, in lift order.
+    assert_eq!(
+        before
+            .iter()
+            .map(|(id, _, _)| id.index())
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+
+    let limit = function.id_limit();
+    let mut plan = EditPlan::new();
+    plan.insert(Anchor::Start(entry), Pass::Fixture, [(SSAOp::Nop, None)]);
+    plan.insert(
+        Anchor::After(before[0].0),
+        Pass::Fixture,
+        [(SSAOp::Nop, Some(before[0].0))],
+    );
+    plan.kill(before[1].0, Pass::Fixture);
+    function.apply_edits(plan);
+
+    let after = sited(&function);
+    // Minted in the order they stand: the start first, then after the first.
+    assert_eq!(after[0].0.index(), limit);
+    assert_eq!(after[0].2, None, "derived from nothing, so no instruction");
+    assert_eq!(after[1], before[0]);
+    assert_eq!(after[2].0.index(), limit + 1);
+    assert_eq!(after[2].2, Some(0x1000), "derived from the first operation");
+    assert_eq!(
+        after[3], before[2],
+        "the killed operation is gone, the rest keep theirs"
+    );
+    assert_eq!(after.len(), 4);
+    assert!(!function.arena().slot(before[1].0).expect("slot").is_live());
+    assert_eq!(function.instruction_of(before[1].0), Some(0x1004));
+    // The graph built over the edited function answers by id.
+    let graph = SsaGraph::from_function(&function);
+    for (id, _, _) in &after {
+        let inst = graph
+            .inst_for_op(*id)
+            .expect("live operation has an instruction");
+        assert_eq!(graph.op_for_inst(inst), Some(*id));
+    }
+    assert_eq!(graph.inst_for_op(before[1].0), None);
+}
+
+/// A sealed function's prep facts describe the blocks it keeps: sealing
+/// rewrites the blocks and collects the facts once, after the last rewrite,
+/// and nothing changes the blocks after. Collecting again from the sealed
+/// blocks gives the same identity facts, and the copy forwarding sealing ran
+/// is in the blocks those facts were read from.
+#[test]
+fn a_sealed_function_s_prep_facts_describe_its_own_blocks() {
     let mut block = R2ILBlock::new(0x1000, 4);
     block.push(R2ILOp::Copy {
         dst: Varnode::register(0, 8),
@@ -2613,19 +2745,21 @@ fn prep_facts_read_after_an_unrefreshed_rewrite_stop_rather_than_answer() {
     block.push(R2ILOp::Return {
         target: Varnode::register(16, 8),
     });
-    let mut func = SSAFunction::from_blocks_raw(&[block], None).expect("a function");
-    func.refresh_decompile_prep_facts();
-    assert!(func.decompile_prep_facts().is_some());
-
-    func.blocks.edit();
-    let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        func.decompile_prep_facts().is_some()
-    }));
-    assert!(stale.is_err(), "stale prep facts were handed out");
-
-    func.recollect_decompile_prep_facts();
-    let facts = func
-        .decompile_prep_facts()
-        .expect("facts at the new revision");
-    assert_eq!(facts.revision, func.blocks.revision());
+    let func = SSAFunction::from_blocks_raw(&[block.clone()], None).expect("a function");
+    let sealed = Lifted::new(func)
+        .validate()
+        .expect("a raw function validates")
+        .seal(&SourceMachineContext::from_blocks(&[block], None))
+        .expect("the sealed function validates");
+    let again = sealed.function().prep_facts_for_test();
+    assert_eq!(sealed.decompile_prep_facts().views, again.views);
+    assert_eq!(
+        sealed.decompile_prep_facts().stack_address_roots,
+        again.stack_address_roots
+    );
+    assert_eq!(
+        sealed.graph(),
+        &SsaGraph::from_function_with_storage(sealed.function()),
+        "the graph was built from the sealed blocks"
+    );
 }

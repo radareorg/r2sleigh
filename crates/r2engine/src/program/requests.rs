@@ -159,6 +159,7 @@ impl Rendering {
 }
 
 /// Every function discovery found, and whether each body was walked as Thumb or why it could not be walked.
+#[derive(Debug)]
 pub(super) struct Survey {
     functions: Vec<Discovered>,
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
@@ -166,6 +167,8 @@ pub(super) struct Survey {
     extents: BTreeMap<u64, r2ssa::body::TraceExtent>,
     /// Each walked body's instructions that enter the supervisor, where it has any.
     supervisor: BTreeMap<u64, std::collections::BTreeSet<u64>>,
+    /// Which walked bodies hold each address.
+    holders: crate::discovery::Holders,
 }
 
 /// One instruction that enters the kernel, with the call it makes where the
@@ -463,7 +466,16 @@ impl<S: Source> OpenProgram<S> {
     /// what the bodies reach.
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
         self.start_request();
-        Ok(self.surveyed()?.functions)
+        Ok(self.surveyed()?.functions.clone())
+    }
+
+    /// The entries of every believed body whose walk decoded this address as
+    /// one of its instructions, in address order: more than one where bodies
+    /// share a tail, none outside every body. O(log n) once discovery has
+    /// walked the program at this state of its bytes.
+    pub fn functions_holding(&mut self, vaddr: u64) -> Result<Vec<u64>, String> {
+        self.start_request();
+        Ok(self.surveyed()?.holders.at(vaddr).to_vec())
     }
 
     /// Every function's basic blocks and their bytes, from the walk discovery
@@ -473,7 +485,7 @@ impl<S: Source> OpenProgram<S> {
     /// counted; one resolved body for every consumer is P6.
     pub fn function_extents(&mut self) -> Result<BTreeMap<u64, r2ssa::body::TraceExtent>, String> {
         self.start_request();
-        Ok(self.surveyed()?.extents)
+        Ok(self.surveyed()?.extents.clone())
     }
 
     /// Every instruction in a believed body that enters the kernel, with the
@@ -486,7 +498,7 @@ impl<S: Source> OpenProgram<S> {
     /// A site two bodies share takes their number where they agree.
     pub fn syscalls(&mut self) -> Result<Vec<Syscall>, String> {
         self.start_request();
-        let sites = self.surveyed()?.supervisor;
+        let sites = self.surveyed()?.supervisor.clone();
         let container = self.source.container();
         let table = r2abi::Syscalls::for_platform(
             super::kernel(container),
@@ -564,7 +576,8 @@ impl<S: Source> OpenProgram<S> {
 
     /// Read every believed body's references, at one revision.
     fn indexed(&mut self, revision: crate::query::Revision) -> Result<References, String> {
-        let walked = self.surveyed()?.walked;
+        let survey = self.surveyed()?;
+        let walked = &survey.walked;
         let mut index = Indexing::default();
         let mut coverage = Coverage::default();
         index.read_words(&self.source.container().loader_writes);
@@ -574,9 +587,9 @@ impl<S: Source> OpenProgram<S> {
         }
         let program = &*self;
         let walker = super::returns::Walking::new(program, true)?;
-        for (entry, walked) in walked {
+        for (&entry, walked) in walked {
             // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
-            let lifted = walked.and_then(|thumb| {
+            let lifted = walked.clone().and_then(|thumb| {
                 let target = walker.target(thumb);
                 let body = r2ssa::body::lift_body(entry, target.disasm, program, &BTreeMap::new());
                 body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
@@ -606,9 +619,29 @@ impl<S: Source> OpenProgram<S> {
         Ok(index.finish(coverage))
     }
 
-    /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
-    pub(super) fn surveyed(&mut self) -> Result<Survey, String> {
+    /// Discovery over the whole program, which settles each function's
+    /// instruction set and whether it returns.
+    ///
+    /// Held per program and state of its bytes: discovery reads the
+    /// container, which is fixed while the program is open, the bytes, and
+    /// the returns table derived from them. Before this every `afl`, `ax`
+    /// and visual-mode lookup walked the whole program again -- 42 seconds a
+    /// time over libc-2.26.
+    pub(super) fn surveyed(&mut self) -> Result<Arc<Survey>, String> {
         self.ensure_current()?;
+        let at = (self.source.identity(), self.source.byte_revision());
+        if let Some((held_at, held)) = &self.survey
+            && *held_at == at
+        {
+            return Ok(Arc::clone(held));
+        }
+        let survey = Arc::new(self.survey()?);
+        self.survey = Some((at, Arc::clone(&survey)));
+        Ok(survey)
+    }
+
+    /// Walk the whole program from what it states, once.
+    fn survey(&mut self) -> Result<Survey, String> {
         let seeds = self.stated_functions();
         let Some(&(first, _, _)) = seeds.first() else {
             return Ok(Survey {
@@ -616,6 +649,7 @@ impl<S: Source> OpenProgram<S> {
                 walked: BTreeMap::new(),
                 extents: BTreeMap::new(),
                 supervisor: BTreeMap::new(),
+                holders: crate::discovery::Holders::default(),
             });
         };
         // Both instruction sets share one convention and one compiler
@@ -637,6 +671,11 @@ impl<S: Source> OpenProgram<S> {
                 (!calls.is_empty()).then(|| (*entry, calls.clone()))
             })
             .collect();
+        let holders =
+            crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
+                let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
+                spans.into_iter().map(move |span| (*entry, span))
+            }));
         let walked = found
             .walks
             .into_iter()
@@ -659,6 +698,7 @@ impl<S: Source> OpenProgram<S> {
             walked,
             extents,
             supervisor,
+            holders,
         })
     }
 

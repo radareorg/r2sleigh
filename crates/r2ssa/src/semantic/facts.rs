@@ -1220,8 +1220,6 @@ pub struct StructuredAccessId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredMemoryAccessFact {
     pub id: StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub space: SpaceId,
     pub object: ObjectId,
     pub address: ValueId,
@@ -1239,8 +1237,7 @@ pub struct StructuredMemoryAccessFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredRecursiveCallFact {
     pub call_site: CallSiteId,
-    pub block_addr: u64,
-    pub op_index: usize,
+    pub at: InstId,
     pub target: u64,
 }
 
@@ -1261,9 +1258,6 @@ pub struct MemoryRoundTripCertificate {
     pub write: StructuredAccessId,
     pub read: StructuredAccessId,
     pub object: ObjectId,
-    pub block_addr: u64,
-    pub write_op_index: usize,
-    pub read_op_index: usize,
     /// Later loads of the same location, in the same block, with no write to
     /// the object between the certified read and them beyond the round trip's
     /// own. The location holds what it held, so each of these reads the value
@@ -1271,8 +1265,6 @@ pub struct MemoryRoundTripCertificate {
     /// The machine spells the flags of a read-modify-write this way: Sleigh
     /// re-loads the address once per flag it sets.
     pub redundant_reads: Vec<StructuredAccessId>,
-    /// The op indexes of those reads, for the ledgers that ask per site.
-    pub redundant_read_op_indexes: Vec<usize>,
 }
 
 /// One store of a proven constant whose bytes tile a run of declared members.
@@ -1282,8 +1274,6 @@ pub struct MemoryRoundTripCertificate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberRunStoreCertificate {
     pub inst: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub object: ObjectId,
     pub address: ValueId,
     pub value: ValueId,
@@ -1573,7 +1563,7 @@ impl<'a> ObjectModelBuilder<'a> {
         }
 
         for block in function.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 match op {
                     SSAOp::Load { addr, space, .. }
                     | SSAOp::Store { addr, space, .. }
@@ -2148,6 +2138,7 @@ pub(crate) struct ReachingAbiPolicy {
 #[derive(Clone, Copy)]
 pub(crate) struct ReachingAbi<'a> {
     pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) storage: CanonicalStorageId,
     pub(crate) policy: ReachingAbiPolicy,
@@ -2209,6 +2200,7 @@ impl DeclaredStackSlots {
 #[derive(Clone, Copy)]
 pub(crate) struct Body<'a> {
     pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
 }
@@ -2228,17 +2220,6 @@ pub(crate) struct RawMemoryProvenance {
     pub(crate) object: ObjectId,
     pub(crate) object_offset: Option<i64>,
     pub(crate) complete: bool,
-}
-
-/// Where an access sits in the program.
-///
-/// The instruction, the block it is in and its index there travel together
-/// through every rule that records a memory effect, so they are one thing.
-#[derive(Clone, Copy)]
-pub(crate) struct AccessSite {
-    pub(crate) inst: InstId,
-    pub(crate) block_addr: u64,
-    pub(crate) op_index: usize,
 }
 
 /// Where a recorded effect goes, and the counter that orders the effects one

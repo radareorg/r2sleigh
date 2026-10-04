@@ -39,13 +39,14 @@ pub use json::{
     RenderedResidualJson, RenderedVariableJson,
 };
 pub use r2sleigh_lift::disasm::syntax::number_spans;
+pub use r2sleigh_lift::flow::Flow;
 pub use r2sleigh_lift::{NumberSpan, Syntax};
 
 mod route;
 
 pub use r2dec::{
     BindingMachineProjectionFailure, BindingObservationAudit, BindingObservationDomainAudit,
-    BindingObservationJournalFailure, BindingShadowAuditFailure, DecompileRenderRefusal,
+    BindingObservationJournalFailure, BindingShadowAuditFailure, CRole, DecompileRenderRefusal,
     EffectObligationAudit, EffectObligationDisposition, PlacementAudit, PlacementAuditRefusal,
 };
 use route::decompile_route_decision;
@@ -2694,11 +2695,17 @@ fn effect_obligation_refusal_reason(audit: EffectObligationAudit) -> Option<Stri
             fn tally(
                 count: usize,
                 label: &str,
-                obligation: Option<r2ssa::SemanticObligationId>,
+                obligation: Option<r2ssa::SpelledObligation>,
             ) -> String {
                 obligation.map_or_else(
                     || format!("{count} {label}"),
-                    |id| format!("{count} {label} ({} at {})", id.kind, id.instruction),
+                    |spelled| {
+                        format!(
+                            "{count} {label} ({} at {})",
+                            spelled.id().kind,
+                            spelled.instruction()
+                        )
+                    },
                 )
             }
             format!(

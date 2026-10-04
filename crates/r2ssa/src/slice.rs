@@ -90,7 +90,7 @@ pub fn resolve_slice_seed(artifact: &SsaArtifact, text: &str) -> Result<SliceSee
             .parse::<usize>()
             .map_err(|_| SliceError::InvalidSyntax(text.into()))?;
         return graph
-            .inst_id_for_op_site(addr, op)
+            .inst_spelled_at(addr, op)
             .map(SliceSeed::Instruction)
             .ok_or_else(|| SliceError::NotFound(text.into()));
     }
@@ -357,7 +357,7 @@ fn render_instruction(artifact: &SsaArtifact, id: InstId) -> String {
     let Some(inst) = graph.inst(id) else {
         return format!("i{} missing-instruction", id.0);
     };
-    let site = match graph.op_site_for_inst(id) {
+    let site = match graph.walk_start(id) {
         Some((block, op)) => format!("0x{block:x}:{op}"),
         None => match graph.block(inst.block) {
             Some(block) => format!("0x{:x}:phi:{}", block.addr, inst.ordinal),
@@ -381,7 +381,7 @@ fn render_instruction(artifact: &SsaArtifact, id: InstId) -> String {
     let obligations = artifact
         .obligations()
         .obligations_for_inst(id)
-        .map(|obligation| obligation.id.to_string())
+        .map(|obligation| obligation.id.spelled(artifact.graph()).to_string())
         .collect::<Vec<_>>()
         .join(", ");
     let mut memory = BTreeSet::new();

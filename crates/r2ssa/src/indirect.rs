@@ -18,7 +18,7 @@
 
 use crate::SSAOp;
 use crate::function::{SSAFunction, SsaArtifact};
-use crate::graph::{GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
+use crate::graph::{GraphInst, InstId, InstPayload, SsaGraph, UseSite, ValueId};
 
 pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) -> Option<ValueId> {
     let value = *inst.inputs.get(input_idx)?;
@@ -112,7 +112,6 @@ impl IndexChain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTableRead {
     pub block_addr: u64,
-    pub op_index: usize,
     /// The instruction that makes the transfer, where the lift recorded it.
     /// What the body walk is keyed by, so it can be told where to continue.
     pub instruction: Option<u64>,
@@ -311,8 +310,7 @@ fn index_operand(
 fn dispatch_load<'a>(
     graph: &'a SsaGraph,
     values: &crate::values::ValueRanges,
-    block_addr: u64,
-    op_index: usize,
+    inst: InstId,
     op: &SSAOp,
 ) -> Option<(Option<&'a GraphInst>, Option<EntryTransform>, ValueId)> {
     // A tail call through a table is a branch, not a call, and it reaches the
@@ -320,9 +318,7 @@ fn dispatch_load<'a>(
     let (SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. }) = op else {
         return None;
     };
-    let call_inst = graph
-        .inst_id_for_op_site(block_addr, op_index)
-        .and_then(|inst| graph.inst(inst))?;
+    let call_inst = graph.inst(inst)?;
     let target_value = exact_input(graph, call_inst, 0)?;
     if graph.value_id_for_var(target) != Some(target_value) {
         return None;
@@ -342,7 +338,7 @@ fn dispatch_table_read(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
     block_addr: u64,
-    op_index: usize,
+    inst: InstId,
     op: &SSAOp,
 ) -> Option<DispatchTableRead> {
     let (SSAOp::CallInd { instruction, .. } | SSAOp::BranchInd { instruction, .. }) = op else {
@@ -352,10 +348,9 @@ fn dispatch_table_read(
     // it: either the target is not read out of memory, or what it reads is
     // not a bounded walk of one table.
     let evidence = |why: &str| {
-        r2il::refusal_evidence!("dispatch-table", "{block_addr:#x}:{op_index}: {why}");
+        r2il::refusal_evidence!("dispatch-table", "{block_addr:#x} {inst:?}: {why}");
     };
-    let Some((Some(load_inst), Some(transform), address)) =
-        dispatch_load(graph, values, block_addr, op_index, op)
+    let Some((Some(load_inst), Some(transform), address)) = dispatch_load(graph, values, inst, op)
     else {
         evidence("the target is not a constant affine function of a load");
         return None;
@@ -404,13 +399,12 @@ fn dispatch_table_read(
     };
     r2il::refusal_evidence!(
         "dispatch-table",
-        "{block_addr:#x}:{op_index} at {instruction:?} reads {count} entries {base:#x}..={last:#x} by {stride}, target = {}*entry + {:#x}, on {selector:?}",
+        "{block_addr:#x} {inst:?} at {instruction:?} reads {count} entries {base:#x}..={last:#x} by {stride}, target = {}*entry + {:#x}, on {selector:?}",
         transform.scale,
         transform.displacement
     );
     Some(DispatchTableRead {
         block_addr,
-        op_index,
         instruction: *instruction,
         address: base,
         stride,
@@ -437,11 +431,11 @@ pub(crate) fn dispatch_selectors(
         .blocks()
         .iter()
         .filter_map(|block| {
-            let (op_index, op) =
-                block.ops.iter().enumerate().rev().find(|(_, op)| {
-                    matches!(op, SSAOp::CallInd { .. } | SSAOp::BranchInd { .. })
-                })?;
-            let (_, _, address) = dispatch_load(graph, values, block.addr, op_index, op)?;
+            let (id, op) = block
+                .sited()
+                .rev()
+                .find(|(_, op)| matches!(op, SSAOp::CallInd { .. } | SSAOp::BranchInd { .. }))?;
+            let (_, _, address) = dispatch_load(graph, values, graph.inst_for_op(id)?, op)?;
             Some((block.addr, selector_of(graph, values, address).0))
         })
         .collect()
@@ -457,8 +451,8 @@ fn dispatch_table_reads_in_graph(
         .blocks()
         .iter()
         .flat_map(|block| {
-            block.ops.iter().enumerate().filter_map(|(op_index, op)| {
-                dispatch_table_read(graph, values, block.addr, op_index, op)
+            block.sited().filter_map(|(id, op)| {
+                dispatch_table_read(graph, values, block.addr, graph.inst_for_op(id)?, op)
             })
         })
         .collect()
@@ -495,7 +489,7 @@ mod tests {
         // The dispatch is resolved from what the address can be, so the test
         // solves for that exactly as the analysis phase does.
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let values = crate::values::solve_value_ranges(&graph, &function, &predicates);
+        let values = crate::values::solve_value_ranges(&graph, &function, None, &predicates);
         dispatch_table_reads_in_graph(&function, &graph, &values)
     }
 
@@ -542,11 +536,10 @@ mod tests {
         let addr = temp("addr", 8);
         let callee = temp("callee", 8);
         let blocks = vec![
-            SSABlock {
-                addr: 0,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![
+            SSABlock::from_parts(
+                0,
+                0x10,
+                vec![
                     SSAOp::IntLess {
                         dst: cond.clone(),
                         a: index.clone(),
@@ -557,20 +550,20 @@ mod tests {
                         cond,
                     },
                 ],
-            },
-            SSABlock {
-                addr: 0x10,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![SSAOp::Return {
+                Vec::new(),
+            ),
+            SSABlock::from_parts(
+                0x10,
+                0x10,
+                vec![SSAOp::Return {
                     target: SSAVar::constant(0, 8),
                 }],
-            },
-            SSABlock {
-                addr: 0x20,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![
+                Vec::new(),
+            ),
+            SSABlock::from_parts(
+                0x20,
+                0x10,
+                vec![
                     SSAOp::IntMult {
                         dst: scaled.clone(),
                         a: index,
@@ -591,7 +584,8 @@ mod tests {
                         instruction: None,
                     },
                 ],
-            },
+                Vec::new(),
+            ),
         ];
         blocks
     }
@@ -645,11 +639,10 @@ mod tests {
         let addr = temp("tmp:7580", 8);
         let callee = temp("x3", 8);
         let blocks = vec![
-            SSABlock {
-                addr: 0,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![
+            SSABlock::from_parts(
+                0,
+                0x10,
+                vec![
                     // arm64 `cmp w0, 3` then `b.ls`: the branch tests
                     // `!cy || zr`, where cy is `3 <= w0` and zr is `w0 == 3`.
                     // Together they prove `w0 <= 3` and nothing narrower.
@@ -677,20 +670,20 @@ mod tests {
                         cond: lower_or_same,
                     },
                 ],
-            },
-            SSABlock {
-                addr: 0x10,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![SSAOp::Return {
+                Vec::new(),
+            ),
+            SSABlock::from_parts(
+                0x10,
+                0x10,
+                vec![SSAOp::Return {
                     target: SSAVar::constant(0, 8),
                 }],
-            },
-            SSABlock {
-                addr: 0x20,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![
+                Vec::new(),
+            ),
+            SSABlock::from_parts(
+                0x20,
+                0x10,
+                vec![
                     // adrp x8, 0xc000 ; add x8, x8, 0x10
                     SSAOp::Copy {
                         dst: page.clone(),
@@ -725,7 +718,8 @@ mod tests {
                         instruction: None,
                     },
                 ],
-            },
+                Vec::new(),
+            ),
         ];
         // The table was read from 0xc000, but the code indexes from 0xc010.
         blocks
@@ -749,11 +743,10 @@ mod tests {
         let scaled = temp("scaled", 8);
         let addr = temp("addr", 8);
         let callee = temp("callee", 8);
-        let blocks = vec![SSABlock {
-            addr: 0,
-            phis: Vec::new(),
-            size: 0x10,
-            ops: vec![
+        let blocks = vec![SSABlock::from_parts(
+            0,
+            0x10,
+            vec![
                 SSAOp::IntMult {
                     dst: scaled.clone(),
                     a: index,
@@ -774,7 +767,8 @@ mod tests {
                     instruction: None,
                 },
             ],
-        }];
+            Vec::new(),
+        )];
         let (cfg, _) = graph_for(&blocks, 0, None);
         assert!(test_dispatch_reads(&blocks, &cfg).is_empty());
     }
@@ -789,11 +783,10 @@ mod tests {
         let address = temp("address", 8);
         let callee = temp("callee", 8);
         let blocks = vec![
-            SSABlock {
-                addr: 0,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![
+            SSABlock::from_parts(
+                0,
+                0x10,
+                vec![
                     SSAOp::IntLess {
                         dst: condition.clone(),
                         a: narrow_index,
@@ -804,20 +797,20 @@ mod tests {
                         cond: condition,
                     },
                 ],
-            },
-            SSABlock {
-                addr: 0x10,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![SSAOp::Return {
+                Vec::new(),
+            ),
+            SSABlock::from_parts(
+                0x10,
+                0x10,
+                vec![SSAOp::Return {
                     target: SSAVar::constant(0, 8),
                 }],
-            },
-            SSABlock {
-                addr: 0x20,
-                phis: Vec::new(),
-                size: 0x10,
-                ops: vec![
+                Vec::new(),
+            ),
+            SSABlock::from_parts(
+                0x20,
+                0x10,
+                vec![
                     SSAOp::IntMult {
                         dst: scaled.clone(),
                         a: wide_index,
@@ -838,7 +831,8 @@ mod tests {
                         instruction: None,
                     },
                 ],
-            },
+                Vec::new(),
+            ),
         ];
         let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
         assert!(test_dispatch_reads(&blocks, &cfg).is_empty());
@@ -859,11 +853,10 @@ mod tests {
         let entry = temp("entry", 4);
         let extended = temp("extended", 8);
         let target = temp("target", 8);
-        let blocks = vec![SSABlock {
-            addr: 0,
-            phis: Vec::new(),
-            size: 0x10,
-            ops: vec![
+        let blocks = vec![SSABlock::from_parts(
+            0,
+            0x10,
+            vec![
                 SSAOp::IntZExt {
                     dst: widened.clone(),
                     src: index,
@@ -897,7 +890,8 @@ mod tests {
                     instruction: None,
                 },
             ],
-        }];
+            Vec::new(),
+        )];
         let (cfg, _) = graph_for(&blocks, 0, None);
         // The old read built one label per entry before anything asked
         // whether 16 GiB of table exists at 0x2018: a 32 GiB vector.
@@ -923,11 +917,10 @@ mod tests {
         let pointer = input("rdi", 8);
         let byte = temp("byte", 1);
         let target = temp("target", 8);
-        let blocks = vec![SSABlock {
-            addr: 0,
-            phis: Vec::new(),
-            size: 0x10,
-            ops: vec![
+        let blocks = vec![SSABlock::from_parts(
+            0,
+            0x10,
+            vec![
                 SSAOp::Load {
                     dst: byte.clone(),
                     space: r2il::SpaceId::Ram,
@@ -942,7 +935,8 @@ mod tests {
                     instruction: None,
                 },
             ],
-        }];
+            Vec::new(),
+        )];
         let (cfg, _) = graph_for(&blocks, 0, None);
         // The old count overflowed: a panic in debug, and a zero-entry table
         // in release that the engine then resolved to no successor at all.

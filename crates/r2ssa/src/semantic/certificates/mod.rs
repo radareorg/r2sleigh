@@ -240,8 +240,6 @@ pub struct ExpressionCertificate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAccessCertificate {
     pub access: StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub space: SpaceId,
     pub object: ObjectId,
     pub address: ValueId,
@@ -293,8 +291,6 @@ pub struct StackSlotCertificate {
 pub struct CallsiteCertificate {
     pub call_site: CallSiteId,
     pub at: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub target: ValueId,
     pub direct_target: Option<u64>,
     pub fallthrough: Option<u64>,
@@ -373,7 +369,8 @@ pub struct PreparedFunctionCertificates {
     pub if_regions: BTreeMap<PredicateId, IfRegionCertificate>,
     pub expressions: BTreeMap<ValueId, ExpressionCertificate>,
     pub memory_accesses: BTreeMap<StructuredAccessId, MemoryAccessCertificate>,
-    pub memory_accesses_by_op: BTreeMap<(u64, usize, bool), Vec<StructuredAccessId>>,
+    /// The accesses one instruction performs, by direction.
+    pub memory_accesses_by_inst: BTreeMap<(InstId, bool), Vec<StructuredAccessId>>,
     pub stack_slots: BTreeMap<ObjectId, StackSlotCertificate>,
     pub stack_frame_round_trips: BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
     pub stack_frame_round_trip_by_inst: BTreeMap<InstId, ObjectId>,
@@ -700,17 +697,18 @@ pub(crate) fn movable_for_clause_value(
     if function.successors(block_addr).as_slice() != [loop_header] {
         return false;
     }
-    let Some((definition_block, op_index)) = graph
-        .def_inst(value)
-        .and_then(|inst| graph.op_site_for_inst(inst))
-    else {
+    let Some(definition) = graph.def_inst(value) else {
         return false;
     };
-    definition_block == block_addr
+    let Some(op) = graph.op_for_inst(definition) else {
+        return false;
+    };
+    graph.block_addr_of(definition) == Some(block_addr)
         && function.get_block(block_addr).is_some_and(|block| {
-            let Some(suffix) = op_index
-                .checked_add(1)
-                .and_then(|start| block.ops.get(start..))
+            let Some(suffix) = block
+                .position(op)
+                .and_then(|index| index.checked_add(1))
+                .and_then(|start| block.ops().get(start..))
             else {
                 return false;
             };
@@ -731,6 +729,7 @@ pub(crate) fn collect_prepared_function_certificates(
 ) -> PreparedFunctionCertificates {
     let Body {
         function,
+        prep,
         graph,
         machine_context,
     } = body;
@@ -805,7 +804,8 @@ pub(crate) fn collect_prepared_function_certificates(
         })
         .collect();
 
-    let renderable_expressions = collect_renderable_expression_values(function, graph, structured);
+    let renderable_expressions =
+        collect_renderable_expression_values(function, prep, graph, structured);
     let expressions = graph
         .values
         .iter()
@@ -828,21 +828,19 @@ pub(crate) fn collect_prepared_function_certificates(
         })
         .collect();
 
-    let mut memory_accesses_by_op = BTreeMap::<(u64, usize, bool), Vec<StructuredAccessId>>::new();
+    let mut memory_accesses_by_inst = BTreeMap::<(InstId, bool), Vec<StructuredAccessId>>::new();
     let memory_accesses = structured
         .memory_accesses
         .iter()
         .map(|(id, fact)| {
-            memory_accesses_by_op
-                .entry((fact.block_addr, fact.op_index, fact.is_write))
+            memory_accesses_by_inst
+                .entry((id.inst, fact.is_write))
                 .or_default()
                 .push(*id);
             (
                 *id,
                 MemoryAccessCertificate {
                     access: *id,
-                    block_addr: fact.block_addr,
-                    op_index: fact.op_index,
                     space: fact.space,
                     object: fact.object,
                     address: fact.address,
@@ -868,6 +866,7 @@ pub(crate) fn collect_prepared_function_certificates(
         .collect::<BTreeMap<_, _>>();
     let callee_stack_allocations = collect_callee_stack_allocation_certificates(
         function,
+        prep,
         graph,
         machine_context,
         objects,
@@ -912,7 +911,7 @@ pub(crate) fn collect_prepared_function_certificates(
         );
     let stack_geometry = collect_stack_geometry_certificate(
         boundaries,
-        function,
+        prep,
         graph,
         objects,
         structured,
@@ -1082,9 +1081,9 @@ pub(crate) fn collect_prepared_function_certificates(
         .by_id
         .iter()
         .map(|(id, fact)| {
-            let (block_addr, op_index) = graph.op_site_for_inst(fact.at).unwrap_or_default();
             let stack_argument_values = collect_stack_call_argument_values(
                 function,
+                prep,
                 graph,
                 objects,
                 structured,
@@ -1144,7 +1143,8 @@ pub(crate) fn collect_prepared_function_certificates(
                     None => {
                         r2il::refusal_evidence!(
                             "call-argument-stack-object",
-                            "callsite ({block_addr:#x}, {op_index}) argument {} at entry offset {} has no outgoing store object among {:?}",
+                            "callsite {:?} argument {} at entry offset {} has no outgoing store object among {:?}",
+                            fact.at,
                             declared.index,
                             declared.entry_offset,
                             stack_argument_values
@@ -1208,8 +1208,6 @@ pub(crate) fn collect_prepared_function_certificates(
                 CallsiteCertificate {
                     call_site: *id,
                     at: fact.at,
-                    block_addr,
-                    op_index,
                     target: fact.target,
                     direct_target: fact.direct_target,
                     fallthrough: fact.fallthrough,
@@ -1238,8 +1236,7 @@ pub(crate) fn collect_prepared_function_certificates(
     let (call_results, call_results_by_inst, call_results_by_callsite) =
         collect_call_result_certificates(body, derived);
     let stack_reloads = collect_stack_reload_source_certificates(
-        function,
-        graph,
+        body,
         objects,
         memory,
         &structured.memory_accesses,
@@ -1315,7 +1312,7 @@ pub(crate) fn collect_prepared_function_certificates(
         if_regions,
         expressions,
         memory_accesses,
-        memory_accesses_by_op,
+        memory_accesses_by_inst,
         memory_round_trips,
         stack_slots,
         stack_frame_round_trips,

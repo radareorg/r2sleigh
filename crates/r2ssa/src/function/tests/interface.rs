@@ -174,7 +174,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
         crate::testing::prepared(&blocks, &arch, Some(interface), Vec::new(), [sp_storage])
             .expect("prepared SSA should build");
     let function = prepared.function();
-    let facts = function.decompile_prep_facts().expect("prep facts");
+    let facts = prepared.decompile_prep_facts();
     let block = function.get_block(0x4000).expect("entry block");
 
     // The projection is the layer a new operation is most easily missed
@@ -190,7 +190,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
     // Every restore the boundary states, in order. Three calls, three of
     // them, and the last one is what the return sees.
     let restored = block
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| match op {
             SSAOp::CallRestore { dst, .. } => Some(dst.clone()),
@@ -201,7 +201,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
         restored.len(),
         3,
         "each call restores the carrier once: {:?}",
-        block.ops
+        block.ops()
     );
 
     for (index, dst) in restored.iter().enumerate() {
@@ -218,7 +218,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
     // And nothing in the function ever offers a slot at the drifted
     // addresses the un-refunded pushes used to leave behind.
     let drifted = block
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| op.dst())
         .filter_map(|dst| facts.entry_stack_address_root_of(dst).copied())
@@ -460,14 +460,11 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
     assert_eq!(prepared.graph().def_inst(parameter.value), None);
     assert_eq!(
         prepared
-            .function()
-            .decompile_prep_facts()
-            .and_then(|facts| {
-                prepared
-                    .graph()
-                    .value(parameter.value)
-                    .and_then(|value| facts.formal_parameter_of(&value.var))
-            }),
+            .graph()
+            .value(parameter.value)
+            .and_then(|value| prepared
+                .decompile_prep_facts()
+                .formal_parameter_of(&value.var)),
         Some(0),
     );
 
@@ -564,7 +561,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
     let call = prepared
         .sole_callsite_certificate_in_block(0x1600)
         .expect("callsite certificate");
-    assert_eq!(call.block_addr, 0x1600);
+    assert_eq!(prepared.graph().block_addr_of(call.at), Some(0x1600));
     assert_eq!(call.argument_values.len(), 1);
     let arg_value = call.argument_values[0];
     let arg = prepared.graph().value(arg_value).expect("arg value");
@@ -605,10 +602,10 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
     }
 
     let memory = prepared
-        .memory_certificate_for_op_site(0x1600, 1, false)
+        .inst_at(0x1600, 1)
+        .and_then(|inst| prepared.memory_certificate_for_inst(inst, false))
         .expect("memory certificate");
-    assert_eq!(memory.block_addr, 0x1600);
-    assert_eq!(memory.op_index, 1);
+    assert_eq!(Some(memory.access.inst), prepared.inst_at(0x1600, 1));
     assert!(!memory.is_write);
 
     let return_idx = prepared
@@ -616,14 +613,15 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .get_block(0x1600)
         .and_then(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .position(|op| matches!(op, SSAOp::Return { .. }))
         })
         .expect("return op index");
     assert!(
         prepared
-            .return_certificate_for_op(0x1600, return_idx)
+            .inst_at(0x1600, return_idx)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
             .is_none()
     );
 
@@ -632,7 +630,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .get_block(0x1600)
         .and_then(|block| {
             block
-                .ops
+                .ops()
                 .iter()
                 .enumerate()
                 .find_map(|(op_idx, op)| match op {
@@ -643,7 +641,8 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         .expect("post-call result op");
     assert!(
         prepared
-            .call_result_certificate_for_op(0x1600, result.0)
+            .inst_at(0x1600, result.0)
+            .and_then(|inst| prepared.call_result_certificate_for_inst(inst))
             .is_none()
     );
     assert!(
@@ -697,7 +696,7 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
         &UncheckedSsaWorkControl,
     )
     .expect("decompile SSA");
-    let artifact = SsaArtifact::new_with_context(function, machine_context);
+    let artifact = SsaArtifact::from_prepared(function, machine_context);
     let facts = artifact.facts();
     let boundary_of = |target: u64| {
         let call = facts
@@ -835,4 +834,89 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
         crate::semantic::CallBoundarySlot::Stack(-8),
         "{boundary:?}"
     );
+}
+
+/// A formal declared narrower than its register is the caller's value of the
+/// lane, live at entry with no definition, and a read of the whole register
+/// takes the formal in its lane and the caller's own register above it: no
+/// byte is made up, and the sealed function validates (P1.7).
+#[test]
+fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_bytes() {
+    let mut arch = ArchSpec::new("aarch64");
+    arch.addr_size = 8;
+    arch.add_register(RegisterDef::new("x0", 0x4000, 8));
+    arch.add_register(RegisterDef::new("w0", 0x4000, 4));
+    arch.add_register(RegisterDef::new("x1", 0x4008, 8));
+    arch.add_register(RegisterDef::new("w2", 0x4010, 4));
+    arch.add_register(RegisterDef::new("x30", 0x4100, 8));
+    arch.add_register(RegisterDef::new("sp", 0x4200, 8));
+    let lane = CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset: 0x4000,
+        size: 4,
+    };
+    let register = |offset, size| CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset,
+        size,
+    };
+    // `w2 = w0` reads the declared lane; `x1 = x0` reads the whole register.
+    let mut block = R2ILBlock::new(0x1600, 12);
+    block.push(R2ILOp::Copy {
+        dst: Varnode::register(0x4010, 4),
+        src: Varnode::register(0x4000, 4),
+    });
+    block.push(R2ILOp::Copy {
+        dst: Varnode::register(0x4008, 8),
+        src: Varnode::register(0x4000, 8),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(0x4100, 8),
+    });
+    for op in 0..3 {
+        block.stamp_instruction(op, 0x1600 + 4 * op as u64);
+    }
+    let interface = SourceFunctionInterface::new_exact(
+        b"narrow-formal".to_vec(),
+        "aapcs64",
+        [SourceAbiParameterSpec::new(0, lane)],
+        SourceFunctionReturn::Void,
+        [],
+    )
+    .and_then(|interface| interface.with_return_address_storage(register(0x4100, 8)))
+    .and_then(|interface| interface.with_stack_pointer_storage(register(0x4200, 8)))
+    .expect("exact function interface");
+    let artifact = crate::testing::prepared(
+        &[block],
+        &arch,
+        Some(interface),
+        Vec::new(),
+        [register(0x4200, 8)],
+    )
+    .expect("the sealed function validates");
+    let function = artifact.function();
+    let defined = function
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops())
+        .filter_map(SSAOp::dst)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        defined.iter().all(|var| var.version != 0),
+        "a version-0 value is defined: {defined:?}"
+    );
+    // The whole register is rebuilt over the caller's register, not zero.
+    let rebuilt = function
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops())
+        .find_map(|op| match op {
+            SSAOp::Insert(insert) if insert.src.version == 0 => Some(insert.clone()),
+            _ => None,
+        })
+        .expect("the whole register is the formal inserted into the caller's register");
+    assert!(rebuilt.src.constant_bits().is_none(), "{rebuilt:?}");
+    assert_eq!(rebuilt.value.size, 4);
+    assert_eq!(rebuilt.value.version, 0);
 }

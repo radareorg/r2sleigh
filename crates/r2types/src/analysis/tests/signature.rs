@@ -126,10 +126,10 @@ fn same_parameter_storage_needs_no_per_architecture_table() {
 fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
     let home_addr = SSAVar::new("tmp:home", 1, 8);
     let return_addr = SSAVar::new("tmp:return", 1, 8);
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 16,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        16,
+        vec![
             SSAOp::IntAdd {
                 dst: home_addr.clone(),
                 a: SSAVar::new("sp", 1, 8),
@@ -151,8 +151,8 @@ fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
                 val: SSAVar::new("w8", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
     let prep_facts = r2ssa::DecompilePrepFacts {
         stack_address_roots: [
             (
@@ -1033,10 +1033,10 @@ fn prepared_entry_store_roots_classify_unknown_param_homes() {
         );
     }
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("tmp:slot", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1068,8 +1068,8 @@ fn prepared_entry_store_roots_classify_unknown_param_homes() {
                 val: SSAVar::new("EDX", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let prep_facts = three_prepared_frame_slot_roots();
     let analysis = build_type_analysis_with_prep_facts(
@@ -1176,10 +1176,10 @@ fn prepared_roots_complete_partial_register_param_homes() {
         );
     }
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("tmp:slot", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1211,8 +1211,8 @@ fn prepared_roots_complete_partial_register_param_homes() {
                 val: SSAVar::new("EDX", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
     let recovered_vars = [
         RecoveredVariable {
             name: "var_8h".to_string(),
@@ -1376,10 +1376,10 @@ fn prepared_entry_store_copy_roots_classify_unknown_param_homes() {
         );
     }
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("tmp:slot", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1423,8 +1423,8 @@ fn prepared_entry_store_copy_roots_classify_unknown_param_homes() {
                 val: SSAVar::new("tmp:spill_v", 1, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let prep_facts = three_prepared_frame_slot_roots();
     let analysis = build_type_analysis_with_prep_facts(
@@ -2616,17 +2616,10 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
 #[test]
 fn prepared_phi_refuses_conflicting_parameter_type_classes() {
     let merged = SSAVar::new("X0", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        phis: vec![PhiNode {
-            dst: merged.clone(),
-            sources: vec![
-                (0xff0, SSAVar::new("X0", 0, 8)),
-                (0xff4, SSAVar::new("X1", 0, 8)),
-            ],
-            canonical_storage: None,
-        }],
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        0,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("field0", 1, 8),
                 a: merged.clone(),
@@ -2639,7 +2632,7 @@ fn prepared_phi_refuses_conflicting_parameter_type_classes() {
             },
             SSAOp::IntAdd {
                 dst: SSAVar::new("field8", 1, 8),
-                a: merged,
+                a: merged.clone(),
                 b: SSAVar::constant(8, 8),
             },
             SSAOp::Load {
@@ -2648,8 +2641,15 @@ fn prepared_phi_refuses_conflicting_parameter_type_classes() {
                 addr: SSAVar::new("field8", 1, 8),
             },
         ],
-        size: 0,
-    }];
+        vec![PhiNode {
+            dst: merged,
+            sources: vec![
+                (0xff0, SSAVar::new("X0", 0, 8)),
+                (0xff4, SSAVar::new("X1", 0, 8)),
+            ],
+            canonical_storage: None,
+        }],
+    )];
     let mut diagnostics = TypeAnalysisDiagnostics::default();
 
     let artifacts = infer_local_struct_artifacts_from_blocks(

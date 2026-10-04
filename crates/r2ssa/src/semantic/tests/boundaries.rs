@@ -44,8 +44,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
             graph: artifact.graph(),
             structured: &structured,
             objects: &objects,
-            block_addr: access.block_addr,
-            op_index: access.op_index,
+            inst: access.id.inst,
             is_write: false,
             value: access.value,
         }),
@@ -55,6 +54,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let certificates = super::super::collect_prepared_function_certificates(
         super::super::Body {
             function: artifact.function(),
+            prep: Some(artifact.decompile_prep_facts()),
             graph: artifact.graph(),
             machine_context: Some(artifact.machine_context()),
         },
@@ -109,6 +109,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let certificates = super::super::collect_prepared_function_certificates(
         super::super::Body {
             function: artifact.function(),
+            prep: Some(artifact.decompile_prep_facts()),
             graph: artifact.graph(),
             machine_context: Some(artifact.machine_context()),
         },

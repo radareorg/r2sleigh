@@ -249,10 +249,7 @@ pub fn interior_stack_object_address(
     } else {
         let graph = artifact.graph();
         let var = &graph.value(value)?.var;
-        let root = artifact
-            .function()
-            .decompile_prep_facts()?
-            .canonical_root(var);
+        let root = artifact.decompile_prep_facts().canonical_root(var);
         graph.value_id_for_var(root)?
     };
     let offset = objects.interior_offset(value)?;
@@ -1334,7 +1331,7 @@ impl Importer<'_> {
 
     /// The frame position `value` holds, through the copies that carried it.
     fn stack_root_of(&self, value: ValueId) -> Option<StackAddressRoot> {
-        let facts = self.artifact.function().decompile_prep_facts()?;
+        let facts = self.artifact.decompile_prep_facts();
         let var = &self.artifact.graph().value(value)?.var;
         if let Some(root) = facts.stack_address_root_of(var) {
             return Some(*root);

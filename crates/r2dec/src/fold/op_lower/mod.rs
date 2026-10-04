@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashMap;
 
-use r2ssa::{SSAOp, SSAVar, SsaArtifact, ValueId};
+use r2ssa::{InstId, SSAOp, SSAVar, SsaArtifact, ValueId};
 #[cfg(test)]
 use r2types::normalize_callee_name;
 use r2types::{
@@ -325,8 +325,8 @@ struct LowerFrame {
     observe_inputs: bool,
     /// Exact normalized operation used only for render-observation identity.
     normalized_site: Option<crate::normalize::NormalizedOpSite>,
-    /// Original source operation used only for callsite/type/render facts.
-    source_call_site: Option<(u64, usize)>,
+    /// The source instruction, used only for callsite/type/render facts.
+    source_call_site: Option<InstId>,
     with_call_args: bool,
 }
 
@@ -348,16 +348,17 @@ impl<'a> CertifiedRenderContext<'a> {
         self.render_facts.expression_is_renderable(value)
     }
 
-    fn memory_access_for_op(
+    fn memory_access_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: InstId,
         is_write: bool,
     ) -> Option<&'a r2types::MemoryAccessRenderFact> {
-        let block = self.prepared.function().get_block(block_addr)?;
-        let space = block.ops.get(op_idx)?.memory_space()?;
+        let r2ssa::InstPayload::Op(op) = &self.prepared.graph().inst(inst)?.payload else {
+            return None;
+        };
+        let space = op.memory_space()?;
         self.render_facts
-            .memory_access_for_op(block_addr, op_idx, is_write, space)
+            .memory_access_for_inst(inst, is_write, space)
     }
 
     fn exact_memory_read_for_value(
@@ -371,13 +372,12 @@ impl<'a> CertifiedRenderContext<'a> {
         ) {
             return None;
         }
-        let (block_addr, op_idx) = self.prepared.inst_op_site(inst)?;
-        let fact = self.memory_access_for_op(block_addr, op_idx, false)?;
+        let fact = self.memory_access_for_inst(inst, false)?;
         (fact.value == Some(value) && !fact.is_write && fact.materialize_result).then_some(fact)
     }
 
-    fn return_for_op(&self, block_addr: u64, op_idx: usize) -> Option<&'a ReturnValueRenderFact> {
-        self.render_facts.return_for_op(block_addr, op_idx)
+    fn return_for_inst(&self, inst: InstId) -> Option<&'a ReturnValueRenderFact> {
+        self.render_facts.return_for_inst(inst)
     }
 }
 
@@ -406,7 +406,7 @@ impl LowerFrame {
 
     fn for_stmt(
         normalized_site: Option<crate::normalize::NormalizedOpSite>,
-        source_call_site: Option<(u64, usize)>,
+        source_call_site: Option<InstId>,
         with_call_args: bool,
     ) -> Self {
         Self {

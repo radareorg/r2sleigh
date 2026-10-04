@@ -36,6 +36,7 @@
 
 use crate::SSAFunction;
 use crate::cfg::BlockTerminator;
+use crate::function::EditPlan;
 use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
 use crate::liveout::FunctionLiveOut;
 use crate::op::SSAOp;
@@ -48,6 +49,13 @@ const fn whole(size: u32) -> u64 {
     } else {
         (1u64 << size) - 1
     }
+}
+
+/// The bytes of a constant that are not zero, as a byte mask.
+fn nonzero_bytes(bits: u64) -> u64 {
+    (0..8)
+        .filter(|byte| (bits >> (byte * 8)) & 0xff != 0)
+        .fold(0, |mask, byte| mask | (1 << byte))
 }
 
 /// The bytes an INSERT's value occupies in its result, where its position is
@@ -158,9 +166,17 @@ fn transfer(inst: &GraphInst, demanded: u64, size: impl Fn(ValueId) -> u32) -> V
             .map(|index| demanded & of(index))
             .collect(),
         InstPayload::Op(op) => match op {
+            // A byte the constant operand clears is zero whatever the other
+            // operand holds there, so the other is not read at that byte.
+            SSAOp::IntAnd { a, b, .. } => {
+                let kept = |other: &SSAVar| match other.size <= 8 {
+                    true => other.constant_bits().map_or(u64::MAX, nonzero_bytes),
+                    false => u64::MAX,
+                };
+                vec![demanded & kept(b) & of(0), demanded & kept(a) & of(1)]
+            }
             SSAOp::Copy { .. }
             | SSAOp::IntZExt { .. }
-            | SSAOp::IntAnd { .. }
             | SSAOp::IntOr { .. }
             | SSAOp::IntXor { .. } => (0..inst.inputs.len())
                 .map(|index| demanded & of(index))
@@ -283,14 +299,15 @@ impl Demand {
 }
 
 impl SSAFunction {
-    /// Replace by zero the base of every INSERT whose demanded bytes all lie
-    /// in its inserted lane. Answers whether any changed.
+    /// The plan that replaces by zero the base of every INSERT whose demanded
+    /// bytes all lie in its inserted lane, computed over `graph`, a graph of
+    /// this function as it stands. Empty where nothing is released.
     pub(crate) fn release_undemanded_insert_bases(
-        &mut self,
+        &self,
         graph: &SsaGraph,
         demand: &Demand,
-    ) -> bool {
-        let mut released = Vec::new();
+    ) -> EditPlan {
+        let mut plan = EditPlan::new();
         for inst in &graph.insts {
             let InstPayload::Op(SSAOp::Insert(insert)) = &inst.payload else {
                 continue;
@@ -313,22 +330,25 @@ impl SSAFunction {
                 );
                 continue;
             }
-            if let Some(site) = graph.op_site_for_inst(inst.id) {
-                released.push(site);
-            }
+            // The operation as the function holds it, which the graph's
+            // payload restates.
+            let Some((id, SSAOp::Insert(insert))) = graph.op_for_inst(inst.id).and_then(|id| {
+                let block = self.get_block(graph.block_addr_of(inst.id)?)?;
+                Some((id, block.ops().get(block.position(id)?)?))
+            }) else {
+                continue;
+            };
+            r2il::refusal_evidence!(
+                "demanded-bytes",
+                "{} reads no byte of its base {} outside the inserted lane",
+                insert.dst,
+                insert.src
+            );
+            let mut released = insert.clone();
+            released.src = SSAVar::constant(0, insert.src.size);
+            plan.replace(id, SSAOp::Insert(released));
         }
-        for (block, index) in &released {
-            if let Some(SSAOp::Insert(insert)) = self.op_mut(*block, *index) {
-                r2il::refusal_evidence!(
-                    "demanded-bytes",
-                    "{} reads no byte of its base {} outside the inserted lane",
-                    insert.dst,
-                    insert.src
-                );
-                insert.src = SSAVar::constant(0, insert.src.size);
-            }
-        }
-        !released.is_empty()
+        plan
     }
 }
 
@@ -378,13 +398,12 @@ mod tests {
             ],
             ..R2ILBlock::default()
         };
-        let mut function =
-            SSAFunction::from_blocks_raw(&[block], Some(&x86_64_arch())).expect("ssa");
+        let function = SSAFunction::from_blocks_raw(&[block], Some(&x86_64_arch())).expect("ssa");
         assert!(
             function
                 .blocks()
                 .iter()
-                .flat_map(|block| &block.ops)
+                .flat_map(|block| block.ops())
                 .any(|op| matches!(op, SSAOp::Insert(_))),
             "the byte write is an INSERT into RDX"
         );
@@ -399,7 +418,9 @@ mod tests {
             return false;
         }
         let demand = Demand::of(&graph, &live_out);
-        function.release_undemanded_insert_bases(&graph, &demand)
+        !function
+            .release_undemanded_insert_bases(&graph, &demand)
+            .is_empty()
     }
 
     #[test]

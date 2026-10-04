@@ -58,6 +58,9 @@ struct LoadedSpecification {
     sleigh: RefCell<GhidraSleigh>,
     /// Canonical register names by (offset, size)
     reg_name_map: HashMap<(u64, u32), String>,
+    /// Every name the specification gives any register, lower-cased: an
+    /// operand body may spell an alias the canonical map does not keep.
+    register_names: std::collections::BTreeSet<String>,
     /// Exact mapping extracted with the architecture metadata for this session.
     space_map: HashMap<AddressSpaceId, SpaceId>,
     /// Register the processor spec names as the program counter.
@@ -108,6 +111,9 @@ pub struct Disassembler {
 #[derive(Debug)]
 pub struct Decoded {
     pub syntax: syntax::Syntax,
+    /// Where control goes after the instruction, read from its lift; absent
+    /// where it did not lift.
+    pub flow: Option<crate::flow::Flow>,
     /// Refused where Sleigh leaves the constructor `unimpl` or the lifter cannot translate its P-code.
     pub lifted: Result<R2ILBlock>,
     /// Present only where Sleigh built the P-code, which is what commits the context.
@@ -1504,6 +1510,11 @@ impl LoadedSpecification {
             .map_err(|e| LiftError::Parse(format!("Failed to load .sla: {}", e)))?;
 
         let reg_name_map = build_register_name_map(&sleigh);
+        let register_names = sleigh
+            .register_name_map()
+            .into_values()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
         extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
         let arch = Arc::new(extracted.arch);
@@ -1521,6 +1532,7 @@ impl LoadedSpecification {
             program_counter: program_counter_from_pspec(pspec),
             sleigh: RefCell::new(sleigh),
             reg_name_map,
+            register_names,
             space_map: extracted.space_map,
             arch,
             modelled_user_ops,
@@ -2289,14 +2301,17 @@ impl Disassembler {
     pub fn decode(&self, bytes: &[u8], addr: u64, after: Option<Continuation>) -> Result<Decoded> {
         self.resume(addr, after)?;
         let (mnemonic, body, size) = self.native_parts(bytes, addr)?;
-        let syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        syntax.registers = syntax::register_spans(&syntax.body, &self.spec.register_names);
         // The P-code is built from the parse just printed, and a finished build is what is known to commit its context.
         let pcode = self.pcode(bytes, addr);
         let end = addr + size as u64;
         let continuation = pcode.is_ok().then(|| self.continuation(end));
+        let lifted = pcode.and_then(|pcode| self.translated(pcode, addr));
         Ok(Decoded {
             syntax,
-            lifted: pcode.and_then(|pcode| self.translated(pcode, addr)),
+            flow: lifted.as_ref().ok().map(crate::flow::of),
+            lifted,
             continuation,
         })
     }

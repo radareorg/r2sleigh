@@ -15,7 +15,7 @@
 pub mod confidence;
 pub mod display_names;
 pub mod native;
-pub use confidence::{Basis, Confidence, Premise};
+pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
 pub use display_names::{DisplayNames, unnamed_function, unnamed_identifier};
 
 use std::collections::BTreeSet;

@@ -610,9 +610,7 @@ pub(super) fn effectful_definition_values(source: &r2ssa::SsaArtifact) -> BTreeS
             )
         })
         .filter_map(|obligation| match obligation.id.instruction.site {
-            r2ssa::CanonicalInstructionSite::Op(op_idx) => {
-                graph.inst_id_for_op_site(obligation.id.instruction.block_addr, op_idx as usize)
-            }
+            r2ssa::CanonicalInstructionSite::Op(op) => graph.inst_for_op(op),
             _ => None,
         })
         .filter_map(|inst| graph.inst(inst).and_then(|inst| inst.output))
@@ -815,17 +813,17 @@ pub(super) fn frame_objects_with_escaped_address(
 fn is_call_argument(source_owned: &SourceOwnedFunctionFacts, value: ValueId) -> bool {
     let source = source_owned.source();
     let graph = source.graph();
-    let identity = source.function().decompile_prep_facts();
+    let identity = source.decompile_prep_facts();
     let Some(callsites) = source_owned.report().callsites() else {
         return false;
     };
     callsites.by_callsite.values().any(|facts| {
         facts.argument_values.iter().any(|argument| {
             argument.value == value
-                || identity
-                    .zip(graph.value(argument.value))
+                || graph
+                    .value(argument.value)
                     .zip(graph.value(value))
-                    .is_some_and(|((identity, argument), address)| {
+                    .is_some_and(|(argument, address)| {
                         identity.same_bits(&argument.var, &address.var)
                     })
         })
@@ -1413,10 +1411,7 @@ fn declared_formal_type(
     }
     let source = source_owned.source();
     let var = &source.graph().value(value)?.var;
-    let index = source
-        .function()
-        .decompile_prep_facts()?
-        .formal_parameter_of(var)?;
+    let index = source.formal_parameter_of(var)?;
     let ty = facts
         .merged_signature
         .as_ref()?
@@ -1654,9 +1649,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
     let mut call_arg_readers = BTreeMap::<ValueId, BTreeSet<InstId>>::new();
     if let Some(callsites) = source_owned.report().callsites() {
         for (site, facts) in &callsites.by_callsite {
-            let Some(inst) = graph.inst_id_for_op_site(site.block_addr, site.op_index) else {
-                continue;
-            };
+            let inst = site.at;
             for argument in &facts.argument_values {
                 call_arg_readers
                     .entry(argument.value)

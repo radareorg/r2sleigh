@@ -990,7 +990,7 @@ fn elided_definitions(
                     | r2ssa::SSAOp::CallRestore { .. },
                 ) => ElidedSource::Value(*inst.inputs.first()?),
                 r2ssa::InstPayload::Op(r2ssa::SSAOp::Load { .. }) => {
-                    let object = loaded_frame_object(source, graph, inst.id)?;
+                    let object = loaded_frame_object(source, inst.id)?;
                     (plan.stack_object_disposition(object)
                         == Some(StackObjectDisposition::Bound { binding: *binding }))
                     .then_some(ElidedSource::Content)?
@@ -1009,16 +1009,11 @@ fn elided_definitions(
 }
 
 /// The one frame object a load reads, by its op site.
-fn loaded_frame_object(
-    source: &r2ssa::SsaArtifact,
-    graph: &r2ssa::SsaGraph,
-    inst: InstId,
-) -> Option<r2ssa::ObjectId> {
-    let (block_addr, op_idx) = graph.op_site_for_inst(inst)?;
+fn loaded_frame_object(source: &r2ssa::SsaArtifact, inst: InstId) -> Option<r2ssa::ObjectId> {
     let accesses = source
         .certificates()
-        .memory_accesses_by_op
-        .get(&(block_addr, op_idx, false))?;
+        .memory_accesses_by_inst
+        .get(&(inst, false))?;
     let [access] = accesses.as_slice() else {
         return None;
     };
@@ -1050,11 +1045,10 @@ fn stored_value(graph: &r2ssa::SsaGraph, inst: InstId) -> Option<r2ssa::ValueId>
 fn removing_statement_would_lose_an_effect(
     source: &r2ssa::SsaArtifact,
     inst: InstId,
-    answered: &BTreeSet<(u64, usize)>,
+    answered: &BTreeSet<InstId>,
 ) -> bool {
     use r2ssa::SemanticObligationKind as Kind;
-    let site = source.graph().op_site_for_inst(inst);
-    if site.is_some_and(|site| answered.contains(&site)) {
+    if answered.contains(&inst) {
         return false;
     }
     // A `CallDefine` is judged by the call it names.
@@ -1068,23 +1062,27 @@ fn removing_statement_would_lose_an_effect(
     // `fprintf(stderr, "...")`, whose result nobody reads, disappeared from
     // every function in a `-O0` binary while the proof line read `0 refused`.
     let mut instructions = vec![inst];
-    if let Some((block_addr, op_index)) = site
-        && matches!(
-            source.graph().inst(inst).map(|i| &i.payload),
-            Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. }))
+    let graph = source.graph();
+    if let Some(defined) = graph.inst(inst).filter(|defined| {
+        matches!(
+            defined.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
         )
+    }) && let Some(block) = graph.block(defined.block)
     {
         // A call is followed by one `CallDefine` per register the convention
         // lets it clobber -- ten of them on amd64 -- so the one naming the
         // result is not necessarily the operation directly after the call.
-        // Walking back over the run of them finds the call that owns them all.
-        let mut previous = op_index;
-        while let Some(earlier) = previous.checked_sub(1) {
-            previous = earlier;
-            let Some(inst_id) = source.graph().inst_id_for_op_site(block_addr, earlier) else {
-                break;
-            };
-            match source.graph().inst(inst_id).map(|i| &i.payload) {
+        // Walking back over the run of them, in the graph's order of the
+        // block, finds the call that owns them all.
+        for &inst_id in block
+            .insts
+            .get(..defined.ordinal)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+        {
+            match graph.inst(inst_id).map(|i| &i.payload) {
                 Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })) => continue,
                 Some(r2ssa::InstPayload::Op(
                     r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. },

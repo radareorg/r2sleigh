@@ -152,6 +152,7 @@ impl Indexing {
                 address: write.place,
                 bytes: Vec::new(),
                 syntax: None,
+                flow: None,
                 annotations: vec![super::Annotation {
                     kind: super::AnnotationKind::Points { value },
                     support: Support::Stated,

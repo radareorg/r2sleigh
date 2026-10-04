@@ -636,8 +636,10 @@ cd ../radare2/test && r2r -L -o results.json db/cmd/cmd_af db/json/json1
 
 1. Decide whether the feature should really be automatic.
 2. Use radare2's name for it, so the two can be diffed.
-3. One arm in the flat verb `match` in `crates/r2s/src/commands.rs`, and one
-   function beside it. `run` already supplies `~` grep and `@` temporary seek.
+3. One entry in the `VERBS` table in `crates/r2s/src/commands.rs` (names,
+   arguments, one-line summary, tier) and one function beside it. Dispatch,
+   `?` and `verb?` all read that table; `run` already supplies `~` grep and
+   `@` temporary seek.
 4. Add coverage for the happy path and the failure path in
    `crates/r2s/tests/`.
 

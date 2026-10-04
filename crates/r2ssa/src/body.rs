@@ -293,15 +293,30 @@ impl Trace {
     /// How many basic blocks the walk reached and how many bytes their
     /// instructions occupy.
     ///
-    /// A block begins at each leader the walk decoded; padding between
-    /// blocks is no instruction of the body and is not counted. A dispatch
-    /// the walk could not follow reaches nothing, so its arms are not
-    /// counted either. O(instructions).
     /// The instructions the walk reached that enter the supervisor.
     pub fn supervisor_calls(&self) -> &BTreeSet<u64> {
         &self.0.supervisor
     }
 
+    /// The bytes the walk decoded as instructions, as ranges in address
+    /// order with abutting instructions joined. Padding between blocks is no
+    /// instruction of the body and lies in no range. O(instructions).
+    pub fn spans(&self) -> Vec<std::ops::Range<u64>> {
+        let mut spans: Vec<std::ops::Range<u64>> = Vec::new();
+        for (&at, one) in &self.0.decoded {
+            let end = at.saturating_add(u64::from(one.size));
+            match spans.last_mut() {
+                Some(last) if last.end >= at => last.end = last.end.max(end),
+                _ => spans.push(at..end),
+            }
+        }
+        spans
+    }
+
+    /// A block begins at each leader the walk decoded; padding between
+    /// blocks is no instruction of the body and is not counted. A dispatch
+    /// the walk could not follow reaches nothing, so its arms are not
+    /// counted either. O(instructions).
     pub fn extent(&self) -> TraceExtent {
         let decoded = &self.0.decoded;
         TraceExtent {

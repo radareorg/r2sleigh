@@ -292,6 +292,16 @@ enum Step {
     LowLane,
 }
 
+/// How an entry-lane formal reads its root: the root's low bits, as a
+/// `Subpiece` at offset zero would. Nothing defines the formal -- it is the
+/// caller's value -- but its bits are the root's.
+fn lane_step(lane: &SSAVar, root: &SSAVar) -> Step {
+    match lane.size == root.size {
+        true => Step::Copy,
+        false => Step::Low,
+    }
+}
+
 /// What an operation's output is made of, where the view can say.
 fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
     let same_width = |dst: &SSAVar, src: &SSAVar| dst.size == src.size;
@@ -412,14 +422,21 @@ impl<'a> Solver<'a> {
     fn new(function: &'a SSAFunction) -> Self {
         let mut nodes = Vec::new();
         let mut definitions = Vec::new();
+        // The entry lanes first: they are the caller's values, in hand
+        // before the body defines anything, so they come first in definition
+        // order as the representative of their class.
+        for (lane, root) in function.entry_lanes() {
+            nodes.push(lane);
+            definitions.push(Definition::Step(root, lane_step(lane, root)));
+        }
         for block in function.blocks() {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 nodes.push(&phi.dst);
                 definitions.push(Definition::Phi(
                     phi.sources.iter().map(|(_, source)| source).collect(),
                 ));
             }
-            for (dst, src, step) in block.ops.iter().filter_map(step_of) {
+            for (dst, src, step) in block.ops().iter().filter_map(step_of) {
                 nodes.push(dst);
                 definitions.push(Definition::Step(src, step));
             }
@@ -428,10 +445,17 @@ impl<'a> Solver<'a> {
     }
 
     fn from_graph(graph: &'a crate::graph::SsaGraph) -> Self {
+        // The entry lanes first, as from a function.
         let (nodes, definitions) = graph
-            .insts
+            .entry_lanes
             .iter()
-            .filter_map(|inst| graph_definition(graph, inst))
+            .map(|(lane, root)| (lane, Definition::Step(root, lane_step(lane, root))))
+            .chain(
+                graph
+                    .insts
+                    .iter()
+                    .filter_map(|inst| graph_definition(graph, inst)),
+            )
             .unzip();
         Self::over(nodes, definitions)
     }
@@ -798,10 +822,7 @@ mod tests {
     /// The function the blocks lift to, with its identity facts and nothing
     /// folded: the constant folder is not what these ask about.
     fn prepared(blocks: &[R2ILBlock]) -> SSAFunction {
-        let mut function =
-            SSAFunction::from_blocks_raw(blocks, Some(&arch())).expect("raw SSA builds");
-        function.refresh_decompile_prep_facts();
-        function
+        SSAFunction::from_blocks_raw(blocks, Some(&arch())).expect("raw SSA builds")
     }
 
     /// The one variable some operation defines into `storage_offset` at `size`.
@@ -809,7 +830,7 @@ mod tests {
         function
             .blocks()
             .iter()
-            .flat_map(|block| &block.ops)
+            .flat_map(|block| block.ops())
             .filter_map(SSAOp::dst)
             .find(|dst| {
                 function
@@ -834,7 +855,8 @@ mod tests {
         });
         block.push(R2ILOp::Return { target: reg(16, 4) });
         let function = prepared(&[block]);
-        let facts = function.decompile_prep_facts().expect("identity facts");
+        let facts = function.prep_facts_for_test();
+        let facts = &facts;
         let high = defined(&function, 16, 4);
         let literal = crate::semantic::resolve_const_value(Some(facts), &high);
         assert_ne!(
@@ -876,10 +898,11 @@ mod tests {
         });
         merge.push(R2ILOp::Return { target: reg(32, 1) });
         let function = prepared(&[entry, left, right, merge]);
-        let facts = function.decompile_prep_facts().expect("identity facts");
+        let facts = function.prep_facts_for_test();
+        let facts = &facts;
         let merged = function
             .get_block(0x100c)
-            .and_then(|block| block.phis.first())
+            .and_then(|block| block.phis().first())
             .map(|phi| phi.dst.clone())
             .expect("the two copies merge");
         // The merge is the constant: both arms agree on it.
@@ -928,8 +951,9 @@ mod tests {
         });
         block.push(R2ILOp::Return { target: reg(16, 4) });
         let function = prepared(&[block]);
-        let facts = function.decompile_prep_facts().expect("identity facts");
-        let ops = &function.blocks()[0].ops;
+        let facts = function.prep_facts_for_test();
+        let facts = &facts;
+        let ops = function.blocks()[0].ops();
         let loaded = ops
             .iter()
             .filter_map(|op| match op {

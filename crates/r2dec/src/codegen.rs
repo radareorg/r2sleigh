@@ -23,6 +23,18 @@ pub(crate) const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 /// recognisable that way: `0xdead` says what `57005` hides.
 const HEX_LITERAL_THRESHOLD: u64 = 0x100;
 
+/// What a whole expression is, where its kind says: a literal, a name
+/// outside the function, or the function a call calls.
+fn expr_role(expr: &CExpr, callee: bool) -> Option<CRole> {
+    match expr {
+        CExpr::IntLit(_) | CExpr::UIntLit(_) | CExpr::FloatLit(..) => Some(CRole::Number),
+        CExpr::StringLit(_) | CExpr::CharLit(_) => Some(CRole::String),
+        CExpr::Var(_) | CExpr::External { .. } if callee => Some(CRole::Function),
+        CExpr::External { .. } | CExpr::DataObject { .. } => Some(CRole::External),
+        _ => None,
+    }
+}
+
 /// How a non-negative integer literal is spelled.
 pub(crate) fn format_unsigned_literal(value: u64) -> String {
     if value >= HEX_LITERAL_THRESHOLD {
@@ -280,9 +292,26 @@ pub struct Emission {
     signature: Option<String>,
     variables: Vec<crate::report::RenderedVariable>,
     links: Vec<crate::report::RenderedLink>,
+    /// What each span of the definition is.
+    roles: CRoles,
 }
 
 impl Emission {
+    /// What each span of [`Emission::definition`] is.
+    pub fn roles(&self) -> &[(std::ops::Range<usize>, CRole)] {
+        &self.roles
+    }
+
+    /// What each span of [`Emission::unit`] is: the definition's roles, past
+    /// the prelude.
+    pub fn unit_roles(&self) -> CRoles {
+        let prelude = self.unit.len() - self.definition.len();
+        self.roles
+            .iter()
+            .map(|(range, role)| (range.start + prelude..range.end + prelude, *role))
+            .collect()
+    }
+
     /// The function and what it declares, as a reader is shown it.
     pub fn definition(&self) -> &str {
         &self.definition
@@ -324,6 +353,27 @@ impl Emission {
         self.definition
     }
 }
+
+/// What a span of the written C is, recorded where the emitter writes it:
+/// the emitter knows it wrote a keyword or a literal, so nothing reads the
+/// text back to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CRole {
+    Keyword,
+    Type,
+    Number,
+    String,
+    Comment,
+    /// The function a call calls.
+    Function,
+    /// A name outside the function: a global, a data object, an import.
+    External,
+    /// A residual: a construct the rendering could not prove, which traps.
+    Residual,
+}
+
+/// Spans of a text in a role, in the order they were written.
+pub type CRoles = Vec<(std::ops::Range<usize>, CRole)>;
 
 /// One line of a translation unit and the instructions it accounts for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +426,10 @@ pub(crate) struct CodeGenerator<'c> {
     /// Set once the work control stops the run; emission then unwinds without
     /// writing more, and the caller's poll reports the stop with the partial.
     stopped: bool,
+    /// What each span of `output` is, as it was written.
+    roles: CRoles,
+    /// Set while a call's callee is written, so its name is the function.
+    callee: bool,
 }
 
 impl<'c> CodeGenerator<'c> {
@@ -394,6 +448,22 @@ impl<'c> CodeGenerator<'c> {
             symbols: crate::symbol::SymbolTable::new(),
             work: None,
             stopped: false,
+            roles: Vec::new(),
+            callee: false,
+        }
+    }
+
+    /// Write `text` in `role`.
+    fn token(&mut self, role: CRole, text: &str) {
+        let start = self.output.len();
+        self.output.push_str(text);
+        self.roles.push((start..self.output.len(), role));
+    }
+
+    /// Say that what was written since `start` is in `role`.
+    fn mark(&mut self, role: CRole, start: usize) {
+        if self.output.len() > start {
+            self.roles.push((start..self.output.len(), role));
         }
     }
 
@@ -440,9 +510,11 @@ impl<'c> CodeGenerator<'c> {
             gap: gap.map(str::to_owned),
             line,
         });
+        let start = self.output.len();
         self.output
             .push_str(&crate::prelude::Helper::Residual(ty).name());
         self.output.push_str(&format!("({site})"));
+        self.mark(CRole::Residual, start);
     }
 
     /// Emit a function as a translation unit, with where each line came from.
@@ -492,6 +564,7 @@ impl<'c> CodeGenerator<'c> {
             signature,
             variables: crate::report::variables(func),
             links: crate::report::links(func, pointer_bits),
+            roles: std::mem::take(&mut self.roles),
         }
     }
 
@@ -552,6 +625,7 @@ impl<'c> CodeGenerator<'c> {
         self.lines.clear();
         self.residuals.clear();
         self.signature = None;
+        self.roles.clear();
 
         // A declared address defines nothing: the reason stands where the body
         // would, and the declarations say what the address resolves to.
@@ -749,12 +823,14 @@ impl<'c> CodeGenerator<'c> {
             "marked C statement reached codegen without journal sealing"
         );
         self.output.clear();
+        self.roles.clear();
         self.emit_stmt(stmt);
         self.output.clone()
     }
 
     /// Generate code for an expression.
     pub(crate) fn generate_expr(&mut self, expr: &CExpr) -> String {
+        self.roles.clear();
         self.output.clear();
         self.emit_expr(expr, 0);
         self.output.clone()
@@ -802,7 +878,8 @@ impl<'c> CodeGenerator<'c> {
                 else_body,
             } => {
                 self.emit_indent();
-                self.output.push_str("if (");
+                self.token(CRole::Keyword, "if");
+                self.output.push_str(" (");
                 self.emit_expr(cond, 0);
                 self.output.push_str(") ");
                 self.emit_stmt_body(then_body);
@@ -810,10 +887,14 @@ impl<'c> CodeGenerator<'c> {
                 if let Some(else_stmt) = else_body {
                     // Check if else body is another if (else-if chain)
                     if matches!(else_stmt.unobserved(), CStmt::If { .. }) {
-                        self.output.push_str(" else ");
+                        self.output.push(' ');
+                        self.token(CRole::Keyword, "else");
+                        self.output.push(' ');
                         self.emit_stmt_inline(else_stmt);
                     } else {
-                        self.output.push_str(" else ");
+                        self.output.push(' ');
+                        self.token(CRole::Keyword, "else");
+                        self.output.push(' ');
                         self.emit_stmt_body(else_stmt);
                     }
                 }
@@ -821,7 +902,8 @@ impl<'c> CodeGenerator<'c> {
             }
             CStmt::While { cond, body } => {
                 self.emit_indent();
-                self.output.push_str("while (");
+                self.token(CRole::Keyword, "while");
+                self.output.push_str(" (");
                 self.emit_expr(cond, 0);
                 self.output.push_str(") ");
                 self.emit_stmt_body(body);
@@ -829,9 +911,12 @@ impl<'c> CodeGenerator<'c> {
             }
             CStmt::DoWhile { body, cond } => {
                 self.emit_indent();
-                self.output.push_str("do ");
+                self.token(CRole::Keyword, "do");
+                self.output.push(' ');
                 self.emit_stmt_body(body);
-                self.output.push_str(" while (");
+                self.output.push(' ');
+                self.token(CRole::Keyword, "while");
+                self.output.push_str(" (");
                 self.emit_expr(cond, 0);
                 self.output.push_str(");\n");
             }
@@ -842,7 +927,8 @@ impl<'c> CodeGenerator<'c> {
                 body,
             } => {
                 self.emit_indent();
-                self.output.push_str("for (");
+                self.token(CRole::Keyword, "for");
+                self.output.push_str(" (");
 
                 if let Some(init_stmt) = init {
                     self.emit_stmt_inline(init_stmt);
@@ -867,13 +953,15 @@ impl<'c> CodeGenerator<'c> {
                 default,
             } => {
                 self.emit_indent();
-                self.output.push_str("switch (");
+                self.token(CRole::Keyword, "switch");
+                self.output.push_str(" (");
                 self.emit_expr(expr, 0);
                 self.output.push_str(") {\n");
 
                 for case in cases {
                     self.emit_indent();
-                    self.output.push_str("case ");
+                    self.token(CRole::Keyword, "case");
+                    self.output.push(' ');
                     self.emit_expr(&case.value, 0);
                     self.output.push_str(":\n");
                     self.indent_level += 1;
@@ -883,7 +971,8 @@ impl<'c> CodeGenerator<'c> {
 
                 if let Some(default_stmts) = default {
                     self.emit_indent();
-                    self.output.push_str("default:\n");
+                    self.token(CRole::Keyword, "default");
+                    self.output.push_str(":\n");
                     self.indent_level += 1;
                     self.emit_stmt_sequence(default_stmts);
                     self.indent_level -= 1;
@@ -893,7 +982,8 @@ impl<'c> CodeGenerator<'c> {
                 if self.output.ends_with(":\n") {
                     self.indent_level += 1;
                     self.emit_indent();
-                    self.output.push_str("break;\n");
+                    self.token(CRole::Keyword, "break");
+                    self.output.push_str(";\n");
                     self.indent_level -= 1;
                 }
 
@@ -902,7 +992,7 @@ impl<'c> CodeGenerator<'c> {
             }
             CStmt::Return(val) => {
                 self.emit_indent();
-                self.output.push_str("return");
+                self.token(CRole::Keyword, "return");
                 if let Some(expr) = val {
                     self.output.push(' ');
                     self.emit_expr(expr, 0);
@@ -911,15 +1001,18 @@ impl<'c> CodeGenerator<'c> {
             }
             CStmt::Break => {
                 self.emit_indent();
-                self.output.push_str("break;\n");
+                self.token(CRole::Keyword, "break");
+                self.output.push_str(";\n");
             }
             CStmt::Continue => {
                 self.emit_indent();
-                self.output.push_str("continue;\n");
+                self.token(CRole::Keyword, "continue");
+                self.output.push_str(";\n");
             }
             CStmt::Goto(label) => {
                 self.emit_indent();
-                self.output.push_str("goto ");
+                self.token(CRole::Keyword, "goto");
+                self.output.push(' ');
                 self.output.push_str(label);
                 self.output.push_str(";\n");
             }
@@ -937,9 +1030,12 @@ impl<'c> CodeGenerator<'c> {
             CStmt::Comment(text) => {
                 if self.config.emit_comments {
                     self.emit_indent();
+                    let start = self.output.len();
                     self.output.push_str("/* ");
                     self.emit_comment_text(text);
-                    self.output.push_str(" */\n");
+                    self.output.push_str(" */");
+                    self.mark(CRole::Comment, start);
+                    self.output.push('\n');
                 }
             }
             CStmt::Gap(marker) => {
@@ -954,9 +1050,13 @@ impl<'c> CodeGenerator<'c> {
                     crate::prelude::ResidualCause::Gap,
                     Some(&marker.kind),
                 );
-                self.output.push_str("; /* ");
+                self.output.push_str("; ");
+                let start = self.output.len();
+                self.output.push_str("/* ");
                 self.emit_comment_text(&marker.to_string());
-                self.output.push_str(" */\n");
+                self.output.push_str(" */");
+                self.mark(CRole::Comment, start);
+                self.output.push('\n');
             }
             CStmt::Observed { .. } => unreachable!("unobserved statement expected"),
         }
@@ -1020,7 +1120,9 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push_str(") ");
                 self.emit_stmt_body(then_body);
                 if let Some(else_stmt) = else_body {
-                    self.output.push_str(" else ");
+                    self.output.push(' ');
+                    self.token(CRole::Keyword, "else");
+                    self.output.push(' ');
                     if matches!(else_stmt.unobserved(), CStmt::If { .. }) {
                         self.emit_stmt_inline(else_stmt);
                     } else {
@@ -1045,6 +1147,8 @@ impl<'c> CodeGenerator<'c> {
         if need_parens {
             self.output.push('(');
         }
+        let role = expr_role(expr, std::mem::take(&mut self.callee));
+        let start = self.output.len();
 
         match expr {
             CExpr::IntLit(val) => {
@@ -1199,12 +1303,14 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push_str(member);
             }
             CExpr::Sizeof(inner) => {
-                self.output.push_str("sizeof(");
+                self.token(CRole::Keyword, "sizeof");
+                self.output.push('(');
                 self.emit_expr(inner, 0);
                 self.output.push(')');
             }
             CExpr::SizeofType(ty) => {
-                self.output.push_str("sizeof(");
+                self.token(CRole::Keyword, "sizeof");
+                self.output.push('(');
                 self.emit_type(ty);
                 self.output.push(')');
             }
@@ -1231,6 +1337,9 @@ impl<'c> CodeGenerator<'c> {
             }
             CExpr::Observed { .. } => unreachable!("unobserved expression expected"),
         }
+        if let Some(role) = role {
+            self.mark(role, start);
+        }
 
         if need_parens {
             self.output.push(')');
@@ -1244,7 +1353,9 @@ impl<'c> CodeGenerator<'c> {
             self.emit_residual(ty, cause, None);
             return;
         }
+        self.callee = true;
         self.emit_expr(func, my_prec);
+        self.callee = false;
         self.output.push('(');
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
@@ -1257,8 +1368,7 @@ impl<'c> CodeGenerator<'c> {
 
     /// Emit a type.
     fn emit_type(&mut self, ty: &CType) {
-        // Use the Display implementation
-        self.output.push_str(&ty.to_string());
+        self.token(CRole::Type, &ty.to_string());
     }
 
     /// Emit the declarator for a data object.
@@ -1501,6 +1611,40 @@ mod tests {
     /// The names a fixture in this module declares.
     fn test_table() -> std::cell::RefCell<crate::symbol::SymbolTable> {
         std::cell::RefCell::new(crate::symbol::SymbolTable::new())
+    }
+
+    /// The emitter says what each part of the C is where it writes it: the
+    /// keywords, the literals and the type it spelled, and nothing else.
+    #[test]
+    fn each_role_names_exactly_the_text_written_in_it() {
+        let stmt = CStmt::If {
+            cond: CExpr::IntLit(7),
+            then_body: Box::new(CStmt::Return(Some(CExpr::binary(
+                BinaryOp::Add,
+                CExpr::SizeofType(CType::u32()),
+                CExpr::StringLit("x".to_owned()),
+            )))),
+            else_body: None,
+        };
+        let mut generator = CodeGenerator::new(CodeGenConfig::default());
+        let text = generator.generate_stmt(&stmt);
+        let spans = generator
+            .roles
+            .iter()
+            .map(|(range, role)| (&text[range.clone()], *role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spans,
+            [
+                ("if", CRole::Keyword),
+                ("7", CRole::Number),
+                ("return", CRole::Keyword),
+                ("sizeof", CRole::Keyword),
+                ("uint32_t", CRole::Type),
+                ("\"x\"", CRole::String),
+            ],
+            "{text}"
+        );
     }
 
     /// A declared address defines nothing, and its declaration stands alone.

@@ -37,7 +37,6 @@ pub mod control;
 pub(crate) mod debug;
 mod effect_ledger;
 pub(crate) mod fold;
-pub mod highlight;
 pub mod ledger;
 pub(crate) mod normalize;
 mod observation_journal;
@@ -53,8 +52,8 @@ pub mod symbol;
 pub(crate) mod unrendered;
 mod variable;
 
+pub use crate::codegen::{CRole, CRoles, Emission, ResidualSite, SourceLine};
 use crate::codegen::{CodeGenerator, EmissionReadyFunction, prepare_function_for_emission};
-pub use crate::codegen::{Emission, ResidualSite, SourceLine};
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
 use crate::observation_journal::{
@@ -65,7 +64,6 @@ pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::CodeGenConfig;
 pub use control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 pub use fold::lower_ssa_ops_to_stmts;
-pub use highlight::highlight_c_ansi;
 use r2ssa::SSAFunction;
 #[cfg(test)]
 use r2ssa::SSAOp;
@@ -80,6 +78,18 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Arc;
 pub(crate) use structure::ControlFlowStructurer;
+
+/// The instruction a test fixture names by its block and its place among the
+/// block's operations in the sealed function.
+#[cfg(test)]
+pub(crate) fn inst_at(
+    artifact: &r2ssa::SsaArtifact,
+    block_addr: u64,
+    index: usize,
+) -> Option<r2ssa::InstId> {
+    let op = artifact.function().get_block(block_addr)?.op_id(index)?;
+    artifact.graph().inst_for_op(op)
+}
 
 #[cfg(test)]
 pub(crate) fn certified_memory_result_name(access: r2ssa::StructuredAccessId) -> String {
@@ -2107,12 +2117,13 @@ pub struct EffectObligationAudit {
     pub gapped: usize,
     pub unaccounted: usize,
     pub conflicts: usize,
-    /// First refused obligation in canonical source order, for diagnostics.
-    pub refused_obligation: Option<r2ssa::SemanticObligationId>,
+    /// First refused obligation in the order the spelling reads, for
+    /// diagnostics.
+    pub refused_obligation: Option<r2ssa::SpelledObligation>,
     /// First obligation with no occurrence or certificate, for diagnostics.
-    pub unaccounted_obligation: Option<r2ssa::SemanticObligationId>,
+    pub unaccounted_obligation: Option<r2ssa::SpelledObligation>,
     /// First obligation with incompatible occurrences, for diagnostics.
-    pub conflicting_obligation: Option<r2ssa::SemanticObligationId>,
+    pub conflicting_obligation: Option<r2ssa::SpelledObligation>,
 }
 
 impl EffectObligationAudit {
@@ -2149,11 +2160,10 @@ impl EffectObligationAudit {
             gapped: closure.gapped,
             unaccounted: closure.unattributed,
             conflicts: closure.conflicts,
-            refused_obligation: ledger.entries().find_map(|(id, outcome)| {
-                matches!(outcome, crate::ledger::Outcome::Refused).then_some(*id)
-            }),
-            unaccounted_obligation: ledger.unattributed().next().copied(),
-            conflicting_obligation: ledger.conflicts().next().map(|(id, _)| *id),
+            refused_obligation: ledger
+                .first_spelled(|_, outcome| matches!(outcome, crate::ledger::Outcome::Refused)),
+            unaccounted_obligation: ledger.first_spelled(|_, outcome| !outcome.is_decided()),
+            conflicting_obligation: ledger.first_conflict_spelled(),
         }
     }
 
@@ -3248,7 +3258,7 @@ impl Decompiler {
             let graph = prepared.graph();
             let live = prepared.live_out();
             let dead = prepared.unobserved_merges();
-            let total: usize = func.blocks().iter().map(|b| b.phis.len()).sum();
+            let total: usize = func.blocks().iter().map(|b| b.phis().len()).sum();
             eprintln!(
                 "MERGES fn={:#x} phis={} unobserved={} live_out={} unresolved={}",
                 func.entry,
@@ -3262,7 +3272,7 @@ impl Decompiler {
             // merge names the value that is lost rather than the layer that lost it.
             let render_facts = self.context.function_facts.render();
             for block in func.blocks() {
-                for phi in &block.phis {
+                for phi in block.phis() {
                     let value = graph.value_id_for_var(&phi.dst);
                     let carrier = value.is_some_and(|value| {
                         render_facts
@@ -3608,7 +3618,7 @@ impl Decompiler {
             // What materialisation left behind, so a carrier update that renders
             // more than once shows which ops the fold was handed.
             for block in normalized_func.blocks() {
-                for (index, op) in block.ops.iter().enumerate() {
+                for (index, op) in block.ops().iter().enumerate() {
                     let op: &r2ssa::SSAOp = op;
                     let kind = format!("{op:?}");
                     let kind = kind.split([' ', '{']).next().unwrap_or("?");
@@ -4070,7 +4080,11 @@ impl Decompiler {
             .callsites()
             .into_iter()
             .flat_map(|facts| facts.by_callsite.values())
-            .filter(|fact| fact.callee_signature_from_source_types)
+            .filter(|fact| {
+                fact.callee_signature_types
+                    .as_ref()
+                    .is_some_and(|types| types.grade() <= r2source::Grade::Declared)
+            })
             .count();
         crate::stage_timing::mark("effect_ledger");
         native.finalize_effect_ledger(
@@ -4131,8 +4145,7 @@ impl Decompiler {
             .map(|slot| slot.storage().location())
             .collect::<std::collections::BTreeSet<_>>();
         let transfer_inputs = graph
-            .inst_id_for_op_site(callsite.block_addr, callsite.op_index)
-            .and_then(|inst| graph.inst(inst))
+            .inst(callsite.at)
             .map(|inst| inst.inputs.to_vec())
             .unwrap_or_default();
         let observable = graph.insts.iter().find(|inst| {
@@ -4184,10 +4197,7 @@ impl Decompiler {
                 .function_facts
                 .callee_resolution()
                 .and_then(|resolution| {
-                    resolution.identity_for_callsite(r2types::CallsiteKey {
-                        block_addr: callsite.block_addr,
-                        op_index: callsite.op_index,
-                    })
+                    resolution.identity_for_callsite(r2types::CallsiteKey { at: callsite.at })
                 })
         else {
             r2il::refusal_evidence!(
@@ -4223,10 +4233,7 @@ impl Decompiler {
         // call renders with: the import's declaration, placed at the slot
         // the stub jumps through. The identity's own is a by-name lookup,
         // which a capture that states no names has nothing in.
-        let key = r2types::CallsiteKey {
-            block_addr: callsite.block_addr,
-            op_index: callsite.op_index,
-        };
+        let key = r2types::CallsiteKey { at: callsite.at };
         let certified = self
             .context
             .function_facts
@@ -4236,9 +4243,8 @@ impl Decompiler {
         let Some(signature) = certified.or(identity.signature.as_ref()) else {
             r2il::refusal_evidence!(
                 "import-stub-declaration",
-                "tail transfer at {:#x}:{} resolves to {name}, which has no prototype",
-                callsite.block_addr,
-                callsite.op_index
+                "tail transfer at {:?} resolves to {name}, which has no prototype",
+                callsite.at
             );
             let reason = format!(
                 "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
@@ -4250,9 +4256,8 @@ impl Decompiler {
         };
         r2il::refusal_evidence!(
             "import-stub-declaration",
-            "tail transfer at {:#x}:{} resolves to {name}, declared rather than defined",
-            callsite.block_addr,
-            callsite.op_index
+            "tail transfer at {:?} resolves to {name}, declared rather than defined",
+            callsite.at
         );
         let reason = format!(
             "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \

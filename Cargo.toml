@@ -38,6 +38,9 @@ z3 = "0.21.0"
 insta = "1"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
+# 0.43 is the last on crossterm 0.28, which ratatui 0.29 is built on: one
+# terminal library in the shell, not two.
+reedline = "0.43"
 
 [profile.dev]
 # Line tables rather than full debug info. A backtrace still names the file and

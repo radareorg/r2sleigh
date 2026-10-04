@@ -130,6 +130,10 @@ pub(crate) struct FoldingContext<'a> {
     /// answers every question about that block, and it is rebuilt when the walk
     /// moves on.
     pub(crate) current_op_idx: Cell<Option<usize>>,
+    /// The source instruction the operation being lowered implements, set
+    /// with the operation: `None` for one normalization inserted, which
+    /// implements none.
+    pub(crate) current_source: Cell<Option<InstId>>,
     /// What the right-hand side of the assignment being lowered has.
     ///
     /// The operation's lowering states it when it spells the assignment,
@@ -353,6 +357,7 @@ impl<'a> FoldingContext<'a> {
             current_block_addr: Cell::new(None),
             current_block_id: Cell::new(None),
             current_op_idx: Cell::new(None),
+            current_source: Cell::new(None),
             pending_assignment_type: Cell::new(None),
             #[cfg(test)]
             inlined_renderings: std::cell::RefCell::new(HashMap::new()),
@@ -742,7 +747,12 @@ impl<'a> FoldingContext<'a> {
         // plan is anchored at the first operation it covers, or it would claim its
         // cells and never open.
         let graph = self.inputs.prepared_ssa.map(r2ssa::SsaArtifact::graph);
-        let anchor = match graph.and_then(|graph| graph.op_site_for_inst(anchor)) {
+        // Where an operation stands, in the order the lowering visits the
+        // sealed function: by block address, then by place. A phi has none.
+        let place = |graph: &r2ssa::SsaGraph, inst: InstId| {
+            Some((graph.block_addr_of(inst)?, graph.op_ordinal(inst)?))
+        };
+        let anchor = match graph.and_then(|graph| place(graph, anchor)) {
             Some(_) => anchor,
             None => {
                 let Some(first) = graph.and_then(|graph| {
@@ -750,7 +760,7 @@ impl<'a> FoldingContext<'a> {
                         .sites
                         .iter()
                         .copied()
-                        .filter_map(|site| graph.op_site_for_inst(site).map(|at| (at, site)))
+                        .filter_map(|site| place(graph, site).map(|at| (at, site)))
                         .min()
                         .map(|(_, site)| site)
                 }) else {
@@ -1178,6 +1188,7 @@ impl<'a> FoldingContext<'a> {
             self.current_block_addr.get(),
             self.current_block_id.get(),
             self.current_op_idx.get(),
+            self.current_source.get(),
         );
         self.current_block_addr.set(Some(block_addr));
         self.current_block_id.set(
@@ -1186,10 +1197,12 @@ impl<'a> FoldingContext<'a> {
                 .and_then(|prepared| prepared.graph().block_id_for_addr(block_addr)),
         );
         self.current_op_idx.set(None);
+        self.current_source.set(None);
         let out = f();
         self.current_block_addr.set(saved.0);
         self.current_block_id.set(saved.1);
         self.current_op_idx.set(saved.2);
+        self.current_source.set(saved.3);
         out
     }
 
@@ -1457,9 +1470,43 @@ impl<'a> FoldingContext<'a> {
         // source function (principally focused unit tests). This is not a
         // fallback for a malformed normalized artifact: once an origins table
         // is supplied, only `Original` rows above can reach source facts.
-        let graph = self.inputs.prepared_ssa?.graph();
+        let prepared = self.inputs.prepared_ssa?;
+        let graph = prepared.graph();
         let block = graph.block(site.block)?;
-        graph.inst_id_for_op_site(block.addr, site.op_idx)
+        let op = prepared
+            .function()
+            .get_block(block.addr)?
+            .op_id(site.op_idx)?;
+        graph.inst_for_op(op)
+    }
+
+    /// Where a source instruction stands in the function being lowered: its
+    /// normalized site, found among its own block's origin rows, or its own
+    /// place when the function was not normalized.
+    pub(crate) fn normalized_site_of_source(
+        &self,
+        inst: InstId,
+    ) -> Option<crate::normalize::NormalizedOpSite> {
+        let prepared = self.inputs.prepared_ssa?;
+        let graph = prepared.graph();
+        let block = graph.inst(inst)?.block;
+        if let Some(origins) = self.inputs.normalization_origins {
+            return origins.original_site(block, inst);
+        }
+        let addr = graph.block(block)?.addr;
+        let op_idx = prepared
+            .function()
+            .get_block(addr)?
+            .position(graph.op_for_inst(inst)?)?;
+        Some(crate::normalize::NormalizedOpSite { block, op_idx })
+    }
+
+    /// The address of the block a normalized site stands in.
+    pub(crate) fn normalized_block_addr(
+        &self,
+        site: crate::normalize::NormalizedOpSite,
+    ) -> Option<u64> {
+        Some(self.inputs.prepared_ssa?.graph().block(site.block)?.addr)
     }
 
     pub(crate) fn source_inst_for_normalized_op(
@@ -1470,42 +1517,30 @@ impl<'a> FoldingContext<'a> {
         self.source_inst_for_normalized_site(self.normalized_site(block_addr, op_idx)?)
     }
 
-    pub(crate) fn source_op_site_for_normalized_op(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<(u64, usize)> {
-        if self.inputs.normalization_origins.is_none() {
-            return Some((block_addr, op_idx));
-        }
-        let inst = self.source_inst_for_normalized_op(block_addr, op_idx)?;
-        self.inputs.prepared_ssa?.inst_op_site(inst)
-    }
-
     /// The source instruction the operation being lowered implements, where
     /// it implements one: an operation normalization inserted -- a phi-edge
     /// copy, a relocated initializer -- implements none.
     pub(crate) fn current_source_inst(&self) -> Option<InstId> {
-        let op_idx = self.current_op_idx.get()?;
-        match self.current_block_id.get() {
+        self.current_source.get()
+    }
+
+    /// Enter the operation at `op_idx` of the block being lowered, with the
+    /// source instruction it implements.
+    pub(crate) fn enter_op(&self, op_idx: usize) {
+        self.current_op_idx.set(Some(op_idx));
+        let source = match self.current_block_id.get() {
             Some(block) => {
                 self.source_inst_for_normalized_site(crate::normalize::NormalizedOpSite {
                     block,
                     op_idx,
                 })
             }
-            None => self.source_inst_for_normalized_op(self.current_block_addr.get()?, op_idx),
-        }
-    }
-
-    pub(crate) fn current_source_op_site(&self) -> Option<(u64, usize)> {
-        let block_addr = self.current_block_addr.get()?;
-        let op_idx = self.current_op_idx.get()?;
-        if self.current_block_id.get().is_some() {
-            let inst = self.current_source_inst()?;
-            return self.inputs.prepared_ssa?.inst_op_site(inst);
-        }
-        self.source_op_site_for_normalized_op(block_addr, op_idx)
+            None => self
+                .current_block_addr
+                .get()
+                .and_then(|block_addr| self.source_inst_for_normalized_op(block_addr, op_idx)),
+        };
+        self.current_source.set(source);
     }
 
     /// Takes every value the occurrence carries.
@@ -1529,15 +1564,10 @@ impl<'a> FoldingContext<'a> {
         let Some(inst) = prepared.graph().inst(source_inst) else {
             return BTreeSet::new();
         };
-        let source_site = prepared.inst_op_site(source_inst);
-        let call_fact = source_site.and_then(|(block_addr, op_idx)| {
-            self.inputs
-                .call_render_facts()?
-                .fact_for_site(r2types::CallsiteKey {
-                    block_addr,
-                    op_index: op_idx,
-                })
-        });
+        let call_fact = self
+            .inputs
+            .call_render_facts()
+            .and_then(|facts| facts.fact_for_site(r2types::CallsiteKey { at: source_inst }));
         // A return is certified when the plan says which value it carries, and
         // also when the source says it carries none.
         //
@@ -1558,12 +1588,10 @@ impl<'a> FoldingContext<'a> {
                     boundary.at == source_inst && boundary.complete && boundary.values.is_empty()
                 });
         let return_certified = void_return
-            || source_site
-                .and_then(|(block_addr, op_idx)| {
-                    self.inputs
-                        .render_facts()?
-                        .return_for_op(block_addr, op_idx)
-                })
+            || self
+                .inputs
+                .render_facts()
+                .and_then(|facts| facts.return_for_inst(source_inst))
                 .is_some_and(|fact| values == [fact.value]);
         let rendered_call = call_fact.filter(|fact| {
             !matches!(
@@ -1857,14 +1885,11 @@ impl<'a> FoldingContext<'a> {
         let Some(prepared) = self.inputs.prepared_ssa else {
             return BTreeSet::new();
         };
-        let Some((block_addr, op_idx)) = prepared.inst_op_site(source_inst) else {
-            return BTreeSet::new();
-        };
         let is_write = kind == EffectOccurrenceKind::MemoryWrite;
         let Some(fact) = self
             .inputs
             .render_facts()
-            .and_then(|facts| facts.memory_access_for_op(block_addr, op_idx, is_write, space))
+            .and_then(|facts| facts.memory_access_for_inst(source_inst, is_write, space))
             .filter(|fact| {
                 fact.access.inst == source_inst
                     && address == Some(fact.address)
@@ -1909,13 +1934,10 @@ impl<'a> FoldingContext<'a> {
         let Some(prepared) = self.inputs.prepared_ssa else {
             return BTreeSet::new();
         };
-        let Some((block_addr, op_idx)) = prepared.inst_op_site(source_inst) else {
-            return BTreeSet::new();
-        };
         let Some(fact) = self
             .inputs
             .render_facts()
-            .and_then(|facts| facts.memory_access_for_access(block_addr, op_idx, true, access))
+            .and_then(|facts| facts.memory_access_for_access(true, access))
             .filter(|fact| {
                 fact.access.inst == source_inst
                     && fact.address == address
@@ -1959,19 +1981,12 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn exact_effect_obligations_for_source_memory(
         &self,
         kind: EffectOccurrenceKind,
-        block_addr: u64,
-        op_idx: usize,
+        source_inst: InstId,
         space: r2il::SpaceId,
         address: Option<ValueId>,
         value: Option<ValueId>,
     ) -> BTreeSet<SemanticObligationId> {
-        self.inputs
-            .prepared_ssa
-            .and_then(|prepared| prepared.graph().inst_id_for_op_site(block_addr, op_idx))
-            .map(|inst| {
-                self.exact_effect_obligations_for_inst_memory(kind, inst, space, address, value)
-            })
-            .unwrap_or_default()
+        self.exact_effect_obligations_for_inst_memory(kind, source_inst, space, address, value)
     }
 
     /// Internal/test convenience constructor. It deliberately has no

@@ -5,15 +5,17 @@ use super::*;
 
 #[test]
 fn global_field_profiles_refuse_spoofed_constant_names() {
-    let load_from = |addr| SSABlock {
-        addr: 0x401000,
-        size: 4,
-        ops: vec![SSAOp::Load {
-            dst: SSAVar::new("value", 1, 4),
-            space: r2il::SpaceId::Ram,
-            addr,
-        }],
-        phis: Vec::new(),
+    let load_from = |addr| {
+        SSABlock::from_parts(
+            0x401000,
+            4,
+            vec![SSAOp::Load {
+                dst: SSAVar::new("value", 1, 4),
+                space: r2il::SpaceId::Ram,
+                addr,
+            }],
+            Vec::new(),
+        )
     };
 
     let loaded = crate::ProgramExtents::new([(0x10000, 0x11000)]);
@@ -430,10 +432,10 @@ fn local_generated_struct_replaces_stale_generated_external_layout() {
         slot_element_strides: HashMap::new(),
         indexed_accesses: Vec::new(),
     };
-    let ssa_blocks = [SSABlock {
-        addr: 0x401000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x401000,
+        4,
+        vec![
             SSAOp::IntMult {
                 dst: SSAVar::new("scaled", 1, 8),
                 a: SSAVar::new("RSI", 0, 8),
@@ -455,8 +457,8 @@ fn local_generated_struct_replaces_stale_generated_external_layout() {
                 addr: SSAVar::new("field", 1, 8),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.test_struct_array_index",
@@ -515,8 +517,7 @@ fn local_generated_struct_replaces_stale_generated_external_layout() {
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: 3,
+            op: op_at(&ssa_blocks, 0x401000, 3),
             is_write: false,
             field_offset: 8,
             element_stride: 56,
@@ -1022,14 +1023,10 @@ fn prepared_phi_preserves_recursive_struct_parameter_type() {
         a: current.clone(),
         b: SSAVar::constant(offset, 8),
     };
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        phis: vec![PhiNode {
-            dst: current.clone(),
-            sources: vec![(0xff0, SSAVar::new("X0", 0, 8)), (0x1010, next.clone())],
-            canonical_storage: None,
-        }],
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        0,
+        vec![
             field_addr("len_addr", 1, 6),
             SSAOp::Load {
                 dst: len.clone(),
@@ -1053,13 +1050,17 @@ fn prepared_phi_preserves_recursive_struct_parameter_type() {
             },
             field_addr("next_addr", 1, 0x20),
             SSAOp::Load {
-                dst: next,
+                dst: next.clone(),
                 space: r2il::SpaceId::Ram,
                 addr: SSAVar::new("next_addr", 1, 8),
             },
         ],
-        size: 0,
-    }];
+        vec![PhiNode {
+            dst: current.clone(),
+            sources: vec![(0xff0, SSAVar::new("X0", 0, 8)), (0x1010, next)],
+            canonical_storage: None,
+        }],
+    )];
     let mut diagnostics = TypeAnalysisDiagnostics::default();
 
     let artifacts = infer_local_struct_artifacts_from_blocks(
@@ -1100,10 +1101,10 @@ fn local_struct_inference_uses_memory_ssa_for_spilled_element_pointer() {
     let stack_pointer = SSAVar::new("SP", 1, 8);
     let element = SSAVar::new("element", 1, 8);
     let blocks = [
-        SSABlock {
-            addr: entry,
-            phis: Vec::new(),
-            ops: vec![
+        SSABlock::from_parts(
+            entry,
+            0,
+            vec![
                 SSAOp::IntSub {
                     dst: stack_pointer.clone(),
                     a: SSAVar::new("SP", 0, 8),
@@ -1159,12 +1160,12 @@ fn local_struct_inference_uses_memory_ssa_for_spilled_element_pointer() {
                     addr: SSAVar::new("flags_addr", 1, 8),
                 },
             ],
-            size: 0,
-        },
-        SSABlock {
-            addr: successor,
-            phis: Vec::new(),
-            ops: vec![
+            Vec::new(),
+        ),
+        SSABlock::from_parts(
+            successor,
+            0,
+            vec![
                 SSAOp::Load {
                     dst: SSAVar::new("element_reload", 2, 8),
                     space: r2il::SpaceId::Ram,
@@ -1206,20 +1207,20 @@ fn local_struct_inference_uses_memory_ssa_for_spilled_element_pointer() {
                     addr: SSAVar::new("element_reload", 4, 8),
                 },
             ],
-            size: 0,
-        },
+            Vec::new(),
+        ),
     ];
     let stack_version = MemoryVersion {
         object: r2ssa::ObjectId(1),
         version: 1,
     };
     let memory_versions = LocalMemoryVersionFacts {
-        stores_by_site: HashMap::from([((entry, 4), vec![stack_version])]),
-        loads_by_site: HashMap::from([
-            ((entry, 5), vec![stack_version]),
-            ((successor, 0), vec![stack_version]),
-            ((successor, 3), vec![stack_version]),
-            ((successor, 6), vec![stack_version]),
+        stores_by_op: HashMap::from([(op_at(&blocks, entry, 4), vec![stack_version])]),
+        loads_by_op: HashMap::from([
+            (op_at(&blocks, entry, 5), vec![stack_version]),
+            (op_at(&blocks, successor, 0), vec![stack_version]),
+            (op_at(&blocks, successor, 3), vec![stack_version]),
+            (op_at(&blocks, successor, 6), vec![stack_version]),
         ]),
         phi_inputs: HashMap::new(),
         value_ids: HashMap::from([(SSAVar::new("W1", 0, 4), r2ssa::ValueId(1))]),
@@ -1317,10 +1318,10 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
         },
     );
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x4012d0,
-        size: 64,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x4012d0,
+        64,
+        vec![
             SSAOp::IntSExt {
                 dst: SSAVar::new("RSI", 1, 8),
                 src: SSAVar::new("ESI", 0, 4),
@@ -1371,8 +1372,8 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
                 addr: SSAVar::new("elem", 1, 8),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.struct_nested_array",
@@ -1430,8 +1431,7 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
         vec![
             ScalarArrayRenderCandidate {
                 slot: 0,
-                block_addr: 0x4012d0,
-                op_index: 6,
+                op: op_at(&ssa_blocks, 0x4012d0, 6),
                 is_write: false,
                 field_offset: 0x10,
                 element_stride: 40,
@@ -1440,8 +1440,7 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
             },
             ScalarArrayRenderCandidate {
                 slot: 0,
-                block_addr: 0x4012d0,
-                op_index: 8,
+                op: op_at(&ssa_blocks, 0x4012d0, 8),
                 is_write: false,
                 field_offset: 4,
                 element_stride: 40,
@@ -1450,8 +1449,7 @@ fn external_struct_pointer_strength_reduced_index_certifies_nested_array_fields(
             },
             ScalarArrayRenderCandidate {
                 slot: 0,
-                block_addr: 0x4012d0,
-                op_index: 9,
+                op: op_at(&ssa_blocks, 0x4012d0, 9),
                 is_write: false,
                 field_offset: 0,
                 element_stride: 40,
@@ -1490,10 +1488,10 @@ fn stack_home_strength_reduced_index_certifies_struct_array_field_access() {
             ]),
         },
     );
-    let ssa_blocks = [SSABlock {
-        addr: 0x401000,
-        size: 64,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x401000,
+        64,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("idx_addr", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1539,8 +1537,8 @@ fn stack_home_strength_reduced_index_certifies_struct_array_field_access() {
                 addr: SSAVar::new("field", 1, 8),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.test_struct_array_index",
@@ -1603,8 +1601,7 @@ fn stack_home_strength_reduced_index_certifies_struct_array_field_access() {
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: 8,
+            op: op_at(&ssa_blocks, 0x401000, 8),
             is_write: false,
             field_offset: 0x34,
             element_stride: 56,

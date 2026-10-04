@@ -61,6 +61,9 @@ impl RecoveredParameter {
 pub struct RecoveredResult {
     slot: CanonicalStorageId,
     observed: CanonicalStorageId,
+    /// Every return path sign-extends the observed bytes into the byte above
+    /// them: the function computed a signed value of the observed width.
+    signed: bool,
 }
 
 impl RecoveredResult {
@@ -72,6 +75,11 @@ impl RecoveredResult {
     /// The widest definition that contributes to the result.
     pub const fn observed(self) -> CanonicalStorageId {
         self.observed
+    }
+
+    /// Whether every return path sign-extends the result above its width.
+    pub const fn signed(self) -> bool {
+        self.signed
     }
 }
 
@@ -671,7 +679,7 @@ fn body_proven_result(
         .is_none()
         .then_some(first)
         .filter(|(candidate, live_out)| {
-            recovered_result(graph, facts, live_out, *candidate)
+            recovered_result(func, graph, facts, live_out, *candidate)
                 .register()
                 .is_some()
         })
@@ -712,7 +720,7 @@ fn returned_result(
         RecoveredFunctionResult::Unproven
     } else {
         // An untouched carrier the caller never filled holds no value: void if no return fills it, unproven if some do.
-        match recovered_result(graph, facts, live_out, slot) {
+        match recovered_result(func, graph, facts, live_out, slot) {
             RecoveredFunctionResult::Register(_) if untouched => RecoveredFunctionResult::Unproven,
             result => result,
         }
@@ -775,13 +783,20 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
 }
 
 /// The carrier the answered returns fill, void where none does, unproven where one is stated nowhere.
+///
+/// Its width is the widest any return path wrote (doc/adr-written-lanes.md):
+/// one past the highest byte some path computed or moved there, as lifted,
+/// and the carrier's own where a path wrote none of it.
 fn recovered_result(
+    func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
 ) -> RecoveredFunctionResult {
+    let written = func.written_or_captured();
     let mut observed = None;
+    let mut signed = true;
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
             ReturnedByCall::Void => continue,
@@ -794,11 +809,14 @@ fn recovered_result(
         if storage.location() != slot.location() || storage.size == 0 || storage.size > slot.size {
             return RecoveredFunctionResult::Unproven;
         }
-        let observed_size = if storage == slot {
-            narrow_zero_extend_input_size(graph, value).unwrap_or(storage.size)
-        } else {
-            storage.size
-        };
+        let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
+        // A path that writes no byte of the carrier hands back what the
+        // caller left there -- on arm64, the first argument, returned through
+        // a spill and reload -- whose width the body does not narrow: the
+        // carrier's. Whether that hands-back is a result at all is decided
+        // above, by the definitions that reach the return.
+        let observed_size = crate::lanes::written_width(&bytes, storage).unwrap_or(storage.size);
+        signed &= crate::lanes::signed(&bytes, observed_size);
         let storage = CanonicalStorageId {
             space: slot.space,
             offset: slot.offset,
@@ -809,35 +827,85 @@ fn recovered_result(
         }
     }
     observed.map_or(RecoveredFunctionResult::Void, |observed| {
-        RecoveredFunctionResult::Register(RecoveredResult { slot, observed })
+        RecoveredFunctionResult::Register(RecoveredResult {
+            slot,
+            observed,
+            signed,
+        })
     })
 }
 
-/// The narrow value a full result definition zero-extends.
+/// What each byte of a value holds, low byte first: as its definition wrote
+/// it when the function was lifted, where the definition is one the lift
+/// made; otherwise from what its inputs hold, by the same rules.
 ///
-/// Lifters make implicit carrier clearing explicit: returning a value through
-/// `eax`/`w0` is represented by a narrow definition followed by `rax`/`x0 =
-/// zext(...)`. The live-out is consequently the full carrier, while the input
-/// of that exact defining operation is the width the machine observed. Other
-/// full-width definitions remain full width; no register name or architecture
-/// convention is guessed here.
-fn narrow_zero_extend_input_size(graph: &SsaGraph, value: crate::ValueId) -> Option<u32> {
-    let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-    // The lane the carrier's definition widens, or inserts at its low end.
-    let input = match (&definition.payload, definition.inputs.as_slice()) {
-        (crate::graph::InstPayload::Op(crate::SSAOp::IntZExt { .. }), [input]) => *input,
-        (crate::graph::InstPayload::Op(crate::SSAOp::Insert(insert)), [_, input, _])
-            if insert.position.constant_bits() == Some(0) =>
-        {
-            *input
-        }
-        _ => return None,
+/// The record is what makes this a fact about the instruction rather than the
+/// optimised operation: `ZEXT(EAX ^ EAX)` folds to the literal `0:8`, whose
+/// bytes are all data, while the instruction computed four of them. A value
+/// defined after the lift -- a lane projection -- is read through its inputs;
+/// a cycle among such values, which no record breaks, is data.
+fn written_bytes(
+    written: &crate::lanes::Written,
+    graph: &SsaGraph,
+    value: crate::ValueId,
+    visiting: &mut BTreeSet<crate::ValueId>,
+) -> crate::lanes::Bytes {
+    let Some(held) = graph.value(value) else {
+        return Vec::new();
     };
-    let input = graph.value(input)?;
-    let output = graph.value(value)?;
-    let input_size = input.var.size;
-    let output_size = output.var.size;
-    (input_size > 0 && input_size < output_size).then_some(input_size)
+    let size = held.var.size;
+    let Some(inst_id) = graph.def_inst(value) else {
+        return crate::lanes::entry_bytes(held.canonical_storage, size);
+    };
+    if let Some(recorded) = graph
+        .op_for_inst(inst_id)
+        .and_then(|id| written.of(id))
+        .filter(|bytes| bytes.len() == size as usize)
+    {
+        return recorded.clone();
+    }
+    let Some(inst) = graph.inst(inst_id) else {
+        return Vec::new();
+    };
+    if !visiting.insert(value) {
+        return vec![crate::lanes::Byte::Data; size as usize];
+    }
+    let mut input = |var: &crate::SSAVar| match graph.value_id_for_var(var) {
+        Some(input) if var.constant_bits().is_none() => {
+            written_bytes(written, graph, input, visiting)
+        }
+        _ => vec![crate::lanes::Byte::Data; var.size as usize],
+    };
+    let bytes = match &inst.payload {
+        crate::graph::InstPayload::Phi { .. } => {
+            let mut joined: Option<crate::lanes::Bytes> = None;
+            for source in inst.inputs.clone() {
+                let source = written_bytes(written, graph, source, visiting);
+                joined = Some(match joined {
+                    None => source,
+                    Some(held) => crate::lanes::join(&held, &source),
+                });
+            }
+            joined.unwrap_or_default()
+        }
+        crate::graph::InstPayload::Op(op) => {
+            let inputs = op
+                .sources()
+                .into_iter()
+                .map(|var| (var.clone(), input(var)))
+                .collect::<BTreeMap<_, _>>();
+            // A definition the lift did not make states no instruction's
+            // extension, so none of its fills is the architecture's.
+            crate::lanes::transfer(op, false, |var| {
+                inputs
+                    .get(var)
+                    .cloned()
+                    .unwrap_or_else(|| vec![crate::lanes::Byte::Data; var.size as usize])
+            })
+        }
+    };
+    visiting.remove(&value);
+    bytes
 }
 
 /// Recover what the machine code proves about this function's interface.
@@ -856,7 +924,7 @@ pub fn recover_interface(
     slots: &SourceConventionSlots,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, slots, None, loader_role)
+    recover_interface_inner(func, None, slots, None, loader_role)
 }
 
 /// Recover an interface while retaining exact source-owned call boundaries.
@@ -864,13 +932,16 @@ pub fn recover_interface(
 /// This is the production path. The context is provisional only in that it
 /// does not yet contain the function interface being recovered; its call-site
 /// identities and interfaces are already final source facts.
+///
+/// `prep` is the prep facts of `func`, which is prepared and never sealed.
 pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
+    prep: &crate::DecompilePrepFacts,
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, slots, Some(machine_context), loader_role)
+    recover_interface_inner(func, Some(prep), slots, Some(machine_context), loader_role)
 }
 
 /// `loader_role` is the source's record that the program loader calls this
@@ -879,6 +950,7 @@ pub(crate) fn recover_interface_with_context(
 /// the register; parameters are still read off the body.
 fn recover_interface_inner(
     func: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
     loader_role: Option<r2source::SourceLoaderRole>,
@@ -904,6 +976,7 @@ fn recover_interface_inner(
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         crate::semantic::PreparedFunctionFacts::collect_with_context(
             func,
+            prep,
             &graph,
             &storage_spans,
             &crate::AssumptionSet::default(),
@@ -991,6 +1064,7 @@ fn recover_interface_inner(
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot,
                 observed: slot,
+                signed: false,
             })
         }
         TailResult::NoTailBoundary | TailResult::Exact(_) => RecoveredFunctionResult::Void,
@@ -1022,7 +1096,7 @@ fn recover_interface_inner(
     if no_tail_boundary && loader_role.is_none() && result == RecoveredFunctionResult::Void {
         let mut proven = body_proven_result(func, &graph, &facts, machine_context, slots);
         if let Some((candidate, candidate_live_out)) = proven.take() {
-            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
+            result = recovered_result(func, &graph, &facts, &candidate_live_out, candidate);
             live_out = candidate_live_out;
         }
     }
@@ -1172,7 +1246,7 @@ fn direct_return_result(
         .by_id
         .values()
         .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
-        .filter_map(|call| graph.op_site_for_inst(call.at).map(|(block, _)| block))
+        .filter_map(|call| graph.block_addr_of(call.at))
         .collect::<BTreeSet<_>>();
     if tail_blocks.is_empty() {
         return None;
@@ -1290,13 +1364,17 @@ fn mint_recovered_interface_inner(
     // graph describes exactly what is referenced and nothing more. The
     // constructor enforces that literally: a graph carrying a type no logical
     // value names is rejected outright.
-    let mut widths: Vec<u32> = Vec::new();
-    fn note_bits(widths: &mut Vec<u32>, bits: u32) {
-        if !widths.contains(&bits) {
-            widths.push(bits);
+    // Keyed by width and sign: only a result the body sign-extends is signed.
+    let mut widths: Vec<(u32, bool)> = Vec::new();
+    fn note_bits(widths: &mut Vec<(u32, bool)>, bits: u32) {
+        note_type(widths, bits, false);
+    }
+    fn note_type(widths: &mut Vec<(u32, bool)>, bits: u32, signed: bool) {
+        if !widths.contains(&(bits, signed)) {
+            widths.push((bits, signed));
         }
     }
-    fn width_of(widths: &mut Vec<u32>, storage: CanonicalStorageId) -> Option<u32> {
+    fn width_of(widths: &mut Vec<(u32, bool)>, storage: CanonicalStorageId) -> Option<u32> {
         let bits = storage_bits(storage)?;
         note_bits(widths, bits);
         Some(bits)
@@ -1338,7 +1416,11 @@ fn mint_recovered_interface_inner(
         )
         .collect::<Option<Vec<_>>>()?;
     let result_width = match recovered.result().register() {
-        Some(result) => Some(width_of(&mut widths, result.observed())?),
+        Some(result) => {
+            let bits = storage_bits(result.observed())?;
+            note_type(&mut widths, bits, result.signed());
+            Some((bits, result.signed()))
+        }
         None => None,
     };
     widths.sort_unstable();
@@ -1346,10 +1428,13 @@ fn mint_recovered_interface_inner(
     let types = widths
         .iter()
         .enumerate()
-        .map(|(index, bits)| {
+        .map(|(index, (bits, signed))| {
             SourceType::new(
                 u32::try_from(index).ok()?,
-                SourceTypeKind::UnsignedInteger,
+                match signed {
+                    true => SourceTypeKind::SignedInteger,
+                    false => SourceTypeKind::UnsignedInteger,
+                },
                 u64::from(*bits),
                 u64::from(*bits),
             )
@@ -1357,24 +1442,24 @@ fn mint_recovered_interface_inner(
         })
         .collect::<Option<Vec<SourceType>>>()?;
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
-    let type_id = |bits: u32| -> Option<u32> {
+    let type_id = |bits: u32, signed: bool| -> Option<u32> {
         widths
             .iter()
-            .position(|candidate| *candidate == bits)
+            .position(|candidate| *candidate == (bits, signed))
             .and_then(|index| u32::try_from(index).ok())
     };
     // `Full` where the read is the whole register, `LowBits` where it is the
     // register's low half. The second is what an `int` parameter looks like in
     // a 64-bit argument register, and it is the projection the parameter-fact
     // collector already knows how to narrow.
-    let logical = |bits: u32, carrier_bits: u32| -> Option<SourceLogicalValue> {
+    let logical = |bits: u32, signed: bool, carrier_bits: u32| -> Option<SourceLogicalValue> {
         let kind = if bits < carrier_bits {
             SourceCarrierKind::LowBits
         } else {
             SourceCarrierKind::Full
         };
         Some(SourceLogicalValue::new(
-            type_id(bits)?,
+            type_id(bits, signed)?,
             SourceCarrierProjection::new(kind, 0, u64::from(bits)),
         ))
     };
@@ -1426,17 +1511,17 @@ fn mint_recovered_interface_inner(
     let parameter_logical_values = parameter_widths
         .iter()
         .zip(parameter_slot_widths.iter())
-        .map(|(bits, carrier_bits)| logical(*bits, *carrier_bits))
+        .map(|(bits, carrier_bits)| logical(*bits, false, *carrier_bits))
         .collect::<Option<Vec<_>>>()?
         .into_iter()
         .map(Some)
         .collect::<Vec<_>>();
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
-        (RecoveredFunctionResult::Register(result), Some(bits)) => (
+        (RecoveredFunctionResult::Register(result), Some((bits, signed))) => (
             SourceFunctionReturn::Register {
                 storage: result.slot(),
             },
-            Some(logical(bits, result.slot().size.checked_mul(8)?)?),
+            Some(logical(bits, signed, result.slot().size.checked_mul(8)?)?),
         ),
         // A body nobody read owns this result, so nothing is claimed for it.
         (RecoveredFunctionResult::Unproven, _) => (SourceFunctionReturn::Unproven, None),
@@ -1469,7 +1554,7 @@ fn mint_recovered_interface_inner(
     // stacked return still stood -- a mechanism with no carriers, refused as
     // a conflict with the machine.
     .with_role_register_names(roles.role_register_names())
-    .with_types_as_carrier_widths();
+    .with_types(r2source::Confidence::of(r2source::Basis::CarrierWidth));
     let interface = if recovered.result_is_return_address() {
         interface.with_body_proven_return_address().ok()?
     } else {
@@ -1600,6 +1685,21 @@ mod tests {
             offset,
             size,
         }
+    }
+
+    /// Recovery under a context, over a function prepared and never sealed,
+    /// with the prep facts its preparation gives it.
+    fn recover_in_context(
+        function: &SSAFunction,
+        context: &crate::SourceMachineContext,
+    ) -> Option<RecoveredInterface> {
+        recover_interface_with_context(
+            function,
+            &function.prep_facts_for_test(),
+            &candidates(),
+            context,
+            None,
+        )
     }
 
     fn candidates() -> SourceConventionSlots {
@@ -1754,8 +1854,7 @@ mod tests {
         let function = SSAFunction::for_decompile_under(&blocks, Some(&arch), &machine_context)
             .expect("decompile-normalized ssa");
         let recovered =
-            recover_interface_with_context(&function, &candidates(), &machine_context, None)
-                .expect("contextual recovery");
+            recover_in_context(&function, &machine_context).expect("contextual recovery");
 
         assert_eq!(recovered.parameters().len(), 1);
         assert_eq!(recovered.parameters()[0].slot(), register(0, 8));
@@ -1802,7 +1901,7 @@ mod tests {
         });
         let graph = graph_for(block);
         let defined = graph
-            .inst_id_for_op_site(0x1000, 0)
+            .inst_spelled_at(0x1000, 0)
             .and_then(|inst| graph.inst(inst))
             .and_then(|inst| inst.output)
             .expect("defined x0 value");
@@ -1838,6 +1937,7 @@ mod tests {
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot: register(0, 8),
                 observed: register(0, 8),
+                signed: false,
             })
         );
     }
@@ -2067,7 +2167,7 @@ mod tests {
             Vec::new(),
             vec![identity],
         );
-        let unproven = recover_interface_with_context(&function, &candidates(), &unknown, None)
+        let unproven = recover_in_context(&function, &unknown)
             .expect("an unproven result is still an interface");
         assert_eq!(
             unproven.result(),
@@ -2110,8 +2210,8 @@ mod tests {
             vec![interface],
             vec![identity],
         );
-        let recovered = recover_interface_with_context(&function, &candidates(), &known, None)
-            .expect("a proven tail boundary owns the result");
+        let recovered =
+            recover_in_context(&function, &known).expect("a proven tail boundary owns the result");
         assert_eq!(
             recovered.result().register().map(|result| result.slot()),
             Some(register(0, 8))
@@ -2176,7 +2276,7 @@ mod tests {
             Vec::new(),
             vec![identity],
         );
-        let recovered = recover_interface_with_context(&function, &candidates(), &context, None)
+        let recovered = recover_in_context(&function, &context)
             .expect("a direct return answers the boundary the tail leaves open");
         assert_eq!(
             recovered.result().register().map(|result| result.slot()),
@@ -2228,9 +2328,7 @@ pub struct RecoveredStackSlot {
 /// is is the preparation's answer too, so a parameter copied or narrowed
 /// before the spill is still recognised.
 pub fn recovered_stack_slots(prepared: &crate::SsaArtifact) -> Vec<RecoveredStackSlot> {
-    let Some(facts) = prepared.function().decompile_prep_facts() else {
-        return Vec::new();
-    };
+    let facts = prepared.decompile_prep_facts();
     let mut slots = Vec::new();
     for (object, certificate) in &prepared.certificates().stack_slots {
         // The frame carriers a function manages for itself are not the

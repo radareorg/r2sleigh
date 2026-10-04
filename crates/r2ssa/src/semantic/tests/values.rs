@@ -20,10 +20,11 @@ fn return_certificate_requires_one_complete_source_boundary_value() {
     };
     let (block_addr, op_index) = artifact
         .graph()
-        .op_site_for_inst(boundary.at)
+        .walk_start(boundary.at)
         .expect("return op site");
     let certificate = artifact
-        .return_certificate_for_op(block_addr, op_index)
+        .inst_at(block_addr, op_index)
+        .and_then(|inst| artifact.return_certificate_for_inst(inst))
         .expect("complete boundary value certificate");
     assert_eq!(certificate.at, boundary.at);
     assert_eq!(certificate.value, boundary_value.value);
@@ -67,10 +68,11 @@ fn low_bit_return_certificate_owns_the_exact_logical_extension_input() {
     let physical = boundary_value.value;
     let (block_addr, op_index) = artifact
         .graph()
-        .op_site_for_inst(boundary.at)
+        .walk_start(boundary.at)
         .expect("return op site");
     let certificate = artifact
-        .return_certificate_for_op(block_addr, op_index)
+        .inst_at(block_addr, op_index)
+        .and_then(|inst| artifact.return_certificate_for_inst(inst))
         .expect("exact logical return certificate");
     assert_ne!(certificate.value, physical);
     assert_eq!(certificate.width, 4);
@@ -117,10 +119,11 @@ fn low_bit_return_certificate_owns_a_constant_that_is_its_own_zero_extension() {
         assert!(boundary.complete, "constant {constant:#x}");
         let (block_addr, op_index) = artifact
             .graph()
-            .op_site_for_inst(boundary.at)
+            .walk_start(boundary.at)
             .expect("return op site");
         let certificate = artifact
-            .return_certificate_for_op(block_addr, op_index)
+            .inst_at(block_addr, op_index)
+            .and_then(|inst| artifact.return_certificate_for_inst(inst))
             .unwrap_or_else(|| panic!("certificate for constant {constant:#x}"));
         assert_eq!(certificate.width, 4, "constant {constant:#x}");
         assert_eq!(
@@ -1116,6 +1119,7 @@ fn return_boundary_without_typed_machine_roles_carries_values_but_no_exit_state(
     );
     let walked = super::super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5000,

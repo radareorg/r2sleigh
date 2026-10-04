@@ -646,6 +646,16 @@ mod tests {
         )
     }
 
+    /// The call instruction a fixture names by its block and place: the
+    /// prepared fixture's own, or a stand-in for a context with no source.
+    fn fixture_call_inst(ctx: &FoldingContext<'_>, source_call: (u64, usize)) -> r2ssa::InstId {
+        match ctx.inputs.prepared_ssa {
+            Some(prepared) => crate::inst_at(&prepared, source_call.0, source_call.1)
+                .expect("the fixture's call"),
+            None => r2ssa::InstId(u32::try_from(source_call.1).expect("a small fixture")),
+        }
+    }
+
     fn install_callsite_resolution(
         ctx: &mut FoldingContext<'_>,
         source_call: (u64, usize),
@@ -663,9 +673,8 @@ mod tests {
         let resolution = r2types::CalleeResolutionFacts::from_direct_call_targets(
             [(
                 r2types::CallsiteKey {
-                    block_addr: source_call.0,
-                    op_index: source_call.1,
-                },
+                at: fixture_call_inst(ctx, source_call),
+            },
                 target_addr,
             )],
             &r2types::CalleeIdentityContext {
@@ -688,9 +697,8 @@ mod tests {
         signature: Option<FunctionType>,
     ) {
         let key = r2types::CalleeIdentityKey::IndirectSite(r2types::CallsiteKey {
-            block_addr: source_call.0,
-            op_index: source_call.1,
-        });
+                at: fixture_call_inst(ctx, source_call),
+            });
         let signatures: HashMap<String, r2types::FunctionType> = signature
             .map(|signature| (target_name.to_string(), signature.into()))
             .into_iter()
@@ -709,8 +717,7 @@ mod tests {
         resolution.by_key.insert(key.clone(), identity);
         resolution.by_callsite.insert(
             r2types::CallsiteKey {
-                block_addr: source_call.0,
-                op_index: source_call.1,
+                at: fixture_call_inst(ctx, source_call),
             },
             key,
         );
@@ -803,11 +810,7 @@ mod tests {
             .callsites
             .values()
             .filter_map(|cert| {
-                let (block_addr, op_index) = prepared.inst_op_site(cert.at)?;
-                let callsite = r2types::CallsiteKey {
-                    block_addr,
-                    op_index,
-                };
+                let callsite = r2types::CallsiteKey { at: cert.at };
                 let register_argument_locations = cert
                     .argument_certificates
                     .iter()
@@ -864,7 +867,7 @@ mod tests {
                         variadic: cert.variadic,
                         fixed_argument_count: cert.fixed_argument_count,
                         callee_signature: None,
-                        callee_signature_from_source_types: false,
+                        callee_signature_types: None,
                         variadic_argument_count_evidence: cert
                             .variadic_argument_count_evidence,
                         variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
@@ -1054,7 +1057,7 @@ mod tests {
 
     fn enter_exact_test_site(ctx: &FoldingContext<'_>, block_addr: u64, op_idx: usize) {
         ctx.current_block_addr.set(Some(block_addr));
-        ctx.current_op_idx.set(Some(op_idx));
+        ctx.enter_op(op_idx);
     }
 
     #[test]
@@ -1131,13 +1134,11 @@ mod tests {
         // The narrow addition defines a lane temporary; the root's definition
         // is the lift's extension of it, which is the write rendered here.
         let copy_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::IntZExt { dst, .. } if dst.size == 8))
             .expect("carrier extension");
-        let copy_inst = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, copy_idx)
+        let copy_inst = crate::inst_at(&prepared, block.addr, copy_idx)
             .expect("copy graph instruction");
 
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
@@ -1228,13 +1229,11 @@ mod tests {
         .with_name("observed_contextual_stack_load");
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let load_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Load { .. }))
             .expect("stack load");
-        let load_inst = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, load_idx)
+        let load_inst = crate::inst_at(&prepared, block.addr, load_idx)
             .expect("load graph instruction");
         let address_site = r2ssa::UseSite {
             inst: load_inst,
@@ -1260,7 +1259,7 @@ mod tests {
             Some(r2ssa::MachineWriteDisposition::Exact(_))
         ));
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[load_idx], block.addr, load_idx)
+            .op_to_stmt_with_args(&block.ops()[load_idx], block.addr, load_idx)
             .expect("supported load lowering")
             .expect("structured stack load");
         let CStmt::Expr(assignment) = stmt.unobserved() else {
@@ -1334,7 +1333,7 @@ mod tests {
         // assignment of its own.
         enter_exact_test_site(&ctx, block.addr, 1);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[1], block.addr, 1)
+            .op_to_stmt_with_args(&block.ops()[1], block.addr, 1)
             .expect("signed borrow reader has exact scalar lowering")
             .expect("signed borrow reader definition");
         let rendered = format!("{stmt:?}");
@@ -1377,10 +1376,10 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("canonical_literal_rule_rendering");
         let block = prepared.function().get_block(0x1000).expect("entry block");
-        let SSAOp::IntSBorrow { dst: flag, .. } = &block.ops[0] else {
+        let SSAOp::IntSBorrow { dst: flag, .. } = &block.ops()[0] else {
             panic!("fixture must begin with signed borrow");
         };
-        let SSAOp::IntZExt { dst: widened, .. } = &block.ops[1] else {
+        let SSAOp::IntZExt { dst: widened, .. } = &block.ops()[1] else {
             panic!("fixture must widen the signed-borrow flag");
         };
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
@@ -1419,7 +1418,7 @@ mod tests {
         // only statement left, and it is where the spelled constant shows.
         enter_exact_test_site(&ctx, block.addr, 3);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[3], block.addr, 3)
+            .op_to_stmt_with_args(&block.ops()[3], block.addr, 3)
             .expect("canonical literal has exact scalar lowering")
             .expect("the store of the constant");
         let rendered = format!("{stmt:?}");
@@ -1466,9 +1465,7 @@ mod tests {
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         let (plan, _names, _journal) = install_observed_lowering(&mut ctx, &prepared);
-        let inst = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, 0)
+        let inst = crate::inst_at(&prepared, block.addr, 0)
             .expect("population-count instruction");
         assert!(matches!(
             plan.use_disposition(r2ssa::UseSite { inst, input_idx: 0 }),
@@ -1477,7 +1474,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, 0);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[0], block.addr, 0)
+            .op_to_stmt_with_args(&block.ops()[0], block.addr, 0)
             .expect("population count has exact scalar lowering")
             .expect("population-count definition");
         assert!(format!("{stmt:?}").contains("__builtin_popcountll"));
@@ -1582,13 +1579,11 @@ mod tests {
         .with_name("observed_contextual_stack_store");
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let store_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Store { .. }))
             .expect("stack store");
-        let store_inst = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, store_idx)
+        let store_inst = crate::inst_at(&prepared, block.addr, store_idx)
             .expect("store graph instruction");
         let address_site = r2ssa::UseSite {
             inst: store_inst,
@@ -1599,7 +1594,7 @@ mod tests {
         let (plan, names, journal) = install_observed_lowering(&mut ctx, &prepared);
         let mut body = Vec::new();
         for prefix_idx in 0..store_idx {
-            if block.ops[prefix_idx]
+            if block.ops()[prefix_idx]
                 .dst()
                 .is_some_and(|dst| ctx.is_dead(dst))
             {
@@ -1607,7 +1602,7 @@ mod tests {
             }
             enter_exact_test_site(&ctx, block.addr, prefix_idx);
             if let Some(prefix) = ctx
-                .op_to_stmt_with_args(&block.ops[prefix_idx], block.addr, prefix_idx)
+                .op_to_stmt_with_args(&block.ops()[prefix_idx], block.addr, prefix_idx)
                 .expect("supported stack-address prefix lowering")
             {
                 body.push(prefix);
@@ -1631,8 +1626,7 @@ mod tests {
             .clone();
         let effect_obligations = ctx.exact_effect_obligations_for_source_memory(
             EffectOccurrenceKind::MemoryWrite,
-            memory.block_addr,
-            memory.op_index,
+            memory.access.inst,
             memory.space,
             Some(memory.address),
             memory.value,
@@ -1640,7 +1634,7 @@ mod tests {
         assert_eq!(effect_obligations.len(), 1);
 
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[store_idx], block.addr, store_idx)
+            .op_to_stmt_with_args(&block.ops()[store_idx], block.addr, store_idx)
             .expect("supported store lowering")
             .expect("structured stack store");
         let CStmt::Expr(assignment) = stmt.unobserved() else {
@@ -1722,7 +1716,7 @@ mod tests {
         );
         let block = prepared.function().get_block(0x1000).expect("entry block");
         let op_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| {
                 if indirect {
@@ -1732,9 +1726,7 @@ mod tests {
                 }
             })
             .expect("call operation");
-        let inst = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, op_idx)
+        let inst = crate::inst_at(&prepared, block.addr, op_idx)
             .expect("call graph instruction");
         let graph_inst = prepared.graph().inst(inst).expect("call graph row");
         assert_eq!(
@@ -1772,7 +1764,7 @@ mod tests {
             // the graph records none -- so the staging writes reach this and
             // the loop has to skip them exactly as the folder does.
             // A definition the plan does not bind has no statement of its own.
-            if block.ops[prefix_idx].dst().is_some_and(|dst| {
+            if block.ops()[prefix_idx].dst().is_some_and(|dst| {
                 !matches!(
                     ctx.prepared_value_id_for_var(dst)
                         .and_then(|value| names.disposition_for_value(value)),
@@ -1783,7 +1775,7 @@ mod tests {
             }
             enter_exact_test_site(&ctx, block.addr, prefix_idx);
             if let Some(prefix) = ctx
-                .op_to_stmt_with_args(&block.ops[prefix_idx], block.addr, prefix_idx)
+                .op_to_stmt_with_args(&block.ops()[prefix_idx], block.addr, prefix_idx)
                 .expect("supported call-prefix lowering")
             {
                 body.push(prefix);
@@ -1791,7 +1783,7 @@ mod tests {
         }
         enter_exact_test_site(&ctx, block.addr, op_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[op_idx], block.addr, op_idx)
+            .op_to_stmt_with_args(&block.ops()[op_idx], block.addr, op_idx)
             .expect("supported call lowering")
             .expect("certified call statement");
         let effect_obligations = ctx.exact_effect_obligations_for_normalized_value(
@@ -1814,12 +1806,12 @@ mod tests {
             !args.is_empty(),
             "fixture must render at least one semantic argument: boundary={:?}; certificate={:?}",
             prepared.facts().boundaries.calls.values().next(),
-            prepared.callsite_certificate_for_op(block.addr, op_idx),
+            prepared.callsite_certificate_for_inst(crate::inst_at(&prepared, block.addr, op_idx).expect("the fixture call")),
         );
         assert_eq!(*ctx.observation_error.borrow(), None);
         body.push(stmt);
-        for suffix_idx in op_idx + 1..block.ops.len() {
-            if block.ops[suffix_idx]
+        for suffix_idx in op_idx + 1..block.ops().len() {
+            if block.ops()[suffix_idx]
                 .dst()
                 .is_some_and(|dst| ctx.is_dead(dst))
             {
@@ -1827,7 +1819,7 @@ mod tests {
             }
             enter_exact_test_site(&ctx, block.addr, suffix_idx);
             if let Some(suffix) = ctx
-                .op_to_stmt_with_args(&block.ops[suffix_idx], block.addr, suffix_idx)
+                .op_to_stmt_with_args(&block.ops()[suffix_idx], block.addr, suffix_idx)
                 .expect("supported post-call definition lowering")
             {
                 body.push(suffix);
@@ -2254,8 +2246,7 @@ mod tests {
         let resolution = r2types::CalleeResolutionFacts::from_direct_call_targets(
             [(
                 r2types::CallsiteKey {
-                    block_addr: 0x1000,
-                    op_index: 0,
+                    at: r2ssa::InstId(0),
                 },
                 0x401000,
             )],
@@ -2272,11 +2263,11 @@ mod tests {
         });
 
         assert!(
-            ctx.is_modeled_call_target_for_site(0x1000, 0),
+            ctx.is_modeled_call_target_for_site(r2ssa::InstId(0)),
             "callsite identity should classify the modeled target from typed resolution"
         );
         assert!(
-            !ctx.is_modeled_call_target_for_site(0x2000, 0),
+            !ctx.is_modeled_call_target_for_site(r2ssa::InstId(1)),
             "unresolved callsites must not inherit modeled policy from unrelated sites"
         );
     }
@@ -2294,6 +2285,8 @@ mod tests {
         );
         ctx.current_block_addr.set(Some(source_call.0));
         ctx.current_op_idx.set(Some(source_call.1));
+        ctx.current_source
+            .set(Some(fixture_call_inst(&ctx, source_call)));
 
         let stmt = ctx
             .op_to_stmt_impl(
@@ -2354,17 +2347,24 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            ctx.op_to_stmt_with_args(
-                &SSAOp::Call {
-                    target: make_var("X16", 0, 8),
-                    instruction: None,
-                },
-                source_call.0,
-                source_call.1,
-            ),
-            Err(OpLoweringRefusal::missing_machine_projection()),
-            "typed callee identity alone must not authorize an executable source call",
+        // With no source instruction behind the operation there is no call
+        // site to certify it, so it refuses or stands as a residual; it never
+        // renders as an executable call.
+        let lowered = ctx.op_to_stmt_with_args(
+            &SSAOp::Call {
+                target: make_var("X16", 0, 8),
+                instruction: None,
+            },
+            source_call.0,
+            source_call.1,
+        );
+        assert!(
+            match &lowered {
+                Err(refusal) => *refusal == OpLoweringRefusal::missing_machine_projection(),
+                Ok(Some(stmt)) => matches!(stmt.unobserved(), CStmt::Comment(_)),
+                Ok(None) => false,
+            },
+            "typed callee identity alone must not authorize an executable source call: {lowered:?}",
         );
     }
 
@@ -2380,17 +2380,24 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            ctx.op_to_stmt_with_args(
-                &SSAOp::CallInd {
-                    target: make_var("X16", 0, 8),
-                    instruction: None,
-                },
-                source_call.0,
-                source_call.1,
-            ),
-            Err(OpLoweringRefusal::missing_machine_projection()),
-            "typed callee identity alone must not authorize an executable indirect source call",
+        // With no source instruction behind the operation there is no call
+        // site to certify it, so it refuses or stands as a residual; it never
+        // renders as an executable call.
+        let lowered = ctx.op_to_stmt_with_args(
+            &SSAOp::CallInd {
+                target: make_var("X16", 0, 8),
+                instruction: None,
+            },
+            source_call.0,
+            source_call.1,
+        );
+        assert!(
+            match &lowered {
+                Err(refusal) => *refusal == OpLoweringRefusal::missing_machine_projection(),
+                Ok(Some(stmt)) => matches!(stmt.unobserved(), CStmt::Comment(_)),
+                Ok(None) => false,
+            },
+            "typed callee identity alone must not authorize an executable indirect source call: {lowered:?}",
         );
     }
 
@@ -2459,7 +2466,7 @@ mod tests {
         );
 
         assert!(
-            !ctx.source_call_expr_returns_void(source_call, &poisoned_rendered_call),
+            !ctx.source_call_expr_returns_void(fixture_call_inst(&ctx, source_call), &poisoned_rendered_call),
             "source-call policy must prefer typed callsite identity over a poisoned rendered name"
         );
     }
@@ -2489,7 +2496,7 @@ mod tests {
         );
 
         assert!(
-            ctx.source_call_expr_returns_void(source_call, &rendered_unknown_call),
+            ctx.source_call_expr_returns_void(fixture_call_inst(&ctx, source_call), &rendered_unknown_call),
             "typed source-call signature should be enough even when the rendered name is not"
         );
     }
@@ -2529,10 +2536,10 @@ mod tests {
         let prepared =
             prepared_from_r2il_blocks(&[entry], &arch).with_name("sealed_inline_admission");
         let block = prepared.function().get_block(0x1000).expect("entry block");
-        let SSAOp::Copy { src, .. } = &block.ops[0] else {
+        let SSAOp::Copy { src, .. } = &block.ops()[0] else {
             panic!("fixture must begin with a copy");
         };
-        let SSAOp::IntAdd { dst, .. } = &block.ops[2] else {
+        let SSAOp::IntAdd { dst, .. } = &block.ops()[2] else {
             panic!("fixture must add the register to the literal");
         };
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
@@ -2840,9 +2847,12 @@ mod tests {
             },
         ];
 
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa func");
-        func = func.with_name("sym._check_secret_like");
-        func.get_block_mut(0x1000).expect("entry").ops = vec![
+        let mut func = r2ssa::Lifted::new(
+            SSAFunction::from_blocks_raw_no_arch(&blocks)
+                .expect("ssa func")
+                .with_name("sym._check_secret_like"),
+        );
+        func.edit_block(0x1000).expect("entry").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::IntSub {
                 dst: make_var("RSP", 1, 8),
                 a: make_var("RSP", 0, 8),
@@ -2885,8 +2895,8 @@ mod tests {
                 cond: make_var("tmp:12800", 1, 1),
                 target: make_var("ram:1008", 0, 8),
             },
-        ];
-        func.get_block_mut(0x1004).expect("then").ops = vec![
+        ]);
+        func.edit_block(0x1004).expect("then").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::Copy {
                 dst: make_var("RAX", 1, 8),
                 src: make_var("const:1", 0, 8),
@@ -2895,12 +2905,12 @@ mod tests {
                 target: make_var("ram:100c", 0, 8),
                 instruction: None,
             },
-        ];
-        func.get_block_mut(0x1008).expect("else").ops = vec![SSAOp::Copy {
+        ]);
+        func.edit_block(0x1008).expect("else").replace_ops(r2ssa::Pass::Fixture, vec![SSAOp::Copy {
             dst: make_var("RAX", 2, 8),
             src: make_var("const:0", 0, 8),
-        }];
-        func.get_block_mut(0x100c).expect("exit").ops = vec![
+        }]);
+        func.edit_block(0x100c).expect("exit").replace_ops(r2ssa::Pass::Fixture, vec![
             SSAOp::Load {
                 dst: make_var("tmp:savedfp", 1, 8),
                 space: r2il::SpaceId::Ram,
@@ -2928,10 +2938,10 @@ mod tests {
             SSAOp::Return {
                 target: make_var("RIP", 1, 8),
             },
-        ];
+        ]);
 
         let then_preserves_return_one =
-            func.get_block(0x1004).expect("then").ops.iter().any(|op| {
+            func.get_block(0x1004).expect("then").ops().iter().any(|op| {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
@@ -2942,7 +2952,7 @@ mod tests {
                 )
             });
         let else_preserves_return_zero =
-            func.get_block(0x1008).expect("else").ops.iter().any(|op| {
+            func.get_block(0x1008).expect("else").ops().iter().any(|op| {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
@@ -2987,8 +2997,7 @@ mod tests {
         let callee_resolution = r2types::CalleeResolutionFacts::from_direct_call_targets(
             [(
                 r2types::CallsiteKey {
-                    block_addr: 0x1000,
-                    op_index: 1,
+                    at: crate::inst_at(&prepared, 0x1000, 1).expect("the fixture call"),
                 },
                 0x401050,
             )],
@@ -3007,12 +3016,12 @@ mod tests {
         });
 
         let block = prepared.function().get_block(0x1000).expect("entry");
-        let SSAOp::Call { target, .. } = &block.ops[1] else {
-            panic!("expected call op, got {:?}", block.ops[1]);
+        let SSAOp::Call { target, .. } = &block.ops()[1] else {
+            panic!("expected call op, got {:?}", block.ops()[1]);
         };
 
         let call_view = ctx
-            .prepared_call_view_for_site(block.addr, 1)
+            .prepared_call_view_for_site(fixture_call_inst(&ctx, (block.addr, 1)))
             .expect("prepared call view");
         let identity = call_view
             .callee_identity
@@ -3028,7 +3037,7 @@ mod tests {
 
         // The name a linker resolves, not the flag radare2 spells it with.
         assert_eq!(
-            ctx.resolve_call_target_for_site(block.addr, 1, target),
+            ctx.resolve_call_target_for_site(fixture_call_inst(&ctx, (block.addr, 1)), target),
             Ok(CExpr::External {
                 name: "fact_helper".to_string(),
                 kind: crate::symbol::ExternalKind::Import,
@@ -3054,7 +3063,7 @@ mod tests {
         install_certified_function_facts(&mut ctx);
 
         assert_eq!(
-            ctx.prepared_direct_call_target(0x1000, 1),
+            ctx.prepared_direct_call_target(fixture_call_inst(&ctx, (0x1000, 1))),
             Some(0x401050),
             "prepared direct targets must come through FunctionFacts callsite evidence"
         );
@@ -3078,9 +3087,8 @@ mod tests {
         callsite_facts
             .by_callsite
             .get_mut(&r2types::CallsiteKey {
-                block_addr: 0x1000,
-                op_index: 1,
-            })
+                    at: crate::inst_at(&prepared, 0x1000, 1).expect("the fixture call"),
+                })
             .expect("fixture callsite facts")
             .direct_target = None;
 
@@ -3089,7 +3097,7 @@ mod tests {
         install_function_callsite_facts(&mut ctx, callsite_facts);
 
         assert_eq!(
-            ctx.prepared_direct_call_target(0x1000, 1),
+            ctx.prepared_direct_call_target(fixture_call_inst(&ctx, (0x1000, 1))),
             None,
             "r2dec must not reparse copied constants when FunctionFacts omits direct-target evidence"
         );
@@ -3118,7 +3126,7 @@ mod tests {
         ctx.set_function_names(HashMap::from([(0x401050, "sym.helper".to_string())]));
         let block = prepared.function().get_block(0x1000).expect("entry");
         let call_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
@@ -3132,7 +3140,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         assert_eq!(
-            ctx.op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx),
+            ctx.op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx),
             Err(OpLoweringRefusal::missing_machine_projection()),
             "a certified position without binding-plan spelling authority must refuse the call"
         );
@@ -3167,7 +3175,7 @@ mod tests {
             .function()
             .get_block(0x1000)
             .expect("entry")
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
@@ -3180,7 +3188,7 @@ mod tests {
         );
 
         let argument_values = prepared
-            .callsite_certificate_for_op(0x1000, call_idx)
+            .callsite_certificate_for_inst(crate::inst_at(&prepared, 0x1000, call_idx).expect("the fixture call"))
             .expect("prepared callsite certificate")
             .argument_values
             .clone();
@@ -3220,7 +3228,7 @@ mod tests {
         .expect("prepared semantic view");
         let call_view = prepared_view
             .call_view_by_site
-            .get_mut(&(0x1000, call_idx))
+            .get_mut(&crate::inst_at(&prepared, 0x1000, call_idx).expect("the fixture call"))
             .expect("prepared call view");
         assert_eq!(call_view.authoritative_arg_values, argument_values);
         call_view.authoritative_args.truncate(1);
@@ -3229,7 +3237,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
+            .op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call stmt");
 
@@ -3302,12 +3310,12 @@ mod tests {
             .with_name("certified_frame_address_argument");
         let block = prepared.function().get_block(0x1000).expect("entry");
         let call_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
         let argument = prepared
-            .callsite_certificate_for_op(block.addr, call_idx)
+            .callsite_certificate_for_inst(crate::inst_at(&prepared, block.addr, call_idx).expect("the fixture call"))
             .and_then(|certificate| certificate.argument_values.first())
             .copied()
             .expect("certified address argument");
@@ -3336,7 +3344,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
+            .op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call statement");
         let CStmt::Expr(call_expr) = stmt.unobserved() else {
@@ -3413,12 +3421,12 @@ mod tests {
             .with_name("bound_frame_address_argument");
         let block = prepared.function().get_block(0x1800).expect("entry");
         let call_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
         let argument = prepared
-            .callsite_certificate_for_op(block.addr, call_idx)
+            .callsite_certificate_for_inst(crate::inst_at(&prepared, block.addr, call_idx).expect("the fixture call"))
             .and_then(|certificate| certificate.argument_values.first())
             .copied()
             .expect("certified address argument");
@@ -3447,7 +3455,7 @@ mod tests {
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
+            .op_to_stmt_with_args(&block.ops()[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call statement");
         let CStmt::Expr(call_expr) = stmt.unobserved() else {
@@ -3534,7 +3542,7 @@ mod tests {
             .find_map(|block_id| {
                 let block_addr = graph.block(*block_id)?.addr;
                 let block = normalized.get_block(block_addr)?;
-                let synthetic_idx = (0..block.ops.len()).find(|op_idx| {
+                let synthetic_idx = (0..block.ops().len()).find(|op_idx| {
                     let site = crate::normalize::NormalizedOpSite {
                         block: *block_id,
                         op_idx: *op_idx,
@@ -3559,13 +3567,13 @@ mod tests {
                         })
                 })?;
                 let (shifted_idx, shifted_inst) =
-                    (synthetic_idx + 1..block.ops.len()).find_map(|op_idx| {
+                    (synthetic_idx + 1..block.ops().len()).find_map(|op_idx| {
                         match origins.origin(crate::normalize::NormalizedOpSite {
                             block: *block_id,
                             op_idx,
                         }) {
                             Some(crate::normalize::NormalizedOpOrigin::Original(inst))
-                                if graph.op_site_for_inst(*inst)?.1 != op_idx =>
+                                if graph.op_ordinal(*inst)? != op_idx =>
                             {
                                 Some((op_idx, *inst))
                             }
@@ -3597,13 +3605,13 @@ mod tests {
         inputs.normalization_origins = Some(Box::leak(Box::new(origins)));
         let ctx = FoldingContext::from_inputs(inputs);
         assert_eq!(
-            ctx.source_op_site_for_normalized_op(block_addr, synthetic_idx),
+            ctx.source_inst_for_normalized_op(block_addr, synthetic_idx),
             None,
             "synthetic geometry must never fall back to its normalized numeric site"
         );
         assert_eq!(
-            ctx.source_op_site_for_normalized_op(block_addr, shifted_idx),
-            graph.op_site_for_inst(shifted_inst),
+            ctx.source_inst_for_normalized_op(block_addr, shifted_idx),
+            Some(shifted_inst),
             "the shifted original must resolve through its exact InstId"
         );
         let synthetic_obligations = ctx.exact_effect_obligations_for_normalized_value(
@@ -3665,7 +3673,13 @@ mod tests {
         let fact = ctx
             .inputs
             .render_facts()
-            .and_then(|facts| facts.memory_access_for_op(0x1920, 0, false, r2il::SpaceId::Ram))
+            .and_then(|facts| {
+                facts.memory_access_for_inst(
+                    crate::inst_at(&prepared, 0x1920, 0).expect("the load"),
+                    false,
+                    r2il::SpaceId::Ram,
+                )
+            })
             .expect("genuine load has one canonical memory fact")
             .clone();
         assert!(
@@ -3680,8 +3694,7 @@ mod tests {
 
         let obligations = ctx.exact_effect_obligations_for_source_memory(
             EffectOccurrenceKind::MemoryRead,
-            fact.block_addr,
-            fact.op_index,
+            fact.access.inst,
             fact.space,
             Some(fact.address),
             fact.value,
@@ -3767,13 +3780,11 @@ mod tests {
             .with_name("rendered_integer_division_trap");
         let block = prepared.function().get_block(0x1910).expect("entry");
         let op_idx = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::IntDiv { .. }))
             .expect("division operation");
-        let inst = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, op_idx)
+        let inst = crate::inst_at(&prepared, block.addr, op_idx)
             .expect("division graph instruction");
         let value = prepared
             .graph()
@@ -3932,7 +3943,7 @@ mod tests {
         let (_plan, names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         enter_exact_test_site(&ctx, 0x1000, 1);
         let block = prepared.function().get_block(0x1000).expect("entry block");
-        let SSAOp::Load { dst, addr, .. } = &block.ops[1] else {
+        let SSAOp::Load { dst, addr, .. } = &block.ops()[1] else {
             panic!("fixture load must remain at its exact source site");
         };
         let memory = ctx
@@ -3943,8 +3954,8 @@ mod tests {
             .render_facts()
             .and_then(|facts| {
                 facts
-                    .member_accesses_by_op
-                    .get(&(memory.block_addr, memory.op_index, false))
+                    .member_accesses_by_inst
+                    .get(&(memory.access.inst, false))
             })
             .and_then(|facts| facts.iter().find(|fact| fact.access == memory.access))
             .expect("source-owned field access certificate");

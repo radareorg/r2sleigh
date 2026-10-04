@@ -229,7 +229,7 @@ impl FormalDependence {
         let mut changed = exposed != self.exposed;
         self.exposed = exposed;
         for block in prepared.function().blocks() {
-            for phi in &block.phis {
+            for phi in block.phis() {
                 let inputs = phi
                     .sources
                     .iter()
@@ -248,11 +248,11 @@ impl FormalDependence {
         // What the last call in this block was handed: the definitions that
         // follow it are what it left, and may be any of it.
         let mut last_call = 0u64;
-        for (index, op) in block.ops.iter().enumerate() {
+        for (id, op) in block.sited() {
             if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
                 last_call = prepared
                     .graph()
-                    .inst_id_for_op_site(block.addr, index)
+                    .inst_for_op(id)
                     .and_then(|inst| prepared.call_sites().by_inst.get(&inst))
                     .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
                 let unseen = self.unseen | last_call;
@@ -355,8 +355,8 @@ impl FrameTraffic {
         let mut loads = Vec::<(ValueId, FramePlace)>::new();
         let mut stores = Vec::<(InstId, ValueId, FramePlace)>::new();
         for block in prepared.function().blocks() {
-            for (index, op) in block.ops.iter().enumerate() {
-                let Some(inst) = graph.inst_id_for_op_site(block.addr, index) else {
+            for (id, op) in block.sited() {
+                let Some(inst) = graph.inst_for_op(id) else {
                     continue;
                 };
                 let (addr, space, loaded, stored) = match op {
@@ -475,7 +475,7 @@ fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId>
         .function()
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(SSAOp::dst)
         .filter_map(move |dst| {
             let value = graph.value_id_for_var(dst)?;
@@ -512,9 +512,7 @@ fn is_frame_object(objects: &ObjectModel, object: ObjectId) -> bool {
 /// argument slot for the formal's storage, and by the preparation's own index
 /// where the storage is a lane of a slot rather than the slot.
 fn formal_values(prepared: &SsaArtifact, abi: &AbiProfile) -> Vec<(ValueId, usize)> {
-    let Some(prep) = prepared.function().decompile_prep_facts() else {
-        return Vec::new();
-    };
+    let prep = prepared.decompile_prep_facts();
     let graph = prepared.graph();
     // Only the values a formal arrives as: an entry register, or the lane
     // projection minted from one. A copy or a reload of a formal is also a

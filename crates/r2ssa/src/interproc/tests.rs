@@ -1670,7 +1670,7 @@ fn symbolic_store_plus_constant_preserves_arg_offset_range() {
     let abi = prepared.abi().expect("exact ABI");
     let block = prepared.function().get_block(0x4300).expect("block");
     let Some(SSAOp::Store { addr, val, .. }) = block
-        .ops
+        .ops()
         .iter()
         .find(|op| matches!(op, SSAOp::Store { .. }))
     else {
@@ -1709,7 +1709,7 @@ fn symbolic_store_plus_constant_preserves_arg_offset_range() {
             range: exact_range(2, val.size),
         },
         "store address should resolve to arg0+2, got {location:?}; addr={addr:?}; ops={:?}",
-        block.ops
+        block.ops()
     );
 }
 
@@ -1744,7 +1744,7 @@ fn symbolic_store_minus_constant_preserves_arg_offset_range() {
     let abi = prepared.abi().expect("exact ABI");
     let block = prepared.function().get_block(0x4310).expect("block");
     let Some(SSAOp::Store { addr, val, .. }) = block
-        .ops
+        .ops()
         .iter()
         .find(|op| matches!(op, SSAOp::Store { .. }))
     else {
@@ -1783,7 +1783,7 @@ fn symbolic_store_minus_constant_preserves_arg_offset_range() {
             range: exact_range(-1, val.size),
         },
         "store address should resolve to arg0-1, got {location:?}; addr={addr:?}; ops={:?}",
-        block.ops
+        block.ops()
     );
 }
 

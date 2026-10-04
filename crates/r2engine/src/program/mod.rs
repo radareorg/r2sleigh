@@ -123,6 +123,9 @@ pub struct OpenProgram<S: Source> {
     callee_reads: crate::query::PerRevision<crate::native::CalleeRead>,
     /// The reference index, and the state of the program it was read at.
     references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
+    /// Discovery's walk of the whole program, and the program and state of
+    /// its bytes it was walked at.
+    survey: Option<((u64, u64), std::sync::Arc<requests::Survey>)>,
 }
 
 impl<S: Source> OpenProgram<S> {
@@ -188,6 +191,7 @@ impl<S: Source> OpenProgram<S> {
             returns: std::sync::Mutex::default(),
             callee_reads: crate::query::PerRevision::default(),
             references: None,
+            survey: None,
         }
     }
 

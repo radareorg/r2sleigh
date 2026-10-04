@@ -10,16 +10,18 @@ pub(crate) struct AccessSummary {
 
 pub(crate) fn collect_object_and_memory_facts(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     addresses: &AddressProvenanceFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
     values: &crate::values::ValueRanges,
 ) -> (ObjectModel, MemorySSAFacts) {
-    let facts = function.decompile_prep_facts();
+    let facts = prep;
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
     let mut object_model = builder.build(function, graph, values);
-    object_model.frame_reach = FrameReach::of(function, graph, &object_model, machine_context);
+    object_model.frame_reach =
+        FrameReach::of(function, prep, graph, &object_model, machine_context);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
@@ -36,8 +38,8 @@ pub(crate) fn collect_access_summaries(
     let mut summaries = BTreeMap::new();
 
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            let Some(inst_id) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+        for (op_id, op) in block.sited() {
+            let Some(inst_id) = graph.inst_for_op(op_id) else {
                 continue;
             };
             let mut uses = Vec::new();
@@ -256,8 +258,8 @@ pub(crate) fn build_memory_ssa(
             let Some(block) = function.get_block(block_addr) else {
                 continue;
             };
-            for (op_idx, _) in block.ops.iter().enumerate() {
-                let Some(inst_id) = graph.inst_id_for_op_site(block_addr, op_idx) else {
+            for (op_id, _) in block.sited() {
+                let Some(inst_id) = graph.inst_for_op(op_id) else {
                     continue;
                 };
                 let Some(summary) = access_summaries.get(&inst_id) else {

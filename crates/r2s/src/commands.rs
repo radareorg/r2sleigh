@@ -25,10 +25,14 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
         Some(Suffix::Filter(grep)) => Some(grep),
         None => None,
     };
+    // A grep reads the text, and an escape in it would split what it matches.
+    session.grepped = grep.is_some();
     let output = match &statement.at {
-        Some(address) => elsewhere(session, address, &statement.command)?,
-        None => dispatch(session, &statement.command)?,
+        Some(address) => elsewhere(session, address, &statement.command),
+        None => dispatch(session, &statement.command),
     };
+    session.grepped = false;
+    let output = output?;
     Ok(match grep {
         Some(grep) => grep.apply(&output)?,
         None => output,
@@ -61,45 +65,378 @@ fn dispatch(session: &mut Session, command: &Command) -> Result<String, String> 
     })
 }
 
+/// Who a verb is for. Maintainer verbs print the engine's tiers and are
+/// listed apart, as AGENTS.md's command surface says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tier {
+    Public,
+    Maintainer,
+}
+
+/// What a verb is given past its name: help spells it, and a completer will
+/// offer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arguments {
+    None,
+    /// An address or a name `f` lists, the seek when absent.
+    Address,
+    /// How many, from the seek.
+    Count,
+    /// Text the line reads with its quotes and escapes (`?e`, `w`).
+    Text,
+    /// Hex bytes.
+    Bytes,
+    /// A configuration key, and the value to set it to.
+    Key,
+}
+
+impl Arguments {
+    const fn spelled(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Address => "[addr]",
+            Self::Count => "[n]",
+            Self::Text => "<text>",
+            Self::Bytes => "<hex>",
+            Self::Key => "[key[=value]]",
+        }
+    }
+}
+
+type Handler = fn(&mut Session, &str) -> Result<String, String>;
+
+/// One verb of the command surface: every name it answers to, what it takes,
+/// what it does, and the function that does it.
+///
+/// The table below is the surface. Dispatch reads it, `?` and `verb?` print
+/// it, and a completer offers it, so none of the three can name a verb the
+/// others do not know. `?e` and `w` read their argument as the line does and
+/// are parsed there; they are here so help lists them, with no handler.
+pub(crate) struct Verb {
+    pub names: &'static [&'static str],
+    pub arguments: Arguments,
+    pub summary: &'static str,
+    pub tier: Tier,
+    run: Option<Handler>,
+}
+
+impl Verb {
+    pub(crate) fn name(&self) -> &'static str {
+        self.names[0]
+    }
+
+    fn usage(&self) -> String {
+        let arguments = self.arguments.spelled();
+        if arguments.is_empty() {
+            self.name().to_owned()
+        } else {
+            format!("{} {arguments}", self.name())
+        }
+    }
+}
+
+macro_rules! verb {
+    ([$($name:literal),+], $arguments:ident, $tier:ident, $summary:literal, $run:expr) => {
+        Verb {
+            names: &[$($name),+],
+            arguments: Arguments::$arguments,
+            summary: $summary,
+            tier: Tier::$tier,
+            run: $run,
+        }
+    };
+}
+
+/// Every verb, in the order help lists them.
+pub(crate) const VERBS: &[Verb] = &[
+    verb!(
+        ["q", "quit", "exit"],
+        None,
+        Public,
+        "quit",
+        Some(|_, _| Err("quit".to_owned()))
+    ),
+    verb!(["?e"], Text, Public, "print the text", None),
+    verb!(
+        ["s"],
+        Address,
+        Public,
+        "seek to an address, or print the seek",
+        Some(seek)
+    ),
+    verb!(
+        ["e"],
+        Key,
+        Public,
+        "read or set a configuration key",
+        Some(crate::config::run)
+    ),
+    verb!(
+        ["i"],
+        None,
+        Public,
+        "what the binary is",
+        Some(|session, _| info(session))
+    ),
+    verb!(
+        ["ie"],
+        None,
+        Public,
+        "entry points",
+        Some(|session, _| entries(session, false))
+    ),
+    verb!(
+        ["iee"],
+        None,
+        Public,
+        "entry points and initialisers",
+        Some(|session, _| entries(session, true))
+    ),
+    verb!(
+        ["iS"],
+        None,
+        Public,
+        "sections",
+        Some(|session, _| Ok(sections(session).spelled()))
+    ),
+    verb!(
+        ["is"],
+        None,
+        Public,
+        "symbols",
+        Some(|session, _| symbols(session).map(|table| table.spelled()))
+    ),
+    verb!(
+        ["ir"],
+        None,
+        Public,
+        "relocations",
+        Some(|session, _| Ok(relocations(session).spelled()))
+    ),
+    verb!(
+        ["iz"],
+        None,
+        Public,
+        "strings in data sections",
+        Some(|session, _| strings(session).map(|table| table.spelled()))
+    ),
+    verb!(
+        ["izz"],
+        None,
+        Public,
+        "strings anywhere in the file",
+        Some(|session, _| every_string(session))
+    ),
+    verb!(
+        ["px"],
+        Count,
+        Public,
+        "hexdump",
+        Some(|session, argument| hexdump(session, argument))
+    ),
+    verb!(
+        ["pd"],
+        Count,
+        Public,
+        "disassemble",
+        Some(crate::listing::disassemble)
+    ),
+    verb!(
+        ["pdf"],
+        Address,
+        Public,
+        "disassemble a function",
+        Some(crate::listing::disassemble_function)
+    ),
+    verb!(
+        ["pdd"],
+        Address,
+        Public,
+        "decompile a function",
+        Some(decompile)
+    ),
+    verb!(
+        ["pddj"],
+        Address,
+        Public,
+        "decompile a function as JSON",
+        Some(decompile_json)
+    ),
+    verb!(
+        ["afl"],
+        None,
+        Public,
+        "list functions",
+        Some(|session, _| discovered(session).map(|table| table.spelled()))
+    ),
+    verb!(
+        ["aflj"],
+        None,
+        Public,
+        "list functions as JSON",
+        Some(|session, _| discovered_json(session))
+    ),
+    verb!(
+        ["afi"],
+        Address,
+        Public,
+        "what a function is",
+        Some(crate::function::info)
+    ),
+    verb!(
+        ["afb"],
+        Address,
+        Public,
+        "a function's basic blocks",
+        Some(crate::function::blocks)
+    ),
+    verb!(
+        ["afv"],
+        Address,
+        Public,
+        "a function's arguments and variables",
+        Some(crate::function::variables)
+    ),
+    verb!(
+        ["agf"],
+        Address,
+        Public,
+        "a function's control-flow graph",
+        Some(crate::visual::agf)
+    ),
+    verb!(
+        ["f"],
+        None,
+        Public,
+        "flags",
+        Some(|session, _| flags(session))
+    ),
+    verb!(
+        ["ax"],
+        Address,
+        Public,
+        "references from an address",
+        Some(cross_references)
+    ),
+    verb!(
+        ["axt"],
+        Address,
+        Public,
+        "references to an address",
+        Some(references_to)
+    ),
+    verb!(
+        ["/as"],
+        None,
+        Public,
+        "system calls",
+        Some(|session, _| syscalls(session))
+    ),
+    verb!(["w"], Text, Public, "write text at the seek", None),
+    verb!(
+        ["wx"],
+        Bytes,
+        Public,
+        "write hex bytes at the seek",
+        Some(write_hex)
+    ),
+    verb!(
+        ["wc"],
+        None,
+        Public,
+        "list the writes",
+        Some(|session, _| patches(session))
+    ),
+    verb!(
+        ["wcr"],
+        None,
+        Public,
+        "revert every write",
+        Some(|session, _| revert(session))
+    ),
+    verb!(
+        ["V"],
+        None,
+        Public,
+        "visual mode",
+        Some(|session, _| crate::visual::open(session))
+    ),
+    verb!(
+        ["pdil"],
+        Address,
+        Maintainer,
+        "the low IL tier",
+        Some(low_tier)
+    ),
+    verb!(
+        ["pdim"],
+        Address,
+        Maintainer,
+        "the medium IL tier",
+        Some(medium_tier)
+    ),
+    verb!(
+        ["pdih"],
+        Address,
+        Maintainer,
+        "the high IL tier",
+        Some(high_tier)
+    ),
+    verb!(
+        ["pddo"],
+        Address,
+        Maintainer,
+        "a function's source obligations",
+        Some(obligations)
+    ),
+];
+
+/// The verb a name names.
+pub(crate) fn find(name: &str) -> Option<&'static Verb> {
+    VERBS.iter().find(|verb| verb.names.contains(&name))
+}
+
+/// `?`: every verb, public ones first, as radare2 lays out its help.
+fn help() -> String {
+    let width = VERBS
+        .iter()
+        .map(|verb| verb.usage().len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::from("Usage: [cmd][~grep][@addr]  append ? to a command for its usage");
+    for (tier, heading) in [(Tier::Public, ""), (Tier::Maintainer, "\nMaintainer:")] {
+        out.push_str(heading);
+        for verb in VERBS.iter().filter(|verb| verb.tier == tier) {
+            out.push_str(&format!("\n| {:width$}  {}", verb.usage(), verb.summary));
+        }
+    }
+    out
+}
+
+/// `verb?`: one verb's usage, and the other names it answers to.
+fn usage(verb: &Verb) -> String {
+    let mut out = format!("Usage: {}  {}", verb.usage(), verb.summary);
+    if verb.names.len() > 1 {
+        out.push_str(&format!("\naliases: {}", verb.names[1..].join(" ")));
+    }
+    out
+}
+
 /// A command whose argument is plain text: `?e` and `w` read theirs as the
-/// line does, so they are not here.
+/// line does, so they never reach here.
 fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, String> {
-    match verb {
-        "" => Ok(String::new()),
-        "q" | "quit" | "exit" => Err("quit".to_owned()),
-        "s" => seek(session, argument),
-        "i" => info(session),
-        "ie" => entries(session, false),
-        "iee" => entries(session, true),
-        "iS" => sections(session),
-        "is" => symbols(session),
-        "ir" => relocations(session),
-        "px" => hexdump(session, argument),
-        "V" => crate::visual::open(session),
-        "agf" => crate::visual::agf(session, argument),
-        "pd" => crate::listing::disassemble(session, argument),
-        "pdf" => crate::listing::disassemble_function(session, argument),
-        "pdd" => decompile(session, argument),
-        "pddj" => decompile_json(session, argument),
-        "afl" => discovered(session),
-        "aflj" => discovered_json(session),
-        "afi" => crate::function::info(session, argument),
-        "afb" => crate::function::blocks(session, argument),
-        "afv" => crate::function::variables(session, argument),
-        "f" => flags(session),
-        "ax" => cross_references(session, argument),
-        "axt" => references_to(session, argument),
-        "iz" => strings(session),
-        "izz" => every_string(session),
-        "/as" => syscalls(session),
-        "wx" => write_hex(session, argument),
-        "wc" => patches(session),
-        "wcr" => revert(session),
-        "pdil" => low_tier(session, argument),
-        "pdim" => medium_tier(session, argument),
-        "pdih" => high_tier(session, argument),
-        "pddo" => obligations(session, argument),
-        other => Err(format!("unknown command '{}'", other)),
+    if verb.is_empty() {
+        return Ok(String::new());
+    }
+    if verb == "?" {
+        return Ok(help());
+    }
+    if let Some(named) = verb.strip_suffix('?').and_then(find) {
+        return Ok(usage(named));
+    }
+    match find(verb).and_then(|verb| verb.run) {
+        Some(run) => run(session, argument),
+        None => Err(format!("unknown command '{verb}'")),
     }
 }
 
@@ -224,20 +561,20 @@ fn entries(session: &Session, initialisers: bool) -> Result<String, String> {
 /// entry point, its initialiser array and a linkage stub per import were
 /// already parsed and only the program entry was read. Discovery starts from
 /// all of them and closes over what the bodies call.
-fn discovered(session: &mut Session) -> Result<String, String> {
-    let rows = listed_functions(session)?;
+pub(crate) fn discovered(session: &mut Session) -> Result<Table, String> {
     // radare2's layout, with no header: `addr nbbs size name`, so the two
     // diff line for line. How sure discovery is moved to `aflj`.
-    Ok(rows
-        .iter()
-        .map(|row| {
+    let mut table = Table::default();
+    for row in listed_functions(session)? {
+        table.row(
+            Some(row.address),
             format!(
                 "{:#010x} {:>4} {:>6} {}",
                 row.address, row.blocks, row.size, row.name
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n"))
+            ),
+        );
+    }
+    Ok(table)
 }
 
 /// `aflj`: the same rows as JSON objects, with radare2's keys and the reason
@@ -288,29 +625,10 @@ fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String
                     .map(r2engine::names::Name::spelled)
                     .or_else(|| one.name.clone())
                     .unwrap_or_else(|| format!("fcn.{:08x}", one.address)),
-                confidence: confidence(&one.confidence),
+                confidence: one.confidence.to_string(),
             }
         })
         .collect())
-}
-
-/// Why a function is believed to be one, and each premise that belief takes for granted.
-fn confidence(confidence: &r2engine::discovery::Confidence) -> String {
-    use r2engine::discovery::{Basis, Premise};
-    let mut spelled = match confidence.basis {
-        Basis::Stated => "stated",
-        Basis::Called => "called",
-        Basis::Handed => "handed",
-        Basis::Reached => "reached",
-    }
-    .to_owned();
-    for premise in &confidence.premises {
-        spelled.push_str(match premise {
-            Premise::ClosedWorld => "+closed-world",
-            Premise::UbFreeSource => "+ub-free",
-        });
-    }
-    spelled
 }
 
 /// Write text at the cursor, as `w` read it. radare2 writes nothing, and says
@@ -420,9 +738,15 @@ fn role(role: Role) -> &'static str {
 /// Every place one address is named from, one line per function holding it, as radare2 lays `axt` out.
 fn references_to(session: &mut Session, argument: &str) -> Result<String, String> {
     let wanted = parse_number(session, argument)?;
+    Ok(references_table(session, wanted)?.spelled())
+}
+
+/// Every reference to `wanted`, a row per referring function, each about the
+/// address the reference is made from.
+pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Table, String> {
     let index = session.program.references()?.value;
     let names = session.program.names();
-    let mut out = String::new();
+    let mut table = Table::default();
     let mut count = 0usize;
     for (fact, source) in index.to(wanted) {
         count += 1;
@@ -441,21 +765,59 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
                 .collect(),
         };
         for owner in owners {
-            out.push_str(&format!(
-                "{owner} {:#x} [{}] {text}\n",
-                fact.from,
-                role(fact.role)
-            ));
+            table.row(
+                Some(fact.from),
+                format!("{owner} {:#x} [{}] {text}", fact.from, role(fact.role)),
+            );
         }
     }
-    out.push_str(&format!("\n{count} references to {wanted:#x}"));
+    // A blank line between the rows and the count, where there are rows.
+    if !table.rows.is_empty() {
+        table.foot.push('\n');
+    }
+    table
+        .foot
+        .push_str(&format!("\n{count} references to {wanted:#x}"));
     if count == 0 {
-        out.push_str(&format!(
+        table.foot.push_str(&format!(
             "\n; none within the functions read, which is not proof {wanted:#x} is unreferenced"
         ));
     }
-    out.push_str(&coverage(&index.coverage));
-    Ok(out)
+    table.foot.push_str(&coverage(&index.coverage));
+    Ok(table)
+}
+
+/// A listing as a command prints it: header lines, then a row per thing
+/// listed with the address the row is about, where it is about one, then
+/// whatever follows the rows. The visual mode lists the same rows and seeks
+/// to their addresses, so it reads no address back out of the text.
+#[derive(Debug, Default)]
+pub(crate) struct Table {
+    head: Vec<String>,
+    pub(crate) rows: Vec<(Option<u64>, String)>,
+    foot: String,
+}
+
+impl Table {
+    fn headed(head: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            head: head.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    fn row(&mut self, address: Option<u64>, text: String) {
+        self.rows.push((address, text));
+    }
+
+    /// The text the command prints.
+    pub(crate) fn spelled(&self) -> String {
+        let mut lines = self.head.iter().map(String::as_str).collect::<Vec<_>>();
+        lines.extend(self.rows.iter().map(|(_, text)| text.as_str()));
+        let mut out = lines.join("\n");
+        out.push_str(&self.foot);
+        out
+    }
 }
 
 /// How radare2 spells a pointer-sized datum: `.qword` or `.dword` by the program's width.
@@ -502,7 +864,7 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
 /// The strings the name table holds, which it reads only out of sections the
 /// container states hold the program's data, and only where the loader
 /// leaves the bytes alone. Spelled with escapes, one per line.
-fn strings(session: &mut Session) -> Result<String, String> {
+pub(crate) fn strings(session: &mut Session) -> Result<Table, String> {
     // The strings are read out of the image, so a patched image has other ones.
     session.program.ensure_current()?;
     let found: Vec<(u64, String)> = session
@@ -564,24 +926,29 @@ fn every_string(session: &Session) -> Result<String, String> {
 }
 
 /// The rows of a string listing, as radare2's `iz` lays them out.
-fn string_table(session: &Session, found: &[(u64, String)]) -> String {
-    let mut out = String::from("nth paddr      vaddr      len size section type  string\n");
-    out.push_str(&"-".repeat(55));
+fn string_table(session: &Session, found: &[(u64, String)]) -> Table {
+    let mut table = Table::headed([
+        "nth paddr      vaddr      len size section type  string".to_owned(),
+        "-".repeat(55),
+    ]);
     for (nth, (vaddr, text)) in found.iter().enumerate() {
         let paddr = file_offset_of(session, *vaddr).map_or_else(
             || "----------".to_owned(),
             |offset| format!("{offset:#010x}"),
         );
-        out.push_str(&format!(
-            "\n{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
-            text.chars().count(),
-            text.len() + 1,
-            section_of(session, *vaddr, false),
-            text_type(text),
-            escaped(text)
-        ));
+        table.row(
+            Some(*vaddr),
+            format!(
+                "{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
+                text.chars().count(),
+                text.len() + 1,
+                section_of(session, *vaddr, false),
+                text_type(text),
+                escaped(text)
+            ),
+        );
     }
-    out
+    table
 }
 
 /// The name of the section holding an address, or a file offset where `file` is set.
@@ -646,10 +1013,11 @@ fn flags(session: &mut Session) -> Result<String, String> {
 /// radare2 numbers ELF sections by their header index and Mach-O ones from
 /// zero; a Mach-O section is named with its segment, which is half its
 /// identity. An unloaded section permits nothing, whatever its address says.
-fn sections(session: &Session) -> Result<String, String> {
-    let mut out =
-        String::from("nth paddr        size vaddr       vsize perm flags type        name\n");
-    out.push_str(&"-".repeat(67));
+pub(crate) fn sections(session: &Session) -> Table {
+    let mut table = Table::headed([
+        "nth paddr        size vaddr       vsize perm flags type        name".to_owned(),
+        "-".repeat(67),
+    ]);
     for section in session.image().sections() {
         let permissions = section.permissions;
         let (nth, flags, kind, name) = match section.stated {
@@ -678,19 +1046,23 @@ fn sections(session: &Session) -> Result<String, String> {
                 (section.index, 0, String::new(), section.name.clone())
             }
         };
-        out.push_str(&format!(
-            "\n{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
-            section.file_offset,
-            format!("{:#x}", section.file_size),
-            section.vaddr,
-            format!("{:#x}", section.vsize),
-            if permissions.read { 'r' } else { '-' },
-            if permissions.write { 'w' } else { '-' },
-            if permissions.execute { 'x' } else { '-' },
-            format!("{flags:#x}"),
-        ));
+        // A section the loader does not map is at no address to seek to.
+        table.row(
+            section.loaded.then_some(section.vaddr),
+            format!(
+                "{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
+                section.file_offset,
+                format!("{:#x}", section.file_size),
+                section.vaddr,
+                format!("{:#x}", section.vsize),
+                if permissions.read { 'r' } else { '-' },
+                if permissions.write { 'w' } else { '-' },
+                if permissions.execute { 'x' } else { '-' },
+                format!("{flags:#x}"),
+            ),
+        );
     }
-    Ok(out)
+    table
 }
 
 /// An ELF section type, as radare2 spells it.
@@ -764,11 +1136,13 @@ fn macho_section_type(kind: u32) -> String {
 /// is the address a call to it names; the dynamic table states the imports
 /// where there is one, since the static table repeats them under versioned
 /// names.
-fn symbols(session: &mut Session) -> Result<String, String> {
+pub(crate) fn symbols(session: &mut Session) -> Result<Table, String> {
     // The stubs are read out of the code, so there must be a decoder first.
     session.program.ensure_current()?;
-    let mut out = String::from("nth paddr      vaddr      bind   type   size lib name\n");
-    out.push_str(&"-".repeat(60));
+    let mut table = Table::headed([
+        "nth paddr      vaddr      bind   type   size lib name".to_owned(),
+        "-".repeat(60),
+    ]);
     let spelled = |value: Option<u64>| {
         value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
     };
@@ -788,16 +1162,19 @@ fn symbols(session: &mut Session) -> Result<String, String> {
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {
         let mapped = symbol.defined.then_some(symbol.vaddr);
-        out.push_str(&format!(
-            "\n{:<3} {} {} {:<6} {:<6} {:<4}     {}",
-            nth(symbol).1.unwrap_or_default(),
-            spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
-            spelled(Some(symbol.vaddr)),
-            binding(symbol.binding),
-            symbol_type(symbol.kind),
-            symbol.size,
-            symbol.name
-        ));
+        table.row(
+            mapped,
+            format!(
+                "{:<3} {} {} {:<6} {:<6} {:<4}     {}",
+                nth(symbol).1.unwrap_or_default(),
+                spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
+                spelled(Some(symbol.vaddr)),
+                binding(symbol.binding),
+                symbol_type(symbol.kind),
+                symbol.size,
+                symbol.name
+            ),
+        );
     }
     let dynamic = session
         .image()
@@ -819,19 +1196,22 @@ fn symbols(session: &mut Session) -> Result<String, String> {
     for symbol in imports {
         let stub = stubs.iter().find(|(_, stub)| stub.symbol == symbol.name);
         let at = stub.map(|(at, _)| *at);
-        out.push_str(&format!(
-            "\n{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
-            index(symbol).unwrap_or_default(),
-            spelled(at.and_then(|at| file_offset_of(session, at))),
-            spelled(at),
-            binding(symbol.binding),
-            symbol_type(symbol.kind),
-            // An import's size is the stub's, which is what a call to it reaches.
-            stub.map_or(symbol.size, |(_, stub)| stub.size),
-            symbol.name
-        ));
+        table.row(
+            at,
+            format!(
+                "{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
+                index(symbol).unwrap_or_default(),
+                spelled(at.and_then(|at| file_offset_of(session, at))),
+                spelled(at),
+                binding(symbol.binding),
+                symbol_type(symbol.kind),
+                // An import's size is the stub's, which is what a call to it reaches.
+                stub.map_or(symbol.size, |(_, stub)| stub.size),
+                symbol.name
+            ),
+        );
     }
-    Ok(out)
+    Ok(table)
 }
 
 /// A symbol's binding, as radare2 spells it.
@@ -908,9 +1288,11 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
 /// loader adds a stated addend and `SET_` where it sets the word outright;
 /// `ntype` is the format's own number. A record naming no symbol is spelled
 /// by its addend, which for a relative relocation is the address it writes.
-fn relocations(session: &Session) -> Result<String, String> {
-    let mut out = String::from("vaddr      paddr      type   ntype name\n");
-    out.push_str(&"-".repeat(40));
+pub(crate) fn relocations(session: &Session) -> Table {
+    let mut table = Table::headed([
+        "vaddr      paddr      type   ntype name".to_owned(),
+        "-".repeat(40),
+    ]);
     // In address order, as radare2 lists them; the container keeps the order they are applied in.
     let mut records: Vec<&r2image::Relocation> = session.image().relocations().iter().collect();
     records.sort_by_key(|relocation| (relocation.vaddr, relocation.record));
@@ -943,12 +1325,15 @@ fn relocations(session: &Session) -> Result<String, String> {
             Some(addend) if addend > 0 => name.push_str(&format!(" {addend:#010x}")),
             _ => {}
         }
-        out.push_str(&format!(
-            "\n{:#010x} {paddr} {kind:<6} {:<5} {name}",
-            relocation.vaddr, relocation.ntype
-        ));
+        table.row(
+            Some(relocation.vaddr),
+            format!(
+                "{:#010x} {paddr} {kind:<6} {:<5} {name}",
+                relocation.vaddr, relocation.ntype
+            ),
+        );
     }
-    Ok(out)
+    table
 }
 
 /// The lift tier: the operations Sleigh produced, before any analysis.
@@ -985,7 +1370,17 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr, RenderTier::C)?;
-    let mut out = rendering.response.output.into_text();
+    let roles = match (&rendering.response.output, session.paints()) {
+        (r2engine::EngineRendering::Function(rendered), true) => {
+            Some(crate::listing::c_roles(rendered.emission().roles()))
+        }
+        _ => None,
+    };
+    let text = rendering.response.output.into_text();
+    let mut out = match roles {
+        Some(roles) => r2s_tui::theme::ansi(&text, &roles),
+        None => text,
+    };
     // A callee whose analysis panicked is a defect in the engine, not a fact
     // about the program, so it is printed with the rendering it degraded
     // rather than only in the ledger `pddo` prints.
@@ -1047,18 +1442,4 @@ fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
     let segment = session.image().segment_at(vaddr)?;
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size).then(|| segment.file_offset + offset_in_segment)
-}
-
-#[cfg(test)]
-mod tests {
-    use r2engine::discovery::{Basis, Confidence, Premise};
-
-    #[test]
-    fn a_confidence_is_spelled_with_every_premise_it_takes_for_granted() {
-        assert_eq!(super::confidence(&Confidence::of(Basis::Called)), "called");
-        let assumed = Confidence::of(Basis::Handed)
-            .assuming(Premise::UbFreeSource)
-            .assuming(Premise::ClosedWorld);
-        assert_eq!(super::confidence(&assumed), "handed+closed-world+ub-free");
-    }
 }

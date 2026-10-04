@@ -23,6 +23,15 @@ pub struct NumberSpan {
     pub value: i128,
 }
 
+/// Where one token of an operand body is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// Byte offset into the operand body where the token starts.
+    pub start: usize,
+    /// Byte offset one past the token's last character.
+    pub end: usize,
+}
+
 /// One instruction as a listing spells it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Syntax {
@@ -34,6 +43,10 @@ pub struct Syntax {
     pub size: usize,
     /// Every number in `body`, in the order it appears there.
     pub numbers: Vec<NumberSpan>,
+    /// Every register `body` names, in the order it appears there: a word the
+    /// specification's register table names, filled in by the decoder that
+    /// holds that table ([`register_spans`]).
+    pub registers: Vec<Span>,
 }
 
 impl Syntax {
@@ -60,7 +73,41 @@ pub fn radare2(mnemonic: &str, body: &str, size: usize, arch: &str) -> Syntax {
         body,
         size,
         numbers,
+        registers: Vec::new(),
     }
+}
+
+/// Every word of an operand body the register table names, ignoring case.
+///
+/// A word starts with a letter or `_` and runs over letters, digits, `_` and
+/// `.`; a number (`0x10`) starts with a digit and is never one. The table is
+/// the specification's own, so this is the decoder saying which tokens are
+/// registers, not a guess from what a name looks like.
+pub fn register_spans(body: &str, registers: &std::collections::BTreeSet<String>) -> Vec<Span> {
+    let bytes = body.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let c = bytes[at];
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let start = at;
+            while at < bytes.len()
+                && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_' || bytes[at] == b'.')
+            {
+                at += 1;
+            }
+            if registers.contains(&body[start..at].to_ascii_lowercase()) {
+                spans.push(Span { start, end: at });
+            }
+        } else if c.is_ascii_digit() {
+            while at < bytes.len() && bytes[at].is_ascii_alphanumeric() {
+                at += 1;
+            }
+        } else {
+            at += 1;
+        }
+    }
+    spans
 }
 
 /// Every number in an operand body, by where it is written.
@@ -312,5 +359,19 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].value, -8);
         assert_eq!(&"[sp, -0x8]"[spans[0].start..spans[0].end], "-0x8");
+    }
+
+    #[test]
+    fn a_register_is_a_word_the_table_names_and_a_number_never_is() {
+        let table = ["rax", "eax", "rbp", "x0"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let body = "EAX,dword ptr [RBP + -0x4], x0, 0x10, rbpx";
+        let words = register_spans(body, &table)
+            .iter()
+            .map(|span| &body[span.start..span.end])
+            .collect::<Vec<_>>();
+        assert_eq!(words, ["EAX", "RBP", "x0"]);
     }
 }

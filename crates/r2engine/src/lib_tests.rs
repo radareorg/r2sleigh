@@ -1313,23 +1313,52 @@ fn r2dec_stop_mapping_preserves_all_decompiler_phases_and_reasons() {
     }
 }
 
-/// Eleven obligations: six rendered, two elided, one refused, one of the
-/// rendered with a conflicting second answer, and two nothing spoke about.
-fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
-    let at = |op: u64| r2ssa::SemanticObligationId {
+/// A function at 0x401000 of sixteen operations, each storing to memory,
+/// whose obligations the ledger tests name by place.
+fn ledger_test_artifact() -> r2ssa::SsaArtifact {
+    let mut block = r2il::R2ILBlock::new(0x401000, 4);
+    for index in 0..16u64 {
+        block.push(r2il::R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::constant(0x500000 + index * 8, 8),
+            val: r2il::Varnode::constant(index, 8),
+        });
+    }
+    block.push(r2il::R2ILOp::Return {
+        target: r2il::Varnode::constant(0, 8),
+    });
+    r2ssa::SsaArtifact::raw(&[block], None).expect("ledger test artifact")
+}
+
+/// The memory-write obligation of operation `index` of that function.
+fn ledger_test_obligation(
+    artifact: &r2ssa::SsaArtifact,
+    index: usize,
+) -> r2ssa::SemanticObligationId {
+    let op = artifact
+        .function()
+        .get_block(0x401000)
+        .and_then(|block| block.op_id(index))
+        .expect("the test operation");
+    r2ssa::SemanticObligationId {
         instruction: r2ssa::CanonicalInstructionId {
             block_addr: 0x401000,
             site: r2ssa::CanonicalInstructionSite::Op(op),
         },
         kind: r2ssa::SemanticObligationKind::ObservableMemoryWrite,
         component: r2ssa::SemanticObligationComponent::Whole,
-    };
-    let ids = (0..11).map(at).collect::<Vec<_>>();
-    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied());
-    let rendered = r2dec::ledger::Outcome::Rendered {
-        block_addr: 0x401000,
-        op_idx: 0,
-    };
+    }
+}
+
+/// Eleven obligations: six rendered, two elided, one refused, one of the
+/// rendered with a conflicting second answer, and two nothing spoke about.
+fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
+    let artifact = ledger_test_artifact();
+    let ids = (0..11)
+        .map(|index| ledger_test_obligation(&artifact, index))
+        .collect::<Vec<_>>();
+    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied(), artifact.graph());
+    let rendered = r2dec::ledger::Outcome::Rendered;
     for id in &ids[..5] {
         ledger.record(*id, rendered);
     }
@@ -1347,25 +1376,13 @@ fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
 
 #[test]
 fn refused_effect_obligations_produce_a_typed_engine_refusal() {
-    let obligation = r2ssa::SemanticObligationId {
-        instruction: r2ssa::CanonicalInstructionId {
-            block_addr: 0x401000,
-            site: r2ssa::CanonicalInstructionSite::Op(7),
-        },
-        kind: r2ssa::SemanticObligationKind::ObservableMemoryWrite,
-        component: r2ssa::SemanticObligationComponent::Whole,
-    };
     // The ledger is the fact the refusal is read from, so the test builds
     // one that closes to two refusals, one unaccounted and one conflict.
-    let sibling = |op: u64| r2ssa::SemanticObligationId {
-        instruction: r2ssa::CanonicalInstructionId {
-            block_addr: 0x401000,
-            site: r2ssa::CanonicalInstructionSite::Op(op),
-        },
-        ..obligation
-    };
-    let ids = (7..16).map(sibling).collect::<Vec<_>>();
-    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied());
+    let artifact = ledger_test_artifact();
+    let ids = (7..16)
+        .map(|index| ledger_test_obligation(&artifact, index))
+        .collect::<Vec<_>>();
+    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied(), artifact.graph());
     ledger.record(ids[0], r2dec::ledger::Outcome::Refused);
     ledger.record(ids[1], r2dec::ledger::Outcome::Refused);
     ledger.record(
@@ -1373,21 +1390,9 @@ fn refused_effect_obligations_produce_a_typed_engine_refusal() {
         r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::StackFrame),
     );
     for id in &ids[3..7] {
-        ledger.record(
-            *id,
-            r2dec::ledger::Outcome::Rendered {
-                block_addr: 0x401000,
-                op_idx: 0,
-            },
-        );
+        ledger.record(*id, r2dec::ledger::Outcome::Rendered);
     }
-    ledger.record(
-        ids[7],
-        r2dec::ledger::Outcome::Rendered {
-            block_addr: 0x401000,
-            op_idx: 1,
-        },
-    );
+    ledger.record(ids[7], r2dec::ledger::Outcome::Rendered);
     ledger.record_conflict(ids[7]);
     let obligation_ledger = Some(ledger);
     let effect_obligations = effect_obligations_of(obligation_ledger.as_ref());

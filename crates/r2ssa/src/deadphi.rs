@@ -511,7 +511,11 @@ impl DeadPhis {
                 .values()
                 .filter(|obligation| obligation.inputs.contains(&value.id))
                 .map(|obligation| {
-                    format!("{:?}/{:?}", obligation.id.kind, obligation.id.instruction)
+                    format!(
+                        "{:?}/{}",
+                        obligation.id.kind,
+                        obligation.id.instruction.spelled(graph)
+                    )
                 })
                 .collect::<Vec<_>>();
             let definition = graph
@@ -523,14 +527,21 @@ impl DeadPhis {
                     instruction
                         .obligations
                         .iter()
-                        .map(|id| format!("{:?}/{:?}/{}", id.kind, id.component, id.instruction))
+                        .map(|id| {
+                            format!(
+                                "{:?}/{:?}/{}",
+                                id.kind,
+                                id.component,
+                                id.instruction.spelled(graph)
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
             let definition_site = graph.def_inst(value.id).map(|inst| {
                 (
                     inst,
-                    graph.op_site_for_inst(inst),
+                    graph.walk_start(inst),
                     graph.inst(inst).map(|inst| format!("{:?}", inst.payload)),
                 )
             });
@@ -686,7 +697,7 @@ mod tests {
 
         let exit = func.get_block(0x100c).expect("exit block");
         let zf = exit
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name().eq_ignore_ascii_case("zf"))
             .and_then(|phi| graph.value_id_for_var(&phi.dst));
@@ -724,7 +735,7 @@ mod tests {
 
         let exit = func.get_block(0x100c).expect("exit block");
         let rax = exit
-            .phis
+            .phis()
             .iter()
             .find(|phi| phi.dst.name().eq_ignore_ascii_case("rax"))
             .and_then(|phi| graph.value_id_for_var(&phi.dst))
@@ -915,7 +926,7 @@ mod tests {
         // about merging flags elsewhere may reach back and call it unobserved.
         let entry = func.get_block(0x1000).expect("entry block");
         let tested = entry
-            .ops
+            .ops()
             .iter()
             .find_map(|op| op.dst())
             .and_then(|dst| graph.value_id_for_var(dst))

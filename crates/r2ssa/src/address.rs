@@ -254,6 +254,8 @@ impl AffineScalar {
 
 struct AddressCollector<'a> {
     function: &'a SSAFunction,
+    /// The function's prep facts, where it was prepared.
+    prep: Option<&'a crate::DecompilePrepFacts>,
     graph: &'a SsaGraph,
     /// Which values carry the same bits; absent only where no preparation
     /// ran, and then there is no formal to propagate either.
@@ -276,17 +278,18 @@ struct AddressCollector<'a> {
 impl<'a> AddressCollector<'a> {
     fn new(
         function: &'a SSAFunction,
+        prep: Option<&'a crate::DecompilePrepFacts>,
         graph: &'a SsaGraph,
         _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let definitions = function
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter())
+            .flat_map(|block| block.ops().iter())
             .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
             .collect();
         let mut expressions = BTreeMap::new();
-        if let Some(prep) = function.decompile_prep_facts() {
+        if let Some(prep) = prep {
             // Every formal, not only those that arrived at their ABI storage's
             // full width. A narrow parameter -- an `unsigned` in `w1` where
             // the convention names `x1` -- is a lane projection rather than a
@@ -319,7 +322,7 @@ impl<'a> AddressCollector<'a> {
         let load_count = function
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter())
+            .flat_map(|block| block.ops().iter())
             .filter(|op| {
                 matches!(
                     op,
@@ -329,8 +332,9 @@ impl<'a> AddressCollector<'a> {
             .count();
         Self {
             function,
+            prep,
             graph,
-            views: function.decompile_prep_facts().map(|prep| &prep.views),
+            views: prep.map(|prep| &prep.views),
             definitions,
             seeded: expressions.keys().copied().collect(),
             expressions,
@@ -445,10 +449,10 @@ impl<'a> AddressCollector<'a> {
         // So the block's own values are derived again from this input alone,
         // and it has changed exactly where one of them came out different.
         let defined = block
-            .phis
+            .phis()
             .iter()
             .map(|phi| &phi.dst)
-            .chain(block.ops.iter().filter_map(SSAOp::dst))
+            .chain(block.ops().iter().filter_map(SSAOp::dst))
             .filter_map(|var| self.graph.value_id_for_var(var))
             .filter(|value| !self.seeded.contains(value))
             .collect::<Vec<_>>();
@@ -470,7 +474,7 @@ impl<'a> AddressCollector<'a> {
         block: &crate::block::SSABlock,
         stack: &mut BTreeMap<SpillSlotKey, AddressExpression>,
     ) {
-        for phi in &block.phis {
+        for phi in block.phis() {
             let expressions = phi
                 .sources
                 .iter()
@@ -487,7 +491,7 @@ impl<'a> AddressCollector<'a> {
                 self.insert_expression(&phi.dst, expression);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::Store { space, addr, val }
                 | SSAOp::StoreGuarded {
@@ -643,7 +647,7 @@ impl<'a> AddressCollector<'a> {
     }
 
     fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
-        let prep = self.function.decompile_prep_facts()?;
+        let prep = self.prep?;
         prep.stack_address_root_of(var)
             .or_else(|| prep.stack_address_root_of(prep.canonical_root(var)))
             .copied()
@@ -762,10 +766,11 @@ fn signed_constant(var: &SSAVar) -> Option<i64> {
 
 pub(crate) fn collect_address_provenance(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> AddressProvenanceFacts {
-    AddressCollector::new(function, graph, machine_context).collect()
+    AddressCollector::new(function, prep, graph, machine_context).collect()
 }
 
 #[cfg(test)]
@@ -1026,7 +1031,7 @@ mod tests {
         let loaded_values = artifact
             .get_block(0x1100)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter_map(|op| match op {
                 SSAOp::Load { dst, space, .. } if *space == SpaceId::Custom(7) => artifact
@@ -1531,13 +1536,14 @@ mod tests {
         let (load_index, _) = artifact
             .get_block(0x1000)
             .expect("block")
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .find(|(_, op)| matches!(op, SSAOp::Load { .. }))
             .expect("load");
         let uses = artifact
-            .memory_uses_for_op_site(0x1000, load_index)
+            .inst_at(0x1000, load_index)
+            .and_then(|inst| artifact.memory_uses_for_inst(inst))
             .expect("memory use");
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].version.version, 0);
@@ -1577,22 +1583,24 @@ mod tests {
         .expect("source-bound artifact");
         let block = artifact.get_block(0x1000).expect("block");
         let store_index = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Store { .. }))
             .expect("store");
         let load_index = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Load { .. }))
             .expect("load");
         let written = artifact
-            .memory_defs_for_op_site(0x1000, store_index)
+            .inst_at(0x1000, store_index)
+            .and_then(|inst| artifact.memory_defs_for_inst(inst))
             .and_then(|defs| defs.first())
             .expect("memory def")
             .next_version;
         let uses = artifact
-            .memory_uses_for_op_site(0x1000, load_index)
+            .inst_at(0x1000, load_index)
+            .and_then(|inst| artifact.memory_uses_for_inst(inst))
             .expect("memory use");
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].version, written);

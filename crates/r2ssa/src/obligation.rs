@@ -11,17 +11,19 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::CanonicalStorageId;
+use crate::arena::OpId;
 use crate::graph::{InstId, InstPayload, SsaGraph, UseSite, ValueId};
 use crate::op::SSAOp;
 use crate::semantic::{SourceBoundaryFacts, StructuredDataflowFacts};
 
-pub const SEMANTIC_OBLIGATION_SCHEMA_VERSION: u32 = 7;
+pub const SEMANTIC_OBLIGATION_SCHEMA_VERSION: u32 = 8;
 
-/// Stable location of one canonical SSA instruction.
+/// Stable identity of one canonical SSA instruction.
 ///
-/// The ordinal is the semantic order within the source block. It is independent
-/// of graph allocation and traversal order. Phi and ordinary-op namespaces are
-/// separate so synthesized SSA joins cannot alias lifted operations.
+/// An operation is named by its [`OpId`], which no edit moves; its place in
+/// the block is only how it is spelled ([`Self::spelled`]). Phi and
+/// ordinary-op namespaces are separate so synthesized SSA joins cannot alias
+/// lifted operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CanonicalInstructionId {
     pub block_addr: u64,
@@ -31,7 +33,7 @@ pub struct CanonicalInstructionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CanonicalInstructionSite {
     Phi(CanonicalStorageId),
-    Op(u64),
+    Op(OpId),
     /// One exact native instruction span for which the trusted translator
     /// emitted no canonical P-code and supplied no no-effect authority.
     NativeSpan {
@@ -40,27 +42,78 @@ pub enum CanonicalInstructionSite {
     },
 }
 
-impl std::fmt::Display for CanonicalInstructionId {
+impl CanonicalInstructionId {
+    /// This instruction as a person reads it, an operation by its place in
+    /// its block: `0x{block}:op:{n}`.
+    pub fn spelled(self, graph: &SsaGraph) -> SpelledInstruction {
+        SpelledInstruction {
+            id: self,
+            ordinal: match self.site {
+                CanonicalInstructionSite::Op(op) => graph
+                    .inst_for_op(op)
+                    .and_then(|inst| graph.op_ordinal(inst)),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// A [`CanonicalInstructionId`] with the place its operation holds in the
+/// sealed block it was spelled against.
+///
+/// Ordered as the spelling reads: by block, then phi before operation before
+/// native span, then by place. Two ids order the same way only when spelled
+/// against one function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpelledInstruction {
+    id: CanonicalInstructionId,
+    ordinal: Option<usize>,
+}
+
+impl SpelledInstruction {
+    fn key(&self) -> (u64, u8, Option<usize>, CanonicalInstructionSite) {
+        let rank = match self.id.site {
+            CanonicalInstructionSite::Phi(_) => 0,
+            CanonicalInstructionSite::Op(_) => 1,
+            CanonicalInstructionSite::NativeSpan { .. } => 2,
+        };
+        (self.id.block_addr, rank, self.ordinal, self.id.site)
+    }
+}
+
+impl Ord for SpelledInstruction {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+impl PartialOrd for SpelledInstruction {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::fmt::Display for SpelledInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.site {
+        let block_addr = self.id.block_addr;
+        match self.id.site {
             CanonicalInstructionSite::Phi(storage) => {
                 write!(
                     f,
                     "0x{:x}:phi:{:?}:0x{:x}:{}",
-                    self.block_addr, storage.space, storage.offset, storage.size
+                    block_addr, storage.space, storage.offset, storage.size
                 )
             }
-            CanonicalInstructionSite::Op(ordinal) => {
-                write!(f, "0x{:x}:op:{ordinal}", self.block_addr)
-            }
+            CanonicalInstructionSite::Op(op) => match self.ordinal {
+                Some(ordinal) => write!(f, "0x{block_addr:x}:op:{ordinal}"),
+                // An operation the function it was spelled against does not
+                // hold: named by identity, so it is never mistaken for one.
+                None => write!(f, "0x{block_addr:x}:op#{op}"),
+            },
             CanonicalInstructionSite::NativeSpan {
                 instruction_addr,
                 size,
-            } => write!(
-                f,
-                "0x{:x}:native:0x{instruction_addr:x}:{size}",
-                self.block_addr
-            ),
+            } => write!(f, "0x{block_addr:x}:native:0x{instruction_addr:x}:{size}"),
         }
     }
 }
@@ -151,9 +204,45 @@ pub struct SemanticObligationId {
     pub component: SemanticObligationComponent,
 }
 
-impl std::fmt::Display for SemanticObligationId {
+impl SemanticObligationId {
+    /// This obligation as a person reads it:
+    /// `{instruction}:{kind}:{component}`, the instruction spelled by
+    /// [`CanonicalInstructionId::spelled`].
+    pub fn spelled(self, graph: &SsaGraph) -> SpelledObligation {
+        SpelledObligation {
+            instruction: self.instruction.spelled(graph),
+            id: self,
+        }
+    }
+}
+
+/// A [`SemanticObligationId`] spelled against the sealed function it is about,
+/// ordered as the spelling reads: by instruction, then kind and component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SpelledObligation {
+    instruction: SpelledInstruction,
+    id: SemanticObligationId,
+}
+
+impl SpelledObligation {
+    /// The obligation spelled.
+    pub const fn id(&self) -> SemanticObligationId {
+        self.id
+    }
+
+    /// Its instruction, spelled.
+    pub const fn instruction(&self) -> SpelledInstruction {
+        self.instruction
+    }
+}
+
+impl std::fmt::Display for SpelledObligation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{:?}", self.instruction, self.kind, self.component)
+        write!(
+            f,
+            "{}:{}:{:?}",
+            self.instruction, self.id.kind, self.id.component
+        )
     }
 }
 
@@ -793,8 +882,9 @@ impl SemanticObligationInventory {
             {
                 r2il::refusal_evidence!(
                     "unread-live-definition",
-                    "{:?} ({id}) defines {:?}, which nothing reads, and owes {kinds:?}",
+                    "{:?} ({}) defines {:?}, which nothing reads, and owes {kinds:?}",
                     inst.id,
+                    id.spelled(graph),
                     inst.output
                 );
             }
@@ -1182,21 +1272,6 @@ impl SemanticObligationInventory {
             .flat_map(|instruction| instruction.obligations.iter())
             .filter_map(|id| self.obligations.get(id))
     }
-
-    /// Deterministic, human-readable inventory for debug and fixture capture.
-    pub fn debug_lines(&self) -> Vec<String> {
-        self.dispositions()
-            .map(|instruction| {
-                let obligations = instruction
-                    .obligations
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("{} {} [{}]", instruction.id, instruction.state, obligations)
-            })
-            .collect()
-    }
 }
 
 fn boundary_component(slot: crate::semantic::CallBoundarySlot) -> SemanticObligationComponent {
@@ -1241,7 +1316,7 @@ fn collect_canonical_instruction_ids(
                 CanonicalInstructionSite::Phi(storage)
             }
             InstPayload::Op(_) => {
-                let Some((_, op_idx)) = graph.op_site_for_inst(inst.id) else {
+                let Some(op) = graph.op_for_inst(inst.id) else {
                     failures.push(ObligationInventoryFailure {
                         inst: inst.id,
                         block_addr: Some(block_addr),
@@ -1249,7 +1324,7 @@ fn collect_canonical_instruction_ids(
                     });
                     continue;
                 };
-                CanonicalInstructionSite::Op(op_idx as u64)
+                CanonicalInstructionSite::Op(op)
             }
         };
         let id = CanonicalInstructionId { block_addr, site };
@@ -1662,6 +1737,24 @@ fn instruction_is_structural(payload: &InstPayload) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The canonical identity of operation `index` of the block at
+    /// `block_addr`, as a fixture names it.
+    fn operation_at(
+        artifact: &crate::SsaArtifact,
+        block_addr: u64,
+        index: usize,
+    ) -> super::CanonicalInstructionId {
+        super::CanonicalInstructionId {
+            block_addr,
+            site: super::CanonicalInstructionSite::Op(
+                artifact
+                    .function()
+                    .get_block(block_addr)
+                    .and_then(|block| block.op_id(index))
+                    .expect("the fixture's operation"),
+            ),
+        }
+    }
     use super::*;
     use crate::{
         CallBoundarySlot, CanonicalStorageId, CanonicalStorageSpace, SourceAbiParameterSpec,
@@ -1974,10 +2067,7 @@ mod tests {
         assert!(arguments.is_empty());
         let call = artifact
             .obligations()
-            .disposition_with_id(CanonicalInstructionId {
-                block_addr: 0x3000,
-                site: CanonicalInstructionSite::Op(2),
-            })
+            .disposition_with_id(operation_at(&artifact, 0x3000, 2))
             .expect("call instruction");
         assert_eq!(call.state, SemanticInstructionState::UnsupportedUnknown);
         assert!(call.obligations.iter().any(|id| {
@@ -1991,10 +2081,7 @@ mod tests {
         for ordinal in 0..2 {
             let setup = artifact
                 .obligations()
-                .disposition_with_id(CanonicalInstructionId {
-                    block_addr: 0x3000,
-                    site: CanonicalInstructionSite::Op(ordinal),
-                })
+                .disposition_with_id(operation_at(&artifact, 0x3000, ordinal))
                 .expect("implicit argument setup");
             assert_eq!(setup.state, SemanticInstructionState::UnsupportedUnknown);
             assert!(setup.obligations.iter().any(|id| {
@@ -2152,7 +2239,7 @@ mod tests {
                 }
                 crate::semantic::SourceCallArgumentValue::PreservedEntry => None,
             },
-            artifact.graph().inst_id_for_op_site(0x3080, 0)
+            artifact.graph().inst_spelled_at(0x3080, 0)
         );
         assert_eq!(boundary.results.len(), 1);
         assert_eq!(
@@ -2436,10 +2523,7 @@ mod tests {
             SsaArtifact::raw(&[block], Some(&x86_64_call_arch())).expect("return artifact");
         let producer = artifact
             .obligations()
-            .disposition_with_id(CanonicalInstructionId {
-                block_addr: 0x3100,
-                site: CanonicalInstructionSite::Op(0),
-            })
+            .disposition_with_id(operation_at(&artifact, 0x3100, 0))
             .expect("potential return-value producer");
         assert_eq!(producer.state, SemanticInstructionState::UnsupportedUnknown);
         assert!(producer.obligations.iter().any(|id| {
@@ -2532,10 +2616,7 @@ mod tests {
         assert_eq!(returned.values.len(), 1);
         let producer = artifact
             .obligations()
-            .disposition_with_id(CanonicalInstructionId {
-                block_addr: 0x3140,
-                site: CanonicalInstructionSite::Op(1),
-            })
+            .disposition_with_id(operation_at(&artifact, 0x3140, 1))
             .expect("return producer");
         // The boundary is complete, so nothing taints the value that reaches
         // it. An unattributed frame used to make this an unknown effect.
@@ -2579,20 +2660,17 @@ mod tests {
             .function()
             .get_block(0x3180)
             .expect("loop block")
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .find_map(|(index, op)| {
                 matches!(op, crate::op::SSAOp::Copy { dst, .. } if dst.name() == "rdi")
-                    .then_some((0x3180u64, index as u64))
+                    .then_some((0x3180u64, index))
             })
             .expect("argument-carrier definition");
         let next_iteration_argument = artifact
             .obligations()
-            .disposition_with_id(CanonicalInstructionId {
-                block_addr,
-                site: CanonicalInstructionSite::Op(op_index),
-            })
+            .disposition_with_id(operation_at(&artifact, block_addr, op_index))
             .expect("next-iteration argument producer");
         assert_eq!(
             next_iteration_argument.state,
@@ -2629,16 +2707,14 @@ mod tests {
             SsaArtifact::raw(&[block], Some(&x86_64_call_arch())).expect("call artifact");
         let graph = artifact.graph();
         let first = graph
-            .inst(graph.inst_id_for_op_site(0x3200, 0).expect("first setup"))
+            .inst(graph.inst_spelled_at(0x3200, 0).expect("first setup"))
             .and_then(|inst| inst.output)
             .expect("first argument value");
         let second = graph
-            .inst(graph.inst_id_for_op_site(0x3200, 1).expect("second setup"))
+            .inst(graph.inst_spelled_at(0x3200, 1).expect("second setup"))
             .and_then(|inst| inst.output)
             .expect("second argument value");
-        let call_inst = graph
-            .inst_id_for_op_site(0x3200, 2)
-            .expect("call instruction");
+        let call_inst = graph.inst_spelled_at(0x3200, 2).expect("call instruction");
         let call_site = crate::semantic::CallSiteId(0);
         let slot = crate::semantic::CallBoundarySlot::Register {
             index: 0,
@@ -2718,10 +2794,7 @@ mod tests {
         let artifact = SsaArtifact::raw(&[block], None).expect("atomic artifact");
         let atomic = artifact
             .obligations()
-            .disposition_with_id(CanonicalInstructionId {
-                block_addr: 0x5000,
-                site: CanonicalInstructionSite::Op(0),
-            })
+            .disposition_with_id(operation_at(&artifact, 0x5000, 0))
             .expect("atomic instruction");
         assert_eq!(
             atomic
@@ -2770,10 +2843,7 @@ mod tests {
         let artifact = SsaArtifact::raw(&[block], None).expect("fence artifact");
         let fence = artifact
             .obligations()
-            .disposition_with_id(CanonicalInstructionId {
-                block_addr: 0x6000,
-                site: CanonicalInstructionSite::Op(0),
-            })
+            .disposition_with_id(operation_at(&artifact, 0x6000, 0))
             .expect("fence instruction");
         assert_eq!(fence.state, SemanticInstructionState::UnsupportedUnknown);
         assert!(fence.obligations.iter().any(|id| {
@@ -2827,8 +2897,8 @@ mod tests {
         graph.values.clear();
         graph.def_of.clear();
         graph.clear_use_sites();
-        graph.op_inst_by_site.clear();
-        graph.op_site_by_inst.clear();
+        graph.inst_by_op.clear();
+        graph.op_by_inst.clear();
         for block in &mut graph.blocks {
             block.insts.clear();
         }

@@ -111,6 +111,17 @@ pub enum SsaIntegrityError {
         site: SsaValueSite,
         var: SSAVar,
     },
+    /// A read whose definition does not dominate it: an operation reading a
+    /// value defined later in its block or in a block that does not dominate
+    /// its own, or a phi input defined where it does not dominate the edge's
+    /// predecessor.
+    UseNotDominated {
+        block_addr: u64,
+        site: SourceSite,
+        var: SSAVar,
+        def_block_addr: u64,
+        def_site: DefSite,
+    },
 }
 
 /// Exact site at which a zero-width SSA value was observed.
@@ -249,6 +260,17 @@ impl fmt::Display for SsaIntegrityError {
             } => write!(
                 f,
                 "SSA value {var} at {site:?} in block 0x{block_addr:x} has zero width"
+            ),
+            Self::UseNotDominated {
+                block_addr,
+                site,
+                var,
+                def_block_addr,
+                def_site,
+            } => write!(
+                f,
+                "SSA value {var} read at {site:?} in block 0x{block_addr:x} is defined at \
+                 {def_site:?} in block 0x{def_block_addr:x}, which does not dominate the read"
             ),
         }
     }
@@ -426,6 +448,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
         }
     }
 
+    let domtree = function.domtree();
     for block in function.blocks() {
         // Query once per block so the full validator remains linear in CFG
         // edges even when a merge block carries several phi values.
@@ -435,7 +458,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             .predecessors
             .clone();
 
-        for (phi_idx, phi) in block.phis.iter().enumerate() {
+        for (phi_idx, phi) in block.phis().iter().enumerate() {
             let actual_predecessors = phi
                 .sources
                 .iter()
@@ -491,7 +514,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             }
         }
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             let mut zero_width_source = None;
             let mut source_idx = 0usize;
             op.for_each_source(|source| {
@@ -530,11 +553,40 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 });
                 return;
             }
-            if source.var.version != 0 && !definitions.contains_key(source.var) {
+            if source.var.version == 0 {
+                return;
+            }
+            let Some(definition) = definitions.get(source.var) else {
                 failure = Some(SsaIntegrityError::MissingDefinition {
                     block_addr: block.addr,
                     site: source.site,
                     var: source.var.clone(),
+                });
+                return;
+            };
+            // Where the read happens: an operation reads at its own position,
+            // a phi input at the end of the edge's predecessor.
+            let dominated = match source.site {
+                SourceSite::Phi { pred_addr, .. } => {
+                    domtree.dominates(definition.block_addr, pred_addr)
+                }
+                SourceSite::Op { op_idx, .. } if definition.block_addr == block.addr => {
+                    match definition.site {
+                        DefSite::Phi { .. } => true,
+                        DefSite::Op { op_idx: def_idx } => def_idx < op_idx,
+                    }
+                }
+                SourceSite::Op { .. } => {
+                    domtree.strictly_dominates(definition.block_addr, block.addr)
+                }
+            };
+            if !dominated {
+                failure = Some(SsaIntegrityError::UseNotDominated {
+                    block_addr: block.addr,
+                    site: source.site,
+                    var: source.var.clone(),
+                    def_block_addr: definition.block_addr,
+                    def_site: definition.site,
                 });
             }
         });
@@ -659,7 +711,7 @@ mod tests {
     #[test]
     fn rejects_entry_outside_the_stored_block_domain() {
         let mut function = diamond();
-        function.remove_block(function.entry);
+        function.corrupt_remove_block(function.entry);
 
         assert_eq!(
             validate_ssa_function(&function),
@@ -672,7 +724,7 @@ mod tests {
     fn rejects_a_root_that_an_edge_reaches() {
         let mut function = diamond();
         function
-            .cfg_mut()
+            .corrupt_cfg()
             .set_terminator(0x100c, BlockTerminator::Branch { target: 0x1000 });
         assert_eq!(
             validate_ssa_function(&function),
@@ -688,8 +740,8 @@ mod tests {
         let mut predecessor = diamond();
         let mut orphan = BasicBlock::new(0x3000);
         orphan.terminator = BlockTerminator::Branch { target: 0x100c };
-        predecessor.cfg_mut().add_block(orphan);
-        predecessor.cfg_mut().rebuild_edges();
+        predecessor.corrupt_cfg().add_block(orphan);
+        predecessor.corrupt_cfg().rebuild_edges();
         assert_eq!(
             validate_ssa_function(&predecessor),
             Err(SsaIntegrityError::PredecessorOutsideBlockDomain {
@@ -701,9 +753,9 @@ mod tests {
         let mut successor = diamond();
         let mut orphan = BasicBlock::new(0x3000);
         orphan.terminator = BlockTerminator::Return;
-        successor.cfg_mut().add_block(orphan);
+        successor.corrupt_cfg().add_block(orphan);
         successor
-            .cfg_mut()
+            .corrupt_cfg()
             .set_terminator(0x1004, BlockTerminator::Branch { target: 0x3000 });
         assert_eq!(
             validate_ssa_function(&successor),
@@ -720,7 +772,7 @@ mod tests {
         // A duplicate CFG address makes the address index name the new node,
         // while existing edges still target the old node. The public topology
         // queries then disagree even though every reported address is stored.
-        function.cfg_mut().add_block(BasicBlock::new(0x1008));
+        function.corrupt_cfg().add_block(BasicBlock::new(0x1008));
 
         assert_eq!(
             validate_ssa_function(&function),
@@ -816,8 +868,8 @@ mod tests {
     #[test]
     fn rejects_a_nonzero_use_without_an_exact_definition() {
         let mut function = diamond();
-        let merge = function.get_block_mut(0x100c).expect("merge block");
-        let SSAOp::IntAdd { a, .. } = &mut merge.ops[0] else {
+        let mut merge = function.edit_block(0x100c).expect("merge block");
+        let SSAOp::IntAdd { a, .. } = &mut merge.ops_mut()[0] else {
             panic!("expected merge use");
         };
         *a = SSAVar::new("reg:dead", 7, 8);
@@ -835,24 +887,76 @@ mod tests {
         ));
     }
 
+    /// A value one arm defines is not available after the join: the merge
+    /// reads it through a phi, never directly.
+    #[test]
+    fn rejects_a_read_its_definition_does_not_dominate() {
+        let mut function = diamond();
+        let left = function.get_block(0x1004).expect("left block");
+        let defined_in_left = left.ops()[0].dst().expect("copy destination").clone();
+        let mut merge = function.edit_block(0x100c).expect("merge block");
+        let SSAOp::IntAdd { a, .. } = &mut merge.ops_mut()[0] else {
+            panic!("expected merge use");
+        };
+        *a = defined_in_left;
+
+        assert!(matches!(
+            validate_ssa_function(&function),
+            Err(SsaIntegrityError::UseNotDominated {
+                block_addr: 0x100c,
+                def_block_addr: 0x1004,
+                site: SourceSite::Op {
+                    op_idx: 0,
+                    src_idx: 0
+                },
+                ..
+            })
+        ));
+    }
+
+    /// Inside one block a read must come after the operation that defines it.
+    #[test]
+    fn rejects_a_read_before_its_definition_in_the_same_block() {
+        let mut function = diamond();
+        let mut left = function.edit_block(0x1004).expect("left block");
+        let defined = left.ops()[0].dst().expect("copy destination").clone();
+        let SSAOp::Copy { src, .. } = &mut left.ops_mut()[0] else {
+            panic!("expected the copy");
+        };
+        *src = defined;
+
+        assert!(matches!(
+            validate_ssa_function(&function),
+            Err(SsaIntegrityError::UseNotDominated {
+                block_addr: 0x1004,
+                def_block_addr: 0x1004,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn rejects_duplicate_and_version_zero_definitions() {
         let mut duplicate = diamond();
-        let block = duplicate.get_block_mut(0x1004).expect("left block");
-        let dst = block.ops[0].dst().expect("copy destination").clone();
-        block.ops.push(SSAOp::Copy {
-            dst,
-            src: SSAVar::constant(9, 8),
-        });
+        let mut block = duplicate.edit_block(0x1004).expect("left block");
+        let dst = block.ops()[0].dst().expect("copy destination").clone();
+        block.push_op(
+            SSAOp::Copy {
+                dst,
+                src: SSAVar::constant(9, 8),
+            },
+            None,
+            crate::Pass::Fixture,
+        );
         assert!(matches!(
             validate_ssa_function(&duplicate),
             Err(SsaIntegrityError::DuplicateDefinition { .. })
         ));
 
         let mut zero = diamond();
-        let block = zero.get_block_mut(0x1004).expect("left block");
-        let dst = block.ops[0].dst().expect("copy destination").clone();
-        let SSAOp::Copy { dst: written, .. } = &mut block.ops[0] else {
+        let mut block = zero.edit_block(0x1004).expect("left block");
+        let dst = block.ops()[0].dst().expect("copy destination").clone();
+        let SSAOp::Copy { dst: written, .. } = &mut block.ops_mut()[0] else {
             unreachable!();
         };
         *written = SSAVar::new(dst.name(), 0, dst.size);
@@ -865,7 +969,10 @@ mod tests {
     #[test]
     fn rejects_phi_predecessor_width_and_storage_drift() {
         let mut predecessor = diamond();
-        predecessor.get_block_mut(0x100c).expect("merge block").phis[0]
+        predecessor
+            .edit_block(0x100c)
+            .expect("merge block")
+            .phis_mut()[0]
             .sources
             .pop();
         assert!(matches!(
@@ -874,7 +981,8 @@ mod tests {
         ));
 
         let mut width = diamond();
-        let phi = &mut width.get_block_mut(0x100c).expect("merge block").phis[0];
+        let mut merge_block = width.edit_block(0x100c).expect("merge block");
+        let phi = &mut merge_block.phis_mut()[0];
         let old = phi.sources[0].1.clone();
         phi.sources[0].1 = SSAVar::new(old.name(), old.version, 4);
         assert!(matches!(
@@ -883,7 +991,8 @@ mod tests {
         ));
 
         let mut storage = diamond();
-        let phi = &mut storage.get_block_mut(0x100c).expect("merge block").phis[0];
+        let mut merge_block = storage.edit_block(0x100c).expect("merge block");
+        let phi = &mut merge_block.phis_mut()[0];
         let mut declared = phi.canonical_storage.expect("lifted phi storage");
         declared.offset += 1;
         phi.canonical_storage = Some(declared);
@@ -896,9 +1005,9 @@ mod tests {
     #[test]
     fn rejects_scalar_width_drift_and_zero_width_values() {
         let mut scalar = diamond();
-        let merge = scalar.get_block_mut(0x100c).expect("merge block");
-        let dst = merge.ops[0].dst().expect("merge destination").clone();
-        merge.ops[0] = SSAOp::Copy {
+        let mut merge = scalar.edit_block(0x100c).expect("merge block");
+        let dst = merge.ops()[0].dst().expect("merge destination").clone();
+        merge.ops_mut()[0] = SSAOp::Copy {
             dst,
             src: SSAVar::constant(3, 4),
         };
@@ -911,8 +1020,8 @@ mod tests {
         ));
 
         let mut zero = diamond();
-        let merge = zero.get_block_mut(0x100c).expect("merge block");
-        let SSAOp::IntAdd { b, .. } = &mut merge.ops[0] else {
+        let mut merge = zero.edit_block(0x100c).expect("merge block");
+        let SSAOp::IntAdd { b, .. } = &mut merge.ops_mut()[0] else {
             unreachable!();
         };
         *b = SSAVar::constant(3, 0);
@@ -931,18 +1040,19 @@ mod tests {
     #[test]
     fn accepts_constant_and_cross_name_phi_sources_with_exact_provenance() {
         let mut function = diamond();
-        let source = function.get_block(0x1004).expect("left block").ops[0]
+        let source = function.get_block(0x1004).expect("left block").ops()[0]
             .dst()
             .expect("left definition")
             .clone();
         let alias = SSAVar::new("tmp:regalias:phi", source.version, source.size);
-        function.get_block_mut(0x1004).expect("left block").ops[0] = SSAOp::Subpiece {
+        function.edit_block(0x1004).expect("left block").ops_mut()[0] = SSAOp::Subpiece {
             dst: alias.clone(),
             src: SSAVar::initial("tmp:regalias:wide", 16),
             offset: 0,
         };
 
-        let phi = &mut function.get_block_mut(0x100c).expect("merge block").phis[0];
+        let mut merge_block = function.edit_block(0x100c).expect("merge block");
+        let phi = &mut merge_block.phis_mut()[0];
         let left_source = phi
             .sources
             .iter_mut()
@@ -963,7 +1073,7 @@ mod tests {
     #[test]
     fn predecessor_order_is_part_of_the_phi_contract() {
         let mut function = diamond();
-        function.get_block_mut(0x100c).expect("merge block").phis[0]
+        function.edit_block(0x100c).expect("merge block").phis_mut()[0]
             .sources
             .swap(0, 1);
 
@@ -976,7 +1086,8 @@ mod tests {
     #[test]
     fn public_phi_shape_remains_accepted_without_storage_provenance() {
         let mut function = diamond();
-        let phi = &mut function.get_block_mut(0x100c).expect("merge block").phis[0];
+        let mut merge_block = function.edit_block(0x100c).expect("merge block");
+        let phi = &mut merge_block.phis_mut()[0];
         *phi = PhiNode {
             dst: phi.dst.clone(),
             sources: phi.sources.clone(),

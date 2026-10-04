@@ -899,7 +899,7 @@ mod tests {
 
     fn defined_at(graph: &SsaGraph, addr: u64, op_idx: usize) -> ValueId {
         graph
-            .inst_id_for_op_site(addr, op_idx)
+            .inst_spelled_at(addr, op_idx)
             .and_then(|inst| graph.inst(inst))
             .and_then(|inst| inst.output)
             .unwrap_or_else(|| panic!("no definition at {addr:#x}:{op_idx}"))
@@ -1362,14 +1362,17 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
         let mut func = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("ssa");
-        func.get_block_mut(0x1000).expect("block").ops = entries
-            .iter()
-            .enumerate()
-            .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
-                dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
-                src: entry.clone(),
-            })
-            .collect();
+        func.edit_block(0x1000).expect("block").replace_ops(
+            crate::Pass::Fixture,
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
+                    dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
+                    src: entry.clone(),
+                })
+                .collect(),
+        );
         let mut graph = SsaGraph::from_function(&func);
         for value in &mut graph.values {
             if let Some((_, at)) = entries.iter().find(|(entry, _)| *entry == value.var) {

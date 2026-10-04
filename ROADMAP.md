@@ -138,13 +138,13 @@ Taken (2026-10-03):
   being a limit of the oracle.
 - **D7. The visual mode never calls the engine while drawing.**
 
-To confirm (each reverses or retires an earlier decision):
+Confirmed 2026-10-04 (each reverses or retires an earlier decision):
 
 - **D8. The observation journal is replaced, not kept.** plan-extension.md's
   track H says it stays because it feeds the obligation ledger. The month's
   evidence says the journal is where proofs are re-derived after rendering; a
   render tree built with its obligation ids, checked once, makes the journal
-  redundant. Proposed: R replaces it.
+  redundant. R replaces it.
 - **D9. `doc/adr-location-ssa.md` is superseded**, not implemented: P1's
   `ValueView` answers bit identity and P4's partition answers frame identity.
   What the ADR wanted that neither yet gives — one liveness model over
@@ -168,7 +168,7 @@ and V (visual mode and shell experience).
 | Queued-run alert; pinned containers for gcc 13, clang 18 and the macOS coverage compiler; compiled coverage cells replaced by pinned bytes | A gate result does not depend on the runner |
 | Diagnose the equivalence `PipelineTests`/`SelfTestSuite` stall on hosted runners. From unittest a driver run never returns, and the step outlives even a step-level timeout, so some process is in an uninterruptible wait (the runtime's guard install is the first suspect); the same self-tests pass inside every equivalence shard. Reproduce on x86-64 Linux: `tests/equiv/bounded.sh 240 test_equiv.SelfTestSuite`. The two classes are out of CI until then | Both classes pass from `bounded.sh` and gate again in the harness job |
 | arm64 equivalence under qemu-user (D6) | `tests/equiv` reports both architectures |
-| SSA integrity check in CI: one definition per value, every use dominated | Fails on the duplicate `tmp:2c200_1` definition seen in #56, or proves it a display artefact |
+| SSA integrity: one definition per value, every use dominated | **Partly done.** The validator now checks dominance and holds over the whole corpus at construction. #56's "duplicate" is a display artefact: `pdim` prints `tmp:2c200` at two widths alike, and width is part of SSA identity. Validating the *sealed* function fails 626 times on one cause, P1.7's entry lanes (version-0 values given definitions), so the seal check lands with P1.7 inside F1 |
 | Split PR #66 into reviewable pieces and merge | `master` carries the program |
 | Close the issues fixed since August; update the partial ones; one tracking issue per item below | The issue board is the roadmap |
 
@@ -176,7 +176,7 @@ and V (visual mode and shell experience).
 
 | Item | Depends on | Exit |
 |------|-----------|------|
-| **F1** Stable op and value ids; every `(block, op index)` map re-keyed; stage types (D2, D3) | G | `get_block_mut`, `op_mut`, the revision asserts and the remap comment are gone |
+| **F1** Stable op and value ids; every `(block, op index)` map re-keyed; stage types (D2, D3). Design and five-step migration: [doc/adr-stable-identity.md](doc/adr-stable-identity.md); step 0 (the remap), step 1 (the `OpId` arena), step 2 (`Lifted -> Prepared -> Sealed`; passes edit through plans; prep facts only on `Sealed`) and step 3 (certificates, obligations and render facts keyed by `InstId`/`OpId`; obligation schema 8) done | G | `get_block_mut`, `op_mut`, the revision asserts and the remap comment are gone |
 | **F2** One IR with views: blocks, graph and value views built once at seal; the machine projection and term arena become indexes; one liveness model over locations; flag and temporary phis pruned by liveness | F1, P4 | No rebuild after seal; closes #47, #50, #56 |
 | **K** One fixpoint driver: lattice height, widening and a visible budget for every iterative pass, Kani on the lattice laws (the rest of track K) | F1 | No bare `loop` until unchanged; `objects.rs:196` first |
 
@@ -184,9 +184,9 @@ and V (visual mode and shell experience).
 
 | Item | Depends on | Exit |
 |------|-----------|------|
-| **PE** Byte-dependency relation; result width from the written-lane lattice; `narrow_zero_extend_input_size` deleted | F1 | `main` returns `int`-width, `gt` is not `uint8_t`, `fnv1a32` returns 32 bits (#58, #63) |
-| **P1.7** `Unspecified(width)` leaf for partial entry-lane writes | PE | The rotl listing makes no false claim |
-| **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted |
+| **PE** Byte-dependency relation; result width from the written-lane lattice; `narrow_zero_extend_input_size` deleted | F1 | `main` returns `int`-width, `gt` is not `uint8_t`, `fnv1a32` returns 32 bits (#58, #63). **Result widths done** (`r2ssa::lanes`, doc/adr-written-lanes.md "As landed"): a stated extension writes its destination, the architecture's lower-half zeroing does not; stated sign extensions are signed. The demand pass onto the same relation and the XMM lane noise remain |
+| **P1.7** Entry lanes rewritten: `mint_entry_lane_projections` defines version-0 values (a live-in with a definition) and rebuilds a whole-register read from the declared lanes "with zero above them", which invents the caller's upper bytes. A formal becomes a view of a lane of its live-in (`ValueView`), and the bytes no declaration covers an `Unspecified(width)` leaf that renders as a residual | PE, F1 | The rotl listing makes no false claim; the sealed function validates. **Done** with F1 step 4: formals are live-ins with a view of their root, the whole register is rebuilt over the caller's register, and `seal` validates (doc/adr-stable-identity.md "Step 4 as landed"). Open: listing claims read values the demand release rewrote |
+| **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted. **Designed** in `doc/adr-provenance.md`: grade derived from basis, steps C0–C4; C0 (the vocabulary) and C1 (interface types and format parameter as `Confidence`/`Fact`) done; a restated interface keeps every fact |
 | **P4** Memory model: frame partition (P4.1 in part), MemorySSA on stable ids, stack-protector elision, `afv`/`afi` from sealed entities | F1, C | The canary traps in #61 are gone; one owner of frame objects |
 | **Q** Demand-driven query database; `memo.rs` and the eight caches deleted | F1 | A random-write session equals a fresh open |
 | **I** Unread container facts: CFI extents and save slots as stated entries, LSDA, IBT, RELRO, init arrays | Q | Stripped discovery finds every FDE start |
@@ -202,10 +202,10 @@ and V (visual mode and shell experience).
 
 | Item | Depends on | Exit |
 |------|-----------|------|
-| **V1** Visual-mode core: message-driven state, engine on a worker thread with a cache keyed by address and revision, a ticked event loop, mouse and resize; a `reedline` prompt with history shared by the shell and `:` | G | No engine call while drawing; first frame within 50 ms whatever the function costs |
-| **S1** One verb table (verb, arity, help, JSON shape); `?` generated from it; `j` on every verb; `e` for presentation keys | — | Help and completion cannot disagree with dispatch |
-| **V2** Colour from the engine: token roles from the disassembly speller and `pddj`, radare2's colour roles and `eco` themes, terminal detection, colour in the shell too | V1 | `pd` and `pdd` coloured identically in the shell and the visual mode |
-| **V3** Completion and discoverability: grammar-aware tab completion from `line.rs` and S1's table; flags, functions, config keys; prefix-key hints; `Ctrl-P` palette; contextual `?` | V1, S1 | Every action is findable without documentation |
+| **V1** Visual-mode core: message-driven state, engine on a worker thread with a cache keyed by address and revision, a ticked event loop, mouse and resize; a `reedline` prompt with history shared by the shell and `:` | G | **Done** (merged `7b5f1d9e`, review fixes `0556f450`): no host call from the drawing thread, first frame 10 ms. The engine stays on the caller's thread because the Sleigh disassembler holds an `Rc`; quitting mid-decompile returns to the prompt only when it ends. The lists read each listing's rows with the address each is about (`commands::Table`), not the first `0x` on the line, which was the file offset for `iz`/`iS`/`is`; the function an address is in comes from discovery's `Holders` index, O(log n), with the resolved-graph check for switch arms kept until P6 |
+| **S1** One verb table (verb, arity, help, JSON shape); `?` generated from it; `j` on every verb; `e` for presentation keys | — | Help and completion cannot disagree with dispatch. **Table, `?`, `verb?` and `e` done** (`e`/`-e` with the keys the shell acts on, `asm.bytes` and `scr.color`, by radare2's names; a value radare2 would coerce is refused); `j` on every verb remains |
+| **V2** Colour from the engine: token roles from the disassembly speller and `pddj`, radare2's colour roles and `eco` themes, terminal detection, colour in the shell too | V1 | `pd` and `pdd` coloured identically in the shell and the visual mode. **Done** for disassembly and C: control flow from the lift, registers from the specification's table, numbers and names; C roles recorded by `r2dec`'s emitter as it writes (`CRole`), replacing both re-lexers; one palette (`r2s-tui::theme`). `eco` themes remain (they need `e`) |
+| **V3** Completion and discoverability: grammar-aware tab completion from `line.rs` and S1's table; flags, functions, config keys; prefix-key hints; `Ctrl-P` palette; contextual `?` | V1, S1 | Every action is findable without documentation. **Shell completion done**: verbs from the table, names after `@` and as address arguments, keys after `e`; and the visual mode's hints, palette and `?` remain |
 | **V4** Panels: a layout tree of splits and tabs (`V!`), linked cursors across C, disassembly and graph, breadcrumbs | V1 | A C line lights its instructions in every pane |
 | **V5** Graphs: edge kinds coloured and labelled, back edges distinct, zoom levels, path highlighting, search, follow calls, loops shaded and folded from sealed loop facts, call and reference graphs through one renderer | V2; loop shading after F2 | `agf`, `agc` and `agx` share the renderer; layout off the UI thread |
 | **S2** `@@` iterators, search, pipes and redirects, `-i`/`-q0` for r2pipe | Q | `diff_r2.py` covers the `j` forms |

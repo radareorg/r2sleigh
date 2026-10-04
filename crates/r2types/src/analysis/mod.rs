@@ -145,8 +145,7 @@ impl TypeAnalysis {
         // An import's prototype is radare2's: its parameters are what the
         // interface declares, and no body reads them for an entity to certify.
         let interface = self.source.machine_context().function_interface();
-        let prototype =
-            interface.is_some_and(r2ssa::SourceFunctionInterface::prototype_from_source_types);
+        let prototype = interface.is_some_and(r2ssa::SourceFunctionInterface::types_are_declared);
         let params = signature
             .params
             .iter()
@@ -1402,7 +1401,7 @@ pub fn build_source_owned_type_analysis(
     let derived = build_type_analysis_inner(
         derived_input,
         semantic_inputs,
-        source.decompile_prep_facts(),
+        Some(source.decompile_prep_facts()),
         Some(&machine_profile),
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
     );
@@ -1940,7 +1939,7 @@ fn canonical_stack_access_widths(
         return BTreeMap::new();
     };
     let mut widths = BTreeMap::<StackSlotKey, BTreeSet<u32>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| &block.ops) {
+    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
         let (addr, size) = match op {
             SSAOp::Load {
                 dst,
@@ -1974,12 +1973,12 @@ fn canonical_stack_access_signedness(
         return BTreeMap::new();
     };
     let scalar_signedness = infer_scalar_signedness(
-        ssa_blocks.iter().flat_map(|block| block.ops.iter()),
+        ssa_blocks.iter().flat_map(|block| block.ops().iter()),
         std::iter::empty(),
         arch_name,
     );
     let mut signedness = BTreeMap::<StackSlotKey, BTreeSet<ScalarSignednessEvidence>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| &block.ops) {
+    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
         let (addr, value) = match op {
             SSAOp::Load {
                 dst,

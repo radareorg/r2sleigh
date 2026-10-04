@@ -74,14 +74,13 @@ impl<'a> FoldingContext<'a> {
         is_write: bool,
         elem_ty: CType,
     ) -> OpLoweringResult<CertifiedMemoryAccessExpr> {
-        let (block_addr, op_idx) = self
-            .current_source_op_site()
+        let inst = self
+            .current_source_inst()
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
         let certified = self.certified_memory_access_for_current_op(is_write);
         let fact = certified
             .filter(|fact| {
-                fact.block_addr == block_addr
-                    && fact.op_index == op_idx
+                fact.access.inst == inst
                     && fact.space == r2il::SpaceId::Ram
                     && fact.address == address
                     && fact.value == Some(value)
@@ -91,11 +90,10 @@ impl<'a> FoldingContext<'a> {
             .ok_or_else(|| {
                 r2il::refusal_evidence!(
                     "memory-access-certificate",
-                    "({block_addr:#x}, {op_idx}) {} of {width} bytes at {address:?} value {value:?}: certified={:?}",
+                    "{inst:?} {} of {width} bytes at {address:?} value {value:?}: certified={:?}",
                     if is_write { "store" } else { "load" },
                     certified.map(|fact| (
-                        fact.block_addr,
-                        fact.op_index,
+                        fact.access,
                         fact.space,
                         fact.address,
                         fact.value,
@@ -123,7 +121,7 @@ impl<'a> FoldingContext<'a> {
         {
             r2il::refusal_evidence!(
                 "memory-access-width",
-                "({block_addr:#x}, {op_idx}) {} of {width} bytes spelled at {elem_ty:?}",
+                "{inst:?} {} of {width} bytes spelled at {elem_ty:?}",
                 if is_write { "store" } else { "load" }
             );
             return Err(OpLoweringRefusal::missing_machine_projection());
@@ -133,7 +131,7 @@ impl<'a> FoldingContext<'a> {
             .ok_or_else(|| {
                 r2il::refusal_evidence!(
                     "memory-access-expression",
-                    "({block_addr:#x}, {op_idx}) access {:?} at {address:?} has no planned expression",
+                    "{inst:?} access {:?} at {address:?} has no planned expression",
                     fact.access
                 );
                 OpLoweringRefusal::missing_machine_projection()
@@ -141,7 +139,7 @@ impl<'a> FoldingContext<'a> {
         if is_write && !Self::expr_is_store_target_candidate(&expr) {
             r2il::refusal_evidence!(
                 "memory-access-expression",
-                "({block_addr:#x}, {op_idx}) store target {:?} is not assignable",
+                "{inst:?} store target {:?} is not assignable",
                 expr
             );
             return Err(OpLoweringRefusal::missing_machine_projection());
@@ -364,11 +362,11 @@ impl<'a> FoldingContext<'a> {
         &self,
         memory: &r2types::MemoryAccessRenderFact,
     ) -> Option<&r2types::MemberAccessRenderFact> {
-        let facts = self.inputs.render_facts()?.member_accesses_by_op.get(&(
-            memory.block_addr,
-            memory.op_index,
-            memory.is_write,
-        ))?;
+        let facts = self
+            .inputs
+            .render_facts()?
+            .member_accesses_by_inst
+            .get(&(memory.access.inst, memory.is_write))?;
         let mut matching = facts.iter().filter(|fact| {
             fact.access == memory.access
                 && fact.object == memory.object
@@ -382,11 +380,11 @@ impl<'a> FoldingContext<'a> {
         &self,
         memory: &r2types::MemoryAccessRenderFact,
     ) -> Option<&r2types::ArrayAccessRenderFact> {
-        let facts = self.inputs.render_facts()?.array_accesses_by_op.get(&(
-            memory.block_addr,
-            memory.op_index,
-            memory.is_write,
-        ))?;
+        let facts = self
+            .inputs
+            .render_facts()?
+            .array_accesses_by_inst
+            .get(&(memory.access.inst, memory.is_write))?;
         let mut matching = facts.iter().filter(|fact| {
             fact.access == memory.access
                 && fact.object == memory.object
@@ -899,9 +897,8 @@ impl<'a> FoldingContext<'a> {
         let Some(access) = canonical.access(fact.access) else {
             r2il::refusal_evidence!(
                 "address-form",
-                "{:#x}:{} no canonical access entry",
-                fact.block_addr,
-                fact.op_index
+                "{:?} no canonical access entry",
+                fact.access
             );
             return;
         };
@@ -909,9 +906,8 @@ impl<'a> FoldingContext<'a> {
         let r2rewrite::TermKind::Load { address, .. } = arena.term(access.canonical).kind else {
             r2il::refusal_evidence!(
                 "address-form",
-                "{:#x}:{} canonical term is {:?}, not a load",
-                fact.block_addr,
-                fact.op_index,
+                "{:?} canonical term is {:?}, not a load",
+                fact.access,
                 arena.term(access.canonical).kind
             );
             return;
@@ -919,20 +915,14 @@ impl<'a> FoldingContext<'a> {
         match r2rewrite::address::address_form(arena, address) {
             Some(form) => r2il::refusal_evidence!(
                 "address-form",
-                "{:#x}:{} base={:?} index={} offset={} width={}",
-                fact.block_addr,
-                fact.op_index,
+                "{:?} base={:?} index={} offset={} width={}",
+                fact.access,
                 form.base,
                 form.index.len(),
                 form.offset,
                 form.width_bits
             ),
-            None => r2il::refusal_evidence!(
-                "address-form",
-                "{:#x}:{} no provable base",
-                fact.block_addr,
-                fact.op_index
-            ),
+            None => r2il::refusal_evidence!("address-form", "{:?} no provable base", fact.access),
         }
     }
 
@@ -1109,11 +1099,10 @@ impl<'a> FoldingContext<'a> {
         addr: &SSAVar,
         val: &SSAVar,
     ) -> Option<CertifiedMemberRunStore> {
-        let (block_addr, op_idx) = self.current_source_op_site()?;
+        let inst = self.current_source_inst()?;
         let address = self.prepared_value_id_for_var(addr)?;
         let value = self.prepared_value_id_for_var(val)?;
         let prepared = self.prepared_ssa()?;
-        let inst = prepared.graph().inst_id_for_op_site(block_addr, op_idx)?;
         let certificate = prepared.structured().member_run_stores.get(&inst)?;
         if certificate.address != address || certificate.value != value {
             return None;

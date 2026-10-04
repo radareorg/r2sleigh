@@ -129,35 +129,28 @@ impl MachineBuilder {
                     });
                 };
                 let width_bits = access.width.checked_mul(8).unwrap_or(0);
-                let source_space = artifact
-                    .machine_context()
-                    .memory_space_at(access.block_addr, access.op_index);
+                let source_space = access.space;
                 let model = artifact.machine_context().memory_model();
-                let space_model = source_space.and_then(|space| model.space(space));
-                let prepared_op = artifact
-                    .function()
-                    .get_block(access.block_addr)
-                    .and_then(|block| block.ops.get(access.op_index));
+                let space_model = model.space(source_space);
+                let prepared_op = graph.function_op(artifact.function(), access.id.inst);
                 if !access.provenance_complete
                     || access.is_write
                     || access.id.ordinal != 0
                     || access.value != Some(output.value)
                     || prepared_op.is_none_or(|prepared_op| {
-                        source_space.is_none_or(|source_space| {
-                            !memory_access_authorities_match(
-                                graph,
-                                artifact.objects(),
-                                op,
-                                prepared_op,
-                                source_space,
-                                access,
-                                artifact
-                                    .facts()
-                                    .structured
-                                    .member_run_stores
-                                    .get(&access.id.inst),
-                            )
-                        })
+                        !memory_access_authorities_match(
+                            graph,
+                            artifact.objects(),
+                            op,
+                            prepared_op,
+                            source_space,
+                            access,
+                            artifact
+                                .facts()
+                                .structured
+                                .member_run_stores
+                                .get(&access.id.inst),
+                        )
                     })
                     // A guarded read states its condition beside the
                     // address; every other read names the address alone.

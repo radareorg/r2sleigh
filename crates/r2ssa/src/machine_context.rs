@@ -12,8 +12,6 @@ use r2il::{
 };
 use serde::Serialize;
 
-use crate::function::SSAFunction;
-use crate::op::SSAOp;
 use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
@@ -593,7 +591,6 @@ pub struct SourceMachineContext {
     /// callsite interfaces. Unlike display strings, these are semantic
     /// evidence, because a variadic format literal is count evidence.
     source_string_literals: BTreeMap<u64, String>,
-    memory_spaces_by_op: BTreeMap<(u64, usize), SpaceId>,
     /// What the processor specification says registers hold on entry to every function.
     tracked_entry_values: Box<[(CanonicalStorageId, u64)]>,
 }
@@ -993,18 +990,6 @@ impl SourceMachineContext {
                 call_site_interfaces_by_identity.remove(&identity);
             }
         }
-        let memory_spaces_by_op = blocks
-            .iter()
-            .flat_map(|block| {
-                block
-                    .ops
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(op_index, op)| {
-                        memory_space(op).map(|space| ((block.addr, op_index), space))
-                    })
-            })
-            .collect();
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             architecture_family,
@@ -1031,7 +1016,6 @@ impl SourceMachineContext {
             code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
-            memory_spaces_by_op,
             tracked_entry_values,
         }
     }
@@ -1421,91 +1405,6 @@ impl SourceMachineContext {
     pub fn source_string_literal_count(&self) -> usize {
         self.source_string_literals.len()
     }
-
-    pub fn memory_space_at(&self, block_addr: u64, op_index: usize) -> Option<SpaceId> {
-        self.memory_spaces_by_op
-            .get(&(block_addr, op_index))
-            .copied()
-    }
-
-    pub const fn memory_spaces_by_op(&self) -> &BTreeMap<(u64, usize), SpaceId> {
-        &self.memory_spaces_by_op
-    }
-
-    /// Rebind raw lifted memory-space identities to the completed SSA operation
-    /// sites. SSA preparation may insert non-memory register-alias operations
-    /// and may promote a private frame slot out of memory, but otherwise it
-    /// must retain the order, count, and exact space identity of memory
-    /// operations in each block. Any violation clears the map so certification
-    /// fails closed.
-    pub(crate) fn remap_memory_sites_to_prepared(&mut self, function: &SSAFunction) -> bool {
-        let promoted = function.promoted_slot_sites();
-        self.memory_spaces_by_op
-            .retain(|site, _| !promoted.contains(site));
-        let mut raw_by_block = BTreeMap::<u64, Vec<SpaceId>>::new();
-        for ((block_addr, _), space) in &self.memory_spaces_by_op {
-            raw_by_block.entry(*block_addr).or_default().push(*space);
-        }
-
-        let mut prepared_by_block = BTreeMap::<u64, Vec<(usize, SpaceId)>>::new();
-        for block in function.blocks() {
-            let sites = block
-                .ops
-                .iter()
-                .enumerate()
-                .filter_map(|(op_index, op)| ssa_memory_space(op).map(|space| (op_index, space)))
-                .collect::<Vec<_>>();
-            if !sites.is_empty() {
-                prepared_by_block.insert(block.addr, sites);
-            }
-        }
-
-        if raw_by_block.len() != prepared_by_block.len()
-            || raw_by_block.iter().any(|(block_addr, raw)| {
-                prepared_by_block.get(block_addr).is_none_or(|prepared| {
-                    prepared.len() != raw.len()
-                        || prepared
-                            .iter()
-                            .map(|(_, space)| *space)
-                            .ne(raw.iter().copied())
-                })
-            })
-        {
-            self.memory_spaces_by_op.clear();
-            return false;
-        }
-
-        let mut remapped = BTreeMap::new();
-        for (block_addr, spaces) in raw_by_block {
-            let Some(sites) = prepared_by_block.get(&block_addr) else {
-                self.memory_spaces_by_op.clear();
-                return false;
-            };
-            for ((op_index, space), _) in sites.iter().copied().zip(spaces) {
-                remapped.insert((block_addr, op_index), space);
-            }
-        }
-        self.memory_spaces_by_op = remapped;
-        true
-    }
-}
-
-#[cfg(test)]
-fn is_memory_op(op: &SSAOp) -> bool {
-    ssa_memory_space(op).is_some()
-}
-
-fn ssa_memory_space(op: &SSAOp) -> Option<SpaceId> {
-    match op {
-        SSAOp::Load { space, .. }
-        | SSAOp::Store { space, .. }
-        | SSAOp::LoadLinked { space, .. }
-        | SSAOp::StoreConditional { space, .. }
-        | SSAOp::LoadGuarded { space, .. }
-        | SSAOp::StoreGuarded { space, .. } => Some(*space),
-        SSAOp::AtomicCAS(swap) => Some(swap.space),
-        _ => None,
-    }
 }
 
 /// Every transfer in the raw lifted input that can be a call site, keyed by
@@ -1653,19 +1552,6 @@ pub fn terminal_indirect_loaded_slot(
     BlockOrigins::upto(block, branch_op_index)
         .of(target)?
         .loaded_slot()
-}
-
-fn memory_space(op: &R2ILOp) -> Option<SpaceId> {
-    match op {
-        R2ILOp::Load { space, .. }
-        | R2ILOp::Store { space, .. }
-        | R2ILOp::LoadLinked { space, .. }
-        | R2ILOp::StoreConditional { space, .. }
-        | R2ILOp::AtomicCAS { space, .. }
-        | R2ILOp::LoadGuarded { space, .. }
-        | R2ILOp::StoreGuarded { space, .. } => Some(*space),
-        _ => None,
-    }
 }
 
 fn space_sort_key(space: SpaceId) -> (u8, u32) {
@@ -3092,81 +2978,6 @@ mod tests {
     }
 
     #[test]
-    fn prepared_memory_sites_follow_inserted_register_alias_operations() {
-        let mut arch = ArchSpec::new("prepared-memory-site-test");
-        arch.addr_size = 8;
-        arch.add_register(RegisterDef::new("rdi", 0, 8));
-        arch.add_register(RegisterDef::new("edi", 0, 4));
-        arch.add_register(RegisterDef::new("rax", 8, 8));
-        arch.add_register(RegisterDef::new("eax", 8, 4));
-
-        let mut block = R2ILBlock::new(0x2400, 4);
-        block.push(R2ILOp::Copy {
-            dst: Varnode::register(8, 8),
-            src: Varnode::register(0, 8),
-        });
-        block.push(R2ILOp::Load {
-            dst: Varnode::unique(0x100, 4),
-            space: SpaceId::Custom(7),
-            addr: Varnode::register(8, 4),
-        });
-        block.push(R2ILOp::Return {
-            target: Varnode::register(8, 8),
-        });
-
-        let function = SSAFunction::from_blocks_for_decompile(&[block.clone()], Some(&arch))
-            .expect("prepared SSA");
-        let prepared_index = function
-            .get_block(0x2400)
-            .expect("prepared block")
-            .ops
-            .iter()
-            .position(is_memory_op)
-            .expect("prepared memory operation");
-        assert!(prepared_index > 1, "alias extraction must precede the load");
-
-        let mut context = SourceMachineContext::from_blocks(&[block], Some(&arch));
-        assert_eq!(context.memory_space_at(0x2400, 1), Some(SpaceId::Custom(7)));
-        assert!(context.remap_memory_sites_to_prepared(&function));
-        assert_eq!(
-            context.memory_space_at(0x2400, prepared_index),
-            Some(SpaceId::Custom(7))
-        );
-        assert_eq!(context.memory_spaces_by_op().len(), 1);
-    }
-
-    #[test]
-    fn prepared_memory_sites_reject_swapped_space_identities() {
-        let mut block = R2ILBlock::new(0x2500, 4);
-        block.push(R2ILOp::Load {
-            dst: Varnode::unique(0x100, 4),
-            space: SpaceId::Ram,
-            addr: Varnode::register(0, 8),
-        });
-        block.push(R2ILOp::Store {
-            space: SpaceId::Custom(7),
-            addr: Varnode::register(8, 8),
-            val: Varnode::unique(0x100, 4),
-        });
-
-        let mut function =
-            SSAFunction::from_blocks_raw(&[block.clone()], None).expect("raw SSA function");
-        let prepared = &mut function.get_block_mut(0x2500).expect("prepared block").ops;
-        match &mut prepared[0] {
-            SSAOp::Load { space, .. } => *space = SpaceId::Custom(7),
-            op => panic!("expected load, got {op:?}"),
-        }
-        match &mut prepared[1] {
-            SSAOp::Store { space, .. } => *space = SpaceId::Ram,
-            op => panic!("expected store, got {op:?}"),
-        }
-
-        let mut context = SourceMachineContext::from_blocks(&[block], None);
-        assert!(!context.remap_memory_sites_to_prepared(&function));
-        assert!(context.memory_spaces_by_op().is_empty());
-    }
-
-    #[test]
     fn interface_registers_missing_from_architecture_are_incoherent() {
         let interface = SourceFunctionInterface::new(
             b"missing-register-interface".to_vec(),
@@ -3233,7 +3044,6 @@ mod tests {
 
         assert!(!context.memory_model().is_available());
         assert!(!context.memory_model().is_coherent());
-        assert_eq!(context.memory_space_at(0x1000, 0), Some(SpaceId::Custom(7)));
     }
 
     #[test]

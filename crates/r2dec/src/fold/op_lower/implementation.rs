@@ -55,37 +55,29 @@ impl<'a> FoldingContext<'a> {
 
     pub(crate) fn certified_callsite_for_op(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
     ) -> Option<&r2types::CallsiteArgumentFacts> {
         self.inputs
             .callsite_facts()?
-            .arguments_for_site(r2types::CallsiteKey {
-                block_addr,
-                op_index: op_idx,
-            })
+            .arguments_for_site(r2types::CallsiteKey { at: call })
     }
 
     pub(crate) fn certified_call_render_fact_for_op(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
     ) -> Option<&r2types::CallsiteRenderFact> {
         self.inputs
             .call_render_facts()?
-            .fact_for_site(r2types::CallsiteKey {
-                block_addr,
-                op_index: op_idx,
-            })
+            .fact_for_site(r2types::CallsiteKey { at: call })
     }
 
     pub(crate) fn certified_memory_access_for_current_op(
         &self,
         is_write: bool,
     ) -> Option<&r2types::MemoryAccessRenderFact> {
-        let (block_addr, op_idx) = self.current_source_op_site()?;
+        let inst = self.current_source_inst()?;
         self.certified_render_context()?
-            .memory_access_for_op(block_addr, op_idx, is_write)
+            .memory_access_for_inst(inst, is_write)
     }
 
     pub(crate) fn certified_return_for_normalized_op(
@@ -93,9 +85,8 @@ impl<'a> FoldingContext<'a> {
         block_addr: u64,
         op_idx: usize,
     ) -> Option<&ReturnValueRenderFact> {
-        let (block_addr, op_idx) = self.source_op_site_for_normalized_op(block_addr, op_idx)?;
-        self.certified_render_context()?
-            .return_for_op(block_addr, op_idx)
+        let inst = self.source_inst_for_normalized_op(block_addr, op_idx)?;
+        self.certified_render_context()?.return_for_inst(inst)
     }
 
     /// Reassemble a return whose ABI register was written in pieces.
@@ -170,11 +161,10 @@ impl<'a> FoldingContext<'a> {
 
     pub(crate) fn prepared_call_view_for_site(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
     ) -> Option<&analysis::PreparedCallView> {
         self.prepared_semantic_view()
-            .and_then(|view| view.call_view_for_site((block_addr, op_idx)))
+            .and_then(|view| view.call_view_for_site(call))
     }
 
     pub(crate) fn prepared_var_for_value_id(&self, value_id: r2ssa::ValueId) -> Option<&SSAVar> {
@@ -192,7 +182,7 @@ impl<'a> FoldingContext<'a> {
             .cloned()
             .unwrap_or_else(|| CalleeIdentity::from_name(&format!("const:{addr:x}")))
     }
-    pub(crate) fn call_result_exprs_map(&self) -> &std::collections::BTreeMap<(u64, usize), CExpr> {
+    pub(crate) fn call_result_exprs_map(&self) -> &std::collections::BTreeMap<InstId, CExpr> {
         &self.use_info().call_result_exprs
     }
     /// Fixture-only spelling constructor. Native rendering has no generic
@@ -304,7 +294,7 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn synthesized_call_expr_for_source_call(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
     ) -> Option<CExpr> {
         self.certified_synthesized_call_expr_for_source_call(source_call)
             .map(|call| call.expr)
@@ -312,11 +302,10 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn certified_synthesized_call_expr_for_source_call(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
     ) -> Option<CertifiedCallExpr> {
-        let (block_addr, op_idx) = source_call;
-        let cert = self.certified_callsite_for_op(block_addr, op_idx)?;
-        let render_fact = self.certified_call_render_fact_for_op(block_addr, op_idx)?;
+        let cert = self.certified_callsite_for_op(source_call)?;
+        let render_fact = self.certified_call_render_fact_for_op(source_call)?;
         if matches!(
             render_fact.disposition,
             r2types::CallsiteRenderDisposition::Residualized
@@ -330,11 +319,10 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
         let func = self.retain_lowering_result(self.resolve_call_target_for_site(
-            block_addr,
-            op_idx,
+            source_call,
             self.prepared_var_for_value_id(cert.target)?,
         ))?;
-        let certified_args = match self.certified_call_args_for_site(block_addr, op_idx) {
+        let certified_args = match self.certified_call_args_for_site(source_call) {
             Ok(args) => args,
             Err(refusal) => {
                 self.retain_first_lowering_refusal(refusal);
@@ -342,7 +330,7 @@ impl<'a> FoldingContext<'a> {
             }
         };
         let func = self
-            .resolved_callee_identity_expr_for_site(block_addr, op_idx)
+            .resolved_callee_identity_expr_for_site(source_call)
             .unwrap_or(func);
         let expr = CExpr::call_at(source_call, func, certified_args.args);
         Some(CertifiedCallExpr {
@@ -1049,12 +1037,8 @@ impl<'a> FoldingContext<'a> {
     /// destination is, where it is as wide as the store.
     fn certified_member_type_for_current_store(&self, width_bytes: u32) -> Option<CType> {
         let render = self.inputs.render_facts()?;
-        let block_addr = self.current_block_addr.get()?;
-        let op_idx = self.current_op_idx.get()?;
-        let (block_addr, op_index) = self
-            .source_op_site_for_normalized_op(block_addr, op_idx)
-            .unwrap_or((block_addr, op_idx));
-        let members = render.member_accesses_by_op.get(&(block_addr, op_index, true))?;
+        let inst = self.current_source_inst()?;
+        let members = render.member_accesses_by_inst.get(&(inst, true))?;
         let [member] = members.as_slice() else {
             return None;
         };
@@ -1111,14 +1095,14 @@ impl<'a> FoldingContext<'a> {
 
     pub(crate) fn should_materialize_call_result_at_source(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
     ) -> Option<CExpr> {
         self.certified_assigned_call_result_owner_expr_for_source(source_call)
     }
 
     pub(crate) fn materializable_call_result_expr_for_call_expr(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
         _call: &CExpr,
     ) -> Option<CExpr> {
         if let Some(owner) = self.should_materialize_call_result_at_source(source_call) {
@@ -1129,12 +1113,9 @@ impl<'a> FoldingContext<'a> {
 
     fn certified_call_result_definition_for_source(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
     ) -> Option<&r2types::CallResultFact> {
-        let callsite = r2types::CallsiteKey {
-            block_addr: source_call.0,
-            op_index: source_call.1,
-        };
+        let callsite = r2types::CallsiteKey { at: source_call };
         self.inputs
             .call_result_facts()?
             .definition_for_site(callsite)
@@ -1142,7 +1123,7 @@ impl<'a> FoldingContext<'a> {
 
     fn certified_call_result_owner_expr_for_source(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
     ) -> Option<CExpr> {
         let value = self
             .certified_call_result_definition_for_source(source_call)?
@@ -1163,7 +1144,7 @@ impl<'a> FoldingContext<'a> {
     /// two disagreed whenever a value had a binding but no recorded owner.
     fn certified_assigned_call_result_owner_expr_for_source(
         &self,
-        source_call: (u64, usize),
+        source_call: InstId,
     ) -> Option<CExpr> {
         let value = self
             .certified_call_result_definition_for_source(source_call)?
@@ -1205,7 +1186,7 @@ impl<'a> FoldingContext<'a> {
         // reaches is certified under the same call site, so "an identity result
         // here" names several; the one the statement assigns is the one
         // `definition_for_site` asks for, and it is the one this slice reads.
-        let source_call = (cert.callsite.block_addr, cert.callsite.op_index);
+        let source_call = cert.callsite.at;
         let carrier = self
             .certified_call_result_definition_for_source(source_call)?
             .value;
@@ -1248,7 +1229,7 @@ impl<'a> FoldingContext<'a> {
     ///
     /// Asked by building the owner expression and discarding it, which
     /// registered a value observation no rendered statement then filled.
-    pub(super) fn call_site_assigns_its_own_result(&self, site: (u64, usize)) -> bool {
+    pub(super) fn call_site_assigns_its_own_result(&self, site: InstId) -> bool {
         self.certified_call_result_definition_for_source(site)
             .zip(self.inputs.binding_names)
             .is_some_and(|(definition, names)| {
@@ -1265,7 +1246,7 @@ impl<'a> FoldingContext<'a> {
     /// names no value, and the call-result obligation the site owns matches
     /// nothing. What the statement assigns is this value, and naming it is what
     /// lets the obligation be discharged by the statement that renders it.
-    pub(super) fn certified_call_result_value(&self, site: (u64, usize)) -> Option<ValueId> {
+    pub(super) fn certified_call_result_value(&self, site: InstId) -> Option<ValueId> {
         self.certified_call_result_definition_for_source(site)
             .map(|cert| cert.value)
     }
@@ -1278,14 +1259,13 @@ impl<'a> FoldingContext<'a> {
     /// that cannot exist and leaves the assignment unaccounted.
     pub(super) fn certified_call_result_definition_site(
         &self,
-        site: (u64, usize),
-    ) -> Option<(u64, usize)> {
+        site: InstId,
+    ) -> Option<InstId> {
         let cert = self.certified_call_result_definition_for_source(site)?;
-        let graph = self.inputs.prepared_ssa?.graph();
-        graph.op_site_for_inst(graph.def_inst(cert.value)?)
+        self.inputs.prepared_ssa?.graph().def_inst(cert.value)
     }
 
-    pub(crate) fn call_result_source_for_var(&self, var: &SSAVar) -> Option<(u64, usize)> {
+    pub(crate) fn call_result_source_for_var(&self, var: &SSAVar) -> Option<InstId> {
         self.prepared_semantic_view()?
             .call_result_source_for_var(self.inputs.prepared_ssa?, var)
     }
@@ -1365,14 +1345,15 @@ impl<'a> FoldingContext<'a> {
                 .and_then(|prepared| prepared.graph().block_id_for_addr(current_block_addr)),
         );
         self.current_op_idx.set(None);
+        self.current_source.set(None);
         self.folded_blocks.borrow_mut().insert(block.addr);
         let mut stmts = Vec::new();
         // A marker waits for the last operation its gap owns in this block, so
         // a value the gap reads from outside is assigned before the marker.
         let mut pending_gaps: Vec<(usize, FoldedOpStmt)> = Vec::new();
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            self.current_op_idx.set(Some(op_idx));
+        for (op_idx, op) in block.ops().iter().enumerate() {
+            self.enter_op(op_idx);
             // A gap a previous attempt planned is opened here, at its anchor,
             // before any of the operations it covers can render and claim a
             // cell it has to account for.
@@ -1381,7 +1362,7 @@ impl<'a> FoldingContext<'a> {
                     return Err(reason.refusal());
                 };
                 self.gapped_sites.borrow_mut().extend(owned);
-                let last = (op_idx..block.ops.len())
+                let last = (op_idx..block.ops().len())
                     .filter(|index| self.normalized_op_is_gapped(block.addr, *index))
                     .max()
                     .unwrap_or(op_idx);
@@ -1465,20 +1446,14 @@ impl<'a> FoldingContext<'a> {
                         let prepared = self
                             .prepared_ssa()
                             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
-                        let (source_block, source_op) = prepared
-                            .inst_op_site(source_inst)
-                            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
                         let certificate = prepared
-                            .return_certificate_for_op(source_block, source_op)
+                            .return_certificate_for_inst(source_inst)
                             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
                         let certified = self
                             .certified_return_for_normalized_op(block.addr, op_idx)
                             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
                         if certificate.at != source_inst
-                            || certificate.block_addr != source_block
-                            || certificate.op_index != source_op
-                            || certified.block_addr != source_block
-                            || certified.op_index != source_op
+                            || certified.at != source_inst
                             || certified.value != certificate.value
                             || certified.width != certificate.width
                         {
@@ -1601,6 +1576,7 @@ impl<'a> FoldingContext<'a> {
         self.current_block_addr.set(None);
         self.current_block_id.set(None);
         self.current_op_idx.set(None);
+        self.current_source.set(None);
         for (_, marker) in pending_gaps {
             stmts.push(marker);
         }
@@ -1628,7 +1604,7 @@ impl<'a> FoldingContext<'a> {
     /// right-hand side of the assignment that defines the register, and
     /// emitting it here as well would call the function twice.
     fn call_statement_unless_result_is_named(&self, call: CExpr) -> Option<CStmt> {
-        let site = (self.current_block_addr.get()?, self.current_op_idx.get()?);
+        let site = self.current_source_inst()?;
         if self.call_result_exprs_map().contains_key(&site) {
             return None;
         }
@@ -1859,16 +1835,22 @@ impl<'a> FoldingContext<'a> {
     fn block_answer_part_stmt(
         &self,
         symbol: crate::symbol::SymbolId,
-        (block_addr, op_idx): (u64, usize),
+        part: InstId,
         value: CExpr,
     ) -> CStmt {
         let assignment = CStmt::expr(CExpr::assign(CExpr::Var(symbol), value));
+        // The part's own operation, where the function being lowered holds it.
+        let Some((block_addr, op_idx)) = self
+            .normalized_site_of_source(part)
+            .and_then(|site| Some((self.normalized_block_addr(site)?, site.op_idx)))
+        else {
+            return assignment;
+        };
         let assignment = self.observe_normalized_output_stmt(block_addr, op_idx, assignment);
         let obligations = self
             .inputs
             .prepared_ssa
-            .map(|prepared| prepared.graph())
-            .and_then(|graph| graph.inst(graph.inst_id_for_op_site(block_addr, op_idx)?))
+            .and_then(|prepared| prepared.graph().inst(part))
             .and_then(|inst| match &inst.payload {
                 r2ssa::InstPayload::Op(op) => Some(op),
                 r2ssa::InstPayload::Phi { .. } => None,
@@ -1881,9 +1863,8 @@ impl<'a> FoldingContext<'a> {
     /// Each read part of the current block operation's answer, with its symbol and extracting site.
     fn block_answer_parts(&self, count_size: u32, element_size: u32) -> BlockAnswerParts {
         let mut parts = BlockAnswerParts::new();
-        let (Some(block_addr), Some(op_idx), Some(prepared), Some(names)) = (
-            self.current_block_addr.get(),
-            self.current_op_idx.get(),
+        let (Some(source), Some(prepared), Some(names)) = (
+            self.current_source_inst(),
             self.inputs.prepared_ssa,
             self.inputs.binding_names,
         ) else {
@@ -1891,8 +1872,7 @@ impl<'a> FoldingContext<'a> {
         };
         let graph = prepared.graph();
         let Some(answer) = graph
-            .inst_id_for_op_site(block_addr, op_idx)
-            .and_then(|inst| graph.inst(inst))
+            .inst(source)
             .and_then(|inst| inst.output)
         else {
             return parts;
@@ -1914,9 +1894,7 @@ impl<'a> FoldingContext<'a> {
             else {
                 continue;
             };
-            if let Some(site) = graph.op_site_for_inst(inst.id) {
-                parts.insert(part, (symbol, site));
-            }
+            parts.insert(part, (symbol, inst.id));
         }
         parts
     }
@@ -2088,7 +2066,7 @@ impl<'a> FoldingContext<'a> {
                     // The callee's recorded return type is what the call
                     // produces.
                     let returned = self
-                        .known_signature_for_site(source_call.0, source_call.1)
+                        .known_signature_for_site(source_call)
                         .map(|signature| CValue::Typed(signature.return_type));
                     (self.observed_input(frame, 1, call), returned)
                 } else {
@@ -2571,11 +2549,9 @@ impl<'a> FoldingContext<'a> {
             SSAOp::Call { target, .. } => {
                 // Note: Call arguments are handled by op_to_stmt_with_args().
 
-                let func_expr = match (self.current_block_addr.get(), self.current_op_idx.get()) {
-                    (Some(block_addr), Some(op_idx)) => {
-                        self.resolve_call_target_for_site(block_addr, op_idx, target)
-                    }
-                    _ => self.resolve_call_target(target),
+                let func_expr = match self.current_source_inst() {
+                    Some(call) => self.resolve_call_target_for_site(call, target),
+                    None => self.resolve_call_target(target),
                 }?;
                 // Deliberately not an observed input. The callee's name is not
                 // a read of the target operand's value -- it is the symbol the
@@ -2588,15 +2564,15 @@ impl<'a> FoldingContext<'a> {
             SSAOp::CallInd { target, .. } => {
                 // Note: Call arguments are handled by op_to_stmt_with_args().
 
-                let func_expr = match (self.current_block_addr.get(), self.current_op_idx.get()) {
-                    (Some(block_addr), Some(op_idx)) => self
-                        .resolved_callee_identity_expr_for_site(block_addr, op_idx)
+                let func_expr = match self.current_source_inst() {
+                    Some(call) => self
+                        .resolved_callee_identity_expr_for_site(call)
                         .map(Ok)
                         .unwrap_or_else(|| {
                             self.get_expr(target)
                                 .map(|expr| CExpr::Deref(Box::new(expr)))
                         })?,
-                    _ => CExpr::Deref(Box::new(input(0, target)?)),
+                    None => CExpr::Deref(Box::new(input(0, target)?)),
                 };
                 let func_expr = self.observed_input(frame, 0, func_expr);
                 let call = CExpr::call(func_expr, vec![]);
@@ -2723,7 +2699,7 @@ impl<'a> FoldingContext<'a> {
                 // produces, and it is a fact rather than a shape read off the
                 // expression.
                 let returned = self
-                    .known_signature_for_site(source_call.0, source_call.1)
+                    .known_signature_for_site(source_call)
                     .map(|signature| CValue::Typed(signature.return_type));
                 self.assign_typed(lhs, call, returned)
             }
@@ -2952,7 +2928,7 @@ impl<'a> FoldingContext<'a> {
             let call_expr = self.observed_input(frame, 0, call_expr);
             let call_expr = self.observed_input(frame, 1, call_expr);
             let returned = self
-                .known_signature_for_site(left_source.0, left_source.1)
+                .known_signature_for_site(left_source)
                 .map(|signature| CValue::Typed(signature.return_type));
             return self.assign_typed(lhs, call_expr, returned);
         }
@@ -3231,7 +3207,7 @@ impl BlockAnswerPart {
 
 /// The read parts of a block operation's answer, each with its symbol and extracting site.
 type BlockAnswerParts =
-    std::collections::BTreeMap<BlockAnswerPart, (crate::symbol::SymbolId, (u64, usize))>;
+    std::collections::BTreeMap<BlockAnswerPart, (crate::symbol::SymbolId, InstId)>;
 
 /// What a block operation's loop declares, runs, and hands back as the parts of its answer.
 #[derive(Default)]
@@ -3239,5 +3215,5 @@ struct BlockWalk {
     answered: BlockAnswerParts,
     declarations: Vec<CStmt>,
     body: Vec<CStmt>,
-    parts: Vec<(crate::symbol::SymbolId, (u64, usize), CExpr)>,
+    parts: Vec<(crate::symbol::SymbolId, InstId, CExpr)>,
 }

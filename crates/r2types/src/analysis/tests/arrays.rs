@@ -1,6 +1,7 @@
 //! What the analysis proves about arrays and their elements.
 
 use super::super::*;
+use super::op_at;
 
 #[test]
 fn phi_scalar_array_addr_expr_preserves_max_confidence() {
@@ -89,12 +90,18 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         .function()
         .get_block(0x401000)
         .expect("block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
         .expect("indexed load");
+    let load_inst = prepared
+        .function()
+        .get_block(0x401000)
+        .and_then(|block| block.op_id(load_index))
+        .and_then(|op| prepared.graph().inst_for_op(op))
+        .expect("indexed load instruction");
     let address = prepared
-        .memory_certificate_for_op_site(0x401000, load_index, false)
+        .memory_certificate_for_inst(load_inst, false)
         .expect("memory certificate");
     let parameter_address = prepared
         .addresses()
@@ -105,13 +112,17 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         .function()
         .get_block(0x401000)
         .expect("block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, r2ssa::SSAOp::Load { space, .. } if *space == r2il::SpaceId::Custom(7)))
         .expect("custom-space load");
     assert!(
         prepared
-            .memory_certificate_for_op_site(0x401000, custom_index, false)
+            .function()
+            .get_block(0x401000)
+            .and_then(|block| block.op_id(custom_index))
+            .and_then(|op| prepared.graph().inst_for_op(op))
+            .and_then(|inst| prepared.memory_certificate_for_inst(inst, false))
             .is_some(),
         "the Custom-space access must exist before type filtering"
     );
@@ -122,8 +133,11 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         candidates,
         vec![ScalarArrayRenderCandidate {
             slot: 0,
-            block_addr: 0x401000,
-            op_index: load_index,
+            op: prepared
+                .function()
+                .get_block(0x401000)
+                .and_then(|block| block.op_id(load_index))
+                .expect("indexed load"),
             is_write: false,
             field_offset: 0,
             element_stride: 1,
@@ -171,10 +185,10 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
             source_reg: Some("rsi".to_string()),
         },
     );
-    let ssa_blocks = [SSABlock {
-        addr: 0x4013b1,
-        size: 32,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x4013b1,
+        32,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("buf_slot_addr", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -206,8 +220,8 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
                 val: SSAVar::constant(0, 1),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.alloc_and_copy",
@@ -257,8 +271,7 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
             slot: legacy_array_slot_for_stack_slot(&buf_slot),
-            block_addr: 0x4013b1,
-            op_index: 5,
+            op: op_at(&ssa_blocks, 0x4013b1, 5),
             is_write: true,
             field_offset: 0,
             element_stride: 1,
@@ -308,10 +321,10 @@ fn typed_pointer_induction_access_certifies_scalar_array_index() {
         }),
         ..ParsedExternalContext::default()
     };
-    let ssa_blocks = [SSABlock {
-        addr: 0x401500,
-        size: 32,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x401500,
+        32,
+        vec![
             SSAOp::Phi {
                 dst: SSAVar::new("RDI", 2, 8),
                 sources: vec![SSAVar::new("RDI", 0, 8), SSAVar::new("RDI", 1, 8)],
@@ -327,8 +340,8 @@ fn typed_pointer_induction_access_certifies_scalar_array_index() {
                 addr: SSAVar::new("RDI", 2, 8),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.pointer_induction",
@@ -399,16 +412,16 @@ fn typed_argument_phi_livein_access_certifies_scalar_array_index() {
         }),
         ..ParsedExternalContext::default()
     };
-    let ssa_blocks = [SSABlock {
-        addr: 0x401500,
-        size: 8,
-        ops: vec![SSAOp::Load {
+    let ssa_blocks = [SSABlock::from_parts(
+        0x401500,
+        8,
+        vec![SSAOp::Load {
             dst: SSAVar::new("byte", 1, 1),
             space: r2il::SpaceId::Ram,
             addr: SSAVar::new("RDI", 1, 8),
         }],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym.pointer_livein",

@@ -1007,17 +1007,23 @@ fn only_variadic_tail_unproven(
     prepared: &SsaArtifact,
     instruction: crate::CanonicalInstructionId,
 ) -> bool {
-    let crate::CanonicalInstructionSite::Op(ordinal) = instruction.site else {
+    let crate::CanonicalInstructionSite::Op(op) = instruction.site else {
         return false;
     };
-    prepared.certificates().callsites.values().any(|site| {
-        site.block_addr == instruction.block_addr
-            && site.op_index as u64 == ordinal
-            && site.direct_target.is_some()
-            && site.variadic
-            && site.variadic_argument_count_refusal.is_some()
-            && site.results_complete
-    })
+    let certificates = prepared.certificates();
+    let Some(inst) = prepared.graph().inst_for_op(op) else {
+        return false;
+    };
+    certificates
+        .callsites_by_inst
+        .get(&inst)
+        .and_then(|call_site| certificates.callsites.get(call_site))
+        .is_some_and(|site| {
+            site.direct_target.is_some()
+                && site.variadic
+                && site.variadic_argument_count_refusal.is_some()
+                && site.results_complete
+        })
 }
 
 fn unknown_call_argument_state(
@@ -2359,7 +2365,7 @@ fn collect_local_summary_facts_with_obligation_authority(
             .filter(|obligation| {
                 obligation.id.kind == crate::SemanticObligationKind::VolatileOrUnknownEffect
             })
-            .map(|obligation| obligation.id.to_string())
+            .map(|obligation| obligation.id.spelled(prepared.graph()).to_string())
             .collect::<Vec<_>>(),
         prepared.call_sites().by_id.len(),
         prepared
@@ -2367,8 +2373,7 @@ fn collect_local_summary_facts_with_obligation_authority(
             .callsites
             .values()
             .map(|site| (
-                site.block_addr,
-                site.op_index,
+                site.at,
                 site.variadic,
                 site.variadic_argument_count_refusal,
                 site.results_complete,
@@ -2475,7 +2480,7 @@ fn collect_local_summary_facts_with_obligation_authority(
     }
 
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_id, op) in block.sited() {
             match op {
                 SSAOp::Load { addr, dst, space }
                 | SSAOp::LoadLinked {
@@ -2588,8 +2593,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                 SSAOp::Return { target } => {
                     out.return_observations.push(classify_return_target(
                         prepared,
-                        block.addr,
-                        op_idx,
+                        op_id,
                         target,
                         &out.call_observations,
                     ));
@@ -2726,12 +2730,11 @@ fn classify_memory_access_location(
 /// value view says whose bits it extends, and how.
 fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
     let var = prepared.value_var(value)?;
-    let facts = prepared.function().decompile_prep_facts()?;
-    if let Some(index) = facts.formal_parameter_of(var) {
+    if let Some(index) = prepared.formal_parameter_of(var) {
         return Some((index, None));
     }
-    let view = facts.view(var);
-    let index = facts.formal_parameter_of_view(&view)?;
+    let view = prepared.decompile_prep_facts().view(var);
+    let index = prepared.formal_parameter_of_view(&view)?;
     match view.extension {
         crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
         crate::view::ViewExtension::Sign => Some((index, Some(view.prefix_bits))),
@@ -2872,10 +2875,8 @@ fn classify_address_root(
 fn address_candidates(prepared: &SsaArtifact, value_id: ValueId) -> Vec<ValueId> {
     let mut candidates = vec![value_id];
     let graph = prepared.graph();
-    if let (Some(facts), Some(var)) = (
-        prepared.function().decompile_prep_facts(),
-        prepared.value_var(value_id),
-    ) {
+    if let Some(var) = prepared.value_var(value_id) {
+        let facts = prepared.decompile_prep_facts();
         for root in [facts.canonical_root(var), facts.same_integer_root(var)] {
             if let Some(root) = graph.value_id_for_var(root)
                 && !candidates.contains(&root)
@@ -3035,7 +3036,7 @@ fn collect_call_arg_state_with_iteration_limit(
             let Some(block) = function.get_block(block_addr) else {
                 continue;
             };
-            for phi in &block.phis {
+            for phi in block.phis() {
                 update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
             }
             let old = in_states.insert(block_addr, state.clone());
@@ -3043,7 +3044,7 @@ fn collect_call_arg_state_with_iteration_limit(
                 changed = true;
             }
 
-            for op in &block.ops {
+            for op in block.ops() {
                 apply_call_carrier_transfer(prepared, abi, &mut state, op);
             }
             let new_state = state;
@@ -3060,18 +3061,21 @@ fn collect_call_arg_state_with_iteration_limit(
 
     let mut by_call = BTreeMap::new();
     for (&call_id, call) in &prepared.call_sites().by_id {
-        let Some((block_addr, call_op_idx)) = prepared.inst_op_site(call.at) else {
+        let graph = prepared.graph();
+        let (Some(block_addr), Some(call_op)) =
+            (graph.block_addr_of(call.at), graph.op_for_inst(call.at))
+        else {
             continue;
         };
         let Some(block) = function.get_block(block_addr) else {
             continue;
         };
         let mut state = in_states.get(&block_addr).cloned().unwrap_or_default();
-        for phi in &block.phis {
+        for phi in block.phis() {
             update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
         }
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            if op_idx == call_op_idx {
+        for (op_id, op) in block.sited() {
+            if op_id == call_op {
                 let args = call_argument_carriers(prepared, abi, call_id)
                     .map(|carriers| {
                         carriers
@@ -3279,12 +3283,11 @@ fn merge_call_carrier_states(
 
 fn classify_return_target(
     prepared: &SsaArtifact,
-    block_addr: u64,
-    return_op_idx: usize,
+    return_op: crate::OpId,
     target: &SSAVar,
     calls: &BTreeMap<CallSiteId, CallObservation>,
 ) -> SummaryValueObservation {
-    if let Some(return_inst) = exact_return_address_use(prepared, block_addr, return_op_idx, target)
+    if let Some(return_inst) = exact_return_address_use(prepared, return_op, target)
         && let Some(observation) = exact_return_boundary_observation(prepared, return_inst, calls)
     {
         return observation;
@@ -3298,12 +3301,11 @@ fn classify_return_target(
 
 fn exact_return_address_use(
     prepared: &SsaArtifact,
-    block_addr: u64,
-    return_op_idx: usize,
+    return_op: crate::OpId,
     target: &SSAVar,
 ) -> Option<crate::graph::InstId> {
     let graph = prepared.graph();
-    let inst = graph.inst_id_for_op_site(block_addr, return_op_idx)?;
+    let inst = graph.inst_for_op(return_op)?;
     let boundary = prepared.facts().boundaries.returns.get(&inst)?;
     let return_address = boundary.return_address?;
     let target_value = graph.value_id_for_var(target)?;

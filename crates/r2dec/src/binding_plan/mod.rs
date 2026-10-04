@@ -232,10 +232,11 @@ pub(crate) fn certified_boundary_read_values(
     at: InstId,
 ) -> BTreeSet<ValueId> {
     let graph = source.graph();
-    let Some(site) = graph.op_site_for_inst(at) else {
-        return BTreeSet::new();
-    };
-    let Some(inst) = graph.inst(at) else {
+    // A phi reads nothing at a boundary.
+    let Some(inst) = graph
+        .inst(at)
+        .filter(|inst| matches!(inst.payload, r2ssa::InstPayload::Op(_)))
+    else {
         return BTreeSet::new();
     };
     let payload = &inst.payload;
@@ -248,7 +249,6 @@ pub(crate) fn certified_boundary_read_values(
         .and_then(|index| certificates.returns.get(*index))
         .filter(|certificate| {
             certificate.at == at
-                && (certificate.block_addr, certificate.op_index) == site
                 && matches!(payload, r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. }))
         })
     {
@@ -285,8 +285,8 @@ pub(crate) fn certified_boundary_read_values(
         values.insert(selector);
     }
 
-    if let Some(certificate) = certified_call_site(source, at)
-        .filter(|certificate| (certificate.block_addr, certificate.op_index) == site)
+    if let Some(certificate) =
+        certified_call_site(source, at).filter(|certificate| certificate.at == at)
     {
         values.extend(
             certificate
@@ -824,9 +824,7 @@ pub(super) fn certified_call_return_address_values(
 /// unused in `murmur3_32` and `xxhash32` at -O0: the slots an argument is
 /// spilled into and then read back out of through the object rather than the
 /// slot.
-pub(super) fn certified_dead_frame_slot_accesses(
-    source: &r2ssa::SsaArtifact,
-) -> BTreeSet<(u64, usize)> {
+pub(super) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
     let certificates = source.certificates();
     let mut accesses = BTreeSet::new();
     for slot in certificates.stack_slots.values() {
@@ -844,11 +842,7 @@ pub(super) fn certified_dead_frame_slot_accesses(
         if owned.is_empty() || owned.iter().any(|access| !access.is_write) {
             continue;
         }
-        accesses.extend(
-            owned
-                .iter()
-                .map(|access| (access.block_addr, access.op_index)),
-        );
+        accesses.extend(owned.iter().map(|access| access.access.inst));
     }
     accesses
 }
@@ -927,11 +921,11 @@ impl CertifiedSilence {
         // held, so the store assigns nothing and the read it puts back
         // produces a value no statement names.
         for certificate in certificates.memory_round_trips.values() {
-            let sites = [certificate.write_op_index, certificate.read_op_index]
-                .into_iter()
-                .chain(certificate.redundant_read_op_indexes.iter().copied());
             insts.extend(
-                sites.filter_map(|op| graph.inst_id_for_op_site(certificate.block_addr, op)),
+                [certificate.write, certificate.read]
+                    .into_iter()
+                    .chain(certificate.redundant_reads.iter().copied())
+                    .map(|access| access.inst),
             );
         }
         // The dispatch of a certified switch: scaling the selector, addressing
@@ -1005,59 +999,25 @@ pub(super) fn certified_elided_read_instructions(
         .chain(certified_return_control_insts(source))
         .chain(certified_call_return_address_insts(source))
         .chain(certified_direct_call_target_insts(source))
-        // A store into a frame slot the function owns and never reads. The
-        // effect ledger already answers for the store itself with
-        // `DeadFrameSlotStore`, and the statement is not emitted; a value
-        // folded into it goes with it. This certificate is keyed by site
-        // rather than by instruction, so the sites are resolved back here.
         // A store that puts back what it read, and the read it puts back. The
         // certificate says the object ends holding what it held, so neither
         // renders and a value folded into either goes with it.
-        .chain({
-            let round_trips = source
-                .certificates()
+        .chain(
+            certificates
                 .memory_round_trips
                 .values()
                 .flat_map(|certificate| {
-                    [
-                        (certificate.block_addr, certificate.write_op_index),
-                        (certificate.block_addr, certificate.read_op_index),
-                    ]
-                    .into_iter()
-                    .chain(
-                        certificate
-                            .redundant_read_op_indexes
-                            .iter()
-                            .map(|op_index| (certificate.block_addr, *op_index)),
-                    )
+                    [certificate.write, certificate.read]
+                        .into_iter()
+                        .chain(certificate.redundant_reads.iter().copied())
                 })
-                .collect::<BTreeSet<_>>();
-            source
-                .graph()
-                .insts
-                .iter()
-                .filter(|inst| {
-                    source
-                        .inst_op_site(inst.id)
-                        .is_some_and(|site| round_trips.contains(&site))
-                })
-                .map(|inst| inst.id)
-                .collect::<Vec<_>>()
-        })
-        .chain({
-            let dead_slots = certified_dead_frame_slot_accesses(source);
-            source
-                .graph()
-                .insts
-                .iter()
-                .filter(|inst| {
-                    source
-                        .inst_op_site(inst.id)
-                        .is_some_and(|site| dead_slots.contains(&site))
-                })
-                .map(|inst| inst.id)
-                .collect::<Vec<_>>()
-        })
+                .map(|access| access.inst),
+        )
+        // A store into a frame slot the function owns and never reads. The
+        // effect ledger already answers for the store itself with
+        // `DeadFrameSlotStore`, and the statement is not emitted; a value
+        // folded into it goes with it.
+        .chain(certified_dead_frame_slot_accesses(source))
         .collect()
 }
 

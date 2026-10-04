@@ -11,8 +11,8 @@ use crate::{
 const CALLEE_NAMESPACE_PREFIXES: [&str; 6] = ["sym.imp.", "sym.", "imp.", "reloc.", "dbg.", "fcn."];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CallsiteKey {
-    pub block_addr: u64,
-    pub op_index: usize,
+    /// The call instruction.
+    pub at: r2ssa::InstId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1538,8 +1538,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let callsite = CallsiteKey {
-            block_addr: 0x10,
-            op_index: 0,
+            at: r2ssa::InstId(0x10),
         };
         let resolution =
             CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x402000)], &ctx);
@@ -1579,8 +1578,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let callsite = CallsiteKey {
-            block_addr: 0x10,
-            op_index: 0,
+            at: r2ssa::InstId(0x10),
         };
         let resolution =
             CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x402000)], &ctx);
@@ -1617,8 +1615,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let callsite = CallsiteKey {
-            block_addr: 0x10,
-            op_index: 0,
+            at: r2ssa::InstId(0x10),
         };
         let resolution =
             CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x401000)], &ctx);
@@ -1712,8 +1709,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let unresolved_site = CallsiteKey {
-            block_addr: 0x10,
-            op_index: 0,
+            at: r2ssa::InstId(0x10),
         };
         assert!(
             CalleeResolutionFacts::resolve_target_policy(CalleeTargetResolutionRequest {
@@ -1775,12 +1771,10 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let imported_site = CallsiteKey {
-            block_addr: 0x10,
-            op_index: 0,
+            at: r2ssa::InstId(0x10),
         };
         let unresolved_site = CallsiteKey {
-            block_addr: 0x20,
-            op_index: 0,
+            at: r2ssa::InstId(0x20),
         };
         let resolution =
             CalleeResolutionFacts::from_direct_call_targets([(imported_site, 0x401000)], &ctx);
@@ -1811,8 +1805,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let callsite = CallsiteKey {
-            block_addr: 0x10,
-            op_index: 0,
+            at: r2ssa::InstId(0x10),
         };
         let resolution =
             CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x401000)], &ctx);
@@ -1995,8 +1988,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let callsite = CallsiteKey {
-            block_addr: 0x402000,
-            op_index: 4,
+            at: r2ssa::InstId(0x402004),
         };
 
         let facts = CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x401000)], &ctx);
@@ -2092,8 +2084,7 @@ mod tests {
         let ctx =
             empty_identity_context(&function_names, &symbols, &callee_facts, &known_signatures);
         let callsite = CallsiteKey {
-            block_addr: 0x402000,
-            op_index: 4,
+            at: r2ssa::InstId(0x402004),
         };
         let mut facts = CalleeResolutionFacts::default();
 

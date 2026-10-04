@@ -156,12 +156,7 @@ fn certified_memory_parameter(
     prepared: &SsaArtifact,
     access: &r2ssa::MemoryAccessCertificate,
 ) -> Option<usize> {
-    if access.space != r2il::SpaceId::Ram
-        || prepared
-            .machine_context()
-            .memory_space_at(access.block_addr, access.op_index)
-            != Some(access.space)
-    {
+    if access.space != r2il::SpaceId::Ram {
         return None;
     }
     prepared
@@ -242,14 +237,14 @@ fn refine_parameter_signedness(
             .function()
             .blocks()
             .iter()
-            .flat_map(|block| block.ops.iter()),
+            .flat_map(|block| block.ops().iter()),
         prepared
             .function()
             .blocks()
             .iter()
             .flat_map(|block| {
                 block
-                    .phis
+                    .phis()
                     .iter()
                     .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
             })

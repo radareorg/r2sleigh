@@ -2,11 +2,15 @@
 
 use super::*;
 
-pub(crate) fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) -> PredicateFacts {
+pub(crate) fn collect_predicate_facts(
+    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+) -> PredicateFacts {
     let mut predicates = BTreeMap::new();
     let mut block_assumptions = BTreeMap::<u64, Vec<BlockAssumption>>::new();
     let mut switches = BTreeMap::new();
-    let compare_defs = collect_compare_defs(function, graph);
+    let compare_defs = collect_compare_defs(function, prep, graph);
     let evaluated_compare_defs = &compare_defs.evaluated;
     let compare_defs = &compare_defs.normalized;
     let mut next_predicate_id = 0u32;
@@ -68,7 +72,7 @@ pub(crate) fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) 
                         // outright. A dispatch through a table does not, and
                         // what it switches on comes from the value analysis,
                         // which has not run yet -- it is filled in there.
-                        selector: block.ops.iter().rev().find_map(|op| match op {
+                        selector: block.ops().iter().rev().find_map(|op| match op {
                             SSAOp::Switch { selector } => graph.value_id_for_var(selector),
                             _ => None,
                         }),
@@ -93,19 +97,23 @@ pub(crate) struct CompareDefinitions {
     pub(crate) evaluated: BTreeMap<SSAVar, CompareProvenance>,
 }
 
-pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> CompareDefinitions {
+pub(crate) fn collect_compare_defs(
+    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+) -> CompareDefinitions {
     let mut normalized = BTreeMap::<SSAVar, CompareProvenance>::new();
     let mut evaluated = BTreeMap::<SSAVar, CompareProvenance>::new();
     // A compared operand is named by its copy class: the values with its bits
     // at its width, as the one identity fact states them.
-    let views = function.decompile_prep_facts().map(|facts| &facts.views);
+    let views = prep.map(|facts| &facts.views);
     let operand = |var: &SSAVar| crate::view::class_value(graph, views, var);
     let mut sub_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
     let mut signed_overflow_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
     let mut signed_sign_sources = BTreeMap::<SSAVar, (ValueId, ValueId)>::new();
 
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             if let SSAOp::IntSub { dst, a, b } = op
                 && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
             {
@@ -115,7 +123,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     }
 
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             if let SSAOp::IntSBorrow { dst, a, b } = op
                 && let (Some(lhs), Some(rhs)) = (operand(a), operand(b))
             {
@@ -133,7 +141,7 @@ pub(crate) fn collect_compare_defs(function: &SSAFunction, graph: &SsaGraph) -> 
     propagate_compare_source_aliases(function, &mut signed_sign_sources);
 
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             let Some((dst, kind, lhs, rhs)) = compare_components(op) else {
                 if let Some((dst, kind, lhs, rhs)) = signed_flag_compare_components(
                     graph,
@@ -200,7 +208,7 @@ pub(crate) fn propagate_compare_definitions(
     loop {
         let mut changed = false;
         for block in function.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 let propagated = match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
@@ -255,7 +263,7 @@ pub(crate) fn propagate_compare_source_aliases(
     loop {
         let mut changed = false;
         for block in function.blocks() {
-            for op in &block.ops {
+            for op in block.ops() {
                 let (dst, src) = match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }

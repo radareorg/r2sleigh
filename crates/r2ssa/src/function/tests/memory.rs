@@ -128,7 +128,7 @@ fn a_switch_on_a_field_selects_the_loaded_value_not_the_pointer() {
     let read_state = function
         .get_block(0x1000)
         .expect("the fixture block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Load { dst, .. } if dst.size == state.size => Some(dst.name().to_string()),
@@ -201,7 +201,12 @@ fn prepared_function_does_not_infer_memory_backed_return_phi() {
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1214, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1214, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -335,7 +340,7 @@ fn prepared_function_ssa_builds_memory_phis_per_object() {
 
     let load_inst = prepared
         .graph()
-        .inst_id_for_op_site(0x130c, 0)
+        .inst_spelled_at(0x130c, 0)
         .expect("load inst");
     let load_use = prepared
         .memory()
@@ -400,7 +405,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .function()
         .get_block(0x1780)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
+            block.ops().iter().find_map(|op| match op {
                 SSAOp::Copy { dst, .. } if dst.name() == "tmp:1798" => Some(dst.clone()),
                 _ => None,
             })
@@ -419,7 +424,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .function()
         .get_block(0x1780)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
+            block.ops().iter().find_map(|op| match op {
                 SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst),
                 _ => None,
             })

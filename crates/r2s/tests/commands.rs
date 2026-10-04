@@ -362,6 +362,62 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// `e` reads and sets the keys the shell acts on, by radare2's names: a key
+/// it lacks and a value it cannot read are refused, and the value stays.
+#[test]
+fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
+    let run = r2s("e; e asm.bytes=false; pd 1 @ 0x401330; e asm.bytes=maybe; e asm.bytes");
+    assert_eq!(
+        run.out,
+        "asm.bytes = true\n\
+         scr.color = 0\n\
+         \x20           0x00401330      endbr64\n\
+         false\n\
+         r2s: asm.bytes takes true or false, not 'maybe'\n",
+    );
+    assert!(
+        on(fixture(), "e nosuch.key")
+            .out
+            .contains("Invalid config key nosuch.key")
+    );
+
+    // Colour is a setting a grep does not reset: the grep only keeps escapes
+    // out of the statement it reads.
+    let colour = r2s("e scr.color=1; pd 1 @ 0x401330~endbr; e scr.color");
+    assert_eq!(
+        colour.out,
+        "            0x00401330      f30f1efa       endbr64\n1\n"
+    );
+
+    // `-e` sets a key before the script runs, and a bad one ends the shell.
+    let flagged = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .args(["-q", "-e", "scr.color=1", "-c", "pd 1 @ 0x401330"])
+        .arg(fixture())
+        .output()
+        .expect("the shell runs");
+    assert!(String::from_utf8_lossy(&flagged.stdout).contains("\x1b["));
+    let refused = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .args(["-q", "-e", "asm.byte=1", "-c", "q"])
+        .arg(fixture())
+        .output()
+        .expect("the shell runs");
+    assert!(!refused.status.success());
+}
+
+/// Discovery's walk is held per state of the bytes, so a patch that ends a
+/// body early is walked again: the second `afl` of one session sees the `ret`.
+#[test]
+fn a_patch_is_discovered_again_in_the_same_session() {
+    let run = r2s("afl~0x00401330; wx c3 @ 0x401334; afl~0x00401330");
+    assert!(run.ok, "{}", run.out);
+    let (before, after) = run
+        .out
+        .split_once("1 bytes at")
+        .expect("the write reports what it wrote");
+    assert!(before.contains("    5     51 sym.fnv1a32"), "{}", run.out);
+    assert!(after.contains("    1      5 sym.fnv1a32"), "{}", run.out);
+}
+
 /// A patch moves what the image says about itself, not only what it reads as.
 ///
 /// The import table is *decoded*: which address is a linkage stub, and which
@@ -1035,4 +1091,49 @@ fn syscalls_are_the_kernel_calls_the_bodies_make() {
         "{}",
         run.out
     );
+}
+
+/// `?` is generated from the one verb table dispatch reads, so every verb it
+/// lists answers `verb?` with its own usage, public verbs come before the
+/// maintainer tier, and a name the table does not hold is still unknown.
+#[test]
+fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
+    let help = r2s("?");
+    assert!(help.ok, "{}", help.out);
+    assert!(
+        help.out.starts_with("Usage: [cmd][~grep][@addr]"),
+        "{}",
+        help.out
+    );
+    let listed = help
+        .out
+        .lines()
+        .filter_map(|line| line.strip_prefix("| "))
+        .map(|row| row.split_whitespace().next().expect("a verb").to_owned())
+        .collect::<Vec<_>>();
+    for verb in ["s", "pd", "pdd", "afl", "axt", "wx", "V", "?e", "w", "pdim"] {
+        assert!(
+            listed.iter().any(|name| name == verb),
+            "{verb} missing from:\n{}",
+            help.out
+        );
+    }
+    let maintainer = help
+        .out
+        .find("\nMaintainer:")
+        .expect("a maintainer section");
+    assert!(help.out[..maintainer].contains("| pdd "));
+    assert!(help.out[maintainer..].contains("| pdim "));
+    for verb in &listed {
+        let usage = r2s(&format!("{verb}?"));
+        assert!(usage.ok, "{verb}?: {}", usage.out);
+        assert!(
+            usage.out.starts_with(&format!("Usage: {verb}")),
+            "{verb}?: {}",
+            usage.out
+        );
+    }
+    assert!(r2s("q?").out.contains("aliases: quit exit"));
+    let unknown = r2s("zz");
+    assert!(!unknown.ok);
 }

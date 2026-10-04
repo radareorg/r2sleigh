@@ -52,8 +52,8 @@ pub struct ArrayIndexCertificate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScalarArrayRenderCandidate {
     pub slot: usize,
-    pub block_addr: u64,
-    pub op_index: usize,
+    /// The load or store, by identity in the sealed function.
+    pub op: r2ssa::OpId,
     pub is_write: bool,
     pub field_offset: u64,
     pub element_stride: u64,

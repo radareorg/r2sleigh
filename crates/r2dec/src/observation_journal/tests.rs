@@ -799,7 +799,7 @@ fn placement_effect_elision_is_considered_only_at_zero_occurrences() {
     );
     assert!(matches!(
         ledger.outcome(&obligation),
-        crate::ledger::Outcome::Rendered { .. }
+        crate::ledger::Outcome::Rendered
     ));
 }
 
@@ -893,7 +893,7 @@ fn duplicate_surviving_effect_occurrence_is_a_conflict() {
     );
     assert!(matches!(
         ledger.outcome(&obligation),
-        crate::ledger::Outcome::Rendered { .. }
+        crate::ledger::Outcome::Rendered
     ));
     assert_eq!(
         ledger.conflicts().collect::<Vec<_>>(),
@@ -1288,8 +1288,8 @@ fn first_bound_rendered_input(
         .insts
         .iter()
         .find_map(|inst| {
-            let (block_addr, op_idx) = source.source().inst_op_site(inst.id)?;
-            let block = graph.block_id_for_addr(block_addr)?;
+            let op_idx = graph.op_ordinal(inst.id)?;
+            let block = inst.block;
             inst.inputs
                 .iter()
                 .copied()
@@ -1338,8 +1338,8 @@ fn first_bound_rendered_output(
             ) {
                 return None;
             }
-            let (block_addr, op_idx) = source.source().inst_op_site(inst.id)?;
-            let block = graph.block_id_for_addr(block_addr)?;
+            let op_idx = graph.op_ordinal(inst.id)?;
+            let block = inst.block;
             Some((value, *binding, inst.id, NormalizedOpSite { block, op_idx }))
         })
         .expect("fixture has an exactly projected bound output")
@@ -1932,10 +1932,9 @@ fn discharging_two_instructions_marks_owned_cells_and_each_effect_once() {
         .collect::<BTreeSet<_>>();
     for inst_id in order {
         let inst = graph.inst(inst_id).expect("discharged instruction");
-        let block = source
-            .source()
-            .inst_op_site(inst_id)
-            .map(|(block, _)| block)
+        let block = graph
+            .op_ordinal(inst_id)
+            .and_then(|_| graph.block_addr_of(inst_id))
             .expect("discharged instruction has a site");
         let write = match plan.write_disposition(inst_id) {
             Some(MachineWriteDisposition::Exact(write)) => LegacyWriteObservation::Exact(*write),

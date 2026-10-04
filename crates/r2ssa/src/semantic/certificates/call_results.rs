@@ -6,8 +6,6 @@ use super::super::*;
 pub struct CallResultCertificate {
     pub call_site: CallSiteId,
     pub at: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub value: ValueId,
     pub width: u32,
     pub relation: CallResultValueRelation,
@@ -43,15 +41,15 @@ pub(crate) fn collect_call_result_certificates(
     body: Body<'_>,
     derived: Derived<'_>,
 ) -> CallResultCertificateIndexes {
-    let (function, graph) = (body.function, body.graph);
+    let function = body.function;
     let call_sites = derived.call_sites;
     let mut call_results = BTreeMap::new();
     let mut call_results_by_inst = BTreeMap::new();
     let mut call_results_by_callsite = BTreeMap::<CallSiteId, Vec<ValueId>>::new();
-    let callsites_by_op = call_sites
+    let callsites_by_inst = call_sites
         .by_id
         .iter()
-        .filter_map(|(id, fact)| graph.op_site_for_inst(fact.at).map(|site| (site, *id)))
+        .map(|(id, fact)| (fact.at, *id))
         .collect::<BTreeMap<_, _>>();
     let mut out_states = BTreeMap::<u64, CallResultFlowState>::new();
     let mut worklist = function
@@ -75,7 +73,7 @@ pub(crate) fn collect_call_result_certificates(
             body,
             derived,
             block,
-            &callsites_by_op,
+            &callsites_by_inst,
             input,
             CallResultSink {
                 call_results: &mut call_results,
@@ -141,7 +139,7 @@ pub(crate) fn process_call_result_flow_block(
     body: Body<'_>,
     derived: Derived<'_>,
     block: &crate::FunctionSSABlock,
-    callsites_by_op: &BTreeMap<(u64, usize), CallSiteId>,
+    callsites_by_inst: &BTreeMap<InstId, CallSiteId>,
     mut state: CallResultFlowState,
     sink: CallResultSink<'_>,
 ) -> CallResultFlowState {
@@ -158,19 +156,22 @@ pub(crate) fn process_call_result_flow_block(
         call_results_by_callsite,
     } = sink;
     let mut active_call = None;
-    for (op_index, op) in block.ops.iter().enumerate() {
+    for (id, op) in block.sited() {
+        let Some(inst) = graph.inst_for_op(id) else {
+            continue;
+        };
         match op {
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 kill_return_register_flow_values(&mut state);
-                active_call = callsites_by_op.get(&(block.addr, op_index)).copied();
+                active_call = callsites_by_inst.get(&inst).copied();
             }
             SSAOp::CallDefine { dst } => {
                 let Some(call_site_id) = active_call else {
                     continue;
                 };
-                let Some(call_site) = call_sites.by_id.get(&call_site_id) else {
+                if !call_sites.by_id.contains_key(&call_site_id) {
                     continue;
-                };
+                }
                 let Some(value) = graph.value_id_for_var(dst) else {
                     continue;
                 };
@@ -249,11 +250,7 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let cert = CallResultCertificate {
                     call_site: call_site_id,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(call_site.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value,
                     width: dst.size,
                     relation,
@@ -280,11 +277,7 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(source.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value: dst_value,
                     width: dst.size,
                     relation: source.relation,
@@ -315,11 +308,7 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(source.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value: dst_value,
                     width: dst.size,
                     relation: CallResultValueRelation::Derived,
@@ -347,8 +336,7 @@ pub(crate) fn process_call_result_flow_block(
                             graph,
                             structured,
                             objects,
-                            block_addr: block.addr,
-                            op_index,
+                            inst,
                             is_write: true,
                             value: Some(value),
                         })
@@ -359,8 +347,7 @@ pub(crate) fn process_call_result_flow_block(
                             graph,
                             structured,
                             objects,
-                            block_addr: block.addr,
-                            op_index,
+                            inst,
                             is_write: true,
                             value: None,
                         })
@@ -404,8 +391,7 @@ pub(crate) fn process_call_result_flow_block(
                         graph,
                         structured,
                         objects,
-                        block_addr: block.addr,
-                        op_index,
+                        inst,
                         is_write: false,
                         value: Some(dst_value),
                     })
@@ -417,11 +403,7 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(source.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value: dst_value,
                     width: dst.size,
                     relation: source.relation,
@@ -473,8 +455,7 @@ pub(crate) struct StackMemoryAccessInput<'a> {
     pub(crate) graph: &'a SsaGraph,
     pub(crate) structured: &'a StructuredDataflowFacts,
     pub(crate) objects: &'a ObjectModel,
-    pub(crate) block_addr: u64,
-    pub(crate) op_index: usize,
+    pub(crate) inst: InstId,
     pub(crate) is_write: bool,
     pub(crate) value: Option<ValueId>,
 }
@@ -483,9 +464,7 @@ pub(crate) fn stack_memory_access_at(
     input: StackMemoryAccessInput<'_>,
 ) -> Option<(ObjectId, i64, StructuredAccessId)> {
     // Only this operation's instruction can own a match, so search its accesses alone.
-    let inst = input
-        .graph
-        .inst_id_for_op_site(input.block_addr, input.op_index)?;
+    let inst = input.inst;
     let first = StructuredAccessId { inst, ordinal: 0 };
     let last = StructuredAccessId {
         inst,
@@ -496,9 +475,7 @@ pub(crate) fn stack_memory_access_at(
         .memory_accesses
         .range(first..=last)
         .filter(|(_, access)| {
-            access.block_addr == input.block_addr
-                && access.op_index == input.op_index
-                && access.is_write == input.is_write
+            access.is_write == input.is_write
                 && input.value.is_none_or(|value| access.value == Some(value))
                 && ram_memory_access_matches_source(
                     input.function,

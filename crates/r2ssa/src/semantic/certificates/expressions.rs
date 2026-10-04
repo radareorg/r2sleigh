@@ -217,6 +217,7 @@ pub(crate) fn collect_two_way_selection_certificates(
 
 pub(crate) fn collect_renderable_expression_values(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,
 ) -> BTreeSet<ValueId> {
@@ -317,7 +318,7 @@ pub(crate) fn collect_renderable_expression_values(
                 continue;
             }
             if expression_loop_phi_is_renderable(
-                function,
+                prep,
                 graph,
                 structured,
                 inst,
@@ -376,20 +377,20 @@ pub(crate) fn expression_phi_is_identity_renderable(
 }
 
 pub(crate) fn expression_phi_is_renderable(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
 ) -> bool {
     expression_phi_is_identity_renderable(graph, inst)
-        || expression_phi_has_single_canonical_root(function, graph, inst)
+        || expression_phi_has_single_canonical_root(prep, graph, inst)
 }
 
 pub(crate) fn expression_phi_has_single_canonical_root(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
 ) -> bool {
-    let Some(prep_facts) = function.decompile_prep_facts() else {
+    let Some(prep_facts) = prep else {
         return false;
     };
     // The inputs are one value when they name one representative: the same
@@ -440,7 +441,7 @@ pub(crate) fn expression_value_depends_on_memory_read(graph: &SsaGraph, value: V
 }
 
 pub(crate) fn expression_loop_phi_is_renderable(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,
     inst: &crate::graph::GraphInst,
@@ -465,7 +466,7 @@ pub(crate) fn expression_loop_phi_is_renderable(
 
     let latches = loop_fact.latches.iter().copied().collect::<BTreeSet<_>>();
     let env = ExpressionRenderEnv {
-        function,
+        prep,
         graph,
         certified_memory_read_insts,
     };
@@ -493,7 +494,7 @@ pub(crate) fn expression_loop_phi_is_renderable(
 }
 
 pub(crate) struct ExpressionRenderEnv<'a> {
-    pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) certified_memory_read_insts: &'a BTreeSet<InstId>,
 }
@@ -519,9 +520,7 @@ pub(crate) fn value_renderable_modulo_loop_phi(
         .and_then(|inst_id| env.graph.inst(inst_id))
         .is_some_and(|inst| {
             let eligible = match &inst.payload {
-                InstPayload::Phi { .. } => {
-                    expression_phi_is_renderable(env.function, env.graph, inst)
-                }
+                InstPayload::Phi { .. } => expression_phi_is_renderable(env.prep, env.graph, inst),
                 InstPayload::Op(op) => {
                     expression_op_is_pure(op)
                         || (op.is_memory_read()

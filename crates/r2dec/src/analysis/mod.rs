@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use r2ssa::{FunctionSSABlock, SSAVar, ValueId};
+use r2ssa::{FunctionSSABlock, InstId, SSAVar, ValueId};
 
 use crate::ast::CExpr;
 
@@ -30,7 +30,7 @@ impl DecompilerFacts {
 pub(crate) struct UseInfo {
     identities: ExactValueIdentities,
     pub(crate) pinned: HashSet<String>,
-    pub(crate) call_result_exprs: BTreeMap<(u64, usize), CExpr>,
+    pub(crate) call_result_exprs: BTreeMap<InstId, CExpr>,
     pub(crate) forwarded_values_by_value: BTreeMap<ValueId, ValueProvenance>,
     /// The first fact dropped because its variable had no exact value identity.
     ///

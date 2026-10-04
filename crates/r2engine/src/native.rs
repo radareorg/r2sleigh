@@ -983,78 +983,20 @@ fn declared_signatures(
     context
 }
 
-/// One interface again, with stack slots it did not have.
-///
-/// There is no builder that adds them, so the interface is rebuilt from what
-/// it says about itself. The order matters: a return mechanism validates
-/// against the carriers, and a carrier refuses to move once a mechanism is
-/// bound, so the carriers go on first.
+/// One interface again, with stack slots it did not have, stated against
+/// `revision`; every other fact it states is kept
+/// (`SourceFunctionInterface::restated`).
 pub(crate) fn restate(
     interface: &r2source::SourceFunctionInterface,
     slots: Vec<r2source::SourceStackSlotSpec>,
     revision: Vec<u8>,
 ) -> Option<r2source::SourceFunctionInterface> {
-    let mut restated = r2source::SourceFunctionInterface::new_exact_with_logical_types(
-        revision,
-        interface.calling_convention(),
-        interface.parameters().to_vec(),
-        interface.return_kind(),
-        slots,
-        interface.parameter_logical_values().to_vec(),
-        interface.return_logical_value(),
-        interface.type_graph().cloned(),
-    )
-    .inspect_err(|error| {
-        r2il::refusal_evidence!("restate-interface", "the slots do not restate: {error:?}");
-    })
-    .ok()?
-    .with_role_register_names(interface.role_register_names());
-    let carried = |what: &str, placed: Result<_, _>| {
-        placed
-            .inspect_err(|error| {
-                r2il::refusal_evidence!(
-                    "restate-interface",
-                    "the restated slots do not carry the {what}: {error:?}"
-                );
-            })
-            .ok()
-    };
-    if let Some(storage) = interface.return_address_storage() {
-        restated = carried(
-            "return address",
-            restated.with_return_address_storage(storage),
-        )?;
-    }
-    if let Some(storage) = interface.stack_pointer_storage() {
-        restated = carried(
-            "stack pointer",
-            restated.with_stack_pointer_storage(storage),
-        )?;
-    }
-    if let Some(storage) = interface.frame_pointer_storage() {
-        restated = carried(
-            "frame pointer",
-            restated.with_frame_pointer_storage(storage),
-        )?;
-    }
-    if let Some(mechanism) = interface.return_mechanism() {
-        restated = carried(
-            "return mechanism",
-            restated.with_exact_stacked_return(
-                mechanism.stack_offset(),
-                mechanism.slot_size_bytes(),
-                mechanism.stack_pointer_delta_bytes(),
-                mechanism.address_size_bytes(),
-            ),
-        )?;
-    }
-    if interface.prototype_from_source_types() {
-        restated = restated.with_prototype_from_source_types();
-    }
-    if interface.types_are_carrier_widths() {
-        restated = restated.with_types_as_carrier_widths();
-    }
-    Some(restated)
+    interface
+        .restated(slots, revision)
+        .inspect_err(|error| {
+            r2il::refusal_evidence!("restate-interface", "the slots do not restate: {error:?}");
+        })
+        .ok()
 }
 
 /// What the bodies a function calls say about their own boundaries.
@@ -1791,7 +1733,7 @@ impl Native<'_> {
         let sites = call_sites(&walked.body, self.program);
         let mut found = Vec::new();
         for block in prepared.function().blocks() {
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (id, op) in block.sited() {
                 let Some((instruction, callee)) = self.called_name(prepared.as_ref(), &sites, op)
                 else {
                     continue;
@@ -1806,9 +1748,8 @@ impl Native<'_> {
                     let Some(storage) = self.machine.slots.argument_slots().get(index) else {
                         continue;
                     };
-                    let Some(address) =
-                        r2ssa::value_reaching(prepared.as_ref(), block.addr, op_index, *storage)
-                            .and_then(|value| prepared.folded_value(value))
+                    let Some(address) = r2ssa::value_reaching(prepared.as_ref(), id, *storage)
+                        .and_then(|value| prepared.folded_value(value))
                     else {
                         continue;
                     };

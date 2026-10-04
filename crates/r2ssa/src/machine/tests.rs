@@ -280,7 +280,7 @@ fn unsigned_64_bit_multiply_retains_wrapping_arithmetic() {
     let machine = MachineFunction::from_artifact(&artifact).expect("machine function");
     let mult_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 2)
+        .inst_spelled_at(0x1000, 2)
         .expect("multiply instruction");
     let output = artifact
         .graph()
@@ -400,7 +400,7 @@ fn shifts_require_exact_value_width_and_keep_the_count_width() {
     ] {
         let inst = artifact
             .graph()
-            .inst_id_for_op_site(0x1000, op_index)
+            .inst_spelled_at(0x1000, op_index)
             .expect("shift instruction");
         let output = artifact
             .graph()
@@ -524,12 +524,13 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         ],
         block_by_addr: [(0x1000, BlockId(0))].into(),
         value_index: crate::graph::value_index_of(&values),
-        op_inst_by_site: [((0x1000, 0), InstId(0))].into(),
-        op_site_by_inst: [(InstId(0), (0x1000, 0))].into(),
+        inst_by_op: vec![Some(InstId(0))],
+        op_by_inst: vec![crate::arena::local_id(0)],
         instruction_by_inst: [(InstId(0), 0x1000)].into(),
         insts_by_instruction: [(0x1000, vec![InstId(0)])].into(),
         formal_projections: BTreeMap::new(),
         formal_roots: BTreeMap::new(),
+        entry_lanes: Vec::new(),
     };
     let inst = graph.inst(InstId(0)).expect("shift instruction");
     let mut builder = MachineBuilder::for_graph(&graph);
@@ -916,7 +917,7 @@ fn divide_negate_and_piece_have_exact_machine_vocabulary() {
     for (op_index, expected_width, expected_inputs) in [(0, 32, 2_usize), (1, 64, 1), (2, 64, 2)] {
         let inst = artifact
             .graph()
-            .inst_id_for_op_site(0x1000, op_index)
+            .inst_spelled_at(0x1000, op_index)
             .expect("projected instruction");
         let output = artifact
             .graph()
@@ -1008,7 +1009,7 @@ fn divide_negate_and_piece_reject_wrong_arity_and_width() {
     for (op_index, expected_arity) in [(0, 2_usize), (1, 1), (2, 2)] {
         let inst = artifact
             .graph()
-            .inst_id_for_op_site(0x1000, op_index)
+            .inst_spelled_at(0x1000, op_index)
             .and_then(|inst| artifact.graph().inst(inst))
             .expect("test instruction");
         let InstPayload::Op(op) = &inst.payload else {
@@ -1070,7 +1071,7 @@ fn unsigned_remainder_has_exact_machine_vocabulary() {
 
     let inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("remainder instruction");
     let graph_inst = artifact.graph().inst(inst).expect("remainder graph node");
     let entity = projection
@@ -1151,7 +1152,7 @@ fn signed_division_and_remainder_read_their_operands_signed() {
 
         let inst = artifact
             .graph()
-            .inst_id_for_op_site(0x1000, 0)
+            .inst_spelled_at(0x1000, 0)
             .expect("signed instruction");
         let graph_inst = artifact.graph().inst(inst).expect("signed graph node");
         let entity = projection
@@ -1221,7 +1222,7 @@ fn unsigned_remainder_rejects_wrong_arity_and_width() {
     }]);
     let inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .and_then(|inst| artifact.graph().inst(inst))
         .expect("remainder instruction");
     let InstPayload::Op(op) = &inst.payload else {
@@ -1309,7 +1310,7 @@ fn plain_load_requires_and_retains_an_explicit_memory_model() {
     ));
     let load_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1800, 0)
+        .inst_spelled_at(0x1800, 0)
         .expect("load instruction");
     let address_use = UseSite {
         inst: load_inst,
@@ -1679,7 +1680,7 @@ fn exact_use(
 ) -> MachineUseSlice {
     let inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, op_index)
+        .inst_spelled_at(0x1000, op_index)
         .expect("operation instruction");
     match projection
         .use_disposition(UseSite { inst, input_idx })
@@ -1702,7 +1703,7 @@ fn exact_write(
 ) -> MachineWriteProjection {
     let inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, op_index)
+        .inst_spelled_at(0x1000, op_index)
         .expect("operation instruction");
     match projection
         .write_disposition(inst)
@@ -1723,7 +1724,7 @@ fn outputless_constant_operand_has_exact_use_and_canonical_arena_leaf() {
     }]);
     let inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("return instruction");
     let graph_inst = artifact
         .graph()
@@ -1803,7 +1804,7 @@ fn register_use_projection_refuses_unavailable_and_invalid_geometry() {
         let projection = MachineProjection::from_artifact(&artifact).expect("typed refusal");
         let inst = artifact
             .graph()
-            .inst_id_for_op_site(0x1000, 0)
+            .inst_spelled_at(0x1000, 0)
             .expect("copy instruction");
         projection
             .use_disposition(UseSite { inst, input_idx: 0 })
@@ -1981,7 +1982,7 @@ fn dense_use_slices_cover_whole_subpiece_narrow_bitwise_casts_and_effects() {
     }
     let store_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 7)
+        .inst_spelled_at(0x1000, 7)
         .expect("store instruction");
     assert_eq!(
         projection.use_disposition(UseSite {
@@ -1997,7 +1998,7 @@ fn dense_use_slices_cover_whole_subpiece_narrow_bitwise_casts_and_effects() {
 
     let remainder_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 8)
+        .inst_spelled_at(0x1000, 8)
         .expect("remainder instruction");
     for input_idx in 0..2 {
         assert_eq!(
@@ -2037,7 +2038,7 @@ fn incoherent_slice_is_a_refusal_and_corrupted_exact_facts_are_rejected() {
         .expect("local incoherence remains a partial projection");
     let inst = incoherent
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("subpiece instruction");
     assert_eq!(
         projection.use_disposition(UseSite { inst, input_idx: 0 }),
@@ -2060,7 +2061,7 @@ fn incoherent_slice_is_a_refusal_and_corrupted_exact_facts_are_rejected() {
         MachineProjection::from_artifact(&artifact).expect("valid exact projection");
     let copy_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("copy instruction");
     let PackedUseDisposition::Exact(copy) =
         &mut projection.use_slots[projection.use_offsets[copy_inst.0 as usize] as usize]
@@ -2080,7 +2081,7 @@ fn incoherent_slice_is_a_refusal_and_corrupted_exact_facts_are_rejected() {
         MachineProjection::from_artifact(&artifact).expect("valid exact projection");
     let cast_inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 1)
+        .inst_spelled_at(0x1000, 1)
         .expect("cast instruction");
     let PackedUseDisposition::Exact(cast) =
         &mut projection.use_slots[projection.use_offsets[cast_inst.0 as usize] as usize]
@@ -2346,7 +2347,7 @@ fn dense_write_projections_cover_full_and_zero_extension() {
     );
     let inserted = low
         .graph()
-        .inst_id_for_op_site(0x1000, 1)
+        .inst_spelled_at(0x1000, 1)
         .expect("insert instruction");
     assert!(matches!(
         low.graph().inst(inserted).map(|inst| &inst.payload),
@@ -2375,7 +2376,7 @@ fn dense_write_projections_cover_full_and_zero_extension() {
     );
     let root = high
         .graph()
-        .inst_id_for_op_site(0x1000, 1)
+        .inst_spelled_at(0x1000, 1)
         .and_then(|inst| high.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("inserted root");
@@ -2422,7 +2423,7 @@ fn dense_write_projections_cover_full_and_zero_extension() {
         .function()
         .get_block(0x1000)
         .expect("block")
-        .ops;
+        .ops();
     let extension = ops
         .iter()
         .position(|op| matches!(op, SSAOp::IntZExt { .. }))
@@ -2484,7 +2485,7 @@ fn register_uses_read_the_root_whole() {
         ],
         &arch,
     );
-    let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+    let ops = artifact.function().get_block(0x1000).expect("block").ops();
     let subpieces = ops
         .iter()
         .enumerate()
@@ -2514,7 +2515,7 @@ fn register_uses_read_the_root_whole() {
 
     let read = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, subpieces[1].0)
+        .inst_spelled_at(0x1000, subpieces[1].0)
         .expect("high-byte read");
     for corrupt in [
         |slice: &mut MachineUseSlice| slice.bit_offset = 8,
@@ -2555,7 +2556,7 @@ fn big_endian_lane_positions_count_from_the_least_significant_byte() {
         ],
         &arch,
     );
-    let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+    let ops = artifact.function().get_block(0x1000).expect("block").ops();
     assert!(
         ops.iter().any(|op| matches!(
             op,
@@ -2593,7 +2594,7 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
         MachineProjection::from_artifact(&missing_artifact).expect("typed refusal");
     let missing_inst = missing_artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("copy instruction");
     assert_eq!(
         missing_projection.write_disposition(missing_inst),
@@ -2613,7 +2614,7 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
         MachineProjection::from_artifact(&refused_artifact).expect("upstream refusal");
     let refused_inst = refused_artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("copy instruction");
     assert_eq!(
         refused_projection.write_disposition(refused_inst),
@@ -2637,7 +2638,7 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
         MachineProjection::from_artifact(&malformed_artifact).expect("malformed refusal");
     let malformed_inst = malformed_artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("copy instruction");
     assert_eq!(
         malformed_projection.write_disposition(malformed_inst),
@@ -2700,7 +2701,7 @@ fn unnamed_vector_lanes_insert_into_their_root() {
         &arch,
     );
     let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
-    let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+    let ops = artifact.function().get_block(0x1000).expect("block").ops();
     let inserts = ops
         .iter()
         .enumerate()
@@ -2738,7 +2739,7 @@ fn corrupted_write_disposition_is_rejected() {
     let mut projection = MachineProjection::from_artifact(&artifact).expect("projection");
     let inst = artifact
         .graph()
-        .inst_id_for_op_site(0x1000, 0)
+        .inst_spelled_at(0x1000, 0)
         .expect("copy instruction");
     projection.write_dispositions[inst.0 as usize] = Some(MachineWriteDisposition::Exact(
         MachineWriteProjection::ZeroExtend {

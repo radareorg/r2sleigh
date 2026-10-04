@@ -244,7 +244,7 @@ impl<'a> EvidenceBuilder<'a> {
                 .function()
                 .blocks()
                 .iter()
-                .flat_map(|block| block.ops.iter()),
+                .flat_map(|block| block.ops().iter()),
             std::iter::empty(),
             crate::prepare::prepared_arch_display_name(self.source),
         );
@@ -377,13 +377,7 @@ impl<'a> EvidenceBuilder<'a> {
         &self,
         access: &r2ssa::MemoryAccessCertificate,
     ) -> Option<r2ssa::ValueId> {
-        if access.space != r2il::SpaceId::Ram
-            || self
-                .source
-                .machine_context()
-                .memory_space_at(access.block_addr, access.op_index)
-                != Some(access.space)
-        {
+        if access.space != r2il::SpaceId::Ram {
             return None;
         }
         let address = self

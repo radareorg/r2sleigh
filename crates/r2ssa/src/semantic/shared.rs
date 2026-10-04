@@ -607,14 +607,19 @@ pub(crate) fn induction_step_for_update(
 /// be reconstructed here. A call the convention does not restore has no such
 /// record, and the position is then unknown.
 pub(crate) fn call_entering_stack_pointer_offset(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    block: &crate::function::SSABlock,
-    call_op_index: usize,
-    calls_move_stack_pointer: bool,
+    at: super::boundaries::CallPosition<'_>,
 ) -> Option<(StackAddressRoot, bool)> {
+    let super::boundaries::CallPosition {
+        function,
+        prep,
+        graph,
+        block_addr,
+        op_index: call_op_index,
+        calls_move_stack_pointer,
+    } = at;
+    let block = function.get_block(block_addr)?;
     let recorded = block
-        .ops
+        .ops()
         .get(call_op_index.checked_add(1)?..)?
         .iter()
         .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
@@ -639,6 +644,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
             };
             match reaching_stack_pointer_before(
                 function,
+                prep,
                 graph,
                 storage,
                 block.addr,
@@ -667,7 +673,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
         }
     };
     let entering = &entering;
-    let Some(root) = resolve_entry_stack_root(function.decompile_prep_facts(), entering) else {
+    let Some(root) = resolve_entry_stack_root(prep, entering) else {
         r2il::refusal_evidence!(
             "call-entering-stack-pointer",
             "call at ({:#x}, {call_op_index}) found {entering}, which has no entry-relative root; \
@@ -679,7 +685,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                     .iter()
                     .flat_map(|block| {
                         block
-                            .phis
+                            .phis()
                             .iter()
                             .map(|phi| {
                                 (
@@ -697,7 +703,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                                         .collect::<Vec<_>>(),
                                 )
                             })
-                            .chain(block.ops.iter().filter_map(|op| {
+                            .chain(block.ops().iter().filter_map(|op| {
                                 op.dst().map(|dst| {
                                     (
                                         dst.clone(),
@@ -711,8 +717,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                 let mut chain = Vec::new();
                 let mut cursor = Some(entering.clone());
                 while let Some(var) = cursor.take() {
-                    let rooted =
-                        resolve_entry_stack_root(function.decompile_prep_facts(), &var).is_some();
+                    let rooted = resolve_entry_stack_root(prep, &var).is_some();
                     let Some((_, text, sources)) = defs.iter().find(|(dst, _, _)| *dst == var)
                     else {
                         chain.push(format!("{var}=<no def> rooted={rooted}"));
@@ -724,8 +729,7 @@ pub(crate) fn call_entering_stack_pointer_offset(
                         .map(|source| {
                             format!(
                                 "{source}:{:?}",
-                                resolve_entry_stack_root(function.decompile_prep_facts(), source)
-                                    .map(|root| root.offset)
+                                resolve_entry_stack_root(prep, source).map(|root| root.offset)
                             )
                         })
                         .collect::<Vec<_>>();
@@ -737,20 +741,15 @@ pub(crate) fn call_entering_stack_pointer_offset(
                         .iter()
                         .find(|source| {
                             source.name() == var.name()
-                                && resolve_entry_stack_root(function.decompile_prep_facts(), source)
-                                    .is_none()
+                                && resolve_entry_stack_root(prep, source).is_none()
                         })
                         .or_else(|| sources.iter().find(|source| source.name() == var.name()))
                         .cloned();
                 }
                 chain
             },
-            function
-                .decompile_prep_facts()
-                .map_or(0, |facts| facts.entry_stack_address_roots.len()),
-            function
-                .decompile_prep_facts()
-                .map_or(0, |facts| facts.stack_address_roots.len())
+            prep.map_or(0, |facts| facts.entry_stack_address_roots.len()),
+            prep.map_or(0, |facts| facts.stack_address_roots.len())
         );
         return None;
     };
@@ -808,7 +807,7 @@ pub(crate) fn preserved_call_carriers(
         if !function.successors(block.addr).is_empty() {
             continue;
         }
-        match terminal_past_call_boundary(&block.ops) {
+        match terminal_past_call_boundary(block.ops()) {
             Some(SSAOp::Return { .. }) => saw_return = true,
             Some(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {}
             _ => return BTreeSet::new(),
@@ -874,6 +873,7 @@ pub(crate) fn projected_logical_register_storage(
 
 pub(crate) fn reaching_abi_value_in_block(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
     block_addr: u64,
@@ -882,6 +882,7 @@ pub(crate) fn reaching_abi_value_in_block(
 ) -> Option<ValueId> {
     reaching_abi_value_in_block_with_policy(
         function,
+        prep,
         graph,
         machine_context,
         block_addr,
@@ -899,6 +900,7 @@ pub(crate) fn reaching_abi_value_in_block(
 /// but no machine context of its own.
 pub(crate) fn reaching_stack_pointer_before(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     storage: CanonicalStorageId,
     block_addr: u64,
@@ -908,6 +910,7 @@ pub(crate) fn reaching_stack_pointer_before(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
+        prep,
         graph,
         storage,
         policy: ReachingAbiPolicy {
@@ -931,6 +934,7 @@ pub(crate) fn reaching_stack_pointer_before(
 
 pub(crate) fn reaching_abi_value_in_block_with_policy(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
     block_addr: u64,
@@ -941,6 +945,7 @@ pub(crate) fn reaching_abi_value_in_block_with_policy(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
+        prep,
         graph,
         storage,
         policy: ReachingAbiPolicy {
@@ -977,7 +982,7 @@ pub(crate) fn reaching_abi_value_at_end(
     visited: &BTreeMap<u64, usize>,
     memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
-    let boundary = search.function.get_block(block_addr)?.ops.len();
+    let boundary = search.function.get_block(block_addr)?.ops().len();
     if visited.contains_key(&block_addr) {
         return reaching_abi_value_before(search, block_addr, boundary, visited, memo);
     }
@@ -998,6 +1003,7 @@ pub(crate) fn reaching_abi_value_before(
 ) -> Option<ReachingAbiPath> {
     let ReachingAbi {
         function,
+        prep,
         graph,
         storage,
         policy,
@@ -1017,10 +1023,10 @@ pub(crate) fn reaching_abi_value_before(
     r2il::refusal_evidence!(
         "reaching-abi-value",
         "walk ({block_addr:#x}, {scan_start}..{boundary_op_index}) of {} ops for {storage:?}",
-        block.ops.len()
+        block.ops().len()
     );
     for (op_index, op) in block
-        .ops
+        .ops()
         .get(scan_start..boundary_op_index)?
         .iter()
         .enumerate()
@@ -1048,7 +1054,7 @@ pub(crate) fn reaching_abi_value_before(
         if op.dst().is_none() {
             continue;
         }
-        let Some(producer) = graph.inst_id_for_op_site(block_addr, op_index) else {
+        let Some(producer) = block.op_id(op_index).and_then(|id| graph.inst_for_op(id)) else {
             continue;
         };
         let Some(dst_storage) = graph.inst(producer).and_then(|inst| inst.canonical_storage) else {
@@ -1127,7 +1133,7 @@ pub(crate) fn reaching_abi_value_before(
         return Some(ReachingAbiPath::Cycle);
     }
     let phi_insts = block
-        .phis
+        .phis()
         .iter()
         .filter(|phi| phi.canonical_storage == Some(storage))
         .filter_map(|phi| graph.value_id_for_var(&phi.dst))
@@ -1153,7 +1159,7 @@ pub(crate) fn reaching_abi_value_before(
             && phi
                 .inputs
                 .iter()
-                .all(|input| value_is_entry_stack_pointer(function, graph, *input, storage))
+                .all(|input| value_is_entry_stack_pointer(prep, graph, *input, storage))
         {
             return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
         }
@@ -1233,7 +1239,7 @@ pub(crate) fn reaching_abi_value_before(
 /// entry value itself, or one the geometry roots at the entry pointer with no
 /// offset.
 pub(crate) fn value_is_entry_stack_pointer(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     value: ValueId,
     storage: CanonicalStorageId,
@@ -1247,9 +1253,7 @@ pub(crate) fn value_is_entry_stack_pointer(
     {
         return true;
     }
-    function
-        .decompile_prep_facts()
-        .and_then(|facts| facts.entry_stack_address_root_of(&graph_value.var))
+    prep.and_then(|facts| facts.entry_stack_address_root_of(&graph_value.var))
         .is_some_and(|root| root.base == StackAddressBase::StackPointer && root.offset == 0)
 }
 
@@ -1309,7 +1313,7 @@ pub(crate) fn observed_convention_call_result_after_call(
 ) -> Option<CallBoundaryValueFact> {
     let block = function.get_block(block_addr)?;
     let candidates = block
-        .ops
+        .ops()
         .get(call_op_index.checked_add(1)?..)?
         .iter()
         .enumerate()
@@ -1318,9 +1322,8 @@ pub(crate) fn observed_convention_call_result_after_call(
             let SSAOp::CallDefine { dst } = op else {
                 return None;
             };
-            let inst = graph.inst_id_for_op_site(
-                block_addr,
-                call_op_index.checked_add(1)?.checked_add(relative_index)?,
+            let inst = graph.inst_for_op(
+                block.op_id(call_op_index.checked_add(1)?.checked_add(relative_index)?)?,
             )?;
             let graph_inst = graph.inst(inst)?;
             let storage = graph_inst.canonical_storage?;
@@ -1384,7 +1387,7 @@ pub(crate) fn storage_phi_value(
 ) -> Result<Option<ValueId>, ()> {
     let block = function.get_block(block_addr).ok_or(())?;
     let values = block
-        .phis
+        .phis()
         .iter()
         .filter(|phi| phi.canonical_storage == Some(storage))
         .filter_map(|phi| graph.value_id_for_var(&phi.dst))
@@ -1436,15 +1439,11 @@ pub(crate) fn block_entry_storage_state(
 
 pub(crate) fn transfer_storage_state(
     graph: &SsaGraph,
-    block_addr: u64,
-    op_index: usize,
+    op: OpId,
     storage: CanonicalStorageId,
     state: ReachingStorageState,
 ) -> ReachingStorageState {
-    let Some(inst) = graph
-        .inst_id_for_op_site(block_addr, op_index)
-        .and_then(|inst| graph.inst(inst))
-    else {
+    let Some(inst) = graph.inst_for_op(op).and_then(|inst| graph.inst(inst)) else {
         return ReachingStorageState::Conflict;
     };
     let Some(written) = inst.canonical_storage else {
@@ -1486,8 +1485,8 @@ pub(crate) fn reaching_storage_states_before(
             exits.insert(block_addr, ReachingStorageState::Conflict);
             continue;
         };
-        for op_index in 0..block.ops.len() {
-            state = transfer_storage_state(graph, block_addr, op_index, storage, state);
+        for (op, _) in block.sited() {
+            state = transfer_storage_state(graph, op, storage, state);
         }
         if exits.get(&block_addr).copied() == Some(state) {
             continue;
@@ -1502,11 +1501,11 @@ pub(crate) fn reaching_storage_states_before(
         let Some(block) = function.get_block(block_addr) else {
             continue;
         };
-        for op_index in 0..block.ops.len() {
-            if let Some(inst) = graph.inst_id_for_op_site(block_addr, op_index) {
+        for (op, _) in block.sited() {
+            if let Some(inst) = graph.inst_for_op(op) {
                 before.insert(inst, state);
             }
-            state = transfer_storage_state(graph, block_addr, op_index, storage, state);
+            state = transfer_storage_state(graph, op, storage, state);
         }
     }
     before
@@ -1548,7 +1547,7 @@ pub(crate) fn callee_write_spans(
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_id, op) in block.sited() {
             let (target, instruction) = match op {
                 SSAOp::Call {
                     target,
@@ -1573,7 +1572,7 @@ pub(crate) fn callee_write_spans(
             let target =
                 target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), target));
             let id = crate::interproc::InterprocFunctionId(target.unwrap_or(0));
-            let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+            let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
             let mut argument = |index: usize| -> Option<&SSAVar> {
@@ -1777,7 +1776,7 @@ impl FrameBoundaries {
         let saves = function
             .blocks()
             .iter()
-            .flat_map(|block| &block.ops)
+            .flat_map(|block| block.ops())
             .filter_map(|op| {
                 structural_save(facts, graph, op, |storage| {
                     Some(storage) != stack_pointer && effect.preserves(storage)
@@ -1936,7 +1935,7 @@ pub(crate) fn evidenced_stack_roots(
         displaced_from(var).is_some_and(|parent| graph.canonical_storage_for_var(&parent).is_none())
     };
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
                     if stack_pointer_carrier.is_some()
@@ -1993,7 +1992,7 @@ pub(crate) fn evidenced_stack_roots(
         });
     }
     for block in function.blocks() {
-        for op in &block.ops {
+        for op in block.ops() {
             let addr = match op {
                 SSAOp::Load { addr, space, .. }
                 | SSAOp::Store { addr, space, .. }
@@ -2020,7 +2019,7 @@ pub(crate) fn evidenced_stack_roots(
     // offsets into fragments nothing is proven to write.
     let mut spans = BTreeMap::<StackAddressRoot, i64>::new();
     for block in function.blocks() {
-        for (at, op) in block.ops.iter().enumerate() {
+        for (at, op) in block.ops().iter().enumerate() {
             let (addr, width) = match op {
                 SSAOp::Load {
                     addr, dst, space, ..
@@ -2789,13 +2788,13 @@ pub(crate) fn insert_raw_memory_subeffect(
     sink: EffectSink<'_>,
     memory: &MemorySSAFacts,
     objects: &ObjectModel,
-    site: AccessSite,
+    inst: InstId,
     access: RawAccess,
 ) {
-    let provenance = raw_memory_subeffect_provenance(memory, objects, site.inst, access);
+    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, access);
     insert_structured_memory_access(
         sink,
-        site,
+        inst,
         access,
         provenance.object,
         provenance.complete,
@@ -2805,17 +2804,12 @@ pub(crate) fn insert_raw_memory_subeffect(
 
 pub(crate) fn insert_structured_memory_access(
     sink: EffectSink<'_>,
-    site: AccessSite,
+    inst: InstId,
     access: RawAccess,
     object: ObjectId,
     provenance_complete: bool,
     object_offset: Option<i64>,
 ) {
-    let AccessSite {
-        inst,
-        block_addr,
-        op_index,
-    } = site;
     let RawAccess {
         address,
         space,
@@ -2833,8 +2827,6 @@ pub(crate) fn insert_structured_memory_access(
         id,
         StructuredMemoryAccessFact {
             id,
-            block_addr,
-            op_index,
             space,
             object,
             address,

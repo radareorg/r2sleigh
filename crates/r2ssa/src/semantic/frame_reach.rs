@@ -70,11 +70,12 @@ impl FrameReach {
 
     pub(crate) fn of(
         function: &SSAFunction,
+        prep: Option<&crate::DecompilePrepFacts>,
         graph: &SsaGraph,
         model: &ObjectModel,
         machine_context: Option<&SourceMachineContext>,
     ) -> Self {
-        let Some(facts) = function.decompile_prep_facts() else {
+        let Some(facts) = prep else {
             // Nothing places a frame address, so nothing is proven private.
             return Self {
                 whole: true,
@@ -281,14 +282,14 @@ fn call_reaches(
         .map_or(0, |placement| placement.first_offset().max(0));
     let states = reaching_storage_states_before(function, graph, stack_pointer);
     for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_id, op) in block.sited() {
             let instruction = match op {
                 SSAOp::Call { instruction, .. } | SSAOp::CallInd { instruction, .. } => {
                     *instruction
                 }
                 _ => continue,
             };
-            let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+            let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
             let sp = match states.get(&call) {
