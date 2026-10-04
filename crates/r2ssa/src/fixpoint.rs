@@ -59,6 +59,32 @@ pub fn forward<S: Join>(
     pass: &'static str,
     height: usize,
     initial: S,
+    transfer: impl FnMut(u64, &S) -> S,
+) -> Result<Solution<S>, Exhausted> {
+    forward_on_edges(
+        function,
+        pass,
+        height,
+        initial,
+        |state: &mut S, other: &S| {
+            state.join(other);
+        },
+        |_, _, state: &S| state.clone(),
+        transfer,
+    )
+}
+
+/// The same, where an edge says something of its own -- the condition a
+/// branch holds on it -- and the join needs the pass's context: `edge` takes
+/// a predecessor's exit state to what it contributes along one edge, and
+/// `join` folds one contribution into another.
+pub fn forward_on_edges<S: Clone + PartialEq>(
+    function: &SSAFunction,
+    pass: &'static str,
+    height: usize,
+    initial: S,
+    join: impl Fn(&mut S, &S),
+    mut edge: impl FnMut(u64, u64, &S) -> S,
     mut transfer: impl FnMut(u64, &S) -> S,
 ) -> Result<Solution<S>, Exhausted> {
     let order = function.block_addrs();
@@ -91,11 +117,10 @@ pub fn forward<S: Join>(
             let Some(reached) = exit.get(&pred) else {
                 continue;
             };
+            let along = edge(pred, block, reached);
             match &mut state {
-                Some(state) => {
-                    state.join(reached);
-                }
-                None => state = Some(reached.clone()),
+                Some(state) => join(state, &along),
+                None => state = Some(along),
             }
         }
         let Some(state) = state else {

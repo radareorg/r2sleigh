@@ -53,104 +53,52 @@ pub(crate) fn collect_control_domain_facts(
             );
         }
     }
-    let mut states = function
-        .block_addrs()
-        .iter()
-        .copied()
-        .map(|addr| {
-            (
-                addr,
-                Some(ControlDomainState {
-                    guards: guard_universe.clone(),
-                    complete: true,
-                }),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    states.insert(
-        function.root(),
-        Some(ControlDomainState {
-            guards: BTreeSet::new(),
-            complete: true,
-        }),
+    // The guards that hold at each block's entry: the greatest fixpoint
+    // from "every guard holds", solved on the fixpoint driver. An edge adds
+    // the guard its branch holds on it; a merge keeps what every reached
+    // edge agrees on, and an edge from a block not yet reached says nothing,
+    // which is the top this used to initialise every block to. A state only
+    // loses guards or widens a switch arm, so it moves at most once per
+    // guard and twice more; past that the driver refuses, where this used to
+    // stop and keep every block it had not settled.
+    let root = function.root();
+    let entered = ControlDomainState {
+        guards: BTreeSet::new(),
+        complete: true,
+    };
+    let solved = crate::fixpoint::forward_on_edges(
+        function,
+        "control-domains",
+        guard_universe.len().saturating_add(2),
+        entered.clone(),
+        |state: &mut ControlDomainState, other: &ControlDomainState| {
+            state.guards = meet_control_guards(&state.guards, &other.guards, &switch_arity);
+            state.complete &= other.complete;
+        },
+        |predecessor, block, state: &ControlDomainState| {
+            // Where control enters the function nothing is guarded yet,
+            // however a later edge returns to it.
+            if block == root {
+                return entered.clone();
+            }
+            let mut along = state.clone();
+            let (guard, edge_complete) =
+                control_guard_for_edge(function, predicates, predecessor, block);
+            if let Some(guard) = guard {
+                insert_control_guard(&mut along.guards, guard, &switch_arity);
+            }
+            along.complete &= edge_complete;
+            along
+        },
+        |_, state| state.clone(),
     );
-
-    // A worklist over the blocks, reading the states as they stand.
-    //
-    // This used to sweep every block once per round and copy the whole state
-    // map at the top of each round so that a round read the previous round's
-    // answers. The map holds one guard set per block, initialised to the whole
-    // universe, so a copy is the function's guard count times its block count,
-    // and a five-hundred-block function paid it once per round. Reading the
-    // current answers instead is the same fixed point -- every state only ever
-    // loses guards, the transfer over an edge is monotone in its input, and a
-    // monotone decreasing iteration from the top element reaches the same
-    // greatest fixed point whatever order the equations are applied in -- and
-    // a block is only revisited when a predecessor actually changed.
-    //
-    // The bound is the same one the round count was derived from: a state can
-    // change only by losing a guard or by widening a switch arm, so the number
-    // of updates is bounded by the blocks times the height of the lattice.
-    let update_limit = function
-        .num_blocks()
-        .saturating_mul(guard_universe.len().saturating_add(2))
-        .max(8);
-    let mut worklist =
-        std::collections::VecDeque::from_iter(function.block_addrs().iter().copied());
-    let mut queued = function
-        .block_addrs()
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let mut updates = 0usize;
-    while let Some(block_addr) = worklist.pop_front() {
-        queued.remove(&block_addr);
-        if block_addr == function.root() || updates >= update_limit {
-            continue;
+    let mut states = match solved {
+        Ok(solved) => solved.entry,
+        Err(exhausted) => {
+            r2il::refusal_evidence!("control-domains", "{exhausted}");
+            BTreeMap::new()
         }
-        let predecessors = function.predecessors(block_addr);
-        let state = if predecessors.is_empty() {
-            Some(ControlDomainState {
-                guards: BTreeSet::new(),
-                complete: false,
-            })
-        } else {
-            let mut incoming = Vec::new();
-            for predecessor in predecessors {
-                let Some(mut state) = states.get(&predecessor).cloned().flatten() else {
-                    continue;
-                };
-                let (guard, edge_complete) =
-                    control_guard_for_edge(function, predicates, predecessor, block_addr);
-                if let Some(guard) = guard {
-                    insert_control_guard(&mut state.guards, guard, &switch_arity);
-                }
-                state.complete &= edge_complete;
-                incoming.push(state);
-            }
-            if incoming.is_empty() {
-                continue;
-            }
-            let mut guards = incoming[0].guards.clone();
-            for state in &incoming[1..] {
-                guards = meet_control_guards(&guards, &state.guards, &switch_arity);
-            }
-            Some(ControlDomainState {
-                guards,
-                complete: incoming.iter().all(|state| state.complete),
-            })
-        };
-        if states.get(&block_addr) == Some(&state) {
-            continue;
-        }
-        states.insert(block_addr, state);
-        updates += 1;
-        for successor in function.successors(block_addr) {
-            if queued.insert(successor) {
-                worklist.push_back(successor);
-            }
-        }
-    }
+    };
 
     let mut loops_by_block = BTreeMap::<u64, Vec<LoopId>>::new();
     for (loop_id, loop_fact) in &structured.loops {
@@ -170,13 +118,11 @@ pub(crate) fn collect_control_domain_facts(
     let mut domains = BTreeMap::new();
     let mut by_block = BTreeMap::new();
     for &block_addr in function.block_addrs() {
-        let state = states
-            .remove(&block_addr)
-            .flatten()
-            .unwrap_or(ControlDomainState {
-                guards: BTreeSet::new(),
-                complete: false,
-            });
+        // A block nothing reaches, or a pass that refused, claims no guard.
+        let state = states.remove(&block_addr).unwrap_or(ControlDomainState {
+            guards: BTreeSet::new(),
+            complete: false,
+        });
         let guards = state.guards.into_iter().collect::<Vec<_>>();
         let loops = loops_by_block.remove(&block_addr).unwrap_or_default();
         let key = (guards.clone(), loops.clone(), state.complete);
