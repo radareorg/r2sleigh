@@ -2070,7 +2070,7 @@ fn test_raw_ssa_construction_is_deterministic_across_runs() {
 }
 
 #[test]
-fn test_find_def_use() {
+fn the_graph_names_a_definition_and_its_readers() {
     let blocks = vec![
         R2ILBlock {
             addr: 0x1000,
@@ -2097,17 +2097,15 @@ fn test_find_def_use() {
 
     let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
 
-    // Find definition of reg:0 v1
+    // The graph answers which operation defines reg:0 v1 and who reads it.
     let var = SSAVar::new("reg:0", 1, 8);
-    let def = func.find_def(&var);
-    assert!(def.is_some());
-    let (addr, loc) = def.unwrap();
-    assert_eq!(addr, 0x1000);
-    assert!(matches!(loc, DefLocation::Op(0)));
-
-    // Find uses of reg:0 v1
-    let uses = func.find_uses(&var);
-    assert!(!uses.is_empty());
+    let graph = crate::graph::SsaGraph::from_function(&func);
+    assert!(matches!(
+        graph.defining_op(&var),
+        Some(SSAOp::Copy { dst, .. }) if *dst == var
+    ));
+    let value = graph.value_id_for_var(&var).unwrap();
+    assert!(!graph.use_sites(value).is_empty());
 }
 
 #[test]

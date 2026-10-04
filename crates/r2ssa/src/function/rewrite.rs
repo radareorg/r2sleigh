@@ -238,7 +238,6 @@ impl SSAFunction {
                 *op = crate::optimize::map_sources_in_op(op, &substitute);
             }
         }
-        self.invalidate_query_index();
     }
 
     pub(crate) fn mint_entry_lane_projections(&mut self, machine_context: &SourceMachineContext) {

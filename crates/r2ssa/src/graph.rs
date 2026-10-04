@@ -773,6 +773,16 @@ impl SsaGraph {
         self.def_of.get(id.0 as usize).copied().flatten()
     }
 
+    /// The operation that defines `var`, when an operation rather than a
+    /// phi does.
+    pub fn defining_op(&self, var: &SSAVar) -> Option<&SSAOp> {
+        let def = self.def_inst(self.value_id_for_var(var)?)?;
+        match &self.inst(def)?.payload {
+            InstPayload::Op(op) => Some(op),
+            InstPayload::Phi { .. } => None,
+        }
+    }
+
     pub fn use_sites(&self, id: ValueId) -> &[UseSite] {
         let start = self.use_offsets.get(id.0 as usize).copied().unwrap_or(0) as usize;
         let end = self

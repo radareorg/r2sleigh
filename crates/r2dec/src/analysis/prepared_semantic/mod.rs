@@ -4,7 +4,6 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use r2ssa::function::DefLocation;
 use r2ssa::{
     CompareKind, InstId, MemoryLocation, ObjectKind, SSAOp, SSAVar, SsaArtifact, ValueId,
     ValueOwner,
@@ -1558,12 +1557,7 @@ fn reconstruct_zero_compare_from_nonzero_def(
         return None;
     }
 
-    let (block_addr, DefLocation::Op(op_idx)) = inputs.prepared.function().find_def(candidate)?
-    else {
-        return None;
-    };
-    let block = inputs.prepared.function().get_block(block_addr)?;
-    let def = block.ops().get(op_idx)?;
+    let def = inputs.prepared.graph().defining_op(candidate)?;
 
     match def {
         SSAOp::Copy { src, .. }
@@ -1650,11 +1644,7 @@ fn compare_def_expr_for_predicate_operand(
         return None;
     }
 
-    let (block_addr, DefLocation::Op(op_idx)) = inputs.prepared.function().find_def(var)? else {
-        return None;
-    };
-    let block = inputs.prepared.function().get_block(block_addr)?;
-    let op = block.ops().get(op_idx)?;
+    let op = inputs.prepared.graph().defining_op(var)?;
 
     match op {
         SSAOp::Copy { src, .. }
@@ -1696,10 +1686,7 @@ fn compare_def_expr_for_predicate_operand(
         SSAOp::IntLessEqual { a, b, .. } | SSAOp::IntSLessEqual { a, b, .. } => {
             compare_expr_for_sources(symbols, view, inputs, a, b, BinaryOp::Le)
         }
-        _ => {
-            let _ = block;
-            None
-        }
+        _ => None,
     }
 }
 

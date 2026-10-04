@@ -2530,22 +2530,6 @@ pub struct SSAFunction {
     /// function was lifted and kept through every rewrite by id
     /// (doc/adr-written-lanes.md).
     written: crate::lanes::Written,
-    /// Structural def/use index for repeated SSA queries.
-    query_index: RwLock<Option<SsaQueryIndex>>,
-}
-
-/// Where every variable is defined and read, without saying so twice.
-///
-/// The function already holds each variable once, at the site that names it,
-/// so an index keyed by an owned copy of the variable pays for a second name
-/// per definition and a third per use. These are the sites alone, ordered by
-/// the variable they mention, and a query binary-searches them and reads the
-/// variable back out of the block. One name, one owner, and the answers and
-/// their order are the ones the owned index gave.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct SsaQueryIndex {
-    defs: Vec<(u32, DefLocation)>,
-    uses: Vec<(u32, UseLocation)>,
 }
 
 /// Reads that see one content: loads of the same bytes of one object -- the
@@ -2749,13 +2733,11 @@ impl SSAFunction {
         if reorder {
             self.reorder_from_cfg();
         }
-        self.invalidate_query_index();
     }
 
     /// One block, open for change with the arena; for applying a plan.
     fn block_for_change(&mut self, addr: u64) -> Option<BlockMut<'_>> {
         let index = *self.block_index.get(&addr)? as usize;
-        self.invalidate_query_index();
         self.blocks.block_mut(index)
     }
 
@@ -2791,7 +2773,6 @@ impl SSAFunction {
     /// The control-flow graph, open for a test that corrupts it to show the
     /// validator refuses what follows.
     pub(crate) fn corrupt_cfg(&mut self) -> &mut CFG {
-        self.invalidate_query_index();
         self.natural_loops = std::sync::OnceLock::new();
         &mut self.cfg
     }
@@ -2804,7 +2785,6 @@ impl SSAFunction {
         self.block_order.retain(|&a| a != addr);
         self.block_index = block_index_of(&self.blocks);
         self.cfg.remove_block(addr);
-        self.invalidate_query_index();
     }
 }
 
@@ -2837,7 +2817,6 @@ impl Clone for SSAFunction {
             formal_roots: self.formal_roots.clone(),
             entry_lanes: self.entry_lanes.clone(),
             written: self.written.clone(),
-            query_index: RwLock::new(None),
         }
     }
 }
@@ -3543,67 +3522,6 @@ impl SSAFunction {
         vars
     }
 
-    /// Find the definition of a variable.
-    ///
-    /// Returns the block address and operation index where the variable is defined.
-    pub fn find_def(&self, var: &SSAVar) -> Option<(u64, DefLocation)> {
-        self.ensure_query_index();
-        self.query_index
-            .read()
-            .expect("SSA query index lock poisoned")
-            .as_ref()
-            .and_then(|index| index.find_def(&self.blocks, var))
-    }
-
-    /// Find all uses of a variable.
-    ///
-    /// Returns a list of (block address, use location) pairs.
-    pub fn find_uses(&self, var: &SSAVar) -> Vec<(u64, UseLocation)> {
-        self.ensure_query_index();
-        self.query_index
-            .read()
-            .expect("SSA query index lock poisoned")
-            .as_ref()
-            .map(|index| index.find_uses(&self.blocks, var))
-            .unwrap_or_default()
-    }
-
-    /// Return whether a value reaches any use other than a pure SSA carrier.
-    ///
-    /// Copy destinations and phi destinations are followed transitively. This
-    /// makes dead carrier cycles removable without relying on register names,
-    /// while conservatively treating malformed use locations as meaningful.
-    pub fn has_noncarrier_use(&self, var: &SSAVar) -> bool {
-        let mut pending = vec![var.clone()];
-        let mut visited = HashSet::new();
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            for (block_addr, location) in self.find_uses(&current) {
-                let Some(block) = self.get_block(block_addr) else {
-                    return true;
-                };
-                let carrier = match location {
-                    UseLocation::Phi { phi_idx, .. } => {
-                        block.phis().get(phi_idx).map(|phi| phi.dst.clone())
-                    }
-                    UseLocation::Op { op_idx, .. } => {
-                        block.ops().get(op_idx).and_then(|op| match op {
-                            SSAOp::Copy { dst, .. } => Some(dst.clone()),
-                            _ => None,
-                        })
-                    }
-                };
-                let Some(carrier) = carrier else {
-                    return true;
-                };
-                pending.push(carrier);
-            }
-        }
-        false
-    }
-
     /// Iterate over all source uses in all blocks.
     pub fn for_each_source<F: FnMut(u64, SourceRef<'_>)>(&self, mut f: F) {
         for block in self.blocks() {
@@ -3645,29 +3563,6 @@ impl SSAFunction {
     /// Each entry-lane formal at the low end of its root, with the root.
     pub(crate) fn entry_lanes(&self) -> impl Iterator<Item = (&SSAVar, &SSAVar)> {
         self.entry_lanes.iter()
-    }
-
-    fn ensure_query_index(&self) {
-        if self
-            .query_index
-            .read()
-            .expect("SSA query index lock poisoned")
-            .is_some()
-        {
-            return;
-        }
-        let index = SsaQueryIndex::build(self);
-        *self
-            .query_index
-            .write()
-            .expect("SSA query index lock poisoned") = Some(index);
-    }
-
-    fn invalidate_query_index(&self) {
-        *self
-            .query_index
-            .write()
-            .expect("SSA query index lock poisoned") = None;
     }
 
     /// Print the function in a human-readable format.
@@ -4060,94 +3955,6 @@ pub enum UseLocation {
     Phi { phi_idx: usize, src_idx: usize },
     /// Used in an operation.
     Op { op_idx: usize, src_idx: usize },
-}
-
-/// The variable a definition site names, read back out of the blocks.
-fn defined_var<'a>(blocks: &'a [SSABlock], site: &(u32, DefLocation)) -> Option<&'a SSAVar> {
-    let block = blocks.get(site.0 as usize)?;
-    match site.1 {
-        DefLocation::Phi(phi_idx) => block.phis().get(phi_idx).map(|phi| &phi.dst),
-        DefLocation::Op(op_idx) => block.ops().get(op_idx)?.dst(),
-    }
-}
-
-/// The variable a use site reads, read back out of the blocks.
-fn used_var<'a>(blocks: &'a [SSABlock], site: &(u32, UseLocation)) -> Option<&'a SSAVar> {
-    let block = blocks.get(site.0 as usize)?;
-    match site.1 {
-        UseLocation::Phi { phi_idx, src_idx } => block
-            .phis()
-            .get(phi_idx)?
-            .sources
-            .get(src_idx)
-            .map(|(_, src)| src),
-        UseLocation::Op { op_idx, src_idx } => {
-            block.ops().get(op_idx)?.sources().get(src_idx).copied()
-        }
-    }
-}
-
-impl SsaQueryIndex {
-    fn build(function: &SSAFunction) -> Self {
-        let blocks = function.blocks();
-        let mut defs = Vec::new();
-        let mut uses = Vec::new();
-        for (index, block) in blocks.iter().enumerate() {
-            let index = u32::try_from(index).unwrap_or(u32::MAX);
-            for (phi_idx, phi) in block.phis().iter().enumerate() {
-                defs.push((index, DefLocation::Phi(phi_idx)));
-                for src_idx in 0..phi.sources.len() {
-                    uses.push((index, UseLocation::Phi { phi_idx, src_idx }));
-                }
-            }
-            for (op_idx, op) in block.ops().iter().enumerate() {
-                if op.dst().is_some() {
-                    defs.push((index, DefLocation::Op(op_idx)));
-                }
-                for src_idx in 0..op.sources().len() {
-                    uses.push((index, UseLocation::Op { op_idx, src_idx }));
-                }
-            }
-        }
-        // Ordered by the variable and then by the site, so a query's range is
-        // contiguous and the sites inside it arrive in the order a walk of the
-        // blocks would have produced.
-        defs.sort_by(|left, right| {
-            defined_var(blocks, left)
-                .cmp(&defined_var(blocks, right))
-                .then_with(|| left.cmp(right))
-        });
-        uses.sort_by(|left, right| {
-            used_var(blocks, left)
-                .cmp(&used_var(blocks, right))
-                .then_with(|| left.cmp(right))
-        });
-        Self { defs, uses }
-    }
-
-    /// The last site defining `var`, which is the one an insert-ordered map
-    /// kept when a malformed function defines a variable twice.
-    fn find_def(&self, blocks: &[SSABlock], var: &SSAVar) -> Option<(u64, DefLocation)> {
-        let start = self
-            .defs
-            .partition_point(|site| defined_var(blocks, site) < Some(var));
-        let site = self.defs[start..]
-            .iter()
-            .take_while(|site| defined_var(blocks, site) == Some(var))
-            .last()?;
-        Some((blocks.get(site.0 as usize)?.addr, site.1))
-    }
-
-    fn find_uses(&self, blocks: &[SSABlock], var: &SSAVar) -> Vec<(u64, UseLocation)> {
-        let start = self
-            .uses
-            .partition_point(|site| used_var(blocks, site) < Some(var));
-        self.uses[start..]
-            .iter()
-            .take_while(|site| used_var(blocks, site) == Some(var))
-            .filter_map(|site| Some((blocks.get(site.0 as usize)?.addr, site.1)))
-            .collect()
-    }
 }
 
 impl SSABlock {

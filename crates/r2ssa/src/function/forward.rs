@@ -80,7 +80,6 @@ impl SSAFunction {
             }
         }
         if stats.reads_forwarded > 0 {
-            self.invalidate_query_index();
             r2il::refusal_evidence!(
                 "copies-forwarded",
                 "{:#x}: {} reads now name the value a copy carried",

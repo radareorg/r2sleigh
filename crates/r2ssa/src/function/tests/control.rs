@@ -1196,49 +1196,6 @@ fn public_ssa_path_handles_a_deep_cycle_and_reports_its_back_edge() {
 }
 
 #[test]
-fn noncarrier_use_follows_copy_and_phi_chains() {
-    let blocks = [R2ILBlock::new(0x1000, 4), R2ILBlock::new(0x1004, 4)];
-    let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function");
-    let source = SSAVar::new("flag", 1, 1);
-    let copied = SSAVar::new("flag", 2, 1);
-    let merged = SSAVar::new("flag", 3, 1);
-    let forwarded = SSAVar::new("flag", 4, 1);
-    func.edit_block(0x1000).expect("copy block").replace_ops(
-        crate::Pass::Fixture,
-        vec![SSAOp::Copy {
-            dst: copied.clone(),
-            src: source.clone(),
-        }],
-    );
-    let mut merge = func.edit_block(0x1004).expect("merge block");
-    merge.replace_phis(
-        crate::Pass::Fixture,
-        vec![PhiNode {
-            dst: merged.clone(),
-            sources: vec![(0x1000, copied)],
-            canonical_storage: None,
-        }],
-    );
-    merge.replace_ops(
-        crate::Pass::Fixture,
-        vec![SSAOp::Copy {
-            dst: forwarded.clone(),
-            src: merged,
-        }],
-    );
-
-    assert!(!func.has_noncarrier_use(&source));
-
-    func.edit_block(0x1004).expect("consumer block").push_op(
-        SSAOp::Return { target: forwarded },
-        None,
-        crate::Pass::Fixture,
-    );
-
-    assert!(func.has_noncarrier_use(&source));
-}
-
-#[test]
 fn test_from_blocks_default_runs_optimization() {
     let blocks = vec![
         R2ILBlock {

@@ -41,7 +41,6 @@ impl SSAFunction {
             formal_roots: BTreeMap::new(),
             entry_lanes: BTreeMap::new(),
             written: crate::lanes::Written::default(),
-            query_index: RwLock::new(None),
         }
     }
 
@@ -570,7 +569,6 @@ impl SSAFunction {
             formal_roots: BTreeMap::new(),
             entry_lanes: BTreeMap::new(),
             written: crate::lanes::Written::default(),
-            query_index: RwLock::new(None),
         };
         function.zero_scratch_insert_roots(abi_carriers);
         // The validator answers with a typed integrity error naming the block
