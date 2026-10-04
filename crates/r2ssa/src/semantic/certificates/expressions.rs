@@ -290,6 +290,24 @@ pub(crate) fn collect_renderable_expression_values(
         }
     }
 
+    // A loop phi is renderable once what enters it is and its back edge is
+    // modulo itself, which reads the back edge's whole expression; so the
+    // loop phis are tested again after each propagation. A round either adds
+    // one or ends this, so there are at most one more round than loop phis,
+    // and a round tests only those.
+    let mut loop_phis = graph
+        .insts
+        .iter()
+        .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
+        .filter(|inst| {
+            graph.block(inst.block).is_some_and(|block| {
+                structured
+                    .loops
+                    .values()
+                    .any(|fact| fact.header == block.addr)
+            })
+        })
+        .collect::<Vec<_>>();
     loop {
         while let Some(value) = ready.pop_front() {
             for use_site in graph.use_sites(value) {
@@ -310,7 +328,11 @@ pub(crate) fn collect_renderable_expression_values(
         }
 
         let mut added_loop_phi = false;
-        for inst in &graph.insts {
+        loop_phis.retain(|inst| {
+            inst.output
+                .is_some_and(|output| !renderable.contains(&output))
+        });
+        for inst in &loop_phis {
             let Some(output) = inst.output else {
                 continue;
             };

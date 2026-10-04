@@ -106,15 +106,18 @@ fn dispatch_operations(
     }) else {
         return Vec::new();
     };
-    let mut found = vec![transfer];
-    loop {
-        let candidates: Vec<ValueId> = found
-            .iter()
-            .filter_map(|inst| graph.inst(*inst))
-            .flat_map(|inst| inst.inputs.iter().copied())
-            .collect();
-        let mut grew = false;
-        for value in candidates {
+    // The operations of this block the transfer is computed by, other than
+    // the selector: a definition joins once every use of its value is an
+    // operation already found. A worklist: each value keeps the uses not
+    // yet found, and its definition joins when the last one is.
+    let mut found = BTreeSet::from([transfer]);
+    let mut outstanding = BTreeMap::<ValueId, BTreeSet<InstId>>::new();
+    let mut pending = vec![transfer];
+    while let Some(inst) = pending.pop() {
+        let Some(inputs) = graph.inst(inst).map(|inst| inst.inputs.clone()) else {
+            continue;
+        };
+        for value in inputs {
             if selector == Some(value) {
                 continue;
             }
@@ -123,22 +126,23 @@ fn dispatch_operations(
             };
             if found.contains(&definition)
                 || graph.inst(definition).map(|inst| inst.block) != Some(block.id)
-                || !graph
-                    .use_sites(value)
-                    .iter()
-                    .all(|site| found.contains(&site.inst))
             {
                 continue;
             }
-            found.push(definition);
-            grew = true;
-        }
-        if !grew {
-            break;
+            let uses = outstanding.entry(value).or_insert_with(|| {
+                graph
+                    .use_sites(value)
+                    .iter()
+                    .map(|site| site.inst)
+                    .collect()
+            });
+            uses.remove(&inst);
+            if uses.iter().all(|user| found.contains(user)) && found.insert(definition) {
+                pending.push(definition);
+            }
         }
     }
-    found.sort_unstable();
-    found
+    found.into_iter().collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
