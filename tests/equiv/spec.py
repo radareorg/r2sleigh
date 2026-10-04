@@ -1,4 +1,4 @@
-"""How to call a function of the source, from its DWARF: the SysV x86-64 view.
+"""How to call a function of the source, from its DWARF, under a target's calling convention.
 
 A :class:`CallSpec` says which register or stack word carries each parameter,
 what kind of value it is (so the vectors can build one), and at which class and
@@ -7,6 +7,12 @@ width the return is compared. Anything the register-level thunk does not model
 definition, a function pointer with no function of its type to point at -- is
 ``unsupported`` with the reason, which the gate records as its own status
 rather than calling it wrongly.
+
+The convention is a :class:`target.Abi`: SysV x86-64 (six integer registers,
+eight vector registers, then stack words) or AAPCS64 (eight of each, then
+stack words). Both give a scalar argument past the registers one 8-byte stack
+word, and both return an integer in the first one or two integer registers and
+a float in the first vector register, so the rest of the spec is shared.
 """
 
 from __future__ import annotations
@@ -14,9 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from dwarf import Dwarf, Subprogram
+from target import SYSV_X86_64, Abi
 
-INTEGER_REGISTERS = 6
-SSE_REGISTERS = 8
 MAX_STACK_WORDS = 16
 
 
@@ -37,7 +42,7 @@ class Param:
     size: int
     signed: bool = False
     spelling: str = ""
-    register: str = ""  # rdi.. / xmm0.. / stack0..
+    register: str = ""  # an Abi register (rdi.., xmm0.. / x0.., v0..) or stack0..
     pointee: Pointee | None = None
     targets: list[int] = field(default_factory=list)
 
@@ -63,9 +68,6 @@ class CallSpec:
     def describe(self) -> str:
         args = ", ".join(f"{p.spelling or p.kind} {p.name}@{p.register}" for p in self.params)
         return f"{self.ret_spelling} {self.name}({args})"
-
-
-_INT_REGISTERS = ("rdi", "rsi", "rdx", "rcx", "r8", "r9")
 
 
 def _is_plain_char(dwarf: Dwarf, offset: int | None) -> bool:
@@ -97,8 +99,9 @@ def _pointee(dwarf: Dwarf, target: int | None) -> Pointee | str:
     return f"pointer to {info.reason or info.kind}"
 
 
-def call_spec(dwarf: Dwarf, sub: Subprogram, functions: list[Subprogram]) -> CallSpec:
-    """The call the thunk makes for ``sub``, or the reason it cannot make one."""
+def call_spec(dwarf: Dwarf, sub: Subprogram, functions: list[Subprogram],
+              abi: Abi = SYSV_X86_64) -> CallSpec:
+    """The call the thunk makes for ``sub`` under ``abi``, or the reason it cannot make one."""
     spec = CallSpec(
         name=sub.name,
         address=sub.low_pc,
@@ -179,11 +182,11 @@ def call_spec(dwarf: Dwarf, sub: Subprogram, functions: list[Subprogram]) -> Cal
             spec.unsupported = f"parameter {name}: {info.reason or info.kind}"
             return spec
 
-        if sse and used_sse < SSE_REGISTERS:
-            param.register = f"xmm{used_sse}"
+        if sse and used_sse < len(abi.fp_registers):
+            param.register = abi.fp_registers[used_sse]
             used_sse += 1
-        elif not sse and used_int < INTEGER_REGISTERS:
-            param.register = _INT_REGISTERS[used_int]
+        elif not sse and used_int < len(abi.int_registers):
+            param.register = abi.int_registers[used_int]
             used_int += 1
         else:
             if used_stack >= MAX_STACK_WORDS:

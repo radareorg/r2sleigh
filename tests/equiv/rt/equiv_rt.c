@@ -11,9 +11,10 @@
  *     for every run (the original at its link address, then each rendering
  *     loaded from its shared object), one child is forked from that same
  *     parent state and calls its function through the register-level thunk
- *     (call_x86_64.S) with the vector's machine entry state;
+ *     (call_x86_64.S, call_aarch64.S) with the vector's machine entry state;
  *     in a rendering's child the rendering first REPLACES the graded function
- *     in the image: every byte of the original's code becomes int3, a call
+ *     in the image: every instruction of the original's code becomes a trap
+ *     (int3 on x86-64, brk on AArch64), a call
  *     into its entry from the program (a caller of the function, a function
  *     pointer, a mutual recursion) is redirected to the rendering, and control
  *     that reaches the original's code from the rendering itself (delegation)
@@ -35,6 +36,11 @@
  *   struct job_pair     [n_pairs]
  *   n_vectors x { struct job_vector, n_patches x { struct job_patch, bytes
  *                 padded to 8 } }
+ *
+ * Everything that depends on the machine -- the entry state the thunk loads,
+ * where a signal context keeps the program counter and the caller's return
+ * address, and the trap that fills the guarded code -- is in the one block
+ * below; the rest of the runtime is the same on every target.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -59,6 +65,11 @@
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
 
+/* ------------------------------------------------------------- machine */
+
+#if defined(__x86_64__)
+
+/* SysV x86-64: rdi..r9, xmm0..xmm7, AL, then stack words (call_x86_64.S). */
 struct equiv_regs {
     uint64_t gpr[6];
     uint8_t xmm[8][16];
@@ -67,11 +78,101 @@ struct equiv_regs {
     uint64_t stack[16];
 };
 
+#define RET_INT_NAME "rax"
+#define RET_FP_NAME "xmm0"
+
+static uint64_t context_pc(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+}
+
+static void context_set_pc(ucontext_t *uc, uint64_t pc)
+{
+    uc->uc_mcontext.gregs[REG_RIP] = (greg_t)pc;
+}
+
+/* int3 reports the byte after it. */
+static uint64_t trap_address(const ucontext_t *uc)
+{
+    return context_pc(uc) - 1;
+}
+
+/* At a function's entry the return address is the word at the stack pointer. */
+static uint64_t entry_return_address(const ucontext_t *uc)
+{
+    return *(const uint64_t *)(uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+}
+
+/* int3 over every byte: any byte control can reach traps. */
+static void trap_fill(uint8_t *start, size_t length)
+{
+    memset(start, 0xcc, length);
+}
+
+#elif defined(__aarch64__)
+
+/* AAPCS64: x0..x7, v0..v7, then stack words (call_aarch64.S). */
+struct equiv_regs {
+    uint64_t gpr[8];
+    uint8_t v[8][16];
+    uint64_t n_stack;
+    uint64_t stack[16];
+};
+
+#define RET_INT_NAME "x0"
+#define RET_FP_NAME "v0"
+
+static uint64_t context_pc(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.pc;
+}
+
+static void context_set_pc(ucontext_t *uc, uint64_t pc)
+{
+    uc->uc_mcontext.pc = pc;
+}
+
+/* brk reports its own address. */
+static uint64_t trap_address(const ucontext_t *uc)
+{
+    return context_pc(uc);
+}
+
+/* At a function's entry the return address is the link register, x30. */
+static uint64_t entry_return_address(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.regs[30];
+}
+
+/* brk #0 over every instruction word: instructions are 4-byte aligned, so any
+ * instruction control can reach traps. A tail shorter than a word (a symbol
+ * size that is not a multiple of four) holds no instruction. */
+static void trap_fill(uint8_t *start, size_t length)
+{
+    const uint32_t brk = 0xd4200000u;
+    for (size_t at = 0; at + 4 <= length; at += 4)
+        memcpy(start + at, &brk, 4);
+}
+
+#else
+#error "equiv_rt models x86-64 and AArch64 only"
+#endif
+
+/* vectors.py packs struct equiv_regs from target.Abi.regs_format(), and
+ * test_equiv.py holds the job's vectors to these sizes. */
+#if defined(__x86_64__)
+_Static_assert(sizeof(struct equiv_regs) == 320, "the x86-64 job layout");
+#else
+_Static_assert(sizeof(struct equiv_regs) == 328, "the AArch64 job layout");
+#endif
+
+/* The first two integer result registers (rax rdx, x0 x1) and the first two
+ * vector result registers (xmm0 xmm1, v0 v1), as the thunk stores them. */
 struct equiv_ret {
-    uint64_t rax;
-    uint64_t rdx;
-    uint8_t xmm0[16];
-    uint8_t xmm1[16];
+    uint64_t r0;
+    uint64_t r1;
+    uint8_t f0[16];
+    uint8_t f1[16];
 };
 
 extern void equiv_call(void *fn, const struct equiv_regs *in, struct equiv_ret *out);
@@ -323,7 +424,7 @@ static void child_fault(int sig, siginfo_t *info, void *context)
     if (slot && slot->fault_signal == 0) {
         ucontext_t *uc = context;
         slot->fault_signal = sig;
-        slot->fault_pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+        slot->fault_pc = context_pc(uc);
         slot->fault_addr = (uint64_t)(uintptr_t)info->si_addr;
         Dl_info where;
         if (dladdr((void *)(uintptr_t)slot->fault_pc, &where) && where.dli_fname) {
@@ -344,11 +445,11 @@ static uintptr_t object_base(const void *address)
     return 0;
 }
 
-/* SIGTRAP in a rendering's child: an int3 of the guarded original. */
+/* SIGTRAP in a rendering's child: a trap of the guarded original. */
 static void child_guard(int sig, siginfo_t *info, void *context)
 {
     ucontext_t *uc = context;
-    uint64_t pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP] - 1; /* int3 reports the next byte */
+    uint64_t pc = trap_address(uc);
     uint64_t start = g_head.guard_start, end = start + g_head.guard_length;
     struct slot_head *slot = g_child_slot;
     if (pc < start || pc >= end || !slot) {
@@ -361,12 +462,12 @@ static void child_guard(int sig, siginfo_t *info, void *context)
     int hit = GUARD_BODY;
     uint64_t caller = 0;
     if (pc == start) {
-        caller = *(const uint64_t *)(uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+        caller = entry_return_address(uc);
         uintptr_t base = object_base((const void *)(uintptr_t)caller);
         if (base != g_guard_own_base && base != g_guard_rt_base) {
             /* The program called the function: it is the rendering now. The
              * registers and the stack are the caller's, exactly as a jump. */
-            uc->uc_mcontext.gregs[REG_RIP] = (greg_t)(uintptr_t)g_guard_target;
+            context_set_pc(uc, (uint64_t)(uintptr_t)g_guard_target);
             return;
         }
         hit = GUARD_DELEGATED;
@@ -388,9 +489,9 @@ static void child_guard(int sig, siginfo_t *info, void *context)
     raise(SIGTRAP);
 }
 
-/* Make the rendering the graded function: int3 over every byte of the
- * original's code (a private copy of the page, this child's alone), and
- * SIGTRAP routed to child_guard. */
+/* Make the rendering the graded function: a trap over the original's code (a
+ * private copy of the page, this child's alone), and SIGTRAP routed to
+ * child_guard. */
 static int guard_install(struct run_state *run)
 {
     if (g_head.guard_length == 0)
@@ -400,9 +501,11 @@ static int guard_install(struct run_state *run)
     uintptr_t low = start & ~(page - 1), high = (end + page - 1) & ~(page - 1);
     if (mprotect((void *)low, high - low, PROT_READ | PROT_WRITE) != 0)
         return errno;
-    memset((void *)start, 0xcc, g_head.guard_length);
+    trap_fill((uint8_t *)start, g_head.guard_length);
     if (mprotect((void *)low, high - low, PROT_READ | PROT_EXEC) != 0)
         return errno;
+    /* No stale copy of the old instructions may run (a no-op on x86-64). */
+    __builtin___clear_cache((char *)start, (char *)end);
     g_guard_target = run->fn;
     g_guard_own_base = object_base(run->fn);
     g_guard_rt_base = object_base((const void *)guard_install);
@@ -620,23 +723,23 @@ static void compare_runs(const struct run_state *a, const struct run_state *b)
         switch (g_head.ret_kind) {
         case RET_INT:
             width = g_head.ret_bytes;
-            memcpy(va, &ra->rax, width);
-            memcpy(vb, &rb->rax, width);
+            memcpy(va, &ra->r0, width);
+            memcpy(vb, &rb->r0, width);
             differs = memcmp(va, vb, width) != 0;
             break;
         case RET_INT128:
             width = 16;
-            memcpy(va, &ra->rax, 8);
-            memcpy(va + 8, &ra->rdx, 8);
-            memcpy(vb, &rb->rax, 8);
-            memcpy(vb + 8, &rb->rdx, 8);
+            memcpy(va, &ra->r0, 8);
+            memcpy(va + 8, &ra->r1, 8);
+            memcpy(vb, &rb->r0, 8);
+            memcpy(vb + 8, &rb->r1, 8);
             differs = memcmp(va, vb, width) != 0;
             break;
         case RET_F32:
         case RET_F64:
             width = g_head.ret_kind == RET_F32 ? 4 : 8;
-            memcpy(va, ra->xmm0, width);
-            memcpy(vb, rb->xmm0, width);
+            memcpy(va, ra->f0, width);
+            memcpy(vb, rb->f0, width);
             /* Two NaNs are the same answer whatever their payload. */
             differs = memcmp(va, vb, width) != 0
                 && !(is_nan_bits(va, (int)width) && is_nan_bits(vb, (int)width));
@@ -716,10 +819,10 @@ static void emit_run(size_t index, const struct run_state *run)
         }
     }
     if (run->outcome == OUT_RETURN) {
-        fputs(",\"rax\":", g_out);
-        json_hex(g_out, (const uint8_t *)&run->slot->ret.rax, 8);
-        fputs(",\"xmm0\":", g_out);
-        json_hex(g_out, run->slot->ret.xmm0, 8);
+        fputs(",\"" RET_INT_NAME "\":", g_out);
+        json_hex(g_out, (const uint8_t *)&run->slot->ret.r0, 8);
+        fputs(",\"" RET_FP_NAME "\":", g_out);
+        json_hex(g_out, run->slot->ret.f0, 8);
     }
     if (run->out_len) {
         size_t shown = run->out_len < 256 ? run->out_len : 256;

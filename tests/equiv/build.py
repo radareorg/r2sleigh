@@ -11,6 +11,12 @@ address the rendering spells is an address in the running image.
 
 A source with no ``main`` of its own (a file of functions) is linked with an
 empty one; its functions are what the gate grades, not its entry point.
+
+Every build is for one :class:`target.Target`: its compilers (``gcc`` names
+``aarch64-linux-gnu-gcc`` there, ``clang`` names ``clang
+--target=aarch64-linux-gnu``) and its ``strip``. What a compiler made is read
+back (``readelf -h``) before it is graded, so a compiler that built for the
+wrong machine is a failed build, never a binary graded under the wrong ABI.
 """
 
 from __future__ import annotations
@@ -19,6 +25,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from target import X86_64, Target
 
 REPO = Path(__file__).resolve().parents[2]
 COMPILERS = ("gcc", "clang")
@@ -35,10 +43,11 @@ class Binary:
     unstripped: Path
     stripped: Path
     error: str | None = None
+    target: Target = X86_64
 
     @property
     def config(self) -> str:
-        return f"{self.compiler}-{self.opt}"
+        return self.target.config(self.compiler, self.opt)
 
     @property
     def source_key(self) -> str:
@@ -48,7 +57,7 @@ class Binary:
             return self.source.name
 
 
-def toolchain(compilers: list[str]) -> dict[str, str]:
+def toolchain(compilers: list[str], target: Target = X86_64) -> dict[str, str]:
     """What each compiler says it is: the first line of its ``--version``.
 
     The population is built by these, and what a binary is depends on which
@@ -56,8 +65,14 @@ def toolchain(compilers: list[str]) -> dict[str, str]:
     """
     found = {}
     for compiler in compilers:
-        proc = subprocess.run([compiler, "--version"], capture_output=True, text=True, check=False)
-        found[compiler] = (proc.stdout.splitlines() or ["absent"])[0].strip()
+        argv = target.compiler(compiler)
+        try:
+            proc = subprocess.run([*argv, "--version"], capture_output=True, text=True,
+                                  check=False)
+            first = proc.stdout.splitlines()
+        except FileNotFoundError:
+            first = []
+        found[compiler] = (first or ["absent"])[0].strip()
     return found
 
 
@@ -68,36 +83,55 @@ def default_sources() -> list[Path]:
     return found
 
 
-def build(source: Path, compiler: str, opt: str, out_dir: Path) -> Binary:
-    where = out_dir / source.stem / f"{compiler}-{opt}"
+def build(source: Path, compiler: str, opt: str, out_dir: Path,
+          target: Target = X86_64) -> Binary:
+    where = out_dir / source.stem / target.config(compiler, opt)
     where.mkdir(parents=True, exist_ok=True)
     unstripped = where / "oracle" / source.stem
     stripped = where / "shown" / source.stem
     unstripped.parent.mkdir(parents=True, exist_ok=True)
     stripped.parent.mkdir(parents=True, exist_ok=True)
-    binary = Binary(source, compiler, opt, unstripped, stripped)
-    if shutil.which(compiler) is None:
-        binary.error = f"{compiler} is not installed"
+    binary = Binary(source, compiler, opt, unstripped, stripped, target=target)
+    cc = target.compiler(compiler)
+    if shutil.which(cc[0]) is None:
+        binary.error = f"{cc[0]} is not installed"
         return binary
-    argv = [compiler, *BUILD_FLAGS, f"-{opt}", str(source), "-o", str(unstripped), "-lm"]
+    argv = [*cc, *BUILD_FLAGS, f"-{opt}", str(source), "-o", str(unstripped), "-lm"]
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.returncode != 0 and "undefined reference to `main'" in proc.stderr:
         stub = where / "equiv_empty_main.c"
         stub.write_text(_EMPTY_MAIN, encoding="utf-8")
-        argv = [compiler, *BUILD_FLAGS, f"-{opt}", str(source), str(stub), "-o",
+        argv = [*cc, *BUILD_FLAGS, f"-{opt}", str(source), str(stub), "-o",
                 str(unstripped), "-lm"]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         binary.error = "build failed: " + " | ".join(proc.stderr.splitlines()[:6])
         return binary
-    proc = subprocess.run(["strip", "--strip-all", "-o", str(stripped), str(unstripped)],
+    machine = elf_machine(unstripped, target)
+    if machine != target.elf_machine:
+        binary.error = (f"{' '.join(cc)} built for {machine or 'an unknown machine'}, "
+                        f"not {target.elf_machine}")
+        return binary
+    proc = subprocess.run([target.tool("strip"), "--strip-all", "-o", str(stripped),
+                           str(unstripped)],
                           capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         binary.error = "strip failed: " + proc.stderr.strip()[:300]
     return binary
 
 
+def elf_machine(binary: Path, target: Target = X86_64) -> str:
+    """The ELF header's machine, as ``readelf -h`` names it ("" when unreadable)."""
+    proc = subprocess.run([target.tool("readelf"), "-h", str(binary)], capture_output=True,
+                          text=True, check=False)
+    for line in proc.stdout.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip() == "Machine":
+            return value.strip()
+    return ""
+
+
 def build_all(sources: list[Path], compilers: list[str], opts: list[str],
-              out_dir: Path) -> list[Binary]:
-    return [build(source, compiler, opt, out_dir)
+              out_dir: Path, target: Target = X86_64) -> list[Binary]:
+    return [build(source, compiler, opt, out_dir, target)
             for source in sources for compiler in compilers for opt in opts]

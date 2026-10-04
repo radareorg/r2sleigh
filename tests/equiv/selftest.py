@@ -10,8 +10,9 @@ graded through the same path an engine rendering takes:
   function) must be ``equal``: the harness produces no false positive for
   integer, 64-bit, float, pointer, string, linked-struct, global-writing,
   buffer-writing, printing, libm-calling or stack-argument functions;
-* one flipped operator, one off-by-one, two swapped stack-passed arguments and a
-  32-bit parameter read as 64 bits must be ``differs`` (return);
+* one flipped operator, one off-by-one, two swapped stack-passed arguments
+  (twice: past x86-64's six integer registers, and past AArch64's eight) and
+  a 32-bit parameter read as 64 bits must be ``differs`` (return);
 * a read of an uninitialised local must be ``uninit``;
 * a write to the wrong global and a wrong value written to the right global
   must be ``differs`` (memory);
@@ -42,9 +43,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import gate
+from build import elf_machine
 from dwarf import Dwarf, code_constants, function_symbols
 from r2s_batch import Answer
 from spec import call_spec
+from target import X86_64, Target
 
 HERE = Path(__file__).resolve().parent
 FIXTURE = HERE / "selftest" / "fixture.c"
@@ -54,6 +57,13 @@ _RESIDUAL_S32 = (
     "{\n    (void)site;\n    __builtin_trap();\n}\n"
 )
 _NODE = "struct st_node { int32_t key; struct st_node *next; };\n"
+_MANY_INT = (
+    "int64_t sub_many_int(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f,\n"
+    "                     int64_t g, int64_t h, int32_t i, int64_t j)\n{{\n"
+    "    return (int64_t)((uint64_t)a + 2u * (uint64_t)b + 3u * (uint64_t)c + 5u * (uint64_t)d\n"
+    "        + 7u * (uint64_t)e + 11u * (uint64_t)f + 13u * (uint64_t)g + 17u * (uint64_t)h\n"
+    "        + {i}u * (uint64_t)(int64_t)i + {j}u * (uint64_t)j);\n}}\n"
+)
 
 
 @dataclass
@@ -127,6 +137,7 @@ CASES = [
     Case("identity-libm-import", "st_cosine", "equal", _tu(
         "double sub_cosine(double x)\n{\n    return cos(x) * 2.0;\n}\n",
         "#include <math.h>\n"), links=[("cos", "import")]),
+    Case("identity-stack-integers", "st_many_int", "equal", _tu(_MANY_INT.format(i=19, j=23))),
     Case("identity-stack-floats", "st_many_fp", "equal", _tu(
         "double sub_many_fp(double a, double b, double c, double d, double e, double f,\n"
         "                   double g, double h, double i)\n{\n"
@@ -146,6 +157,10 @@ CASES = [
         "    return (int64_t)((uint64_t)a + 3u * (uint64_t)b + 5u * (uint64_t)c\n"
         "        + 7u * (uint64_t)d + 11u * (uint64_t)e + 13u * (uint64_t)f\n"
         "        + 19u * (uint64_t)(int64_t)g + 17u * (uint64_t)h);\n}\n"), expect_field="return"),
+    # The ninth and tenth integer arguments swapped: on AArch64 the first two
+    # stack words, on x86-64 the third and fourth.
+    Case("stack-integers-swapped", "st_many_int", "differs", _tu(_MANY_INT.format(i=23, j=19)),
+         expect_field="return"),
     # A 32-bit parameter read as 64 bits: the ABI leaves bits 32..63 to the caller.
     Case("narrow-parameter-read-wide", "st_mix", "differs", _tu(
         "uint64_t sub_mix(uint64_t a, uint64_t b)\n{\n"
@@ -238,7 +253,7 @@ CASES = [
 ]
 
 
-def build_fixture(cc: str, out_dir: Path) -> Path:
+def build_fixture(cc: str, out_dir: Path, target: Target = X86_64) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     binary = out_dir / "fixture"
     proc = subprocess.run(
@@ -247,6 +262,10 @@ def build_fixture(cc: str, out_dir: Path) -> Path:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"cannot build the self-test fixture:\n{proc.stderr}")
+    machine = elf_machine(binary, target)
+    if machine != target.elf_machine:
+        raise RuntimeError(f"{cc} built the self-test fixture for "
+                           f"{machine or 'an unknown machine'}, not {target.elf_machine}")
     return binary
 
 
@@ -281,20 +300,22 @@ class Outcome:
 
 def run_self_tests(config: gate.Config, workdir: Path,
                    only: list[str] | None = None) -> list[Outcome]:
-    binary = build_fixture(config.cc, workdir)
-    dwarf = Dwarf.read(binary)
+    """Grade every case on ``config.target``: its fixture build, ABI and runner."""
+    target = config.target
+    binary = build_fixture(config.cc, workdir, target)
+    dwarf = Dwarf.read(binary, target)
     functions = [s for s in dwarf.subprograms() if s.name]
     by_name = {s.name: s for s in functions}
-    symbols = _all_symbols(binary)
-    extents = function_symbols(binary)
+    symbols = _all_symbols(binary, target)
+    extents = function_symbols(binary, target)
     outcomes: list[Outcome] = []
     for case in CASES:
         if only and case.name not in only:
             continue
         sub = by_name[case.function]
-        spec = call_spec(dwarf, sub, functions)
+        spec = call_spec(dwarf, sub, functions, target.abi)
         spec.extent = extents.get(sub.low_pc, ([], 0))[1]
-        spec.constants = code_constants(binary, sub.low_pc, spec.extent)
+        spec.constants = code_constants(binary, sub.low_pc, spec.extent, target=target)
         record = synthetic_pddj(case, sub.low_pc, symbols)
         if case.refused:
             answer = Answer(sub.low_pc, "decline", record=record, cause=f"refused: {case.refused}",
@@ -320,8 +341,9 @@ def run_self_tests(config: gate.Config, workdir: Path,
     return outcomes
 
 
-def _all_symbols(binary: Path) -> dict[str, int]:
-    proc = subprocess.run(["nm", str(binary)], capture_output=True, text=True, check=False)
+def _all_symbols(binary: Path, target: Target = X86_64) -> dict[str, int]:
+    proc = subprocess.run([target.tool("nm"), str(binary)], capture_output=True, text=True,
+                          check=False)
     out: dict[str, int] = {}
     for line in proc.stdout.splitlines():
         fields = line.split()

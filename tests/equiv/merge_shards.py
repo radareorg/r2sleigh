@@ -16,7 +16,8 @@ Every baseline record must be graded by some shard: a shard missing from the
 matrix would otherwise drop its records unseen. ``--partial`` holds only the
 configurations the given shards ran, for a local run over part of the
 population. A shard built with another toolchain than the baseline's is
-refused, as in the gate.
+refused, as in the gate, and so are shards of two targets (a shard's
+``config.target``; a file written before the target axis is x86-64's).
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import gate  # noqa: E402
+from target import by_name  # noqa: E402
 from run_equiv import EXIT_OK, EXIT_RATCHET, EXIT_SETUP, summarize  # noqa: E402
 
 
@@ -37,9 +39,15 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
     records: list[gate.Record] = []
     ran: set[tuple[str, str]] = set()
     toolchain: dict[str, str] = {}
+    targets: set[str] = set()
     for path in paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
         config = payload["config"]
+        target = by_name(config.get("target", "x86-64"))
+        targets.add(target.name)
+        if len(targets) > 1:
+            raise ValueError(f"{path}: shards of {' and '.join(sorted(targets))} cannot be "
+                             "held to one baseline")
         for name, version in (config.get("toolchain") or {}).items():
             if toolchain.setdefault(name, version) != version:
                 raise ValueError(f"{path}: {name} is {version}, another shard has "
@@ -47,7 +55,7 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
         for source in config["sources"]:
             for compiler in config["compilers"].split(","):
                 for opt in config["opts"].split(","):
-                    ran.add((source, f"{compiler}-{opt}"))
+                    ran.add((source, target.config(compiler, opt)))
         for raw in payload["records"]:
             records.append(gate.Record(
                 key=raw["key"], function=raw["function"], address=int(raw["address"], 16),

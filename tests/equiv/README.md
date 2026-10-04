@@ -10,11 +10,17 @@ cargo build -p r2s --features sleigh
 tests/equiv/run_equiv.py --r2s target/debug/r2s                 # measure
 tests/equiv/run_equiv.py --r2s target/debug/r2s \
     --baseline tests/equiv/baseline.json                         # gate (ratchet)
+tests/equiv/run_equiv.py --r2s target/debug/r2s --target aarch64 \
+    --baseline tests/equiv/baseline-aarch64.json                 # the same, for arm64
 python3 -m unittest discover -s tests/equiv -p 'test_*.py'       # the gate's own tests
 ```
 
-It needs x86-64 Linux, `gcc`, `clang` (for the Clang cells), and binutils. It
-uses only the Python standard library.
+For x86-64 (the default target) it needs x86-64 Linux, `gcc`, `clang` (for the
+Clang cells), and binutils. For aarch64 it needs Linux, `qemu-aarch64`
+(qemu-user), `aarch64-linux-gnu-gcc` with its binutils and its sysroot in
+`/usr/aarch64-linux-gnu` (Ubuntu: `gcc-aarch64-linux-gnu`,
+`qemu-user`), and a `clang` that can target it with that sysroot. It uses
+only the Python standard library.
 
 What it does
 ------------
@@ -48,14 +54,16 @@ over after libc and the program's constructors have run. For each vector it
 fills a fixed-address arena, then forks one child per run from that same
 state: the original at its link address, the original again through a
 trampoline (identity), and the rendering built four ways. Every child enters
-its function through one register-level thunk (`rt/call_x86_64.S`) with the
-same registers, AL and stack words, so a rendering is judged against the
-machine ABI rather than the prototype it declares. Each child records how it
+its function through one register-level thunk (`rt/call_x86_64.S`,
+`rt/call_aarch64.S`) with the same registers (and x86-64's AL) and stack
+words, so a rendering is judged against the machine ABI rather than the
+prototype it declares. Each child records how it
 ended, its return registers, the arena, the program's writable segments, and
 fd 1 and fd 2.
 
 **The rendering replaces the function.** In a rendering's child every byte of
-the original function's code (its symbol's extent) becomes `int3` before the
+the original function's code (its symbol's extent) becomes a trap (`int3`;
+`brk #0` in every instruction word on AArch64) before the
 call. When the program enters the function's entry -- a caller, a function
 pointer, a mutual recursion through another function -- the entry is
 redirected to the rendering, so the rendering is graded at every depth the
@@ -86,7 +94,9 @@ Records
 -------
 
 One record per function, always, in `artifacts/records.json`, sorted by key
-`<source>::<compiler>-<opt>::<function>`:
+`<source>::<config>::<function>`, where the configuration is
+`<compiler>-<opt>` on x86-64 and `<target>-<compiler>-<opt>` on any other
+target (`aarch64-gcc-O0`):
 
 | status | graded by | meaning |
 |---|---|---|
@@ -100,7 +110,7 @@ One record per function, always, in `artifacts/records.json`, sorted by key
 | `no-record` | engine | r2s printed no usable `pddj` (crash, deadline, failed statement, broken contract), with the cause |
 | `unsupported` | harness | the thunk cannot call the signature (aggregate by value, variadic definition, a compiler clone) |
 | `untested` | harness | fewer than a quarter of the vectors survived the original, too few to rest an `equal` on |
-| `harness-error` | harness | the gate itself failed, or never asked r2s |
+| `harness-error` | harness | the gate itself failed, never asked r2s, or cannot bind an object link on this target |
 
 Each record carries the first vector that shows its status (inputs, the field,
 the first differing address and bytes), the vector counts, the proof counters
@@ -112,7 +122,8 @@ The self-tests come first
 
 `selftest.py` grades hand-written renderings of `selftest/fixture.c` whose
 verdicts are known: source-equivalent identities must be `equal`; a flipped
-operator, an off-by-one, swapped stack arguments and a 32-bit parameter read
+operator, an off-by-one, swapped stack arguments (past six integer registers,
+and past eight) and a 32-bit parameter read
 as 64 bits must be `differs`; an uninitialised read `uninit`; a signed
 overflow `ub`; a write to the wrong global and a wrong byte through a pointer
 `differs` (memory, arena); swapped printf arguments `differs` (stdout); a
@@ -128,6 +139,10 @@ original's body, and an identifier missing from the link map,
 `compile-error`; a refusal `refused`. Every gate run runs them first and
 grades nothing (exit 2) if one misses. There is no flag to skip them.
 
+The self-tests run on the target being graded: an aarch64 run grades them
+built for AArch64 and run under qemu-user, so the gate's own verdicts are
+proven on the machine model it then applies.
+
 `test_equiv.py` then runs the whole pipeline over the fixture (built, stripped,
 asked through the batch runner with `testdata/stub_r2s.py` standing in for
 r2s): the known renderings keep their verdicts end to end, and the stub's
@@ -137,7 +152,8 @@ for every function.
 The ratchet
 -----------
 
-`tests/equiv/baseline.json` holds, per key, a status and -- for every record
+`tests/equiv/baseline.json` (x86-64) and `tests/equiv/baseline-aarch64.json`
+hold, per key, a status and -- for every record
 that is not `equal` -- the person's recorded cause and the machine's reason
 (`gate.reason`: the refusal cause, the differing field, the residual helper,
 with addresses, generated names and source line numbers erased). It also
@@ -157,17 +173,69 @@ names the compilers it was blessed on. With `--baseline` the ratchet is exact:
 - a run built by other compilers than the baseline names is refused before
   anything is graded, since another compiler makes other binaries.
 
-CI runs this on every push (`equivalence` in `.github/workflows/ci.yml`).
+CI runs this on every push (`equivalence` in `.github/workflows/ci.yml`) for
+x86-64. No CI job runs the aarch64 target yet: its baseline was blessed from a
+full run on an x86-64 Linux host under qemu-user, and is held by running
+`run_equiv.py --target aarch64 --baseline tests/equiv/baseline-aarch64.json`
+there.
 The baseline is written only with `--write-baseline PATH`, which keeps any
 cause already recorded for an unchanged status and reason, records each
 reason and the toolchain, and leaves the other causes `null` for a person to
 fill in after reading the records.
 
+Targets
+-------
+
+`--target` picks the machine (`target.py`, one `Target` value each). A target
+names its compilers (`gcc` is `aarch64-linux-gnu-gcc` there, `clang` is
+`clang --target=aarch64-linux-gnu`), its binutils prefix and sysroot, its
+calling convention, the thunk and the shim's jumps, how its programs run, and
+the signal `__builtin_trap` raises. What a compiler built is read back
+(`readelf -h`), so a compiler that built for the wrong machine is a failed
+build, never a binary graded under the wrong ABI.
+
+| | x86-64 | aarch64 |
+|---|---|---|
+| arguments | rdi..r9, xmm0..7, then 8-byte stack words; AL counts vector registers | x0..x7, v0..v7, then 8-byte stack words |
+| a narrow integer argument | extended to 32 bits by its type, bits 32..63 arbitrary | every bit above the type arbitrary (AAPCS64) |
+| results | rax (rdx), xmm0 | x0 (x1), v0 |
+| a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` |
+| an object link | `.set name, addr` | the same, bound by the loader (below) |
+| guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) |
+| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -E VAR=... prog` |
+| `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot |
+| keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` |
+
+x86-64's keys predate the target axis and carry no target name, so its
+baseline is unchanged; every other target's keys and work directories carry
+its name, so records of two machines never share a key. A `records.json`
+names its target in `config.target`, and `merge_shards.py` refuses shards of
+two targets.
+
+*Layout.* qemu-user gives its guest no address randomisation of its own: it
+places the guest's image, stack and mappings by a first-fit search from fixed
+bases. That search runs over the host address space qemu itself occupies, so
+qemu runs under the same `setarch -R` as a native target, and two runs write
+the same records (`AArch64PipelineTests.test_two_runs_write_the_same_records`).
+The runtime's variables go to the guest with `-E`, never into qemu's own
+environment, where the host loader would try to preload a foreign object.
+
+*Object links on AArch64.* GNU ld for AArch64 (2.42, and gold) resolves the
+GOT entry of an absolute symbol a shared object defines as if it were
+section-relative (an `R_AARCH64_RELATIVE` of the address), so the loader adds
+the rendering's load base and `&name` lands a load base past the image's
+object. There the object links are listed in a `--dynamic-list`: the loader
+binds them, and glibc's loader places an `SHN_ABS` definition at its value.
+The loader searches the program and its libraries first, so a rendering whose
+object link one of those would capture (a name the program exports at another
+address, or one a library exports) is `harness-error` with the conflict named,
+never graded against an object it did not name (`link.loader_conflicts`).
+
 Limits, stated
 --------------
 
-- x86-64 ELF only; there is no emulator here, so the arm64 fixtures get the
-  static tiers only.
+- Linux ELF for x86-64 and AArch64 only (`target.py`); aarch64 runs under
+  qemu-user unless the host is AArch64.
 - Non-PIE only: a rendering may spell image addresses as integers, which are
   run-time addresses only when the link address is the load address.
 - A parameter's pointee is built from its DWARF type: bytes, a NUL-terminated

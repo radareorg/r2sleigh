@@ -26,7 +26,11 @@ blocks (exit 1). The baseline is written only on request, with
 ``--write-baseline``, and every non-equal record in it needs a recorded cause
 before the ratchet accepts it.
 
-Runtime equivalence needs x86-64 Linux; elsewhere the gate says so and exits 3.
+``--target`` picks the machine (``target.py``): ``x86-64``, the default, runs
+natively on x86-64 Linux; ``aarch64`` builds with the AArch64 cross compilers
+and runs under qemu-user. An aarch64 record's configuration says so
+(``aarch64-gcc-O0``), and its baseline is ``baseline-aarch64.json``. Where the
+target cannot run, the gate says so and exits 3.
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ import selftest  # noqa: E402
 from dwarf import Dwarf, code_constants, function_symbols  # noqa: E402
 from r2s_batch import Answer, run_batch  # noqa: E402
 from spec import call_spec  # noqa: E402
+from target import TARGETS, Target, by_name  # noqa: E402
 
 EXIT_OK, EXIT_RATCHET, EXIT_SELF_TEST, EXIT_SETUP = 0, 1, 2, 3
 
@@ -57,6 +62,8 @@ EXIT_OK, EXIT_RATCHET, EXIT_SELF_TEST, EXIT_SETUP = 0, 1, 2, 3
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--r2s", type=Path, default=build.REPO / "target" / "debug" / "r2s")
+    parser.add_argument("--target", choices=sorted(TARGETS), default="x86-64",
+                        help="the machine the population is built for and run on")
     parser.add_argument("--sources", type=Path, nargs="+", default=None,
                         help="C sources to build (default: tests/corpus/*.c tests/gold/*.c)")
     parser.add_argument("--compilers", default=",".join(build.COMPILERS))
@@ -64,7 +71,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--only", default=None,
                         help="grade only record keys matching this regular expression")
     parser.add_argument("--out", type=Path, default=HERE / "artifacts")
-    parser.add_argument("--cc", default="gcc", help="compiler for the renderings")
+    parser.add_argument("--cc", default=None,
+                        help="compiler for the renderings (default: the target's gcc)")
     parser.add_argument("--vectors", type=int, default=48)
     parser.add_argument("--timeout-ms", type=int, default=1000,
                         help="the original's budget per call; a rendering gets four times it")
@@ -81,7 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run_self_tests(config: gate.Config, out: Path) -> bool:
-    outcomes = selftest.run_self_tests(config, out / "selftest")
+    outcomes = selftest.run_self_tests(config, out / config.target.directory("selftest"))
     failed = [o for o in outcomes if not o.ok]
     for outcome in outcomes:
         mark = "ok  " if outcome.ok else "FAIL"
@@ -102,7 +110,7 @@ def sha256(path: Path) -> str:
 
 def functions_of(binary: build.Binary) -> tuple[Dwarf, list]:
     """The source's own functions in this build, from its DWARF, in address order."""
-    dwarf = Dwarf.read(binary.unstripped)
+    dwarf = Dwarf.read(binary.unstripped, binary.target)
     unit = binary.source.name
     subs = [s for s in dwarf.subprograms()
             if s.name and Path(s.unit).name == unit]
@@ -119,7 +127,8 @@ def functions_of(binary: build.Binary) -> tuple[Dwarf, list]:
 def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Config,
                  only: re.Pattern | None, pool: concurrent.futures.Executor) -> list[gate.Record]:
     dwarf, subs = functions_of(binary)
-    symbols = function_symbols(binary.unstripped)
+    target = binary.target
+    symbols = function_symbols(binary.unstripped, target)
     all_functions = [s for s in dwarf.subprograms() if s.name]
     names_used: dict[str, int] = {}
     wanted = []
@@ -141,14 +150,14 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
     answers = report.by_address()
     futures = []
     for key, sub in wanted:
-        spec = call_spec(dwarf, sub, all_functions)
+        spec = call_spec(dwarf, sub, all_functions, target.abi)
         names, size = symbols.get(sub.low_pc, ([], 0))
         if names and sub.name not in names and not spec.unsupported:
             spec.unsupported = (
                 f"the symbol at 0x{sub.low_pc:x} is {names[0]}, a compiler copy whose "
                 "prototype is not the source's"
             )
-        spec.constants = code_constants(binary.unstripped, sub.low_pc, size)
+        spec.constants = code_constants(binary.unstripped, sub.low_pc, size, target=target)
         spec.extent = size
         workdir = args.out / "work" / binary.source.stem / binary.config / re.sub(
             r"[^A-Za-z0-9_.@-]", "_", sub.name + ("" if names_used[sub.name] == 1
@@ -175,10 +184,10 @@ def build_failure_record(binary: build.Binary) -> gate.Record:
     )
 
 
-def selected_predicate(args: argparse.Namespace, sources: list[Path]):
+def selected_predicate(args: argparse.Namespace, sources: list[Path], target: Target):
     source_keys = {build.Binary(s, "", "", s, s).source_key for s in sources}
-    compilers = set(args.compilers.split(","))
-    opts = set(args.opts.split(","))
+    configs = {target.config(compiler, opt) for compiler in args.compilers.split(",")
+               for opt in args.opts.split(",")}
     only = re.compile(args.only) if args.only else None
 
     def selected(key: str) -> bool:
@@ -186,8 +195,7 @@ def selected_predicate(args: argparse.Namespace, sources: list[Path]):
         if len(parts) != 3:
             return False
         source, config, _ = parts
-        compiler, _, opt = config.partition("-")
-        return (source in source_keys and compiler in compilers and opt in opts
+        return (source in source_keys and config in configs
                 and (only is None or bool(only.search(key))))
 
     return selected
@@ -222,18 +230,22 @@ def main(argv: list[str] | None = None) -> int:
     # must be absolute.
     args.out = args.out.resolve()
     args.r2s = args.r2s.resolve()
-    problem = gate.environment_problem()
+    target = by_name(args.target)
+    if args.cc is None:
+        args.cc = target.rendering_cc
+    problem = gate.environment_problem(target)
     if problem:
         print(f"equiv: {problem}; the gate cannot run here", file=sys.stderr)
         return EXIT_SETUP
     args.out.mkdir(parents=True, exist_ok=True)
     try:
-        runtime = link.build_runtime(args.cc, HERE / "rt", args.out / "rt")
+        runtime = link.build_runtime(args.cc, HERE / "rt", args.out / target.directory("rt"),
+                                     target)
     except RuntimeError as error:
         print(f"equiv: {error}", file=sys.stderr)
         return EXIT_SETUP
     config = gate.Config(runtime=runtime, cc=args.cc, vectors=args.vectors,
-                         timeout_ms=args.timeout_ms, keep=args.keep)
+                         timeout_ms=args.timeout_ms, keep=args.keep, target=target)
 
     if args.baseline is not None and not args.baseline.exists():
         print(f"equiv: no baseline at {args.baseline}; measure without --baseline, read "
@@ -252,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_SETUP
 
     sources = [s.resolve() for s in (args.sources or build.default_sources())]
-    toolchain = build.toolchain(args.compilers.split(","))
+    toolchain = build.toolchain(args.compilers.split(","), target)
     if args.baseline is not None:
         blessed = gate.load_baseline(args.baseline).get("toolchain")
         if blessed is not None and any(blessed.get(name) != version
@@ -264,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                   "toolchain, or bless a baseline for this one.")
             return EXIT_RATCHET
     binaries = build.build_all(sources, args.compilers.split(","), args.opts.split(","),
-                               args.out / "build")
+                               args.out / "build", target)
     only = re.compile(args.only) if args.only else None
     records: list[gate.Record] = []
     # Rendering is one r2s process per binary and was the serial part of the
@@ -289,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         "schema": 1,
         "r2s": str(args.r2s),
         "r2s_sha256": sha256(args.r2s),
-        "config": {"vectors": args.vectors, "timeout_ms": args.timeout_ms, "cc": args.cc,
+        "config": {"target": target.name,
+                   "vectors": args.vectors, "timeout_ms": args.timeout_ms, "cc": args.cc,
                    "compilers": args.compilers, "opts": args.opts, "only": args.only,
                    "sources": [build.Binary(s, "", "", s, s).source_key for s in sources],
                    "fixed_layout": bool(gate.fixed_layout_prefix()),
@@ -306,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     status = EXIT_OK
     if args.baseline is not None:
         baseline = gate.load_baseline(args.baseline)
-        selected = selected_predicate(args, sources)
+        selected = selected_predicate(args, sources, target)
         held = {key for key in baseline["records"] if selected(key)}
         graded = {r.key: (r.status, gate.reason(r.status, r.evidence)) for r in records}
         problems = gate.ratchet(baseline, graded, held)
