@@ -38,6 +38,7 @@ impl SSAFunction {
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
+            entry_lanes: BTreeMap::new(),
             written: crate::lanes::Written::default(),
             query_index: RwLock::new(None),
         }
@@ -567,6 +568,7 @@ impl SSAFunction {
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
+            entry_lanes: BTreeMap::new(),
             written: crate::lanes::Written::default(),
             query_index: RwLock::new(None),
         };

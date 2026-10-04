@@ -292,6 +292,16 @@ enum Step {
     LowLane,
 }
 
+/// How an entry-lane formal reads its root: the root's low bits, as a
+/// `Subpiece` at offset zero would. Nothing defines the formal -- it is the
+/// caller's value -- but its bits are the root's.
+fn lane_step(lane: &SSAVar, root: &SSAVar) -> Step {
+    match lane.size == root.size {
+        true => Step::Copy,
+        false => Step::Low,
+    }
+}
+
 /// What an operation's output is made of, where the view can say.
 fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
     let same_width = |dst: &SSAVar, src: &SSAVar| dst.size == src.size;
@@ -412,6 +422,13 @@ impl<'a> Solver<'a> {
     fn new(function: &'a SSAFunction) -> Self {
         let mut nodes = Vec::new();
         let mut definitions = Vec::new();
+        // The entry lanes first: they are the caller's values, in hand
+        // before the body defines anything, so they come first in definition
+        // order as the representative of their class.
+        for (lane, root) in function.entry_lanes() {
+            nodes.push(lane);
+            definitions.push(Definition::Step(root, lane_step(lane, root)));
+        }
         for block in function.blocks() {
             for phi in block.phis() {
                 nodes.push(&phi.dst);
@@ -428,10 +445,17 @@ impl<'a> Solver<'a> {
     }
 
     fn from_graph(graph: &'a crate::graph::SsaGraph) -> Self {
+        // The entry lanes first, as from a function.
         let (nodes, definitions) = graph
-            .insts
+            .entry_lanes
             .iter()
-            .filter_map(|inst| graph_definition(graph, inst))
+            .map(|(lane, root)| (lane, Definition::Step(root, lane_step(lane, root))))
+            .chain(
+                graph
+                    .insts
+                    .iter()
+                    .filter_map(|inst| graph_definition(graph, inst)),
+            )
             .unzip();
         Self::over(nodes, definitions)
     }

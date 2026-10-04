@@ -505,7 +505,9 @@ pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Ss
         .validate()
         .map_err(integrity_refusal)
         .ok()?
-        .seal(&machine_context);
+        .seal(&machine_context)
+        .map_err(integrity_refusal)
+        .ok()?;
     let graph = sealed.graph().clone();
     (!graph.blocks.is_empty()).then_some(graph)
 }
@@ -576,7 +578,7 @@ impl SsaArtifact {
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
-        let sealed = prepared.seal(&machine_context);
+        let sealed = prepared.seal(&machine_context).map_err(integrity_refusal)?;
         let mut artifact =
             sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
@@ -2516,6 +2518,10 @@ pub struct SSAFunction {
     /// variable, valued by the root's storage. The rebuild restates what the
     /// caller passed; it is no write the body made.
     formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
+    /// Each entry-lane formal at the low end of its root, and that root: the
+    /// formal is the caller's own value of the lane, live at entry with no
+    /// definition, and its bits are the root's low bits.
+    entry_lanes: BTreeMap<SSAVar, SSAVar>,
     /// Which bytes each operation and phi wrote as data, recorded when the
     /// function was lifted and kept through every rewrite by id
     /// (doc/adr-written-lanes.md).
@@ -2818,6 +2824,7 @@ impl Clone for SSAFunction {
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
+            entry_lanes: self.entry_lanes.clone(),
             written: self.written.clone(),
             query_index: RwLock::new(None),
         }
@@ -3612,6 +3619,11 @@ impl SSAFunction {
 
     pub(crate) fn formal_root_vars(&self) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
         self.formal_roots.iter()
+    }
+
+    /// Each entry-lane formal at the low end of its root, with the root.
+    pub(crate) fn entry_lanes(&self) -> impl Iterator<Item = (&SSAVar, &SSAVar)> {
+        self.entry_lanes.iter()
     }
 
     /// Root the stack pointer a mask realigned, as an origin of its own.

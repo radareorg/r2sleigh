@@ -87,7 +87,7 @@ Each step keeps every gate green and deletes what it replaces.
 | 1 | `OpId` arena, private `ops`/`ids`, `OpOrigin`, graph `OpId`↔`InstId` maps, `EditPlan` | `op_instruction_addrs`, the index shifting in `insert_ops`, the graph's site BTreeMaps — **done** |
 | 2 | Stage types; `seal` replaces `prepare_graph`; optimize and demand through `EditPlan` | `get_block_mut`, `op_mut`, `cfg_mut`, public `remove_*`, `optimize()`, `Blocks::edit`, `IrRevision`, the revision assert, `recollect_*` — **done** |
 | 3 | Certificates, obligations and downstream maps keyed by `OpId` | every `op_index` field in r2ssa/r2types, `op_site_for_inst`, `inst_id_for_op_site`, `rendered_site` — **done** |
-| 4 | With P1.7: `ValueDef::{LiveIn, Unspecified}`, formals as views | version-0 definitions; the sealed validator check switches on |
+| 4 | With P1.7: formals as live-ins related to their root by a view | version-0 definitions; the sealed validator check switches on — **done** |
 
 Positions survive only as an ordering view of an IR that can no longer
 change.
@@ -236,3 +236,33 @@ The census, with what became of each:
   first and fast.
 - The graph is still built twice where the demand pass edits (once
   provisional, borrowed); F2 removes that.
+
+Step 4 as landed (with P1.7):
+
+- An entry-lane formal is the caller's value of the lane: version zero, no
+  definition, its storage the lane. The view solver is seeded with "the
+  formal is its root's low bits" (`SSAFunction::entry_lanes`), first in
+  definition order, so the formal remains its class's representative as
+  the minted `Subpiece` was.
+- A read of the whole register is the formals inserted into the caller's
+  own register at a fresh version, not into zero: no byte is invented. The
+  demand pass releases the base with proof wherever nothing reads above
+  the lanes, which is where the old zero was right. Where something does,
+  the caller's bytes render as the residuals they are (`sext`,
+  `shape_struct_array`, `shape_stack_buffer` in the census).
+- No `ValueDef::Unspecified` was needed: the bytes no declaration names are
+  the caller's real bytes, and the live-in already names them.
+- `Prepared::seal` returns the validator's typed failure, so a sealed
+  function validates. Over the census no function fails it; the old
+  minting failed it on every function with a narrow formal.
+- The demand pass reads an `AND` against a constant only at the bytes the
+  constant keeps.
+- Open, for R: the demand release keeps `Insert(0, lane, 0)`, which prints
+  as `(0 & ~mask) | lane << 0`. Spelling it `(T)lane` in the printer is
+  refused by the observation journal, which wants the literal operands
+  rendered. Canonicalising it to `zext` in r2ssa let the value analysis
+  claim a machine-register bound (`rax in [0, 255]` after `setc al`) that
+  holds only for the bytes the function reads. Listing claims are made
+  after a rewrite that is valid only for the function's meaning, and that
+  seam needs its own fix.
+

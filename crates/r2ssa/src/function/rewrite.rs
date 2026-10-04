@@ -369,12 +369,18 @@ impl SSAFunction {
                 .register_name(lane_storage)
                 .map(|name| name.to_ascii_uppercase())
                 .unwrap_or_else(|| format!("reg:{:x}:{width}", lane_storage.offset));
+            // The caller's value of the lane, live at entry: nothing in the
+            // body defines it, so it is version zero with no definition.
             let projection = SSAVar::new(name, 0, width);
             self.canonical_storage_by_var
                 .entry(root_var.clone())
                 .or_insert(root);
             self.formal_projections
                 .insert(projection.clone(), lane_storage);
+            if offset == 0 {
+                self.entry_lanes
+                    .insert(projection.clone(), root_var.clone());
+            }
             for (addr, op_index, inside) in reads {
                 if let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), addr)
                     && let Some(SSAOp::Subpiece { dst, .. }) = block.ops().get(op_index)
@@ -398,24 +404,15 @@ impl SSAFunction {
                 .entry(root_var.clone())
                 .or_insert((root, Vec::new()))
                 .1
-                .push((projection.clone(), offset));
-            minted.push(SSAOp::Subpiece {
-                dst: projection,
-                src: root_var,
-                offset,
-            });
+                .push((projection, offset));
         }
-        // The caller's root is its formals: a read of the whole register --
-        // a merge input, a spill -- takes the declared lanes with zero above
-        // them, so no rendering reads a register byte no formal names.
-        //
-        // The bytes above a declared lane are not the caller's to describe.
-        // The declaration is the source's own statement of what it passed, so
-        // no source expression names them, and where the interface was
-        // recovered rather than declared they are exactly the bytes no
-        // observation reached -- which is why the recovery declared the lane
-        // narrow in the first place. Either way nothing the program computes
-        // depends on them, and zero is as good a value as the register held.
+        // A read of the whole register -- a merge input, a spill -- reads the
+        // declared lanes through their formals and every other byte as the
+        // caller left it: the root rebuilt by inserting each formal into the
+        // caller's own register. No byte is invented. Where nothing reads the
+        // bytes above the lanes the demand pass releases the base with its
+        // proof; where something does, it reads the caller's entry bytes,
+        // which no declaration names and the rendering shows as residuals.
         // Every variable the body reads, and the highest disambiguator each
         // name carries. Both were asked once per root, and each asking walked
         // the whole function, so a body with many entry registers paid for it
@@ -449,34 +446,27 @@ impl SSAFunction {
             let disambiguator = highest_disambiguator
                 .get(root_var.name())
                 .map_or(1, |max| max + 1);
+            // A definition, so not version zero.
             let composed =
-                SSAVar::new(root_var.name(), 0, root.size).with_rename_disambiguator(disambiguator);
-            match lanes.as_slice() {
-                [(lane, 0)] if lane.size < root.size => minted.push(SSAOp::IntZExt {
-                    dst: composed.clone(),
-                    src: lane.clone(),
-                }),
-                _ => {
-                    let mut carried = SSAVar::constant(0, root.size);
-                    for (index, (lane, offset)) in lanes.iter().enumerate() {
-                        let dst = if index + 1 == lanes.len() {
-                            composed.clone()
-                        } else {
-                            SSAVar::new(
-                                format!("tmp:root:{}:{index}", root_var.name()),
-                                1,
-                                root.size,
-                            )
-                        };
-                        minted.push(SSAOp::Insert(Box::new(crate::op::InsertOp {
-                            dst: dst.clone(),
-                            src: carried,
-                            value: lane.clone(),
-                            position: SSAVar::constant(u64::from(*offset) * 8, 4),
-                        })));
-                        carried = dst;
-                    }
-                }
+                SSAVar::new(root_var.name(), 1, root.size).with_rename_disambiguator(disambiguator);
+            let mut carried = root_var.clone();
+            for (index, (lane, offset)) in lanes.iter().enumerate() {
+                let dst = if index + 1 == lanes.len() {
+                    composed.clone()
+                } else {
+                    SSAVar::new(
+                        format!("tmp:root:{}:{index}", root_var.name()),
+                        1,
+                        root.size,
+                    )
+                };
+                minted.push(SSAOp::Insert(Box::new(crate::op::InsertOp {
+                    dst: dst.clone(),
+                    src: carried,
+                    value: lane.clone(),
+                    position: SSAVar::constant(u64::from(*offset) * 8, 4),
+                })));
+                carried = dst;
             }
             highest_disambiguator.insert(composed.name().to_string(), disambiguator);
             self.canonical_storage_by_var.insert(composed.clone(), root);

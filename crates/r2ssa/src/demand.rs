@@ -51,6 +51,13 @@ const fn whole(size: u32) -> u64 {
     }
 }
 
+/// The bytes of a constant that are not zero, as a byte mask.
+fn nonzero_bytes(bits: u64) -> u64 {
+    (0..8)
+        .filter(|byte| (bits >> (byte * 8)) & 0xff != 0)
+        .fold(0, |mask, byte| mask | (1 << byte))
+}
+
 /// The bytes an INSERT's value occupies in its result, where its position is
 /// a byte-aligned constant.
 fn inserted_lane(value: &SSAVar, position: &SSAVar) -> Option<(u32, u64)> {
@@ -159,9 +166,17 @@ fn transfer(inst: &GraphInst, demanded: u64, size: impl Fn(ValueId) -> u32) -> V
             .map(|index| demanded & of(index))
             .collect(),
         InstPayload::Op(op) => match op {
+            // A byte the constant operand clears is zero whatever the other
+            // operand holds there, so the other is not read at that byte.
+            SSAOp::IntAnd { a, b, .. } => {
+                let kept = |other: &SSAVar| match other.size <= 8 {
+                    true => other.constant_bits().map_or(u64::MAX, nonzero_bytes),
+                    false => u64::MAX,
+                };
+                vec![demanded & kept(b) & of(0), demanded & kept(a) & of(1)]
+            }
             SSAOp::Copy { .. }
             | SSAOp::IntZExt { .. }
-            | SSAOp::IntAnd { .. }
             | SSAOp::IntOr { .. }
             | SSAOp::IntXor { .. } => (0..inst.inputs.len())
                 .map(|index| demanded & of(index))

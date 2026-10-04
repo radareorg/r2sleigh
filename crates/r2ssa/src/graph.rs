@@ -241,6 +241,8 @@ pub struct SsaGraph {
     /// Entry roots rebuilt from their declared lanes, valued by the root's
     /// storage (`SSAFunction::mint_entry_lane_projections`).
     pub(crate) formal_roots: BTreeMap<ValueId, CanonicalStorageId>,
+    /// Each entry-lane formal at the low end of its root, with the root.
+    pub(crate) entry_lanes: Vec<(SSAVar, SSAVar)>,
 }
 
 /// Record which machine instruction one operation came from, both ways round.
@@ -513,6 +515,10 @@ impl SsaGraph {
             .formal_root_vars()
             .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
             .collect();
+        let entry_lanes = function
+            .entry_lanes()
+            .map(|(lane, root)| (lane.clone(), root.clone()))
+            .collect();
         let value_index = value_index_of(&values);
         Self {
             entry,
@@ -531,6 +537,7 @@ impl SsaGraph {
             insts_by_instruction,
             formal_projections,
             formal_roots,
+            entry_lanes,
         }
     }
 

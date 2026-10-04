@@ -530,6 +530,7 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         insts_by_instruction: [(0x1000, vec![InstId(0)])].into(),
         formal_projections: BTreeMap::new(),
         formal_roots: BTreeMap::new(),
+        entry_lanes: Vec::new(),
     };
     let inst = graph.inst(InstId(0)).expect("shift instruction");
     let mut builder = MachineBuilder::for_graph(&graph);

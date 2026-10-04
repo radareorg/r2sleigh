@@ -2749,7 +2749,8 @@ fn a_sealed_function_s_prep_facts_describe_its_own_blocks() {
     let sealed = Lifted::new(func)
         .validate()
         .expect("a raw function validates")
-        .seal(&SourceMachineContext::from_blocks(&[block], None));
+        .seal(&SourceMachineContext::from_blocks(&[block], None))
+        .expect("the sealed function validates");
     let again = sealed.function().prep_facts_for_test();
     assert_eq!(sealed.decompile_prep_facts().views, again.views);
     assert_eq!(

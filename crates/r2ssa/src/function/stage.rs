@@ -17,10 +17,10 @@
 //! facts are collected once, the graph is final, and the source's formals
 //! are read off it. No step can be called on its own, so none can run twice.
 //!
-//! The sealed function is validated as a precondition of [`Prepared`] only.
-//! The entry lanes define version-0 values, which the validator refuses; the
-//! check moves to [`Sealed`] when P1.7 makes those values views (step 4 of the
-//! ADR).
+//! The validator is the precondition of both [`Prepared`] and [`Sealed`]: an
+//! entry-lane formal is the caller's value, live at entry with no definition,
+//! and the whole register it is a lane of is rebuilt at a fresh version from
+//! the caller's own register (step 4 of the ADR).
 
 use std::ops::Deref;
 
@@ -183,7 +183,15 @@ impl Prepared {
     ///
     /// `O(n)` per rewrite and per collection; the graph is built once, twice
     /// for a function the demand pass changes.
-    pub fn seal(self, machine_context: &SourceMachineContext) -> Sealed {
+    ///
+    /// The sealed function validates as the prepared one did: the steps add
+    /// no definition at version zero and no read its definition does not
+    /// dominate. Where one does, the typed failure is the refusal.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the validator's typed failure is the refusal; it is mapped once, at the artifact boundary"
+    )]
+    pub fn seal(self, machine_context: &SourceMachineContext) -> Result<Sealed, SsaIntegrityError> {
         let mut ir = self.ir;
         ir.apply_boundary_constants(machine_context);
         ir.mint_entry_lane_projections(machine_context);
@@ -210,7 +218,8 @@ impl Prepared {
         let formal_parameters =
             crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
         prep.install_exact_formal_parameters(&graph, &formal_parameters);
-        Sealed { ir, prep, graph }
+        validate_ssa_function(&ir)?;
+        Ok(Sealed { ir, prep, graph })
     }
 }
 

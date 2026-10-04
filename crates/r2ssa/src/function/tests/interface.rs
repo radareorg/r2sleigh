@@ -835,3 +835,88 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
         "{boundary:?}"
     );
 }
+
+/// A formal declared narrower than its register is the caller's value of the
+/// lane, live at entry with no definition, and a read of the whole register
+/// takes the formal in its lane and the caller's own register above it: no
+/// byte is made up, and the sealed function validates (P1.7).
+#[test]
+fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_bytes() {
+    let mut arch = ArchSpec::new("aarch64");
+    arch.addr_size = 8;
+    arch.add_register(RegisterDef::new("x0", 0x4000, 8));
+    arch.add_register(RegisterDef::new("w0", 0x4000, 4));
+    arch.add_register(RegisterDef::new("x1", 0x4008, 8));
+    arch.add_register(RegisterDef::new("w2", 0x4010, 4));
+    arch.add_register(RegisterDef::new("x30", 0x4100, 8));
+    arch.add_register(RegisterDef::new("sp", 0x4200, 8));
+    let lane = CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset: 0x4000,
+        size: 4,
+    };
+    let register = |offset, size| CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset,
+        size,
+    };
+    // `w2 = w0` reads the declared lane; `x1 = x0` reads the whole register.
+    let mut block = R2ILBlock::new(0x1600, 12);
+    block.push(R2ILOp::Copy {
+        dst: Varnode::register(0x4010, 4),
+        src: Varnode::register(0x4000, 4),
+    });
+    block.push(R2ILOp::Copy {
+        dst: Varnode::register(0x4008, 8),
+        src: Varnode::register(0x4000, 8),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(0x4100, 8),
+    });
+    for op in 0..3 {
+        block.stamp_instruction(op, 0x1600 + 4 * op as u64);
+    }
+    let interface = SourceFunctionInterface::new_exact(
+        b"narrow-formal".to_vec(),
+        "aapcs64",
+        [SourceAbiParameterSpec::new(0, lane)],
+        SourceFunctionReturn::Void,
+        [],
+    )
+    .and_then(|interface| interface.with_return_address_storage(register(0x4100, 8)))
+    .and_then(|interface| interface.with_stack_pointer_storage(register(0x4200, 8)))
+    .expect("exact function interface");
+    let artifact = crate::testing::prepared(
+        &[block],
+        &arch,
+        Some(interface),
+        Vec::new(),
+        [register(0x4200, 8)],
+    )
+    .expect("the sealed function validates");
+    let function = artifact.function();
+    let defined = function
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops())
+        .filter_map(SSAOp::dst)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        defined.iter().all(|var| var.version != 0),
+        "a version-0 value is defined: {defined:?}"
+    );
+    // The whole register is rebuilt over the caller's register, not zero.
+    let rebuilt = function
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops())
+        .find_map(|op| match op {
+            SSAOp::Insert(insert) if insert.src.version == 0 => Some(insert.clone()),
+            _ => None,
+        })
+        .expect("the whole register is the formal inserted into the caller's register");
+    assert!(rebuilt.src.constant_bits().is_none(), "{rebuilt:?}");
+    assert_eq!(rebuilt.value.size, 4);
+    assert_eq!(rebuilt.value.version, 0);
+}
