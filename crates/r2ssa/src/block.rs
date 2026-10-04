@@ -49,23 +49,36 @@ pub fn branch_condition(block: &SSABlock) -> Option<(usize, &SSAVar)> {
 /// rewriting an operation in place keeps its id, and the only paths that
 /// change how many operations a block has mint an id for what they insert and
 /// tombstone the id of what they remove.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SSABlock {
+#[derive(Debug, Clone, Serialize)]
+pub struct SSABlock<V = SSAVar> {
     /// The address of the instruction.
     pub addr: u64,
     /// The size of the instruction in bytes.
     pub size: u32,
     /// The SSA operations.
-    ops: Vec<SSAOp>,
+    ops: Vec<SSAOp<V>>,
     /// Each operation's identity, at the operation's index.
     #[serde(skip)]
     ids: Vec<OpId>,
     /// Phi nodes at the start of this block.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    phis: Vec<PhiNode>,
+    phis: Vec<PhiNode<V>>,
     /// Each phi's identity, at the phi's index.
     #[serde(skip)]
     phi_ids: Vec<OpId>,
+}
+
+impl<V> Default for SSABlock<V> {
+    fn default() -> Self {
+        Self {
+            addr: 0,
+            size: 0,
+            ops: Vec::new(),
+            ids: Vec::new(),
+            phis: Vec::new(),
+            phi_ids: Vec::new(),
+        }
+    }
 }
 
 /// Context for SSA conversion, tracking variable versions.
@@ -130,7 +143,7 @@ impl SSAContext {
     }
 }
 
-impl SSABlock {
+impl<V> SSABlock<V> {
     /// Create a new empty SSA block.
     pub fn new(addr: u64, size: u32) -> Self {
         Self::from_parts(addr, size, Vec::new(), Vec::new())
@@ -138,7 +151,7 @@ impl SSABlock {
 
     /// A block holding these operations and phis, numbered by itself until a
     /// function adopts it ([`crate::arena`]).
-    pub fn from_parts(addr: u64, size: u32, ops: Vec<SSAOp>, phis: Vec<PhiNode>) -> Self {
+    pub fn from_parts(addr: u64, size: u32, ops: Vec<SSAOp<V>>, phis: Vec<PhiNode<V>>) -> Self {
         Self {
             addr,
             size,
@@ -153,8 +166,8 @@ impl SSABlock {
     pub(crate) fn from_sited(
         addr: u64,
         size: u32,
-        ops: Vec<(OpId, SSAOp)>,
-        phis: Vec<(OpId, PhiNode)>,
+        ops: Vec<(OpId, SSAOp<V>)>,
+        phis: Vec<(OpId, PhiNode<V>)>,
     ) -> Self {
         let (ids, ops) = ops.into_iter().unzip();
         let (phi_ids, phis) = phis.into_iter().unzip();
@@ -195,24 +208,24 @@ impl SSABlock {
     }
 
     /// The operations, in order.
-    pub fn ops(&self) -> &[SSAOp] {
+    pub fn ops(&self) -> &[SSAOp<V>] {
         &self.ops
     }
 
     /// The phis, in order.
-    pub fn phis(&self) -> &[PhiNode] {
+    pub fn phis(&self) -> &[PhiNode<V>] {
         &self.phis
     }
 
     /// Each operation with its identity, in order.
-    pub fn sited(&self) -> impl DoubleEndedIterator<Item = (OpId, &SSAOp)> + ExactSizeIterator {
+    pub fn sited(&self) -> impl DoubleEndedIterator<Item = (OpId, &SSAOp<V>)> + ExactSizeIterator {
         self.ids.iter().copied().zip(&self.ops)
     }
 
     /// Each phi with its identity, in order.
     pub fn sited_phis(
         &self,
-    ) -> impl DoubleEndedIterator<Item = (OpId, &PhiNode)> + ExactSizeIterator {
+    ) -> impl DoubleEndedIterator<Item = (OpId, &PhiNode<V>)> + ExactSizeIterator {
         self.phi_ids.iter().copied().zip(&self.phis)
     }
 
@@ -232,18 +245,18 @@ impl SSABlock {
     }
 
     /// The operations, to be rewritten in place: each keeps its id.
-    pub fn ops_mut(&mut self) -> &mut [SSAOp] {
+    pub fn ops_mut(&mut self) -> &mut [SSAOp<V>] {
         &mut self.ops
     }
 
     /// The phis, to be rewritten in place: each keeps its id.
-    pub fn phis_mut(&mut self) -> &mut [PhiNode] {
+    pub fn phis_mut(&mut self) -> &mut [PhiNode<V>] {
         &mut self.phis
     }
 
     /// Add an operation to a block being built one instruction at a time,
     /// numbered by the block itself.
-    pub(crate) fn push(&mut self, op: SSAOp) {
+    pub(crate) fn push(&mut self, op: SSAOp<V>) {
         self.ids.push(local_id(self.ops.len()));
         self.ops.push(op);
     }
@@ -251,7 +264,7 @@ impl SSABlock {
     /// Add a phi to a block being built by hand, numbered by the block
     /// itself.
     #[cfg(test)]
-    pub(crate) fn push_phi(&mut self, phi: PhiNode) {
+    pub(crate) fn push_phi(&mut self, phi: PhiNode<V>) {
         self.phi_ids.push(local_id(self.phis.len()));
         self.phis.push(phi);
     }
@@ -273,7 +286,7 @@ impl SSABlock {
         arena: &mut OpArena,
         at: usize,
         pass: Pass,
-        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+        ops: impl IntoIterator<Item = (SSAOp<V>, Option<OpId>)>,
     ) {
         let at = at.min(self.ops.len());
         let (ops, ids): (Vec<_>, Vec<_>) = ops
@@ -285,7 +298,7 @@ impl SSABlock {
     }
 
     /// Remove the operation at `at`, tombstoning its id.
-    pub(crate) fn remove_op(&mut self, arena: &mut OpArena, at: usize, pass: Pass) -> SSAOp {
+    pub(crate) fn remove_op(&mut self, arena: &mut OpArena, at: usize, pass: Pass) -> SSAOp<V> {
         arena.kill(self.ids.remove(at), pass);
         self.ops.remove(at)
     }
@@ -295,7 +308,7 @@ impl SSABlock {
         &mut self,
         arena: &mut OpArena,
         pass: Pass,
-        mut keep: impl FnMut(&PhiNode) -> bool,
+        mut keep: impl FnMut(&PhiNode<V>) -> bool,
     ) {
         let mut index = 0;
         while index < self.phis.len() {
@@ -317,7 +330,7 @@ impl SSABlock {
 
     /// Replace every operation, tombstoning the old ones and minting the new
     /// ones as derived by `pass` from nothing.
-    pub(crate) fn replace_ops(&mut self, arena: &mut OpArena, pass: Pass, ops: Vec<SSAOp>) {
+    pub(crate) fn replace_ops(&mut self, arena: &mut OpArena, pass: Pass, ops: Vec<SSAOp<V>>) {
         for id in self.ids.drain(..) {
             arena.kill(id, pass);
         }
@@ -328,6 +341,20 @@ impl SSABlock {
         self.ops = ops;
     }
 
+    /// Replace every phi, as [`Self::replace_ops`] does operations.
+    pub(crate) fn replace_phis(&mut self, arena: &mut OpArena, pass: Pass, phis: Vec<PhiNode<V>>) {
+        for id in self.phi_ids.drain(..) {
+            arena.kill(id, pass);
+        }
+        self.phi_ids = phis
+            .iter()
+            .map(|_| arena.mint(OpOrigin::Derived { from: None, pass }))
+            .collect();
+        self.phis = phis;
+    }
+}
+
+impl SSABlock {
     /// Apply one block's share of an [`crate::function::EditPlan`] in a single
     /// walk of its operations, minting what it inserts in the order the
     /// insertions end up in the block.
@@ -368,54 +395,42 @@ impl SSABlock {
         self.ops = ops;
         self.ids = ids;
     }
-
-    /// Replace every phi, as [`Self::replace_ops`] does operations.
-    pub(crate) fn replace_phis(&mut self, arena: &mut OpArena, pass: Pass, phis: Vec<PhiNode>) {
-        for id in self.phi_ids.drain(..) {
-            arena.kill(id, pass);
-        }
-        self.phi_ids = phis
-            .iter()
-            .map(|_| arena.mint(OpOrigin::Derived { from: None, pass }))
-            .collect();
-        self.phis = phis;
-    }
 }
 
 /// One block of a function, open for change together with the function's
 /// arena, so that whatever changes the block's shape mints or tombstones ids
 /// as it does. Reading goes through [`SSABlock`].
-pub struct BlockMut<'a> {
-    block: &'a mut SSABlock,
+pub struct BlockMut<'a, V = SSAVar> {
+    block: &'a mut SSABlock<V>,
     arena: &'a mut OpArena,
 }
 
-impl<'a> BlockMut<'a> {
+impl<'a, V> BlockMut<'a, V> {
     /// Open `block` for change. Every id the block holds must have been
     /// minted from `arena`: a block the function owns gets its own arena from
     /// the function, and a detached block numbered by itself pairs with an
     /// empty one.
-    pub fn new(block: &'a mut SSABlock, arena: &'a mut OpArena) -> Self {
+    pub fn new(block: &'a mut SSABlock<V>, arena: &'a mut OpArena) -> Self {
         Self { block, arena }
     }
 
     /// The operations, to be rewritten in place: each keeps its id.
-    pub fn ops_mut(&mut self) -> &mut [SSAOp] {
+    pub fn ops_mut(&mut self) -> &mut [SSAOp<V>] {
         self.block.ops_mut()
     }
 
     /// The phis, to be rewritten in place: each keeps its id.
-    pub fn phis_mut(&mut self) -> &mut [PhiNode] {
+    pub fn phis_mut(&mut self) -> &mut [PhiNode<V>] {
         self.block.phis_mut()
     }
 
     /// Insert one operation at `at`, derived by `pass` from `from`.
-    pub fn insert_op(&mut self, at: usize, op: SSAOp, from: Option<OpId>, pass: Pass) {
+    pub fn insert_op(&mut self, at: usize, op: SSAOp<V>, from: Option<OpId>, pass: Pass) {
         self.block.insert_ops(self.arena, at, pass, [(op, from)]);
     }
 
     /// Append one operation, derived by `pass` from `from`.
-    pub fn push_op(&mut self, op: SSAOp, from: Option<OpId>, pass: Pass) {
+    pub fn push_op(&mut self, op: SSAOp<V>, from: Option<OpId>, pass: Pass) {
         let end = self.block.len();
         self.insert_op(end, op, from, pass);
     }
@@ -426,36 +441,36 @@ impl<'a> BlockMut<'a> {
         &mut self,
         at: usize,
         pass: Pass,
-        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+        ops: impl IntoIterator<Item = (SSAOp<V>, Option<OpId>)>,
     ) {
         self.block.insert_ops(self.arena, at, pass, ops);
     }
 
     /// Remove the operation at `at`, tombstoning its id.
-    pub fn remove_op(&mut self, at: usize, pass: Pass) -> SSAOp {
+    pub fn remove_op(&mut self, at: usize, pass: Pass) -> SSAOp<V> {
         self.block.remove_op(self.arena, at, pass)
     }
 
     /// Keep the phis `keep` accepts, tombstoning the rest.
-    pub fn retain_phis(&mut self, pass: Pass, keep: impl FnMut(&PhiNode) -> bool) {
+    pub fn retain_phis(&mut self, pass: Pass, keep: impl FnMut(&PhiNode<V>) -> bool) {
         self.block.retain_phis(self.arena, pass, keep);
     }
 
     /// Replace every operation: the old ids die, the new ones are minted.
-    pub fn replace_ops(&mut self, pass: Pass, ops: Vec<SSAOp>) {
+    pub fn replace_ops(&mut self, pass: Pass, ops: Vec<SSAOp<V>>) {
         self.block.replace_ops(self.arena, pass, ops);
     }
 
     /// Replace every phi: the old ids die, the new ones are minted.
-    pub fn replace_phis(&mut self, pass: Pass, phis: Vec<PhiNode>) {
+    pub fn replace_phis(&mut self, pass: Pass, phis: Vec<PhiNode<V>>) {
         self.block.replace_phis(self.arena, pass, phis);
     }
 }
 
-impl std::ops::Deref for BlockMut<'_> {
-    type Target = SSABlock;
+impl<V> std::ops::Deref for BlockMut<'_, V> {
+    type Target = SSABlock<V>;
 
-    fn deref(&self) -> &SSABlock {
+    fn deref(&self) -> &SSABlock<V> {
         self.block
     }
 }
@@ -1117,7 +1132,7 @@ mod tests {
 
     #[test]
     fn test_ssa_block_basic() {
-        let block = SSABlock::new(0x1000, 4);
+        let block: SSABlock = SSABlock::new(0x1000, 4);
         assert_eq!(block.addr, 0x1000);
         assert_eq!(block.size, 4);
         assert!(block.is_empty());

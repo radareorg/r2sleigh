@@ -3071,11 +3071,11 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
 
 /// A phi node in SSA form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhiNode {
+pub struct PhiNode<V = SSAVar> {
     /// The destination variable.
-    pub dst: SSAVar,
+    pub dst: V,
     /// The source variables, one per predecessor.
-    pub sources: Vec<(u64, SSAVar)>, // (predecessor addr, variable)
+    pub sources: Vec<(u64, V)>, // (predecessor addr, variable)
     /// Name-independent lifted storage identity.
     #[serde(default)]
     pub canonical_storage: Option<CanonicalStorageId>,
