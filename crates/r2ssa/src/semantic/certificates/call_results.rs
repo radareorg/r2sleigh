@@ -51,45 +51,61 @@ pub(crate) fn collect_call_result_certificates(
         .iter()
         .map(|(id, fact)| (fact.at, *id))
         .collect::<BTreeMap<_, _>>();
-    let mut out_states = BTreeMap::<u64, CallResultFlowState>::new();
-    let mut worklist = function
-        .blocks()
-        .iter()
-        .map(|block| block.addr)
-        .collect::<VecDeque<_>>();
-    let mut queued = function
-        .blocks()
-        .iter()
-        .map(|block| block.addr)
-        .collect::<BTreeSet<_>>();
-
-    while let Some(block_addr) = worklist.pop_front() {
-        queued.remove(&block_addr);
-        let Some(block) = function.get_block(block_addr) else {
+    // Settle the tracked results on the fixpoint driver first, writing no
+    // certificate: a state seen before the merges settle may claim an owner
+    // the settled state does not, and a certificate written from it would
+    // outlive it. Each tracked value or owner can only be dropped, once.
+    let height = body.graph.values.len().saturating_add(1);
+    let solved = crate::fixpoint::forward(
+        function,
+        "call-results",
+        height,
+        CallResultFlowState::default(),
+        |block_addr, input| {
+            let Some(block) = function.get_block(block_addr) else {
+                return input.clone();
+            };
+            process_call_result_flow_block(
+                body,
+                derived,
+                block,
+                &callsites_by_inst,
+                input.clone(),
+                CallResultSink {
+                    call_results: &mut BTreeMap::new(),
+                    call_results_by_inst: &mut BTreeMap::new(),
+                    call_results_by_callsite: &mut BTreeMap::new(),
+                },
+            )
+        },
+    );
+    let solved = match solved {
+        Ok(solved) => solved,
+        Err(exhausted) => {
+            r2il::refusal_evidence!("call-results", "{exhausted}");
+            return Default::default();
+        }
+    };
+    // Then the certificates, once, from each block's settled entry state.
+    for &block_addr in function.block_addrs() {
+        let (Some(block), Some(input)) = (
+            function.get_block(block_addr),
+            solved.entry.get(&block_addr),
+        ) else {
             continue;
         };
-        let input = merge_call_result_flow_predecessors(function, &out_states, block_addr);
-        let output = process_call_result_flow_block(
+        process_call_result_flow_block(
             body,
             derived,
             block,
             &callsites_by_inst,
-            input,
+            input.clone(),
             CallResultSink {
                 call_results: &mut call_results,
                 call_results_by_inst: &mut call_results_by_inst,
                 call_results_by_callsite: &mut call_results_by_callsite,
             },
         );
-        if out_states.get(&block_addr) == Some(&output) {
-            continue;
-        }
-        out_states.insert(block_addr, output);
-        for succ in function.successors(block_addr) {
-            if queued.insert(succ) {
-                worklist.push_back(succ);
-            }
-        }
     }
 
     for values in call_results_by_callsite.values_mut() {
@@ -106,26 +122,19 @@ pub(crate) struct CallResultFlowState {
     pub(crate) stack_owners: BTreeMap<(ObjectId, i64), CallResultCertificate>,
 }
 
-pub(crate) fn merge_call_result_flow_predecessors(
-    function: &SSAFunction,
-    out_states: &BTreeMap<u64, CallResultFlowState>,
-    block_addr: u64,
-) -> CallResultFlowState {
-    let preds = function.predecessors(block_addr);
-    let Some((first, rest)) = preds.split_first() else {
-        return CallResultFlowState::default();
-    };
-    let mut merged = out_states.get(first).cloned().unwrap_or_default();
-    for pred in rest {
-        let pred_state = out_states.get(pred).cloned().unwrap_or_default();
-        merged
-            .tracked
-            .retain(|value, cert| pred_state.tracked.get(value) == Some(cert));
-        merged
-            .stack_owners
-            .retain(|slot, cert| pred_state.stack_owners.get(slot) == Some(cert));
+impl crate::fixpoint::Join for CallResultFlowState {
+    /// What every path that reaches the merge agrees on: a tracked result
+    /// or owner survives only where both sides hold the same certificate.
+    /// The driver never joins an unreached predecessor, so a loop's back edge
+    /// does not empty the header before it has been walked.
+    fn join(&mut self, other: &Self) -> bool {
+        let before = (self.tracked.len(), self.stack_owners.len());
+        self.tracked
+            .retain(|value, cert| other.tracked.get(value) == Some(cert));
+        self.stack_owners
+            .retain(|slot, cert| other.stack_owners.get(slot) == Some(cert));
+        before != (self.tracked.len(), self.stack_owners.len())
     }
-    merged
 }
 
 /// The three indexes a call-result certificate is recorded in at once.
