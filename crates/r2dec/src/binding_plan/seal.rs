@@ -1412,6 +1412,22 @@ impl HeldSet {
             *word |= theirs;
         }
     }
+
+    /// The `len` bits from `base`, a word boundary, as a set of their own:
+    /// a copy of the words that hold them.
+    fn range(&self, base: usize, len: usize) -> Self {
+        debug_assert!(base.is_multiple_of(64), "a lane starts on a word");
+        let first = base / 64;
+        Self(self.0[first..first + len.div_ceil(64)].to_vec())
+    }
+
+    /// Overwrite the `len` bits from `base`, a word boundary, with `local`.
+    /// The lane owns every bit of its last word, so whole words are copied.
+    fn set_range(&mut self, base: usize, len: usize, local: &Self) {
+        debug_assert!(base.is_multiple_of(64), "a lane starts on a word");
+        let first = base / 64;
+        self.0[first..first + len.div_ceil(64)].copy_from_slice(&local.0);
+    }
 }
 
 /// One event of one variable inside one block.
@@ -1535,32 +1551,6 @@ impl<'a> VariableFlow<'a> {
         held
     }
 
-    /// What the variable holds on entry to `block`. A predecessor not yet
-    /// visited contributes nothing, which is the top of the must lattice.
-    fn entering<C: ReachingControlFlow + ?Sized>(
-        &self,
-        cfg: &C,
-        block: u64,
-        out: &BTreeMap<u64, Held>,
-    ) -> Held {
-        let mut held = if block == cfg.entry() {
-            self.entry.clone()
-        } else {
-            Held {
-                must: HeldSet::full(self.values.len()),
-                may: HeldSet::empty(self.values.len()),
-            }
-        };
-        for pred in cfg.predecessors(block) {
-            if let Some(pred_out) = out.get(&pred) {
-                let arriving = self.across_edge(pred, block, pred_out);
-                held.must.meet(&arriving.must);
-                held.may.join(&arriving.may);
-            }
-        }
-        held
-    }
-
     /// Run `block` over what it is entered with, handing each read that does
     /// not see its value to `stale`. A block the text renders more than once
     /// runs each copy from its entry, and leaves what every copy leaves.
@@ -1643,61 +1633,6 @@ impl<'a> VariableFlow<'a> {
                 held.may.insert(bit);
             }
         }
-    }
-
-    /// One round-robin pass in `order`; whether any block's exit changed.
-    fn sweep<C: ReachingControlFlow + ?Sized>(
-        &self,
-        cfg: &C,
-        facts: &ReachingFacts<'_>,
-        order: &[u64],
-        out: &mut BTreeMap<u64, Held>,
-    ) -> bool {
-        let mut changed = false;
-        for block in order {
-            let entered = self.entering(cfg, *block, out);
-            let left = self.through(facts, *block, entered, &mut |_, _| {});
-            changed |= out.insert(*block, left.clone()).as_ref() != Some(&left);
-        }
-        changed
-    }
-
-    /// Every stale read of this variable.
-    ///
-    /// Round-robin in reverse postorder to a fixed point, then one sweep that
-    /// reports. Every transfer is monotone -- a write replaces the set, a
-    /// read leaves it alone, a merge adds its output where its inputs are --
-    /// and every must-set starts at the top and only loses members, so the
-    /// iteration stops after at most one pass per member of each block's set.
-    /// The kill-and-generate part of the framework is rapid, so it settles
-    /// within Kam and Ullman's d + 2 passes, d the loop-connectedness of the
-    /// order; a merge whose input is itself a merge of an enclosing loop can
-    /// add one pass per level of that nesting.
-    fn stale_reads<C: ReachingControlFlow + ?Sized>(
-        &self,
-        cfg: &C,
-        facts: &ReachingFacts<'_>,
-        order: &[u64],
-    ) -> Vec<StaleRead> {
-        let mut out = BTreeMap::<u64, Held>::new();
-        while self.sweep(cfg, facts, order, &mut out) {}
-        let mut stale = Vec::new();
-        for block in order {
-            let entered = self.entering(cfg, *block, &out);
-            self.through(facts, *block, entered, &mut |read, held| {
-                stale.push(StaleRead {
-                    read: *read,
-                    instead: self
-                        .values
-                        .iter()
-                        .enumerate()
-                        .filter(|(bit, value)| held.may.has(*bit) && **value != read.value)
-                        .map(|(_, value)| *value)
-                        .collect(),
-                });
-            });
-        }
-        stale
     }
 }
 
@@ -1891,7 +1826,8 @@ pub(crate) fn stale_reads<C: ReachingControlFlow + ?Sized>(
             entry_values.entry(binding).or_default().push(*value);
         }
     }
-    let mut stale = Vec::new();
+    let mut lanes = Vec::new();
+    let mut width = 0usize;
     for (binding, binding_reads) in &reads {
         let flow = VariableFlow::new(
             facts,
@@ -1904,10 +1840,228 @@ pub(crate) fn stale_reads<C: ReachingControlFlow + ?Sized>(
             entry_values.get(binding).map_or(&[], Vec::as_slice),
         );
         if !flow.is_trivial() {
-            stale.extend(flow.stale_reads(cfg, facts, &order));
+            // Each lane starts on a word and owns its last word whole, so a
+            // lane's part of the shared state is a run of words.
+            let len = flow.values.len();
+            lanes.push(Lane { base: width, flow });
+            width += len.div_ceil(64) * 64;
         }
     }
-    stale
+    SharedFlow::new(lanes, width).stale_reads(cfg, facts, &order)
+}
+
+/// One variable's place in the shared check: its bits are `base..` in the
+/// vector every variable's bits share.
+struct Lane<'a> {
+    base: usize,
+    flow: VariableFlow<'a>,
+}
+
+impl Lane<'_> {
+    fn len(&self) -> usize {
+        self.flow.values.len()
+    }
+
+    /// This variable's part of a shared state, as a state of its own.
+    fn local(&self, held: &Held) -> Held {
+        Held {
+            must: held.must.range(self.base, self.len()),
+            may: held.may.range(self.base, self.len()),
+        }
+    }
+
+    /// Write this variable's part back into a shared state.
+    fn store(&self, held: &mut Held, local: &Held) {
+        held.must.set_range(self.base, self.len(), &local.must);
+        held.may.set_range(self.base, self.len(), &local.may);
+    }
+}
+
+/// Every variable's check at once, over one bit vector in which each owns a
+/// disjoint range.
+///
+/// The variables are independent: a variable's transfer reads and writes its
+/// own range only, and a merge sets a bit of its own variable. The product of
+/// their monotone systems, iterated round-robin, settles where each would on
+/// its own, so the stale reads are the ones the per-variable checks found.
+/// What changes is the cost: a block's step costs the meet over its
+/// predecessors, `O(width / 64)`, and the variables that have events there,
+/// rather than one sweep of every block per variable.
+struct SharedFlow<'a> {
+    lanes: Vec<Lane<'a>>,
+    /// The lanes with events in each block, in lane order.
+    events: BTreeMap<u64, Vec<usize>>,
+    /// The lanes with merges at each block.
+    merges: BTreeMap<u64, Vec<usize>>,
+    entry: Held,
+    /// What a block nothing has reached yet holds: every lane's own top,
+    /// whose bits past the lane's values are clear as the lane's own are.
+    top: Held,
+}
+
+impl<'a> SharedFlow<'a> {
+    fn new(lanes: Vec<Lane<'a>>, width: usize) -> Self {
+        let mut events = BTreeMap::<u64, Vec<usize>>::new();
+        let mut merges = BTreeMap::<u64, Vec<usize>>::new();
+        let mut entry = Held {
+            must: HeldSet::empty(width),
+            may: HeldSet::empty(width),
+        };
+        let mut top = entry.clone();
+        for (index, lane) in lanes.iter().enumerate() {
+            for block in lane.flow.events.keys() {
+                events.entry(*block).or_default().push(index);
+            }
+            for block in lane.flow.merges.keys() {
+                merges.entry(*block).or_default().push(index);
+            }
+            lane.store(&mut entry, &lane.flow.entry);
+            lane.store(
+                &mut top,
+                &Held {
+                    must: HeldSet::full(lane.len()),
+                    may: HeldSet::empty(lane.len()),
+                },
+            );
+        }
+        Self {
+            lanes,
+            events,
+            merges,
+            entry,
+            top,
+        }
+    }
+
+    /// What the shared state is after the edge from `pred` into `block`:
+    /// each lane's merges at `block`, as that lane's own check makes them.
+    fn across_edge(&self, pred: u64, block: u64, out: &Held) -> Held {
+        let mut held = out.clone();
+        for index in self.merges.get(&block).into_iter().flatten() {
+            let lane = &self.lanes[*index];
+            let arriving = lane.flow.across_edge(pred, block, &lane.local(out));
+            lane.store(&mut held, &arriving);
+        }
+        held
+    }
+
+    fn entering<C: ReachingControlFlow + ?Sized>(
+        &self,
+        cfg: &C,
+        block: u64,
+        out: &BTreeMap<u64, Held>,
+    ) -> Held {
+        let mut held = if block == cfg.entry() {
+            self.entry.clone()
+        } else {
+            self.top.clone()
+        };
+        for pred in cfg.predecessors(block) {
+            if let Some(pred_out) = out.get(&pred) {
+                let arriving = self.across_edge(pred, block, pred_out);
+                held.must.meet(&arriving.must);
+                held.may.join(&arriving.may);
+            }
+        }
+        held
+    }
+
+    /// Run every lane with events in `block`, each on its own range, handing
+    /// each stale read to `stale` with the lane it belongs to.
+    fn through(
+        &self,
+        facts: &ReachingFacts<'_>,
+        block: u64,
+        mut held: Held,
+        stale: &mut dyn FnMut(usize, &RenderedRead, &Held),
+    ) -> Held {
+        for index in self.events.get(&block).into_iter().flatten() {
+            let lane = &self.lanes[*index];
+            let local = lane
+                .flow
+                .through(facts, block, lane.local(&held), &mut |read, local| {
+                    stale(*index, read, local);
+                });
+            lane.store(&mut held, &local);
+        }
+        held
+    }
+
+    /// Every block's exit at the shared fixed point.
+    ///
+    /// A worklist by reverse-postorder rank: every block runs once, and again
+    /// only when a predecessor's exit moved. Each transfer is monotone and
+    /// every state starts at its top, so this settles where a round-robin
+    /// does -- the greatest fixed point -- without re-running the blocks
+    /// whose entry did not change.
+    fn settle<C: ReachingControlFlow + ?Sized>(
+        &self,
+        cfg: &C,
+        facts: &ReachingFacts<'_>,
+        order: &[u64],
+    ) -> BTreeMap<u64, Held> {
+        let successors = successors_by_rank(cfg, order);
+        let mut out = BTreeMap::<u64, Held>::new();
+        let mut queued = vec![true; order.len()];
+        let mut work = (0..order.len())
+            .map(std::cmp::Reverse)
+            .collect::<std::collections::BinaryHeap<_>>();
+        while let Some(std::cmp::Reverse(at)) = work.pop() {
+            queued[at] = false;
+            let block = order[at];
+            let entered = self.entering(cfg, block, &out);
+            let left = self.through(facts, block, entered, &mut |_, _, _| {});
+            if out.get(&block) == Some(&left) {
+                continue;
+            }
+            out.insert(block, left);
+            let unqueued = successors[at]
+                .iter()
+                .copied()
+                .filter(|next| !std::mem::replace(&mut queued[*next], true))
+                .collect::<Vec<_>>();
+            work.extend(unqueued.into_iter().map(std::cmp::Reverse));
+        }
+        out
+    }
+
+    /// Settle the shared state, then one sweep that reports, in the order
+    /// the per-variable checks reported:
+    /// variable, then block, then the text's order within the block.
+    fn stale_reads<C: ReachingControlFlow + ?Sized>(
+        &self,
+        cfg: &C,
+        facts: &ReachingFacts<'_>,
+        order: &[u64],
+    ) -> Vec<StaleRead> {
+        if self.lanes.is_empty() {
+            return Vec::new();
+        }
+        let out = self.settle(cfg, facts, order);
+        let mut found = Vec::new();
+        for (rank, block) in order.iter().enumerate() {
+            let entered = self.entering(cfg, *block, &out);
+            self.through(facts, *block, entered, &mut |lane, read, held| {
+                let values = &self.lanes[lane].flow.values;
+                found.push((
+                    lane,
+                    rank,
+                    found.len(),
+                    StaleRead {
+                        read: *read,
+                        instead: values
+                            .iter()
+                            .enumerate()
+                            .filter(|(bit, value)| held.may.has(*bit) && **value != read.value)
+                            .map(|(_, value)| *value)
+                            .collect(),
+                    },
+                ));
+            });
+        }
+        found.sort_by_key(|(lane, rank, sequence, _)| (*lane, *rank, *sequence));
+        found.into_iter().map(|(.., read)| read).collect()
+    }
 }
 
 /// How the stale reads are answered: the values that leave their variable
@@ -2313,4 +2467,26 @@ mod reaching_tests {
             vec![(2, 6), (5, 7)]
         );
     }
+}
+
+/// Each block's successors, by reverse-postorder rank: the edges the order
+/// reaches, read off the predecessors once.
+fn successors_by_rank<C: ReachingControlFlow + ?Sized>(cfg: &C, order: &[u64]) -> Vec<Vec<usize>> {
+    let rank = order
+        .iter()
+        .enumerate()
+        .map(|(rank, block)| (*block, rank))
+        .collect::<BTreeMap<_, _>>();
+    let mut successors = vec![Vec::new(); order.len()];
+    let edges = order.iter().enumerate().flat_map(|(at, block)| {
+        cfg.predecessors(*block)
+            .into_iter()
+            .filter_map(|pred| rank.get(&pred).copied())
+            .map(move |from| (from, at))
+            .collect::<Vec<_>>()
+    });
+    for (from, at) in edges {
+        successors[from].push(at);
+    }
+    successors
 }
