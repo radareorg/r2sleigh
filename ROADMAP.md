@@ -138,13 +138,13 @@ Taken (2026-10-03):
   being a limit of the oracle.
 - **D7. The visual mode never calls the engine while drawing.**
 
-To confirm (each reverses or retires an earlier decision):
+Confirmed 2026-10-04 (each reverses or retires an earlier decision):
 
 - **D8. The observation journal is replaced, not kept.** plan-extension.md's
   track H says it stays because it feeds the obligation ledger. The month's
   evidence says the journal is where proofs are re-derived after rendering; a
   render tree built with its obligation ids, checked once, makes the journal
-  redundant. Proposed: R replaces it.
+  redundant. R replaces it.
 - **D9. `doc/adr-location-ssa.md` is superseded**, not implemented: P1's
   `ValueView` answers bit identity and P4's partition answers frame identity.
   What the ADR wanted that neither yet gives — one liveness model over
