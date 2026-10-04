@@ -901,6 +901,12 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
 
+    // Each operation is rewritten until a step moves nothing. A step folds a
+    // definition into it or simplifies it, and every step keeps its meaning;
+    // nothing proves the rules cannot undo each other, so the steps on one
+    // operation are budgeted by the definitions there are to fold, and an
+    // operation that meets the budget keeps its last form and says so.
+    let budget = defs.len().saturating_add(1);
     let mut combined = EditPlan::new();
     for addr in &block_addrs {
         let Some(block) = func.get_block(*addr) else {
@@ -908,7 +914,15 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         };
         for (id, original) in block.sited() {
             let mut op = original.clone();
-            loop {
+            for step in 0.. {
+                if step == budget {
+                    r2il::refusal_evidence!(
+                        "inst-combine",
+                        "{:#x}: {op:?} still rewriting after {budget} steps",
+                        func.entry
+                    );
+                    break;
+                }
                 let Some(new_op) = substitute_constant_temporaries(&op, &defs)
                     .or_else(|| fold_through_definition(&op, &defs))
                     .or_else(|| simplify_op(&op))
@@ -1392,23 +1406,24 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
         .flat_map(|op| op.sources())
         .map(VarKey::from_var)
         .collect::<HashSet<_>>();
-    loop {
-        let grown = func
-            .blocks()
-            .iter()
-            .flat_map(|block| block.ops().iter())
-            .filter_map(|op| match op {
-                SSAOp::Copy { dst, src } if combined.contains(&VarKey::from_var(dst)) => {
-                    Some(VarKey::from_var(src))
-                }
-                _ => None,
-            })
-            .filter(|key| !combined.contains(key))
-            .collect::<Vec<_>>();
-        if grown.is_empty() {
-            break;
+    // Back through the copies, once: each copy's source joins the set when
+    // its destination is in it.
+    let copied_from = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops().iter())
+        .filter_map(|op| match op {
+            SSAOp::Copy { dst, src } => Some((VarKey::from_var(dst), VarKey::from_var(src))),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut pending = combined.iter().cloned().collect::<Vec<_>>();
+    while let Some(key) = pending.pop() {
+        if let Some(src) = copied_from.get(&key)
+            && combined.insert(src.clone())
+        {
+            pending.push(src.clone());
         }
-        combined.extend(grown);
     }
     // Which values are copies of which, as the value view states it once for
     // the whole function. The folds below rewrite comparisons, never a copy,

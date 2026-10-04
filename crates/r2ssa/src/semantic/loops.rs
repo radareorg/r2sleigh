@@ -310,6 +310,10 @@ pub(crate) fn loop_carrier_facts(
                 .insert(carrier_index);
         }
     }
+    // A worklist over the loop's inner phis. A phi is given its one owner at
+    // most once -- one already owned is skipped -- and owners only grow, so
+    // a phi is re-queued only when an input it reads gains one: each phi is
+    // decided once, and the work is the phis plus their uses.
     let mut pending = graph
         .insts
         .iter()
