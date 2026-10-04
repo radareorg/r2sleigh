@@ -359,6 +359,28 @@ pub(crate) fn promote_private_stack_slots(
     // compiled without optimisation addresses its locals through it as soon as
     // the function calls anything, so without this the pass only ever sees a
     // leaf.
+    //
+    // A frame base has to hold the frame at every access it names, and a call
+    // hands back only what the convention preserves. In a function that calls
+    // anything, a register a call may clobber -- `lea rdi, [rsp+0x18]`, an
+    // outgoing `&first` -- is an address passed on, not the frame pointer;
+    // with no convention nothing is known to survive a call.
+    let calls = blocks.iter().any(|block| {
+        block
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }))
+    });
+    let survives_calls = |register: &r2il::Varnode| {
+        !calls
+            || call_effect.is_some_and(|effect| {
+                effect.preserves(CanonicalStorageId {
+                    space: CanonicalStorageSpace::Register,
+                    offset: register.offset,
+                    size: register.size,
+                })
+            })
+    };
     let frame_pointer = entry
         .ops
         .iter()
@@ -372,6 +394,14 @@ pub(crate) fn promote_private_stack_slots(
                 return None;
             }
             let (base, displacement) = resolved_stack_address(entry, at, src, &is_stack_pointer)?;
+            if !survives_calls(dst) {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x}:{at} points {dst} at the frame, but a call may clobber it",
+                    entry.addr
+                );
+                return None;
+            }
             is_stack_pointer(&base)
                 .then(|| (at, dst.clone(), displacement + entry_adjustment(0, at)))
         });
@@ -382,9 +412,27 @@ pub(crate) fn promote_private_stack_slots(
     };
     let frame_base_register =
         |varnode: &r2il::Varnode| is_stack_pointer(varnode) || is_frame_pointer(varnode);
+    // Where each block first writes the frame pointer again, other than the
+    // prologue's own write: a block that does so leaves the function (any
+    // other is refused below), and from that write on the register holds what
+    // the epilogue put there, not the frame.
+    let rewritten = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            block.ops.iter().enumerate().position(|(at, op)| {
+                op.output().is_some_and(&is_frame_pointer)
+                    && !(index == 0
+                        && frame_pointer
+                            .as_ref()
+                            .is_some_and(|(established, _, _)| at <= *established))
+            })
+        })
+        .collect::<Vec<_>>();
     // The frame pointer is a base only once the prologue has pointed it at the
-    // frame: before that it still holds the caller's, which the prologue saves
-    // like any other callee-saved register.
+    // frame -- before that it still holds the caller's, which the prologue
+    // saves like any other callee-saved register -- and only until the block
+    // writes it again.
     let is_frame_base = |varnode: &r2il::Varnode, block_index: usize, at: usize| {
         is_stack_pointer(varnode)
             || is_frame_pointer(varnode)
@@ -392,6 +440,7 @@ pub(crate) fn promote_private_stack_slots(
                     && frame_pointer
                         .as_ref()
                         .is_some_and(|(established, _, _)| at <= *established))
+                && rewritten[block_index].is_none_or(|first| at < first)
     };
     // A block that leaves the function -- by returning, or by a branch to an
     // address no block of it owns, which is a tail call -- may restore the
@@ -1075,5 +1124,80 @@ mod tests {
         assert_eq!(promoted_under(Vec::new(), reg(32, 8), preserving_r3()), 0);
         // The parameter's low lane is still the parameter's.
         assert_eq!(promoted_under(Vec::new(), reg(24, 4), preserving_r3()), 2);
+    }
+
+    /// clang's frameless `shape_call_chain`: the first register pointed into
+    /// the frame is an outgoing `&first`, and `second`, whose address is
+    /// passed to the next call, has to stay in memory so the reload after
+    /// that call reads what the callee stored.
+    ///
+    /// ```text
+    /// sp -= 32
+    /// rdi = sp + 24          ; &first
+    /// [sp + 16] = 0          ; second = 0
+    /// rdi = sp + 16          ; &second, passed on
+    /// call stash
+    /// load [sp + 16]         ; second, as the callee left it
+    /// ```
+    #[test]
+    fn an_address_passed_to_a_call_is_not_the_frame_pointer() {
+        let storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let (sp, rdi) = (reg(0, 8), reg(40, 8));
+        let at = |unique_offset, displacement| R2ILOp::IntAdd {
+            dst: unique(unique_offset, 8),
+            a: sp.clone(),
+            b: Varnode::constant(displacement, 8),
+        };
+        let mut block = R2ILBlock::new(0x4000, 4);
+        block.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(32, 8),
+        });
+        block.push(at(0x100, 24));
+        block.push(R2ILOp::Copy {
+            dst: rdi.clone(),
+            src: unique(0x100, 8),
+        });
+        block.push(at(0x108, 16));
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: unique(0x108, 8),
+            val: Varnode::constant(0, 8),
+        });
+        block.push(at(0x110, 16));
+        block.push(R2ILOp::Copy {
+            dst: rdi,
+            src: unique(0x110, 8),
+        });
+        block.push(R2ILOp::Call {
+            target: Varnode::constant(0x9000, 8),
+        });
+        block.push(at(0x118, 16));
+        block.push(R2ILOp::Load {
+            dst: unique(0x120, 8),
+            space: SpaceId::Ram,
+            addr: unique(0x118, 8),
+        });
+        block.push(R2ILOp::Return { target: reg(8, 8) });
+        let promoted = |effect: Option<crate::SourceCallEffect>| {
+            promote_private_stack_slots(
+                std::slice::from_ref(&block),
+                Some(storage(0)),
+                None,
+                effect.as_ref(),
+                true,
+            )
+            .map_or(0, |promoted| promoted.len())
+        };
+        // A call may clobber rdi, so it is no frame base.
+        assert_eq!(promoted(crate::testing::call_effect([storage(40)], [])), 0);
+        // Under a convention that preserved it, the second write still ends
+        // its time as the frame: from there it holds `&second`, which leaves.
+        assert_eq!(promoted(crate::testing::call_effect([], [storage(40)])), 0);
     }
 }
