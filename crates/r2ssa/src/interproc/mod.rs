@@ -2977,6 +2977,30 @@ fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgum
     collect_call_arg_state_of_height(prepared, abi, height)
 }
 
+/// What a call is handed in each argument carrier, as `state` holds them
+/// where the call stands.
+fn call_arguments_in(
+    prepared: &SsaArtifact,
+    abi: &AbiProfile,
+    call_id: CallSiteId,
+    state: &CallCarrierMap,
+) -> Vec<SummaryOperand> {
+    call_argument_carriers(prepared, abi, call_id)
+        .map(|carriers| {
+            carriers
+                .into_iter()
+                .map(|carrier| match state.get(&carrier) {
+                    Some(CallCarrierState::EntryArg(index)) => SummaryOperand::Arg(*index),
+                    Some(CallCarrierState::Value(value_id)) => {
+                        classify_value_operand(prepared, *value_id)
+                    }
+                    Some(CallCarrierState::Unknown) | None => SummaryOperand::Unknown,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| unknown_call_arguments(prepared, abi, call_id))
+}
+
 /// What one block leaves in each carrier it sets, whatever it was entered
 /// with.
 ///
@@ -3093,47 +3117,41 @@ fn collect_call_arg_state_of_height(
         }
     };
 
-    let mut by_call = BTreeMap::new();
+    // Each block's calls, by the operation each sits at: one walk of a block
+    // states every call in it, rather than one walk from the block's top per
+    // call.
+    let graph = prepared.graph();
+    let mut calls_by_block = BTreeMap::<u64, BTreeMap<crate::arena::OpId, CallSiteId>>::new();
     for (&call_id, call) in &prepared.call_sites().by_id {
-        let graph = prepared.graph();
-        let (Some(block_addr), Some(call_op)) =
+        if let (Some(block_addr), Some(call_op)) =
             (graph.block_addr_of(call.at), graph.op_for_inst(call.at))
-        else {
-            continue;
-        };
-        let Some(block) = function.get_block(block_addr) else {
+        {
+            calls_by_block
+                .entry(block_addr)
+                .or_default()
+                .insert(call_op, call_id);
+        }
+    }
+    let mut by_call = BTreeMap::new();
+    for (block_addr, calls) in &calls_by_block {
+        let Some(block) = function.get_block(*block_addr) else {
             continue;
         };
         // A block nothing reaches holds nothing known.
         let mut state = in_states
-            .get(&block_addr)
+            .get(block_addr)
             .cloned()
             .unwrap_or_else(|| unknown_state.clone());
-        for phi in block.phis() {
-            if let Some(dst) = graph.value_of(phi.dst) {
-                update_call_carrier_state(prepared, abi, &mut state, dst);
-            }
+        for dst in block
+            .phis()
+            .iter()
+            .filter_map(|phi| graph.value_of(phi.dst))
+        {
+            update_call_carrier_state(prepared, abi, &mut state, dst);
         }
         for (op_id, op) in block.sited() {
-            if op_id == call_op {
-                let args = call_argument_carriers(prepared, abi, call_id)
-                    .map(|carriers| {
-                        carriers
-                            .into_iter()
-                            .map(|carrier| match state.get(&carrier) {
-                                Some(CallCarrierState::EntryArg(index)) => {
-                                    SummaryOperand::Arg(*index)
-                                }
-                                Some(CallCarrierState::Value(value_id)) => {
-                                    classify_value_operand(prepared, *value_id)
-                                }
-                                Some(CallCarrierState::Unknown) | None => SummaryOperand::Unknown,
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_else(|| unknown_call_arguments(prepared, abi, call_id));
-                by_call.insert(call_id, args);
-                break;
+            if let Some(call_id) = calls.get(&op_id) {
+                by_call.insert(*call_id, call_arguments_in(prepared, abi, *call_id, &state));
             }
             apply_call_carrier_transfer(prepared, abi, &mut state, op);
         }
