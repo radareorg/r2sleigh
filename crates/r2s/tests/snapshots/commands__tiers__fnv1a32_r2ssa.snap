@@ -38,10 +38,9 @@ Block 0x401348:
   preds: 0x401339, 0x401348
   RAX_2 = phi([0x401339]: RAX_1, [0x401348]: RAX_4)
   RDI_1 = phi([0x401339]: RDI_0, [0x401348]: RDI_2)
-  RDX_1 = phi([0x401339]: RDX_0, [0x401348]: RDX_2)
   tmp:11e00_1 = LOAD [ram]RDI_1
   tmp:lane:401348:1:0_1 = ZEXT(tmp:11e00_1)
-  RDX_2 = ZEXT(tmp:lane:401348:1:0_1)
+  RDX_1 = ZEXT(tmp:lane:401348:1:0_1)
   CF_3 = CARRY(RDI_1, const:1_0)
   OF_3 = SCARRY(RDI_1, const:1_0)
   RDI_2 = RDI_1 + const:1_0
@@ -106,7 +105,7 @@ Bindings: 5
   b0 RSI_0 Int { bits: 64, signedness: Unsigned } Parameter { slot: 1 } [3 18]
   b1 RDI_0 Int { bits: 64, signedness: Unsigned } Parameter { slot: 0 } [15 29 30]
   b2 RAX_1 Int { bits: 64, signedness: Unsigned } Local [26 27 28]
-  b3 tmp:11e00_1 Int { bits: 8, signedness: Unsigned } Local [34]
+  b3 tmp:11e00_1 Int { bits: 8, signedness: Unsigned } Local [31]
   b4 stack_p0 Int { bits: 64, signedness: Unsigned } StackObject { object: ObjectId(1) } entry-declared []
 Frame: 2 objects, 0 escaped
   o1 slot sp+0x0 private
@@ -119,7 +118,7 @@ Values:
   tmp:70500_1 inline TermId(3)
   const:0_0 inline TermId(6)
   SF_1 elided UnobservedValue
-  ZF_1 inline TermId(123)
+  ZF_1 inline TermId(122)
   const:ff_0 elided UnobservedValue
   tmp:2c200_1 elided UnobservedValue
   tmp:2c280_1 elided UnobservedValue
@@ -143,12 +142,10 @@ Values:
   RAX_2 bound b2
   RDI_2 bound b1
   RDI_1 bound b1
-  RDX_0 elided UnobservedValue
-  RDX_2 elided UnobservedValue
-  RDX_1 elided UnobservedMerge
   tmp:11e00_1 bound b3
-  tmp:lane:401348:1:0_1 inline TermId(45)
-  const:1_0 inline TermId(48)
+  tmp:lane:401348:1:0_1 inline TermId(44)
+  RDX_1 elided UnobservedValue
+  const:1_0 inline TermId(47)
   CF_3 elided UnobservedValue
   OF_3 elided UnobservedValue
   SF_3 elided UnobservedValue
@@ -159,9 +156,9 @@ Values:
   PF_3 elided UnobservedValue
   CF_4 elided UnobservedValue
   OF_4 elided UnobservedValue
-  tmp:lane:401348:e:1_1 inline TermId(68)
+  tmp:lane:401348:e:1_1 inline TermId(67)
   tmp:lane:401348:e:2_1 elided UnobservedValue
-  tmp:lane:401348:e:3_1 inline TermId(126)
+  tmp:lane:401348:e:3_1 inline TermId(125)
   RAX_3 elided UnobservedValue
   tmp:lane:401348:10:4_1 elided UnobservedValue
   const:0_0 elided UnobservedValue
@@ -173,11 +170,11 @@ Values:
   tmp:2c300_4 elided UnobservedValue
   PF_4 elided UnobservedValue
   tmp:lane:401348:16:5_1 elided UnobservedValue
-  tmp:4c600_1 inline TermId(132)
-  const:1000193_0 inline TermId(85)
+  tmp:4c600_1 inline TermId(131)
+  const:1000193_0 inline TermId(84)
   tmp:4c680_1 elided UnobservedValue
-  tmp:4c780_1 inline TermId(133)
-  tmp:lane:401348:19:6_1 inline TermId(134)
+  tmp:4c780_1 inline TermId(132)
+  tmp:lane:401348:19:6_1 inline TermId(133)
   tmp:4c900_1 elided UnobservedValue
   tmp:2d180_1 elided UnobservedValue
   CF_5 elided UnobservedValue
@@ -185,14 +182,14 @@ Values:
   tmp:3f080_1 elided UnobservedValue
   CF_6 elided UnobservedValue
   OF_6 elided UnobservedValue
-  tmp:3f180_1 inline TermId(106)
+  tmp:3f180_1 inline TermId(105)
   SF_5 elided UnobservedValue
-  ZF_5 inline TermId(139)
+  ZF_5 inline TermId(138)
   tmp:2c200_4 elided UnobservedValue
   tmp:2c280_5 elided UnobservedValue
   tmp:2c300_5 elided UnobservedValue
   PF_5 elided UnobservedValue
-  tmp:12800_1 inline TermId(141)
+  tmp:12800_1 inline TermId(140)
   ram:401348_0 elided DirectControlTarget
   RSP_0 elided DeadStackBase
   RIP_1 elided ReturnControl
@@ -201,6 +198,7 @@ Values:
   RAX_5 inline TermId(37)
   RIP_2 elided ReturnControl
   RSP_2 elided DeadStackBase
+  RDX_0 elided UnobservedValue
   RCX_0 elided UnobservedValue
   R8_0 elided UnobservedValue
   R9_0 elided UnobservedValue

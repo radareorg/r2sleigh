@@ -425,6 +425,8 @@ pub fn live_in_by_block(
         naming,
         identities: Vec::new(),
         numbers: HashMap::new(),
+        bases: Vec::new(),
+        bits: 0,
     };
 
     let addrs = cfg.block_addrs().collect::<Vec<_>>();
@@ -445,22 +447,24 @@ pub fn live_in_by_block(
             .collect();
         effects.push(rows);
     }
-    let IdentityNumbers {
-        identities,
-        numbers,
-        ..
-    } = numbering;
-    let numbers_of_set = |set: &BTreeSet<RenameIdentity>,
-                          numbers: &HashMap<RenameIdentity, u32>| {
+    // A call or a return reads or writes the whole of each register the
+    // convention names.
+    let wholes = |set: &BTreeSet<RenameIdentity>| {
         set.iter()
-            .filter_map(|identity| numbers.get(identity).copied())
+            .filter_map(|identity| numbering.whole(identity))
             .collect::<Vec<_>>()
     };
-    let clobbered_numbers = numbers_of_set(&clobbered, &numbers);
-    let argument_numbers = numbers_of_set(&arguments, &numbers);
-    let returned_numbers = numbers_of_set(&returned, &numbers);
+    let clobbered_bytes = wholes(&clobbered);
+    let argument_bytes = wholes(&arguments);
+    let returned_bytes = wholes(&returned);
+    let IdentityNumbers {
+        identities,
+        bases,
+        bits,
+        ..
+    } = numbering;
 
-    let words = identities.len().div_ceil(64).max(1);
+    let words = (bits as usize).div_ceil(64).max(1);
     let mut live = vec![0u64; addrs.len() * words];
     let mut position = HashMap::with_capacity(addrs.len());
     for (index, addr) in addrs.iter().enumerate() {
@@ -491,25 +495,25 @@ pub fn live_in_by_block(
         for effect in effects[index].iter().rev() {
             match effect.boundary {
                 LivenessBoundary::Call => {
-                    for number in &clobbered_numbers {
-                        scratch[*number as usize / 64] &= !(1u64 << (*number % 64));
+                    for bytes in &clobbered_bytes {
+                        set_bits(&mut scratch, bytes, false);
                     }
-                    for number in &argument_numbers {
-                        scratch[*number as usize / 64] |= 1u64 << (*number % 64);
+                    for bytes in &argument_bytes {
+                        set_bits(&mut scratch, bytes, true);
                     }
                 }
                 LivenessBoundary::Return => {
-                    for number in &returned_numbers {
-                        scratch[*number as usize / 64] |= 1u64 << (*number % 64);
+                    for bytes in &returned_bytes {
+                        set_bits(&mut scratch, bytes, true);
                     }
                 }
                 LivenessBoundary::None => {}
             }
-            if let Some(number) = effect.kill {
-                scratch[number as usize / 64] &= !(1u64 << (number % 64));
+            if let Some(bytes) = &effect.kill {
+                set_bits(&mut scratch, bytes, false);
             }
-            for number in &effect.reads {
-                scratch[*number as usize / 64] |= 1u64 << (*number % 64);
+            for bytes in &effect.reads {
+                set_bits(&mut scratch, bytes, true);
             }
         }
         let base = index * words;
@@ -534,15 +538,14 @@ pub fn live_in_by_block(
             continue;
         }
         let base = index * words;
-        let mut set = BTreeSet::new();
-        for (word_index, word) in live[base..base + words].iter().enumerate() {
-            let mut bits = *word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                set.insert(identities[word_index * 64 + bit].clone());
-            }
-        }
+        let row = &live[base..base + words];
+        // An identity is live where any byte of it is.
+        let set = identities
+            .iter()
+            .zip(&bases)
+            .filter(|(_, bytes)| any_bit(row, bytes))
+            .map(|(identity, _)| identity.clone())
+            .collect();
         live_in.insert(*addr, set);
     }
     live_in
@@ -556,32 +559,65 @@ pub struct IdentityNaming<'a> {
     pub families: Option<&'a RegisterFamilyInfo>,
 }
 
-/// Every identity a walk names, numbered in the order first met.
+/// Every identity a walk names, numbered in the order first met, with one
+/// liveness bit per byte of it.
+///
+/// Liveness is by byte rather than by identity because a lane is renamed as
+/// its root: writing `edx` defines `rdx`'s low four bytes and keeps the rest,
+/// and reading `edx` reads only those four. Counted by identity, a lane write
+/// ends nothing and a lane read keeps the whole root live, so the root merges
+/// wherever any of it was ever written. Counted by byte, a lane write ends
+/// the bytes it writes, and the root merges only where some byte is read
+/// before it is written again.
 struct IdentityNumbers<'a> {
     naming: IdentityNaming<'a>,
     identities: Vec<RenameIdentity>,
     numbers: HashMap<RenameIdentity, u32>,
+    /// Each identity's bytes, as a range of bits.
+    bases: Vec<std::ops::Range<u32>>,
+    bits: u32,
 }
 
 impl IdentityNumbers<'_> {
-    fn number(&mut self, varnode: &r2il::Varnode) -> u32 {
-        let identity =
-            RenameIdentity::for_varnode(varnode, self.naming.reg_names, self.naming.families);
+    fn number_identity(&mut self, identity: RenameIdentity) -> u32 {
         if let Some(number) = self.numbers.get(&identity) {
             return *number;
         }
         let number = self.identities.len() as u32;
+        let width = identity.storage.size.max(1);
+        self.bases.push(self.bits..self.bits + width);
+        self.bits += width;
         self.identities.push(identity.clone());
         self.numbers.insert(identity, number);
         number
     }
 
-    /// The number of what `written` defines whole; a lane written in place
-    /// does not end its root's liveness.
-    fn kill(&mut self, written: &r2il::Varnode) -> Option<u32> {
-        register_root_slot(written, self.naming.families)
-            .is_none()
-            .then(|| self.number(written))
+    /// The bits of the bytes `varnode` covers in the identity it is renamed
+    /// as: a lane's own bytes of its root, or the whole of anything else.
+    fn bytes(&mut self, varnode: &r2il::Varnode) -> std::ops::Range<u32> {
+        let identity =
+            RenameIdentity::for_varnode(varnode, self.naming.reg_names, self.naming.families);
+        let root = identity.storage;
+        let number = self.number_identity(identity);
+        let whole = self.bases[number as usize].clone();
+        let lane = varnode
+            .offset
+            .checked_sub(root.offset)
+            .and_then(|start| u32::try_from(start).ok())
+            .filter(|start| start + varnode.size <= root.size);
+        match lane {
+            Some(start) if register_root_slot(varnode, self.naming.families).is_some() => {
+                whole.start + start..whole.start + start + varnode.size
+            }
+            _ => whole,
+        }
+    }
+
+    /// All the bytes of an identity the walk has met; `None` for one it
+    /// never met, which no operation reads or writes.
+    fn whole(&self, identity: &RenameIdentity) -> Option<std::ops::Range<u32>> {
+        let number = self.numbers.get(identity)?;
+        Some(self.bases[*number as usize].clone())
     }
 
     /// What one operation reads and defines, as renaming writes it. A
@@ -595,21 +631,21 @@ impl IdentityNumbers<'_> {
         });
         if let Some((read, written)) = copied {
             let reads = (!matches!(read.space, r2il::SpaceId::Const))
-                .then(|| self.number(read))
+                .then(|| self.bytes(read))
                 .into_iter()
                 .collect();
             return LivenessOpEffect {
                 boundary: LivenessBoundary::None,
-                kill: self.kill(written),
+                kill: Some(self.bytes(written)),
                 reads,
             };
         }
-        let kill = get_op_output_varnode(op).and_then(|varnode| self.kill(varnode));
+        let kill = get_op_output_varnode(op).map(|varnode| self.bytes(varnode));
         let reads = op
             .inputs()
             .into_iter()
             .filter(|varnode| !matches!(varnode.space, r2il::SpaceId::Const))
-            .map(|varnode| self.number(varnode))
+            .map(|varnode| self.bytes(varnode))
             .collect();
         LivenessOpEffect {
             boundary: match op {
@@ -626,8 +662,26 @@ impl IdentityNumbers<'_> {
 /// What one operation does to the liveness of the numbered identities.
 struct LivenessOpEffect {
     boundary: LivenessBoundary,
-    kill: Option<u32>,
-    reads: Vec<u32>,
+    kill: Option<std::ops::Range<u32>>,
+    reads: Vec<std::ops::Range<u32>>,
+}
+
+/// Set or clear a range of bits.
+fn set_bits(words: &mut [u64], bits: &std::ops::Range<u32>, on: bool) {
+    for bit in bits.clone() {
+        let (word, mask) = (bit as usize / 64, 1u64 << (bit % 64));
+        if on {
+            words[word] |= mask;
+        } else {
+            words[word] &= !mask;
+        }
+    }
+}
+
+/// Whether any bit of a range is set.
+fn any_bit(words: &[u64], bits: &std::ops::Range<u32>) -> bool {
+    bits.clone()
+        .any(|bit| words[bit as usize / 64] & (1u64 << (bit % 64)) != 0)
 }
 
 /// The convention's own reads and writes at a call or a return.

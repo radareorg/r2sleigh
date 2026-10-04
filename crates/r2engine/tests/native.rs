@@ -3977,12 +3977,11 @@ const FNV1A32_O2: &[u8] = &[
     0xc3, // ret
 ];
 
-/// A merge is placed only where its storage is live on entry (issue #56).
-/// The loop carries the hash and the pointer; every flag the compare sets is
-/// written again before it is read, and no Sleigh temporary outlives its
-/// instruction, so none of them has a merge at the header. `rdx` keeps one
-/// because the `movzx` writes only its low lane, which this lane model does
-/// not count as defining the whole register.
+/// A merge is placed only where some byte of its storage is live on entry
+/// (issue #56). The loop carries the hash and the pointer; every flag the
+/// compare sets is written again before it is read, no Sleigh temporary
+/// outlives its instruction, and the `movzx` writes the four bytes of `rdx`
+/// the `xor` reads before anything reads them, so none of those merges.
 #[test]
 fn a_loop_header_merges_only_what_the_loop_carries() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -4000,5 +3999,5 @@ fn a_loop_header_merges_only_what_the_loop_carries() {
         .iter()
         .map(|phi| phi.dst.display_name())
         .collect::<Vec<_>>();
-    assert_eq!(merged, ["RAX_2", "RDI_1", "RDX_1"], "{}", function.dump());
+    assert_eq!(merged, ["RAX_2", "RDI_1"], "{}", function.dump());
 }
