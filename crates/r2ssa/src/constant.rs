@@ -25,9 +25,10 @@
 //! fold expands no phi, so recording each value once terminates the walk and
 //! also keeps a shared subexpression from being evaluated twice.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::CanonicalStorageSpace;
+use crate::dense::{IdMap, IdVec};
 use crate::function::DecompilePrepFacts;
 use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
 use crate::indirect::exact_input;
@@ -200,10 +201,41 @@ pub(crate) fn prepared_folded_value(
 }
 
 fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) -> Option<u64> {
-    let mut known: BTreeMap<ValueId, Option<u64>> = BTreeMap::new();
+    let mut known = IdMap::new(graph.values.len());
+    fold_into(graph, facts, value, &mut known);
+    known.get(value).copied().flatten()
+}
+
+/// What every value of `graph` folds to, each evaluated once.
+///
+/// A value's fold depends only on the value -- its literal, or its
+/// definition over its inputs' folds -- never on which question reached it,
+/// so one table shared across all of them is the per-value answer, and the
+/// whole graph costs `O(V + E)` rather than a walk per question.
+pub(crate) fn fold_all(
+    graph: &SsaGraph,
+    facts: Option<&DecompilePrepFacts>,
+) -> IdVec<ValueId, Option<u64>> {
+    let mut known = IdMap::new(graph.values.len());
+    for value in &graph.values {
+        fold_into(graph, facts, value.id, &mut known);
+    }
+    IdVec::from_fn(graph.values.len(), |value| {
+        known.get(value).copied().flatten()
+    })
+}
+
+/// Fold `value` and everything it is folded from into `known`, which may
+/// already hold answers for other values.
+fn fold_into(
+    graph: &SsaGraph,
+    facts: Option<&DecompilePrepFacts>,
+    value: ValueId,
+    known: &mut IdMap<ValueId, Option<u64>>,
+) {
     let mut pending = vec![(value, false)];
     while let Some((current, operands_ready)) = pending.pop() {
-        if known.contains_key(&current) {
+        if known.contains(current) {
             continue;
         }
         if let Some(bits) = literal_of(graph, facts, current) {
@@ -232,12 +264,11 @@ fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) ->
         }
         let operands: Vec<Option<u64>> = inputs
             .iter()
-            .map(|input| known.get(input).copied().flatten())
+            .map(|input| known.get(*input).copied().flatten())
             .collect();
         let folded = fold_op(graph, op, &operands);
         known.insert(current, folded);
     }
-    known.get(&value).copied().flatten()
 }
 
 #[cfg(test)]
@@ -290,6 +321,33 @@ mod tests {
             target: reg(0x80, 8),
         });
         SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("widened counter SSA")
+    }
+
+    /// The table folded once is each value's own fold: the graph alone, and
+    /// with the prep facts, for every value of a function whose constants run
+    /// through extensions, copies and arithmetic.
+    #[test]
+    fn folding_every_value_at_once_is_folding_each_alone() {
+        let function = widened_counter();
+        let prep = function.prep_facts_for_test();
+        let graph = &prep.graph;
+        let bare = super::fold_all(graph, None);
+        let prepared = super::fold_all(graph, Some(&prep.facts));
+        for value in &graph.values {
+            assert_eq!(
+                bare[value.id],
+                super::fold(graph, None, value.id),
+                "{}",
+                value.var
+            );
+            assert_eq!(
+                prepared[value.id],
+                super::fold(graph, Some(&prep.facts), value.id),
+                "{}",
+                value.var
+            );
+        }
+        assert!(bare.iter().any(|(_, folded)| *folded == Some(16)));
     }
 
     /// The value defined by the instruction at `index` in the entry block.

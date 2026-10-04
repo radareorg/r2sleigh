@@ -219,7 +219,16 @@ impl Prepared {
             crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
         prep.install_exact_formal_parameters(&graph, &formal_parameters);
         validate_ssa_function(&ir)?;
-        Ok(Sealed { ir, prep, graph })
+        let folded = Folded {
+            prepared: crate::constant::fold_all(&graph, Some(&prep)),
+            bare: crate::constant::fold_all(&graph, None),
+        };
+        Ok(Sealed {
+            ir,
+            prep,
+            graph,
+            folded,
+        })
     }
 }
 
@@ -261,6 +270,16 @@ pub struct Sealed {
     ir: SSAFunction,
     prep: DecompilePrepFacts,
     graph: SsaGraph,
+    folded: Folded,
+}
+
+/// What each value of the sealed graph folds to, computed once at the seal
+/// (`crate::constant::fold_all`): with what preparation proved admitted, and
+/// from the graph alone.
+#[derive(Debug, Clone)]
+pub(crate) struct Folded {
+    pub(crate) prepared: crate::dense::IdVec<crate::graph::ValueId, Option<u64>>,
+    pub(crate) bare: crate::dense::IdVec<crate::graph::ValueId, Option<u64>>,
 }
 
 impl Sealed {
@@ -277,6 +296,11 @@ impl Sealed {
     /// The graph, built once, from these blocks.
     pub fn graph(&self) -> &SsaGraph {
         &self.graph
+    }
+
+    /// The constant folds of every value, computed once at the seal.
+    pub(crate) fn folded(&self) -> &Folded {
+        &self.folded
     }
 
     /// The same sealed function under the name the source gives it. A name

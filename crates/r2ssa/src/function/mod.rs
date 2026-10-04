@@ -1527,11 +1527,18 @@ impl SsaArtifact {
     /// that question: four places used to fold it privately, and a consumer
     /// outside the crate had none.
     pub fn folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
-        crate::constant::prepared_folded_value(
-            self.graph(),
-            Some(self.decompile_prep_facts()),
-            value_id,
-        )
+        self.sealed
+            .folded()
+            .prepared
+            .get(value_id)
+            .copied()
+            .flatten()
+    }
+
+    /// The constant a value computes to from the graph alone, without what
+    /// preparation admitted; one lookup into the table folded at the seal.
+    pub(crate) fn bare_folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
+        self.sealed.folded().bare.get(value_id).copied().flatten()
     }
 
     /// Every value the body computes, in graph order.

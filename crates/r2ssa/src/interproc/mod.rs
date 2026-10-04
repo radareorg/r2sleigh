@@ -3420,7 +3420,7 @@ fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar) -> SummaryOperand 
 fn classify_value_operand(prepared: &SsaArtifact, value_id: ValueId) -> SummaryOperand {
     let rooted = canonical_root_value(prepared, value_id);
     for candidate in [value_id, rooted] {
-        if let Some(bits) = crate::constant::folded_value(prepared.graph(), candidate) {
+        if let Some(bits) = prepared.bare_folded_value(candidate) {
             return SummaryOperand::Const(bits);
         }
         if let Some(expression) = prepared.addresses().parameter_expression(candidate) {
