@@ -351,6 +351,77 @@ fn prepared_function_ssa_builds_memory_phis_per_object() {
     assert_eq!(load_use.version, phis[0].output_version);
 }
 
+/// A loop that stores nothing to a location merges nothing for it: the
+/// back edge carries the version that entered the loop, and the header's
+/// load reads that store. A loop that does store merges the two.
+#[test]
+fn a_loop_merges_a_location_only_where_it_stores_to_it() {
+    let looping = |store_in_loop: bool| {
+        let mut body = vec![R2ILOp::Load {
+            dst: make_reg(0, 8),
+            space: SpaceId::Ram,
+            addr: make_const(0x5000, 8),
+        }];
+        if store_in_loop {
+            body.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: make_const(0x5000, 8),
+                val: make_const(2, 8),
+            });
+        }
+        body.push(R2ILOp::CBranch {
+            target: make_const(0x1404, 8),
+            cond: make_reg(8, 1),
+        });
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1400,
+                size: 4,
+                ops: vec![R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: make_const(0x5000, 8),
+                    val: make_const(1, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1404,
+                size: 4,
+                ops: body,
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1408,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_reg(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let prepared = SsaArtifact::raw(&blocks, None).expect("prepared SSA should build");
+        let entry_store = prepared.graph().inst_spelled_at(0x1400, 0).expect("store");
+        let stored = prepared.memory().defs_by_inst[&entry_store][0].next_version;
+        let load = prepared.graph().inst_spelled_at(0x1404, 0).expect("load");
+        let loaded = prepared.memory().uses_by_inst[&load][0].version;
+        let merged = prepared.memory().phis_by_block.get(&0x1404).cloned();
+        (stored, loaded, merged)
+    };
+
+    let (stored, loaded, merged) = looping(false);
+    assert_eq!(merged, None, "nothing in the loop stores");
+    assert_eq!(loaded, stored);
+
+    let (stored, loaded, merged) = looping(true);
+    let merged = merged.expect("the loop's store merges with the entry's");
+    assert_eq!(merged.len(), 1);
+    assert_eq!(loaded, merged[0].output_version);
+    assert!(merged[0].inputs.iter().any(|(_, version)| *version == stored));
+}
+
 #[test]
 fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
     let arch = make_x86_64_prep_arch();

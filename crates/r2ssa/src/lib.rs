@@ -30,6 +30,7 @@ pub(crate) mod defuse;
 pub(crate) mod demand;
 pub mod domtree;
 pub mod fate;
+pub mod fixpoint;
 pub mod function;
 pub mod graph;
 pub mod indirect;
