@@ -2977,6 +2977,45 @@ fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgum
     collect_call_arg_state_of_height(prepared, abi, height)
 }
 
+/// What one block leaves in each carrier it sets, whatever it was entered
+/// with.
+///
+/// Two runs from two starts no event can write: a carrier both end on the
+/// same content is one the block set, and that content is its effect; one
+/// still on its start is one the block leaves alone. `O(ops x carriers)`,
+/// once per block.
+fn block_carrier_effect(
+    prepared: &SsaArtifact,
+    abi: &AbiProfile,
+    tracked: &BTreeSet<CallCarrierKey>,
+    block: &crate::SSABlock<crate::VarId>,
+) -> CallCarrierMap {
+    let start = |sentinel: u32| {
+        tracked
+            .iter()
+            .map(|carrier| (*carrier, CallCarrierState::Value(ValueId(sentinel))))
+            .collect::<CallCarrierMap>()
+    };
+    let mut runs = [start(u32::MAX), start(u32::MAX - 1)];
+    for run in &mut runs {
+        for dst in block
+            .phis()
+            .iter()
+            .filter_map(|phi| prepared.graph().value_of(phi.dst))
+        {
+            update_call_carrier_state(prepared, abi, run, dst);
+        }
+        for op in block.ops() {
+            apply_call_carrier_transfer(prepared, abi, run, op);
+        }
+    }
+    let [first, second] = runs;
+    first
+        .into_iter()
+        .filter(|(carrier, value)| second.get(carrier) == Some(value))
+        .collect()
+}
+
 /// The call-argument state, solved under a stated lattice height; a solve
 /// that runs past it degrades every observation to unknown.
 fn collect_call_arg_state_of_height(
@@ -3005,6 +3044,20 @@ fn collect_call_arg_state_of_height(
         .iter()
         .map(|storage| (*storage, CallCarrierState::Unknown))
         .collect::<BTreeMap<_, _>>();
+    // What each block leaves in each carrier it touches, whatever it was
+    // entered with: every event sets a carrier to a content of its own, so a
+    // block's effect is the last event per carrier. Computed once per block,
+    // so a visit of the fixpoint below costs the carriers, not the block.
+    let effects = function
+        .blocks()
+        .iter()
+        .map(|block| {
+            (
+                block.addr,
+                block_carrier_effect(prepared, abi, &tracked, block),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     // The carriers' contents at each block's entry, on the fixpoint
     // driver: a flat lattice per carrier, where two different contents join
     // to unknown and an edge from a block not yet walked says nothing. Each
@@ -3026,16 +3079,8 @@ fn collect_call_arg_state_of_height(
         },
         |block_addr, entry| {
             let mut state = entry.clone();
-            let Some(block) = function.get_block(block_addr) else {
-                return state;
-            };
-            for phi in block.phis() {
-                if let Some(dst) = prepared.graph().value_of(phi.dst) {
-                    update_call_carrier_state(prepared, abi, &mut state, dst);
-                }
-            }
-            for op in block.ops() {
-                apply_call_carrier_transfer(prepared, abi, &mut state, op);
+            for (carrier, value) in effects.get(&block_addr).into_iter().flatten() {
+                state.insert(*carrier, *value);
             }
             state
         },

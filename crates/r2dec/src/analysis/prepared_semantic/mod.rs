@@ -1899,11 +1899,7 @@ fn authoritative_scalar_expr_for_value(
         return Some(expr);
     }
 
-    let (_, op) = block
-        .ops()
-        .iter()
-        .enumerate()
-        .find(|(_, op)| op.dst() == Some(var))?;
+    let op = defining_op_in_block(prepared, block, var)?;
 
     match op {
         SSAOp::Copy { src, .. }
@@ -3328,4 +3324,26 @@ impl NamedBlocks {
     fn get(&self, addr: u64) -> Option<&r2ssa::SSABlock> {
         self.blocks.get(*self.index.get(&addr)?)
     }
+}
+
+/// The operation of `block` that defines `var`, found through the graph's
+/// definition rather than by reading the block: the definition's ordinal is
+/// its position among the block's phis then operations, so this is `O(1)`
+/// where the walk was the block's length, once per question.
+fn defining_op_in_block<'b>(
+    prepared: &SsaArtifact,
+    block: &'b r2ssa::FunctionSSABlock,
+    var: &SSAVar,
+) -> Option<&'b SSAOp> {
+    let graph = prepared.graph();
+    let inst = graph.inst(graph.def_inst(value_of(prepared, var)?)?)?;
+    if graph.block_addr_of(inst.id)? != block.addr
+        || !matches!(inst.payload, r2ssa::InstPayload::Op(_))
+    {
+        return None;
+    }
+    let op = block
+        .ops()
+        .get(inst.ordinal.checked_sub(block.phis().len())?)?;
+    (op.dst() == Some(var)).then_some(op)
 }
