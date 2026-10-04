@@ -117,6 +117,58 @@ pub fn forward<S: Join>(
     Ok(Solution { entry, exit })
 }
 
+/// Solve a sparse dataflow over values: each value's cell is computed from
+/// the cells of the values it reads, and recomputed only when one of those
+/// moves.
+///
+/// `order` lists every value in definition order, which is the order work
+/// is taken in; `readers` names, for each value, the values computed from
+/// it. Every cell starts at `start` -- the optimistic top of a descending
+/// lattice -- and `eval` must only move a cell down. `height` bounds how
+/// many times one cell can move.
+pub fn sparse<K: Ord + Clone, L: Clone + PartialEq>(
+    pass: &'static str,
+    height: usize,
+    order: &[K],
+    readers: &BTreeMap<K, Vec<K>>,
+    start: L,
+    mut eval: impl FnMut(&K, &BTreeMap<K, L>) -> L,
+) -> Result<BTreeMap<K, L>, Exhausted> {
+    let rank = order
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let budget = order.len().saturating_mul(height.saturating_add(1)).max(1);
+    let mut cells = order
+        .iter()
+        .map(|key| (key.clone(), start.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut work = (0..order.len()).collect::<BTreeSet<_>>();
+    let mut visits = 0usize;
+    while let Some(index) = work.pop_first() {
+        visits += 1;
+        if visits > budget {
+            r2il::refusal_evidence!("fixpoint", "{pass}: {budget} value visits were not enough");
+            return Err(Exhausted { pass, budget });
+        }
+        let key = &order[index];
+        let next = eval(key, &cells);
+        if cells.get(key) == Some(&next) {
+            continue;
+        }
+        cells.insert(key.clone(), next);
+        work.extend(
+            readers
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter_map(|reader| rank.get(reader).copied()),
+        );
+    }
+    Ok(cells)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

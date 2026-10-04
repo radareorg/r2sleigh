@@ -419,7 +419,12 @@ fn a_loop_merges_a_location_only_where_it_stores_to_it() {
     let merged = merged.expect("the loop's store merges with the entry's");
     assert_eq!(merged.len(), 1);
     assert_eq!(loaded, merged[0].output_version);
-    assert!(merged[0].inputs.iter().any(|(_, version)| *version == stored));
+    assert!(
+        merged[0]
+            .inputs
+            .iter()
+            .any(|(_, version)| *version == stored)
+    );
 }
 
 #[test]

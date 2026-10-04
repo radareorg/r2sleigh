@@ -86,35 +86,67 @@ fn stack_root_follows_a_displacement_materialised_into_a_temp() {
     // the frame pointer with no stack root, and with it every address
     // derived from the frame pointer, which is most of a non-leaf
     // function's locals.
-    use super::{StackAddressBase, StackAddressRoot, stack_address_root_from_add};
-    use std::collections::BTreeMap;
-
-    let sp = SSAVar::new("sp", 1, 8);
-    let displacement = SSAVar::new("tmp:11e80", 1, 8);
-    let literal = SSAVar::constant(0x60, 8);
-
-    let mut stack_roots = BTreeMap::new();
-    stack_roots.insert(
-        sp.clone(),
-        StackAddressRoot {
-            base: StackAddressBase::StackPointer,
-            offset: -0x70,
-        },
-    );
-    assert_eq!(
-        stack_address_root_from_add(&sp, &sp, &displacement, &displacement, &stack_roots),
-        None,
-        "with nothing linking the temp to the constant there is no delta to add"
-    );
-
-    // The temp's representative is the literal it copies.
-    assert_eq!(
-        stack_address_root_from_add(&sp, &sp, &displacement, &literal, &stack_roots),
-        Some(StackAddressRoot {
-            base: StackAddressBase::StackPointer,
-            offset: -0x10,
-        }),
-        "the frame pointer sits 0x60 above a 0x70 frame, so 0x10 below entry"
+    let mut arch = ArchSpec::new("custom-frame");
+    arch.addr_size = 8;
+    arch.add_register(RegisterDef::new("custom_sp", 0x10, 8));
+    arch.add_register(RegisterDef::new("custom_fp", 0x18, 8));
+    arch.add_register(RegisterDef::new("custom_ra", 0x20, 8));
+    let register = |offset| CanonicalStorageId {
+        space: crate::CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    };
+    let interface = SourceFunctionInterface::new_exact(
+        b"custom-frame-roots".to_vec(),
+        "custom-unknown",
+        [],
+        SourceFunctionReturn::Void,
+        [],
+    )
+    .and_then(|interface| interface.with_return_address_storage(register(0x20)))
+    .and_then(|interface| interface.with_stack_pointer_storage(register(0x10)))
+    .expect("exact custom interface");
+    let blocks = vec![R2ILBlock {
+        addr: 0x3500,
+        size: 4,
+        ops: vec![
+            R2ILOp::IntSub {
+                dst: make_reg(0x10, 8),
+                a: make_reg(0x10, 8),
+                b: make_const(0x70, 8),
+            },
+            R2ILOp::Copy {
+                dst: make_unique(0x30, 8),
+                src: make_const(0x60, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: make_reg(0x18, 8),
+                a: make_reg(0x10, 8),
+                b: make_unique(0x30, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: make_reg(0x18, 8),
+                val: make_const(1, 8),
+            },
+            R2ILOp::Return {
+                target: make_reg(0x20, 8),
+            },
+        ],
+        switch_info: None,
+        op_metadata: Default::default(),
+    }];
+    let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
+        .expect("frame artifact must build");
+    let facts = artifact.decompile_prep_facts();
+    assert!(
+        facts.stack_address_roots.values().any(|root| *root
+            == StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset: -0x10,
+            }),
+        "the frame pointer sits 0x60 above a 0x70 frame, so 0x10 below entry: {:?}",
+        facts.stack_address_roots
     );
 }
 

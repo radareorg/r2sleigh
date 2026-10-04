@@ -70,7 +70,7 @@ to be a fixpoint at all and replaced by a direct algorithm.
 |------|--------|---------|
 | K0 | `r2ssa::fixpoint`: forward block dataflow, `Join`, a budget from the stated height, `Exhausted` as a typed refusal — **done** | — |
 | K1 | Memory SSA on the driver. Each (block, location) slot is a three-level lattice: unreached, then one version, then `Phi(block, location)`. Versions stay symbolic while iterating and are numbered after convergence; uses, defs and phis come from one pass over the converged states | lazy phi minting, phis that outlive their merge, the loop-header phi from an unreached back edge — **done** |
-| K2 | The non-monotone r2ssa passes, rewritten to join or replaced: `rewrite.rs` stack roots, `address.rs`, `call_results.rs`, `interproc` call-argument state, `predicates.rs`, `control_domains` | overwriting updates, writes during iteration, silent skips |
+| K2 | The non-monotone r2ssa passes, rewritten to join or replaced: `rewrite.rs` stack roots (**done**: `function/stack_roots.rs`, optimistic on the sparse driver; the census is byte-identical), `address.rs`, `call_results.rs`, `interproc` call-argument state, `predicates.rs`, `control_domains` | overwriting updates, writes during iteration, silent skips |
 | K3 | `optimize.rs`: one stated order of passes run to a fixpoint with a budget that refuses, instead of a round count | `max_iterations` and its silent stop |
 
 ## Consequences
