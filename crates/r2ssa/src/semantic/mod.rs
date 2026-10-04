@@ -241,7 +241,6 @@ impl PreparedFunctionFacts {
             call_sites,
             declared_slots,
             predicates,
-            latches_by_header,
             values,
             objects,
             memory,
@@ -279,7 +278,6 @@ impl PreparedFunctionFacts {
             LoopEvidence {
                 predicates: &predicates,
                 values: &values,
-                latches_by_header: &latches_by_header,
             },
             &live_out,
             storage_spans,

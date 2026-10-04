@@ -43,27 +43,10 @@ fn loop_induction_facts(
         .collect()
 }
 
-/// Each loop header with the blocks that branch back to it: one natural loop per header.
-pub(crate) fn latches_by_header(function: &SSAFunction) -> BTreeMap<u64, BTreeSet<u64>> {
-    let mut latches_by_header = BTreeMap::<u64, BTreeSet<u64>>::new();
-    for &block_addr in function.block_addrs() {
-        for succ in function.successors(block_addr) {
-            if function.dominates(succ, block_addr) {
-                latches_by_header
-                    .entry(succ)
-                    .or_default()
-                    .insert(block_addr);
-            }
-        }
-    }
-    latches_by_header
-}
-
-/// What loop recovery reads beside the body: the branch tests, the value ranges and the back edges.
+/// What loop recovery reads beside the body: the branch tests and the value ranges.
 pub(crate) struct LoopEvidence<'a> {
     pub(crate) predicates: &'a PredicateFacts,
     pub(crate) values: &'a crate::values::ValueRanges,
-    pub(crate) latches_by_header: &'a BTreeMap<u64, BTreeSet<u64>>,
 }
 
 /// Every natural loop with its carriers and trip count, and every induction its carriers prove.
@@ -79,26 +62,24 @@ pub(crate) fn collect_structured_loop_facts(
     let Body {
         function, graph, ..
     } = code;
-    let LoopEvidence {
-        predicates,
-        values,
-        latches_by_header,
-    } = evidence;
+    let LoopEvidence { predicates, values } = evidence;
     let mut counter = TripCounter::new(function, graph, predicates, values);
     let mut loops = BTreeMap::new();
     let mut inductions = BTreeMap::new();
-    for (idx, (&header, latches)) in latches_by_header.iter().enumerate() {
+    for (idx, natural) in function.natural_loops().iter().enumerate() {
         let id = LoopId(idx as u32);
-        let body_set = natural_loop_body(function, header, latches);
+        let header = natural.header;
+        let latches = &natural.latches;
+        let body_set = &natural.body;
         let body = body_set.iter().copied().collect::<Vec<_>>();
-        let leaving = LoopExits::of(function, &body_set);
+        let leaving = LoopExits::of(function, body_set);
         let exits = leaving.targets();
-        let condition = loop_condition(predicates, header, &body_set, &exits);
+        let condition = loop_condition(predicates, header, body_set, &exits);
         let loop_ = NaturalLoop {
             id,
             header,
             latches,
-            body: &body_set,
+            body: body_set,
             exits: &leaving,
         };
         let carriers = loop_carrier_facts(code, loop_, live_out, storage_spans);
@@ -441,28 +422,4 @@ pub(crate) fn loop_carrier_facts(
         carrier.members = members;
     }
     carriers
-}
-
-pub(crate) fn natural_loop_body(
-    function: &SSAFunction,
-    header: u64,
-    latches: &BTreeSet<u64>,
-) -> BTreeSet<u64> {
-    let mut body = BTreeSet::new();
-    body.insert(header);
-    let mut stack = latches.iter().copied().collect::<Vec<_>>();
-    while let Some(addr) = stack.pop() {
-        if !function.dominates(header, addr) {
-            continue;
-        }
-        if !body.insert(addr) {
-            continue;
-        }
-        for pred in function.predecessors(addr) {
-            if !body.contains(&pred) {
-                stack.push(pred);
-            }
-        }
-    }
-    body
 }

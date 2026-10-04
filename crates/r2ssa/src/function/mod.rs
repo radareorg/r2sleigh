@@ -2491,6 +2491,9 @@ pub struct SSAFunction {
     cfg: CFG,
     /// Dominator tree.
     domtree: DomTree,
+    /// The natural loops of `cfg`, computed on first use from it and the
+    /// dominator tree, and forgotten whenever those are recomputed.
+    natural_loops: std::sync::OnceLock<crate::natural_loops::NaturalLoops>,
     /// SSA operations, one entry per block, in reverse postorder.
     ///
     /// Dense and ordered rather than a hash map beside a separate order, so
@@ -2714,6 +2717,10 @@ impl SSAFunction {
             return;
         }
         let (shape, reorder) = plan.take_shape();
+        if !shape.is_empty() {
+            // The loops are the control graph's; any edit to it forgets them.
+            self.natural_loops = std::sync::OnceLock::new();
+        }
         self.blocks.apply(plan);
         for edit in shape {
             match edit {
@@ -2762,6 +2769,7 @@ impl SSAFunction {
         self.block_order = self.cfg.reverse_postorder();
         self.reorder_blocks();
         self.domtree = DomTree::compute(&self.cfg);
+        self.natural_loops = std::sync::OnceLock::new();
     }
 }
 
@@ -2784,6 +2792,7 @@ impl SSAFunction {
     /// validator refuses what follows.
     pub(crate) fn corrupt_cfg(&mut self) -> &mut CFG {
         self.invalidate_query_index();
+        self.natural_loops = std::sync::OnceLock::new();
         &mut self.cfg
     }
 
@@ -2819,6 +2828,7 @@ impl Clone for SSAFunction {
             entry: self.entry,
             cfg: self.cfg.clone(),
             domtree: self.domtree.clone(),
+            natural_loops: self.natural_loops.clone(),
             blocks: self.blocks.clone(),
             block_index: self.block_index.clone(),
             block_order: self.block_order.clone(),
@@ -2885,6 +2895,10 @@ impl<'a> RewrittenFunction<'a> {
 
     pub fn domtree(&self) -> &DomTree {
         self.source.domtree()
+    }
+
+    pub fn natural_loops(&self) -> &crate::natural_loops::NaturalLoops {
+        self.source.natural_loops()
     }
 
     /// All blocks in reverse postorder.
@@ -3404,6 +3418,12 @@ impl SSAFunction {
     /// Get the dominator tree.
     pub fn domtree(&self) -> &DomTree {
         &self.domtree
+    }
+
+    /// The natural loops of the control graph.
+    pub fn natural_loops(&self) -> &crate::natural_loops::NaturalLoops {
+        self.natural_loops
+            .get_or_init(|| crate::natural_loops::NaturalLoops::compute(&self.cfg, &self.domtree))
     }
 
     /// Get predecessors of a block.

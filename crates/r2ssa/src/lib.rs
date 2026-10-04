@@ -45,6 +45,7 @@ pub(crate) mod machine_context;
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
+pub mod natural_loops;
 pub(crate) mod obligation;
 pub(crate) mod op;
 pub(crate) mod optimize;

@@ -8,8 +8,6 @@ pub(crate) struct MemoryPrefix {
     pub(crate) call_sites: CallSiteFacts,
     pub(crate) declared_slots: DeclaredStackSlots,
     pub(crate) predicates: PredicateFacts,
-    /// Each loop header with the blocks that branch back to it.
-    pub(crate) latches_by_header: BTreeMap<u64, BTreeSet<u64>>,
     pub(crate) values: crate::values::ValueRanges,
     pub(crate) objects: ObjectModel,
     pub(crate) memory: MemorySSAFacts,
@@ -42,7 +40,6 @@ impl MemoryPrefix {
         let declared_slots = collect_declared_stack_slots(machine_context);
         let mut predicates = collect_predicate_facts(function, prep, graph);
         phase!("predicates", 0);
-        let latches_by_header = latches_by_header(function);
         let values = crate::values::solve_value_ranges(graph, function, prep, &predicates);
         // A table dispatch switches on what indexes the table's read, known only now.
         for (block_addr, selector) in crate::indirect::dispatch_selectors(function, graph, &values)
@@ -78,7 +75,6 @@ impl MemoryPrefix {
             call_sites,
             declared_slots,
             predicates,
-            latches_by_header,
             values,
             objects,
             memory,
