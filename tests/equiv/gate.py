@@ -94,6 +94,11 @@ class Config:
     # The machine the graded binaries are built for, and how to run them.
     target: Target = X86_64
 
+    def call_budget_ms(self) -> int:
+        """The original's budget per call on this host: ``timeout_ms`` in native
+        time, scaled for an emulated target (:meth:`target.Target.time_scale`)."""
+        return self.timeout_ms * self.target.time_scale()
+
     def floor(self) -> int:
         """How many graded vectors an ``equal`` or ``residual-trap`` must rest on.
 
@@ -214,7 +219,7 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     ]
     vectors = build_vectors(spec, dwarf, config.vectors, record.key, target.abi)
     job = workdir / "job.bin"
-    job.write_bytes(encode_job(spec, runs, list(PAIRS), vectors, config.timeout_ms,
+    job.write_bytes(encode_job(spec, runs, list(PAIRS), vectors, config.call_budget_ms(),
                                abi=target.abi))
     out = workdir / "result.jsonl"
     ok, cause, lines = run_driver(binary, job, out, config, len(vectors))
@@ -283,7 +288,7 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
         "UBSAN_OPTIONS=print_stacktrace=0:halt_on_error=1:exitcode=86",
     ]
     argv = [*fixed_layout_prefix(), *config.target.run_argv(binary, assignments)]
-    budget = max(120.0, vector_count * config.timeout_ms * 22 / 1000.0 + 60.0)
+    budget = max(120.0, vector_count * config.call_budget_ms() * 22 / 1000.0 + 60.0)
     out.unlink(missing_ok=True)
     try:
         proc = subprocess.run(

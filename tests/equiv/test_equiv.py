@@ -473,6 +473,11 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(X86_64.directory("rt"), "rt")
         self.assertEqual(AARCH64.config("clang", "O2"), "aarch64-clang-O2")
         self.assertEqual(AARCH64.directory("rt"), "rt-aarch64")
+        # Budgets are native time: x86-64's are never scaled, an emulated
+        # target's by its emulator's slowdown.
+        self.assertEqual(X86_64.time_scale(), 1)
+        self.assertEqual(gate.Config(runtime=Path("/x")).call_budget_ms(), 1000)
+        self.assertEqual(AARCH64.time_scale(), 5 if AARCH64.emulated() else 1)
 
     def test_a_narrow_argument_carries_only_the_bits_its_convention_defines(self):
         garbage = 0xDEADBEEF_CAFEBABE
@@ -534,7 +539,7 @@ class TargetTests(unittest.TestCase):
         if not AARCH64.emulated():
             self.skipTest("this host runs AArch64 natively")
         argv = AARCH64.run_argv(Path("/w/prog"), ["LD_PRELOAD=/w/rt.so", "EQUIV_JOB=/w/job"])
-        self.assertEqual(argv, ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu",
+        self.assertEqual(argv, ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu", "-seed", "1",
                                 "-E", "LD_PRELOAD=/w/rt.so", "-E", "EQUIV_JOB=/w/job", "/w/prog"])
         with self.assertRaises(ValueError):
             AARCH64.run_argv(Path("/w/prog"), ["UBSAN_OPTIONS=a=1,b=2"])

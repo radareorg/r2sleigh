@@ -202,7 +202,8 @@ build, never a binary graded under the wrong ABI.
 | a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` |
 | an object link | `.set name, addr` | the same, bound by the loader (below) |
 | guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) |
-| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -E VAR=... prog` |
+| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` |
+| per-call budget | `--timeout-ms` (four times it for a rendering) | five times that under qemu |
 | `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot |
 | keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` |
 
@@ -217,8 +218,26 @@ places the guest's image, stack and mappings by a first-fit search from fixed
 bases. That search runs over the host address space qemu itself occupies, so
 qemu runs under the same `setarch -R` as a native target, and two runs write
 the same records (`AArch64PipelineTests.test_two_runs_write_the_same_records`).
-The runtime's variables go to the guest with `-E`, never into qemu's own
-environment, where the host loader would try to preload a foreign object.
+`-seed 1` fixes the bytes qemu gives the guest as `AT_RANDOM`, from which
+glibc derives the stack-protector canary, so a UBSan report that shows stack
+memory is the same on every run too. (Natively the kernel gives every process
+fresh `AT_RANDOM` bytes, and such a report can differ in the canary's bytes
+between two x86-64 runs.) The runtime's variables go to the guest with `-E`,
+never into qemu's own environment, where the host loader would try to preload
+a foreign object.
+
+*Time.* `--timeout-ms` is native time. qemu-aarch64 ran a bitwise CRC 3.5
+(`-O2`) to 5 (`-O0`) times slower than x86-64 natively, so under it every
+per-call budget is five times longer (`Target.time_scale`). Unscaled, a
+rendering keeps a fraction of its native margin: on a loaded host the `-O0`
+build of a clang `-O2` crc32_bitwise needed 1.6 to 4 s of its 4 s on three
+vectors, and one run in two graded it `slow`. A budget in wall-clock time
+still has a boundary: a vector whose original needs about its whole budget
+(review.c's clang `fact` at n near 2^31, 3 to 5 s under qemu and about 1 s
+natively) can be graded in one run and dropped in the next, so the vector
+counts of such a record can differ between two runs while its status does
+not. Two full aarch64 runs side by side wrote 754 of 756 records byte for
+byte and the other two with the same status.
 
 *Object links on AArch64.* GNU ld for AArch64 (2.42, and gold) resolves the
 GOT entry of an absolute symbol a shared object defines as if it were

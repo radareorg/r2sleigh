@@ -75,7 +75,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="compiler for the renderings (default: the target's gcc)")
     parser.add_argument("--vectors", type=int, default=48)
     parser.add_argument("--timeout-ms", type=int, default=1000,
-                        help="the original's budget per call; a rendering gets four times it")
+                        help="the original's budget per call, in native time (an emulated "
+                             "target scales it); a rendering gets four times it")
     parser.add_argument("--function-timeout", type=float, default=300.0,
                         help="seconds r2s may spend on one function before it is restarted")
     parser.add_argument("--startup-timeout", type=float, default=600.0,
