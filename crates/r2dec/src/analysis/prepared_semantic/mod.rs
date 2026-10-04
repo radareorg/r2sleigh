@@ -214,10 +214,11 @@ impl PreparedSemanticView {
         populate_stack_offsets(&mut view, inputs.prepared);
         #[cfg(test)]
         populate_authorized_stack_owner_names(&mut view, &inputs);
-        populate_owner_exprs(symbols, &mut view, &inputs);
+        let named = NamedBlocks::of(inputs.prepared.function());
+        populate_owner_exprs(symbols, &mut view, &inputs, &named);
         populate_call_result_sources(&mut view, inputs.call_result_facts());
-        populate_calls(symbols, &mut view, &inputs);
-        populate_predicates(symbols, &mut view, &inputs);
+        populate_calls(symbols, &mut view, &inputs, &named);
+        populate_predicates(symbols, &mut view, &inputs, &named);
         view
     }
 
@@ -686,11 +687,11 @@ fn populate_owner_exprs(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     let prepared = inputs.prepared;
-    let named_blocks = prepared.function().named_blocks();
     let mut producer_by_dst = HashMap::<SSAVar, &SSAOp>::new();
-    for block in &named_blocks {
+    for block in &named.blocks {
         for op in block.ops() {
             if let Some(dst) = op.dst() {
                 producer_by_dst.insert(dst.clone(), op);
@@ -712,7 +713,7 @@ fn populate_owner_exprs(
         view.insert_owner_expr(inputs.prepared, &value, CExpr::AddrOf(Box::new(stack_expr)));
     }
 
-    for block in prepared.function().named_blocks() {
+    for block in &named.blocks {
         for (op_idx, (op_id, op)) in block.sited().enumerate() {
             if let SSAOp::Load {
                 dst,
@@ -723,7 +724,7 @@ fn populate_owner_exprs(
                 let derived = prepared_direct_stack_load_offset(prepared, view, addr)
                     .and_then(|offset| {
                         local_store_owner_expr_for_offset(
-                            symbols, view, prepared, &block, op_idx, offset,
+                            symbols, view, prepared, block, op_idx, offset,
                         )
                         .map(|expr| (expr, Some(offset)))
                         .or_else(|| {
@@ -755,7 +756,7 @@ fn populate_owner_exprs(
                     })
                     .or_else(|| {
                         prepared_load_access_expr_for_addr(
-                            symbols, prepared, &block, view, addr, dst.size,
+                            symbols, prepared, block, view, addr, dst.size,
                         )
                         .map(|expr| (expr, None))
                     });
@@ -775,7 +776,7 @@ fn populate_owner_exprs(
     for _ in 0..4 {
         let mut changed = false;
 
-        for block in prepared.function().named_blocks() {
+        for block in &named.blocks {
             for op in block.ops() {
                 match op {
                     SSAOp::Copy { dst, src }
@@ -1071,16 +1072,17 @@ fn populate_owner_exprs(
         }
     }
 
-    refine_load_owner_exprs(symbols, view, inputs);
+    refine_load_owner_exprs(symbols, view, inputs, named);
 }
 
 fn refine_load_owner_exprs(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     let prepared = inputs.prepared;
-    for block in prepared.function().named_blocks() {
+    for block in &named.blocks {
         for (op_idx, (op_id, op)) in block.sited().enumerate() {
             let SSAOp::Load {
                 dst,
@@ -1093,7 +1095,7 @@ fn refine_load_owner_exprs(
             let candidate = prepared_direct_stack_load_offset(prepared, view, addr)
                 .and_then(|offset| {
                     local_store_owner_expr_for_offset(
-                        symbols, view, prepared, &block, op_idx, offset,
+                        symbols, view, prepared, block, op_idx, offset,
                     )
                     .map(|expr| (expr, Some(offset)))
                     .or_else(|| {
@@ -1121,7 +1123,7 @@ fn refine_load_owner_exprs(
                 })
                 .or_else(|| {
                     prepared_load_access_expr_for_addr(
-                        symbols, prepared, &block, view, addr, dst.size,
+                        symbols, prepared, block, view, addr, dst.size,
                     )
                     .map(|expr| (expr, None))
                 });
@@ -1373,6 +1375,7 @@ fn populate_predicates(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     view.predicate_expr_by_value.clear();
 
@@ -1416,18 +1419,19 @@ fn populate_predicates(
         view.insert_predicate_expr(inputs.prepared, cond_var, expr.clone());
     }
 
-    populate_derived_predicates(symbols, view, inputs);
+    populate_derived_predicates(symbols, view, inputs, named);
 }
 
 fn populate_derived_predicates(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     for _ in 0..4 {
         let mut changed = false;
 
-        for block in inputs.prepared.function().named_blocks() {
+        for block in &named.blocks {
             for op in block.ops() {
                 let Some(dst) = op.dst() else {
                     continue;
@@ -1694,6 +1698,7 @@ fn populate_calls(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     for call_site in inputs.prepared.call_sites().by_id.values() {
         let site = call_site.at;
@@ -1738,7 +1743,7 @@ fn populate_calls(
         let authoritative_args = canonical_call_authoritative_args(
             symbols,
             site,
-            inputs.prepared.function(),
+            named,
             inputs.prepared,
             view,
             inputs.callsite_facts(),
@@ -1778,7 +1783,7 @@ fn callsite_direct_target(
 fn canonical_call_authoritative_args(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     site: InstId,
-    function: &r2ssa::SSAFunction,
+    named: &NamedBlocks,
     prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     callsite_facts: Option<&FunctionCallsiteFacts>,
@@ -1792,7 +1797,7 @@ fn canonical_call_authoritative_args(
     let Some(block) = prepared
         .graph()
         .block_addr_of(site)
-        .and_then(|addr| function.named_block(addr))
+        .and_then(|addr| named.get(addr))
     else {
         return Vec::new();
     };
@@ -1806,7 +1811,7 @@ fn canonical_call_authoritative_args(
             break;
         }
         if let Some(expr) =
-            authoritative_expr_for_prepared_value(symbols, &block, prepared, view, argument.value)
+            authoritative_expr_for_prepared_value(symbols, block, prepared, view, argument.value)
         {
             args.push((argument.value, expr));
         } else {
@@ -1825,7 +1830,7 @@ fn canonical_call_authoritative_args(
             break;
         }
         if let Some(expr) =
-            authoritative_expr_for_prepared_value(symbols, &block, prepared, view, stack_arg.value)
+            authoritative_expr_for_prepared_value(symbols, block, prepared, view, stack_arg.value)
         {
             args.push((stack_arg.value, expr));
         } else {
@@ -3297,5 +3302,30 @@ fn canonical_root_var(prepared: &SsaArtifact, var: &SSAVar) -> SSAVar {
     match prepared.decompile_prep_facts().canonical_root(value) {
         r2ssa::Representative::Value(root) => prepared.graph().var(root).clone(),
         r2ssa::Representative::Literal { bits, size } => SSAVar::constant(bits, size),
+    }
+}
+
+/// The function's blocks with every operand spelled as its variable, made
+/// once per view: the readers here still work in names
+/// (doc/adr-renderer-printer.md), and asking `SSAFunction::named_block` per
+/// call site or per round copied a block each time.
+pub(crate) struct NamedBlocks {
+    blocks: Vec<r2ssa::SSABlock>,
+    index: BTreeMap<u64, usize>,
+}
+
+impl NamedBlocks {
+    fn of(function: &r2ssa::SSAFunction) -> Self {
+        let blocks = function.named_blocks();
+        let index = blocks
+            .iter()
+            .enumerate()
+            .map(|(at, block)| (block.addr, at))
+            .collect();
+        Self { blocks, index }
+    }
+
+    fn get(&self, addr: u64) -> Option<&r2ssa::SSABlock> {
+        self.blocks.get(*self.index.get(&addr)?)
     }
 }

@@ -656,6 +656,18 @@ impl SsaGraph {
 
     /// The instruction a spelled site `0x{block}:{n}` names: the inverse of
     /// [`Self::op_ordinal`], for reading back a site a person wrote.
+    /// The instructions of `block` strictly between two ordinals, in order.
+    ///
+    /// A block's instructions are held in ordinal order -- its phis, then its
+    /// operations -- and an instruction's ordinal is its position there, so
+    /// the range is a slice: `O(1)` to find rather than a walk of the block.
+    pub fn insts_between(&self, block: BlockId, after: usize, before: usize) -> &[InstId] {
+        self.block(block)
+            .map(|block| &block.insts)
+            .and_then(|insts| insts.get(after.saturating_add(1)..before.min(insts.len())))
+            .unwrap_or(&[])
+    }
+
     pub(crate) fn inst_spelled_at(&self, block_addr: u64, ordinal: usize) -> Option<InstId> {
         let block = self.block(self.block_id_for_addr(block_addr)?)?;
         block.insts.get(self.phi_count(block) + ordinal).copied()

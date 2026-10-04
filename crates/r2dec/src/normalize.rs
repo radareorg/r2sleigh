@@ -1676,10 +1676,10 @@ fn guarded_loop_backedge_phi_op(
     if successors.len() != 2 || !successors.contains(&target) || !func.dominates(target, pred) {
         return None;
     }
-    let source_block = func.named_block(pred)?;
+    let source_block = func.get_block(pred)?;
     let terminator_idx = source_block.ops().len().checked_sub(1)?;
     let cond = match source_block.ops().get(terminator_idx)? {
-        SSAOp::CBranch { cond, .. } if cond != dst => cond.clone(),
+        SSAOp::CBranch { cond, .. } if func.var(*cond) != dst => func.var(*cond).clone(),
         _ => return None,
     };
     let guard_inst = graph.inst_for_op(source_block.op_id(terminator_idx)?)?;
@@ -1963,11 +1963,12 @@ fn can_materialize_on_branch_edge(
     let successors = func.successors(pred);
     successors.len() > 1
         && successors.contains(&target)
-        && !func.named_block(pred).is_some_and(|block| {
-            block
-                .ops()
-                .last()
-                .is_some_and(|op| op.sources().contains(&dst))
+        && !func.get_block(pred).is_some_and(|block| {
+            block.ops().last().is_some_and(|op| {
+                op.sources()
+                    .into_iter()
+                    .any(|source| func.var(*source) == dst)
+            })
         })
         && successors
             .into_iter()

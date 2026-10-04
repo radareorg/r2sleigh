@@ -2076,13 +2076,11 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
             continue;
         };
         // Only this block's operations can sit between the definition and the
-        // reader, so only this block's are read. Asking every operation in the
-        // function was the same answer at the cost of the whole graph, once per
-        // candidate value.
+        // reader, so only those are read: the slice between the two ordinals,
+        // not the block from its start, once per candidate value.
         let rewritten_by = graph
-            .block(def_inst.block)
-            .into_iter()
-            .flat_map(|block| block.insts.iter())
+            .insts_between(def_inst.block, def_inst.ordinal, use_inst.ordinal)
+            .iter()
             .filter_map(|inst| graph.inst(*inst))
             .find(|inst| {
                 inst.ordinal > def_inst.ordinal
