@@ -2967,32 +2967,22 @@ fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64>
     }
 }
 
-/// The iterations this dataflow can take, from the data rather than a guess.
-///
-/// The carrier lattice is flat: a cell is absent, then a specific entry
-/// argument or value, then `Unknown`, and a join with anything leaves
-/// `Unknown` where it is. So each of a block's carrier cells advances at most
-/// twice, and the block's own in-state and out-state each appear once, which
-/// is what the first pass reports as a change. Every round that reports a
-/// change made at least one of those moves, so bound the rounds by how many
-/// exist and add the round that reports none.
-fn call_arg_state_iteration_bound(prepared: &SsaArtifact, abi: &AbiProfile) -> usize {
-    let blocks = prepared.function().block_addrs().len();
-    let carriers = tracked_call_carriers(prepared, abi).len();
-    blocks
-        .saturating_mul(carriers.saturating_mul(2).saturating_add(2))
-        .saturating_add(1)
-}
-
 fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgumentState {
-    let bound = call_arg_state_iteration_bound(prepared, abi);
-    collect_call_arg_state_with_iteration_limit(prepared, abi, bound)
+    // The carrier lattice is flat: a cell is unreached, then one entry
+    // argument or value, then unknown, so each moves at most twice.
+    let height = tracked_call_carriers(prepared, abi)
+        .len()
+        .saturating_mul(2)
+        .saturating_add(1);
+    collect_call_arg_state_of_height(prepared, abi, height)
 }
 
-fn collect_call_arg_state_with_iteration_limit(
+/// The call-argument state, solved under a stated lattice height; a solve
+/// that runs past it degrades every observation to unknown.
+fn collect_call_arg_state_of_height(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
-    max_iterations: usize,
+    height: usize,
 ) -> CallArgumentState {
     let function = prepared.function();
     let tracked = tracked_call_carriers(prepared, abi);
@@ -3015,49 +3005,46 @@ fn collect_call_arg_state_with_iteration_limit(
         .iter()
         .map(|storage| (*storage, CallCarrierState::Unknown))
         .collect::<BTreeMap<_, _>>();
-    let mut in_states = BTreeMap::<u64, CallCarrierMap>::new();
-    let mut out_states = BTreeMap::<u64, CallCarrierMap>::new();
-    let mut changed = true;
-    let mut iterations = 0usize;
-    while changed && iterations < max_iterations.max(1) {
-        iterations += 1;
-        changed = false;
-        for &block_addr in function.block_addrs() {
-            let preds = function.predecessors(block_addr);
-            // The root is the one way in: a loop through the function's first
-            // instruction merges at the block after it, like any other.
-            let mut state = if block_addr == function.root() {
-                entry_state.clone()
-            } else if preds.is_empty() {
-                unknown_state.clone()
-            } else {
-                merge_pred_states(&out_states, &preds, &tracked)
-            };
+    // The carriers' contents at each block's entry, on the fixpoint
+    // driver: a flat lattice per carrier, where two different contents join
+    // to unknown and an edge from a block not yet walked says nothing. Each
+    // carrier moves at most twice, from unreached to a content to unknown.
+    let root = function.root();
+    let solved = crate::fixpoint::forward_on_edges(
+        function,
+        "call-arguments",
+        height,
+        entry_state.clone(),
+        |merged: &mut CallCarrierMap, other: &CallCarrierMap| {
+            *merged = merge_call_carrier_states(merged, other, &tracked);
+        },
+        // The root is the one way in: a loop through the function's first
+        // instruction merges at the block after it, like any other.
+        |_, block, state: &CallCarrierMap| match block == root {
+            true => entry_state.clone(),
+            false => state.clone(),
+        },
+        |block_addr, entry| {
+            let mut state = entry.clone();
             let Some(block) = function.get_block(block_addr) else {
-                continue;
+                return state;
             };
             for phi in block.phis() {
                 update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
             }
-            let old = in_states.insert(block_addr, state.clone());
-            if old.as_ref() != Some(&state) {
-                changed = true;
-            }
-
             for op in block.ops() {
                 apply_call_carrier_transfer(prepared, abi, &mut state, op);
             }
-            let new_state = state;
-            let old = out_states.insert(block_addr, new_state.clone());
-            if old.as_ref() != Some(&new_state) {
-                changed = true;
-            }
+            state
+        },
+    );
+    let in_states = match solved {
+        Ok(solved) => solved.entry,
+        Err(exhausted) => {
+            r2il::refusal_evidence!("call-arguments", "{exhausted}");
+            return unknown_call_argument_state(prepared, abi, false);
         }
-    }
-
-    if changed {
-        return unknown_call_argument_state(prepared, abi, false);
-    }
+    };
 
     let mut by_call = BTreeMap::new();
     for (&call_id, call) in &prepared.call_sites().by_id {
@@ -3070,7 +3057,11 @@ fn collect_call_arg_state_with_iteration_limit(
         let Some(block) = function.get_block(block_addr) else {
             continue;
         };
-        let mut state = in_states.get(&block_addr).cloned().unwrap_or_default();
+        // A block nothing reaches holds nothing known.
+        let mut state = in_states
+            .get(&block_addr)
+            .cloned()
+            .unwrap_or_else(|| unknown_state.clone());
         for phi in block.phis() {
             update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
         }
@@ -3231,26 +3222,6 @@ pub fn observe_call_arguments(
             (call_id, args)
         })
         .collect()
-}
-
-fn merge_pred_states(
-    in_states: &BTreeMap<u64, CallCarrierMap>,
-    preds: &[u64],
-    tracked: &BTreeSet<CallCarrierKey>,
-) -> CallCarrierMap {
-    let unknown = tracked
-        .iter()
-        .map(|storage| (*storage, CallCarrierState::Unknown))
-        .collect::<CallCarrierMap>();
-    let mut states = preds
-        .iter()
-        .map(|pred| in_states.get(pred).unwrap_or(&unknown));
-    let Some(first) = states.next() else {
-        return unknown;
-    };
-    states.fold(first.clone(), |merged, state| {
-        merge_call_carrier_states(&merged, state, tracked)
-    })
 }
 
 fn merge_call_carrier_states(

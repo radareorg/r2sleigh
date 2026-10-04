@@ -2167,24 +2167,26 @@ fn call_carrier_nonconvergence_degrades_all_observations() {
                     target: c(0x1010, 8),
                 }],
             ),
+            // A block that loops on itself is walked twice, which a stated
+            // height of nought does not allow.
             block(
                 0x1010,
                 vec![
                     R2ILOp::Call {
                         target: c(0x8000, 8),
                     },
-                    R2ILOp::Return { target: c(0, 8) },
+                    R2ILOp::CBranch {
+                        target: c(0x1010, 8),
+                        cond: Varnode::register(0x200, 1),
+                    },
                 ],
             ),
+            block(0x1020, vec![R2ILOp::Return { target: c(0, 8) }]),
         ],
         Some(&arch),
     )
     .expect("advisory SSA");
-    let state = collect_call_arg_state_with_iteration_limit(
-        &prepared,
-        &AbiProfile::from_arch(Some(&arch)),
-        1,
-    );
+    let state = collect_call_arg_state_of_height(&prepared, &AbiProfile::from_arch(Some(&arch)), 0);
 
     assert!(!state.converged);
     assert!(
