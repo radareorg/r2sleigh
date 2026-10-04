@@ -322,11 +322,12 @@ Triaged against `fe7698e8` on 2026-10-03.
 
 | Issue | State | Owner here |
 |-------|-------|-----------|
-| #49, #51, #52, #53, #54, #55, #59 | Fixed | close |
-| #60 | Fixed on x86-64 | close after an arm64 -O0 check |
-| #57 | Obsolete (the plugin is deleted) | close |
-| #47, #50 | Partly fixed | F2.2 |
-| #56 | Width is part of SSA identity, so the "duplicate" is a display artefact; the dead phis remain | F2.2 |
+| #49, #51, #52, #53, #54, #55, #59 | Fixed | closed 2026-10-04 |
+| #57 | Obsolete (the plugin is deleted) | closed 2026-10-04 |
+| #60 | Fixed on x86-64 | close after the arm64 equivalence run (D6) |
+| #47 | The name-matched return carrier is gone; register families rename a lane as its root | F2.2 (byte liveness landed) |
+| #50 | Liveness is one model in r2ssa, consumed by r2types (unobserved merges) and r2dec | F2.2, R |
+| #56 | Merges pruned by byte-granular liveness; the fnv1a32 header merges only what the loop carries | close after review |
 | #58 | Pointers and return widths fixed (PE); pointee types open | P9 |
 | #63 | The `ub` records PE fixed are equal on CI | close after review |
 | #61 | 85 of 98; tracker kept | P4 (canary), R (unaligned loads), P7 |

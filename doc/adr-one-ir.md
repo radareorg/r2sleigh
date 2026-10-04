@@ -112,6 +112,30 @@ deletes what it replaces.
 | F2.5 | Machine projection and term arena as indexes | their per-round rebuilds |
 | F2.6 | The Dylint made fatal in r2ssa, then in r2types | — |
 
+### F2.3 and F2.4 in stages
+
+Operations name their operands by `SSAVar`, a name, a version, a width and
+a disambiguator. About 2,300 `SSAOp::` matches and 1,450 `SSAVar` uses
+across 113 files read the IR that way, and the graph keeps a second copy of
+every operation so that it can also say each operand's `ValueId`. The
+target is one IR whose operands are value ids, with names a presentation
+table. It is reached in stages. Each stage compiles, keeps the census
+byte-identical, and deletes what it replaces:
+
+1. `SSAOp<V = SSAVar>`, generic over its operand. Every match keeps its
+   syntax; only code that reads an operand's name changes.
+2. The graph's payload is `SSAOp<ValueId>`, so the graph no longer copies
+   names, and graph readers resolve a name only to print it.
+3. The function's blocks hold `SSAOp<ValueId>` and one value table that
+   renaming fills: id, storage, width, version and name. The graph becomes
+   the function's def-use index rather than a second copy of it, and is
+   built at the seal from ids alone.
+4. The optimiser and the demand pass run on ids: `VarKey` and every
+   `SSAVar`-keyed map in them become `IdVec`/`IdMap`, and the per-pass
+   `defs` maps become the builder's incremental def-use.
+5. The certificates' `SSAVar`-keyed maps become dense. `ENTITY_KEYED_MAP`
+   is made fatal in r2ssa once its count there is zero.
+
 ## Consequences
 
 - **Cost targets.** The seal costs O(n log n) once. Each index costs O(n), or
