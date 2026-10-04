@@ -915,6 +915,23 @@ impl<'a> FoldingContext<'a> {
         })
     }
 
+    /// `required_input` for an operand an operation computes with as a
+    /// number, which no string literal stands for.
+    fn required_number(
+        &self,
+        frame: &LowerFrame,
+        input_idx: usize,
+        var: &SSAVar,
+        stated: Option<&CType>,
+    ) -> OpLoweringResult<CExpr> {
+        let (expr, ty) = self.typed_input(frame, input_idx, var)?;
+        let required = self.required_at(frame, input_idx);
+        Ok(match required.as_ref().or(stated) {
+            Some(required) => self.convert_number(expr, ty.as_ref(), required),
+            None => expr,
+        })
+    }
+
     /// Declare a machine operation so the rendering that calls it compiles.
     ///
     /// Its operands are machine words of the widths the operation was given,
@@ -2932,10 +2949,12 @@ impl<'a> FoldingContext<'a> {
                 .map(|signature| CValue::Typed(signature.return_type));
             return self.assign_typed(lhs, call_expr, returned);
         }
-        let lhs_expr =
-            self.retain_lowering_result(self.required_input(frame, 0, a, stated.as_ref()))?;
-        let rhs_expr =
-            self.retain_lowering_result(self.required_input(frame, 1, b, stated.as_ref()))?;
+        let input = |index: usize, var: &SSAVar| match comparison_op(op) {
+            true => self.required_input(frame, index, var, stated.as_ref()),
+            false => self.required_number(frame, index, var, stated.as_ref()),
+        };
+        let lhs_expr = self.retain_lowering_result(input(0, a))?;
+        let rhs_expr = self.retain_lowering_result(input(1, b))?;
         let rhs_raw = self.identity_simplify_binary(
             op,
             lhs_expr,

@@ -665,7 +665,10 @@ impl<'a> FoldingContext<'a> {
                     rendered.unobserved()
                 );
             }
-            Ok(self.convert_from(rendered, typed.produced(id), required))
+            Ok(match computes_with(machine_expr.kind()) {
+                true => self.convert_number(rendered, typed.produced(id), required),
+                false => self.convert_from(rendered, typed.produced(id), required),
+            })
         };
         Ok(match machine_expr.kind() {
             Kind::Constant {
@@ -875,7 +878,10 @@ impl<'a> FoldingContext<'a> {
                     rendered.unobserved()
                 );
             }
-            Ok(self.convert_from(rendered, typed.term_produced(id), required))
+            Ok(match term_computes_with(&arena.term(term).kind) {
+                true => self.convert_number(rendered, typed.term_produced(id), required),
+                false => self.convert_from(rendered, typed.term_produced(id), required),
+            })
         };
         let literal =
             |bits: r2ssa::MachineBitVector| wide_aware_literal(bits.bits(), bits.width_bits());
@@ -2135,4 +2141,31 @@ mod typed_output_contract_tests {
             }
         ));
     }
+}
+
+/// Whether an operation computes with its operands as numbers: arithmetic,
+/// bitwise logic and shifts, whose operands no string literal stands for.
+fn computes_with(kind: &r2ssa::MachineExprKind) -> bool {
+    use r2ssa::MachineExprKind as Kind;
+    matches!(
+        kind,
+        Kind::Arithmetic { .. }
+            | Kind::Bitwise { .. }
+            | Kind::BitwiseNot { .. }
+            | Kind::Negate { .. }
+            | Kind::Shift { .. }
+    )
+}
+
+/// The same question of a term.
+fn term_computes_with(kind: &r2rewrite::TermKind) -> bool {
+    use r2rewrite::TermKind as Kind;
+    matches!(
+        kind,
+        Kind::Arithmetic { .. }
+            | Kind::Bitwise { .. }
+            | Kind::BitwiseNot(_)
+            | Kind::Negate(_)
+            | Kind::Shift { .. }
+    )
 }

@@ -4001,3 +4001,105 @@ fn a_loop_header_merges_only_what_the_loop_carries() {
         .collect::<Vec<_>>();
     assert_eq!(merged, ["RAX_2", "RDI_1"], "{}", function.dump());
 }
+
+/// clang -O1's `classify`: a switch over 0..=7 lowered to a lookup in an
+/// `int[8]` at `LOOKUP`, or -1 above it.
+///
+/// ```text
+/// mov eax, 0xffffffff
+/// cmp edi, 7
+/// ja  done
+/// mov eax, edi
+/// mov eax, dword [LOOKUP + rax*4]
+/// done: ret
+/// ```
+const LOOKUP: u64 = 0x2068;
+const CLASSIFY: &[u8] = &[
+    0xb8, 0xff, 0xff, 0xff, 0xff, // mov eax, -1
+    0x83, 0xff, 0x07, // cmp edi, 7
+    0x77, 0x09, // ja +9
+    0x89, 0xf8, // mov eax, edi
+    0x8b, 0x04, 0x85, 0x68, 0x20, 0x00, 0x00, // mov eax, [rax*4 + 0x2068]
+    0xc3, // ret
+];
+/// The table's eight words. The first is 10 -- `0a 00 00 00` -- so its
+/// first two bytes read as the text "\n", which is what the string scan
+/// finds there.
+const LOOKUP_BYTES: [u8; 32] = [
+    10, 0, 0, 0, 21, 0, 0, 0, 32, 0, 0, 0, 43, 0, 0, 0, 54, 0, 0, 0, 65, 0, 0, 0, 0xff, 0xff, 0xff,
+    0xff, 87, 0, 0, 0,
+];
+
+/// `CLASSIFY` as code and `LOOKUP_BYTES` as static data at `LOOKUP`.
+struct LookupTable;
+
+impl r2ssa::body::Program for LookupTable {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => CLASSIFY,
+            false => &LOOKUP_BYTES,
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let end = LOOKUP + LOOKUP_BYTES.len() as u64;
+        code_region(CLASSIFY.len(), vaddr).or_else(|| {
+            (LOOKUP..end)
+                .contains(&vaddr)
+                .then_some(r2ssa::body::Region {
+                    start: LOOKUP,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: false,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE
+    }
+}
+
+impl Program for LookupTable {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (LOOKUP..LOOKUP + LOOKUP_BYTES.len() as u64).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == BASE).then(|| "classify".to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+/// An address the function computes with is a number, whatever text its
+/// first bytes happen to spell: the table is read a word at a time at
+/// `LOOKUP + 4 * x`, and a string literal there would be two bytes the
+/// compiler places somewhere else, so the read would leave it.
+#[test]
+fn the_base_of_an_indexed_word_read_is_no_string_literal() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let response = decompile(&target, &LookupTable, BASE).expect("decompile");
+    let text = response.output.text().to_string();
+    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(
+        !text.contains("\"\\n\""),
+        "the table's address is spelled as text: {text}"
+    );
+    assert!(
+        text.contains("0x2068"),
+        "the table is read at its own address: {text}"
+    );
+}

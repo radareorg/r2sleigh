@@ -61,6 +61,26 @@ impl FoldingContext<'_> {
     /// `uint8_t *X0_9 = sym__rotl32(...)` on exactly that path.
     #[track_caller]
     pub(super) fn convert_from(&self, expr: CExpr, from: Option<&CValue>, to: &CType) -> CExpr {
+        self.convert_from_as(expr, from, to, Operand::Value)
+    }
+
+    /// Convert an operand of arithmetic or bitwise logic: a number the
+    /// program computes with, which a string literal never stands for.
+    /// `"\n" + 4 * i` read as a word is the table at that address, not text;
+    /// a literal is two bytes of its own wherever the compiler places it.
+    #[track_caller]
+    pub(super) fn convert_number(&self, expr: CExpr, from: Option<&CValue>, to: &CType) -> CExpr {
+        self.convert_from_as(expr, from, to, Operand::Number)
+    }
+
+    #[track_caller]
+    fn convert_from_as(
+        &self,
+        expr: CExpr,
+        from: Option<&CValue>,
+        to: &CType,
+        operand: Operand,
+    ) -> CExpr {
         // A constant address is named here, where the requirement is stated.
         // Asked of the literal itself: an address the lift folded into a load
         // arrives typed as the carrier and is still the number it spells.
@@ -71,7 +91,7 @@ impl FoldingContext<'_> {
                 self.inputs.function_facts.display_names().symbols(),
                 &self.inputs.function_facts.type_facts().program_data_objects,
                 &mut self.named_data_objects.borrow_mut(),
-                crate::string_literal_serves(to, self.pointer_bits()),
+                operand == Operand::Value && crate::string_literal_serves(to, self.pointer_bits()),
             )
         {
             return super::convert::convert(
@@ -174,4 +194,12 @@ impl FoldingContext<'_> {
         let root = self.root_at(frame)?;
         self.typed_boundaries()?.produced(root).cloned()
     }
+}
+
+/// How an operand is read: as a value, which a constant address may name as
+/// text, or as a number the operation computes with, which it never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Operand {
+    Value,
+    Number,
 }
