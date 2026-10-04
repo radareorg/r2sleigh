@@ -1,0 +1,118 @@
+# ADR: one IR, indexed once
+
+Status: proposed (ROADMAP F2, decisions D11–D12)
+
+## Context
+
+F1 gave every operation and value a stable id, and K put iteration on one
+driver. The representation those ids index is still scattered, and every pass
+rebuilds what it needs:
+
+- **Rebuilt indexes.** Rebuilds happen at 42 call sites of
+  `SsaGraph::from_function`, 16 of `ValueLiveness::compute`, 23 of
+  `FunctionLiveOut::compute` and 8 of `PreparedFunctionFacts::collect`, and
+  the views and the dominator tree are rebuilt at their own sites. Each
+  answers a question the sealed function already determines.
+- **Side tables instead of indexes.** About 200 maps are keyed by a
+  function's own entities: 35 `BTreeMap<SSAVar, _>`, 35
+  `HashMap<SSAVar, _>`, 56 `BTreeMap<ValueId, _>`, 51 `BTreeMap<InstId, _>`
+  and 20 `HashMap<VarKey, _>` in the optimiser alone. Every lookup is a tree
+  walk or a hash of a name, every pass builds its own, and two passes that
+  need the same relation build it twice.
+- **Names as identity.** `SSAVar` (a name, a version, a width and a
+  disambiguator) still keys facts, although a value's identity is its
+  `ValueId`. The optimiser hashes `VarKey` strings.
+- **Facts in bags.** `DecompilePrepFacts` has 6 fields,
+  `PreparedFunctionFacts` 15 and `PreparedFunctionCertificates` 24, each a
+  set of maps assembled by its own pass. Nothing says which pass owns which
+  relation, so the same relation reappears in several. Frame objects have
+  twelve owners (doc/adr-frame-model.md).
+- **Seven representations of one function**: the blocks, the graph (built
+  twice), the views (three times), the machine projection (per plan build),
+  the term arena (per inlining round), the binding plan (per render round),
+  and the liveness models.
+
+The cost is not only time. A fact computed twice can be computed two ways,
+and each copy is a place for the two to disagree.
+
+## Decision
+
+**The sealed function is the IR, and everything about it is an index over its
+ids.**
+
+1. **Dense identity.** `OpId`, `InstId`, `ValueId` and `BlockId` are dense
+   `u32`s fixed at seal. Facts about them live in dense containers:
+   - `ValueMap<T>`, `InstMap<T>` and `BlockMap<T>`: a `Vec<T>` indexed by id;
+   - `ValueSet` and `BlockSet`: bitsets;
+   - `Csr<T>`: compressed adjacency for def-use, predecessors and
+     successors.
+
+   Iteration order is id order, which is deterministic by construction. A
+   `BTreeMap` or `HashMap` keyed by a function's own entity is not allowed in
+   r2ssa, r2types or r2dec; a Dylint enforces it, the way the existing lints
+   enforce the other seams. `SSAVar` stays as the presentation of a value,
+   and nothing is keyed by it.
+
+2. **One index layer.** `Sealed` owns a `FunctionIndex`. Each index is
+   computed at most once, on first use (a `OnceCell` per index), from the IR
+   and from the indexes it depends on:
+   - structure: reverse postorder, the dominator tree with dominance
+     frontiers, loops, def-use (CSR), use sites;
+   - values: views and representatives, constants and ranges (P5), written
+     lanes (PE), demand;
+   - lifetime: liveness (one model over locations) and storage spans;
+   - memory: the frame model (P4) and memory SSA.
+
+   Each index declares its inputs as other indexes, so the dependency order is
+   static and no index is computed twice. A pass that needs a relation reads
+   the index; it does not build a graph or a map of its own.
+
+3. **Analyses are declared.** Every iterating index is an analysis on the
+   fixpoint driver (doc/adr-fixpoint.md): its lattice, its height and its
+   transfer, over dense cells. Non-iterating indexes are one pass in a stated
+   order. Certificates are views over indexes plus the decisions only they
+   make.
+
+4. **Before the seal, a builder.** `Lifted` and `Prepared` are a mutable
+   builder over the same arena, with an incremental def-use, so the
+   optimiser and the demand pass edit through plans without rebuilding a
+   graph. The seal freezes the builder into the IR; no graph exists before
+   it. The provisional graph that demand borrows today is replaced by the
+   builder's own def-use.
+
+5. **The other representations become indexes or go.** The machine
+   projection and r2rewrite's term arena become indexes over the IR. The
+   binding plan and the journal go with R (doc/adr-renderer-printer.md). The
+   liveness models merge into one model over locations; flag and temporary
+   phis nothing reads are pruned by it (issues #47, #50, #56).
+
+## Migration
+
+Each step keeps the census byte-identical unless it says otherwise, and
+deletes what it replaces.
+
+| Step | Change | Deletes |
+|------|--------|---------|
+| F2.0 | Dense id newtypes and containers (`ValueMap`, `InstMap`, `BlockMap`, `ValueSet`, `Csr`); the Dylint against entity-keyed maps, warning only | — |
+| F2.1 | `FunctionIndex` on `Sealed`: reverse postorder, dominators, loops, def-use; every reader takes `&Sealed` or the index | the 42 `SsaGraph::from_function` sites outside the seal; `SsaQueryIndex` |
+| F2.2 | One liveness model over locations, as an index; dead flag and temporary phis pruned by it | `ValueLiveness`/`FunctionLiveOut` call sites (39), the duplicate live-in computation in `phi.rs`; closes #47, #50, #56 |
+| F2.3 | Prep facts, prepared facts and certificates re-expressed as indexes over dense containers | every `SSAVar`-keyed and `VarKey`-keyed map in r2ssa; the 8 `PreparedFunctionFacts::collect` sites become one |
+| F2.4 | The builder before the seal, with an incremental def-use; optimiser and demand on it | the provisional graph; the per-pass `defs` maps the optimiser builds |
+| F2.5 | Machine projection and term arena as indexes | their per-round rebuilds |
+| F2.6 | The Dylint made fatal in r2ssa, then in r2types | — |
+
+## Consequences
+
+- **Cost targets.** The seal costs O(n log n) once. Each index costs O(n), or
+  O(n × height) for a lattice analysis, once per sealed function. A lookup is
+  O(1), where today it is O(log n) on a name or a hash of one.
+- **Ownership becomes checkable.** Every relation has one index, and two
+  passes that need it share it. A second implementation of a relation is
+  visible as a second index, and is a bug.
+- **Risk.** F2.3 touches most of r2ssa's certificates. It goes one index at a
+  time, behind the census, and deletes each side table as its index lands.
+  The tripwire is the ADR's own: if F2.3 needs semantic changes rather than
+  re-keying in more than about 40 files, stop and reassess.
+- **Prerequisite for P4, Q and R.** The frame model is an index; the query
+  database caches sealed functions with their indexes; the printer reads
+  indexes only.

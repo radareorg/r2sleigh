@@ -143,6 +143,17 @@ you do not understand it well enough to land it.
 6. Prefer explicit budgets and refusal modes over silent blowups.
 7. Prefer stronger upstream facts over downstream heuristics.
 
+Structural rules (ROADMAP D11, until the Dylints enforce them):
+
+- an iteration runs on `r2ssa::fixpoint` or is a worklist whose termination is
+  stated where it is written; a cap that keeps a partial result silently is a
+  bug
+- a fact about a function's values, instructions or blocks is an index over
+  their dense ids (doc/adr-one-ir.md), not a `BTreeMap`/`HashMap` keyed by
+  `SSAVar`, `ValueId` or `InstId`, and not a graph rebuilt for one pass
+- a computed program fact is kept only in the query database
+  (doc/adr-query-database.md), never in a `Mutex` table or a memo of its own
+
 ## Architectural Stance
 
 This system should move toward a gold-standard analysis architecture even when
