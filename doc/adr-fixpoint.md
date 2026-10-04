@@ -1,6 +1,6 @@
 # ADR: one fixpoint driver
 
-Status: accepted, in progress (ROADMAP K)
+Status: accepted; r2ssa done (ROADMAP K), r2types loops to C3 and r2dec loops to R
 
 ## Context
 
@@ -81,3 +81,33 @@ to be a fixpoint at all and replaced by a direct algorithm.
   in the census and judged by the equivalence gate.
 - Cost: each driven pass costs at most `blocks × (h + 1)` transfers. The
   dense rescans become worklists.
+
+## As landed
+
+All of r2ssa's iterating passes are now in one of these forms:
+
+- **On the driver.** Memory SSA, stack roots (optimistic and sparse),
+  call-result certificates, control domains, and the call-argument state.
+- **A coupled optimistic worklist with a stated budget.** Address
+  provenance, which solves values and spill slots together.
+- **A worklist that touches only what a change can affect.** The dispatch
+  slice, stack geometry, renderable loop phis, and the copy closure in the
+  condition-code fold.
+- **One pass, with the reason stated.** Compare definitions and their
+  source aliases, because no phi carries them.
+- **Budgeted rewriting that keeps meaning and says when it stops.** The
+  optimiser's rounds and `inst_combine`'s steps.
+
+The passes the census found sound already keep their own termination
+arguments: value ranges, views, demand, dead phis, liveness, SCCP,
+dominators, `interproc` summaries, and the loop-carrier worklist, whose
+argument is now written down.
+
+On the census, every change except K1 and K3 is byte-identical.
+
+- K1 removes spurious loop-header memory phis. Its equivalence result is
+  identical, and it leaves an R item: how the renderer binds a certified
+  reload.
+- K3 runs the optimiser to its fixpoint, which folds arm64 signed-compare
+  flags to the comparison in 8 binaries.
+
