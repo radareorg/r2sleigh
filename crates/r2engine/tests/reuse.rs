@@ -54,6 +54,20 @@ fn deriving_the_tables_the_first_time_is_not_a_change() {
 }
 
 #[test]
+fn a_patch_that_renames_nothing_leaves_every_name_and_entry_revision() {
+    // A write to code moves the bytes, and the name table read out of them
+    // comes out equal, so nothing that read only a name or an entry is stale.
+    let mut program = opened();
+    program.prepared(ONE).expect("it prepares");
+    let before = program.revision();
+    program.source_mut().write(ONE + 1, &[0x03]);
+    program.prepared(ONE).expect("it prepares");
+    let after = program.revision();
+    assert_ne!(after.bytes, before.bytes);
+    assert_eq!((after.names, after.entries), (before.names, before.entries));
+}
+
+#[test]
 fn a_patch_makes_the_held_analysis_stale() {
     let mut program = opened();
     program.prepared(ONE).expect("it prepares");
@@ -128,10 +142,9 @@ fn a_patch_that_names_a_string_makes_every_held_analysis_stale() {
     program.prepared(ONE).expect("it prepares");
     assert_eq!(program.names().text_at(TEXT), Some("hello"));
     let after = program.revision();
-    assert_eq!(
-        (after.names, after.entries),
-        (before.names + 1, before.entries)
-    );
+    // The table changed and the stubs did not.
+    assert_ne!(after.names, before.names);
+    assert_eq!(after.entries, before.entries);
     assert_eq!(program.memo_stats().replacements, 1);
 }
 
@@ -153,7 +166,7 @@ fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
     program.source_mut().write(STUB + 2, &[0x10]);
     program.prepared(ONE).expect("it prepares");
     assert!(program.imports().is_empty());
-    assert_eq!(program.revision().entries, before + 1);
+    assert_ne!(program.revision().entries, before);
     let stats = program.memo_stats();
     assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
 }
@@ -169,7 +182,7 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
     assert_eq!(before, 0);
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
     let _ = program.prepared(THUMB_LEAF);
-    assert_eq!(program.revision().entries, before + 1);
+    assert_ne!(program.revision().entries, before);
     assert_eq!(program.memo_stats().replacements, 1);
     let called = program
         .functions()

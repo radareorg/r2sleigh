@@ -22,7 +22,7 @@ pub(super) struct Pointers {
     by_callee: BTreeMap<Callee, Pointed>,
 }
 
-impl<S: Source> Parameters for OpenProgram<S> {
+impl<S: Source + 'static> Parameters for OpenProgram<S> {
     fn pointer_use(
         &self,
         callee: Callee,
@@ -43,7 +43,7 @@ impl<S: Source> Parameters for OpenProgram<S> {
     }
 }
 
-impl<S: Source> OpenProgram<S> {
+impl<S: Source + 'static> OpenProgram<S> {
     /// A callee's pointer parameters, and whether a call cycle cut the answer short.
     ///
     /// An answer a cycle cut short depends on where the walk entered the

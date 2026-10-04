@@ -24,8 +24,11 @@ use std::collections::BTreeMap;
 
 use r2sleigh_lift::EmbeddedMachine;
 
+use std::rc::Rc;
+
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
+use crate::query::db::{Db, Inputs, Query};
 use crate::query::{Consulted, Decoders, Memo, Moved, Revision};
 
 /// Everything a native request needs that is not the decoder itself.
@@ -45,16 +48,14 @@ struct Assembled {
 }
 
 /// One open program: its source, its decoders, and the tables read out of both.
-pub struct OpenProgram<S: Source> {
-    source: S,
-    /// What this binary calls each address it names.
-    names: NameDb,
-    /// Which stub stands for which import, by the import's own name, and how large each is.
-    imports: BTreeMap<u64, naming::Stub>,
-    /// Which import each slot the loader fills stands for. A stub's tail
-    /// transfer names the slot it reads rather than any code address, so the
-    /// slot has to answer for the import too; only a stub is an entry.
-    slots: BTreeMap<u64, String>,
+pub struct OpenProgram<S: Source + 'static> {
+    /// The source and the decoders, and every fact derived from them that has
+    /// moved onto queries (doc/adr-query-database.md).
+    db: Db<ProgramInputs<S>>,
+    /// The name table and the import stubs as of the last `ensure_current`:
+    /// the database's answers, held for the request that reads them.
+    names: Rc<NameDb>,
+    imports: Rc<BTreeMap<u64, naming::Stub>>,
     /// Whether a function begins at each address the binary defines, indexed
     /// once.
     ///
@@ -85,22 +86,9 @@ pub struct OpenProgram<S: Source> {
     mapped: BTreeMap<u64, bool>,
     /// Which revision of the bytes `modes` was discovered at.
     modes_at: Option<u64>,
-    /// Which revision of the bytes the names and the imports were derived at.
-    ///
-    /// Both are read out of the bytes, and the imports are *decoded* from
-    /// them: the table comes from lifting the stub section. A patch changes
-    /// what those say, and `imports` decides `is_entry`, which is what bounds
-    /// every body walk -- so a stale table is not a stale listing, it is a
-    /// body that ends in the wrong place.
-    derived_at: Option<u64>,
-    /// How many times the rebuilt name table has actually differed.
-    ///
-    /// Separate from the byte revision because most patches rename nothing:
-    /// anything that depended only on a name stays good across them, and one
-    /// counter for both would throw that away.
-    names_revision: u64,
-    /// The same, for the import stubs, which are the entries a write can move.
-    entries_revision: u64,
+    /// How many times discovery's entry modes have differed, until the
+    /// survey moves onto a query (Q3).
+    modes_revision: u64,
     assembled: Option<Assembled>,
     /// What this session has already worked out about one function, and the type analysis sealed from it.
     memo: Memo<Prepared, crate::SealedFunctionAnalysis>,
@@ -111,10 +99,6 @@ pub struct OpenProgram<S: Source> {
     /// The control a caller set for the next request, which that request
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
-    machine: Option<EmbeddedMachine>,
-    /// The same instruction set with TMode set, where the architecture has
-    /// one. Which functions it decodes is what `modes` says.
-    thumb_machine: Option<EmbeddedMachine>,
     /// Which parameters of each callee take an address, read once per callee and revision.
     pointers: std::sync::Mutex<pointers::Pointers>,
     /// Whether control comes back from each function, derived on first use per state of the bytes.
@@ -128,18 +112,18 @@ pub struct OpenProgram<S: Source> {
     survey: Option<((u64, u64), std::sync::Arc<requests::Survey>)>,
 }
 
-impl<S: Source> OpenProgram<S> {
+impl<S: Source + 'static> OpenProgram<S> {
     pub fn of(source: S) -> Self {
         let container = source.container();
+        let slots = container
+            .import_slots()
+            .map(|(slot, symbol)| (slot, symbol.to_owned()))
+            .collect();
         Self {
-            // Derived by `ensure_current` alone, which is the first thing
-            // every request does.
-            names: NameDb::new(),
-            imports: BTreeMap::new(),
-            slots: container
-                .import_slots()
-                .map(|(slot, symbol)| (slot, symbol.to_owned()))
-                .collect(),
+            // Read from the database by `ensure_current` alone, which is the
+            // first thing every request does.
+            names: Rc::new(NameDb::new()),
+            imports: Rc::new(BTreeMap::new()),
             defined: definitions(container),
             extents: r2types::ProgramExtents::new(
                 container
@@ -176,34 +160,34 @@ impl<S: Source> OpenProgram<S> {
                 })
                 .collect(),
             modes_at: None,
-            source,
-            // The import table needs a decoder, so nothing here is derived yet.
-            derived_at: None,
-            names_revision: 0,
-            entries_revision: 0,
+            modes_revision: 0,
             assembled: None,
             memo: Memo::default(),
             control: crate::EngineExecutionControl::default(),
             next: None,
-            machine: None,
-            thumb_machine: None,
             pointers: std::sync::Mutex::default(),
             returns: std::sync::Mutex::default(),
             callee_reads: crate::query::PerRevision::default(),
             references: None,
             survey: None,
+            db: Db::new(ProgramInputs {
+                source,
+                slots,
+                machine: None,
+                thumb_machine: None,
+            }),
         }
     }
 
     /// What was opened.
-    pub const fn source(&self) -> &S {
-        &self.source
+    pub fn source(&self) -> &S {
+        &self.db.inputs().source
     }
 
     /// What was opened, to be written to. Everything derived from it is
     /// derived again the next time it is asked for.
-    pub const fn source_mut(&mut self) -> &mut S {
-        &mut self.source
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.db.inputs_mut().source
     }
 
     /// Make everything derived from the bytes current.
@@ -213,50 +197,33 @@ impl<S: Source> OpenProgram<S> {
     /// import stubs are read or decoded out of the bytes, so they are derived
     /// again whenever the source says it is at a different revision.
     pub fn ensure_current(&mut self) -> Result<(), String> {
-        if self.machine.is_none() {
-            self.machine = Some(
-                r2sleigh_lift::embedded_machine(&self.source.container().arch.name)
-                    .map_err(|error| error.to_string())?,
-            );
+        if self.db.inputs().machine.is_none() {
+            let arch = self.source().container().arch.name.clone();
+            let machine =
+                r2sleigh_lift::embedded_machine(&arch).map_err(|error| error.to_string())?;
             // Whether any function is Thumb is discovery's answer, so the
             // decoder is loaded wherever the architecture has one.
-            self.thumb_machine =
-                r2sleigh_lift::embedded_thumb_machine(&self.source.container().arch.name)
-                    .transpose()
-                    .map_err(|error| error.to_string())?;
+            let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            let inputs = self.db.inputs_mut();
+            inputs.machine = Some(machine);
+            inputs.thumb_machine = thumb;
         }
-        let revision = self.source.byte_revision();
-        if self.derived_at == Some(revision) {
-            return Ok(());
-        }
-        let machine = self.machine.as_ref().expect("the machine is loaded above");
-        let mut names = naming::of(&self.source);
-        naming::name_strings(&mut names, &self.source);
-        // The import stubs can only be read once there is a decoder.
-        let imports = naming::imports(&self.source, &machine.disasm, machine.arch.alignment);
-        naming::name_imports(&mut names, &imports);
-        naming::name_slots(
-            &mut names,
-            &self.slots,
-            &imports,
-            &self.source.container().loader_writes,
-        );
-        // A patch that renamed nothing and moved no stub leaves everything
-        // derived from those still good, so the counters move only on a
-        // difference rather than on every write; the first derivation is no
-        // change, since nothing was derived before it.
-        let derived = self.derived_at.is_some();
-        self.names_revision += u64::from(derived && names != self.names);
-        self.entries_revision += u64::from(derived && imports != self.imports);
-        self.names = names;
-        self.imports = imports;
-        self.derived_at = Some(revision);
+        self.imports = self
+            .db
+            .get::<Imports>(&())
+            .map_err(|cycle| format!("{cycle:?}"))?;
+        self.names = self
+            .db
+            .get::<Names>(&())
+            .map_err(|cycle| format!("{cycle:?}"))?;
         Ok(())
     }
 
     /// What this binary calls each address it names, as of the last
     /// `ensure_current`.
-    pub const fn names(&self) -> &NameDb {
+    pub fn names(&self) -> &NameDb {
         &self.names
     }
 
@@ -267,7 +234,7 @@ impl<S: Source> OpenProgram<S> {
     /// `entry0`; then any entry; then the first code section, because an
     /// object file declares no entry at all.
     pub fn start(&self) -> Option<u64> {
-        let container = self.source.container();
+        let container = self.source().container();
         let entries = &container.entries;
         let declared = entries
             .iter()
@@ -294,7 +261,7 @@ impl<S: Source> OpenProgram<S> {
         // Import stubs are named only once there is a decoder to read them with.
         self.ensure_current()?;
         let declared = || {
-            let entries = &self.source.container().entries;
+            let entries = &self.source().container().entries;
             entries
                 .iter()
                 .find(|entry| entry.kind == EntryKind::Main)
@@ -307,7 +274,7 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Which stub stands for which import, as of the last `ensure_current`.
-    pub const fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
+    pub fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
         &self.imports
     }
 
@@ -318,7 +285,9 @@ impl<S: Source> OpenProgram<S> {
     /// by a call decodes the same whichever command asked first.
     fn ensure_decodable(&mut self) -> Result<(), String> {
         self.ensure_current()?;
-        if self.thumb_machine.is_some() && self.modes_at != Some(self.source.byte_revision()) {
+        if self.db.inputs().thumb_machine.is_some()
+            && self.modes_at != Some(self.source().byte_revision())
+        {
             self.surveyed()?;
         }
         Ok(())
@@ -341,7 +310,7 @@ impl<S: Source> OpenProgram<S> {
         {
             return Ok(());
         }
-        let container = self.source.container();
+        let container = self.source().container();
         let bits = container.arch.bits;
         let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
             .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
@@ -424,7 +393,7 @@ impl<S: Source> OpenProgram<S> {
             call_effect: assembled.call_effect.as_ref(),
             compiler: &assembled.compiler,
             prototypes: &assembled.prototypes,
-            declarations: &self.source.container().declarations,
+            declarations: &self.source().container().declarations,
         })
     }
 
@@ -439,7 +408,7 @@ impl<S: Source> OpenProgram<S> {
         entry: u64,
     ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
         let moved = Moved {
-            written: &|since, range| self.source.written_since(since, range),
+            written: &|since, range| self.source().written_since(since, range),
             returns: &|callee| self.comes_back(callee),
         };
         self.memo
@@ -504,10 +473,13 @@ impl<S: Source> OpenProgram<S> {
     /// Which state of this program every answer is about.
     pub fn revision(&self) -> Revision {
         Revision {
-            program: self.source.identity(),
-            bytes: self.source.byte_revision(),
-            names: self.names_revision,
-            entries: self.entries_revision,
+            program: self.source().identity(),
+            bytes: self.source().byte_revision(),
+            // When the table last differed, which most patches leave alone:
+            // anything that read only a name stays good across them.
+            names: self.db.changed_at::<Names>(&()).unwrap_or(0),
+            // The entries a write can move: the import stubs, and the modes.
+            entries: self.db.changed_at::<Imports>(&()).unwrap_or(0) + self.modes_revision,
         }
     }
 
@@ -532,8 +504,8 @@ impl<S: Source> OpenProgram<S> {
     /// The decoder for one instruction set.
     fn machine_in(&self, thumb: bool) -> Option<&EmbeddedMachine> {
         match thumb {
-            true => self.thumb_machine.as_ref(),
-            false => self.machine.as_ref(),
+            true => self.db.inputs().thumb_machine.as_ref(),
+            false => self.db.inputs().machine.as_ref(),
         }
     }
 
@@ -544,28 +516,28 @@ impl<S: Source> OpenProgram<S> {
     /// Sleigh specification gives the wrong answer on exactly the binaries
     /// that have literal pools.
     pub fn endian(&self) -> r2il::Endianness {
-        match self.source.container().arch.endian {
+        match self.source().container().arch.endian {
             Endian::Little => r2il::Endianness::Little,
             Endian::Big => r2il::Endianness::Big,
         }
     }
 }
 
-impl<S: Source> Decoders for OpenProgram<S> {
+impl<S: Source + 'static> Decoders for OpenProgram<S> {
     fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
         self.machine_at(vaddr)
     }
 }
 
-impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
+impl<S: Source + 'static> r2ssa::body::Program for OpenProgram<S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        self.source.read(vaddr, max)
+        self.source().read(vaddr, max)
     }
 
     /// The segment the container states holds this address. Read from the
     /// container alone, so no write moves it and nothing need record asking.
     fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
-        let segment = self.source.container().segment_at(vaddr)?;
+        let segment = self.source().container().segment_at(vaddr)?;
         let (start, end) = segment.range();
         Some(r2ssa::body::Region {
             start,
@@ -600,7 +572,7 @@ impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
     }
 }
 
-impl<S: Source> crate::native::Program for OpenProgram<S> {
+impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn control(&self) -> crate::EngineExecutionControl {
         // The token and the meter are shared, so this is the request's own
         // control rather than a copy that nothing could stop.
@@ -616,7 +588,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
         self.names
             .text_at(vaddr)
             .map(str::to_owned)
-            .or_else(|| self.slots.get(&vaddr).cloned())
+            .or_else(|| self.db.inputs().slots.get(&vaddr).cloned())
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
@@ -624,11 +596,11 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     }
 
     fn loader_writes(&self) -> &[LoaderWrite] {
-        &self.source.container().loader_writes
+        &self.source().container().loader_writes
     }
 
     fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source.container().immutable(range)
+        self.source().container().immutable(range)
     }
 
     fn holds_code(&self, vaddr: u64) -> bool {
@@ -639,7 +611,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
-        self.source
+        self.source()
             .container()
             .unwind
             .at(entry)
@@ -664,7 +636,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
         self.imports
             .get(&vaddr)
             .map(|stub| &stub.symbol)
-            .or_else(|| self.slots.get(&vaddr))
+            .or_else(|| self.db.inputs().slots.get(&vaddr))
             .cloned()
     }
 
@@ -674,14 +646,14 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
 }
 
 /// The program as one derivation reads it, logging the bytes it read and each callee's return it was told.
-struct Recording<'a, S: Source> {
+struct Recording<'a, S: Source + 'static> {
     program: &'a OpenProgram<S>,
     consulted: std::cell::RefCell<Consulted>,
 }
 
-impl<S: Source> r2ssa::body::Program for Recording<'_, S> {
+impl<S: Source + 'static> r2ssa::body::Program for Recording<'_, S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let read = self.program.source.read(vaddr, max)?;
+        let read = self.program.source().read(vaddr, max)?;
         // Only what is mapped: no write can land in the unmapped rest.
         self.consulted
             .borrow_mut()
@@ -719,7 +691,7 @@ impl<S: Source> r2ssa::body::Program for Recording<'_, S> {
     }
 }
 
-impl<S: Source> crate::native::Program for Recording<'_, S> {
+impl<S: Source + 'static> crate::native::Program for Recording<'_, S> {
     fn control(&self) -> crate::EngineExecutionControl {
         crate::native::Program::control(self.program)
     }
@@ -876,4 +848,105 @@ fn definitions(container: &Container) -> BTreeMap<u64, bool> {
             .or_insert(symbol.kind == SymbolKind::Function);
     }
     defined
+}
+
+/// What the query database reads: the source, and what no write moves -- the
+/// decoders and the slots the container states the loader fills.
+pub(crate) struct ProgramInputs<S> {
+    pub(crate) source: S,
+    /// Which import each slot the loader fills stands for. A stub's tail
+    /// transfer names the slot it reads rather than any code address, so the
+    /// slot has to answer for the import too; only a stub is an entry.
+    slots: BTreeMap<u64, String>,
+    machine: Option<EmbeddedMachine>,
+    /// The same instruction set with TMode set, where the architecture has
+    /// one. Which functions it decodes is what `modes` says.
+    thumb_machine: Option<EmbeddedMachine>,
+}
+
+impl<S: Source + 'static> Inputs for ProgramInputs<S> {
+    fn byte_revision(&self) -> u64 {
+        self.source.byte_revision()
+    }
+
+    fn written_since(&self, revision: u64, range: &std::ops::Range<u64>) -> bool {
+        self.source.written_since(revision, range)
+    }
+}
+
+/// The source as a query reads it: every byte read is recorded against the
+/// query running, so no query can read the program without depending on it.
+struct Recorded<'a, S: Source + 'static> {
+    db: &'a Db<ProgramInputs<S>>,
+}
+
+impl<S: Source + 'static> Source for Recorded<'_, S> {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let read = self.db.inputs().source.read(vaddr, max)?;
+        // Only what is mapped: no write can land in the unmapped rest.
+        self.db
+            .reads(vaddr..vaddr.saturating_add(read.len() as u64));
+        Some(read)
+    }
+
+    fn container(&self) -> &Container {
+        self.db.inputs().source.container()
+    }
+
+    fn identity(&self) -> u64 {
+        self.db.inputs().source.identity()
+    }
+
+    fn byte_revision(&self) -> u64 {
+        self.db.inputs().source.byte_revision()
+    }
+
+    fn written_since(&self, revision: u64, range: &std::ops::Range<u64>) -> bool {
+        self.db.inputs().source.written_since(revision, range)
+    }
+}
+
+/// Which stub stands for which import, by the import's own name, and how
+/// large each is: stated by a Mach-O stub section, and decoded out of the
+/// bytes elsewhere. `is_entry` reads it, which is what bounds every body
+/// walk, so a stale table would be a body that ends in the wrong place.
+struct Imports;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Imports {
+    type Key = ();
+    type Value = BTreeMap<u64, naming::Stub>;
+    const NAME: &'static str = "imports";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        let machine = db
+            .inputs()
+            .machine
+            .as_ref()
+            .expect("the decoder is loaded before anything is asked");
+        naming::imports(&Recorded { db }, &machine.disasm, machine.arch.alignment)
+    }
+}
+
+/// What this binary calls each address it names.
+struct Names;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Names {
+    type Key = ();
+    type Value = NameDb;
+    const NAME: &'static str = "names";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        let source = Recorded { db };
+        let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
+        let mut names = naming::of(&source);
+        naming::name_strings(&mut names, &source);
+        naming::name_imports(&mut names, &imports);
+        naming::name_slots(
+            &mut names,
+            &db.inputs().slots,
+            &imports,
+            &source.container().loader_writes,
+        );
+        names
+    }
 }

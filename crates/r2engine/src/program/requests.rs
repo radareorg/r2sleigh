@@ -220,7 +220,7 @@ fn listed_by_block(
     whole
 }
 
-impl<S: Source> OpenProgram<S> {
+impl<S: Source + 'static> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
     pub fn prepared(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
         self.start_request();
@@ -499,7 +499,7 @@ impl<S: Source> OpenProgram<S> {
     pub fn syscalls(&mut self) -> Result<Vec<Syscall>, String> {
         self.start_request();
         let sites = self.surveyed()?.supervisor.clone();
-        let container = self.source.container();
+        let container = self.source().container();
         let table = r2abi::Syscalls::for_platform(
             super::kernel(container),
             &container.arch.name,
@@ -580,7 +580,7 @@ impl<S: Source> OpenProgram<S> {
         let walked = &survey.walked;
         let mut index = Indexing::default();
         let mut coverage = Coverage::default();
-        index.read_words(&self.source.container().loader_writes);
+        index.read_words(&self.source().container().loader_writes);
         // A program that states no function is never assembled, and has nothing to index.
         if walked.is_empty() {
             return Ok(index.finish(coverage));
@@ -629,7 +629,7 @@ impl<S: Source> OpenProgram<S> {
     /// time over libc-2.26.
     pub(super) fn surveyed(&mut self) -> Result<Arc<Survey>, String> {
         self.ensure_current()?;
-        let at = (self.source.identity(), self.source.byte_revision());
+        let at = (self.source().identity(), self.source().byte_revision());
         if let Some((held_at, held)) = &self.survey
             && *held_at == at
         {
@@ -681,17 +681,17 @@ impl<S: Source> OpenProgram<S> {
             .into_iter()
             .map(|(entry, walk)| (entry, walk.map(|walk| walk.thumb)))
             .collect();
-        let at = (self.source.identity(), self.source.byte_revision());
+        let at = (self.source().identity(), self.source().byte_revision());
         self.hold_returns(at, found.returns);
-        if self.thumb_machine.is_some() {
+        if self.db.inputs().thumb_machine.is_some() {
             let modes = found
                 .functions
                 .iter()
                 .map(|one| (one.address, one.thumb))
                 .collect::<BTreeMap<_, _>>();
-            self.entries_revision += u64::from(self.modes_at.is_some() && modes != self.modes);
+            self.modes_revision += u64::from(self.modes_at.is_some() && modes != self.modes);
             self.modes = modes;
-            self.modes_at = Some(self.source.byte_revision());
+            self.modes_at = Some(self.source().byte_revision());
         }
         Ok(Survey {
             functions: found.functions,
@@ -707,7 +707,7 @@ impl<S: Source> OpenProgram<S> {
     /// functions, and a linkage stub per import, which the loader's own table
     /// places.
     fn stated_functions(&self) -> Vec<(u64, Confidence, bool)> {
-        let container = self.source.container();
+        let container = self.source().container();
         container
             .entries
             .iter()
@@ -744,7 +744,7 @@ impl<S: Source> OpenProgram<S> {
 }
 
 /// One body listed as the reference index reads it, or why it is unread.
-fn claimed_by<S: Source>(
+fn claimed_by<S: Source + 'static>(
     program: &OpenProgram<S>,
     (target, machine): (
         &crate::native::NativeTarget<'_>,

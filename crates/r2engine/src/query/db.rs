@@ -44,16 +44,6 @@ pub trait Inputs {
     fn written_since(&self, revision: u64, range: &Range<u64>) -> bool;
 }
 
-impl<S: crate::program::Source> Inputs for S {
-    fn byte_revision(&self) -> u64 {
-        crate::program::Source::byte_revision(self)
-    }
-
-    fn written_since(&self, revision: u64, range: &Range<u64>) -> bool {
-        crate::program::Source::written_since(self, revision, range)
-    }
-}
-
 /// One kind of derived fact.
 pub trait Query<I: Inputs>: 'static {
     type Key: Ord + Clone + Debug + 'static;
@@ -69,10 +59,34 @@ pub trait Query<I: Inputs>: 'static {
 }
 
 /// A query asked, through some chain, for itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Cycle {
     pub query: &'static str,
-    pub key: String,
+    pub key: Rc<dyn CycleKey>,
+}
+
+impl PartialEq for Cycle {
+    fn eq(&self, other: &Self) -> bool {
+        self.query == other.query && self.key.same_key(other.key.as_ref())
+    }
+}
+
+impl Eq for Cycle {}
+
+/// The key a cycle went through, kept as the value it is.
+pub trait CycleKey: Debug {
+    fn same_key(&self, other: &dyn CycleKey) -> bool;
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<K: Debug + PartialEq + 'static> CycleKey for K {
+    fn same_key(&self, other: &dyn CycleKey) -> bool {
+        other.as_any().downcast_ref::<K>() == Some(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// What the database has done, for tests and for traces.
@@ -144,6 +158,19 @@ impl<I: Inputs + 'static> Db<I> {
         &mut self.inputs
     }
 
+    /// The revision `Q`'s answer at `key` last changed at, as last checked;
+    /// `None` where nothing has asked.
+    pub fn changed_at<Q: Query<I>>(&self, key: &Q::Key) -> Option<u64> {
+        let tables = self.tables.borrow();
+        let table = tables.get(&TypeId::of::<Q>())?;
+        let typed = table.as_any().downcast_ref::<Table<Q, I>>()?;
+        typed
+            .entries
+            .borrow()
+            .get(key)
+            .map(|entry| entry.changed_at)
+    }
+
     pub fn stats(&self) -> DbStats {
         *self.stats.borrow()
     }
@@ -207,7 +234,7 @@ impl<I: Inputs + 'static, K: Ord> Running<'_, I, K> {
         if let Some(key) = self.key.take() {
             self.running.borrow_mut().remove(&key);
         }
-        self.db.frames.borrow_mut().pop().unwrap_or_default()
+        coalesced(self.db.frames.borrow_mut().pop().unwrap_or_default())
     }
 }
 
@@ -218,6 +245,31 @@ impl<I: Inputs + 'static, K: Ord> Drop for Running<'_, I, K> {
             self.db.frames.borrow_mut().pop();
         }
     }
+}
+
+/// The same dependencies with overlapping and adjacent byte ranges merged,
+/// so checking an answer costs one test per region it read rather than one
+/// per read. The queries asked keep their order.
+fn coalesced(deps: Vec<Dep>) -> Vec<Dep> {
+    let (mut ranges, queries): (Vec<Dep>, Vec<Dep>) = deps
+        .into_iter()
+        .partition(|dep| matches!(dep, Dep::Bytes(_)));
+    let mut ranges = ranges
+        .drain(..)
+        .filter_map(|dep| match dep {
+            Dep::Bytes(range) if range.start < range.end => Some(range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged.into_iter().map(Dep::Bytes).chain(queries).collect()
 }
 
 impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
@@ -265,7 +317,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         if !self.running.borrow_mut().insert(key.clone()) {
             return Err(Cycle {
                 query: Q::NAME,
-                key: format!("{key:?}"),
+                key: Rc::new(key.clone()),
             });
         }
         db.frames.borrow_mut().push(Vec::new());
@@ -460,7 +512,7 @@ mod tests {
             *answer,
             Err(Cycle {
                 query: "loop",
-                key: "7".to_owned()
+                key: Rc::new(7u64)
             })
         );
         // The failed run left nothing running, so the next question is asked afresh.

@@ -41,7 +41,7 @@ impl BodyWalk {
 }
 
 /// Discovery's walker over one open program.
-pub(super) struct Walking<'p, S: Source> {
+pub(super) struct Walking<'p, S: Source + 'static> {
     program: &'p OpenProgram<S>,
     primary: NativeTarget<'p>,
     thumb: Option<NativeTarget<'p>>,
@@ -85,7 +85,7 @@ impl r2ssa::body::Program for Knowing<'_> {
     }
 }
 
-impl<'p, S: Source> Walking<'p, S> {
+impl<'p, S: Source + 'static> Walking<'p, S> {
     /// A walker over both instruction sets, entering each body in the set `entered` chooses.
     pub(super) fn new(program: &'p OpenProgram<S>, entered: bool) -> Result<Self, String> {
         let decoder = |machine: Option<&'p EmbeddedMachine>| machine.map(|m| program.target_of(m));
@@ -144,7 +144,7 @@ impl<'p, S: Source> Walking<'p, S> {
     }
 }
 
-impl<S: Source> Walker for Walking<'_, S> {
+impl<S: Source + 'static> Walker for Walking<'_, S> {
     type Walk = BodyWalk;
     type Refusal = NativeRefusal;
 
@@ -213,7 +213,7 @@ impl<S: Source> Walker for Walking<'_, S> {
     }
 }
 
-impl<S: Source> OpenProgram<S> {
+impl<S: Source + 'static> OpenProgram<S> {
     /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
     pub(super) fn comes_back(&self, callee: u64) -> bool {
         let Ok(walker) = Walking::new(self, false) else {
@@ -222,7 +222,7 @@ impl<S: Source> OpenProgram<S> {
         if let Some(declared) = walker.declared(callee) {
             return declared;
         }
-        let at = (self.source.identity(), self.source.byte_revision());
+        let at = (self.source().identity(), self.source().byte_revision());
         if let Some(known) = self.returns_held(at, callee) {
             return known;
         }
