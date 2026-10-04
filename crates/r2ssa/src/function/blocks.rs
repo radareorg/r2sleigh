@@ -96,16 +96,19 @@ impl<V> Blocks<V> {
             .collect();
     }
 
+    /// The arena every id of these blocks was minted from.
+    pub(crate) const fn arena(&self) -> &OpArena {
+        &self.arena
+    }
+}
+
+impl Blocks<crate::VarId> {
     /// Apply a pass's plan: blocks in the order they stand (reverse
     /// postorder), operations in order, so ids are minted in IR order.
     ///
     /// `O(n)` to find which block holds each operation, then one walk of each
     /// block the plan touches.
-    pub(super) fn apply(
-        &mut self,
-        plan: EditPlan,
-        convert: &mut impl FnMut(&crate::op::SSAOp) -> crate::op::SSAOp<V>,
-    ) {
+    pub(super) fn apply(&mut self, plan: EditPlan) {
         if plan.is_empty() {
             return;
         }
@@ -118,14 +121,9 @@ impl<V> Blocks<V> {
         let mut edits = plan.by_block(|id: OpId| block_of.get(id.index()).copied().flatten());
         for block in &mut self.items {
             if let Some(edits) = edits.remove(&block.addr) {
-                block.apply(&mut self.arena, edits, convert);
+                block.apply(&mut self.arena, edits);
             }
         }
-    }
-
-    /// The arena every id of these blocks was minted from.
-    pub(crate) const fn arena(&self) -> &OpArena {
-        &self.arena
     }
 }
 

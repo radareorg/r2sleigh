@@ -2719,14 +2719,11 @@ impl SSAFunction {
             // The loops are the control graph's; any edit to it forgets them.
             self.natural_loops = std::sync::OnceLock::new();
         }
-        let values = &mut self.values;
-        self.blocks.apply(plan, &mut |op: &SSAOp| {
-            op.map(&mut |var| values.intern(var))
-        });
+        self.values.adopt(plan.take_minted());
+        self.blocks.apply(plan);
         for edit in shape {
             match edit {
                 ShapeEdit::ReplacePhi { block, id, phi } => {
-                    let phi = phi.map(&mut |var| self.values.intern(var));
                     if let Some(mut block) = self.block_for_change(block) {
                         let index = block.sited_phis().position(|(held, _)| held == id);
                         if let Some(index) = index {

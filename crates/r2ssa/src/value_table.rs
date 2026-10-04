@@ -74,3 +74,103 @@ impl ValueTable {
         &self.vars
     }
 }
+
+impl ValueTable {
+    /// Append what a plan minted against this table, in the order it minted
+    /// them, so that every id the plan wrote names what it meant.
+    pub(crate) fn adopt(&mut self, minted: Minted) {
+        if minted.vars.is_empty() {
+            return;
+        }
+        assert_eq!(
+            self.vars.len(),
+            minted.base,
+            "a plan's minted variables join the table they were numbered past"
+        );
+        for var in minted.vars {
+            let id = VarId::from_len(self.vars.len());
+            self.index.insert(var.clone(), id);
+            self.vars.push(var);
+        }
+    }
+}
+
+impl VarId {
+    fn from_len(len: usize) -> Self {
+        Self(u32::try_from(len).expect("fewer than 2^32 variables"))
+    }
+}
+
+/// The variables a pass names while it plans against a function it only
+/// reads: those the table holds keep their ids, and each new one is
+/// numbered past the table in the order the pass first names it. The plan
+/// carries them as [`Minted`], and they join the table when it applies.
+///
+/// Interning is `O(1)` expected per variable, as the table's own is.
+pub(crate) struct Minting<'t> {
+    table: &'t ValueTable,
+    vars: Vec<SSAVar>,
+    index: HashMap<SSAVar, VarId>,
+}
+
+/// What a [`Minting`] numbered, and the table length it numbered past.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Minted {
+    base: usize,
+    vars: Vec<SSAVar>,
+}
+
+impl Minted {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.vars.is_empty()
+    }
+}
+
+impl<'t> Minting<'t> {
+    pub(crate) fn new(table: &'t ValueTable) -> Self {
+        Self {
+            table,
+            vars: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+
+    /// The id `var` is held under, numbering it past the table if neither
+    /// the table nor this minting holds it yet.
+    pub(crate) fn intern(&mut self, var: &SSAVar) -> VarId {
+        if let Some(id) = self
+            .table
+            .id_of(var)
+            .or_else(|| self.index.get(var).copied())
+        {
+            return id;
+        }
+        let id = VarId::from_len(self.table.len() + self.vars.len());
+        self.vars.push(var.clone());
+        self.index.insert(var.clone(), id);
+        id
+    }
+
+    /// The constant `value` at `size` bytes, as a variable id.
+    pub(crate) fn constant(&mut self, value: u64, size: u32) -> VarId {
+        self.intern(&SSAVar::constant(value, size))
+    }
+
+    /// The variable an id is spelled as, whether the table or this minting
+    /// numbered it.
+    pub(crate) fn var(&self, id: VarId) -> &SSAVar {
+        let index = id.0 as usize;
+        match index.checked_sub(self.table.len()) {
+            Some(minted) => &self.vars[minted],
+            None => self.table.var(id),
+        }
+    }
+
+    /// Everything numbered past the table, for the plan to carry.
+    pub(crate) fn finish(self) -> Minted {
+        Minted {
+            base: self.table.len(),
+            vars: self.vars,
+        }
+    }
+}

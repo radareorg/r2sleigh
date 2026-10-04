@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use crate::arena::{OpId, Pass};
 use crate::cfg::BlockTerminator;
 use crate::op::SSAOp;
+use crate::value_table::{Minted, VarId};
 
 use super::PhiNode;
 
@@ -40,13 +41,13 @@ pub(crate) enum Anchor {
 #[derive(Debug, Clone)]
 enum Edit {
     /// Rewrite an operation in place: it keeps its id.
-    Replace { id: OpId, op: SSAOp },
+    Replace { id: OpId, op: SSAOp<VarId> },
     /// Insert operations at an anchor, each derived by `pass` from the
     /// operation named beside it.
     Insert {
         at: Anchor,
         pass: Pass,
-        ops: Vec<(SSAOp, Option<OpId>)>,
+        ops: Vec<(SSAOp<VarId>, Option<OpId>)>,
     },
     /// Remove an operation; its id is tombstoned.
     Kill { id: OpId, pass: Pass },
@@ -57,7 +58,11 @@ enum Edit {
 #[derive(Debug, Clone)]
 pub(crate) enum ShapeEdit {
     /// Rewrite the phi `id` of `block` in place: it keeps its id.
-    ReplacePhi { block: u64, id: OpId, phi: PhiNode },
+    ReplacePhi {
+        block: u64,
+        id: OpId,
+        phi: PhiNode<VarId>,
+    },
     /// Drop from every phi of `block` the source arriving from `pred`.
     DropPhiSources { block: u64, pred: u64 },
     /// Remove the control-flow edge `from -> to`.
@@ -80,6 +85,9 @@ pub(crate) struct EditPlan {
     /// Recompute the block order and the dominators from the control-flow
     /// graph once every edit is applied, keeping only the blocks it has.
     reorder: bool,
+    /// The variables the plan's operations name that the function did not
+    /// hold when the plan was made, numbered past its table.
+    minted: Minted,
 }
 
 impl EditPlan {
@@ -89,6 +97,21 @@ impl EditPlan {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.edits.is_empty() && self.shape.is_empty() && !self.reorder
+    }
+
+    /// The plan's operations name variables `minted` numbered past the
+    /// table they were planned against; they join it as the plan applies.
+    pub(crate) fn adopt(&mut self, minted: Minted) {
+        assert!(
+            self.minted.is_empty(),
+            "a plan is made against one table and adopts its minted variables once"
+        );
+        self.minted = minted;
+    }
+
+    /// The variables this plan numbered past its function's table.
+    pub(crate) fn take_minted(&mut self) -> Minted {
+        std::mem::take(&mut self.minted)
     }
 
     /// Whether the plan edits no operation.
@@ -115,7 +138,7 @@ impl EditPlan {
         )
     }
 
-    pub(crate) fn replace(&mut self, id: OpId, op: SSAOp) {
+    pub(crate) fn replace(&mut self, id: OpId, op: SSAOp<VarId>) {
         self.edits.push(Edit::Replace { id, op });
     }
 
@@ -123,7 +146,7 @@ impl EditPlan {
         &mut self,
         at: Anchor,
         pass: Pass,
-        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+        ops: impl IntoIterator<Item = (SSAOp<VarId>, Option<OpId>)>,
     ) {
         let ops = ops.into_iter().collect::<Vec<_>>();
         if !ops.is_empty() {
@@ -145,7 +168,7 @@ impl EditPlan {
 
 /// Operations inserted together by one pass, each beside the operation it
 /// is derived from.
-pub(crate) type Insertion = (Pass, Vec<(SSAOp, Option<OpId>)>);
+pub(crate) type Insertion = (Pass, Vec<(SSAOp<VarId>, Option<OpId>)>);
 
 /// A plan sorted for one walk of one block: what goes at its start, and what
 /// happens at and around each of its operations.
@@ -158,7 +181,7 @@ pub(crate) struct BlockEdits {
 #[derive(Default)]
 pub(crate) struct OpEdits {
     pub(crate) before: Vec<Insertion>,
-    pub(crate) replace: Option<SSAOp>,
+    pub(crate) replace: Option<SSAOp<VarId>>,
     pub(crate) kill: Option<Pass>,
     pub(crate) after: Vec<Insertion>,
 }

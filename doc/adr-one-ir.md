@@ -204,3 +204,20 @@ byte-identical, and deletes what it replaces:
     in r2types. Each one is a reader whose facts are keyed by `SSAVar`. It
     is deleted when its maps are re-keyed by id in stage 4, for the
     optimiser and the demand pass, or in stage 5, for the certificates.
+  - Stage 4: the optimiser runs on ids. `VarKey`, which hashed a copied
+    name string per lookup, is deleted. SCCP's lattice is an `IdVec`, its
+    use lists a `Csr`, and its constants an `IdMap`. Definitions, the kept
+    and combined flag sets and the copy roots are dense, built once per
+    pass. A plan is now over ids too: a pass that names a variable the
+    function does not hold yet, such as a folded constant, numbers it past
+    the table through a `Minting`, and the plan carries those variables to
+    the table when it applies. The table's length when the plan was made is
+    asserted, so a plan cannot be applied to a function it was not made
+    against. The demand pass was already on graph values; its one release
+    edit mints through the same path.
+  - Left for stage 5: `ValueViews` is still keyed by `SSAVar`. Its readers
+    are the certificates, which stage 5 re-keys. Until then the optimiser
+    asks it through one dense `VarId` to copy-root vector per pass. The
+    optimiser's definition maps are rebuilt once per pass, O(n), rather
+    than kept incrementally by `apply_edits`. That stays until a pass
+    measurably needs it.

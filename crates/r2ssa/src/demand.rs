@@ -324,6 +324,7 @@ impl SSAFunction {
         demand: &Demand,
     ) -> EditPlan {
         let mut plan = EditPlan::new();
+        let mut minting = crate::value_table::Minting::new(self.values());
         for inst in &graph.insts {
             let InstPayload::Op(SSAOp::Insert(insert)) = &inst.payload else {
                 continue;
@@ -352,20 +353,21 @@ impl SSAFunction {
             // payload restates.
             let Some((id, SSAOp::Insert(insert))) = graph.op_for_inst(inst.id).and_then(|id| {
                 let block = self.get_block(graph.block_addr_of(inst.id)?)?;
-                Some((id, self.named(block.ops().get(block.position(id)?)?)))
+                Some((id, block.ops().get(block.position(id)?)?))
             }) else {
                 continue;
             };
             r2il::refusal_evidence!(
                 "demanded-bytes",
                 "{} reads no byte of its base {} outside the inserted lane",
-                insert.dst,
-                insert.src
+                self.var(insert.dst),
+                self.var(insert.src)
             );
             let mut released = insert.clone();
-            released.src = SSAVar::constant(0, insert.src.size);
+            released.src = minting.constant(0, self.var(insert.src).size);
             plan.replace(id, SSAOp::Insert(released));
         }
+        plan.adopt(minting.finish());
         plan
     }
 }

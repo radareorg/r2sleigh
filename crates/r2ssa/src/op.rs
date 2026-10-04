@@ -519,7 +519,7 @@ impl<V> SSAOp<V> {
     /// The same operation with each source mapped by `f` and its
     /// destination kept. The destination is told apart by where it is held,
     /// not by its value.
-    pub fn map_sources(&self, f: impl Fn(&V) -> V) -> SSAOp<V>
+    pub fn map_sources(&self, mut f: impl FnMut(&V) -> V) -> SSAOp<V>
     where
         V: Clone,
     {

@@ -369,54 +369,45 @@ impl<V> SSABlock<V> {
     }
 }
 
-impl<V> SSABlock<V> {
+impl SSABlock<crate::VarId> {
     /// Apply one block's share of an [`crate::function::EditPlan`] in a single
     /// walk of its operations, minting what it inserts in the order the
     /// insertions end up in the block.
-    ///
-    /// The plan names its operands; `convert` gives each operation it
-    /// inserts or substitutes over this block's operands.
-    pub(crate) fn apply(
-        &mut self,
-        arena: &mut OpArena,
-        edits: crate::function::BlockEdits,
-        convert: &mut impl FnMut(&SSAOp) -> SSAOp<V>,
-    ) {
+    pub(crate) fn apply(&mut self, arena: &mut OpArena, edits: crate::function::BlockEdits) {
         let crate::function::BlockEdits { start, mut at } = edits;
         let old_ops = std::mem::take(&mut self.ops);
         let old_ids = std::mem::take(&mut self.ids);
         let mut ops = Vec::with_capacity(old_ops.len());
         let mut ids = Vec::with_capacity(old_ids.len());
-        fn place<V>(
-            ops: &mut Vec<SSAOp<V>>,
+        fn place(
+            ops: &mut Vec<SSAOp<crate::VarId>>,
             ids: &mut Vec<OpId>,
             arena: &mut OpArena,
             runs: Vec<crate::function::Insertion>,
-            convert: &mut impl FnMut(&SSAOp) -> SSAOp<V>,
         ) {
             let flat = runs
                 .into_iter()
                 .flat_map(|(pass, run)| run.into_iter().map(move |(op, from)| (pass, op, from)));
             for (pass, op, from) in flat {
                 ids.push(arena.mint(OpOrigin::Derived { from, pass }));
-                ops.push(convert(&op));
+                ops.push(op);
             }
         }
-        place(&mut ops, &mut ids, arena, start, convert);
+        place(&mut ops, &mut ids, arena, start);
         for (id, op) in old_ids.into_iter().zip(old_ops) {
             let Some(edit) = at.remove(&id) else {
                 ids.push(id);
                 ops.push(op);
                 continue;
             };
-            place(&mut ops, &mut ids, arena, edit.before, convert);
+            place(&mut ops, &mut ids, arena, edit.before);
             if let Some(pass) = edit.kill {
                 arena.kill(id, pass);
             } else {
                 ids.push(id);
-                ops.push(edit.replace.map_or(op, |op| convert(&op)));
+                ops.push(edit.replace.unwrap_or(op));
             }
-            place(&mut ops, &mut ids, arena, edit.after, convert);
+            place(&mut ops, &mut ids, arena, edit.after);
         }
         self.ops = ops;
         self.ids = ids;

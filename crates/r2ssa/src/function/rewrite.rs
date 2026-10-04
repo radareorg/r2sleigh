@@ -147,12 +147,12 @@ impl SSAFunction {
                 }
             }
         }
+        let minted = minted
+            .iter()
+            .map(|op| (op.map(&mut |var| self.values.intern(var)), None))
+            .collect::<Vec<_>>();
         let mut plan = EditPlan::new();
-        plan.insert(
-            Anchor::Start(self.root()),
-            Pass::ScratchZero,
-            minted.into_iter().map(|op| (op, None)),
-        );
+        plan.insert(Anchor::Start(self.root()), Pass::ScratchZero, minted);
         self.apply_edits(plan);
     }
 
@@ -502,12 +502,12 @@ impl SSAFunction {
                 }
             }
         }
+        let minted = minted
+            .iter()
+            .map(|op| (op.map(&mut |var| self.values.intern(var)), None))
+            .collect::<Vec<_>>();
         let mut plan = EditPlan::new();
-        plan.insert(
-            Anchor::Start(self.root()),
-            Pass::EntryLanes,
-            minted.into_iter().map(|op| (op, None)),
-        );
+        plan.insert(Anchor::Start(self.root()), Pass::EntryLanes, minted);
         self.apply_edits(plan);
     }
 
