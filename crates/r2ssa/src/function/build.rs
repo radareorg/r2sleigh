@@ -42,7 +42,6 @@ impl SSAFunction {
             blocks: Blocks::adopting(ordered),
             values,
             block_order,
-            canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
             entry_lanes: BTreeMap::new(),
@@ -570,6 +569,11 @@ impl SSAFunction {
             .iter()
             .map(|block| block.map_operands(&mut |var| values.intern(var)))
             .collect::<Vec<_>>();
+        // What the renamer learned of each variable's lifted storage joins
+        // its row, including variables no operation names any more.
+        for (var, storage) in renamed_storage {
+            values.intern_with_storage(&var, storage);
+        }
         let mut cfg = cfg;
         cfg.release_operations();
         let mut function = Self {
@@ -588,7 +592,6 @@ impl SSAFunction {
             block_order: renamed_block_order,
             blocks: Blocks::new(ssa_blocks, arena),
             values,
-            canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             formal_roots: BTreeMap::new(),
             entry_lanes: BTreeMap::new(),

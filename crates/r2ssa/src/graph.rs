@@ -320,7 +320,7 @@ impl<'f> ValueNumbering<'f> {
         }
         let var = self.function.var(operand);
         let id = ValueId(self.values.len() as u32);
-        let canonical_storage = self.function.canonical_storage_for_var(var).or_else(|| {
+        let canonical_storage = self.function.storage_of(operand).or_else(|| {
             var.constant_bits().map(|bits| CanonicalStorageId {
                 space: CanonicalStorageSpace::Constant,
                 offset: bits,

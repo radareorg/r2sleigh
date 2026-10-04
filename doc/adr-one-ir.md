@@ -240,9 +240,14 @@ byte-identical, and deletes what it replaces:
     instructions and ask by value. `class_key` normalises a class so that
     a literal the graph holds compares equal to that value, as the names
     did.
-  - Transitional after 5b: `predicates.rs` still keys its compare
-    definitions by `SSAVar` and asks through `graph.value_id_for_var`.
-    r2types' type analysis still reads named blocks and asks the frame
+  - 5c, in parts: the compare definitions are `IdMap<ValueId, _>` read off
+    graph instructions in block order. Each variable's lifted storage is a
+    column of the `ValueTable`, its one owner, instead of a
+    `BTreeMap<SSAVar, CanonicalStorageId>` beside it, and the graph builder
+    reads it by id. The seal's passes that take the first match among the
+    stored variables read one snapshot ordered by variable, so the match
+    does not depend on interning order.
+  - Transitional after 5c: r2types' type analysis still reads named blocks and asks the frame
     through one `FrameRoots` lookup, built from the prep facts and the
     graph in production and from a map in its own tests. r2dec's prepared
     semantics asks through `value_of` and `canonical_root_var` until the

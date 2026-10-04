@@ -108,7 +108,7 @@ impl SSAFunction {
         if callees.return_addresses().is_empty() {
             return Forwarding::default();
         }
-        let storage = |id: VarId| self.canonical_storage_by_var.get(self.var(id)).copied();
+        let storage = |id: VarId| self.storage_of(id);
         let mut forwarded = Forwarded::new(self.values.len());
         for block in &self.blocks {
             let mut pushed: Option<VarId> = None;
@@ -177,8 +177,7 @@ impl SSAFunction {
     /// Whether this variable is a stack slot the function proved private and
     /// treats as a variable.
     fn is_memory_variable(&self, var: VarId) -> bool {
-        self.canonical_storage_by_var
-            .get(self.var(var))
+        self.storage_of(var)
             .is_some_and(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
     }
 }

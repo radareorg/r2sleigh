@@ -83,7 +83,7 @@ impl SSAFunction {
             .filter(|id| self.var(*id).version == 0 && reaches_inserts_only(*id))
             .filter_map(|id| {
                 let var = self.var(id);
-                let storage = self.canonical_storage_by_var.get(var).copied()?;
+                let storage = self.storage_of(id)?;
                 (storage.space == CanonicalStorageSpace::Register
                     && !abi_carriers.iter().any(|carrier| {
                         carrier.space == storage.space
@@ -106,8 +106,10 @@ impl SSAFunction {
                 SSAVar::constant(0, var.size)
             } else {
                 let disambiguator = self
-                    .canonical_storage_by_var
-                    .keys()
+                    .values
+                    .storage_by_var()
+                    .into_iter()
+                    .map(|(other, _)| other)
                     .filter(|other| other.name() == var.name())
                     .map(SSAVar::rename_disambiguator)
                     .max()
@@ -120,8 +122,8 @@ impl SSAFunction {
                     dst: zero.clone(),
                     src: SSAVar::constant(0, 4),
                 });
-                if let Some(storage) = self.canonical_storage_by_var.get(var).copied() {
-                    self.canonical_storage_by_var.insert(zero.clone(), storage);
+                if let Some(storage) = self.canonical_storage_for_var(var) {
+                    self.values.intern_with_storage(&zero, storage);
                 }
                 zero
             };
@@ -191,13 +193,14 @@ impl SSAFunction {
             .copied()
             .chain(cleared_flag.map(|storage| (storage, 0)))
             .collect::<BTreeMap<_, _>>();
-        let storage_of = |id: VarId| self.canonical_storage_by_var.get(self.var(id)).copied();
+        let storage_of = |id: VarId| self.storage_of(id);
         // The entry values, and the value each call's clobber leaves in the flag.
         let boundary_values = self
-            .canonical_storage_by_var
-            .iter()
+            .values
+            .storage_by_var()
+            .into_iter()
             .filter(|(var, _)| var.version == 0)
-            .filter_map(|(var, storage)| Some((var.clone(), *entry_constants.get(storage)?)))
+            .filter_map(|(var, storage)| Some((var.clone(), *entry_constants.get(&storage)?)))
             .chain(
                 self.blocks
                     .iter()
@@ -262,14 +265,15 @@ impl SSAFunction {
         // them is a lane of that root, whatever width the convention names
         // it at -- `d1` is a lane of `z1` as much as `edi` is one of `rdi`.
         let entry_roots = self
-            .canonical_storage_by_var
-            .iter()
+            .values
+            .storage_by_var()
+            .into_iter()
             .filter(|(var, storage)| {
                 var.version == 0
                     && storage.space == CanonicalStorageSpace::Register
                     && storage.size == var.size
             })
-            .map(|(_, storage)| *storage)
+            .map(|(_, storage)| storage)
             .collect::<Vec<_>>();
         for projection in crate::semantic::source_formal_parameter_projections(machine_context) {
             let lane = projection.graph_storage;
@@ -315,7 +319,7 @@ impl SSAFunction {
                     continue;
                 };
                 let (dst, src) = (self.var(*dst), self.var(*src));
-                let storage = self.canonical_storage_by_var.get(src).copied();
+                let storage = self.canonical_storage_for_var(src);
                 if !is_root_entry(src, storage) {
                     continue;
                 }
@@ -349,9 +353,12 @@ impl SSAFunction {
             // fresh name would enter the family a second time.
             let root_var = root_var
                 .or_else(|| {
-                    self.canonical_storage_by_var
-                        .iter()
-                        .find(|(var, storage)| var.version == 0 && **storage == root)
+                    // Live, not a snapshot: a root an earlier lane named is
+                    // the one this lane must name too.
+                    self.values
+                        .storage_by_var()
+                        .into_iter()
+                        .find(|(var, storage)| var.version == 0 && *storage == root)
                         .map(|(var, _)| var.clone())
                 })
                 .unwrap_or_else(|| {
@@ -374,9 +381,10 @@ impl SSAFunction {
             // The caller's value of the lane, live at entry: nothing in the
             // body defines it, so it is version zero with no definition.
             let projection = SSAVar::new(name, 0, width);
-            self.canonical_storage_by_var
-                .entry(root_var.clone())
-                .or_insert(root);
+            let held = self.values.intern(&root_var);
+            if self.values.storage(held).is_none() {
+                self.values.set_storage(held, root);
+            }
             self.formal_projections
                 .insert(projection.clone(), lane_storage);
             if offset == 0 {
@@ -435,7 +443,7 @@ impl SSAFunction {
             }
         }
         let mut highest_disambiguator = BTreeMap::<String, u32>::new();
-        for var in self.canonical_storage_by_var.keys() {
+        for (var, _) in self.values.storage_by_var() {
             let entry = highest_disambiguator
                 .entry(var.name().to_string())
                 .or_insert(0);
@@ -481,7 +489,7 @@ impl SSAFunction {
                 carried = dst;
             }
             highest_disambiguator.insert(composed.name().to_string(), disambiguator);
-            self.canonical_storage_by_var.insert(composed.clone(), root);
+            self.values.intern_with_storage(&composed, root);
             self.formal_roots.insert(composed.clone(), root);
             substitutions.insert(root_id, self.values.intern(&composed));
         }
@@ -600,7 +608,7 @@ impl SSAFunction {
         // The entry values of the declared bases are the seeds: a value of
         // the graph at version zero whose storage is one of them.
         for value in &graph.values {
-            if value.var.version != 0 || !self.canonical_storage_by_var.contains_key(&value.var) {
+            if value.var.version != 0 || self.canonical_storage_for_var(&value.var).is_none() {
                 continue;
             }
             let Some(storage) = self.canonical_storage_for_var(&value.var) else {

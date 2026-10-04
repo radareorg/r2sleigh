@@ -2520,11 +2520,6 @@ pub struct SSAFunction {
     /// The same addresses as `blocks`, in the same order, for readers that want
     /// the addresses without the operations.
     block_order: Vec<u64>,
-    /// Canonical lifted storage retained during SSA renaming.
-    ///
-    /// Values are attached from raw varnodes at the lift/SSA seam. Consumers
-    /// must not reconstruct this information from `SSAVar::name`.
-    canonical_storage_by_var: BTreeMap<SSAVar, CanonicalStorageId>,
     /// Entry-lane projections: the value standing for a lane of a register as
     /// the function was entered with it, defined at entry as a `Subpiece` of
     /// the family root's entry value (doc/adr-register-identity.md §8, 6).
@@ -2851,7 +2846,6 @@ impl Clone for SSAFunction {
             values: self.values.clone(),
             block_index: self.block_index.clone(),
             block_order: self.block_order.clone(),
-            canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
             entry_lanes: self.entry_lanes.clone(),
@@ -3496,8 +3490,17 @@ impl SSAFunction {
 
     /// Return name-independent storage provenance retained from the lifted
     /// varnode that produced or supplied this SSA value.
+    ///
+    /// Values are attached from raw varnodes at the lift/SSA seam, into the
+    /// value table's storage column. Consumers must not reconstruct this
+    /// information from `SSAVar::name`.
     pub(crate) fn canonical_storage_for_var(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
-        self.canonical_storage_by_var.get(var).copied()
+        self.values.storage_of_var(var)
+    }
+
+    /// The lifted storage of a variable the function holds by id.
+    pub(crate) fn storage_of(&self, id: VarId) -> Option<CanonicalStorageId> {
+        self.values.storage(id)
     }
 
     /// Get the number of blocks.

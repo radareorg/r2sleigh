@@ -1786,9 +1786,7 @@ fn projected_peer_loop_artifact(
     );
     for (index, width) in widths.iter().copied().enumerate() {
         for value in [&entries[index], &phis[index], &updates[index]] {
-            function
-                .canonical_storage_by_var
-                .insert(value.clone(), storage(width));
+            function.values.intern_with_storage(value, storage(width));
         }
     }
 

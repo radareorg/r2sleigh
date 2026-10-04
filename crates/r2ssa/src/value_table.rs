@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::CanonicalStorageId;
 use crate::var::SSAVar;
 
 /// A function's number for one of its variables (see the module doc).
@@ -36,6 +37,10 @@ impl crate::dense::DenseId for VarId {
 #[derive(Debug, Clone, Default)]
 pub struct ValueTable {
     vars: Vec<SSAVar>,
+    /// The lifted storage each variable was read from or written to, where
+    /// the lift stated one: the one owner of that fact, a column beside the
+    /// variable rather than a second map keyed by its name.
+    storage: Vec<Option<CanonicalStorageId>>,
     index: HashMap<SSAVar, VarId>,
 }
 
@@ -47,8 +52,50 @@ impl ValueTable {
         }
         let id = VarId(u32::try_from(self.vars.len()).expect("fewer than 2^32 variables"));
         self.vars.push(var.clone());
+        self.storage.push(None);
         self.index.insert(var.clone(), id);
         id
+    }
+
+    /// The lifted storage of `id`, where one was stated.
+    pub fn storage(&self, id: VarId) -> Option<CanonicalStorageId> {
+        self.storage.get(id.0 as usize).copied().flatten()
+    }
+
+    /// The lifted storage of `var`, where it is interned and one was stated.
+    pub fn storage_of_var(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
+        self.storage(self.id_of(var)?)
+    }
+
+    /// State `id`'s lifted storage.
+    pub(crate) fn set_storage(&mut self, id: VarId, storage: CanonicalStorageId) {
+        self.storage[id.0 as usize] = Some(storage);
+    }
+
+    /// Intern `var` and state its storage.
+    pub(crate) fn intern_with_storage(
+        &mut self,
+        var: &SSAVar,
+        storage: CanonicalStorageId,
+    ) -> VarId {
+        let id = self.intern(var);
+        self.set_storage(id, storage);
+        id
+    }
+
+    /// Every variable with a stated storage, ordered by the variable: a
+    /// snapshot for the seal's few passes that take the first match among
+    /// them, so the match does not depend on interning order. `O(n log n)`,
+    /// once per pass.
+    pub(crate) fn storage_by_var(&self) -> Vec<(&SSAVar, CanonicalStorageId)> {
+        let mut held = self
+            .vars
+            .iter()
+            .zip(&self.storage)
+            .filter_map(|(var, storage)| Some((var, (*storage)?)))
+            .collect::<Vec<_>>();
+        held.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        held
     }
 
     /// The variable an id is spelled as.
@@ -91,6 +138,7 @@ impl ValueTable {
             let id = VarId::from_len(self.vars.len());
             self.index.insert(var.clone(), id);
             self.vars.push(var);
+            self.storage.push(None);
         }
     }
 }
