@@ -1028,7 +1028,7 @@ impl SsaArtifact {
             .iter()
             .filter(|(_, expression)| expression.terms.is_empty() && expression.offset == 0)
             .filter_map(move |(value, expression)| {
-                (!prep.formal_parameters.contains(*value)).then_some((*value, expression.parameter))
+                (!prep.formal_parameters.contains(value)).then_some((value, expression.parameter))
             });
         entry.chain(addressed)
     }

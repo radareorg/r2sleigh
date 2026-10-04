@@ -790,8 +790,8 @@ pub(crate) fn collect_stack_geometry_certificate(
                     _ => false,
                 })
     };
-    let mut geometry_outputs = BTreeMap::<InstId, ValueId>::new();
-    let mut geometry_inputs = BTreeSet::<ValueId>::new();
+    let mut geometry_outputs = crate::dense::IdMap::<InstId, ValueId>::default();
+    let mut geometry_inputs = crate::dense::IdSet::<ValueId>::default();
     for inst in &graph.insts {
         let Some(output) = inst.output.filter(|output| stack_root(*output).is_some()) else {
             continue;
@@ -902,10 +902,10 @@ pub(crate) fn collect_stack_geometry_certificate(
             !program_values.contains(&value.id)
                 && !frame_values.contains(&value.id)
                 && !return_control_values.contains(&value.id)
-                && (stack_root(value.id).is_some() || geometry_inputs.contains(&value.id))
+                && (stack_root(value.id).is_some() || geometry_inputs.contains(value.id))
                 && graph
                     .def_inst(value.id)
-                    .is_none_or(|inst| geometry_outputs.get(&inst).copied() == Some(value.id))
+                    .is_none_or(|inst| geometry_outputs.get(inst).copied() == Some(value.id))
         })
         .map(|value| value.id)
         .collect::<BTreeSet<_>>();
@@ -931,7 +931,7 @@ pub(crate) fn collect_stack_geometry_certificate(
                 // had written.
                 && !unobserved.unobserved_uses().contains(site)
                 && !geometry_outputs
-                    .get(&site.inst)
+                    .get(site.inst)
                     .is_some_and(|output| values.contains(output))
         }) else {
             continue;

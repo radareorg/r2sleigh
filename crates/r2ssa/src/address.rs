@@ -20,7 +20,7 @@
 //! `i + 1` where the addition wrapped. A sign extension and a truncation are
 //! terms of their own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
@@ -87,21 +87,21 @@ pub struct PointeeAddressExpression {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AddressProvenanceFacts {
-    pub parameter_expressions: BTreeMap<ValueId, ParameterAddressExpression>,
+    pub parameter_expressions: crate::dense::IdMap<ValueId, ParameterAddressExpression>,
     /// Addresses reached through at least one load from a parameter. Kept
     /// apart from `parameter_expressions` so that everything reading the
     /// latter keeps its meaning: a parameter expression is directly
     /// parameter-relative, a pointee expression never is.
-    pub pointee_expressions: BTreeMap<ValueId, PointeeAddressExpression>,
+    pub pointee_expressions: crate::dense::IdMap<ValueId, PointeeAddressExpression>,
 }
 
 impl AddressProvenanceFacts {
     pub fn parameter_expression(&self, value: ValueId) -> Option<&ParameterAddressExpression> {
-        self.parameter_expressions.get(&value)
+        self.parameter_expressions.get(value)
     }
 
     pub fn pointee_expression(&self, value: ValueId) -> Option<&PointeeAddressExpression> {
-        self.pointee_expressions.get(&value)
+        self.pointee_expressions.get(value)
     }
 }
 
@@ -263,12 +263,12 @@ struct AddressCollector<'a> {
     views: Option<&'a ValueViews<ValueId>>,
     /// Each value's expression as the solve has it: absent while nothing
     /// has ruled one in or out.
-    expressions: BTreeMap<ValueId, Cell>,
+    expressions: crate::dense::IdMap<ValueId, Cell>,
     /// The values whose expression is the formal they are, placed before any
     /// block is read and fixed.
-    seeded: BTreeSet<ValueId>,
-    scalar_memo: HashMap<ValueId, Option<AffineScalar>>,
-    scalar_visiting: HashSet<ValueId>,
+    seeded: crate::dense::IdSet<ValueId>,
+    scalar_memo: crate::dense::IdMap<ValueId, Option<AffineScalar>>,
+    scalar_visiting: crate::dense::IdSet<ValueId>,
     /// What each block's spill slots hold where control leaves it.
     stack_out: BTreeMap<u64, Spills>,
     /// The number of loads in the function: the most dereferences any chain
@@ -357,8 +357,8 @@ impl<'a> AddressCollector<'a> {
                 .into_iter()
                 .map(|(value, expression)| (value, Cell::Expr(expression)))
                 .collect(),
-            scalar_memo: HashMap::new(),
-            scalar_visiting: HashSet::new(),
+            scalar_memo: crate::dense::IdMap::default(),
+            scalar_visiting: crate::dense::IdSet::default(),
             stack_out: BTreeMap::new(),
             load_count,
         }
@@ -383,13 +383,15 @@ impl<'a> AddressCollector<'a> {
             .enumerate()
             .map(|(index, addr)| (*addr, index))
             .collect::<BTreeMap<_, _>>();
-        let mut readers = BTreeMap::<ValueId, BTreeSet<usize>>::new();
+        let mut readers = crate::dense::IdMap::<ValueId, BTreeSet<usize>>::default();
         let mut slots = 0usize;
         for (index, &addr) in order.iter().enumerate() {
             for inst in self.block_insts(addr) {
                 for input in &inst.inputs {
                     for value in [*input, self.same_integer_root(*input)] {
-                        readers.entry(value).or_default().insert(index);
+                        readers
+                            .get_or_insert_with(value, BTreeSet::new)
+                            .insert(index);
                     }
                 }
                 slots += usize::from(matches!(
@@ -430,7 +432,7 @@ impl<'a> AddressCollector<'a> {
             };
             let moved = self.transfer_ops(block_addr, &mut spills);
             for value in moved {
-                work.extend(readers.get(&value).into_iter().flatten().copied());
+                work.extend(readers.get(value).into_iter().flatten().copied());
             }
             if self.stack_out.get(&block_addr) != Some(&spills) {
                 self.stack_out.insert(block_addr, spills);
@@ -613,10 +615,10 @@ impl<'a> AddressCollector<'a> {
     /// from pending to one expression to none, and two different
     /// expressions for one value meet to none.
     fn settle(&mut self, value: ValueId, derived: Derived, moved: &mut Vec<ValueId>) {
-        if self.seeded.contains(&value) {
+        if self.seeded.contains(value) {
             return;
         }
-        let next = match (self.expressions.get(&value), derived) {
+        let next = match (self.expressions.get(value), derived) {
             (_, Derived::Pending) => return,
             (None, Derived::Expr(expression)) => Cell::Expr(expression),
             (Some(Cell::Expr(held)), Derived::Expr(expression)) if *held == expression => return,
@@ -697,7 +699,7 @@ impl<'a> AddressCollector<'a> {
 
     /// What the solve has for `value` so far.
     fn cell(&self, value: ValueId) -> Derived {
-        match self.expressions.get(&value) {
+        match self.expressions.get(value) {
             Some(Cell::Expr(expression)) => Derived::Expr(expression.clone()),
             Some(Cell::Not) => Derived::Not,
             // A value nothing defines -- an entry value no formal seeded --
@@ -712,14 +714,14 @@ impl<'a> AddressCollector<'a> {
     }
 
     fn scalar_for_value(&mut self, value: ValueId) -> Option<AffineScalar> {
-        if let Some(cached) = self.scalar_memo.get(&value) {
+        if let Some(cached) = self.scalar_memo.get(value) {
             return cached.clone();
         }
         if !self.scalar_visiting.insert(value) {
             return None;
         }
         let result = self.compute_scalar(value);
-        self.scalar_visiting.remove(&value);
+        self.scalar_visiting.remove(value);
         self.scalar_memo.insert(value, result.clone());
         result
     }

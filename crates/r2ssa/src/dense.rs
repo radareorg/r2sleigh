@@ -232,6 +232,18 @@ impl<'a, I: DenseId, T> IntoIterator for &'a IdMap<I, T> {
     }
 }
 
+/// The entries, moved out in id order.
+impl<I: DenseId, T> IntoIterator for IdMap<I, T> {
+    type Item = (I, T);
+    type IntoIter = std::vec::IntoIter<(I, T)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut entries = self.entries;
+        entries.sort_unstable_by_key(|(id, _)| id.index());
+        entries.into_iter()
+    }
+}
+
 /// Two maps are equal when they hold the same values for the same ids,
 /// whatever order the values were inserted in.
 impl<I: DenseId, T: PartialEq> PartialEq for IdMap<I, T> {
@@ -556,6 +568,10 @@ mod tests {
                 proptest::prop_assert_eq!(map.get(ValueId(id)), model.get(&id));
             }
             // Keeping the even ids is keeping them in the model.
+            proptest::prop_assert_eq!(
+                map.clone().into_iter().collect::<Vec<_>>(),
+                map.iter().map(|(id, value)| (id, *value)).collect::<Vec<_>>()
+            );
             let mut kept = map.clone();
             let mut asked = Vec::new();
             kept.retain(|id, _| {

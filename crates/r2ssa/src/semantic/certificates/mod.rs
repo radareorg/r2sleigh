@@ -825,7 +825,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     defining_inst,
                     inputs,
                     width: value.var.size,
-                    renderable: renderable_expressions.contains(&value.id),
+                    renderable: renderable_expressions.contains(value.id),
                 },
             )
         })
