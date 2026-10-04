@@ -8,17 +8,24 @@ F1 gave every operation and value a stable id, and K put iteration on one
 driver. The representation those ids index is still scattered, and every pass
 rebuilds what it needs:
 
-- **Rebuilt indexes.** Rebuilds happen at 42 call sites of
-  `SsaGraph::from_function`, 16 of `ValueLiveness::compute`, 23 of
-  `FunctionLiveOut::compute` and 8 of `PreparedFunctionFacts::collect`, and
-  the views and the dominator tree are rebuilt at their own sites. Each
-  answers a question the sealed function already determines.
-- **Side tables instead of indexes.** About 200 maps are keyed by a
-  function's own entities: 35 `BTreeMap<SSAVar, _>`, 35
-  `HashMap<SSAVar, _>`, 56 `BTreeMap<ValueId, _>`, 51 `BTreeMap<InstId, _>`
-  and 20 `HashMap<VarKey, _>` in the optimiser alone. Every lookup is a tree
-  walk or a hash of a name, every pass builds its own, and two passes that
-  need the same relation build it twice.
+- **Rebuilt indexes.** Outside tests, preparation builds the graph twice
+  (again after the demand release changes operands, `function/stage.rs`),
+  computes liveness twice (the second time with what the facts collected
+  from the first said about shared content and uncertified call reads), and
+  interface recovery prepares a whole provisional fact set before the real
+  preparation (`recover_interface.rs`: graph, liveness, spans and
+  `PreparedFunctionFacts`). r2dec computes dominators twice more over its own
+  control graph (`structure/place.rs`, `structure/certify.rs`). Tests build
+  the graph at 39 further sites, because nothing smaller answers their
+  questions. Each rebuild answers a question the function already
+  determines, and the liveness rebuild is a dependency cycle (liveness,
+  spans, facts, liveness) solved by running it twice.
+- **Side tables instead of indexes.** 684 maps and sets in production code
+  are keyed by a function's own entities (`SSAVar`, `ValueId`, `InstId`,
+  `BlockId`, `OpId`, the optimiser's `VarKey`): 373 in r2ssa, 240 in r2dec
+  and 71 in r2types, as `ENTITY_KEYED_MAP` counted them on 2026-10-04. Every
+  lookup is a tree walk or a hash of a name, every pass builds its own, and
+  two passes that need the same relation build it twice.
 - **Names as identity.** `SSAVar` (a name, a version, a width and a
   disambiguator) still keys facts, although a value's identity is its
   `ValueId`. The optimiser hashes `VarKey` strings.
@@ -42,10 +49,14 @@ ids.**
 
 1. **Dense identity.** `OpId`, `InstId`, `ValueId` and `BlockId` are dense
    `u32`s fixed at seal. Facts about them live in dense containers:
-   - `ValueMap<T>`, `InstMap<T>` and `BlockMap<T>`: a `Vec<T>` indexed by id;
-   - `ValueSet` and `BlockSet`: bitsets;
-   - `Csr<T>`: compressed adjacency for def-use, predecessors and
+   - `IdVec<I, T>`: a value for every id, a `Vec<T>` indexed by it;
+   - `IdMap<I, T>`: a value for some ids, a `Vec<Option<T>>`;
+   - `IdSet<I>`: a bitset;
+   - `Csr<I, T>`: compressed adjacency for def-use, predecessors and
      successors.
+
+   They are generic over the id type (`r2ssa::dense`), so a value fact
+   cannot be indexed by an instruction.
 
    Iteration order is id order, which is deterministic by construction. A
    `BTreeMap` or `HashMap` keyed by a function's own entity is not allowed in
@@ -93,10 +104,10 @@ deletes what it replaces.
 
 | Step | Change | Deletes |
 |------|--------|---------|
-| F2.0 | Dense id newtypes and containers (`ValueMap`, `InstMap`, `BlockMap`, `ValueSet`, `Csr`); the Dylint against entity-keyed maps, warning only | — |
-| F2.1 | `FunctionIndex` on `Sealed`: reverse postorder, dominators, loops, def-use; every reader takes `&Sealed` or the index | the 42 `SsaGraph::from_function` sites outside the seal; `SsaQueryIndex` |
-| F2.2 | One liveness model over locations, as an index; dead flag and temporary phis pruned by it | `ValueLiveness`/`FunctionLiveOut` call sites (39), the duplicate live-in computation in `phi.rs`; closes #47, #50, #56 |
-| F2.3 | Prep facts, prepared facts and certificates re-expressed as indexes over dense containers | every `SSAVar`-keyed and `VarKey`-keyed map in r2ssa; the 8 `PreparedFunctionFacts::collect` sites become one |
+| F2.0 | Dense containers (`IdVec`, `IdMap`, `IdSet`, `Csr` in `r2ssa::dense`); the Dylint against entity-keyed maps (`ENTITY_KEYED_MAP`), warning only | — |
+| F2.1 | `FunctionIndex` on `Sealed`: reverse postorder, dominators, loops, def-use; every reader takes `&Sealed` or the index; r2dec's structuring reads the dominators from it | the second graph build (with F2.4), r2dec's two `DomTree::compute`, the test-only graph builds where the index answers |
+| F2.2 | One liveness model over locations, as an index whose inputs include shared content and certified call reads, so it is computed once; dead flag and temporary phis pruned by it | the second liveness pass and `compute_with_relocations`; the duplicate live-in computation in `phi.rs`; closes #47, #50, #56 |
+| F2.3 | Prep facts, prepared facts and certificates re-expressed as indexes over dense containers; interface recovery reads the indexes it needs instead of a provisional preparation | every `SSAVar`-keyed and `VarKey`-keyed map in r2ssa; the provisional preparation in `recover_interface.rs` |
 | F2.4 | The builder before the seal, with an incremental def-use; optimiser and demand on it | the provisional graph; the per-pass `defs` maps the optimiser builds |
 | F2.5 | Machine projection and term arena as indexes | their per-round rebuilds |
 | F2.6 | The Dylint made fatal in r2ssa, then in r2types | — |

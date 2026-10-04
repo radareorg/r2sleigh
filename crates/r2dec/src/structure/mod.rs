@@ -371,6 +371,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         certify::certify(
             stmt,
             self.func.cfg(),
+            self.func.domtree(),
             self.func.root(),
             &|id| {
                 journal
@@ -470,7 +471,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     /// moved into the `for` header before the blocks are written.
     fn prepare_certified_for_loops(
         &mut self,
-        placement: &place::Placement,
+        placement: &place::Placement<'_>,
     ) -> ControlFlowStructureResult<()> {
         self.certified_for_regions.clear();
         self.certified_for_header_sites.clear();

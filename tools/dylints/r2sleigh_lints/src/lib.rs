@@ -4,6 +4,7 @@
 extern crate rustc_ast;
 extern crate rustc_hir;
 extern crate rustc_lint;
+extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
 
@@ -2355,6 +2356,44 @@ rustc_session::declare_lint!(
     "an observation node is built only by the fusing constructors in r2dec::ast"
 );
 
+rustc_session::declare_lint!(
+    /// ### What it does
+    ///
+    /// Warns when a `BTreeMap`, `HashMap`, `BTreeSet` or `HashSet` is keyed
+    /// by a function's own entity (`SSAVar`, `ValueId`, `InstId`,
+    /// `BlockId`, `OpId`, or the optimiser's `VarKey`) in r2ssa, r2types or
+    /// r2dec.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// A sealed function numbers its values, instructions and blocks densely
+    /// from zero (doc/adr-one-ir.md, ROADMAP D11 and D12). A fact about them
+    /// is an index over those ids, built once and shared: a lookup is one
+    /// array index and iteration is in id order. A map keyed by an entity is
+    /// the side table the IR replaces. Each costs a tree walk or a hash per
+    /// lookup, each pass builds its own, and two copies of one relation are
+    /// two places for it to disagree.
+    ///
+    /// The check reads the types written in signatures, fields and aliases,
+    /// and the type of every `let`. A map built and consumed inside one
+    /// expression is not seen.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// let mut defs: BTreeMap<ValueId, InstId> = BTreeMap::new();
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust
+    /// let defs = index.definitions(); // an IdVec<ValueId, InstId>
+    /// ```
+    pub ENTITY_KEYED_MAP,
+    Warn,
+    "a fact about a function's entities is an index over their dense ids, not a map keyed by them"
+);
+
 rustc_session::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2441,7 +2480,8 @@ rustc_session::declare_lint_pass!(R2sleighLintPass => [
     R2TYPES_ROLE_NAME_SIGNATURE_HINT_OWNERSHIP,
     R2TYPES_FUNCTION_FACTS_FIELD_OWNERSHIP,
     FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
-    R2DEC_OBSERVED_LITERAL_CONSTRUCTION
+    R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
+    ENTITY_KEYED_MAP
 ]);
 
 #[unsafe(no_mangle)]
@@ -2535,11 +2575,56 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2TYPES_FUNCTION_FACTS_FIELD_OWNERSHIP,
         FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
         R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
+        ENTITY_KEYED_MAP,
     ]);
     lint_store.register_late_pass(|_| Box::new(R2sleighLintPass));
 }
 
 impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
+    fn check_ty(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        ty: &'tcx rustc_hir::Ty<'tcx, rustc_hir::AmbigArg>,
+    ) {
+        // A type written inside an expression or a `let` is the `let`
+        // check's, which reads the type rustc settled on, written or not;
+        // here only signatures, fields and aliases.
+        let ty = ty.as_unambig_ty();
+        if !written_inside_a_body(cx, ty.hir_id)
+            && is_entity_index_owner_span(cx, ty.span)
+            && !clippy_utils::is_in_test(cx.tcx, ty.hir_id)
+            && let Some(collection) = written_entity_keyed_collection(cx, ty)
+        {
+            span_lint(
+                cx,
+                ENTITY_KEYED_MAP,
+                ty.span,
+                format!(
+                    "`{collection}` keyed by a function's entity; use an index over dense ids (r2ssa::dense)"
+                ),
+            );
+        }
+    }
+
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx rustc_hir::LetStmt<'tcx>) {
+        // `let _ = ...` binds nothing: the map it reads is someone else's.
+        if !matches!(local.pat.kind, rustc_hir::PatKind::Wild)
+            && is_entity_index_owner_span(cx, local.pat.span)
+            && !clippy_utils::is_in_test(cx.tcx, local.hir_id)
+            && let Some(collection) =
+                inferred_entity_keyed_collection(cx, cx.typeck_results().node_type(local.pat.hir_id))
+        {
+            span_lint(
+                cx,
+                ENTITY_KEYED_MAP,
+                local.pat.span,
+                format!(
+                    "`{collection}` keyed by a function's entity; use an index over dense ids (r2ssa::dense)"
+                ),
+            );
+        }
+    }
+
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         if facts_impl_self_name(item).is_some() && !item_is_test_only(cx, item) {
             for span in rendering_decision_method_names(cx, item) {
@@ -6151,6 +6236,86 @@ fn constructs_observation_node(
 fn is_r2dec_ast_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
     let filename = cx.sess().source_map().span_to_filename(span);
     format!("{filename:?}").contains("crates/r2dec/src/ast.rs")
+}
+
+/// The crates whose facts about a function become indexes over its dense ids.
+fn is_entity_index_owner_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
+    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(span));
+    ["crates/r2ssa/src/", "crates/r2types/src/", "crates/r2dec/src/"]
+        .iter()
+        .any(|owner| filename.contains(owner))
+}
+
+/// Whether a written type sits in an expression or a `let` of the item that
+/// holds it, rather than in its signature or fields.
+fn written_inside_a_body(cx: &LateContext<'_>, ty: rustc_hir::HirId) -> bool {
+    use rustc_hir::Node;
+    cx.tcx
+        .hir_parent_iter(ty)
+        .map(|(_, node)| node)
+        .take_while(|node| {
+            !matches!(
+                node,
+                Node::Item(_) | Node::ImplItem(_) | Node::TraitItem(_) | Node::ForeignItem(_)
+            )
+        })
+        .any(|node| matches!(node, Node::Expr(_) | Node::LetStmt(_)))
+}
+
+/// The identities a sealed function numbers densely, and the optimiser's
+/// name-shaped key for them.
+const FUNCTION_ENTITIES: &[&str] = &["SSAVar", "ValueId", "InstId", "BlockId", "OpId", "VarKey"];
+
+const KEYED_COLLECTIONS: &[&str] = &["BTreeMap", "HashMap", "BTreeSet", "HashSet"];
+
+/// The collection's name, when `ty` is written as an ordered or hashed map or
+/// set whose key is a function entity.
+fn written_entity_keyed_collection(
+    cx: &LateContext<'_>,
+    ty: &rustc_hir::Ty<'_>,
+) -> Option<&'static str> {
+    let rustc_hir::TyKind::Path(QPath::Resolved(None, path)) = ty.kind else {
+        return None;
+    };
+    let rustc_hir::def::Res::Def(_, collection) = path.res else {
+        return None;
+    };
+    let name = cx.tcx.get_diagnostic_name(collection)?;
+    let collection = KEYED_COLLECTIONS
+        .iter()
+        .find(|keyed| name.as_str() == **keyed)?;
+    let rustc_hir::GenericArg::Type(key) = path.segments.last()?.args?.args.first()? else {
+        return None;
+    };
+    let rustc_hir::TyKind::Path(QPath::Resolved(None, key)) = key.as_unambig_ty().kind else {
+        return None;
+    };
+    let rustc_hir::def::Res::Def(_, key) = key.res else {
+        return None;
+    };
+    FUNCTION_ENTITIES
+        .contains(&cx.tcx.item_name(key).as_str())
+        .then_some(*collection)
+}
+
+/// The same, for a type rustc inferred.
+fn inferred_entity_keyed_collection(
+    cx: &LateContext<'_>,
+    ty: rustc_middle::ty::Ty<'_>,
+) -> Option<&'static str> {
+    let rustc_middle::ty::Adt(collection, args) = ty.kind() else {
+        return None;
+    };
+    let name = cx.tcx.get_diagnostic_name(collection.did())?;
+    let collection = KEYED_COLLECTIONS
+        .iter()
+        .find(|keyed| name.as_str() == **keyed)?;
+    let rustc_middle::ty::Adt(key, _) = args.types().next()?.kind() else {
+        return None;
+    };
+    FUNCTION_ENTITIES
+        .contains(&cx.tcx.item_name(key.did()).as_str())
+        .then_some(*collection)
 }
 
 fn is_r2dec_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {

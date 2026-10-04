@@ -1005,15 +1005,15 @@ fn switch_edges_agree(rendered: &[(Target, EdgeLabel)], expected: &[(Target, Edg
 pub(crate) fn certify(
     body: &CStmt,
     cfg: &CFG,
+    dom: &DomTree,
     entry: u64,
     block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
     label_block: &dyn Fn(&str) -> Option<u64>,
     terminal_call: &dyn Fn(&CStmt) -> bool,
 ) -> ControlCertificate {
-    let dom = DomTree::compute(cfg);
     let mut walker = Walker {
         cfg,
-        dom: &dom,
+        dom,
         block_of,
         label_block,
         terminal_call,
@@ -1242,7 +1242,15 @@ mod tests {
                 .find(|(label, _)| *label == name)
                 .map(|(_, block)| *block)
         };
-        certify(&body, cfg, entry, &block_of, &label_block, &|_| false)
+        certify(
+            &body,
+            cfg,
+            &DomTree::compute(cfg),
+            entry,
+            &block_of,
+            &label_block,
+            &|_| false,
+        )
     }
 
     fn branch(target: u64) -> BlockTerminator {

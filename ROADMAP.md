@@ -107,15 +107,18 @@ The evidence:
      speculated and rolled back, or minted facts and never retracted them.
    - K fixed r2ssa's. r2types' and r2dec's remain.
 2. **Recomputation instead of ownership.**
-   - `SsaGraph::from_function` is called at 42 sites,
-     `ValueLiveness::compute` at 16, `FunctionLiveOut::compute` at 23, and
-     `PreparedFunctionFacts::collect` at 8.
+   - Preparation builds the graph twice and liveness twice; the second
+     liveness pass resolves a dependency cycle (liveness, spans, facts,
+     liveness) by running it again.
+   - Interface recovery prepares a whole provisional fact set first.
+   - r2dec computes dominators of its own.
    - Discovery re-walked the whole program on every `afl` (42 s on libc)
      until it got one more cache.
 3. **Side tables instead of indexes.**
-   - About 200 maps are keyed by a function's own entities (`SSAVar`,
-     `ValueId`, `InstId`, the optimiser's `VarKey` strings).
-   - About 950 map types in total are spread across five crates.
+   - 684 maps and sets in production code are keyed by a function's own
+     entities (`SSAVar`, `ValueId`, `InstId`, the optimiser's `VarKey`
+     strings): 373 in r2ssa, 240 in r2dec and 71 in r2types, counted by the
+     `ENTITY_KEYED_MAP` Dylint.
    - Every lookup is a tree walk or a hash of a name, and every pass builds
      the relation it needs again.
 4. **Caches instead of a database.** Eight caches each decide for themselves
@@ -198,13 +201,21 @@ Taken 2026-10-04, after the review:
   - Memory-to-register promotion is an SSA rewrite reading it.
   - The canary is elided under a stated `UbFreeSource` premise, never
     silently.
+- **D15. One machine profile.**
+  - What an architecture is — registers and their aliases, stack pointer,
+    return address, calling conventions, killed-by-call sets, address spaces,
+    delay slots, TLS register — is one typed profile with one owner.
+  - It is derived from the trusted Sleigh bundle (`.sla`, `.pspec`, `.cspec`;
+    `sleigh-config` already embeds the `CSPEC_*` texts), never from a name.
+  - No crate below the lifter matches an architecture name. A new
+    architecture is a profile, not a match arm in eight crates.
 
 The program
 -----------
 
 Identifiers are kept from plan.md and plan-extension.md (P*, PE, C, H, I, K,
-Q, S, E, A). G is gates, F foundation, R the renderer as printer, and V the
-visual mode and shell.
+Q, S, E, A). G is gates, F foundation, M the machine profile, R the
+renderer as printer, and V the visual mode and shell.
 
 ### Foundation — now, blocks the rest
 
@@ -214,7 +225,8 @@ visual mode and shell.
 | **K** One fixpoint driver | adr-fixpoint.md | F1 | No iteration without a lattice and a budget | **Done in r2ssa**; r2types' loops go with C3, r2dec's with R |
 | **F2** One IR, indexed once: dense ids and containers; `FunctionIndex` (RPO, dominators, loops, def-use, views, liveness, spans); prepared facts and certificates as indexes; a builder with incremental def-use before the seal; machine projection and term arena as indexes | adr-one-ir.md | F1, K | No graph outside the seal; no entity-keyed map in r2ssa; one liveness model; closes #47, #50, #56 | Next |
 | **Q** One query database: container and bytes as inputs; discovery, decode, walk, lift, seal, summaries, references and renderings as queries; red-green revalidation | adr-query-database.md | F2.1 | A random-write session equals a fresh open; no cache outside the database; `Revision` deleted | After F2.1, beside F2 |
-| **P4** One frame model: one partition, one escape analysis, one extent rule, roles; promotion as an SSA rewrite; canary elided under its premise; `afv`/`afi` from it | adr-frame-model.md | F2, C | One owner of frame objects; the 37 canary residual traps gone; `afv` agrees with `pdd` | After F2 |
+| **M** One machine profile: registers, aliases, stack pointer, return address, conventions, killed-by-call, address spaces and delay slots read from the trusted Sleigh bundle's `.pspec`/`.cspec`; the hand-written tables in `r2image`, the lifter's tuple gate, `r2ssa::abi`, `r2ssa::machine_context`, `r2types::signature_infer`, `r2dec` and `r2abi::platform` read it | — | F1 | No architecture-name match below the lifter; the tables deleted; RISC-V's profile derives from its `.cspec` with no arm added in r2ssa, r2types or r2dec | Beside F2, before P4 |
+| **P4** One frame model: one partition, one escape analysis, one extent rule, roles; promotion as an SSA rewrite; canary elided under its premise; `afv`/`afi` from it | adr-frame-model.md | F2, C, M | One owner of frame objects; the 37 canary residual traps gone; `afv` agrees with `pdd` | After F2 |
 | **R** The renderer as a printer: one render plan from the indexes, expressions as r2rewrite terms with proved rules, obligations carried by the tree with one linear checker, bindings from the frame model, no retries | adr-renderer-printer.md | F2, P4, P5 | r2dec reads only sealed facts; the journal, the binding-plan fixpoint and every retry deleted | After P4 |
 
 ### Analysis
@@ -267,7 +279,8 @@ Single-engineer order:
    F2.3–F2.5.
 3. **F2.3–F2.6**: facts and certificates as indexes, the builder, the
    projections, the Dylint made fatal.
-4. **P4**: the frame model.
+4. **M, then P4**: the machine profile, then the frame model reading its
+   stack pointer and return address.
 5. **P5**: values as an index.
 6. **R**: the printer.
 7. **Q3–Q4 with P6, then I**: summaries by component, the resolved body,

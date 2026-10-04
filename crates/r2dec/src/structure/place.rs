@@ -27,9 +27,10 @@ pub(crate) struct NaturalLoop {
 
 /// Where every block and every edge of a function goes, decided before any
 /// text is written.
-pub(crate) struct Placement {
+pub(crate) struct Placement<'f> {
     entry: u64,
-    dom: DomTree,
+    /// The function's own dominator tree; placement computes none.
+    dom: &'f DomTree,
     rpo: HashMap<u64, usize>,
     loops: Vec<NaturalLoop>,
     /// The loops containing each block, outermost first.
@@ -45,11 +46,11 @@ pub(crate) struct Placement {
     labelled: BTreeSet<u64>,
 }
 
-impl Placement {
-    pub(crate) fn compute(func: &r2ssa::RewrittenFunction<'_>) -> Self {
+impl<'f> Placement<'f> {
+    pub(crate) fn compute(func: &'f r2ssa::RewrittenFunction<'_>) -> Self {
         let cfg = func.cfg();
         let entry = func.root();
-        let dom = DomTree::compute(cfg);
+        let dom = func.domtree();
         let rpo: HashMap<u64, usize> = cfg
             .reverse_postorder()
             .into_iter()

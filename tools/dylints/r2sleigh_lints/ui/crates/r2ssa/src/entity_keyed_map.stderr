@@ -1,0 +1,28 @@
+warning: `BTreeMap` keyed by a function's entity; use an index over dense ids (r2ssa::dense)
+  --> $DIR/entity_keyed_map.rs:10:18
+   |
+LL |     definitions: BTreeMap<ValueId, InstId>,
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(entity_keyed_map)]` on by default
+
+warning: `HashMap` keyed by a function's entity; use an index over dense ids (r2ssa::dense)
+  --> $DIR/entity_keyed_map.rs:14:35
+   |
+LL | fn readers(values: &[ValueId]) -> HashMap<InstId, usize> {
+   |                                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `BTreeSet` keyed by a function's entity; use an index over dense ids (r2ssa::dense)
+  --> $DIR/entity_keyed_map.rs:15:9
+   |
+LL |     let mut seen = BTreeSet::<ValueId>::new();
+   |         ^^^^^^^^
+
+warning: `BTreeMap` keyed by a function's entity; use an index over dense ids (r2ssa::dense)
+  --> $DIR/entity_keyed_map.rs:16:9
+   |
+LL |     let mut counts = BTreeMap::new();
+   |         ^^^^^^^^^^
+
+warning: 4 warnings emitted
+
