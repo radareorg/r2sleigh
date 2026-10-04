@@ -1912,6 +1912,7 @@ pub(crate) fn evidenced_stack_roots(
     // The address a constant displacement was measured from, where it was.
     let displaced_from = |var: &SSAVar| match definition(var).map(|inst| &inst.payload) {
         Some(InstPayload::Op(SSAOp::IntAdd { a, b, .. })) => {
+            let (a, b) = (graph.var(*a), graph.var(*b));
             let (base, delta) = if a.constant_bits().is_some() {
                 (b, a)
             } else {
@@ -1920,6 +1921,7 @@ pub(crate) fn evidenced_stack_roots(
             (delta.constant_bits().is_some() && exact_root(base).is_some()).then(|| base.clone())
         }
         Some(InstPayload::Op(SSAOp::IntSub { a, b, .. })) => {
+            let (a, b) = (graph.var(*a), graph.var(*b));
             (b.constant_bits().is_some() && exact_root(a).is_some()).then(|| a.clone())
         }
         _ => None,
@@ -2170,10 +2172,10 @@ pub(crate) fn object_index_operand(
     let InstPayload::Op(SSAOp::IntAdd { a, b, .. }) = &inst.payload else {
         return None;
     };
-    let rooted = |var: &SSAVar| resolve_stack_root(Some(facts), var).is_some();
+    let rooted = |id: &ValueId| resolve_stack_root(Some(facts), graph.var(*id)).is_some();
     match (rooted(a), rooted(b)) {
-        (true, false) => graph.value_id_for_var(b),
-        (false, true) => graph.value_id_for_var(a),
+        (true, false) => Some(*b),
+        (false, true) => Some(*a),
         _ => None,
     }
 }
@@ -2658,12 +2660,10 @@ pub(crate) fn exact_copy_identity_values(graph: &SsaGraph, root: ValueId) -> BTr
         let InstPayload::Op(SSAOp::Copy { dst, src }) = &inst.payload else {
             continue;
         };
-        if dst.size != src.size {
+        if graph.var(*dst).size != graph.var(*src).size {
             continue;
         }
-        let Some(source) = graph.value_id_for_var(src) else {
-            continue;
-        };
+        let source = *src;
         if identities.insert(source) {
             pending.push(source);
         }

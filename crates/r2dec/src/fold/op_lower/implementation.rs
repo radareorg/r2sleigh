@@ -1855,7 +1855,7 @@ impl<'a> FoldingContext<'a> {
                 r2ssa::InstPayload::Op(op) => Some(op),
                 r2ssa::InstPayload::Phi { .. } => None,
             })
-            .map(|op| self.exact_normalized_op_effects(op, block_addr, op_idx))
+            .map(|op| self.exact_op_effects(op, |dst| Some(*dst), block_addr, op_idx))
             .unwrap_or_default();
         self.observe_effect_stmt(&obligations, assignment)
     }
@@ -1889,7 +1889,7 @@ impl<'a> FoldingContext<'a> {
             };
             let Some(Ok(crate::binding_plan::PlannedValueSymbol::Bound(symbol))) = inst
                 .output
-                .filter(|_| !self.is_dead(dst))
+                .filter(|_| !self.is_dead(graph.var(*dst)))
                 .map(|value| names.require_value(value))
             else {
                 continue;

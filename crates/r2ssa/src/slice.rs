@@ -253,7 +253,7 @@ pub fn backward_slice(artifact: &SsaArtifact, seed: SliceSeed) -> Slice {
     slice
 }
 
-fn operation_kind(op: &crate::SSAOp) -> &'static str {
+fn operation_kind<V>(op: &crate::SSAOp<V>) -> &'static str {
     macro_rules! kinds {
         ($($kind:ident),* $(,)?) => {
             match op {
@@ -366,7 +366,11 @@ fn render_instruction(artifact: &SsaArtifact, id: InstId) -> String {
     };
     let operation = match &inst.payload {
         InstPayload::Phi { .. } => "PHI".into(),
-        InstPayload::Op(op) => format!("{}: {op}", operation_kind(op)),
+        InstPayload::Op(op) => format!(
+            "{}: {}",
+            operation_kind(op),
+            op.map(&mut |id| graph.var(*id).clone())
+        ),
     };
     let output = inst
         .output

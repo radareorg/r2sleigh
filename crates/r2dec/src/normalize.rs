@@ -898,7 +898,12 @@ fn validate_original_origin(graph: &SsaGraph, block: BlockId, op: &SSAOp, inst: 
     let r2ssa::InstPayload::Op(payload) = &original.payload else {
         return false;
     };
-    if original.block != block || payload != op || original.inputs.len() != op.sources().len() {
+    if original.block != block
+        // The same operation apart from its operands, which the checks below
+        // compare one by one.
+        || payload.map(&mut |_| ()) != op.map(&mut |_| ())
+        || original.inputs.len() != op.sources().len()
+    {
         return false;
     }
     original
@@ -999,13 +1004,8 @@ fn validate_phi_edge_origin(
                     == graph
                         .block_id_for_addr(origin.predecessor)
                         .unwrap_or(BlockId(u32::MAX))
-                && guard_inst
-                    .inputs
-                    .get(guarded.guard.input_idx)
-                    .and_then(|value| graph.value(*value))
-                    .map(|value| &value.var)
-                    == Some(original_cond)
-                && cond == original_cond
+                && guard_inst.inputs.get(guarded.guard.input_idx) == Some(original_cond)
+                && cond == graph.var(*original_cond)
                 && select_dst == dst
                 && origin.incoming_input_idx < operands.len()
                 && guarded.preserve.input_idx < operands.len()

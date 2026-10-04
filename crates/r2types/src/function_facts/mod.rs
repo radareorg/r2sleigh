@@ -2446,12 +2446,11 @@ impl FunctionFacts {
                 let r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { dst, src }) = &inst.payload else {
                     continue;
                 };
-                if dst.size != src.size {
+                let graph = prepared.graph();
+                if graph.var(*dst).size != graph.var(*src).size {
                     continue;
                 }
-                let Some(source) = prepared.graph().value_id_for_var(src) else {
-                    continue;
-                };
+                let source = *src;
                 let Some(slot) = parameter_slot_by_value.get(&source).copied() else {
                     continue;
                 };

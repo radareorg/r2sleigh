@@ -2676,13 +2676,13 @@ impl Program for ImportCaller {
 }
 
 /// The operation defining what one instruction stores, through the copies and lane reads between.
-fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp {
+fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp<r2ssa::ValueId> {
     let graph = artifact.graph();
     let mut value = graph
         .insts_for_instruction(instruction)
         .iter()
         .find_map(|inst| match &graph.inst(*inst)?.payload {
-            InstPayload::Op(SSAOp::Store { val, .. }) => graph.value_id_for_var(val),
+            InstPayload::Op(SSAOp::Store { val, .. }) => Some(*val),
             _ => None,
         })
         .expect("the instruction stores");
@@ -2693,7 +2693,7 @@ fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp
             .expect("the stored value has a definition");
         match &inst.payload {
             InstPayload::Op(SSAOp::Copy { src, .. } | SSAOp::Subpiece { src, .. }) => {
-                value = graph.value_id_for_var(src).expect("the copied value");
+                value = *src;
             }
             InstPayload::Op(op) => return op.clone(),
             InstPayload::Phi { .. } => panic!("a straight line has no merge"),
@@ -3622,7 +3622,7 @@ fn a_buffer_an_unknown_call_is_handed_runs_to_the_nearest_save_slot() {
             .iter()
             .find_map(|inst| match &graph.inst(*inst)?.payload {
                 InstPayload::Op(SSAOp::Store { addr, space, .. }) => {
-                    objects.object_for_var(graph, addr, *space)
+                    objects.object_for_value(*addr, *space)
                 }
                 _ => None,
             })
@@ -3935,7 +3935,7 @@ fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
     let Some(SSAOp::Copy { src, .. }) = graph.defining_op(passed) else {
         panic!("the argument is the copy: {passed:?}");
     };
-    let carried = graph.value_id_for_var(src).expect("the copied value");
+    let carried = *src;
     let call_reads = graph
         .use_sites(carried)
         .iter()

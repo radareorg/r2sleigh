@@ -415,20 +415,20 @@ fn transparent_same_width_source(prepared: &SsaArtifact, start: r2ssa::ValueId) 
         let r2ssa::InstPayload::Op(op) = &inst.payload else {
             return Some(current_var);
         };
+        let graph = prepared.graph();
         let source = match op {
-            SSAOp::Copy { src, .. } | SSAOp::New { src, .. } | SSAOp::Cast { src, .. } => src,
-            SSAOp::Subpiece { src, offset, .. } if *offset == 0 && src.size == current_var.size => {
-                src
+            SSAOp::Copy { src, .. } | SSAOp::New { src, .. } | SSAOp::Cast { src, .. } => *src,
+            SSAOp::Subpiece { src, offset, .. }
+                if *offset == 0 && graph.var(*src).size == current_var.size =>
+            {
+                *src
             }
             _ => return Some(current_var),
         };
-        if source.size != current_var.size {
+        if graph.var(source).size != current_var.size {
             return Some(current_var);
         }
-        let Some(source_value) = prepared.graph().value_id_for_var(source) else {
-            return Some(current_var);
-        };
-        current = source_value;
+        current = source;
     }
     None
 }

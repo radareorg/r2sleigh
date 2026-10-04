@@ -2435,7 +2435,7 @@ pub(crate) fn certificate_elided_cells(
         };
         // By position: another operand may be the very same constant.
         let input_idx = r2ssa::BlockTransferOp::DIRECTION_INPUT;
-        if inst.inputs.get(input_idx) == graph.value_id_for_var(&transfer.direction).as_ref() {
+        if inst.inputs.get(input_idx) == Some(&transfer.direction) {
             insert_elided_use(
                 &mut uses,
                 r2ssa::UseSite {

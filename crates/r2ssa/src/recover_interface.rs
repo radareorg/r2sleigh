@@ -869,12 +869,6 @@ fn written_bytes(
     if !visiting.insert(value) {
         return vec![crate::lanes::Byte::Data; size as usize];
     }
-    let mut input = |var: &crate::SSAVar| match graph.value_id_for_var(var) {
-        Some(input) if var.constant_bits().is_none() => {
-            written_bytes(written, graph, input, visiting)
-        }
-        _ => vec![crate::lanes::Byte::Data; var.size as usize],
-    };
     let bytes = match &inst.payload {
         crate::graph::InstPayload::Phi { .. } => {
             let mut joined: Option<crate::lanes::Bytes> = None;
@@ -888,18 +882,25 @@ fn written_bytes(
             joined.unwrap_or_default()
         }
         crate::graph::InstPayload::Op(op) => {
+            let facts = |id: &crate::ValueId| crate::op::var_facts(graph.var(*id));
             let inputs = op
                 .sources()
                 .into_iter()
-                .map(|var| (var.clone(), input(var)))
+                .map(|source| {
+                    let bytes = match facts(source) {
+                        (size, Some(_)) => vec![crate::lanes::Byte::Data; size as usize],
+                        _ => written_bytes(written, graph, *source, visiting),
+                    };
+                    (*source, bytes)
+                })
                 .collect::<BTreeMap<_, _>>();
             // A definition the lift did not make states no instruction's
             // extension, so none of its fills is the architecture's.
-            crate::lanes::transfer(op, false, |var| {
+            crate::lanes::transfer(op, false, facts, |source| {
                 inputs
-                    .get(var)
+                    .get(source)
                     .cloned()
-                    .unwrap_or_else(|| vec![crate::lanes::Byte::Data; var.size as usize])
+                    .unwrap_or_else(|| vec![crate::lanes::Byte::Data; facts(source).0 as usize])
             })
         }
     };

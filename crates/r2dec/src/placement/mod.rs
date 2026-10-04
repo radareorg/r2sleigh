@@ -1025,7 +1025,7 @@ fn loaded_frame_object(source: &r2ssa::SsaArtifact, inst: InstId) -> Option<r2ss
 fn stored_value(graph: &r2ssa::SsaGraph, inst: InstId) -> Option<r2ssa::ValueId> {
     let inst = graph.inst(inst)?;
     match &inst.payload {
-        r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { val, .. }) => graph.value_id_for_var(val),
+        r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { val, .. }) => Some(*val),
         _ => None,
     }
 }

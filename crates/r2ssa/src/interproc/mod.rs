@@ -2955,7 +2955,9 @@ fn is_an_index(prepared: &SsaArtifact, value_id: ValueId) -> bool {
             .flatten()
             .any(|factor| factor > 1),
         SSAOp::IntLeft { .. } => constant(1).is_some_and(|places| places > 0),
-        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => src.size < dst.size,
+        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
+            graph.var(*src).size < graph.var(*dst).size
+        }
         _ => false,
     }
 }

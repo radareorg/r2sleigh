@@ -83,7 +83,7 @@ enum Kind {
     Effect,
 }
 
-fn kind(inst: &GraphInst) -> Kind {
+fn kind(graph: &SsaGraph, inst: &GraphInst) -> Kind {
     let op = match &inst.payload {
         InstPayload::Phi { .. } => return Kind::Exact,
         InstPayload::Op(op) => op,
@@ -97,10 +97,12 @@ fn kind(inst: &GraphInst) -> Kind {
         | SSAOp::IntAnd { .. }
         | SSAOp::IntOr { .. }
         | SSAOp::IntXor { .. } => Kind::Exact,
-        SSAOp::Insert(insert) => match inserted_lane(&insert.value, &insert.position) {
-            Some(_) => Kind::Exact,
-            None => Kind::Pure,
-        },
+        SSAOp::Insert(insert) => {
+            match inserted_lane(graph.var(insert.value), graph.var(insert.position)) {
+                Some(_) => Kind::Exact,
+                None => Kind::Pure,
+            }
+        }
         SSAOp::IntAdd { .. }
         | SSAOp::IntSub { .. }
         | SSAOp::IntMult { .. }
@@ -155,7 +157,12 @@ fn kind(inst: &GraphInst) -> Kind {
 
 /// The bytes of each input an exact operation reads when `demanded` of its
 /// output is read, in input order.
-fn transfer(inst: &GraphInst, demanded: u64, size: impl Fn(ValueId) -> u32) -> Vec<u64> {
+fn transfer(
+    graph: &SsaGraph,
+    inst: &GraphInst,
+    demanded: u64,
+    size: impl Fn(ValueId) -> u32,
+) -> Vec<u64> {
     let of = |index: usize| {
         inst.inputs
             .get(index)
@@ -169,8 +176,11 @@ fn transfer(inst: &GraphInst, demanded: u64, size: impl Fn(ValueId) -> u32) -> V
             // A byte the constant operand clears is zero whatever the other
             // operand holds there, so the other is not read at that byte.
             SSAOp::IntAnd { a, b, .. } => {
-                let kept = |other: &SSAVar| match other.size <= 8 {
-                    true => other.constant_bits().map_or(u64::MAX, nonzero_bytes),
+                let kept = |other: &ValueId| match size(*other) <= 8 {
+                    true => graph
+                        .var(*other)
+                        .constant_bits()
+                        .map_or(u64::MAX, nonzero_bytes),
                     false => u64::MAX,
                 };
                 vec![demanded & kept(b) & of(0), demanded & kept(a) & of(1)]
@@ -182,10 +192,10 @@ fn transfer(inst: &GraphInst, demanded: u64, size: impl Fn(ValueId) -> u32) -> V
                 .map(|index| demanded & of(index))
                 .collect(),
             SSAOp::IntSExt { src, .. } => {
-                let within = whole(src.size);
+                let within = whole(size(*src));
                 let sign = match demanded & !within {
                     0 => 0,
-                    _ => 1u64.checked_shl(src.size.saturating_sub(1)).unwrap_or(0),
+                    _ => 1u64.checked_shl(size(*src).saturating_sub(1)).unwrap_or(0),
                 };
                 vec![(demanded & within) | sign]
             }
@@ -193,11 +203,13 @@ fn transfer(inst: &GraphInst, demanded: u64, size: impl Fn(ValueId) -> u32) -> V
                 vec![demanded.checked_shl(*offset).unwrap_or(0) & of(0)]
             }
             SSAOp::Piece { lo, .. } => vec![
-                demanded.checked_shr(lo.size).unwrap_or(0) & of(0),
+                demanded.checked_shr(size(*lo)).unwrap_or(0) & of(0),
                 demanded & of(1),
             ],
             SSAOp::Insert(insert) => {
-                let Some((first, lane)) = inserted_lane(&insert.value, &insert.position) else {
+                let Some((first, lane)) =
+                    inserted_lane(graph.var(insert.value), graph.var(insert.position))
+                else {
                     return vec![of(0), of(1), of(2)];
                 };
                 vec![
@@ -253,7 +265,11 @@ impl Demand {
         for value in live_out.iter() {
             demand.raise(value, whole(size(value)), &mut pending);
         }
-        for inst in graph.insts.iter().filter(|inst| kind(inst) == Kind::Effect) {
+        for inst in graph
+            .insts
+            .iter()
+            .filter(|inst| kind(graph, inst) == Kind::Effect)
+        {
             for input in &inst.inputs {
                 demand.raise(*input, whole(size(*input)), &mut pending);
             }
@@ -262,8 +278,8 @@ impl Demand {
             let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
                 continue;
             };
-            let masks = match kind(inst) {
-                Kind::Exact => transfer(inst, demand.bytes(value), size),
+            let masks = match kind(graph, inst) {
+                Kind::Exact => transfer(graph, inst, demand.bytes(value), size),
                 Kind::Pure => inst
                     .inputs
                     .iter()
@@ -312,20 +328,22 @@ impl SSAFunction {
             let InstPayload::Op(SSAOp::Insert(insert)) = &inst.payload else {
                 continue;
             };
-            if insert.src.constant_bits().is_some() {
+            let base = graph.var(insert.src);
+            if base.constant_bits().is_some() {
                 continue;
             }
-            let (Some(output), Some((_, lane))) =
-                (inst.output, inserted_lane(&insert.value, &insert.position))
-            else {
+            let (Some(output), Some((_, lane))) = (
+                inst.output,
+                inserted_lane(graph.var(insert.value), graph.var(insert.position)),
+            ) else {
                 continue;
             };
-            if demand.bytes(output) & !lane & whole(insert.src.size) != 0 {
+            if demand.bytes(output) & !lane & whole(base.size) != 0 {
                 r2il::refusal_evidence!(
                     "demanded-bytes",
                     "{} keeps its base {}: bytes {:#x} are read, the lane is {lane:#x}",
-                    insert.dst,
-                    insert.src,
+                    graph.var(insert.dst),
+                    base,
                     demand.bytes(output)
                 );
                 continue;

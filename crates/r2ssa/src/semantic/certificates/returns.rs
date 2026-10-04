@@ -61,14 +61,11 @@ pub(crate) fn collect_machine_return_control_certificates(
             };
             match &definition.payload {
                 InstPayload::Op(SSAOp::Copy { dst, src }) => {
-                    let Some(source) = graph.value_id_for_var(src) else {
-                        complete = false;
-                        break;
-                    };
+                    let source = *src;
                     if definition.output != Some(current)
                         || definition.inputs.as_slice() != [source]
-                        || dst.size != return_address.storage.size
-                        || src.size != return_address.storage.size
+                        || graph.var(*dst).size != return_address.storage.size
+                        || graph.var(source).size != return_address.storage.size
                         || !insts.insert(inst)
                         || !values.insert(source)
                     {
@@ -107,7 +104,7 @@ pub(crate) fn collect_machine_return_control_certificates(
                         )
                     );
                     if !stack_object
-                        || dst.size != return_address.storage.size
+                        || graph.var(*dst).size != return_address.storage.size
                         || definition.output != Some(current)
                         || definition.inputs.as_slice() != [access.address]
                         || !insts.insert(inst)
@@ -521,16 +518,17 @@ pub(crate) fn exact_logical_lane_input(
             (
                 InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }),
                 [input],
-            ) if *dst == value.var => (*input, src),
+            ) if *dst == value.id => (*input, *src),
             (InstPayload::Op(SSAOp::Insert(insert)), [_, input, _])
-                if insert.dst == value.var && insert.position.constant_bits() == Some(0) =>
+                if insert.dst == value.id
+                    && graph.var(insert.position).constant_bits() == Some(0) =>
             {
-                (*input, &insert.value)
+                (*input, insert.value)
             }
             _ => return None,
         };
         let lane_value = graph.value(lane)?;
-        if lane_value.var != *lane_var || lane_value.var.size < logical_width {
+        if lane != lane_var || lane_value.var.size < logical_width {
             return None;
         }
         at = lane;

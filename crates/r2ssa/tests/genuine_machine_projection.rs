@@ -229,8 +229,9 @@ fn genuine_x86_ah_write_survives_as_one_high_slice_insert() {
     else {
         panic!("the high byte write inserts into the root");
     };
-    assert_eq!(insert.position.constant_bits(), Some(8));
-    assert_eq!(insert.value.size, 1);
+    let graph = artifact.graph();
+    assert_eq!(graph.var(insert.position).constant_bits(), Some(8));
+    assert_eq!(graph.var(insert.value).size, 1);
 }
 
 /// `mov bl, ah`: the byte is read as a `Subpiece` of `RAX` one byte up, and
@@ -253,7 +254,8 @@ fn genuine_x86_ah_read_is_relative_to_rax() {
     }));
     assert!(artifact.graph().insts.iter().any(|inst| matches!(
         &inst.payload,
-        r2ssa::InstPayload::Op(r2ssa::SSAOp::Subpiece { dst, offset: 1, .. }) if dst.size == 1
+        r2ssa::InstPayload::Op(r2ssa::SSAOp::Subpiece { dst, offset: 1, .. })
+            if artifact.graph().var(*dst).size == 1
     )));
 }
 

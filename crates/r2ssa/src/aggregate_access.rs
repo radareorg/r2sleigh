@@ -131,26 +131,18 @@ fn exact_access_binding(
         return None;
     }
     match (&instruction.payload, access.is_write) {
-        (InstPayload::Op(SSAOp::Load { dst, space, addr }), false) => {
-            let address = graph.value_id_for_var(addr)?;
-            let result = graph.value_id_for_var(dst)?;
-            (*space == expected_space
-                && address == access.address
-                && access.value == Some(result)
-                && instruction.output == Some(result)
-                && dst.size == access.width)
-                .then_some(AggregateAccessBinding::Read { result })
-        }
-        (InstPayload::Op(SSAOp::Store { space, addr, val }), true) => {
-            let address = graph.value_id_for_var(addr)?;
-            let value = graph.value_id_for_var(val)?;
-            (*space == expected_space
-                && address == access.address
-                && access.value == Some(value)
-                && instruction.output.is_none()
-                && val.size == access.width)
-                .then_some(AggregateAccessBinding::Write { value })
-        }
+        (InstPayload::Op(SSAOp::Load { dst, space, addr }), false) => (*space == expected_space
+            && *addr == access.address
+            && access.value == Some(*dst)
+            && instruction.output == Some(*dst)
+            && graph.var(*dst).size == access.width)
+            .then_some(AggregateAccessBinding::Read { result: *dst }),
+        (InstPayload::Op(SSAOp::Store { space, addr, val }), true) => (*space == expected_space
+            && *addr == access.address
+            && access.value == Some(*val)
+            && instruction.output.is_none()
+            && graph.var(*val).size == access.width)
+            .then_some(AggregateAccessBinding::Write { value: *val }),
         _ => None,
     }
 }

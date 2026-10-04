@@ -234,7 +234,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
             || accesses.iter().any(|access| {
                 access.width != element_width
                     || !access.provenance_complete
-                    || !ram_memory_access_matches_source(function, graph, objects, access)
+                    || !ram_memory_access_matches_source(graph, objects, access)
             })
         {
             continue;
@@ -384,10 +384,10 @@ pub(crate) fn exact_copy_chain_to_storage(
         let output = definition.output?;
         if site.input_idx != 0
             || definition.inputs.as_slice() != [current]
-            || graph.value_id_for_var(src) != Some(current)
-            || graph.value_id_for_var(dst) != Some(output)
-            || src.size != storage.size
-            || dst.size != storage.size
+            || *src != current
+            || *dst != output
+            || graph.var(*src).size != storage.size
+            || graph.var(*dst).size != storage.size
             || !insts.insert(site.inst)
             || !values.insert(output)
         {
@@ -1176,18 +1176,13 @@ pub(crate) fn collect_stack_reload_source_certificates(
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<ValueId, StackReloadSourceCertificate> {
-    let Body {
-        function,
-        prep,
-        graph,
-        ..
-    } = body;
+    let Body { prep, graph, .. } = body;
     let store_sources = collect_stack_store_sources(body, objects, memory, accesses);
     let mut certificates = BTreeMap::new();
     let mut ready = VecDeque::new();
 
     for access in accesses.values().filter(|access| {
-        !access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
+        !access.is_write && ram_memory_access_matches_source(graph, objects, access)
     }) {
         let Some(value) = access.value else {
             continue;
@@ -1288,15 +1283,10 @@ pub(crate) fn collect_stack_store_sources(
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<MemoryVersion, StackStoreSource> {
-    let Body {
-        function,
-        prep,
-        graph,
-        ..
-    } = body;
+    let Body { prep, graph, .. } = body;
     let mut sources = BTreeMap::new();
     for access in accesses.values().filter(|access| {
-        access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
+        access.is_write && ram_memory_access_matches_source(graph, objects, access)
     }) {
         let Some(value) = access.value else {
             continue;
@@ -1473,8 +1463,7 @@ pub(crate) fn collect_stack_call_argument_values(
                 .memory_accesses
                 .range(accesses)
                 .filter(|(_, access)| {
-                    access.is_write
-                        && ram_memory_access_matches_source(function, graph, objects, access)
+                    access.is_write && ram_memory_access_matches_source(graph, objects, access)
                 })
         {
             if access.value != Some(value) {

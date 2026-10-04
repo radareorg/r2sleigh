@@ -416,13 +416,8 @@ pub(crate) fn compare_values_equivalent_inner(
         else {
             return Some(false);
         };
-        let mut equivalent_sources = |lhs: &SSAVar, rhs: &SSAVar| {
-            graph
-                .value_id_for_var(lhs)
-                .zip(graph.value_id_for_var(rhs))
-                .is_some_and(|(lhs, rhs)| {
-                    compare_values_equivalent_inner(graph, lhs, rhs, depth + 1, visiting)
-                })
+        let mut equivalent_sources = |lhs: &ValueId, rhs: &ValueId| {
+            compare_values_equivalent_inner(graph, *lhs, *rhs, depth + 1, visiting)
         };
         Some(match (lhs_op, rhs_op) {
             (

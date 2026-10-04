@@ -368,10 +368,10 @@ fn dispatch_table_read(
     // The entry size is how far the read steps and how wide it reads. A read
     // that steps by anything but what it reads leaves gaps or overlaps, and
     // neither is a table walk.
-    if u64::from(dst.size) != stride {
+    if u64::from(graph.var(*dst).size) != stride {
         evidence(&format!(
             "it steps by {stride} and reads {} bytes",
-            dst.size
+            graph.var(*dst).size
         ));
         return None;
     }
@@ -408,7 +408,7 @@ fn dispatch_table_read(
         instruction: *instruction,
         address: base,
         stride,
-        size: dst.size,
+        size: graph.var(*dst).size,
         count,
         transform,
         selector,

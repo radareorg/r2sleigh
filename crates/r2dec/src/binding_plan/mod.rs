@@ -676,7 +676,7 @@ pub(super) fn certified_direct_control_target_sites(
                 }
                 _ => return None,
             };
-            let value = graph.value_id_for_var(target)?;
+            let value = *target;
             let site = UseSite {
                 inst: inst.id,
                 input_idx: 0,

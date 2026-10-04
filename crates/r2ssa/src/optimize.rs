@@ -586,7 +586,7 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
         .into_iter()
         .map(known)
         .collect::<Option<Vec<_>>>()?;
-    crate::constant::computed(op, &operands)
+    crate::constant::computed(op, crate::op::var_facts, &operands)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1841,7 +1841,7 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
             .map(const_of)
             .collect::<Option<Vec<_>>>()
     {
-        return crate::constant::computed(op, &values).map(make_const);
+        return crate::constant::computed(op, crate::op::var_facts, &values).map(make_const);
     }
 
     // What remains are identities, which hold whatever the unknown operand is.

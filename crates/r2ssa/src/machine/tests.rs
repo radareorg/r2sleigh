@@ -483,6 +483,12 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         var: SSAVar::constant(1, 1),
         canonical_storage: None,
     };
+    // Defined by nothing the graph records: the instruction states no output.
+    let result = GraphValue {
+        id: ValueId(2),
+        var: SSAVar::new("result", 1, 4),
+        canonical_storage: None,
+    };
     let inst = GraphInst {
         id: InstId(0),
         block: BlockId(0),
@@ -491,12 +497,12 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         output: None,
         canonical_storage: None,
         payload: InstPayload::Op(SSAOp::IntRight {
-            dst: SSAVar::new("result", 1, 4),
-            a: value.var.clone(),
-            b: count.var.clone(),
+            dst: result.id,
+            a: value.id,
+            b: count.id,
         }),
     };
-    let values = vec![value, count];
+    let values = vec![value, count, result];
     let graph = SsaGraph {
         entry: BlockId(0),
         block_order: vec![BlockId(0)],
@@ -510,8 +516,8 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         }],
         insts: vec![inst],
         values: values.clone(),
-        def_of: vec![None, None],
-        use_offsets: vec![0, 1, 2],
+        def_of: vec![None, None, None],
+        use_offsets: vec![0, 1, 2, 2],
         use_sites: vec![
             UseSite {
                 inst: InstId(0),
@@ -1401,7 +1407,6 @@ fn memory_access_authority_rejects_each_exact_space_mismatch() {
         artifact.graph(),
         artifact.objects(),
         &op,
-        &op,
         SpaceId::Ram,
         &fact,
         None,
@@ -1416,7 +1421,6 @@ fn memory_access_authority_rejects_each_exact_space_mismatch() {
         artifact.graph(),
         artifact.objects(),
         &mismatched_op,
-        &op,
         SpaceId::Ram,
         &fact,
         None,
@@ -1424,16 +1428,6 @@ fn memory_access_authority_rejects_each_exact_space_mismatch() {
     assert!(!memory_access_authorities_match(
         artifact.graph(),
         artifact.objects(),
-        &op,
-        &mismatched_op,
-        SpaceId::Ram,
-        &fact,
-        None,
-    ));
-    assert!(!memory_access_authorities_match(
-        artifact.graph(),
-        artifact.objects(),
-        &op,
         &op,
         SpaceId::Custom(7),
         &fact,
@@ -1445,7 +1439,6 @@ fn memory_access_authority_rejects_each_exact_space_mismatch() {
     assert!(!memory_access_authorities_match(
         artifact.graph(),
         artifact.objects(),
-        &op,
         &op,
         SpaceId::Ram,
         &mismatched_fact,
@@ -1463,7 +1456,6 @@ fn memory_access_authority_rejects_each_exact_space_mismatch() {
     assert!(!memory_access_authorities_match(
         artifact.graph(),
         &mismatched_objects,
-        &op,
         &op,
         SpaceId::Ram,
         &fact,

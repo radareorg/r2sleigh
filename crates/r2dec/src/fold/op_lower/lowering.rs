@@ -270,6 +270,19 @@ impl<'a> FoldingContext<'a> {
         block_addr: u64,
         op_idx: usize,
     ) -> std::collections::BTreeSet<r2ssa::SemanticObligationId> {
+        let rendered = |dst: &r2ssa::SSAVar| self.value_id_for_rendered_op(dst);
+        self.exact_op_effects(op, rendered, block_addr, op_idx)
+    }
+
+    /// The obligations an operation discharges where it is rendered;
+    /// `value_of` says which value its destination is.
+    pub(super) fn exact_op_effects<V>(
+        &self,
+        op: &SSAOp<V>,
+        value_of: impl Fn(&V) -> Option<r2ssa::ValueId>,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> std::collections::BTreeSet<r2ssa::SemanticObligationId> {
         // A call has no `dst`. One statement implements two instructions --
         // the call supplies the effect, the `CallDefine` owns the write -- so
         // the value the occurrence names has to come from the site's certified
@@ -282,7 +295,7 @@ impl<'a> FoldingContext<'a> {
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 source_call.and_then(|call| self.certified_call_result_value(call))
             }
-            _ => op.dst().and_then(|dst| self.value_id_for_rendered_op(dst)),
+            _ => op.dst().and_then(value_of),
         };
         let mut obligations = self.exact_effect_obligations_for_normalized_value(
             EffectOccurrenceKind::Expression,

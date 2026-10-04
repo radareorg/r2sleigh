@@ -766,7 +766,7 @@ impl<'a> EvidenceBuilder<'a> {
 enum AddressIdentity {
     Value(r2ssa::ValueId),
     Computed {
-        op: std::mem::Discriminant<r2ssa::SSAOp>,
+        op: std::mem::Discriminant<r2ssa::SSAOp<r2ssa::ValueId>>,
         inputs: Vec<r2ssa::ValueId>,
     },
 }

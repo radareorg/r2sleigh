@@ -73,7 +73,7 @@ impl MachineBuilder {
         &mut self,
         artifact: &SsaArtifact,
         inst: &GraphInst,
-        op: &SSAOp,
+        op: &SSAOp<ValueId>,
         output: MachineValueBinding,
     ) -> Result<(MachineType, MachineExprKind), MachineBuildError> {
         let graph = artifact.graph();
@@ -132,17 +132,14 @@ impl MachineBuilder {
                 let source_space = access.space;
                 let model = artifact.machine_context().memory_model();
                 let space_model = model.space(source_space);
-                let prepared_op = graph.function_op(artifact.function(), access.id.inst);
                 if !access.provenance_complete
                     || access.is_write
                     || access.id.ordinal != 0
                     || access.value != Some(output.value)
-                    || prepared_op.is_none_or(|prepared_op| {
-                        !memory_access_authorities_match(
+                    || (!memory_access_authorities_match(
                             graph,
                             artifact.objects(),
                             op,
-                            prepared_op,
                             source_space,
                             access,
                             artifact
@@ -150,8 +147,7 @@ impl MachineBuilder {
                                 .structured
                                 .member_run_stores
                                 .get(&access.id.inst),
-                        )
-                    })
+                        ))
                     // A guarded read states its condition beside the
                     // address; every other read names the address alone.
                     || !read_operands_are_exact(Some(op), &inst.inputs, access.address)

@@ -1568,20 +1568,18 @@ impl<'a> AddressBases<'a> {
             r2ssa::InstPayload::Phi { .. } => return AddressStep::Merge(inst.inputs.clone()),
             r2ssa::InstPayload::Op(op) => op,
         };
-        let displaced = |base: &r2ssa::SSAVar, delta: Option<i64>| match (
-            graph.value_id_for_var(base),
-            delta,
-        ) {
-            (Some(base), Some(delta)) => AddressStep::Displaced(base, delta),
-            _ => AddressStep::Settled(None),
+        let displaced = |base: &r2ssa::ValueId, delta: Option<i64>| match delta {
+            Some(delta) => AddressStep::Displaced(*base, delta),
+            None => AddressStep::Settled(None),
         };
+        let constant = |value: &r2ssa::ValueId| const_var_i64(graph.var(*value));
         match op {
-            r2ssa::SSAOp::IntAdd { a, b, .. } => match (const_var_i64(a), const_var_i64(b)) {
+            r2ssa::SSAOp::IntAdd { a, b, .. } => match (constant(a), constant(b)) {
                 (None, Some(delta)) => displaced(a, Some(delta)),
                 (Some(delta), None) => displaced(b, Some(delta)),
                 _ => AddressStep::Settled(None),
             },
-            r2ssa::SSAOp::IntSub { a, b, .. } => match (const_var_i64(a), const_var_i64(b)) {
+            r2ssa::SSAOp::IntSub { a, b, .. } => match (constant(a), constant(b)) {
                 (None, Some(delta)) => displaced(a, delta.checked_neg()),
                 _ => AddressStep::Settled(None),
             },
@@ -1592,7 +1590,7 @@ impl<'a> AddressBases<'a> {
                 ..
             } => displaced(
                 base,
-                const_var_i64(index).and_then(|index| index.checked_mul(i64::from(*element_size))),
+                constant(index).and_then(|index| index.checked_mul(i64::from(*element_size))),
             ),
             r2ssa::SSAOp::PtrSub {
                 base,
@@ -1601,7 +1599,7 @@ impl<'a> AddressBases<'a> {
                 ..
             } => displaced(
                 base,
-                const_var_i64(index)
+                constant(index)
                     .and_then(|index| index.checked_mul(i64::from(*element_size)))
                     .and_then(i64::checked_neg),
             ),

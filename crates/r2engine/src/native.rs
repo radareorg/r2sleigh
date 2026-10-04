@@ -1713,7 +1713,7 @@ impl Native<'_> {
                 else {
                     return None;
                 };
-                let slot = prepared.folded_value(graph.value_id_for_var(addr)?)?;
+                let slot = prepared.folded_value(*addr)?;
                 Some((*instruction, self.program.import_at(slot)?))
             }
             _ => None,

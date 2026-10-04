@@ -1557,7 +1557,8 @@ fn reconstruct_zero_compare_from_nonzero_def(
         return None;
     }
 
-    let def = inputs.prepared.graph().defining_op(candidate)?;
+    let graph = inputs.prepared.graph();
+    let def = graph.named_op(graph.defining_op(candidate)?);
 
     match def {
         SSAOp::Copy { src, .. }
@@ -1644,7 +1645,8 @@ fn compare_def_expr_for_predicate_operand(
         return None;
     }
 
-    let op = inputs.prepared.graph().defining_op(var)?;
+    let graph = inputs.prepared.graph();
+    let op = graph.named_op(graph.defining_op(var)?);
 
     match op {
         SSAOp::Copy { src, .. }

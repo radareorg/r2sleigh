@@ -47,7 +47,7 @@
 use std::collections::HashMap;
 
 use crate::function::SSAFunction;
-use crate::op::SSAOp;
+use crate::op::{SSAOp, var_facts};
 use crate::var::SSAVar;
 
 /// What the bits of a value above its view's prefix are.
@@ -303,8 +303,13 @@ fn lane_step(lane: &SSAVar, root: &SSAVar) -> Step {
 }
 
 /// What an operation's output is made of, where the view can say.
-fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
-    let same_width = |dst: &SSAVar, src: &SSAVar| dst.size == src.size;
+///
+/// `facts` says an operand's width and, for a constant, its bits: read off
+/// the operand itself in a function's operations, off the graph's value in
+/// the graph's.
+fn step_of<V>(op: &SSAOp<V>, facts: impl Fn(&V) -> (u32, Option<u64>)) -> Option<(&V, &V, Step)> {
+    let size = |operand: &V| facts(operand).0;
+    let same_width = |dst: &V, src: &V| size(dst) == size(src);
     match op {
         SSAOp::Copy { dst, src } | SSAOp::Cast { dst, src } | SSAOp::CallRestore { dst, src }
             if same_width(dst, src) =>
@@ -315,13 +320,13 @@ fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
             dst,
             src,
             offset: 0,
-        } if dst.size == src.size => Some((dst, src, Step::Copy)),
+        } if size(dst) == size(src) => Some((dst, src, Step::Copy)),
         SSAOp::Subpiece {
             dst,
             src,
             offset: 0,
-        } if dst.size < src.size => Some((dst, src, Step::Low)),
-        SSAOp::IntZExt { dst, src } if dst.size >= src.size => Some((
+        } if size(dst) < size(src) => Some((dst, src, Step::Low)),
+        SSAOp::IntZExt { dst, src } if size(dst) >= size(src) => Some((
             dst,
             src,
             if same_width(dst, src) {
@@ -330,7 +335,7 @@ fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
                 Step::ZeroExtend
             },
         )),
-        SSAOp::IntSExt { dst, src } if dst.size >= src.size => Some((
+        SSAOp::IntSExt { dst, src } if size(dst) >= size(src) => Some((
             dst,
             src,
             if same_width(dst, src) {
@@ -340,8 +345,7 @@ fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
             },
         )),
         SSAOp::Insert(insert)
-            if insert.position.constant_bits() == Some(0)
-                && insert.value.size <= insert.dst.size =>
+            if facts(&insert.position).1 == Some(0) && size(&insert.value) <= size(&insert.dst) =>
         {
             Some((
                 &insert.dst,
@@ -353,7 +357,7 @@ fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
                 },
             ))
         }
-        SSAOp::Piece { dst, lo, .. } if lo.size < dst.size => Some((dst, lo, Step::LowLane)),
+        SSAOp::Piece { dst, lo, .. } if size(lo) < size(dst) => Some((dst, lo, Step::LowLane)),
         _ => None,
     }
 }
@@ -364,9 +368,15 @@ fn step_of(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
 /// The same rule the view applies, for the walks that read a value through
 /// its definitions rather than through the solved view -- the constant
 /// folder's, over a graph no preparation has run on.
-pub(crate) fn preserves_integer(op: &SSAOp) -> bool {
+pub(crate) fn preserves_integer<V>(
+    op: &SSAOp<V>,
+    facts: impl Fn(&V) -> (u32, Option<u64>),
+) -> bool {
     !matches!(op, SSAOp::Insert(_) | SSAOp::Piece { .. })
-        && matches!(step_of(op), Some((_, _, Step::Copy | Step::ZeroExtend)))
+        && matches!(
+            step_of(op, facts),
+            Some((_, _, Step::Copy | Step::ZeroExtend))
+        )
 }
 
 /// The view of an output, given its input's view.
@@ -436,7 +446,7 @@ impl<'a> Solver<'a> {
                     phi.sources.iter().map(|(_, source)| source).collect(),
                 ));
             }
-            for (dst, src, step) in block.ops().iter().filter_map(step_of) {
+            for (dst, src, step) in block.ops().iter().filter_map(|op| step_of(op, var_facts)) {
                 nodes.push(dst);
                 definitions.push(Definition::Step(src, step));
             }
@@ -646,9 +656,8 @@ fn graph_definition<'a>(
                 .collect();
             Some((&output.var, Definition::Phi(sources)))
         }
-        crate::graph::InstPayload::Op(op) => {
-            step_of(op).map(|(dst, src, step)| (dst, Definition::Step(src, step)))
-        }
+        crate::graph::InstPayload::Op(op) => step_of(op, |id| var_facts(graph.var(*id)))
+            .map(|(dst, src, step)| (graph.var(*dst), Definition::Step(graph.var(*src), step))),
     }
 }
 
@@ -798,6 +807,10 @@ fn literal_of_view(view: &ValueView, width: u32) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step_of_var(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
+        step_of(op, var_facts)
+    }
     use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
 
     fn var(name: &str, version: u32, size: u32) -> SSAVar {
@@ -995,7 +1008,7 @@ mod tests {
         assert_eq!(high.extension, ViewExtension::Sign);
         // SUBPIECE(SEXT(t), 8) has no step at all: the lane is its own value.
         assert!(
-            step_of(&SSAOp::Subpiece {
+            step_of_var(&SSAOp::Subpiece {
                 dst: sign,
                 src: wide.clone(),
                 offset: 8,
@@ -1003,7 +1016,7 @@ mod tests {
             .is_none()
         );
         // SUBPIECE(SEXT(t), 0) is t again.
-        let (_, _, step) = step_of(&SSAOp::Subpiece {
+        let (_, _, step) = step_of_var(&SSAOp::Subpiece {
             dst: low.clone(),
             src: wide,
             offset: 0,

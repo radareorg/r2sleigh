@@ -170,7 +170,9 @@ fn capture_block(
     for (id, op) in block.sited() {
         if let Some(dst) = op.dst() {
             let convention = by_convention(function, writes, op);
-            let bytes = transfer(op, convention, |var| read(function, by_var, var));
+            let bytes = transfer(op, convention, crate::op::var_facts, |var| {
+                read(function, by_var, var)
+            });
             changed |= settle(by_var, by_op, id, dst, bytes);
         }
     }
@@ -294,8 +296,16 @@ pub fn home(storage: Option<CanonicalStorageId>, byte: u64) -> Option<RegisterBy
 /// What an operation writes to each byte of its output, given what each of
 /// its inputs holds. Only operations that move bytes without computing them
 /// are modelled; every other result is data.
-pub(crate) fn transfer(op: &SSAOp, convention: bool, input: impl Fn(&SSAVar) -> Bytes) -> Bytes {
-    let size = op.dst().map_or(0, |dst| dst.size as usize);
+///
+/// `facts` gives an operand's width and constant bits (`op::var_facts` for a
+/// function's operations); `input` gives the bytes of a source.
+pub(crate) fn transfer<V>(
+    op: &SSAOp<V>,
+    convention: bool,
+    facts: impl Fn(&V) -> (u32, Option<u64>),
+    input: impl Fn(&V) -> Bytes,
+) -> Bytes {
+    let size = op.dst().map_or(0, |dst| facts(dst).0 as usize);
     let fill = |sign| match (convention, sign) {
         (true, false) => Byte::fill(Fill::Zero),
         (true, true) => Byte::fill(Fill::Sign),
@@ -313,7 +323,7 @@ pub(crate) fn transfer(op: &SSAOp, convention: bool, input: impl Fn(&SSAVar) -> 
             bytes.extend(input(hi));
             bytes
         }
-        SSAOp::Insert(insert) => match lane(&insert.position) {
+        SSAOp::Insert(insert) => match lane(facts(&insert.position).1) {
             Some(first) => {
                 let mut bytes = input(&insert.src);
                 for (at, byte) in input(&insert.value).into_iter().enumerate() {
@@ -341,8 +351,8 @@ fn extended(mut bytes: Bytes, size: usize, fill: Byte) -> Bytes {
 
 /// The first byte an INSERT writes, where its position is a byte-aligned
 /// constant.
-fn lane(position: &SSAVar) -> Option<usize> {
-    let bits = position.constant_bits()?;
+fn lane(position: Option<u64>) -> Option<usize> {
+    let bits = position?;
     (bits % 8 == 0)
         .then(|| usize::try_from(bits / 8).ok())
         .flatten()

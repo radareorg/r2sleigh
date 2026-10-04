@@ -29,8 +29,7 @@ use crate::{CanonicalStorageId, CanonicalStorageSpace};
 fn memory_access_authorities_match(
     graph: &SsaGraph,
     objects: &ObjectModel,
-    graph_op: &SSAOp,
-    prepared_op: &SSAOp,
+    graph_op: &SSAOp<ValueId>,
     context_space: r2il::SpaceId,
     fact: &StructuredMemoryAccessFact,
     member_run: Option<&crate::MemberRunStoreCertificate>,
@@ -59,9 +58,6 @@ fn memory_access_authorities_match(
     {
         return no("the graph instruction is not this operation");
     }
-    if graph_op != prepared_op {
-        return no("the graph and the prepared function spell it differently");
-    }
     if graph_op.memory_space() != Some(context_space) {
         return no("the operation names another space than the context");
     }
@@ -80,29 +76,29 @@ fn memory_access_authorities_match(
         | SSAOp::LoadLinked { dst, addr, .. }
         | SSAOp::LoadGuarded { dst, addr, .. } => {
             !fact.is_write
-                && graph.value_id_for_var(addr) == Some(fact.address)
-                && fact.value == graph.value_id_for_var(dst)
-                && fact.width == dst.size
+                && *addr == fact.address
+                && fact.value == Some(*dst)
+                && fact.width == graph.var(*dst).size
         }
         // A conditional store reads to test the monitor and writes where the
         // monitor held. The read names no value, because what it reads is not
         // a value the program takes; the write names what was stored.
         SSAOp::StoreConditional { addr, val, .. } => {
-            graph.value_id_for_var(addr) == Some(fact.address)
-                && fact.width == val.size
+            *addr == fact.address
+                && fact.width == graph.var(*val).size
                 && match fact.is_write {
                     false => fact.id.ordinal == 0 && fact.value.is_none(),
-                    true => fact.id.ordinal == 1 && fact.value == graph.value_id_for_var(val),
+                    true => fact.id.ordinal == 1 && fact.value == Some(*val),
                 }
         }
         SSAOp::StoreGuarded { addr, val, .. } => {
             fact.is_write
-                && graph.value_id_for_var(addr) == Some(fact.address)
-                && fact.value == graph.value_id_for_var(val)
-                && fact.width == val.size
+                && *addr == fact.address
+                && fact.value == Some(*val)
+                && fact.width == graph.var(*val).size
         }
         SSAOp::Store { addr, val, .. } => {
-            let addressed = fact.is_write && graph.value_id_for_var(addr) == Some(fact.address);
+            let addressed = fact.is_write && *addr == fact.address;
             match member {
                 Some(member) => {
                     let lane = match member.source {
@@ -115,13 +111,11 @@ fn memory_access_authorities_match(
                         && fact.object_offset == i64::try_from(member.offset).ok()
                         && member_run.is_some_and(|run| {
                             run.address == fact.address
-                                && Some(run.value) == graph.value_id_for_var(val)
+                                && run.value == *val
                                 && run.object == fact.object
                         })
                 }
-                None => {
-                    addressed && fact.value == graph.value_id_for_var(val) && fact.width == val.size
-                }
+                None => addressed && fact.value == Some(*val) && fact.width == graph.var(*val).size,
             }
         }
         _ => false,
@@ -132,7 +126,7 @@ fn memory_access_authorities_match(
 ///
 /// A plain or linked read names its address and nothing else; a guarded one
 /// names its condition after it.
-fn read_operands_are_exact(op: Option<&SSAOp>, inputs: &[ValueId], address: ValueId) -> bool {
+fn read_operands_are_exact<V>(op: Option<&SSAOp<V>>, inputs: &[ValueId], address: ValueId) -> bool {
     match op {
         Some(SSAOp::LoadGuarded { .. }) => inputs.len() == 2 && inputs.first() == Some(&address),
         Some(_) => inputs == [address],
@@ -141,7 +135,7 @@ fn read_operands_are_exact(op: Option<&SSAOp>, inputs: &[ValueId], address: Valu
 }
 
 /// The operation an instruction performs, where it performs one.
-fn source_op_of(inst: &GraphInst) -> Option<&SSAOp> {
+fn source_op_of(inst: &GraphInst) -> Option<&SSAOp<ValueId>> {
     match &inst.payload {
         InstPayload::Op(op) => Some(op),
         InstPayload::Phi { .. } => None,
@@ -321,21 +315,10 @@ impl MachineValueUse {
             InstPayload::Op(op) => op,
             _ => return Err(MachineBuildError::EntityMismatch(access.inst)),
         };
-        let prepared_op = artifact
-            .graph()
-            .function_op(artifact.function(), access.inst)
-            .ok_or_else(|| {
-                r2il::refusal_evidence!(
-                    "memory-access-entity",
-                    "{access:?}: no prepared operation"
-                );
-                MachineBuildError::EntityMismatch(access.inst)
-            })?;
         if !memory_access_authorities_match(
             artifact.graph(),
             artifact.objects(),
             source_op,
-            prepared_op,
             source_space,
             fact,
             artifact
@@ -1274,7 +1257,7 @@ pub enum MachineBuildError {
     ObligationSourceMismatch(CanonicalInstructionId),
     UnsupportedOperation {
         inst: InstId,
-        op: Box<SSAOp>,
+        op: Box<SSAOp<ValueId>>,
     },
 }
 
@@ -1843,7 +1826,7 @@ fn use_refusal_for_error(error: &MachineBuildError) -> MachineUseRefusal {
             // the whole question a reader of it has.
             r2il::refusal_evidence!(
                 "machine-unsupported-operation",
-                "{inst:?} is outside the machine vocabulary: {op}"
+                "{inst:?} is outside the machine vocabulary: {op:?}"
             );
             MachineUseRefusal::UnsupportedOperation
         }
@@ -3242,10 +3225,6 @@ impl MachineFunction {
                 return Err(MachineBuildError::EntityMismatch(inst.id));
             }
         };
-        let prepared_op = artifact
-            .graph()
-            .function_op(artifact.function(), fact.id.inst)
-            .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
         let source_model = artifact.machine_context().memory_model();
         let source_space_model = source_model
             .space(source_space)
@@ -3265,7 +3244,6 @@ impl MachineFunction {
             artifact.graph(),
             artifact.objects(),
             source_op,
-            prepared_op,
             source_space,
             fact,
             artifact
@@ -3442,7 +3420,7 @@ impl MachineBuilder {
         &mut self,
         artifact: &SsaArtifact,
         inst: &GraphInst,
-        op: &SSAOp,
+        op: &SSAOp<ValueId>,
     ) -> Result<(), MachineBuildError> {
         let graph = artifact.graph();
         let accesses = artifact
@@ -3458,27 +3436,21 @@ impl MachineBuilder {
         let source_space = access.space;
         let model = artifact.machine_context().memory_model();
         let space_model = model.space(source_space);
-        let prepared_op = artifact
-            .graph()
-            .function_op(artifact.function(), access.id.inst);
         if !access.provenance_complete
             || !access.is_write
             || access.id.ordinal != 0
-            || prepared_op.is_none_or(|prepared_op| {
-                !memory_access_authorities_match(
-                    graph,
-                    artifact.objects(),
-                    op,
-                    prepared_op,
-                    source_space,
-                    access,
-                    artifact
-                        .facts()
-                        .structured
-                        .member_run_stores
-                        .get(&access.id.inst),
-                )
-            })
+            || !memory_access_authorities_match(
+                graph,
+                artifact.objects(),
+                op,
+                source_space,
+                access,
+                artifact
+                    .facts()
+                    .structured
+                    .member_run_stores
+                    .get(&access.id.inst),
+            )
             || inst.inputs.first() != Some(&access.address)
             || !model.is_available()
             || !model.is_coherent()
@@ -3980,7 +3952,7 @@ fn operand_leaf_binding(
     }
 }
 
-fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
+fn machine_kind_matches_op<V>(op: &SSAOp<V>, kind: &MachineExprKind) -> bool {
     if let (SSAOp::Subpiece { offset, .. }, MachineExprKind::Extract { lsb_bits, .. }) = (op, kind)
     {
         return offset.checked_mul(8) == Some(*lsb_bits);
@@ -4358,7 +4330,7 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
     )
 }
 
-fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bool {
+fn machine_type_matches_op<V>(op: &SSAOp<V>, ty: &MachineType, output_bits: u32) -> bool {
     let unsigned = integer_type(output_bits, MachineSignedness::Unsigned);
     let signed = integer_type(output_bits, MachineSignedness::Signed);
     match op {

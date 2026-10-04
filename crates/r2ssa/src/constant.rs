@@ -37,8 +37,13 @@ use crate::op::SSAOp;
 /// unchanged: a copy or a zero extension, as the one identity fact states
 /// them (`crate::view`). A truncation, a lane at an offset and a sign
 /// extension each change the number.
-fn is_value_preserving(op: &SSAOp) -> bool {
-    crate::view::preserves_integer(op)
+fn is_value_preserving(graph: &SsaGraph, op: &SSAOp<ValueId>) -> bool {
+    crate::view::preserves_integer(op, operand_facts(graph))
+}
+
+/// What a graph operation's operand is: its value's width and constant bits.
+fn operand_facts(graph: &SsaGraph) -> impl Fn(&ValueId) -> (u32, Option<u64>) + Copy + '_ {
+    |value| crate::op::var_facts(graph.var(*value))
 }
 
 /// The literal a value states about itself, at its own width.
@@ -77,7 +82,7 @@ pub(crate) fn root_of(graph: &SsaGraph, value: ValueId) -> ValueId {
         let InstPayload::Op(op) = &inst.payload else {
             break;
         };
-        if !is_value_preserving(op) {
+        if !is_value_preserving(graph, op) {
             break;
         }
         let Some(source) = exact_input(graph, inst, 0) else {
@@ -114,8 +119,8 @@ pub(crate) fn sign_extend(value: u64, size: u32) -> i64 {
 }
 
 /// How many operands an operation folds over, when it folds at all.
-fn folded_arity(op: &SSAOp) -> Option<usize> {
-    if is_value_preserving(op) {
+fn folded_arity(graph: &SsaGraph, op: &SSAOp<ValueId>) -> Option<usize> {
+    if is_value_preserving(graph, op) {
         return Some(1);
     }
     op.operation().map(|_| op.sources().len())
@@ -124,7 +129,14 @@ fn folded_arity(op: &SSAOp) -> Option<usize> {
 /// What an operation computes from its operands' values, in `sources` order, as `r2il::eval` states it.
 ///
 /// `None` where p-code leaves the value undefined or it does not fit a constant.
-pub(crate) fn computed(op: &SSAOp, operands: &[u64]) -> Option<u64> {
+///
+/// `facts` gives each operand's width (`op::var_facts` for a function's
+/// operations).
+pub(crate) fn computed<V>(
+    op: &SSAOp<V>,
+    facts: impl Fn(&V) -> (u32, Option<u64>),
+    operands: &[u64],
+) -> Option<u64> {
     let operation = op.operation()?;
     let sources = op.sources();
     if sources.len() != operands.len() {
@@ -133,15 +145,15 @@ pub(crate) fn computed(op: &SSAOp, operands: &[u64]) -> Option<u64> {
     let words = sources
         .iter()
         .zip(operands)
-        .map(|(source, value)| r2il::eval::Word::new(u128::from(*value), source.size).ok())
+        .map(|(source, value)| r2il::eval::Word::new(u128::from(*value), facts(source).0).ok())
         .collect::<Option<Vec<_>>>()?;
-    let value = r2il::eval::apply(operation, &words, op.dst()?.size).ok()?;
+    let value = r2il::eval::apply(operation, &words, facts(op.dst()?).0).ok()?;
     u64::try_from(value).ok()
 }
 
 /// The operands an operation folds over, where it folds at all.
-fn folded_inputs(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> Option<Vec<ValueId>> {
-    (0..folded_arity(op)?)
+fn folded_inputs(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp<ValueId>) -> Option<Vec<ValueId>> {
+    (0..folded_arity(graph, op)?)
         .map(|index| exact_input(graph, inst, index))
         .collect()
 }
@@ -157,15 +169,19 @@ pub(crate) fn fold_inst(
     };
     let inputs = folded_inputs(graph, inst, op)?;
     let operands = inputs.iter().map(|input| known(*input)).collect::<Vec<_>>();
-    fold_op(op, &operands)
+    fold_op(graph, op, &operands)
 }
 
 /// Evaluate one operation over operands already folded to constants.
-fn fold_op(op: &SSAOp, operands: &[Option<u64>]) -> Option<u64> {
-    if is_value_preserving(op) {
+fn fold_op(graph: &SsaGraph, op: &SSAOp<ValueId>, operands: &[Option<u64>]) -> Option<u64> {
+    if is_value_preserving(graph, op) {
         return *operands.first()?;
     }
-    computed(op, &operands.iter().copied().collect::<Option<Vec<_>>>()?)
+    computed(
+        op,
+        operand_facts(graph),
+        &operands.iter().copied().collect::<Option<Vec<_>>>()?,
+    )
 }
 
 /// The constant a value computes to.
@@ -217,7 +233,7 @@ fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) ->
             .iter()
             .map(|input| known.get(input).copied().flatten())
             .collect();
-        let folded = fold_op(op, &operands);
+        let folded = fold_op(graph, op, &operands);
         known.insert(current, folded);
     }
     known.get(&value).copied().flatten()

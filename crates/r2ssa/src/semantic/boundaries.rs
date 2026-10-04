@@ -1504,8 +1504,8 @@ pub(crate) fn exact_return_address_fact(
         && producer.block == return_inst.block
         && producer.ordinal.checked_add(1) == Some(return_inst.ordinal)
         && producer.output == Some(target.id)
-        && target.var == *dst
-        && source.var == *src
+        && target.id == *dst
+        && *source_id == *src
         && target.var.size == storage.size
         && source.var.size == storage.size
         && source.canonical_storage == Some(storage)
@@ -1532,13 +1532,16 @@ pub(crate) fn exact_return_address_fact(
         && carried.var.size == storage.size
     {
         let source = match &producer.payload {
-            InstPayload::Op(SSAOp::Copy { dst, .. }) if carried.var == *dst => {
+            InstPayload::Op(SSAOp::Copy { dst, .. }) if carried.id == *dst => {
                 producer.inputs.first()
             }
             InstPayload::Op(SSAOp::IntAnd { dst, b, .. })
-                if carried.var == *dst
-                    && b.is_const()
-                    && b.constant_bits().is_some_and(|mask| mask & 1 == 0) =>
+                if carried.id == *dst
+                    && graph.var(*b).is_const()
+                    && graph
+                        .var(*b)
+                        .constant_bits()
+                        .is_some_and(|mask| mask & 1 == 0) =>
             {
                 producer.inputs.first()
             }
@@ -1547,7 +1550,7 @@ pub(crate) fn exact_return_address_fact(
                 space: r2il::SpaceId::Ram,
                 dst,
                 ..
-            }) if carried.var == *dst => {
+            }) if carried.id == *dst => {
                 return Some(SourceReturnAddressFact {
                     storage,
                     value: target.id,

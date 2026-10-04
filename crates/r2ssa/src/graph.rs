@@ -165,8 +165,12 @@ pub struct GraphValue {
 /// not a pointer chase and building one is not an allocation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InstPayload {
-    Phi { predecessors: Vec<BlockId> },
-    Op(SSAOp),
+    Phi {
+        predecessors: Vec<BlockId>,
+    },
+    /// The operation over value ids: an operand is the value it reads or
+    /// defines, and its name is `SsaGraph::value(id).var`, kept once.
+    Op(SSAOp<ValueId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,6 +294,31 @@ pub(crate) fn use_offsets_of(uses: &[Vec<UseSite>]) -> Vec<u32> {
     }
     offsets.push(total);
     offsets
+}
+
+/// An operation over the values its operands were interned as: the
+/// destination is `output`, and each source the input at its place in
+/// `sources()`. Operands are told apart by where they are held, so the same
+/// variable read twice is two inputs, as it is in `inputs`, and nothing is
+/// hashed.
+fn op_over_values(op: &SSAOp, inputs: &[ValueId], output: Option<ValueId>) -> SSAOp<ValueId> {
+    let dst = op.dst().map(std::ptr::from_ref);
+    let sources = op
+        .sources()
+        .into_iter()
+        .map(std::ptr::from_ref)
+        .collect::<Vec<_>>();
+    op.map(&mut |operand: &SSAVar| {
+        let at = std::ptr::from_ref(operand);
+        if Some(at) == dst {
+            return output.expect("an operation with a destination defines a value");
+        }
+        let place = sources
+            .iter()
+            .position(|source| *source == at)
+            .expect("every operand is the destination or a source");
+        inputs[place]
+    })
 }
 
 impl SsaGraph {
@@ -469,6 +498,7 @@ impl SsaGraph {
                         &mut uses_of,
                     )
                 });
+                let payload = InstPayload::Op(op_over_values(op, &inputs, output));
                 let inst_id = InstId(insts.len() as u32);
                 for (input_idx, input) in inputs.iter().copied().enumerate() {
                     uses_of[input.0 as usize].push(UseSite {
@@ -488,7 +518,7 @@ impl SsaGraph {
                     canonical_storage: output
                         .and_then(|value| values.get(value.0 as usize))
                         .and_then(|value| value.canonical_storage),
-                    payload: InstPayload::Op(op.clone()),
+                    payload,
                 });
                 blocks[block_id.0 as usize].insts.push(inst_id);
                 inst_by_op[op_id.index()] = Some(inst_id);
@@ -647,20 +677,6 @@ impl SsaGraph {
         block.insts.get(self.phi_count(block) + ordinal).copied()
     }
 
-    /// The operation of `function` an instruction was built from: the sealed
-    /// function's own copy, which the graph's payload restates.
-    pub(crate) fn function_op<'f>(
-        &self,
-        function: &'f SSAFunction,
-        id: InstId,
-    ) -> Option<&'f SSAOp> {
-        let (block_addr, index) = self.walk_start(id)?;
-        let block = function.get_block(block_addr)?;
-        (block.op_id(index)? == self.op_for_inst(id)?)
-            .then(|| block.ops().get(index))
-            .flatten()
-    }
-
     /// The address of the block an instruction stands in.
     pub fn block_addr_of(&self, id: InstId) -> Option<u64> {
         Some(self.block(self.inst(id)?.block)?.addr)
@@ -720,6 +736,20 @@ impl SsaGraph {
         self.values.get(id.0 as usize)
     }
 
+    /// An operation with each operand spelled as its variable, borrowed from
+    /// this graph's one table of values. For a reader that still works in
+    /// names (the renderer, until it reads values: doc/adr-renderer-printer.md);
+    /// nothing is cloned.
+    pub fn named_op(&self, op: &SSAOp<ValueId>) -> SSAOp<&SSAVar> {
+        op.map(&mut |id| self.var(*id))
+    }
+
+    /// The variable a value is spelled as: its name, version and width.
+    /// Every id an operation names is a value of this graph.
+    pub fn var(&self, id: ValueId) -> &SSAVar {
+        &self.values[id.0 as usize].var
+    }
+
     /// Materialize an exact source-declared value at function entry.
     ///
     /// Calls read their register arguments implicitly. A parameter handed
@@ -775,7 +805,7 @@ impl SsaGraph {
 
     /// The operation that defines `var`, when an operation rather than a
     /// phi does.
-    pub fn defining_op(&self, var: &SSAVar) -> Option<&SSAOp> {
+    pub fn defining_op(&self, var: &SSAVar) -> Option<&SSAOp<ValueId>> {
         let def = self.def_inst(self.value_id_for_var(var)?)?;
         match &self.inst(def)?.payload {
             InstPayload::Op(op) => Some(op),

@@ -492,6 +492,14 @@ impl<V> SelectOp<V> {
     }
 }
 
+/// An operand's width in bytes and, for a constant, its bits: what the
+/// structural readers of an operation ask of an operand, read off the
+/// variable itself. A graph operation's operand answers the same through its
+/// value's variable.
+pub(crate) fn var_facts(var: &SSAVar) -> (u32, Option<u64>) {
+    (var.size, var.constant_bits())
+}
+
 /// The name a block operation is printed under, and the comparison that stops it.
 pub(crate) const fn block_transfer_spelling(
     kind: r2il::BlockTransferKind,

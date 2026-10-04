@@ -152,7 +152,7 @@ pub(crate) fn process_call_result_flow_block(
     mut state: CallResultFlowState,
     sink: CallResultSink<'_>,
 ) -> CallResultFlowState {
-    let (function, graph) = (body.function, body.graph);
+    let graph = body.graph;
     let (boundaries, objects, call_sites, structured) = (
         derived.boundaries,
         derived.objects,
@@ -341,7 +341,6 @@ pub(crate) fn process_call_result_flow_block(
                 let stack_access = value
                     .and_then(|value| {
                         stack_memory_access_at(StackMemoryAccessInput {
-                            function,
                             graph,
                             structured,
                             objects,
@@ -352,7 +351,6 @@ pub(crate) fn process_call_result_flow_block(
                     })
                     .or_else(|| {
                         stack_memory_access_at(StackMemoryAccessInput {
-                            function,
                             graph,
                             structured,
                             objects,
@@ -396,7 +394,6 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let Some((object, offset, access)) =
                     stack_memory_access_at(StackMemoryAccessInput {
-                        function,
                         graph,
                         structured,
                         objects,
@@ -460,7 +457,6 @@ pub(crate) fn insert_call_result_certificate(
 }
 
 pub(crate) struct StackMemoryAccessInput<'a> {
-    pub(crate) function: &'a SSAFunction,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) structured: &'a StructuredDataflowFacts,
     pub(crate) objects: &'a ObjectModel,
@@ -486,12 +482,7 @@ pub(crate) fn stack_memory_access_at(
         .filter(|(_, access)| {
             access.is_write == input.is_write
                 && input.value.is_none_or(|value| access.value == Some(value))
-                && ram_memory_access_matches_source(
-                    input.function,
-                    input.graph,
-                    input.objects,
-                    access,
-                )
+                && ram_memory_access_matches_source(input.graph, input.objects, access)
         })
         .filter_map(|(access_id, access)| {
             stack_object_offset(input.objects, access.object)

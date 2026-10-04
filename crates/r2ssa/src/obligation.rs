@@ -1440,7 +1440,7 @@ fn block_can_reenter(graph: &SsaGraph, start: crate::graph::BlockId) -> bool {
 
 fn seed_direct_obligations(
     inst: &crate::graph::GraphInst,
-    op: &SSAOp,
+    op: &SSAOp<crate::graph::ValueId>,
     required: &mut ObligationSeeds,
     explicit_inputs: &mut BTreeMap<
         (InstId, SemanticObligationKind, SemanticObligationComponent),

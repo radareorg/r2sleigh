@@ -393,7 +393,7 @@ fn transfer(
 fn exact(
     graph: &SsaGraph,
     inst: &GraphInst,
-    op: &SSAOp,
+    op: &SSAOp<ValueId>,
     lookup: &dyn Fn(ValueId) -> StridedInterval,
 ) -> Option<u64> {
     // A number less itself, or exclusive-or itself, is nought whatever it is: `xor eax, eax`.
@@ -424,7 +424,7 @@ fn read_at(range: StridedInterval, width: u32) -> StridedInterval {
 }
 
 /// Whether an operation's transfer would read an unknown value past sixty-four bits as below `2^64`.
-fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> bool {
+fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp<ValueId>) -> bool {
     inst.output.is_some_and(|output| wide(graph, output))
         && matches!(
             op,
@@ -436,7 +436,7 @@ fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> bo
 }
 
 /// A carry, borrow or boolean operation, which yields a flag.
-fn is_flag(op: &SSAOp) -> bool {
+fn is_flag<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,
         SSAOp::IntCarry { .. }
@@ -688,7 +688,7 @@ fn comparison_of(
 }
 
 /// Which comparison an operation is, where it is one.
-fn comparison_kind(op: &SSAOp) -> Option<crate::semantic::CompareKind> {
+fn comparison_kind<V>(op: &SSAOp<V>) -> Option<crate::semantic::CompareKind> {
     use crate::semantic::CompareKind;
     Some(match op {
         SSAOp::IntEqual { .. } => CompareKind::Equal,

@@ -1063,7 +1063,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     .and_then(|value| value.canonical_storage)
                     .is_some_and(|storage| storage.location() == stack_pointer.location())
             });
-            if val.constant_bits().is_some() && through_stack_pointer {
+            if graph.var(*val).constant_bits().is_some() && through_stack_pointer {
                 constant_stack_stores
                     .entry(inst.block)
                     .or_default()

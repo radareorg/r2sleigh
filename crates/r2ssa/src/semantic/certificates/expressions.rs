@@ -566,7 +566,7 @@ pub(crate) fn value_renderable_modulo_loop_phi(
     result
 }
 
-pub(crate) fn expression_op_is_pure(op: &SSAOp) -> bool {
+pub(crate) fn expression_op_is_pure<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,
         SSAOp::Copy { .. }

@@ -2100,11 +2100,11 @@ fn the_graph_names_a_definition_and_its_readers() {
     // The graph answers which operation defines reg:0 v1 and who reads it.
     let var = SSAVar::new("reg:0", 1, 8);
     let graph = crate::graph::SsaGraph::from_function(&func);
+    let value = graph.value_id_for_var(&var).unwrap();
     assert!(matches!(
         graph.defining_op(&var),
-        Some(SSAOp::Copy { dst, .. }) if *dst == var
+        Some(SSAOp::Copy { dst, .. }) if *dst == value
     ));
-    let value = graph.value_id_for_var(&var).unwrap();
     assert!(!graph.use_sites(value).is_empty());
 }
 

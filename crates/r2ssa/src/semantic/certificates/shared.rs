@@ -104,11 +104,11 @@ pub(crate) fn exact_copy_chain_to_entry_storage(
         let InstPayload::Op(SSAOp::Copy { dst, src }) = &definition.payload else {
             return None;
         };
-        let source = graph.value_id_for_var(src)?;
+        let source = *src;
         if definition.output != Some(current)
             || definition.inputs.as_slice() != [source]
-            || dst.size != width
-            || src.size != width
+            || graph.var(*dst).size != width
+            || graph.var(source).size != width
             || !insts.insert(inst)
             || !values.insert(source)
         {
@@ -139,7 +139,6 @@ pub(crate) fn expression_phi_is_identity(inst: &crate::graph::GraphInst) -> bool
 }
 
 pub(crate) fn ram_memory_access_matches_source(
-    function: &SSAFunction,
     graph: &SsaGraph,
     objects: &ObjectModel,
     access: &StructuredMemoryAccessFact,
@@ -157,15 +156,11 @@ pub(crate) fn ram_memory_access_matches_source(
     let Some(graph_inst) = graph.inst(access.id.inst) else {
         return false;
     };
-    let Some(prepared_op) = graph.function_op(function, access.id.inst) else {
-        return false;
-    };
+    // The graph is built from the sealed function and neither changes, so
+    // its operation is the function's.
     let InstPayload::Op(graph_op) = &graph_inst.payload else {
         return false;
     };
-    if graph_op != prepared_op {
-        return false;
-    }
     match graph_op {
         SSAOp::Load {
             space: SpaceId::Ram,
@@ -173,9 +168,9 @@ pub(crate) fn ram_memory_access_matches_source(
             addr,
         } => {
             !access.is_write
-                && graph.value_id_for_var(addr) == Some(access.address)
-                && graph.value_id_for_var(dst) == access.value
-                && access.width == dst.size
+                && *addr == access.address
+                && Some(*dst) == access.value
+                && access.width == graph.var(*dst).size
         }
         SSAOp::Store {
             space: SpaceId::Ram,
@@ -183,9 +178,9 @@ pub(crate) fn ram_memory_access_matches_source(
             val,
         } => {
             access.is_write
-                && graph.value_id_for_var(addr) == Some(access.address)
-                && graph.value_id_for_var(val) == access.value
-                && access.width == val.size
+                && *addr == access.address
+                && Some(*val) == access.value
+                && access.width == graph.var(*val).size
         }
         _ => false,
     }

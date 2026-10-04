@@ -1771,24 +1771,29 @@ impl<'a> ObjectModelBuilder<'a> {
     fn displaced_parent(&self, graph: &SsaGraph, value_id: ValueId) -> Option<(ValueId, i64)> {
         let inst = graph.inst(graph.def_inst(value_id)?)?;
         let rooted = |var: &SSAVar| resolve_stack_root(self.facts, var).is_some();
-        let id = |var: &SSAVar| graph.value_id_for_var(var);
+        let var = |id: &ValueId| graph.var(*id);
         match &inst.payload {
             crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
-                match (rooted(a), b.constant_bits(), rooted(b), a.constant_bits()) {
-                    (true, Some(delta), _, _) => Some((id(a)?, delta as i64)),
-                    (_, _, true, Some(delta)) => Some((id(b)?, delta as i64)),
+                match (
+                    rooted(var(a)),
+                    var(b).constant_bits(),
+                    rooted(var(b)),
+                    var(a).constant_bits(),
+                ) {
+                    (true, Some(delta), _, _) => Some((*a, delta as i64)),
+                    (_, _, true, Some(delta)) => Some((*b, delta as i64)),
                     _ => None,
                 }
             }
             crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. }) => {
-                let delta = b.constant_bits()?;
-                rooted(a).then(|| id(a).map(|a| (a, (delta as i64).wrapping_neg())))?
+                let delta = var(b).constant_bits()?;
+                rooted(var(a)).then(|| (*a, (delta as i64).wrapping_neg()))
             }
             crate::InstPayload::Op(
                 crate::SSAOp::Copy { src, .. }
                 | crate::SSAOp::Cast { src, .. }
                 | crate::SSAOp::CallRestore { src, .. },
-            ) => rooted(src).then(|| id(src).map(|src| (src, 0)))?,
+            ) => rooted(var(src)).then_some((*src, 0)),
             crate::InstPayload::Phi { .. } => inst
                 .inputs
                 .iter()
@@ -1811,21 +1816,19 @@ impl<'a> ObjectModelBuilder<'a> {
             let (base, index) = match &inst.payload {
                 crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
                     let index = self.index_operand_for_indexed_address(graph, value_id)?;
-                    let a_id = graph.value_id_for_var(a)?;
-                    let b_id = graph.value_id_for_var(b)?;
-                    (if index == a_id { b_id } else { a_id }, Some(index))
+                    (if index == *a { *b } else { *a }, Some(index))
                 }
                 crate::InstPayload::Op(
                     crate::SSAOp::Copy { src, .. }
                     | crate::SSAOp::Cast { src, .. }
                     | crate::SSAOp::CallRestore { src, .. },
-                ) => (graph.value_id_for_var(src)?, None),
+                ) => (*src, None),
                 // Taken back by a constant from an address already inside the
                 // object: the same object, at an offset nothing states.
                 crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. })
-                    if b.constant_bits().is_some() =>
+                    if graph.var(*b).constant_bits().is_some() =>
                 {
-                    (graph.value_id_for_var(a)?, None)
+                    (*a, None)
                 }
                 crate::InstPayload::Phi { .. } => (*inst.inputs.first()?, None),
                 _ => return None,
@@ -1939,15 +1942,14 @@ impl<'a> ObjectModelBuilder<'a> {
         let crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) = &inst.payload else {
             return None;
         };
-        let a_id = graph.value_id_for_var(a)?;
-        let b_id = graph.value_id_for_var(b)?;
-        let a_rooted = resolve_stack_root(self.facts, a).is_some()
-            || resolve_indexed_stack_root(self.facts, a).is_some();
-        let b_rooted = resolve_stack_root(self.facts, b).is_some()
-            || resolve_indexed_stack_root(self.facts, b).is_some();
-        match (a_rooted, b_rooted) {
-            (true, false) => Some(b_id),
-            (false, true) => Some(a_id),
+        let rooted = |id: &ValueId| {
+            let var = graph.var(*id);
+            resolve_stack_root(self.facts, var).is_some()
+                || resolve_indexed_stack_root(self.facts, var).is_some()
+        };
+        match (rooted(a), rooted(b)) {
+            (true, false) => Some(*b),
+            (false, true) => Some(*a),
             _ => None,
         }
     }
