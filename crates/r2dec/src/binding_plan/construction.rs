@@ -234,7 +234,7 @@ pub(super) fn unspecified_reads(
                     r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
                 )
             })
-        }) && !call_results.contains_key(&value.id)
+        }) && !call_results.contains(value.id)
         {
             UnspecifiedRead::LeftByCall
         } else {

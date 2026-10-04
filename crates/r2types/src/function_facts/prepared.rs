@@ -1832,9 +1832,9 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                 renderable: cert.renderable || call_result.is_some(),
             };
             (
-                r2ssa::SemanticId::expression(*value),
+                r2ssa::SemanticId::expression(value),
                 CertifiedExpr {
-                    id: r2ssa::SemanticId::expression(*value),
+                    id: r2ssa::SemanticId::expression(value),
                     fact,
                     inputs: cert
                         .inputs
@@ -1843,7 +1843,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                         .map(r2ssa::SemanticId::expression)
                         .collect(),
                     bindings,
-                    guarded_phi: prepared_guarded_phi_render_fact(prepared, *value),
+                    guarded_phi: prepared_guarded_phi_render_fact(prepared, value),
                 },
             )
         })
@@ -1946,8 +1946,8 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     size: cert.size,
                     array_layout: cert.array_layout.clone(),
                     source_slot: cert.source_slot,
-                    reload_values: cert.reload_values.clone(),
-                    stored_values: cert.stored_values.clone(),
+                    reload_values: cert.reload_values.iter().collect(),
+                    stored_values: cert.stored_values.iter().collect(),
                     callee_allocation: cert.callee_allocation.clone(),
                     ty: cert
                         .source_slot

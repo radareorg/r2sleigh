@@ -1014,9 +1014,10 @@ fn only_variadic_tail_unproven(
     let Some(inst) = prepared.graph().inst_for_op(op) else {
         return false;
     };
-    certificates
-        .callsites_by_inst
-        .get(&inst)
+    prepared
+        .call_sites()
+        .by_inst
+        .get(inst)
         .and_then(|call_site| certificates.callsites.get(call_site))
         .is_some_and(|site| {
             site.direct_target.is_some()
@@ -3453,7 +3454,7 @@ fn return_call_site_for_value(
                 return prepared
                     .call_sites()
                     .by_inst
-                    .get(&scan_inst_id)
+                    .get(scan_inst_id)
                     .copied()
                     .and_then(exact_result_matches);
             }

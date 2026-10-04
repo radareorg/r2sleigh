@@ -316,7 +316,7 @@ impl<'a> EvidenceBuilder<'a> {
             if !certificate.relation.is_identity() {
                 continue;
             }
-            bounds.push((EvidenceNode::Value(*value), signature.return_type.clone()));
+            bounds.push((EvidenceNode::Value(value), signature.return_type.clone()));
         }
 
         for (node, declared) in bounds {
@@ -439,7 +439,7 @@ impl<'a> EvidenceBuilder<'a> {
             let Some(elem) = pointee_type_for_width(width) else {
                 continue;
             };
-            bounds.push((EvidenceNode::Value(*value), elem));
+            bounds.push((EvidenceNode::Value(value), elem));
         }
 
         for (node, elem) in bounds {

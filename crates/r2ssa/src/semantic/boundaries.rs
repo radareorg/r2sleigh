@@ -230,7 +230,7 @@ impl FormatForwardingLookup<'_> {
         graph: &SsaGraph,
         definition: InstId,
     ) -> Option<CallSiteId> {
-        if let Some(call_site) = self.call_sites.by_inst.get(&definition) {
+        if let Some(call_site) = self.call_sites.by_inst.get(definition) {
             return Some(*call_site);
         }
         let (block_addr, op_index) = graph.walk_start(definition)?;
@@ -263,7 +263,7 @@ impl FormatForwardingLookup<'_> {
             index -= 1;
             if !matches!(block.ops().get(index)?, SSAOp::CallDefine { .. }) {
                 let inst = graph.inst_for_op(block.op_id(index)?)?;
-                let site = self.call_sites.by_inst.get(&inst).copied();
+                let site = self.call_sites.by_inst.get(inst).copied();
                 if site.is_none() {
                     r2il::refusal_evidence!(
                         "variadic-format-literal",

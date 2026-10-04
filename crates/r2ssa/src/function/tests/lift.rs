@@ -348,7 +348,7 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
     let expr_cert = prepared
         .certificates()
         .expressions
-        .get(&return_value)
+        .get(return_value)
         .expect("return value expression certificate");
     let input_debug = expr_cert
         .inputs
@@ -361,14 +361,14 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
             let renderable = prepared
                 .certificates()
                 .expressions
-                .get(value)
+                .get(*value)
                 .is_some_and(|cert| cert.renderable);
             format!("{name}:{renderable}")
         })
         .collect::<Vec<_>>();
     let mut tmp_debug = Vec::new();
     for value in &expr_cert.inputs {
-        if let Some(cert) = prepared.certificates().expressions.get(value) {
+        if let Some(cert) = prepared.certificates().expressions.get(*value) {
             let value_name = prepared
                 .value_var(*value)
                 .map(|var| var.display_name())
@@ -381,7 +381,7 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
                 let renderable = prepared
                     .certificates()
                     .expressions
-                    .get(input)
+                    .get(*input)
                     .is_some_and(|cert| cert.renderable);
                 tmp_debug.push(format!("{value_name}->{input_name}:{renderable}"));
             }

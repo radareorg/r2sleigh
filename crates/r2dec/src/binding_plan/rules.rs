@@ -1686,13 +1686,13 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
         let Some(certificate) = source.certificates().returns.get(*index) else {
             continue;
         };
-        if certificate.at != *at {
+        if certificate.at != at {
             continue;
         }
         return_readers
             .entry(certificate.value)
             .or_default()
-            .insert(*at);
+            .insert(at);
     }
     // Which gate turned a value away, by name. Reading this function said a
     // flag copy passes every test in it, and the corpus said it stays bound;
@@ -2494,7 +2494,7 @@ pub(crate) fn certificate_elided_cells(
         let Some(output) = inst.output else {
             continue;
         };
-        if certificates.call_results.contains_key(&output) {
+        if certificates.call_results.contains(output) {
             continue;
         }
         insert_elided_write(&mut writes, inst.id, ElisionReason::CallBoundaryCarrier)?;

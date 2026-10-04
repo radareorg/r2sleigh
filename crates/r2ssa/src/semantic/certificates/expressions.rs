@@ -51,8 +51,8 @@ pub(crate) fn constant_root_through_copies(graph: &SsaGraph, value: ValueId) -> 
 pub(crate) fn collect_two_way_selection_certificates(
     function: &SSAFunction,
     graph: &SsaGraph,
-) -> BTreeMap<InstId, TwoWaySelectionCertificate> {
-    let mut certificates = BTreeMap::new();
+) -> crate::dense::IdMap<InstId, TwoWaySelectionCertificate> {
+    let mut certificates = crate::dense::IdMap::default();
     for inst in &graph.insts {
         let crate::graph::InstPayload::Phi { predecessors } = &inst.payload else {
             continue;

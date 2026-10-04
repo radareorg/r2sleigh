@@ -256,7 +256,7 @@ impl FormalDependence {
                 last_call = prepared
                     .graph()
                     .inst_for_op(id)
-                    .and_then(|inst| prepared.call_sites().by_inst.get(&inst))
+                    .and_then(|inst| prepared.call_sites().by_inst.get(inst))
                     .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
                 let unseen = self.unseen | last_call;
                 changed |= unseen != self.unseen;

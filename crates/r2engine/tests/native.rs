@@ -3160,7 +3160,7 @@ fn the_sign_word_a_division_extends_into_is_not_the_parameter_it_extends() {
     for slot in homes.values() {
         for lane in &high_lanes {
             assert!(
-                !slot.reload_values.contains(lane),
+                !slot.reload_values.contains(*lane),
                 "{lane:?} is a sign word, not the contents of the slot at {}",
                 slot.offset
             );

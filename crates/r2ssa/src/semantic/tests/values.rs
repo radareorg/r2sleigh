@@ -256,7 +256,7 @@ fn stack_return_carrier_requires_stack_reload_certificate() {
     let mut value = boundary.values[0];
     value.slot = CallBoundarySlot::Stack(-8);
     assert_eq!(
-        super::super::return_carrier_for_boundary_value(&value, &BTreeMap::new()),
+        super::super::return_carrier_for_boundary_value(&value, &crate::dense::IdMap::default()),
         None
     );
 
@@ -284,7 +284,7 @@ fn stack_return_carrier_requires_stack_reload_certificate() {
     assert_eq!(
         super::super::return_carrier_for_boundary_value(
             &value,
-            &BTreeMap::from([(value.value, reload)]),
+            &[(value.value, reload)].into_iter().collect(),
         ),
         Some(ReturnCarrier::StackSlot {
             object,

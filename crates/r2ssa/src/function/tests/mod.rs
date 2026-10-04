@@ -1492,7 +1492,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
     assert!(
         pure.certificates()
             .expressions
-            .get(&pure_value)
+            .get(pure_value)
             .is_some_and(|cert| cert.renderable),
         "pure expression outputs should be renderable"
     );
@@ -1524,7 +1524,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
         loaded
             .certificates()
             .expressions
-            .get(&loaded_value)
+            .get(loaded_value)
             .is_some_and(|cert| cert.renderable),
         "memory-load expression outputs require a structured memory-read certificate"
     );
@@ -1560,7 +1560,7 @@ fn prepared_expression_certificates_require_structural_render_proof() {
         userop
             .certificates()
             .expressions
-            .get(&userop_value)
+            .get(userop_value)
             .is_some_and(|cert| !cert.renderable),
         "opaque userop outputs must not be renderable by width alone"
     );

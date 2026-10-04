@@ -671,8 +671,14 @@ impl BindingPlan {
                     || certificate.size != size
                     || certificate.array_layout != array_layout
                     || certificate.source_slot != source_slot
-                    || certificate.reload_values != reload_values
-                    || certificate.stored_values != stored_values
+                    || !certificate
+                        .reload_values
+                        .iter()
+                        .eq(reload_values.iter().copied())
+                    || !certificate
+                        .stored_values
+                        .iter()
+                        .eq(stored_values.iter().copied())
                     || certificate.callee_allocation != callee_allocation
             }) {
                 r2il::refusal_evidence!(

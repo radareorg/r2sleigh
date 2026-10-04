@@ -1392,7 +1392,7 @@ impl SsaArtifact {
         &self,
         inst: crate::graph::InstId,
     ) -> Option<&CallsiteCertificate> {
-        let callsite = self.facts.certificates.callsites_by_inst.get(&inst)?;
+        let callsite = self.facts.call_sites.by_inst.get(inst)?;
         self.facts.certificates.callsites.get(callsite)
     }
 
@@ -1455,7 +1455,7 @@ impl SsaArtifact {
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<&StackReloadSourceCertificate> {
-        self.facts.certificates.stack_reloads.get(&value_id)
+        self.facts.certificates.stack_reloads.get(value_id)
     }
 
     pub fn stack_reload_certificate_for_inst(
@@ -1463,22 +1463,22 @@ impl SsaArtifact {
         inst: crate::graph::InstId,
     ) -> Option<&StackReloadSourceCertificate> {
         let value = self.graph().inst(inst)?.output?;
-        self.facts.certificates.stack_reloads.get(&value)
+        self.facts.certificates.stack_reloads.get(value)
     }
 
     pub fn call_result_certificate_for_value(
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<&CallResultCertificate> {
-        self.facts.certificates.call_results.get(&value_id)
+        self.facts.certificates.call_results.get(value_id)
     }
 
     pub fn call_result_certificate_for_inst(
         &self,
         inst: crate::graph::InstId,
     ) -> Option<&CallResultCertificate> {
-        let value = self.facts.certificates.call_results_by_inst.get(&inst)?;
-        self.facts.certificates.call_results.get(value)
+        let value = self.facts.certificates.call_results_by_inst.get(inst)?;
+        self.facts.certificates.call_results.get(*value)
     }
 
     pub fn call_result_certificates_for_callsite(
@@ -1491,7 +1491,7 @@ impl SsaArtifact {
             .get(&call_site)
             .into_iter()
             .flatten()
-            .filter_map(|value| self.facts.certificates.call_results.get(value))
+            .filter_map(|value| self.facts.certificates.call_results.get(*value))
             .collect()
     }
 
@@ -1499,7 +1499,7 @@ impl SsaArtifact {
         &self,
         inst: crate::graph::InstId,
     ) -> Option<&ReturnValueCertificate> {
-        let index = self.facts.certificates.returns_by_inst.get(&inst)?;
+        let index = self.facts.certificates.returns_by_inst.get(inst)?;
         self.facts.certificates.returns.get(*index)
     }
 

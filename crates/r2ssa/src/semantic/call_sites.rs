@@ -9,7 +9,7 @@ pub(crate) fn collect_call_sites(
     machine_context: Option<&SourceMachineContext>,
 ) -> CallSiteFacts {
     let mut by_id = BTreeMap::new();
-    let mut by_inst = BTreeMap::new();
+    let mut by_inst = crate::dense::IdMap::default();
     let mut next_id = 0u32;
 
     for &block_addr in function.block_addrs() {

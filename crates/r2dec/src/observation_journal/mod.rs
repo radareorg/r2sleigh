@@ -2598,7 +2598,7 @@ impl LegacyObservationJournal {
             // read into the return register before the machine returns it.
             fn reaches_only_return(
                 graph: &r2ssa::SsaGraph,
-                returns: &BTreeMap<InstId, usize>,
+                returns: &r2ssa::dense::IdMap<InstId, usize>,
                 owner: &dyn Fn(ValueId) -> Option<crate::binding_plan::BindingId>,
                 binding: crate::binding_plan::BindingId,
                 value: ValueId,
@@ -2606,7 +2606,7 @@ impl LegacyObservationJournal {
             ) -> bool {
                 depth < 8
                     && graph.use_sites(value).iter().all(|site| {
-                        returns.contains_key(&site.inst)
+                        returns.contains(site.inst)
                             || graph
                                 .inst(site.inst)
                                 .is_some_and(|inst| match &inst.payload {
@@ -2999,7 +2999,7 @@ impl LegacyObservationJournal {
                 matches!(target, ObservationTarget::Value(target) if *target == value).then_some(id)
             })
             .collect::<Vec<_>>();
-        if let Some(fact) = self.source.facts().certificates.call_results.get(&value) {
+        if let Some(fact) = self.source.facts().certificates.call_results.get(value) {
             let site = fact.call_site;
             for peer in self
                 .source

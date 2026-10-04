@@ -245,7 +245,7 @@ pub(crate) fn certified_boundary_read_values(
 
     if let Some(certificate) = certificates
         .returns_by_inst
-        .get(&at)
+        .get(at)
         .and_then(|index| certificates.returns.get(*index))
         .filter(|certificate| {
             certificate.at == at
@@ -267,7 +267,7 @@ pub(crate) fn certified_boundary_read_values(
         values.extend(carriers.iter().copied().filter(|value| {
             certificates
                 .call_results
-                .get(value)
+                .get(*value)
                 .is_some_and(|carrier| carrier.relation.is_identity())
         }));
     }
@@ -703,7 +703,7 @@ pub(crate) fn certified_call_site(
     let certificates = source.certificates();
     let certificate = certificates
         .callsites
-        .get(certificates.callsites_by_inst.get(&at)?)?;
+        .get(source.call_sites().by_inst.get(at)?)?;
     (certificate.at == at).then_some(certificate)
 }
 
@@ -785,7 +785,11 @@ pub(super) fn certified_direct_call_target_insts(source: &r2ssa::SsaArtifact) ->
 /// call site falls through to, and it precedes that call in its own block.
 /// Nothing else in a function stores its own continuation address.
 pub(super) fn certified_call_return_address_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
-    source.certificates().call_return_address_stores.clone()
+    source
+        .certificates()
+        .call_return_address_stores
+        .iter()
+        .collect()
 }
 
 /// The return addresses those pushes write.
@@ -897,11 +901,8 @@ impl CertifiedSilence {
     pub(crate) fn for_function(source: &r2ssa::SsaArtifact) -> Self {
         let graph = source.graph();
         let certificates = source.certificates();
-        let mut insts: BTreeSet<r2ssa::InstId> = certificates
-            .stack_frame_round_trip_by_inst
-            .keys()
-            .copied()
-            .collect();
+        let mut insts: BTreeSet<r2ssa::InstId> =
+            certificates.stack_frame_round_trip_by_inst.keys().collect();
         // Every instruction a return-control certificate answers for, not only
         // the ones it claims exclusively: the prologue's save of the return
         // address is shared with the frame's own setup and with every other
@@ -916,7 +917,7 @@ impl CertifiedSilence {
         insts.extend(certified_direct_call_target_insts(source));
         // The push that records where the call comes back to. The call
         // statement is the transfer.
-        insts.extend(certificates.call_return_address_stores.iter().copied());
+        insts.extend(certificates.call_return_address_stores.iter());
         // The halves of a memory round trip. The object ends holding what it
         // held, so the store assigns nothing and the read it puts back
         // produces a value no statement names.

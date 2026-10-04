@@ -190,7 +190,7 @@ fn return_address_object(
         let object = facts
             .certificates
             .machine_return_controls
-            .get(at)?
+            .get(*at)?
             .reload_object?;
         if found.is_some_and(|known| known != object) {
             return None;
@@ -265,7 +265,7 @@ fn recovered_return_mechanism(
             );
             return None;
         };
-        let Some(certificate) = facts.certificates.machine_return_controls.get(at) else {
+        let Some(certificate) = facts.certificates.machine_return_controls.get(*at) else {
             r2il::refusal_evidence!(
                 "interface-recovery",
                 "return {at:?} has no certified control chain, so no return mechanism"
@@ -617,7 +617,7 @@ fn returned_by_call(
             })
         })
         .last()
-        .and_then(|call| facts.call_sites.by_inst.get(call))
+        .and_then(|call| facts.call_sites.by_inst.get(*call))
     else {
         return ReturnedByCall::Produced;
     };
@@ -2337,7 +2337,7 @@ pub fn recovered_stack_slots(prepared: &crate::SsaArtifact) -> Vec<RecoveredStac
         let parameter = certificate
             .stored_values
             .iter()
-            .find_map(|value| facts.formal_parameter_of(*value))
+            .find_map(|value| facts.formal_parameter_of(value))
             .and_then(|index| u32::try_from(index).ok());
         slots.push(RecoveredStackSlot {
             offset: certificate.offset,

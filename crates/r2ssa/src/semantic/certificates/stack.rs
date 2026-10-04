@@ -432,7 +432,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
     live_out: &crate::liveout::FunctionLiveOut,
 ) -> (
     BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
-    BTreeMap<InstId, ObjectId>,
+    crate::dense::IdMap<InstId, ObjectId>,
 ) {
     let Body {
         function,
@@ -442,7 +442,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
     } = body;
     let (boundaries, structured) = (derived.boundaries, derived.structured);
     let mut certificates = BTreeMap::new();
-    let mut by_inst = BTreeMap::new();
+    let mut by_inst = crate::dense::IdMap::default();
     for (object, allocation) in callee_allocations {
         let accesses = structured
             .memory_accesses
@@ -660,9 +660,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
                 })
                 .map(|site| (*value, *site))
         });
-        if !complete
-            || escaping_read.is_some()
-            || insts.iter().any(|inst| by_inst.contains_key(inst))
+        if !complete || escaping_read.is_some() || insts.iter().any(|inst| by_inst.contains(*inst))
         {
             r2il::refusal_evidence!(
                 "frame-round-trip",
@@ -699,7 +697,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
 /// return control, and the merge analysis have already accounted for.
 pub(crate) struct StackGeometryContext<'a> {
     pub(crate) frame_round_trips: &'a BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
-    pub(crate) return_controls: &'a BTreeMap<InstId, MachineReturnControlCertificate>,
+    pub(crate) return_controls: &'a crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
     pub(crate) unobserved: &'a crate::deadphi::DeadPhis,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     pub(crate) declared_slots: &'a DeclaredStackSlots,
@@ -1175,10 +1173,10 @@ pub(crate) fn collect_stack_reload_source_certificates(
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-) -> BTreeMap<ValueId, StackReloadSourceCertificate> {
+) -> crate::dense::IdMap<ValueId, StackReloadSourceCertificate> {
     let Body { prep, graph, .. } = body;
     let store_sources = collect_stack_store_sources(body, objects, memory, accesses);
-    let mut certificates = BTreeMap::new();
+    let mut certificates = crate::dense::IdMap::default();
     let mut ready = VecDeque::new();
 
     for access in accesses.values().filter(|access| {
@@ -1235,7 +1233,7 @@ pub(crate) fn collect_stack_reload_source_certificates(
         }
     };
     while let Some(value) = ready.pop_front() {
-        let Some(cert) = certificates.get(&value).cloned() else {
+        let Some(cert) = certificates.get(value).cloned() else {
             continue;
         };
         for use_site in graph.use_sites(value) {
@@ -1245,7 +1243,7 @@ pub(crate) fn collect_stack_reload_source_certificates(
             let Some(output) = stack_reload_propagation_output(inst, value) else {
                 continue;
             };
-            if certificates.contains_key(&output) {
+            if certificates.contains(output) {
                 continue;
             }
             let value_width = graph
@@ -1312,12 +1310,12 @@ pub(crate) fn collect_stack_store_sources(
 }
 
 pub(crate) fn insert_stack_reload_source_certificate(
-    certificates: &mut BTreeMap<ValueId, StackReloadSourceCertificate>,
+    certificates: &mut crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
     ready: &mut VecDeque<ValueId>,
     cert: StackReloadSourceCertificate,
 ) {
     let value = cert.value;
-    if certificates.contains_key(&value) {
+    if certificates.contains(value) {
         return;
     }
     certificates.insert(value, cert);

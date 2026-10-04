@@ -21,11 +21,11 @@ pub(crate) fn collect_machine_return_control_certificates(
     structured: &StructuredDataflowFacts,
     unobserved: &crate::deadphi::DeadPhis,
 ) -> (
-    BTreeMap<InstId, MachineReturnControlCertificate>,
-    BTreeMap<InstId, InstId>,
+    crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
+    crate::dense::IdMap<InstId, InstId>,
 ) {
-    let mut certificates = BTreeMap::new();
-    let mut by_inst = BTreeMap::new();
+    let mut certificates = crate::dense::IdMap::default();
+    let mut by_inst = crate::dense::IdMap::default();
     for (at, boundary) in &boundaries.returns {
         let Some(return_address) = boundary.return_address else {
             continue;
@@ -184,7 +184,7 @@ pub(crate) fn collect_machine_return_control_certificates(
             })
             || insts
                 .iter()
-                .any(|inst| !absorbed.contains(inst) && by_inst.contains_key(inst))
+                .any(|inst| !absorbed.contains(inst) && by_inst.contains(*inst))
         {
             continue;
         }
@@ -225,10 +225,13 @@ pub(crate) fn collect_return_value_certificates(
     boundaries: &SourceBoundaryFacts,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
-    stack_reloads: &BTreeMap<ValueId, StackReloadSourceCertificate>,
-) -> (Vec<ReturnValueCertificate>, BTreeMap<InstId, usize>) {
+    stack_reloads: &crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
+) -> (
+    Vec<ReturnValueCertificate>,
+    crate::dense::IdMap<InstId, usize>,
+) {
     let mut returns = Vec::new();
-    let mut returns_by_inst = BTreeMap::new();
+    let mut returns_by_inst = crate::dense::IdMap::default();
 
     for (boundary_at, boundary) in &boundaries.returns {
         if boundary.at != *boundary_at || !boundary.complete {
@@ -537,13 +540,13 @@ pub(crate) fn exact_logical_lane_input(
 
 pub(crate) fn return_carrier_for_boundary_value(
     boundary: &CallBoundaryValueFact,
-    stack_reloads: &BTreeMap<ValueId, StackReloadSourceCertificate>,
+    stack_reloads: &crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
 ) -> Option<ReturnCarrier> {
     match boundary.slot {
         CallBoundarySlot::Register { .. } => return_carrier_for_boundary_slot(boundary.slot),
         CallBoundarySlot::Stack(offset) => {
             let reload = stack_reloads
-                .get(&boundary.value)
+                .get(boundary.value)
                 .filter(|reload| reload.relation == crate::view::ViewRelation::Identity)?;
             (reload.offset == offset).then_some(ReturnCarrier::StackSlot {
                 object: reload.object,

@@ -684,7 +684,7 @@ pub(crate) fn prepared_parameter_indexed_accesses(
             || !prepared
                 .certificates()
                 .expressions
-                .get(&index.value)
+                .get(index.value)
                 .is_some_and(|certificate| certificate.renderable)
         {
             continue;

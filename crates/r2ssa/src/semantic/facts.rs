@@ -587,7 +587,7 @@ pub struct CallSiteFact {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallSiteFacts {
     pub by_id: BTreeMap<CallSiteId, CallSiteFact>,
-    pub by_inst: BTreeMap<InstId, CallSiteId>,
+    pub by_inst: crate::dense::IdMap<InstId, CallSiteId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

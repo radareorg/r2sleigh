@@ -194,6 +194,18 @@ impl<I: DenseId, T> IdMap<I, T> {
         Some(value)
     }
 
+    /// Keep only the values `keep` accepts, asking in id order as an
+    /// ordered map would; `O(bound / 64 + entries)`.
+    pub fn retain(&mut self, mut keep: impl FnMut(I, &mut T) -> bool) {
+        let ids = self.present.iter().collect::<Vec<_>>();
+        for id in ids {
+            let slot = self.slots[id.index()] as usize;
+            if !keep(id, &mut self.entries[slot].1) {
+                self.remove(id);
+            }
+        }
+    }
+
     /// Every id with a value, in id order.
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.present
@@ -230,6 +242,29 @@ impl<I: DenseId, T: PartialEq> PartialEq for IdMap<I, T> {
 
 impl<I: DenseId, T: Eq> Eq for IdMap<I, T> {}
 
+/// An empty map; it grows to hold whatever is inserted.
+impl<I: DenseId, T> Default for IdMap<I, T> {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl<I: DenseId, T> FromIterator<(I, T)> for IdMap<I, T> {
+    fn from_iter<A: IntoIterator<Item = (I, T)>>(entries: A) -> Self {
+        let mut map = Self::default();
+        map.extend(entries);
+        map
+    }
+}
+
+impl<I: DenseId, T> Extend<(I, T)> for IdMap<I, T> {
+    fn extend<A: IntoIterator<Item = (I, T)>>(&mut self, entries: A) {
+        for (id, value) in entries {
+            self.insert(id, value);
+        }
+    }
+}
+
 impl<I: DenseId, T> std::ops::Index<I> for IdMap<I, T> {
     type Output = T;
 
@@ -239,7 +274,7 @@ impl<I: DenseId, T> std::ops::Index<I> for IdMap<I, T> {
 }
 
 /// A set of ids below a bound, one bit each.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct IdSet<I> {
     words: Vec<u64>,
     ids: PhantomData<fn(I) -> I>,
@@ -323,6 +358,52 @@ impl<I: DenseId> IdSet<I> {
                 })
             })
         })
+    }
+}
+
+/// Two sets are equal when they hold the same ids, whatever bound each was
+/// made with or grew to.
+impl<I> PartialEq for IdSet<I> {
+    fn eq(&self, other: &Self) -> bool {
+        let (short, long) = match self.words.len() <= other.words.len() {
+            true => (&self.words, &other.words),
+            false => (&other.words, &self.words),
+        };
+        long[..short.len()] == short[..] && long[short.len()..].iter().all(|word| *word == 0)
+    }
+}
+
+impl<I> Eq for IdSet<I> {}
+
+/// An empty set; it grows to hold whatever is inserted.
+impl<I: DenseId> Default for IdSet<I> {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl<I: DenseId> FromIterator<I> for IdSet<I> {
+    fn from_iter<T: IntoIterator<Item = I>>(ids: T) -> Self {
+        let mut set = Self::default();
+        set.extend(ids);
+        set
+    }
+}
+
+impl<I: DenseId> Extend<I> for IdSet<I> {
+    fn extend<T: IntoIterator<Item = I>>(&mut self, ids: T) {
+        for id in ids {
+            self.insert(id);
+        }
+    }
+}
+
+impl<'a, I: DenseId> IntoIterator for &'a IdSet<I> {
+    type Item = I;
+    type IntoIter = Box<dyn Iterator<Item = I> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
     }
 }
 
@@ -474,6 +555,55 @@ mod tests {
             for id in 0..200 {
                 proptest::prop_assert_eq!(map.get(ValueId(id)), model.get(&id));
             }
+            // Keeping the even ids is keeping them in the model.
+            let mut kept = map.clone();
+            let mut asked = Vec::new();
+            kept.retain(|id, _| {
+                asked.push(id.0);
+                id.0 % 2 == 0
+            });
+            let mut kept_model = model.clone();
+            kept_model.retain(|id, _| id % 2 == 0);
+            proptest::prop_assert_eq!(asked, model.keys().copied().collect::<Vec<_>>());
+            proptest::prop_assert_eq!(
+                kept.iter().map(|(id, value)| (id.0, *value)).collect::<Vec<_>>(),
+                kept_model.into_iter().collect::<Vec<_>>()
+            );
+            // Collected afresh, from bound zero, it is the same map.
+            let rebuilt = map.iter().map(|(id, value)| (id, *value)).collect::<IdMap<_, _>>();
+            proptest::prop_assert!(rebuilt == map);
+        }
+
+        /// An `IdSet` is the set its operations describe, and two sets are
+        /// equal exactly when their members are, whatever bound each was made
+        /// with or grew to.
+        #[test]
+        fn an_id_set_behaves_as_an_ordered_set(
+            first in proptest::collection::vec((0u32..300, proptest::bool::ANY), 0..300),
+            second in proptest::collection::vec((0u32..300, proptest::bool::ANY), 0..300),
+        ) {
+            let build = |bound: usize, operations: &[(u32, bool)]| {
+                let mut set = IdSet::<ValueId>::new(bound);
+                let mut model = std::collections::BTreeSet::new();
+                for &(id, add) in operations {
+                    let (changed, expected) = match add {
+                        true => (set.insert(ValueId(id)), model.insert(id)),
+                        false => (set.remove(ValueId(id)), model.remove(&id)),
+                    };
+                    assert_eq!(changed, expected);
+                }
+                (set, model)
+            };
+            let (left, left_model) = build(0, &first);
+            let (right, right_model) = build(320, &second);
+            proptest::prop_assert_eq!(left.len(), left_model.len());
+            proptest::prop_assert_eq!(
+                left.iter().map(|id| id.0).collect::<Vec<_>>(),
+                left_model.iter().copied().collect::<Vec<_>>()
+            );
+            proptest::prop_assert_eq!(left == right, left_model == right_model);
+            let (same, _) = build(320, &first);
+            proptest::prop_assert!(same == left);
         }
     }
 }

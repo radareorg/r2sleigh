@@ -2706,7 +2706,7 @@ fn prepared_signed_dividend_expr(
     dividend: &SSAVar,
 ) -> Option<CExpr> {
     let dividend_value = prepared.graph().value_id_for_var(dividend)?;
-    let certificate = prepared.certificates().expressions.get(&dividend_value)?;
+    let certificate = prepared.certificates().expressions.get(dividend_value)?;
     if certificate.value != dividend_value
         || certificate.width != dividend.size
         || !certificate.renderable

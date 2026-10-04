@@ -32,8 +32,8 @@ pub enum ValueOwner {
 }
 
 pub(crate) type CallResultCertificateIndexes = (
-    BTreeMap<ValueId, CallResultCertificate>,
-    BTreeMap<InstId, ValueId>,
+    crate::dense::IdMap<ValueId, CallResultCertificate>,
+    crate::dense::IdMap<InstId, ValueId>,
     BTreeMap<CallSiteId, Vec<ValueId>>,
 );
 
@@ -43,14 +43,10 @@ pub(crate) fn collect_call_result_certificates(
 ) -> CallResultCertificateIndexes {
     let function = body.function;
     let call_sites = derived.call_sites;
-    let mut call_results = BTreeMap::new();
-    let mut call_results_by_inst = BTreeMap::new();
+    let mut call_results = crate::dense::IdMap::default();
+    let mut call_results_by_inst = crate::dense::IdMap::default();
     let mut call_results_by_callsite = BTreeMap::<CallSiteId, Vec<ValueId>>::new();
-    let callsites_by_inst = call_sites
-        .by_id
-        .iter()
-        .map(|(id, fact)| (fact.at, *id))
-        .collect::<BTreeMap<_, _>>();
+    let callsites_by_inst = &call_sites.by_inst;
     // Settle the tracked results on the fixpoint driver first, writing no
     // certificate: a state seen before the merges settle may claim an owner
     // the settled state does not, and a certificate written from it would
@@ -69,11 +65,11 @@ pub(crate) fn collect_call_result_certificates(
                 body,
                 derived,
                 block,
-                &callsites_by_inst,
+                callsites_by_inst,
                 input.clone(),
                 CallResultSink {
-                    call_results: &mut BTreeMap::new(),
-                    call_results_by_inst: &mut BTreeMap::new(),
+                    call_results: &mut crate::dense::IdMap::default(),
+                    call_results_by_inst: &mut crate::dense::IdMap::default(),
                     call_results_by_callsite: &mut BTreeMap::new(),
                 },
             )
@@ -98,7 +94,7 @@ pub(crate) fn collect_call_result_certificates(
             body,
             derived,
             block,
-            &callsites_by_inst,
+            callsites_by_inst,
             input.clone(),
             CallResultSink {
                 call_results: &mut call_results,
@@ -118,7 +114,7 @@ pub(crate) fn collect_call_result_certificates(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CallResultFlowState {
-    pub(crate) tracked: BTreeMap<ValueId, CallResultCertificate>,
+    pub(crate) tracked: crate::dense::IdMap<ValueId, CallResultCertificate>,
     pub(crate) stack_owners: BTreeMap<(ObjectId, i64), CallResultCertificate>,
 }
 
@@ -139,8 +135,8 @@ impl crate::fixpoint::Join for CallResultFlowState {
 
 /// The three indexes a call-result certificate is recorded in at once.
 pub(crate) struct CallResultSink<'a> {
-    pub(crate) call_results: &'a mut BTreeMap<ValueId, CallResultCertificate>,
-    pub(crate) call_results_by_inst: &'a mut BTreeMap<InstId, ValueId>,
+    pub(crate) call_results: &'a mut crate::dense::IdMap<ValueId, CallResultCertificate>,
+    pub(crate) call_results_by_inst: &'a mut crate::dense::IdMap<InstId, ValueId>,
     pub(crate) call_results_by_callsite: &'a mut BTreeMap<CallSiteId, Vec<ValueId>>,
 }
 
@@ -148,7 +144,7 @@ pub(crate) fn process_call_result_flow_block(
     body: Body<'_>,
     derived: Derived<'_>,
     block: &crate::SSABlock<crate::VarId>,
-    callsites_by_inst: &BTreeMap<InstId, CallSiteId>,
+    callsites_by_inst: &crate::dense::IdMap<InstId, CallSiteId>,
     mut state: CallResultFlowState,
     sink: CallResultSink<'_>,
 ) -> CallResultFlowState {
@@ -173,7 +169,7 @@ pub(crate) fn process_call_result_flow_block(
         match op {
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 kill_return_register_flow_values(&mut state);
-                active_call = callsites_by_inst.get(&inst).copied();
+                active_call = callsites_by_inst.get(inst).copied();
             }
             SSAOp::CallDefine { dst } => {
                 let Some(call_site_id) = active_call else {
@@ -279,7 +275,7 @@ pub(crate) fn process_call_result_flow_block(
                 let Some(src_value) = graph.value_of(*src) else {
                     continue;
                 };
-                let Some(source) = state.tracked.get(&src_value) else {
+                let Some(source) = state.tracked.get(src_value) else {
                     continue;
                 };
                 let Some(dst_value) = graph.value_of(*dst) else {
@@ -310,7 +306,7 @@ pub(crate) fn process_call_result_flow_block(
                 let Some(src_value) = graph.value_of(*src) else {
                     continue;
                 };
-                let Some(source) = state.tracked.get(&src_value) else {
+                let Some(source) = state.tracked.get(src_value) else {
                     continue;
                 };
                 let Some(dst_value) = graph.value_of(*dst) else {
@@ -367,7 +363,7 @@ pub(crate) fn process_call_result_flow_block(
                     state.stack_owners.remove(&(object, offset));
                     continue;
                 };
-                let Some(source) = state.tracked.get(&value).cloned() else {
+                let Some(source) = state.tracked.get(value).cloned() else {
                     state.stack_owners.remove(&(object, offset));
                     continue;
                 };
@@ -378,12 +374,12 @@ pub(crate) fn process_call_result_flow_block(
                         ..source.clone()
                     },
                 );
-                call_results.entry(value).and_modify(|cert| {
+                if let Some(cert) = call_results.get_mut(value) {
                     cert.owner = Some(ValueOwner::StackSlot { object, offset });
-                });
-                state.tracked.entry(value).and_modify(|cert| {
+                }
+                if let Some(cert) = state.tracked.get_mut(value) {
                     cert.owner = Some(ValueOwner::StackSlot { object, offset });
-                });
+                }
             }
             SSAOp::Load {
                 space: SpaceId::Ram,
@@ -442,10 +438,10 @@ pub(crate) fn kill_return_register_flow_values(state: &mut CallResultFlowState) 
 }
 
 pub(crate) fn insert_call_result_certificate(
-    call_results: &mut BTreeMap<ValueId, CallResultCertificate>,
-    call_results_by_inst: &mut BTreeMap<InstId, ValueId>,
+    call_results: &mut crate::dense::IdMap<ValueId, CallResultCertificate>,
+    call_results_by_inst: &mut crate::dense::IdMap<InstId, ValueId>,
     call_results_by_callsite: &mut BTreeMap<CallSiteId, Vec<ValueId>>,
-    tracked: &mut BTreeMap<ValueId, CallResultCertificate>,
+    tracked: &mut crate::dense::IdMap<ValueId, CallResultCertificate>,
     cert: CallResultCertificate,
 ) {
     call_results_by_inst.insert(cert.at, cert.value);

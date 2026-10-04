@@ -277,10 +277,10 @@ pub struct StackSlotCertificate {
     /// A load whose reaching memory version is one store, at the slot's own
     /// location and width, holds what that store wrote; so does a copy of it.
     /// Rendering them and the slot as one variable asserts only that equality.
-    pub reload_values: BTreeSet<ValueId>,
+    pub reload_values: crate::dense::IdSet<ValueId>,
     /// Values a full-width store writes into the slot. Each is offered to the
     /// slot's object on its own, judged by identity and liveness.
-    pub stored_values: BTreeSet<ValueId>,
+    pub stored_values: crate::dense::IdSet<ValueId>,
     /// Exact proof that a source-less object lies wholly inside storage owned
     /// by this callee at every access. This is deliberately separate from a
     /// source slot: compiler-created spills and temporaries are real machine
@@ -371,30 +371,29 @@ pub struct PreparedFunctionCertificates {
     pub loops: BTreeMap<LoopId, LoopCertificate>,
     pub switches: BTreeMap<u64, SwitchCertificate>,
     pub if_regions: BTreeMap<PredicateId, IfRegionCertificate>,
-    pub expressions: BTreeMap<ValueId, ExpressionCertificate>,
+    pub expressions: crate::dense::IdMap<ValueId, ExpressionCertificate>,
     pub memory_accesses: BTreeMap<StructuredAccessId, MemoryAccessCertificate>,
     /// The accesses one instruction performs, by direction.
     pub memory_accesses_by_inst: BTreeMap<(InstId, bool), Vec<StructuredAccessId>>,
     pub stack_slots: BTreeMap<ObjectId, StackSlotCertificate>,
     pub stack_frame_round_trips: BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
-    pub stack_frame_round_trip_by_inst: BTreeMap<InstId, ObjectId>,
+    pub stack_frame_round_trip_by_inst: crate::dense::IdMap<InstId, ObjectId>,
     /// Accesses that together leave the object exactly as they found it.
     pub memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
     pub stack_geometry: StackGeometryCertificate,
-    pub machine_return_controls: BTreeMap<InstId, MachineReturnControlCertificate>,
-    pub machine_return_control_by_inst: BTreeMap<InstId, InstId>,
+    pub machine_return_controls: crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
+    pub machine_return_control_by_inst: crate::dense::IdMap<InstId, InstId>,
     pub callsites: BTreeMap<CallSiteId, CallsiteCertificate>,
-    pub callsites_by_inst: BTreeMap<InstId, CallSiteId>,
     /// Every call's return-address store, for the ledgers that ask per op.
-    pub call_return_address_stores: BTreeSet<InstId>,
-    pub call_results: BTreeMap<ValueId, CallResultCertificate>,
-    pub call_results_by_inst: BTreeMap<InstId, ValueId>,
+    pub call_return_address_stores: crate::dense::IdSet<InstId>,
+    pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
+    pub call_results_by_inst: crate::dense::IdMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
-    pub stack_reloads: BTreeMap<ValueId, StackReloadSourceCertificate>,
+    pub stack_reloads: crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
     pub returns: Vec<ReturnValueCertificate>,
-    pub returns_by_inst: BTreeMap<InstId, usize>,
+    pub returns_by_inst: crate::dense::IdMap<InstId, usize>,
     /// Merges of two values that the one condition above them selects between.
-    pub two_way_selections: BTreeMap<InstId, TwoWaySelectionCertificate>,
+    pub two_way_selections: crate::dense::IdMap<InstId, TwoWaySelectionCertificate>,
     pub failures: Vec<PreparedProofFailure>,
 }
 
@@ -1026,8 +1025,8 @@ pub(crate) fn collect_prepared_function_certificates(
                             .cloned()
                             .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
                         source_slot: exact_stack_slots.get(&(base, offset)).copied(),
-                        reload_values: BTreeSet::new(),
-                        stored_values: BTreeSet::new(),
+                        reload_values: crate::dense::IdSet::default(),
+                        stored_values: crate::dense::IdSet::default(),
                         callee_allocation: callee_stack_allocations.get(object).cloned(),
                     },
                 ))
@@ -1080,7 +1079,6 @@ pub(crate) fn collect_prepared_function_certificates(
             .max_by_key(|(ordinal, _)| *ordinal)
             .map(|(_, inst)| *inst)
     };
-    let mut callsites_by_inst = BTreeMap::new();
     let callsites = call_sites
         .by_id
         .iter()
@@ -1206,7 +1204,6 @@ pub(crate) fn collect_prepared_function_certificates(
                 boundary.map_or((false, false), |boundary| {
                     (boundary.arguments_complete, boundary.results_complete)
                 });
-            callsites_by_inst.insert(fact.at, *id);
             (
                 *id,
                 CallsiteCertificate {
@@ -1235,7 +1232,7 @@ pub(crate) fn collect_prepared_function_certificates(
     let call_return_address_stores = callsites
         .values()
         .filter_map(|certificate: &CallsiteCertificate| certificate.return_address_store)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
 
     let (call_results, call_results_by_inst, call_results_by_callsite) =
         collect_call_result_certificates(body, derived);
@@ -1325,7 +1322,6 @@ pub(crate) fn collect_prepared_function_certificates(
         machine_return_controls,
         machine_return_control_by_inst,
         callsites,
-        callsites_by_inst,
         call_return_address_stores,
         call_results,
         call_results_by_inst,

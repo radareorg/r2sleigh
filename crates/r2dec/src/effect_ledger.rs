@@ -118,7 +118,7 @@ fn certified_instruction_elision(
         prepared
             .certificates()
             .stack_frame_round_trip_by_inst
-            .contains_key(&inst)
+            .contains(inst)
     }) {
         return Some(ElisionReason::StackFrame);
     }
@@ -126,7 +126,7 @@ fn certified_instruction_elision(
         prepared
             .certificates()
             .machine_return_control_by_inst
-            .contains_key(&inst)
+            .contains(inst)
     }) {
         return Some(ElisionReason::ReturnControl);
     }
@@ -163,7 +163,7 @@ fn certified_instruction_elision(
                 r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
             ) && inst
                 .output
-                .is_some_and(|output| !prepared.certificates().call_results.contains_key(&output))
+                .is_some_and(|output| !prepared.certificates().call_results.contains(output))
         })
     }) {
         return Some(ElisionReason::UnclaimedCallClobber);
@@ -174,7 +174,7 @@ fn certified_instruction_elision(
         prepared
             .certificates()
             .call_return_address_stores
-            .contains(&inst)
+            .contains(inst)
     }) {
         return Some(ElisionReason::CallReturnAddress);
     }

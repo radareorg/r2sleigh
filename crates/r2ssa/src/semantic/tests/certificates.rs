@@ -199,7 +199,7 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
         artifact
             .certificates()
             .stack_frame_round_trip_by_inst
-            .get(inst)
+            .get(*inst)
             == Some(&store.location.object)
     }));
     let geometry_sites = artifact
@@ -529,7 +529,7 @@ fn machine_return_control_certificate_owns_exact_stack_reload() {
     let certificate = artifact
         .certificates()
         .machine_return_controls
-        .get(&return_inst)
+        .get(return_inst)
         .expect("machine return-control certificate");
     assert_eq!(certificate.storage, register_storage(16, 8));
     assert_eq!(certificate.insts, BTreeSet::from([load_inst]));
@@ -544,7 +544,7 @@ fn machine_return_control_certificate_owns_exact_stack_reload() {
         artifact
             .certificates()
             .machine_return_control_by_inst
-            .get(&load_inst),
+            .get(load_inst),
         Some(&return_inst)
     );
     assert!(
