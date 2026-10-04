@@ -241,22 +241,22 @@ pub struct SsaGraph {
     ///
     /// Carried here from the function so a consumer holding only the graph can
     /// ask. Absent for a phi and for anything the lifter stamped no address on.
-    pub(crate) instruction_by_inst: BTreeMap<InstId, u64>,
+    pub(crate) instruction_by_inst: crate::dense::IdMap<InstId, u64>,
     /// The inverse: every operation one machine instruction became, in order.
     pub(crate) insts_by_instruction: BTreeMap<u64, Vec<InstId>>,
     /// Entry-lane projections by value, valued by the lane's storage
     /// (`SSAFunction::mint_entry_lane_projections`).
-    pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
+    pub(crate) formal_projections: crate::dense::IdMap<ValueId, CanonicalStorageId>,
     /// Entry roots rebuilt from their declared lanes, valued by the root's
     /// storage (`SSAFunction::mint_entry_lane_projections`).
-    pub(crate) formal_roots: BTreeMap<ValueId, CanonicalStorageId>,
+    pub(crate) formal_roots: crate::dense::IdMap<ValueId, CanonicalStorageId>,
     /// Each entry-lane formal at the low end of its root, with the root.
     pub(crate) entry_lanes: Vec<(SSAVar, SSAVar)>,
 }
 
 /// Record which machine instruction one operation came from, both ways round.
 fn record_instruction(
-    by_inst: &mut BTreeMap<InstId, u64>,
+    by_inst: &mut crate::dense::IdMap<InstId, u64>,
     by_instruction: &mut BTreeMap<u64, Vec<InstId>>,
     inst: InstId,
     from: Option<u64>,
@@ -430,7 +430,7 @@ impl SsaGraph {
         let mut insts = Vec::new();
         let mut inst_by_op = vec![None; function.id_limit()];
         let mut op_by_inst = Vec::new();
-        let mut instruction_by_inst = BTreeMap::new();
+        let mut instruction_by_inst = crate::dense::IdMap::default();
         let mut insts_by_instruction: BTreeMap<u64, Vec<InstId>> = BTreeMap::new();
 
         for block in function.blocks() {
@@ -558,7 +558,7 @@ impl SsaGraph {
     /// Whether the caller supplied this value: an entry value with no
     /// defining instruction, or a lane the declaration mints from one.
     pub fn caller_supplied(&self, value: ValueId) -> bool {
-        self.def_inst(value).is_none() || self.formal_projections.contains_key(&value)
+        self.def_inst(value).is_none() || self.formal_projections.contains(value)
     }
 
     /// Whether this function's body wrote the value. It wrote no
@@ -567,16 +567,16 @@ impl SsaGraph {
     /// restates what the caller passed rather than storing anything the body
     /// computed.
     pub fn written_by_body(&self, value: ValueId) -> bool {
-        !self.caller_supplied(value) && !self.formal_roots.contains_key(&value)
+        !self.caller_supplied(value) && !self.formal_roots.contains(value)
     }
 
     /// The lane storage an entry-lane projection stands for.
     pub fn formal_projection_storage(&self, value: ValueId) -> Option<CanonicalStorageId> {
-        self.formal_projections.get(&value).copied()
+        self.formal_projections.get(value).copied()
     }
 
     /// Every entry-lane projection with the lane it stands for.
-    pub fn formal_projections(&self) -> impl Iterator<Item = (&ValueId, &CanonicalStorageId)> {
+    pub fn formal_projections(&self) -> impl Iterator<Item = (ValueId, &CanonicalStorageId)> {
         self.formal_projections.iter()
     }
 
@@ -684,7 +684,7 @@ impl SsaGraph {
     /// index space instead was wrong from the first operation renaming added
     /// to a block, and wrong in silence.
     pub fn instruction_for_inst(&self, id: InstId) -> Option<u64> {
-        self.instruction_by_inst.get(&id).copied()
+        self.instruction_by_inst.get(id).copied()
     }
 
     /// Every operation one machine instruction became, in order.

@@ -40,7 +40,7 @@ pub struct FrameReach {
     /// A frame address escaped that names no object, so every frame object is
     /// reachable.
     whole: bool,
-    by_call: BTreeMap<InstId, CallFrameReach>,
+    by_call: crate::dense::IdMap<InstId, CallFrameReach>,
 }
 
 impl FrameReach {
@@ -58,14 +58,14 @@ impl FrameReach {
 
     /// Every call this fact bounds or does not, in instruction order.
     pub fn calls(&self) -> impl Iterator<Item = (InstId, &CallFrameReach)> {
-        self.by_call.iter().map(|(call, reach)| (*call, reach))
+        self.by_call.iter()
     }
 
     /// The frame objects this call reaches through its argument area, beyond
     /// those that have escaped. A call this fact does not know reaches all.
     pub fn call(&self, call: InstId) -> &CallFrameReach {
         const WHOLE: &CallFrameReach = &CallFrameReach::Whole;
-        self.by_call.get(&call).unwrap_or(WHOLE)
+        self.by_call.get(call).unwrap_or(WHOLE)
     }
 
     pub(crate) fn of(
@@ -267,8 +267,8 @@ fn call_reaches(
     facts: &DecompilePrepFacts,
     frame: &BTreeMap<ObjectId, Option<i64>>,
     machine_context: Option<&SourceMachineContext>,
-) -> BTreeMap<InstId, CallFrameReach> {
-    let mut out = BTreeMap::new();
+) -> crate::dense::IdMap<InstId, CallFrameReach> {
+    let mut out = crate::dense::IdMap::default();
     let Some(machine_context) = machine_context else {
         return out;
     };

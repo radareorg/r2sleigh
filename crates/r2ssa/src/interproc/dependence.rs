@@ -305,7 +305,7 @@ impl FormalDependence {
             .map_or(0, |reload| self.bits_of(reload.source));
         self.frame
             .sources
-            .get(&value)
+            .get(value)
             .into_iter()
             .flatten()
             .map(|stored| self.bits_of(*stored))
@@ -338,7 +338,7 @@ impl FormalDependence {
 #[derive(Default)]
 struct FrameTraffic {
     /// Each load of the frame, and the values stored where it may read.
-    sources: BTreeMap<ValueId, Vec<ValueId>>,
+    sources: crate::dense::IdMap<ValueId, Vec<ValueId>>,
     /// Every value written to the frame where an escaping address can reach
     /// it: stored to it, or written to a slot promotion took out of it.
     exposed: Vec<ValueId>,
@@ -433,7 +433,7 @@ impl FrameTraffic {
         for (value, place) in &loads {
             read_at.entry(place).or_default().push(*value);
         }
-        let mut sources = BTreeMap::<ValueId, Vec<ValueId>>::new();
+        let mut sources = crate::dense::IdMap::<ValueId, Vec<ValueId>>::default();
         for (read, readers) in &read_at {
             let reached = stored_at
                 .iter()

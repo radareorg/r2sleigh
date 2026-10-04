@@ -533,10 +533,10 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
         value_index: crate::graph::value_index_of(&values),
         inst_by_op: vec![Some(InstId(0))],
         op_by_inst: vec![crate::arena::local_id(0)],
-        instruction_by_inst: [(InstId(0), 0x1000)].into(),
+        instruction_by_inst: [(InstId(0), 0x1000)].into_iter().collect(),
         insts_by_instruction: [(0x1000, vec![InstId(0)])].into(),
-        formal_projections: BTreeMap::new(),
-        formal_roots: BTreeMap::new(),
+        formal_projections: crate::dense::IdMap::default(),
+        formal_roots: crate::dense::IdMap::default(),
         entry_lanes: Vec::new(),
     };
     let inst = graph.inst(InstId(0)).expect("shift instruction");

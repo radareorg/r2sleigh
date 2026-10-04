@@ -1443,7 +1443,7 @@ pub(crate) fn unique_entry_values_by_storage(
         values
             .entry(*storage)
             .and_modify(|existing| *existing = None)
-            .or_insert(Some(*value));
+            .or_insert(Some(value));
     }
     values
 }

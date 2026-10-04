@@ -24,7 +24,7 @@ use crate::graph::{SsaGraph, ValueId};
 /// The values a function hands back to its caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionLiveOut {
-    values: BTreeSet<ValueId>,
+    values: crate::dense::IdSet<ValueId>,
     /// The values each returning block hands back, by the block's address.
     by_return: BTreeMap<u64, BTreeSet<ValueId>>,
     /// Return blocks where no definition of a return register could be found.
@@ -209,11 +209,11 @@ impl FunctionLiveOut {
 
     /// Whether the caller reads this value once the function returns.
     pub fn contains(&self, value: ValueId) -> bool {
-        self.values.contains(&value)
+        self.values.contains(value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.values.iter().copied()
+        self.values.iter()
     }
 
     pub fn len(&self) -> usize {

@@ -232,6 +232,25 @@ impl<'a, I: DenseId, T> IntoIterator for &'a IdMap<I, T> {
     }
 }
 
+/// Written as a map from id to value, in id order: the shape an ordered map
+/// of the same entries is written in.
+impl<I: DenseId + serde::Serialize, T: serde::Serialize> serde::Serialize for IdMap<I, T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.iter())
+    }
+}
+
+impl<'de, I, T> serde::Deserialize<'de> for IdMap<I, T>
+where
+    I: DenseId + Ord + serde::Deserialize<'de>,
+    T: serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = std::collections::BTreeMap::<I, T>::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
 /// The entries, moved out in id order.
 impl<I: DenseId, T> IntoIterator for IdMap<I, T> {
     type Item = (I, T);

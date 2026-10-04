@@ -260,8 +260,8 @@ pub(crate) fn loop_carrier_facts(
     // mutable carrier after structured control flow. Resolve the transitive
     // relation through a sorted worklist: every phi edge is reconsidered only
     // when a newly certified output can change its answer.
-    let mut owners_by_value = BTreeMap::<ValueId, BTreeSet<usize>>::new();
-    let mut continuing_owners_by_value = BTreeMap::<ValueId, BTreeSet<usize>>::new();
+    let mut owners_by_value = crate::dense::IdMap::<ValueId, BTreeSet<usize>>::default();
+    let mut continuing_owners_by_value = crate::dense::IdMap::<ValueId, BTreeSet<usize>>::default();
     for (carrier_index, carrier) in carriers.iter().enumerate() {
         for value in carrier
             .identity_values
@@ -273,8 +273,7 @@ pub(crate) fn loop_carrier_facts(
             }))
         {
             owners_by_value
-                .entry(value)
-                .or_default()
+                .get_or_insert_with(value, Default::default)
                 .insert(carrier_index);
         }
         for value in carrier
@@ -286,8 +285,7 @@ pub(crate) fn loop_carrier_facts(
             }))
         {
             continuing_owners_by_value
-                .entry(value)
-                .or_default()
+                .get_or_insert_with(value, Default::default)
                 .insert(carrier_index);
         }
     }
@@ -316,7 +314,7 @@ pub(crate) fn loop_carrier_facts(
         let Some(output) = inst.output else {
             continue;
         };
-        if owners_by_value.contains_key(&output)
+        if owners_by_value.contains(output)
             || predecessors.len() != inst.inputs.len()
             || inst.inputs.is_empty()
             || inst.inputs.iter().copied().collect::<BTreeSet<_>>().len() != inst.inputs.len()
@@ -326,13 +324,13 @@ pub(crate) fn loop_carrier_facts(
         let Some(mut candidate_owners) = inst
             .inputs
             .first()
-            .and_then(|input| owners_by_value.get(input))
+            .and_then(|input| owners_by_value.get(*input))
             .cloned()
         else {
             continue;
         };
         for input in inst.inputs.iter().skip(1) {
-            let Some(input_owners) = owners_by_value.get(input) else {
+            let Some(input_owners) = owners_by_value.get(*input) else {
                 candidate_owners.clear();
                 break;
             };
@@ -341,7 +339,7 @@ pub(crate) fn loop_carrier_facts(
         candidate_owners.retain(|owner| {
             inst.inputs.iter().any(|input| {
                 continuing_owners_by_value
-                    .get(input)
+                    .get(*input)
                     .is_some_and(|owners| owners.contains(owner))
             })
         });
@@ -384,12 +382,10 @@ pub(crate) fn loop_carrier_facts(
             }
         }
         owners_by_value
-            .entry(output)
-            .or_default()
+            .get_or_insert_with(output, Default::default)
             .insert(carrier_index);
         continuing_owners_by_value
-            .entry(output)
-            .or_default()
+            .get_or_insert_with(output, Default::default)
             .insert(carrier_index);
         for site in graph.use_sites(output) {
             if graph

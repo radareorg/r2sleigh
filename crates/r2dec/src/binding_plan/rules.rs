@@ -2503,7 +2503,7 @@ pub(crate) fn certificate_elided_cells(
     // `Subpiece` minting it from the root's entry value has no statement, and
     // its read of the root is not an occurrence (doc/adr-register-identity.md).
     for (value, _) in graph.formal_projections() {
-        let Some(inst) = graph.def_inst(*value) else {
+        let Some(inst) = graph.def_inst(value) else {
             continue;
         };
         let definition = graph

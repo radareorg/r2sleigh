@@ -18,7 +18,7 @@ pub(crate) fn private_stack_objects(
     let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
     // Every value that names some stack address. Arithmetic from one slot's
     // base to another slot's address stays inside the frame and is not escape.
-    let mut stack_addresses = BTreeSet::<ValueId>::new();
+    let mut stack_addresses = crate::dense::IdSet::<ValueId>::default();
     for (key, object) in &objects.value_objects {
         if key.space != SpaceId::Ram {
             continue;
@@ -92,7 +92,7 @@ pub(crate) fn private_stack_objects(
 pub(crate) fn stack_address_escape(
     graph: &SsaGraph,
     access_addresses: &BTreeSet<(InstId, ValueId)>,
-    stack_addresses: &BTreeSet<ValueId>,
+    stack_addresses: &crate::dense::IdSet<ValueId>,
     live_out: &crate::liveout::FunctionLiveOut,
     addresses: &BTreeSet<ValueId>,
 ) -> Option<UseSite> {
@@ -147,7 +147,7 @@ pub(crate) fn stack_address_escape(
             let Some(output) = inst.output else {
                 return Some(*site);
             };
-            if stack_addresses.contains(&output) {
+            if stack_addresses.contains(output) {
                 continue;
             }
             pending.push(output);

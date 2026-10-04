@@ -111,7 +111,7 @@ fn dispatch_operations(
     // operation already found. A worklist: each value keeps the uses not
     // yet found, and its definition joins when the last one is.
     let mut found = BTreeSet::from([transfer]);
-    let mut outstanding = BTreeMap::<ValueId, BTreeSet<InstId>>::new();
+    let mut outstanding = crate::dense::IdMap::<ValueId, BTreeSet<InstId>>::default();
     let mut pending = vec![transfer];
     while let Some(inst) = pending.pop() {
         let Some(inputs) = graph.inst(inst).map(|inst| inst.inputs.clone()) else {
@@ -129,7 +129,7 @@ fn dispatch_operations(
             {
                 continue;
             }
-            let uses = outstanding.entry(value).or_insert_with(|| {
+            let uses = outstanding.get_or_insert_with(value, || {
                 graph
                     .use_sites(value)
                     .iter()

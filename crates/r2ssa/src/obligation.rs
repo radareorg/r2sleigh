@@ -493,10 +493,7 @@ impl SemanticObligationInventory {
         >,
     ) -> Self {
         let (canonical_ids, mut construction_failures) = collect_canonical_instruction_ids(graph);
-        let mut required = BTreeMap::<
-            InstId,
-            BTreeSet<(SemanticObligationKind, SemanticObligationComponent)>,
-        >::new();
+        let mut required = ObligationSeeds::default();
         let mut explicit_inputs = BTreeMap::<
             (InstId, SemanticObligationKind, SemanticObligationComponent),
             Vec<ValueId>,
@@ -505,7 +502,7 @@ impl SemanticObligationInventory {
             (InstId, SemanticObligationKind, SemanticObligationComponent),
             UseSite,
         >::new();
-        let mut unsupported = BTreeSet::<InstId>::new();
+        let mut unsupported = crate::dense::IdSet::<InstId>::default();
         let mut duplicate_seeds =
             BTreeSet::<(InstId, SemanticObligationKind, SemanticObligationComponent)>::new();
 
@@ -801,7 +798,7 @@ impl SemanticObligationInventory {
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
         propagate_live_dependencies(graph, &mut required);
-        let live_before_loop_annotation = required.keys().copied().collect::<BTreeSet<_>>();
+        let live_before_loop_annotation = required.keys().collect::<BTreeSet<_>>();
         for fact in structured.loops.values() {
             for carrier in &fact.carriers {
                 let carrier_inst = graph.def_inst(carrier.phi);
@@ -871,10 +868,10 @@ impl SemanticObligationInventory {
         inventory.construction_failures = construction_failures;
         inventory.unstructured_cycle_blocks = structured.unstructured_cycle_blocks.clone();
         for inst in &graph.insts {
-            let Some(id) = canonical_ids.get(&inst.id).copied() else {
+            let Some(id) = canonical_ids.get(inst.id).copied() else {
                 continue;
             };
-            let kinds = required.remove(&inst.id).unwrap_or_default();
+            let kinds = required.remove(inst.id).unwrap_or_default();
             if !kinds.is_empty()
                 && inst
                     .output
@@ -888,7 +885,7 @@ impl SemanticObligationInventory {
                     inst.output
                 );
             }
-            let state = if unsupported.contains(&inst.id) {
+            let state = if unsupported.contains(inst.id) {
                 SemanticInstructionState::UnsupportedUnknown
             } else if !kinds.is_empty() {
                 SemanticInstructionState::LiveObligation
@@ -1288,10 +1285,10 @@ fn boundary_component(slot: crate::semantic::CallBoundarySlot) -> SemanticObliga
 fn collect_canonical_instruction_ids(
     graph: &SsaGraph,
 ) -> (
-    BTreeMap<InstId, CanonicalInstructionId>,
+    crate::dense::IdMap<InstId, CanonicalInstructionId>,
     Vec<ObligationInventoryFailure>,
 ) {
-    let mut ids = BTreeMap::new();
+    let mut ids = crate::dense::IdMap::new(graph.insts.len());
     let mut owners = BTreeMap::<CanonicalInstructionId, InstId>::new();
     let mut failures = Vec::new();
     for inst in &graph.insts {
@@ -1342,13 +1339,13 @@ fn collect_canonical_instruction_ids(
 }
 
 type ObligationSeeds =
-    BTreeMap<InstId, BTreeSet<(SemanticObligationKind, SemanticObligationComponent)>>;
+    crate::dense::IdMap<InstId, BTreeSet<(SemanticObligationKind, SemanticObligationComponent)>>;
 
 fn taint_incomplete_boundary_inputs(
     graph: &SsaGraph,
     boundary_inst: InstId,
     required: &mut ObligationSeeds,
-    unsupported: &mut BTreeSet<InstId>,
+    unsupported: &mut crate::dense::IdSet<InstId>,
 ) {
     let Some(boundary) = graph.inst(boundary_inst) else {
         return;
@@ -1447,7 +1444,7 @@ fn seed_direct_obligations(
         Vec<ValueId>,
     >,
     duplicate_seeds: &mut BTreeSet<(InstId, SemanticObligationKind, SemanticObligationComponent)>,
-    unsupported: &mut BTreeSet<InstId>,
+    unsupported: &mut crate::dense::IdSet<InstId>,
 ) {
     use SemanticObligationComponent as Component;
     use SemanticObligationKind as Kind;
@@ -1660,7 +1657,9 @@ fn seed_instruction(
     component: SemanticObligationComponent,
     required: &mut ObligationSeeds,
 ) {
-    required.entry(inst).or_default().insert((kind, component));
+    required
+        .get_or_insert_with(inst, Default::default)
+        .insert((kind, component));
 }
 
 fn seed_instruction_with_inputs(
@@ -1696,7 +1695,7 @@ fn seed_value_definition(
 }
 
 fn propagate_live_dependencies(graph: &SsaGraph, required: &mut ObligationSeeds) {
-    let mut ready = required.keys().copied().collect::<VecDeque<_>>();
+    let mut ready = required.keys().collect::<VecDeque<_>>();
     let mut visited = BTreeSet::new();
     while let Some(inst_id) = ready.pop_front() {
         if !visited.insert(inst_id) {
@@ -1709,7 +1708,7 @@ fn propagate_live_dependencies(graph: &SsaGraph, required: &mut ObligationSeeds)
             let Some(definition) = graph.def_inst(*input) else {
                 continue;
             };
-            let was_live = required.contains_key(&definition);
+            let was_live = required.contains(definition);
             seed_instruction(
                 definition,
                 SemanticObligationKind::LiveValueProducer,

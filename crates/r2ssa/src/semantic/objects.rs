@@ -34,8 +34,8 @@ pub(crate) fn collect_access_summaries(
     prep_facts: Option<&DecompilePrepFacts>,
     addresses: &AddressProvenanceFacts,
     object_model: &ObjectModel,
-) -> BTreeMap<InstId, AccessSummary> {
-    let mut summaries = BTreeMap::new();
+) -> crate::dense::IdMap<InstId, AccessSummary> {
+    let mut summaries = crate::dense::IdMap::default();
 
     for block in function.named_blocks() {
         for (op_id, op) in block.sited() {
@@ -212,7 +212,7 @@ pub(crate) fn build_memory_ssa(
     function: &SSAFunction,
     graph: &SsaGraph,
     object_model: &ObjectModel,
-    access_summaries: BTreeMap<InstId, AccessSummary>,
+    access_summaries: crate::dense::IdMap<InstId, AccessSummary>,
 ) -> MemorySSAFacts {
     let mut next_version_by_object = BTreeMap::<ObjectId, u32>::new();
     for object in object_model.objects.keys() {
@@ -227,11 +227,11 @@ pub(crate) fn build_memory_ssa(
         *next = next.saturating_add(1);
         version
     };
-    let mut def_versions = BTreeMap::<InstId, Vec<MemoryVersion>>::new();
+    let mut def_versions = crate::dense::IdMap::<InstId, Vec<MemoryVersion>>::default();
     for (inst_id, summary) in &access_summaries {
         if !summary.defs.is_empty() {
             let versions = summary.defs.iter().map(|location| mint(location.object));
-            def_versions.insert(*inst_id, versions.collect());
+            def_versions.insert(inst_id, versions.collect());
         }
     }
     let locations = access_summaries
@@ -257,7 +257,7 @@ pub(crate) fn build_memory_ssa(
                 let Some(inst_id) = graph.inst_for_op(op_id) else {
                     continue;
                 };
-                let Some(summary) = access_summaries.get(&inst_id) else {
+                let Some(summary) = access_summaries.get(inst_id) else {
                     continue;
                 };
                 let reaching = |state: &Holding, location: &MemoryLocation| {
@@ -273,7 +273,7 @@ pub(crate) fn build_memory_ssa(
                 for location in &summary.uses {
                     seen(inst_id, Access::Use(location, reaching(&state, location)));
                 }
-                let Some(versions) = def_versions.get(&inst_id) else {
+                let Some(versions) = def_versions.get(inst_id) else {
                     continue;
                 };
                 for (location, next) in summary.defs.iter().zip(versions) {
