@@ -785,9 +785,8 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
 /// The carrier the answered returns fill, void where none does, unproven where one is stated nowhere.
 ///
 /// Its width is the widest any return path wrote (doc/adr-written-lanes.md):
-/// one past the highest byte some path computed or moved there, as lifted.
-/// A path that wrote no byte of it hands back what the caller left, whose
-/// width the body does not state, so the result is unproven.
+/// one past the highest byte some path computed or moved there, as lifted,
+/// and the carrier's own where a path wrote none of it.
 fn recovered_result(
     func: &SSAFunction,
     graph: &SsaGraph,
@@ -811,9 +810,12 @@ fn recovered_result(
             return RecoveredFunctionResult::Unproven;
         }
         let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
-        let Some(observed_size) = crate::lanes::written_width(&bytes, storage) else {
-            return RecoveredFunctionResult::Unproven;
-        };
+        // A path that writes no byte of the carrier hands back what the
+        // caller left there -- on arm64, the first argument, returned through
+        // a spill and reload -- whose width the body does not narrow: the
+        // carrier's. Whether that hands-back is a result at all is decided
+        // above, by the definitions that reach the return.
+        let observed_size = crate::lanes::written_width(&bytes, storage).unwrap_or(storage.size);
         signed &= crate::lanes::signed(&bytes, observed_size);
         let storage = CanonicalStorageId {
             space: slot.space,
