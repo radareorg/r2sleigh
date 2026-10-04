@@ -109,7 +109,10 @@ impl FormalDependence {
             frame: FrameTraffic::of(prepared),
             exposed: 0,
         };
-        while dependence.pass(prepared) {}
+        // Named once, not once a pass: the pass reads names until this
+        // module reads values (doc/adr-one-ir.md, F2.3 stage 5).
+        let named = prepared.function().named_blocks();
+        while dependence.pass(prepared, &named) {}
         dependence
     }
 
@@ -219,7 +222,7 @@ impl FormalDependence {
     }
 
     /// One pass over the blocks in order; whether any value gained a bit.
-    fn pass(&mut self, prepared: &SsaArtifact) -> bool {
+    fn pass(&mut self, prepared: &SsaArtifact, named: &[crate::block::SSABlock]) -> bool {
         let exposed = self
             .frame
             .exposed
@@ -228,7 +231,7 @@ impl FormalDependence {
             .fold(0, |left, right| left | right);
         let mut changed = exposed != self.exposed;
         self.exposed = exposed;
-        for block in prepared.function().named_blocks() {
+        for block in named {
             for phi in block.phis() {
                 let inputs = phi
                     .sources
@@ -237,7 +240,7 @@ impl FormalDependence {
                     .fold(0, |left, right| left | right);
                 changed |= self.raise(prepared, &phi.dst, inputs);
             }
-            changed |= self.ops_pass(prepared, &block);
+            changed |= self.ops_pass(prepared, block);
         }
         changed
     }

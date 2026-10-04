@@ -62,13 +62,13 @@ pub(crate) fn collect_call_result_certificates(
         height,
         CallResultFlowState::default(),
         |block_addr, input| {
-            let Some(block) = function.named_block(block_addr) else {
+            let Some(block) = function.get_block(block_addr) else {
                 return input.clone();
             };
             process_call_result_flow_block(
                 body,
                 derived,
-                &block,
+                block,
                 &callsites_by_inst,
                 input.clone(),
                 CallResultSink {
@@ -89,7 +89,7 @@ pub(crate) fn collect_call_result_certificates(
     // Then the certificates, once, from each block's settled entry state.
     for &block_addr in function.block_addrs() {
         let (Some(block), Some(input)) = (
-            function.named_block(block_addr),
+            function.get_block(block_addr),
             solved.entry.get(&block_addr),
         ) else {
             continue;
@@ -97,7 +97,7 @@ pub(crate) fn collect_call_result_certificates(
         process_call_result_flow_block(
             body,
             derived,
-            &block,
+            block,
             &callsites_by_inst,
             input.clone(),
             CallResultSink {
@@ -147,12 +147,13 @@ pub(crate) struct CallResultSink<'a> {
 pub(crate) fn process_call_result_flow_block(
     body: Body<'_>,
     derived: Derived<'_>,
-    block: &crate::FunctionSSABlock,
+    block: &crate::SSABlock<crate::VarId>,
     callsites_by_inst: &BTreeMap<InstId, CallSiteId>,
     mut state: CallResultFlowState,
     sink: CallResultSink<'_>,
 ) -> CallResultFlowState {
     let graph = body.graph;
+    let width = |id: &crate::VarId| body.function.var(*id).size;
     let (boundaries, objects, call_sites, structured) = (
         derived.boundaries,
         derived.objects,
@@ -181,7 +182,7 @@ pub(crate) fn process_call_result_flow_block(
                 if !call_sites.by_id.contains_key(&call_site_id) {
                     continue;
                 }
-                let Some(value) = graph.value_id_for_var(dst) else {
+                let Some(value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let Some(boundary) = boundaries
@@ -261,7 +262,7 @@ pub(crate) fn process_call_result_flow_block(
                     call_site: call_site_id,
                     at: inst,
                     value,
-                    width: dst.size,
+                    width: width(dst),
                     relation,
                     carrier,
                     owner: Some(ValueOwner::Value(value)),
@@ -275,20 +276,20 @@ pub(crate) fn process_call_result_flow_block(
                 );
             }
             SSAOp::Copy { dst, src } => {
-                let Some(src_value) = graph.value_id_for_var(src) else {
+                let Some(src_value) = graph.value_of(*src) else {
                     continue;
                 };
                 let Some(source) = state.tracked.get(&src_value) else {
                     continue;
                 };
-                let Some(dst_value) = graph.value_id_for_var(dst) else {
+                let Some(dst_value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
                     at: inst,
                     value: dst_value,
-                    width: dst.size,
+                    width: width(dst),
                     relation: source.relation,
                     carrier: source.carrier.clone(),
                     owner: source.owner.clone().or(Some(ValueOwner::Value(src_value))),
@@ -306,20 +307,20 @@ pub(crate) fn process_call_result_flow_block(
             | SSAOp::Trunc { dst, src }
             | SSAOp::Cast { dst, src, .. }
             | SSAOp::Subpiece { dst, src, .. } => {
-                let Some(src_value) = graph.value_id_for_var(src) else {
+                let Some(src_value) = graph.value_of(*src) else {
                     continue;
                 };
                 let Some(source) = state.tracked.get(&src_value) else {
                     continue;
                 };
-                let Some(dst_value) = graph.value_id_for_var(dst) else {
+                let Some(dst_value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
                     at: inst,
                     value: dst_value,
-                    width: dst.size,
+                    width: width(dst),
                     relation: CallResultValueRelation::Derived,
                     carrier: source.carrier.clone(),
                     owner: source.owner.clone().or(Some(ValueOwner::Value(src_value))),
@@ -337,7 +338,7 @@ pub(crate) fn process_call_result_flow_block(
                 val,
                 ..
             } => {
-                let value = graph.value_id_for_var(val);
+                let value = graph.value_of(*val);
                 let stack_access = value
                     .and_then(|value| {
                         stack_memory_access_at(StackMemoryAccessInput {
@@ -389,7 +390,7 @@ pub(crate) fn process_call_result_flow_block(
                 dst,
                 ..
             } => {
-                let Some(dst_value) = graph.value_id_for_var(dst) else {
+                let Some(dst_value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let Some((object, offset, access)) =
@@ -411,7 +412,7 @@ pub(crate) fn process_call_result_flow_block(
                     call_site: source.call_site,
                     at: inst,
                     value: dst_value,
-                    width: dst.size,
+                    width: width(dst),
                     relation: source.relation,
                     carrier: ReturnCarrier::StackSlot {
                         object,

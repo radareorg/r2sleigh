@@ -3395,7 +3395,7 @@ impl SSAFunction {
     }
 
     /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
-    pub fn enters_supervisor(&self, op: &SSAOp) -> bool {
+    pub fn enters_supervisor<V>(&self, op: &SSAOp<V>) -> bool {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
 

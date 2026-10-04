@@ -749,7 +749,7 @@ fn unrooted_definition_chain(
 }
 
 /// The last operation of a block past a call's boundary: its `CallDefine` and `CallRestore` run and the lanes it inserts.
-fn terminal_past_call_boundary(ops: &[SSAOp]) -> Option<&SSAOp> {
+fn terminal_past_call_boundary<V: Ord>(ops: &[SSAOp<V>]) -> Option<&SSAOp<V>> {
     let call_defined = ops
         .iter()
         .filter_map(|op| match op {
@@ -791,7 +791,7 @@ pub(crate) fn preserved_call_carriers(
         return BTreeSet::new();
     }
     let mut saw_return = false;
-    for block in function.named_blocks() {
+    for block in function.blocks() {
         if !function.successors(block.addr).is_empty() {
             continue;
         }
@@ -970,7 +970,7 @@ pub(crate) fn reaching_abi_value_at_end(
     visited: &BTreeMap<u64, usize>,
     memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
-    let boundary = search.function.named_block(block_addr)?.ops().len();
+    let boundary = search.function.get_block(block_addr)?.ops().len();
     if visited.contains_key(&block_addr) {
         return reaching_abi_value_before(search, block_addr, boundary, visited, memo);
     }
@@ -996,7 +996,8 @@ pub(crate) fn reaching_abi_value_before(
         storage,
         policy,
     } = search;
-    let block = function.named_block(block_addr)?;
+    let block = function.get_block(block_addr)?;
+    let var = |id: crate::VarId| function.var(id);
     // A block already on this path was scanned up to the boundary it was
     // entered at; a back edge asks about the rest of it. What that rest
     // defines reaches the boundary round the loop, and what it does not
@@ -1035,7 +1036,8 @@ pub(crate) fn reaching_abi_value_before(
         {
             r2il::refusal_evidence!(
                 "reaching-abi-value",
-                "({block_addr:#x}, {op_index}) is a barrier for {storage:?}: {op:?}"
+                "({block_addr:#x}, {op_index}) is a barrier for {storage:?}: {:?}",
+                function.named(op)
             );
             return None;
         }
@@ -1052,7 +1054,7 @@ pub(crate) fn reaching_abi_value_before(
             r2il::refusal_evidence!(
                 "reaching-abi-value",
                 "({block_addr:#x}, {op_index}) defines {:?} with no canonical storage; skipped while looking for {storage:?}",
-                op.dst()
+                op.dst().map(|dst| var(*dst))
             );
             continue;
         };
@@ -1075,12 +1077,12 @@ pub(crate) fn reaching_abi_value_before(
             // definition when the lane is beside it.
             if let SSAOp::Insert(insert) = op
                 && contained_register_storage_offset(dst_storage, storage).is_some()
-                && let Some(lsb_bits) = insert.position.constant_bits()
+                && let Some(lsb_bits) = var(insert.position).constant_bits()
             {
                 let lane = CanonicalStorageId {
                     space: dst_storage.space,
                     offset: dst_storage.offset + lsb_bits / 8,
-                    size: insert.value.size,
+                    size: var(insert.value).size,
                 };
                 if lane == storage {
                     r2il::refusal_evidence!(
@@ -1101,9 +1103,10 @@ pub(crate) fn reaching_abi_value_before(
             // no implicit register-merge semantics, so it must fail closed.
             r2il::refusal_evidence!(
                 "reaching-abi-value",
-                "({block_addr:#x}, {op_index}) writes {:?}, a slice of the {:?} wanted: {op:?}",
+                "({block_addr:#x}, {op_index}) writes {:?}, a slice of the {:?} wanted: {:?}",
                 dst_storage,
-                storage
+                storage,
+                function.named(op)
             );
             return None;
         }
@@ -1124,7 +1127,7 @@ pub(crate) fn reaching_abi_value_before(
         .phis()
         .iter()
         .filter(|phi| phi.canonical_storage == Some(storage))
-        .filter_map(|phi| graph.value_id_for_var(&phi.dst))
+        .filter_map(|phi| graph.value_of(phi.dst))
         .filter_map(|value| graph.def_inst(value))
         .collect::<Vec<_>>();
     if let [phi_inst] = phi_insts.as_slice() {
@@ -1299,7 +1302,7 @@ pub(crate) fn observed_convention_call_result_after_call(
     call_op_index: usize,
     convention_storage: CanonicalStorageId,
 ) -> Option<CallBoundaryValueFact> {
-    let block = function.named_block(block_addr)?;
+    let block = function.get_block(block_addr)?;
     let candidates = block
         .ops()
         .get(call_op_index.checked_add(1)?..)?
@@ -1322,7 +1325,9 @@ pub(crate) fn observed_convention_call_result_after_call(
             }
             let value = graph_inst.output?;
             // The caller of this body is a reader too, and the use list alone cannot see it.
-            if dst.size != storage.size || !crate::liveout::is_read(graph, live_out, value) {
+            if function.var(*dst).size != storage.size
+                || !crate::liveout::is_read(graph, live_out, value)
+            {
                 return None;
             }
             Some(CallBoundaryValueFact {
@@ -1373,12 +1378,12 @@ pub(crate) fn storage_phi_value(
     block_addr: u64,
     storage: CanonicalStorageId,
 ) -> Result<Option<ValueId>, ()> {
-    let block = function.named_block(block_addr).ok_or(())?;
+    let block = function.get_block(block_addr).ok_or(())?;
     let values = block
         .phis()
         .iter()
         .filter(|phi| phi.canonical_storage == Some(storage))
-        .filter_map(|phi| graph.value_id_for_var(&phi.dst))
+        .filter_map(|phi| graph.value_of(phi.dst))
         .collect::<Vec<_>>();
     match values.as_slice() {
         [] => Ok(None),
@@ -1469,7 +1474,7 @@ pub(crate) fn reaching_storage_states_before(
     let mut pending = block_addrs.iter().copied().collect::<BTreeSet<_>>();
     while let Some(block_addr) = pending.pop_first() {
         let mut state = block_entry_storage_state(function, graph, &exits, block_addr, storage);
-        let Some(block) = function.named_block(block_addr) else {
+        let Some(block) = function.get_block(block_addr) else {
             exits.insert(block_addr, ReachingStorageState::Conflict);
             continue;
         };
@@ -1486,7 +1491,7 @@ pub(crate) fn reaching_storage_states_before(
     let mut before = BTreeMap::new();
     for block_addr in block_addrs {
         let mut state = block_entry_storage_state(function, graph, &exits, block_addr, storage);
-        let Some(block) = function.named_block(block_addr) else {
+        let Some(block) = function.get_block(block_addr) else {
             continue;
         };
         for (op, _) in block.sited() {

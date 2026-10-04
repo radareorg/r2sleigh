@@ -174,7 +174,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
     ) else {
         return BTreeMap::new();
     };
-    let contains_call = function.named_blocks().iter().any(|block| {
+    let contains_call = function.blocks().iter().any(|block| {
         block.ops().iter().any(|op| {
             matches!(
                 op,
@@ -1404,7 +1404,7 @@ pub(crate) fn collect_stack_call_argument_values(
     let Some((block_addr, op_idx)) = graph.walk_start(call_site.at) else {
         return Vec::new();
     };
-    let Some(block) = function.named_block(block_addr) else {
+    let Some(block) = function.get_block(block_addr) else {
         return Vec::new();
     };
 
@@ -1440,7 +1440,7 @@ pub(crate) fn collect_stack_call_argument_values(
         else {
             continue;
         };
-        let Some(value) = graph.value_id_for_var(val) else {
+        let Some(value) = graph.value_of(*val) else {
             continue;
         };
 

@@ -2644,7 +2644,7 @@ fn collect_local_summary_facts_with_obligation_authority(
 /// Keep this classification aligned with the operations for which obligation
 /// collection emits `VolatileOrUnknownEffect`. None of these operations carry
 /// exact preservation authority for call carriers or observable memory.
-fn has_volatile_or_unknown_effect(op: &SSAOp) -> bool {
+fn has_volatile_or_unknown_effect<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,
         SSAOp::CallOther { .. } | SSAOp::Unimplemented | SSAOp::CpuId { .. } | SSAOp::New { .. }
@@ -2655,7 +2655,7 @@ fn apply_call_carrier_transfer(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
     state: &mut CallCarrierMap,
-    op: &SSAOp,
+    op: &SSAOp<crate::VarId>,
 ) {
     // A user operation writes only its named output.
     let clobbers_every_carrier = !matches!(op, SSAOp::CallOther { .. })
@@ -2665,7 +2665,7 @@ fn apply_call_carrier_transfer(
         state
             .values_mut()
             .for_each(|value| *value = CallCarrierState::Unknown);
-    } else if let Some(dst) = op.dst() {
+    } else if let Some(dst) = op.dst().and_then(|dst| prepared.graph().value_of(*dst)) {
         update_call_carrier_state(prepared, abi, state, dst);
     }
 }
@@ -3026,11 +3026,13 @@ fn collect_call_arg_state_of_height(
         },
         |block_addr, entry| {
             let mut state = entry.clone();
-            let Some(block) = function.named_block(block_addr) else {
+            let Some(block) = function.get_block(block_addr) else {
                 return state;
             };
             for phi in block.phis() {
-                update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
+                if let Some(dst) = prepared.graph().value_of(phi.dst) {
+                    update_call_carrier_state(prepared, abi, &mut state, dst);
+                }
             }
             for op in block.ops() {
                 apply_call_carrier_transfer(prepared, abi, &mut state, op);
@@ -3054,7 +3056,7 @@ fn collect_call_arg_state_of_height(
         else {
             continue;
         };
-        let Some(block) = function.named_block(block_addr) else {
+        let Some(block) = function.get_block(block_addr) else {
             continue;
         };
         // A block nothing reaches holds nothing known.
@@ -3063,7 +3065,9 @@ fn collect_call_arg_state_of_height(
             .cloned()
             .unwrap_or_else(|| unknown_state.clone());
         for phi in block.phis() {
-            update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
+            if let Some(dst) = graph.value_of(phi.dst) {
+                update_call_carrier_state(prepared, abi, &mut state, dst);
+            }
         }
         for (op_id, op) in block.sited() {
             if op_id == call_op {
@@ -3151,11 +3155,8 @@ fn update_call_carrier_state(
     prepared: &SsaArtifact,
     _abi: &AbiProfile,
     state: &mut CallCarrierMap,
-    var: &SSAVar,
+    value_id: ValueId,
 ) {
-    let Some(value_id) = prepared.graph().value_id_for_var(var) else {
-        return;
-    };
     let storage = prepared
         .graph()
         .value(value_id)

@@ -310,7 +310,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
         || block_domain.len() != ordered.len()
         || ordered
             .iter()
-            .any(|addr| function.named_block(*addr).is_none())
+            .any(|addr| function.get_block(*addr).is_none())
     {
         return Err(SsaIntegrityError::BlockOrderMismatch {
             ordered: ordered.to_vec(),

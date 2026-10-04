@@ -141,13 +141,11 @@ impl Written {
         let mut by_op = BTreeMap::<OpId, Bytes>::new();
         let writes = Writes::of(function);
         // Until nothing changes: a loop's phi reads a value defined below it.
-        while function
-            .named_blocks()
-            .iter()
-            .fold(false, |changed, block| {
-                changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
-            })
-        {}
+        // Named once, not once a round.
+        let named = function.named_blocks();
+        while named.iter().fold(false, |changed, block| {
+            changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
+        }) {}
         Self { by_op }
     }
 }

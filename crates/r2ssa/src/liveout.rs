@@ -120,8 +120,13 @@ impl FunctionLiveOut {
             if !seen.insert(addr) {
                 continue;
             }
-            let Some(block) = func.named_block(addr) else {
+            let Some(block) = func.get_block(addr) else {
                 continue;
+            };
+            let storage_of = |id: &crate::VarId| {
+                graph
+                    .value_of(*id)
+                    .and_then(|value| graph.value(value)?.canonical_storage)
             };
             let mut defined_here = false;
             // Whether a call on this path leaves the return register holding a
@@ -147,13 +152,13 @@ impl FunctionLiveOut {
                 let Some(dst) = op.dst() else {
                     continue;
                 };
-                let Some(storage) = graph.canonical_storage_for_var(dst) else {
+                let Some(storage) = storage_of(dst) else {
                     continue;
                 };
                 if !contributes_to(storage, return_storage) {
                     continue;
                 }
-                if let Some(value) = graph.value_id_for_var(dst) {
+                if let Some(value) = graph.value_of(*dst) {
                     self.values.insert(value);
                     found |= here.insert(value);
                 }
@@ -163,7 +168,7 @@ impl FunctionLiveOut {
                 }
             }
             for phi in block.phis() {
-                let Some(storage) = graph.canonical_storage_for_var(&phi.dst) else {
+                let Some(storage) = storage_of(&phi.dst) else {
                     continue;
                 };
                 if !contributes_to(storage, return_storage) {
@@ -173,15 +178,13 @@ impl FunctionLiveOut {
                 // merge. A narrower one leaves the remaining bytes to the phi.
                 let overwritten = block.ops().iter().any(|op| {
                     op.dst().is_some_and(|dst| {
-                        graph
-                            .canonical_storage_for_var(dst)
-                            .is_some_and(|written| covers_fully(written, return_storage))
+                        storage_of(dst).is_some_and(|written| covers_fully(written, return_storage))
                     })
                 });
                 if overwritten {
                     continue;
                 }
-                if let Some(value) = graph.value_id_for_var(&phi.dst) {
+                if let Some(value) = graph.value_of(phi.dst) {
                     defined_here |= covers_fully(storage, return_storage);
                     self.values.insert(value);
                     found |= here.insert(value);

@@ -250,7 +250,7 @@ pub(crate) fn build_memory_ssa(
                     *held = Held::Merged(block_addr);
                 }
             }
-            let Some(block) = function.named_block(block_addr) else {
+            let Some(block) = function.get_block(block_addr) else {
                 return state;
             };
             for (op_id, _) in block.sited() {
