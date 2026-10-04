@@ -209,7 +209,7 @@ impl RenderedReaders {
                     !effectful.contains(&output)
                         && (dead.contains(&output)
                             || unrendered.contains(&output)
-                            || unobserved.contains(&output))
+                            || unobserved.contains(output))
                 })
         };
         let mut by_value = BTreeMap::new();

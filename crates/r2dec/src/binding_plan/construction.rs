@@ -1143,7 +1143,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if unobserved_values.contains(&graph_value.id) {
+            } else if unobserved_values.contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,

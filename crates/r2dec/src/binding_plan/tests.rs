@@ -877,7 +877,7 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
         .and_then(|inst| inst.inputs.first())
         .copied()
         .expect("dead merge has an entry support value");
-    assert!(source.unobserved_values().contains(&dead_support));
+    assert!(source.unobserved_values().contains(dead_support));
 
     let plan = BindingPlan::build_shadow(&source_owned).expect("dead-merge-aware plan");
     assert!(matches!(

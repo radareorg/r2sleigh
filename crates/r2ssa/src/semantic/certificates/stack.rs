@@ -944,7 +944,7 @@ pub(crate) fn collect_stack_geometry_certificate(
             graph
                 .inst(site.inst)
                 .and_then(|inst| inst.output)
-                .map(|output| unobserved.unobserved_values().contains(&output)),
+                .map(|output| unobserved.unobserved_values().contains(output)),
             stack_root(value),
             prep.entry_stack_address_roots.len(),
             graph

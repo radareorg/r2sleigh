@@ -1147,7 +1147,7 @@ impl SsaArtifact {
 
     /// Complete upstream-certified domain of pure values no program
     /// observation depends on.
-    pub const fn unobserved_values(&self) -> &std::collections::BTreeSet<crate::graph::ValueId> {
+    pub const fn unobserved_values(&self) -> &crate::dense::IdSet<crate::graph::ValueId> {
         self.unobserved_merges.unobserved_values()
     }
 

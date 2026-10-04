@@ -260,7 +260,7 @@ impl BindingPlan {
                 ValueDisposition::Refused { .. }
                     if graph_value.var.constant_bits().is_none()
                         && !unobserved_merges.contains(value)
-                        && !unobserved_values.contains(&value)
+                        && !unobserved_values.contains(value)
                         && !return_controls.contains(&value)
                         && !direct_control_targets.contains(&value)
                         && !direct_call_targets.contains(&value)
@@ -278,7 +278,7 @@ impl BindingPlan {
                     if *reason == crate::ledger::ElisionReason::UnobservedValue
                         && proof.authority == *source.authority()
                         && proof.value == value
-                        && unobserved_values.contains(&value)
+                        && unobserved_values.contains(value)
                         && !unobserved_merges.contains(value) => {}
                 ValueDisposition::Elided { reason, proof }
                     if *reason == crate::ledger::ElisionReason::ReturnControl
@@ -331,7 +331,7 @@ impl BindingPlan {
                         && (unread.contains(&value)
                             || unrendered.contains(&value)
                             || structural_unused.contains(&value)
-                            || unobserved_values.contains(&value)
+                            || unobserved_values.contains(value)
                             || unobserved_merges.contains(value)) => {}
                 ValueDisposition::Elided { .. } => {
                     return Err(BindingPlanBuildError::Seal(

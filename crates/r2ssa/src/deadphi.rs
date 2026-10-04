@@ -33,15 +33,15 @@ use crate::semantic::{PreparedFunctionFacts, SourceBoundaryFacts, SourceCallArgu
 /// Which merges no observation depends on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeadPhis {
-    values: BTreeSet<ValueId>,
+    values: crate::dense::IdSet<ValueId>,
     /// Complete pure value domain on which no program observation depends.
     ///
     /// This includes dead merge inputs such as an entry condition-code value,
     /// not only the merge outputs. Outputs of effectful operations are kept out
     /// even when nobody consumes their result: the operation still owes its
     /// memory/control/call occurrence.
-    unobserved_values: BTreeSet<ValueId>,
-    unobserved_insts: BTreeSet<InstId>,
+    unobserved_values: crate::dense::IdSet<ValueId>,
+    unobserved_insts: crate::dense::IdSet<InstId>,
     unobserved_uses: BTreeSet<UseSite>,
 }
 
@@ -54,20 +54,20 @@ pub struct DeadPhis {
 /// positive claim only from this narrower certificate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProvenProgramObservations {
-    values: BTreeSet<ValueId>,
+    values: crate::dense::IdSet<ValueId>,
     /// The bytes of each observed value some observation reaches.
-    bytes: std::collections::BTreeMap<ValueId, ByteMask>,
+    bytes: crate::dense::IdMap<ValueId, ByteMask>,
     /// The value through which each observed value was reached, so a claim
     /// that something is observed can name the observation it rests on.
-    parents: std::collections::BTreeMap<ValueId, ValueId>,
+    parents: crate::dense::IdMap<ValueId, ValueId>,
     /// Why each root is one: the obligation that reads it, or the return.
-    roots: std::collections::BTreeMap<ValueId, String>,
+    roots: crate::dense::IdMap<ValueId, String>,
 }
 
 struct Closure {
-    values: BTreeSet<ValueId>,
-    bytes: std::collections::BTreeMap<ValueId, ByteMask>,
-    parents: std::collections::BTreeMap<ValueId, ValueId>,
+    values: crate::dense::IdSet<ValueId>,
+    bytes: crate::dense::IdMap<ValueId, ByteMask>,
+    parents: crate::dense::IdMap<ValueId, ValueId>,
 }
 
 /// The bytes of a value an observation reaches, one bit per byte.
@@ -265,9 +265,8 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
             .value(value)
             .map_or(ByteMask::All, |value| ByteMask::whole(value.var.size))
     };
-    let mut bytes: std::collections::BTreeMap<ValueId, ByteMask> =
-        std::collections::BTreeMap::new();
-    let mut parents = std::collections::BTreeMap::new();
+    let mut bytes: crate::dense::IdMap<ValueId, ByteMask> = crate::dense::IdMap::default();
+    let mut parents = crate::dense::IdMap::default();
     let mut pending = VecDeque::new();
     for value in roots {
         let mask = width(value);
@@ -276,7 +275,7 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
         }
     }
     while let Some(value) = pending.pop_front() {
-        let observed = bytes.get(&value).copied().unwrap_or(ByteMask::NONE);
+        let observed = bytes.get(value).copied().unwrap_or(ByteMask::NONE);
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
@@ -285,7 +284,7 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
             if mask.is_empty() {
                 continue;
             }
-            let entry = bytes.entry(input).or_insert(ByteMask::NONE);
+            let entry = bytes.get_or_insert_with(input, || ByteMask::NONE);
             let before = *entry;
             *entry = before.union(mask);
             if before.is_empty() {
@@ -297,7 +296,7 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
         }
     }
     Closure {
-        values: bytes.keys().copied().collect(),
+        values: bytes.keys().collect(),
         bytes,
         parents,
     }
@@ -313,21 +312,19 @@ impl ProvenProgramObservations {
         if !facts.obligations.is_complete() {
             return None;
         }
-        let mut roots = std::collections::BTreeMap::new();
+        let mut roots = crate::dense::IdMap::default();
         for value in live_out.iter() {
-            roots.entry(value).or_insert_with(|| "return".to_string());
+            roots.get_or_insert_with(value, || "return".to_string());
         }
         for obligation in facts.obligations.obligations().values() {
             if !obligation.id.kind.is_positive_observation_root() {
                 continue;
             }
             for input in obligation.inputs.iter().copied() {
-                roots
-                    .entry(input)
-                    .or_insert_with(|| format!("{:?}", obligation.id));
+                roots.get_or_insert_with(input, || format!("{:?}", obligation.id));
             }
         }
-        let closure = dependency_closure(graph, roots.keys().copied());
+        let closure = dependency_closure(graph, roots.keys());
         Some(Self {
             values: closure.values,
             bytes: closure.bytes,
@@ -337,12 +334,12 @@ impl ProvenProgramObservations {
     }
 
     pub fn contains(&self, value: ValueId) -> bool {
-        self.values.contains(&value)
+        self.values.contains(value)
     }
 
     /// The bytes of a value some observation reaches.
     pub fn observed_bytes(&self, value: ValueId) -> Option<ByteMask> {
-        self.bytes.get(&value).copied()
+        self.bytes.get(value).copied()
     }
 
     /// How many of a value's least significant bytes some observation
@@ -350,19 +347,19 @@ impl ProvenProgramObservations {
     /// a value nothing observes, one observed at a higher lane only, or one
     /// observed past the bytes a mask can name.
     pub fn observed_low_bytes(&self, value: ValueId) -> Option<u32> {
-        self.bytes.get(&value)?.low_bytes()
+        self.bytes.get(value)?.low_bytes()
     }
 
     /// The chain of values from the root that observes `value` down to it.
     pub fn witness(&self, value: ValueId) -> (Option<&str>, Vec<ValueId>) {
         let mut chain = vec![value];
         let mut current = value;
-        while let Some(parent) = self.parents.get(&current) {
+        while let Some(parent) = self.parents.get(current) {
             chain.push(*parent);
             current = *parent;
         }
         chain.reverse();
-        (self.roots.get(&current).map(String::as_str), chain)
+        (self.roots.get(current).map(String::as_str), chain)
     }
 }
 
@@ -419,7 +416,7 @@ impl DeadPhis {
             .values
             .iter()
             .filter(|value| {
-                !observed.contains(&value.id)
+                !observed.contains(value.id)
                     && graph
                         .def_inst(value.id)
                         .and_then(|inst| obligations.instruction_for_inst(inst))
@@ -448,7 +445,7 @@ impl DeadPhis {
             if !proven_dead_effect
                 && !inst
                     .output
-                    .is_some_and(|output| dead.unobserved_values.contains(&output))
+                    .is_some_and(|output| dead.unobserved_values.contains(output))
             {
                 continue;
             }
@@ -463,7 +460,7 @@ impl DeadPhis {
             if matches!(inst.payload, crate::graph::InstPayload::Phi { .. })
                 && inst
                     .output
-                    .is_some_and(|value| dead.unobserved_values.contains(&value))
+                    .is_some_and(|value| dead.unobserved_values.contains(value))
             {
                 dead.values.insert(inst.output.expect("checked phi output"));
             }
@@ -489,20 +486,20 @@ impl DeadPhis {
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         obligations: &SemanticObligationInventory,
-        observed: &BTreeSet<ValueId>,
+        observed: &crate::dense::IdSet<ValueId>,
     ) {
         if !r2il::refusal_evidence::tracing() {
             return;
         }
         for value in &graph.values {
-            if self.unobserved_values.contains(&value.id) {
+            if self.unobserved_values.contains(value.id) {
                 continue;
             }
             let uses = graph.use_sites(value.id);
             if uses.is_empty()
                 || !uses
                     .iter()
-                    .all(|site| self.unobserved_insts.contains(&site.inst))
+                    .all(|site| self.unobserved_insts.contains(site.inst))
             {
                 continue;
             }
@@ -550,18 +547,18 @@ impl DeadPhis {
                 "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} definition={definition_site:?} own_obligations={own_obligations:?} obligations={rooted_by:?}",
                 value.id,
                 uses.len(),
-                observed.contains(&value.id),
+                observed.contains(value.id),
                 live_out.contains(value.id)
             );
         }
     }
 
     pub fn contains(&self, value: ValueId) -> bool {
-        self.values.contains(&value)
+        self.values.contains(value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.values.iter().copied()
+        self.values.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -573,12 +570,12 @@ impl DeadPhis {
     }
 
     /// Every pure value outside the transitive observation slice.
-    pub const fn unobserved_values(&self) -> &BTreeSet<ValueId> {
+    pub const fn unobserved_values(&self) -> &crate::dense::IdSet<ValueId> {
         &self.unobserved_values
     }
 
     /// Every pure definition whose output is in [`Self::unobserved_values`].
-    pub const fn unobserved_insts(&self) -> &BTreeSet<InstId> {
+    pub const fn unobserved_insts(&self) -> &crate::dense::IdSet<InstId> {
         &self.unobserved_insts
     }
 
@@ -710,11 +707,11 @@ mod tests {
             .def_inst(zf)
             .and_then(|inst| graph.inst(inst))
             .expect("dead merge definition");
-        assert!(dead.unobserved_values().contains(&zf));
-        assert!(dead.unobserved_insts().contains(&definition.id));
+        assert!(dead.unobserved_values().contains(zf));
+        assert!(dead.unobserved_insts().contains(definition.id));
         for (input_idx, input) in definition.inputs.iter().copied().enumerate() {
             assert!(
-                dead.unobserved_values().contains(&input),
+                dead.unobserved_values().contains(input),
                 "a value used only by the dead merge belongs to its pure support domain"
             );
             assert!(dead.unobserved_uses().contains(&UseSite {

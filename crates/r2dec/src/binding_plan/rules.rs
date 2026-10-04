@@ -427,7 +427,7 @@ pub(super) fn component_eligible_with(
         .map(|value| {
             value.var.constant_bits().is_none()
                 && !unobserved_merges.contains(value.id)
-                && !unobserved_values.contains(&value.id)
+                && !unobserved_values.contains(value.id)
                 && !return_controls.contains(&value.id)
                 && !direct_control_targets.contains(&value.id)
                 && !direct_call_targets.contains(&value.id)
@@ -1636,7 +1636,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
             .is_some_and(|output| {
                 dead_readers.contains(&output)
                     || unrendered.contains(&output)
-                    || unobserved.contains(&output)
+                    || unobserved.contains(output)
             })
     };
     // Of those graphless reads, call arguments are the one kind the renderer
@@ -2557,15 +2557,13 @@ pub(crate) fn certificate_elided_cells(
     }
     for inst in unobserved.unobserved_insts() {
         let definition = graph
-            .inst(*inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(*inst))?;
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
         if matches!(definition.payload, r2ssa::InstPayload::Phi { .. }) {
             continue;
         }
         if definition.output.is_some() {
-            writes
-                .entry(*inst)
-                .or_insert(ElisionReason::UnobservedValue);
+            writes.entry(inst).or_insert(ElisionReason::UnobservedValue);
         }
     }
     for value in unobserved.iter() {
