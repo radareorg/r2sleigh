@@ -200,94 +200,87 @@ pub(crate) fn collect_compare_defs(
     }
 }
 
+/// Carry each comparison through the operations that keep it: copies,
+/// extensions, the low piece, negation, and the conjunction or disjunction of
+/// two.
+///
+/// One pass. No phi carries a comparison here, and an operation's operands
+/// are defined by operations that dominate it, which come before it in
+/// reverse postorder: so every operand is settled when its reader is
+/// reached. Each value is defined once, so nothing is overwritten.
 pub(crate) fn propagate_compare_definitions(
     function: &SSAFunction,
     graph: &SsaGraph,
     compare_defs: &mut BTreeMap<SSAVar, CompareProvenance>,
 ) {
-    loop {
-        let mut changed = false;
-        for block in function.blocks() {
-            for op in block.ops() {
-                let propagated = match op {
-                    SSAOp::Copy { dst, src }
-                    | SSAOp::Cast { dst, src }
-                    | SSAOp::IntZExt { dst, src }
-                    | SSAOp::IntSExt { dst, src }
-                    | SSAOp::Trunc { dst, src } => compare_defs
-                        .get(src)
-                        .cloned()
-                        .map(|comparison| (dst, comparison)),
-                    SSAOp::Subpiece {
-                        dst,
-                        src,
-                        offset: 0,
-                    } => compare_defs
-                        .get(src)
-                        .cloned()
-                        .map(|comparison| (dst, comparison)),
-                    SSAOp::BoolNot { dst, src } => compare_defs.get(src).and_then(|comparison| {
-                        invert_compare_provenance(comparison).map(|comparison| (dst, comparison))
-                    }),
-                    SSAOp::BoolAnd { dst, a, b } => compare_defs
-                        .get(a)
-                        .zip(compare_defs.get(b))
-                        .and_then(|(lhs, rhs)| combine_compare_provenance(graph, lhs, rhs, false))
-                        .map(|comparison| (dst, comparison)),
-                    SSAOp::BoolOr { dst, a, b } => compare_defs
-                        .get(a)
-                        .zip(compare_defs.get(b))
-                        .and_then(|(lhs, rhs)| combine_compare_provenance(graph, lhs, rhs, true))
-                        .map(|comparison| (dst, comparison)),
-                    _ => None,
-                };
-                let Some((dst, comparison)) = propagated else {
-                    continue;
-                };
-                if compare_defs.get(dst) != Some(&comparison) {
-                    compare_defs.insert(dst.clone(), comparison);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
+    for block in function.blocks() {
+        for op in block.ops() {
+            let propagated = match op {
+                SSAOp::Copy { dst, src }
+                | SSAOp::Cast { dst, src }
+                | SSAOp::IntZExt { dst, src }
+                | SSAOp::IntSExt { dst, src }
+                | SSAOp::Trunc { dst, src } => compare_defs
+                    .get(src)
+                    .cloned()
+                    .map(|comparison| (dst, comparison)),
+                SSAOp::Subpiece {
+                    dst,
+                    src,
+                    offset: 0,
+                } => compare_defs
+                    .get(src)
+                    .cloned()
+                    .map(|comparison| (dst, comparison)),
+                SSAOp::BoolNot { dst, src } => compare_defs.get(src).and_then(|comparison| {
+                    invert_compare_provenance(comparison).map(|comparison| (dst, comparison))
+                }),
+                SSAOp::BoolAnd { dst, a, b } => compare_defs
+                    .get(a)
+                    .zip(compare_defs.get(b))
+                    .and_then(|(lhs, rhs)| combine_compare_provenance(graph, lhs, rhs, false))
+                    .map(|comparison| (dst, comparison)),
+                SSAOp::BoolOr { dst, a, b } => compare_defs
+                    .get(a)
+                    .zip(compare_defs.get(b))
+                    .and_then(|(lhs, rhs)| combine_compare_provenance(graph, lhs, rhs, true))
+                    .map(|comparison| (dst, comparison)),
+                _ => None,
+            };
+            let Some((dst, comparison)) = propagated else {
+                continue;
+            };
+            compare_defs.insert(dst.clone(), comparison);
         }
     }
 }
 
+/// Carry each comparison's operands through the operations that keep a
+/// value's bits: one pass, for the reason `propagate_compare_definitions`
+/// is one.
 pub(crate) fn propagate_compare_source_aliases(
     function: &SSAFunction,
     sources: &mut BTreeMap<SSAVar, (ValueId, ValueId)>,
 ) {
-    loop {
-        let mut changed = false;
-        for block in function.blocks() {
-            for op in block.ops() {
-                let (dst, src) = match op {
-                    SSAOp::Copy { dst, src }
-                    | SSAOp::Cast { dst, src }
-                    | SSAOp::IntZExt { dst, src }
-                    | SSAOp::IntSExt { dst, src }
-                    | SSAOp::Trunc { dst, src } => (dst, src),
-                    SSAOp::Subpiece {
-                        dst,
-                        src,
-                        offset: 0,
-                    } => (dst, src),
-                    _ => continue,
-                };
-                let Some(source) = sources.get(src).copied() else {
-                    continue;
-                };
-                if sources.get(dst) != Some(&source) {
-                    sources.insert(dst.clone(), source);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
+    for block in function.blocks() {
+        for op in block.ops() {
+            let (dst, src) = match op {
+                SSAOp::Copy { dst, src }
+                | SSAOp::Cast { dst, src }
+                | SSAOp::IntZExt { dst, src }
+                | SSAOp::IntSExt { dst, src }
+                | SSAOp::Trunc { dst, src } => (dst, src),
+                SSAOp::Subpiece {
+                    dst,
+                    src,
+                    offset: 0,
+                } => (dst, src),
+                _ => continue,
+            };
+            let Some(source) = sources.get(src).copied() else {
+                continue;
+            };
+            sources.insert(dst.clone(), source);
         }
     }
 }
