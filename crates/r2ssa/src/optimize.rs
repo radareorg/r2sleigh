@@ -17,7 +17,6 @@ use crate::{
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
-    pub max_iterations: usize,
     pub enable_sccp: bool,
     pub enable_inst_combine: bool,
     pub preserve_memory_reads: bool,
@@ -30,14 +29,12 @@ pub struct OptimizationConfig {
 /// simplification passes and only allows explicitly opted-in transforms.
 #[derive(Debug, Clone)]
 pub struct DecompilePrepConfig {
-    pub max_iterations: usize,
     pub enable_inst_combine: bool,
 }
 
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 4,
             enable_sccp: true,
             enable_inst_combine: true,
             preserve_memory_reads: false,
@@ -48,7 +45,6 @@ impl Default for OptimizationConfig {
 impl Default for DecompilePrepConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 1,
             enable_inst_combine: true,
         }
     }
@@ -57,7 +53,6 @@ impl Default for DecompilePrepConfig {
 impl From<&DecompilePrepConfig> for OptimizationConfig {
     fn from(value: &DecompilePrepConfig) -> Self {
         Self {
-            max_iterations: value.max_iterations.max(1),
             enable_sccp: false,
             enable_inst_combine: value.enable_inst_combine,
             preserve_memory_reads: true,
@@ -103,12 +98,29 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
     control.poll()?;
     let mut stats = OptimizationStats::default();
-    let max_iters = config.max_iterations.max(1);
-
     // Constants and folds feed each other: a fold through a definition can
     // turn a lane read into a constant copy, which is a constant the next
-    // propagation round carries to its readers. Both run until neither moves.
-    for _ in 0..max_iters {
+    // propagation round carries to its readers. The passes run in one stated
+    // order until a round moves nothing (doc/adr-fixpoint.md, K3). A round
+    // that moves rewrites at least one operation, so the rounds are budgeted
+    // by the operations; every round preserves the function's meaning, so a
+    // run that meets the budget leaves a correct function, less simplified,
+    // and says so.
+    let budget = func
+        .blocks()
+        .iter()
+        .map(|block| block.ops().len())
+        .sum::<usize>()
+        .saturating_add(1);
+    loop {
+        if stats.iterations >= budget {
+            r2il::refusal_evidence!(
+                "optimize",
+                "{:#x}: still moving after {budget} rounds",
+                func.entry
+            );
+            break;
+        }
         control.poll()?;
         let mut changed = false;
 

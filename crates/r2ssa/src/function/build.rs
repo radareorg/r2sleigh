@@ -54,7 +54,6 @@ impl SSAFunction {
         let func = Self::from_blocks_raw(blocks, arch)?;
         // Constructor path applies SCCP by default while keeping legacy SSA consumers stable.
         let cfg = crate::optimize::OptimizationConfig {
-            max_iterations: 1,
             enable_sccp: true,
             enable_inst_combine: false,
             preserve_memory_reads: false,
@@ -278,7 +277,6 @@ impl SSAFunction {
             control,
         )?;
         let cfg = crate::optimize::OptimizationConfig {
-            max_iterations: 1,
             enable_sccp: true,
             enable_inst_combine: false,
             preserve_memory_reads: true,
