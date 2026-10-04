@@ -127,3 +127,30 @@ deletes what it replaces.
 - **Prerequisite for P4, Q and R.** The frame model is an index; the query
   database caches sealed functions with their indexes; the printer reads
   indexes only.
+
+## As landed
+
+- **F2.0** (`15ac7a9c`): `r2ssa::dense` and the `ENTITY_KEYED_MAP` Dylint,
+  warning only. It counted 684 entity-keyed maps on 2026-10-04.
+- **F2.1, in part**:
+  - `DomTree` is Cooper, Harvey and Kennedy's over dense reverse-postorder
+    numbers, and `dominates` is O(1) from preorder intervals; a property test
+    holds it to the data-flow definition (`15ac7a9c`).
+  - The natural loops are one index of the function, read by the loop facts
+    and by placement (`8741ba40`).
+  - The function's second def-use index, `SsaQueryIndex`, is deleted
+    (`f634efbf`).
+  - Remaining: a `FunctionIndex` holding these on `Sealed`, and the
+    test-only graph builds.
+- **F2.2, in part**:
+  - Fact collection computes liveness once, after the prefix and the
+    boundaries that refine it, and the artifact keeps that one model
+    (`09f23ac1`). Collapsing the two passes exposed a call read the old
+    second pass wrongly ignored: the argument had been copied, and the call
+    read the value the copy carried.
+  - Merges are pruned by pre-SSA liveness (`f9111a28`), closing the Sleigh
+    temporary and rewritten-flag half of #56.
+  - Remaining: byte-granular liveness over locations, so a lane write that
+    every reader sees whole defines the register (the `RDX` merge in
+    `fnv1a32`); r2dec's relocated liveness folded into the one model; #47
+    and #50.
