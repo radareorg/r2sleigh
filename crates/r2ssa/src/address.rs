@@ -20,7 +20,7 @@
 //! `i + 1` where the addition wrapped. A sign extension and a truncation are
 //! terms of their own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
@@ -261,19 +261,45 @@ struct AddressCollector<'a> {
     /// ran, and then there is no formal to propagate either.
     views: Option<&'a ValueViews>,
     definitions: HashMap<SSAVar, SSAOp>,
-    expressions: BTreeMap<ValueId, AddressExpression>,
+    /// Each value's expression as the solve has it: absent while nothing
+    /// has ruled one in or out.
+    expressions: BTreeMap<ValueId, Cell>,
     /// The values whose expression is the formal they are, placed before any
-    /// block is read; every other expression is derived by the block that
-    /// defines its value, from what that block is entered with.
+    /// block is read and fixed.
     seeded: BTreeSet<ValueId>,
     scalar_memo: HashMap<ValueId, Option<AffineScalar>>,
     scalar_visiting: HashSet<ValueId>,
-    stack_in: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
-    stack_out: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
+    /// What each block's spill slots hold where control leaves it.
+    stack_out: BTreeMap<u64, Spills>,
     /// The number of loads in the function: the most dereferences any chain
     /// can take, and so the bound on a pointee path.
     load_count: usize,
 }
+
+/// A value's settled expression: one, or none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cell {
+    Expr(AddressExpression),
+    Not,
+}
+
+/// A value's expression as derived from its inputs now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Derived {
+    Pending,
+    Expr(AddressExpression),
+    Not,
+}
+
+/// What a spill slot holds: one expression, or one still pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Held {
+    Pending,
+    Expr(AddressExpression),
+}
+
+/// Each spill slot's content where control stands.
+type Spills = BTreeMap<SpillSlotKey, Held>;
 
 impl<'a> AddressCollector<'a> {
     fn new(
@@ -337,45 +363,109 @@ impl<'a> AddressCollector<'a> {
             views: prep.map(|prep| &prep.views),
             definitions,
             seeded: expressions.keys().copied().collect(),
-            expressions,
+            expressions: expressions
+                .into_iter()
+                .map(|(value, expression)| (value, Cell::Expr(expression)))
+                .collect(),
             scalar_memo: HashMap::new(),
             scalar_visiting: HashSet::new(),
-            stack_in: BTreeMap::new(),
             stack_out: BTreeMap::new(),
             load_count,
         }
     }
 
+    /// Solve every value's expression and every block's spill slots together
+    /// (doc/adr-fixpoint.md, K2).
+    ///
+    /// The two feed each other: a reload's expression is what its slot
+    /// holds, and a slot holds the expression of the value stored there. Both
+    /// are solved optimistically. A value is pending until something rules
+    /// its expression in or out; a merge keeps what its known inputs agree
+    /// on; a slot survives a merge where every reached predecessor holds it.
+    /// A cell or slot only descends -- pending, one expression, none -- so
+    /// each moves at most twice, which bounds the work. A value's change
+    /// re-reads every block that reads it, wherever it is, and a block whose
+    /// slots change re-reads its successors.
     fn collect(mut self) -> AddressProvenanceFacts {
-        let mut ready = self
-            .function
-            .block_addrs()
+        let order = self.function.block_addrs().to_vec();
+        let rank = order
             .iter()
-            .copied()
-            .collect::<VecDeque<_>>();
-        let mut queued = ready.iter().copied().collect::<BTreeSet<_>>();
-        while let Some(block_addr) = ready.pop_front() {
-            queued.remove(&block_addr);
-            let input = self.merge_predecessor_stack(block_addr);
-            let input_changed = self.stack_in.get(&block_addr) != Some(&input);
-            if input_changed {
-                self.stack_in.insert(block_addr, input.clone());
-            }
-            let (output, expression_changed) = self.transfer_block(block_addr, input);
-            let output_changed = self.stack_out.get(&block_addr) != Some(&output);
-            if output_changed {
-                self.stack_out.insert(block_addr, output);
-            }
-            if input_changed || output_changed || expression_changed {
-                for successor in self.function.successors(block_addr) {
-                    if queued.insert(successor) {
-                        ready.push_back(successor);
+            .enumerate()
+            .map(|(index, addr)| (*addr, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut readers = BTreeMap::<ValueId, BTreeSet<usize>>::new();
+        let mut slots = 0usize;
+        for (index, &addr) in order.iter().enumerate() {
+            let Some(block) = self.function.get_block(addr) else {
+                continue;
+            };
+            let read = block
+                .phis()
+                .iter()
+                .flat_map(|phi| phi.sources.iter().map(|(_, source)| source))
+                .chain(block.ops().iter().flat_map(SSAOp::sources));
+            for var in read {
+                for var in [var, self.same_integer_root(var)] {
+                    if let Some(value) = self.graph.value_id_for_var(var) {
+                        readers.entry(value).or_default().insert(index);
                     }
                 }
             }
+            slots += block
+                .ops()
+                .iter()
+                .filter(|op| matches!(op, SSAOp::Store { .. } | SSAOp::StoreGuarded { .. }))
+                .count();
+        }
+        let budget = order
+            .len()
+            .saturating_mul(
+                self.graph
+                    .values
+                    .len()
+                    .saturating_add(slots)
+                    .saturating_mul(2)
+                    .saturating_add(1),
+            )
+            .max(1);
+        let mut work = (0..order.len()).collect::<BTreeSet<_>>();
+        let mut visits = 0usize;
+        while let Some(index) = work.pop_first() {
+            visits += 1;
+            if visits > budget {
+                r2il::refusal_evidence!(
+                    "address-provenance",
+                    "{:#x}: did not settle within {budget} block visits",
+                    self.function.entry
+                );
+                return AddressProvenanceFacts::default();
+            }
+            let block_addr = order[index];
+            let Some(block) = self.function.get_block(block_addr) else {
+                continue;
+            };
+            let Some(mut spills) = self.entering(block_addr) else {
+                continue;
+            };
+            let moved = self.transfer_ops(block, &mut spills);
+            for value in moved {
+                work.extend(readers.get(&value).into_iter().flatten().copied());
+            }
+            if self.stack_out.get(&block_addr) != Some(&spills) {
+                self.stack_out.insert(block_addr, spills);
+                work.extend(
+                    self.function
+                        .successors(block_addr)
+                        .into_iter()
+                        .filter_map(|succ| rank.get(&succ).copied()),
+                );
+            }
         }
         let mut facts = AddressProvenanceFacts::default();
-        for (value, expression) in self.expressions {
+        for (value, cell) in self.expressions {
+            let Cell::Expr(expression) = cell else {
+                continue;
+            };
             match expression.base {
                 AddressBase::Parameter { index, storage } => {
                     facts.parameter_expressions.insert(
@@ -409,87 +499,50 @@ impl<'a> AddressCollector<'a> {
         facts
     }
 
-    fn merge_predecessor_stack(
-        &self,
-        block_addr: u64,
-    ) -> BTreeMap<SpillSlotKey, AddressExpression> {
-        let predecessors = self.function.predecessors(block_addr);
-        let known = predecessors
-            .iter()
-            .filter_map(|pred| self.stack_out.get(pred))
-            .collect::<Vec<_>>();
-        let Some(first) = known.first() else {
-            return BTreeMap::new();
-        };
-        first
-            .iter()
-            .filter(|(slot, expression)| {
-                known
-                    .iter()
-                    .skip(1)
-                    .all(|state| state.get(slot) == Some(*expression))
-            })
-            .map(|(slot, expression)| (*slot, expression.clone()))
-            .collect()
+    /// The spill slots a block is entered with: what every reached
+    /// predecessor agrees on, nothing at the function's root, and `None`
+    /// where no predecessor has been reached yet.
+    fn entering(&self, block_addr: u64) -> Option<Spills> {
+        if block_addr == self.function.root() {
+            return Some(Spills::new());
+        }
+        let mut reached = self
+            .function
+            .predecessors(block_addr)
+            .into_iter()
+            .filter_map(|pred| self.stack_out.get(&pred));
+        let first = reached.next()?.clone();
+        Some(reached.fold(first, |held, other| {
+            held.into_iter()
+                .filter_map(|(slot, cell)| {
+                    let merged = match (cell, other.get(&slot)?) {
+                        (Held::Pending, theirs) => theirs.clone(),
+                        (mine, Held::Pending) => mine,
+                        (Held::Expr(a), Held::Expr(b)) if a == *b => Held::Expr(a),
+                        _ => return None,
+                    };
+                    Some((slot, merged))
+                })
+                .collect()
+        }))
     }
 
-    fn transfer_block(
-        &mut self,
-        block_addr: u64,
-        mut stack: BTreeMap<SpillSlotKey, AddressExpression>,
-    ) -> (BTreeMap<SpillSlotKey, AddressExpression>, bool) {
-        let Some(block) = self.function.get_block(block_addr) else {
-            return (stack, false);
-        };
-        // What this block derived the last time it was read was derived from
-        // the input it had then. The fixpoint starts from the predecessors it
-        // has seen, so a loop header is first read before its latch, under a
-        // spill the latch overwrites; keeping what was derived then would
-        // leave a reload of an overwritten home naming the formal for ever.
-        // So the block's own values are derived again from this input alone,
-        // and it has changed exactly where one of them came out different.
-        let defined = block
-            .phis()
-            .iter()
-            .map(|phi| &phi.dst)
-            .chain(block.ops().iter().filter_map(SSAOp::dst))
-            .filter_map(|var| self.graph.value_id_for_var(var))
-            .filter(|value| !self.seeded.contains(value))
-            .collect::<Vec<_>>();
-        let before = defined
-            .iter()
-            .filter_map(|value| Some((*value, self.expressions.remove(value)?)))
-            .collect::<BTreeMap<_, _>>();
-        self.transfer_ops(block, &mut stack);
-        let changed = defined
-            .iter()
-            .any(|value| self.expressions.get(value) != before.get(value));
-        (stack, changed)
-    }
-
-    /// Derive the expressions of one block's values and its stack state, in
-    /// program order, from `stack` as the block is entered.
-    fn transfer_ops(
-        &mut self,
-        block: &crate::block::SSABlock,
-        stack: &mut BTreeMap<SpillSlotKey, AddressExpression>,
-    ) {
+    /// Derive one block's values and its slots, in program order, from the
+    /// slots it is entered with; returns the values whose cell moved.
+    fn transfer_ops(&mut self, block: &crate::block::SSABlock, stack: &mut Spills) -> Vec<ValueId> {
+        let mut moved = Vec::new();
         for phi in block.phis() {
-            let expressions = phi
+            // What the sources known so far agree on.
+            let derived = phi
                 .sources
                 .iter()
-                .map(|(_, source)| self.expression_for_var(source))
-                .collect::<Option<Vec<_>>>();
-            let expression = expressions.and_then(|expressions| {
-                let first = expressions.first()?.clone();
-                expressions
-                    .iter()
-                    .all(|value| *value == first)
-                    .then_some(first)
-            });
-            if let Some(expression) = expression {
-                self.insert_expression(&phi.dst, expression);
-            }
+                .map(|(_, source)| self.cell_for_var(source))
+                .fold(Derived::Pending, |held, source| match (held, source) {
+                    (Derived::Pending, other) | (other, Derived::Pending) => other,
+                    (Derived::Expr(a), Derived::Expr(b)) if a == b => Derived::Expr(a),
+                    _ => Derived::Not,
+                });
+            self.settle(&phi.dst, derived, &mut moved);
         }
         for op in block.ops() {
             match op {
@@ -501,13 +554,19 @@ impl<'a> AddressCollector<'a> {
                         // A store replaces whatever any read of the place
                         // would have found, at every width.
                         stack.retain(|slot, _| slot.root != root || slot.space != *space);
-                        if let Some(expression) = self.expression_for_var(val) {
-                            let slot = SpillSlotKey {
-                                root,
-                                space: *space,
-                                width: val.size,
-                            };
-                            stack.insert(slot, expression);
+                        let slot = SpillSlotKey {
+                            root,
+                            space: *space,
+                            width: val.size,
+                        };
+                        match self.cell_for_var(val) {
+                            Derived::Expr(expression) => {
+                                stack.insert(slot, Held::Expr(expression));
+                            }
+                            Derived::Pending => {
+                                stack.insert(slot, Held::Pending);
+                            }
+                            Derived::Not => {}
                         }
                     }
                 }
@@ -518,78 +577,100 @@ impl<'a> AddressCollector<'a> {
                 | SSAOp::LoadGuarded {
                     dst, space, addr, ..
                 } => {
-                    if let Some(expression) = self.stack_root(addr).and_then(|root| {
-                        stack
-                            .get(&SpillSlotKey {
-                                root,
-                                space: *space,
-                                width: dst.size,
-                            })
-                            .cloned()
-                    }) {
-                        self.insert_expression(dst, expression);
-                    } else if *space == SpaceId::Ram
-                        && let Some(expression) = self.expression_for_var(addr)
-                        && expression.path_len() < self.load_count
-                        && let Some(pointee) = expression.dereferenced(dst.size)
-                    {
-                        // The value read at a known address, taken as a
-                        // pointer: its own address is one step further along
-                        // the chain from the parameter.
-                        self.insert_expression(dst, pointee);
-                    }
+                    let slot = self.stack_root(addr).and_then(|root| {
+                        stack.get(&SpillSlotKey {
+                            root,
+                            space: *space,
+                            width: dst.size,
+                        })
+                    });
+                    let derived = match slot {
+                        Some(Held::Expr(expression)) => Derived::Expr(expression.clone()),
+                        Some(Held::Pending) => Derived::Pending,
+                        None if *space == SpaceId::Ram => match self.cell_for_var(addr) {
+                            // The value read at a known address, taken as a
+                            // pointer: its own address is one step further
+                            // along the chain from the parameter.
+                            Derived::Expr(expression)
+                                if expression.path_len() < self.load_count =>
+                            {
+                                expression
+                                    .dereferenced(dst.size)
+                                    .map_or(Derived::Not, Derived::Expr)
+                            }
+                            Derived::Pending => Derived::Pending,
+                            _ => Derived::Not,
+                        },
+                        None => Derived::Not,
+                    };
+                    self.settle(dst, derived, &mut moved);
+                    continue;
                 }
                 _ => {}
             }
-            if let Some((dst, expression)) = self.derive_op_expression(op) {
-                self.insert_expression(dst, expression);
+            if let Some(dst) = op.dst() {
+                let derived = self.derive_op_expression(op);
+                self.settle(dst, derived, &mut moved);
             }
         }
+        moved
     }
 
-    fn derive_op_expression<'b>(
-        &mut self,
-        op: &'b SSAOp,
-    ) -> Option<(&'b SSAVar, AddressExpression)> {
+    /// Record what was derived for `var`, never rising: a cell only moves
+    /// from pending to one expression to none, and two different
+    /// expressions for one value meet to none.
+    fn settle(&mut self, var: &SSAVar, derived: Derived, moved: &mut Vec<ValueId>) {
+        let Some(value) = self.graph.value_id_for_var(var) else {
+            return;
+        };
+        if self.seeded.contains(&value) {
+            return;
+        }
+        let next = match (self.expressions.get(&value), derived) {
+            (_, Derived::Pending) => return,
+            (None, Derived::Expr(expression)) => Cell::Expr(expression),
+            (Some(Cell::Expr(held)), Derived::Expr(expression)) if *held == expression => return,
+            (Some(Cell::Not), _) => return,
+            _ => Cell::Not,
+        };
+        self.expressions.insert(value, next);
+        moved.push(value);
+    }
+
+    fn derive_op_expression(&mut self, op: &SSAOp) -> Derived {
         match op {
-            SSAOp::IntAdd { dst, a, b } => self
-                .derive_additive_expression(a, b, 1, 1)
-                .map(|expression| (dst, expression)),
+            SSAOp::IntAdd { a, b, .. } => self.derive_additive_expression(a, b, 1, 1),
             SSAOp::PtrAdd {
-                dst,
                 base,
                 index,
                 element_size,
-            } => self
-                .derive_additive_expression(base, index, 1, i128::from(*element_size))
-                .map(|expression| (dst, expression)),
-            SSAOp::IntSub { dst, a, b } => self
-                .derive_additive_expression(a, b, -1, 1)
-                .map(|expression| (dst, expression)),
+                ..
+            } => self.derive_additive_expression(base, index, 1, i128::from(*element_size)),
+            SSAOp::IntSub { a, b, .. } => self.derive_additive_expression(a, b, -1, 1),
             SSAOp::PtrSub {
-                dst,
                 base,
                 index,
                 element_size,
-            } => self
-                .derive_additive_expression(base, index, -1, i128::from(*element_size))
-                .map(|expression| (dst, expression)),
+                ..
+            } => self.derive_additive_expression(base, index, -1, i128::from(*element_size)),
             // Any other definition is its same-integer root's address, where
             // the view says it has one: a copy, a same-width cast or a zero
             // extension of a full-width root. A narrowed, sign-extended or
             // otherwise converted pointer is a scalar the body computes with.
             op => {
-                let dst = op.dst()?;
-                let root = self.same_integer_root(dst);
-                (root != dst)
-                    .then(|| self.expression_for_var(root))
-                    .flatten()
-                    .map(|expression| (dst, expression))
+                let Some(dst) = op.dst() else {
+                    return Derived::Not;
+                };
+                let root = self.same_integer_root(dst).clone();
+                match root != *dst {
+                    true => self.cell_for_var(&root),
+                    false => Derived::Not,
+                }
             }
         }
     }
 
-    /// The value `var` equals as an unsigned integer, by the view.
+    /// The same integer root `var` has, by the view.
     fn same_integer_root<'v>(&self, var: &'v SSAVar) -> &'v SSAVar
     where
         'a: 'v,
@@ -600,50 +681,52 @@ impl<'a> AddressCollector<'a> {
         }
     }
 
+    /// An address plus a scalar: one operand is an address and the other a
+    /// scalar the analysis can state. An operand still pending is taken as
+    /// no address for now, which can only take the answer down later; two
+    /// addresses are not one.
     fn derive_additive_expression(
         &mut self,
         left: &SSAVar,
         right: &SSAVar,
         right_sign: i128,
         right_scale: i128,
-    ) -> Option<AddressExpression> {
-        let left_base = self.expression_for_var(left);
-        let right_base = self.expression_for_var(right);
-        if left_base.is_some() && right_base.is_some() {
-            return None;
-        }
-        if let Some(base) = left_base {
-            let delta = self
-                .scalar_for_var(right)?
-                .scale(right_sign.checked_mul(right_scale)?)?;
-            return add_delta(base, delta);
-        }
-        if right_sign > 0
-            && let Some(base) = right_base
-        {
-            let delta = self.scalar_for_var(left)?;
-            return add_delta(base, delta);
-        }
-        None
+    ) -> Derived {
+        let (left_cell, right_cell) = (self.cell_for_var(left), self.cell_for_var(right));
+        let derived = match (&left_cell, &right_cell) {
+            (Derived::Expr(_), Derived::Expr(_)) => return Derived::Not,
+            (Derived::Expr(base), _) => self
+                .scalar_for_var(right)
+                .and_then(|delta| delta.scale(right_sign.checked_mul(right_scale)?))
+                .and_then(|delta| add_delta(base.clone(), delta)),
+            (_, Derived::Expr(base)) if right_sign > 0 => self
+                .scalar_for_var(left)
+                .and_then(|delta| add_delta(base.clone(), delta)),
+            (Derived::Pending, _) | (_, Derived::Pending) => return Derived::Pending,
+            _ => None,
+        };
+        derived.map_or(Derived::Not, Derived::Expr)
     }
 
-    fn expression_for_var(&self, var: &SSAVar) -> Option<AddressExpression> {
-        let value = self.graph.value_id_for_var(var)?;
-        self.expressions.get(&value).cloned()
-    }
-
-    fn insert_expression(&mut self, var: &SSAVar, expression: AddressExpression) -> bool {
+    /// What the solve has for `var` so far.
+    fn cell_for_var(&self, var: &SSAVar) -> Derived {
         let Some(value) = self.graph.value_id_for_var(var) else {
-            return false;
+            return Derived::Not;
         };
         match self.expressions.get(&value) {
-            Some(existing) if *existing == expression => false,
-            Some(_) => false,
-            None => {
-                self.expressions.insert(value, expression);
-                true
+            Some(Cell::Expr(expression)) => Derived::Expr(expression.clone()),
+            Some(Cell::Not) => Derived::Not,
+            // A value nothing defines -- an entry value no formal seeded --
+            // is no address the analysis can state, and never will be.
+            None if !self.definitions.contains_key(var) && !self.defined_by_phi(value) => {
+                Derived::Not
             }
+            None => Derived::Pending,
         }
+    }
+
+    fn defined_by_phi(&self, value: ValueId) -> bool {
+        self.graph.def_inst(value).is_some()
     }
 
     fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
