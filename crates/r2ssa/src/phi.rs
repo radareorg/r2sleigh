@@ -159,34 +159,14 @@ impl PhiPlacement {
         Ok(placement)
     }
 
-    /// Take from `complete` the merges this placement lacks, where the
-    /// identity is live at the block that would carry them.
-    pub fn merge_live_additions(
-        &mut self,
-        complete: Self,
-        live_in: &HashMap<u64, BTreeSet<RenameIdentity>>,
-    ) {
-        for (block, phis) in complete.phis {
-            let existing = self.phis.entry(block).or_default();
-            let held = existing
-                .iter()
-                .map(|phi| phi.identity.clone())
-                .collect::<BTreeSet<_>>();
-            let live = live_in.get(&block);
-            for phi in phis {
-                if held.contains(&phi.identity)
-                    || !live.is_some_and(|live| live.contains(&phi.identity))
-                {
-                    continue;
-                }
-                existing.push(phi);
-            }
-            existing.sort_unstable_by(|lhs, rhs| {
-                lhs.identity
-                    .cmp(&rhs.identity)
-                    .then(lhs.predecessors.cmp(&rhs.predecessors))
-            });
+    /// Keep only the merges whose identity is live on entry to their block.
+    pub fn retain_live(mut self, live_in: &HashMap<u64, BTreeSet<RenameIdentity>>) -> Self {
+        for (block, phis) in &mut self.phis {
+            let live = live_in.get(block);
+            phis.retain(|phi| live.is_some_and(|live| live.contains(&phi.identity)));
         }
+        self.phis.retain(|_, phis| !phis.is_empty());
+        self
     }
 
     /// Get phi nodes for a specific block.
@@ -411,6 +391,7 @@ pub fn live_in_by_block(
     call_boundaries: &crate::rename::CallBoundaryConfig,
     reg_names: Option<&RegisterNameMap>,
     families: Option<&RegisterFamilyInfo>,
+    promoted: &PromotedStackSlots,
     defs: &DefinitionSitesByIdentity,
 ) -> HashMap<u64, BTreeSet<RenameIdentity>> {
     let resolve = |regs: &[crate::rename::CallBoundaryDef]| {
@@ -462,7 +443,38 @@ pub fn live_in_by_block(
         };
         present.push(true);
         let mut rows = Vec::with_capacity(block.ops.len());
-        for op in &block.ops {
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            // A promoted access is a copy of the slot, exactly as renaming
+            // writes it: a load reads the slot and not the address, a store
+            // reads its value and defines the slot.
+            if let Some(slot) = promoted.get(&(block.addr, op_idx))
+                && let Some((read, written)) = match op {
+                    r2il::R2ILOp::Load { dst, .. } => Some((slot, dst)),
+                    r2il::R2ILOp::Store { val, .. } => Some((val, slot)),
+                    _ => None,
+                }
+            {
+                let mut number = |varnode: &r2il::Varnode| {
+                    number_of(
+                        RenameIdentity::for_varnode(varnode, reg_names, families),
+                        &mut identities,
+                        &mut numbers,
+                    )
+                };
+                let reads = if matches!(read.space, r2il::SpaceId::Const) {
+                    Vec::new()
+                } else {
+                    vec![number(read)]
+                };
+                let kill =
+                    (register_root_slot(written, families).is_none()).then(|| number(written));
+                rows.push(LivenessOpEffect {
+                    boundary: LivenessBoundary::None,
+                    kill,
+                    reads,
+                });
+                continue;
+            }
             let kill = get_op_output_varnode(op)
                 .filter(|varnode| register_root_slot(varnode, families).is_none())
                 .map(|varnode| {

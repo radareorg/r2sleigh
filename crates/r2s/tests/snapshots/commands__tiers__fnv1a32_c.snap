@@ -1,10 +1,11 @@
 ---
 source: crates/r2s/tests/commands.rs
+assertion_line: 527
 expression: run.out
 ---
 uint64_t fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 27 rendered, 14 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 26 rendered, 14 elided, 0 refused; 12 statements rendered */
     if (RSI_0 == 0) {
         return 0x811c9dc5;
     } else {
@@ -12,9 +13,9 @@ uint64_t fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
         RSI_0 += RDI_0;
         RAX_1 = 0x811c9dc5;
         for (; ; ) {
-            uint8_t tmp_11e00_2 = *(uint8_t*)RDI_0;
+            uint8_t tmp_11e00_1 = *(uint8_t*)RDI_0;
             RDI_0++;
-            RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_2 ^ (uint32_t)RAX_1) * 0x1000193);
+            RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_1 ^ (uint32_t)RAX_1) * 0x1000193);
             if (RSI_0 == RDI_0) {
                 break;
             }

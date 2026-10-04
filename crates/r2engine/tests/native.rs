@@ -3955,3 +3955,50 @@ fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
         );
     }
 }
+
+/// `fnv1a32` from `tests/coverage/pinned/hashes_gcc_x64_O2`, gcc -O2:
+/// `for (i = 0; i < len; i++) { h ^= data[i]; h *= 16777619; }`.
+const FNV1A32_O2: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // endbr64
+    0x48, 0x85, 0xf6, // test rsi, rsi
+    0x74, 0x27, // je 0x30
+    0x48, 0x01, 0xfe, // add rsi, rdi
+    0xb8, 0xc5, 0x9d, 0x1c, 0x81, // mov eax, 0x811c9dc5
+    0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, // nop
+    0x0f, 0xb6, 0x17, // 0x18 movzx edx, byte [rdi]
+    0x48, 0x83, 0xc7, 0x01, // add rdi, 1
+    0x31, 0xd0, // xor eax, edx
+    0x69, 0xc0, 0x93, 0x01, 0x00, 0x01, // imul eax, eax, 0x1000193
+    0x48, 0x39, 0xfe, // cmp rsi, rdi
+    0x75, 0xec, // jne 0x18
+    0xc3, // ret
+    0x0f, 0x1f, 0x00, // nop
+    0xb8, 0xc5, 0x9d, 0x1c, 0x81, // 0x30 mov eax, 0x811c9dc5
+    0xc3, // ret
+];
+
+/// A merge is placed only where its storage is live on entry (issue #56).
+/// The loop carries the hash and the pointer; every flag the compare sets is
+/// written again before it is read, and no Sleigh temporary outlives its
+/// instruction, so none of them has a merge at the header. `rdx` keeps one
+/// because the `movzx` writes only its low lane, which this lane model does
+/// not count as defining the whole register.
+#[test]
+fn a_loop_header_merges_only_what_the_loop_carries() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: FNV1A32_O2.to_vec(),
+        name: "fnv1a32",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let function = prepared.artifact().function();
+    let header = function
+        .get_block(BASE + 0x18)
+        .unwrap_or_else(|| panic!("the loop header\n{}", function.dump()));
+    let merged = header
+        .phis()
+        .iter()
+        .map(|phi| phi.dst.display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(merged, ["RAX_2", "RDI_1", "RDX_1"], "{}", function.dump());
+}

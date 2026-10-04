@@ -437,18 +437,15 @@ impl SSAFunction {
                 control,
             )?;
 
-        // Place phi nodes
-        let mut phi_placement = PhiPlacement::compute_with_storage_and_control(
-            &cfg,
-            &domtree,
-            &defs,
-            &storage_by_identity,
-            control,
-        )?;
-        // A call defines its convention's registers, and renaming writes those
-        // definitions after placement has run, so the merges they need are
-        // added here -- pruned, because an unread merge only invents a live-in.
-        if let Some(call_boundaries) = call_boundaries {
+        // Place phi nodes: at the iterated dominance frontier of each
+        // identity's definitions, and, where the convention says what calls
+        // and returns read, only where the identity is live on entry to the
+        // merge (pruned SSA, Choi et al.). A merge nothing reads names no
+        // program state: a Sleigh temporary never outlives its instruction,
+        // so none of its merges is live. A call defines its convention's
+        // registers, and renaming writes those definitions after placement,
+        // so their sites are added to the definitions first.
+        let phi_placement = if let Some(call_boundaries) = call_boundaries {
             crate::phi::add_call_boundary_def_sites(
                 &cfg,
                 call_boundaries,
@@ -457,22 +454,33 @@ impl SSAFunction {
                 &mut defs,
                 &mut storage_by_identity,
             );
-            let complete = PhiPlacement::compute_with_storage_and_control(
-                &cfg,
-                &domtree,
-                &defs,
-                &storage_by_identity,
-                control,
-            )?;
             let live_in = crate::phi::live_in_by_block(
                 &cfg,
                 call_boundaries,
                 reg_names_ref,
                 families_ref,
+                promoted,
                 &defs,
             );
-            phi_placement.merge_live_additions(complete, &live_in);
-        }
+            PhiPlacement::compute_with_storage_and_control(
+                &cfg,
+                &domtree,
+                &defs,
+                &storage_by_identity,
+                control,
+            )?
+            .retain_live(&live_in)
+        } else {
+            // Without a convention nothing says what a return observes, so
+            // every merge a definition reaches is kept.
+            PhiPlacement::compute_with_storage_and_control(
+                &cfg,
+                &domtree,
+                &defs,
+                &storage_by_identity,
+                control,
+            )?
+        };
 
         // Rename variables
         let renamed = rename_function(

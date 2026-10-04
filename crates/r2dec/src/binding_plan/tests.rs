@@ -385,41 +385,42 @@ fn shadow_plan_groups_spans_and_inlines_only_upstream_literals() {
 
 #[test]
 fn dead_phi_reader_does_not_force_a_live_temporary_copy_to_bind() {
+    // Around the loop, the stored copy is RDI's next value, so it feeds RDI's
+    // merge. The merge is placed, because the scratch increment reads it, and
+    // unobserved, because nothing the program observes reads that.
     let mut entry = R2ILBlock::new(0x1000, 4);
-    entry.push(R2ILOp::CBranch {
-        cond: Varnode::constant(1, 1),
-        target: Varnode::constant(0x1008, 8),
+    entry.push(R2ILOp::Copy {
+        dst: Varnode::register(0x38, 8),
+        src: Varnode::constant(11, 8),
     });
-    let mut left = R2ILBlock::new(0x1004, 4);
-    left.push(R2ILOp::Copy {
-        dst: Varnode::unique(0x38, 8),
+    let mut header = R2ILBlock::new(0x1004, 4);
+    header.push(R2ILOp::IntAdd {
+        dst: Varnode::register(0x20, 8),
+        a: Varnode::register(0x38, 8),
+        b: Varnode::constant(1, 8),
+    });
+    header.push(R2ILOp::Copy {
+        dst: Varnode::register(0x38, 8),
         src: Varnode::register(0, 8),
     });
-    left.push(R2ILOp::Store {
+    header.push(R2ILOp::Store {
         space: SpaceId::Ram,
         addr: Varnode::constant(0x2000, 8),
-        val: Varnode::unique(0x38, 8),
+        val: Varnode::register(0x38, 8),
     });
-    left.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
+    header.push(R2ILOp::CBranch {
+        cond: Varnode::constant(1, 1),
+        target: Varnode::constant(0x1004, 8),
     });
-    let mut right = R2ILBlock::new(0x1008, 4);
-    right.push(R2ILOp::Copy {
-        dst: Varnode::unique(0x38, 8),
-        src: Varnode::constant(2, 8),
-    });
-    right.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
-    });
-    let mut join = R2ILBlock::new(0x100c, 4);
-    join.push(R2ILOp::Return {
+    let mut exit = R2ILBlock::new(0x1008, 4);
+    exit.push(R2ILOp::Return {
         target: Varnode::register(0x30, 8),
     });
-    let source_owned = source_owned_blocks(&[entry, left, right, join]);
+    let source_owned = source_owned_blocks(&[entry, header, exit]);
     let source = source_owned.source();
     // The copy feeds the merge, so it is the merge's edge write and stays a
     // copy the merge reads; that read is what the dead-value analysis owns.
-    let producer = crate::inst_at(source, 0x1004, 0)
+    let producer = crate::inst_at(source, 0x1004, 1)
         .and_then(|inst| source.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("copy output");
@@ -806,41 +807,39 @@ fn direct_cfg_target_is_elided_only_when_every_use_is_control_topology() {
 
 #[test]
 fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
+    // RDI only feeds itself around the loop, so its merge is placed (the
+    // increment reads it) and unobserved; RAX is returned, so its merge is
+    // observed.
     let mut entry = R2ILBlock::new(0x1000, 4);
-    entry.push(R2ILOp::CBranch {
-        cond: Varnode::constant(1, 1),
-        target: Varnode::constant(0x1008, 8),
-    });
-    let mut left = R2ILBlock::new(0x1004, 4);
-    left.push(R2ILOp::Copy {
+    entry.push(R2ILOp::Copy {
         dst: Varnode::register(0, 8),
         src: Varnode::constant(1, 8),
     });
-    left.push(R2ILOp::Copy {
+    entry.push(R2ILOp::Copy {
         dst: Varnode::register(0x38, 8),
         src: Varnode::constant(11, 8),
     });
-    left.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
-    });
-    let mut right = R2ILBlock::new(0x1008, 4);
-    right.push(R2ILOp::Copy {
+    let mut header = R2ILBlock::new(0x1004, 4);
+    header.push(R2ILOp::IntAdd {
         dst: Varnode::register(0, 8),
-        src: Varnode::constant(2, 8),
+        a: Varnode::register(0, 8),
+        b: Varnode::constant(2, 8),
     });
-    right.push(R2ILOp::Copy {
+    header.push(R2ILOp::IntAdd {
         dst: Varnode::register(0x38, 8),
-        src: Varnode::constant(12, 8),
+        a: Varnode::register(0x38, 8),
+        b: Varnode::constant(1, 8),
     });
-    right.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
+    header.push(R2ILOp::CBranch {
+        cond: Varnode::constant(1, 1),
+        target: Varnode::constant(0x1004, 8),
     });
-    let mut join = R2ILBlock::new(0x100c, 4);
-    join.push(R2ILOp::Return {
+    let mut exit = R2ILBlock::new(0x1008, 4);
+    exit.push(R2ILOp::Return {
         target: Varnode::register(0x30, 8),
     });
 
-    let source_owned = source_owned_blocks(&[entry, left, right, join]);
+    let source_owned = source_owned_blocks(&[entry, header, exit]);
     let source = source_owned.source();
     let graph = source.graph();
     let dead = source

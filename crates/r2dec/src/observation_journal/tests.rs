@@ -945,36 +945,34 @@ fn first_bound(plan: &BindingPlan, source: &SourceOwnedFunctionFacts) -> (ValueI
 
 #[test]
 fn source_certified_dead_phi_accounts_for_value_edges_and_write() {
+    // A register the loop only feeds back into itself: its merge is live by
+    // the reads alone (the increment reads it), so it is placed, and nothing
+    // the program observes reads it, so it is unobserved. A merge nothing
+    // reads at all is never placed.
     let mut entry = R2ILBlock::new(0x1000, 4);
-    entry.push(R2ILOp::CBranch {
-        cond: Varnode::constant(1, 1),
-        target: Varnode::constant(0x1008, 8),
-    });
-    let mut left = R2ILBlock::new(0x1004, 4);
-    left.push(R2ILOp::Copy {
-        dst: Varnode::unique(0x90, 8),
+    entry.push(R2ILOp::Copy {
+        dst: Varnode::register(0x38, 8),
         src: Varnode::constant(11, 8),
     });
-    left.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
+    let mut header = R2ILBlock::new(0x1004, 4);
+    header.push(R2ILOp::IntAdd {
+        dst: Varnode::register(0x38, 8),
+        a: Varnode::register(0x38, 8),
+        b: Varnode::constant(1, 8),
     });
-    let mut right = R2ILBlock::new(0x1008, 4);
-    right.push(R2ILOp::Copy {
-        dst: Varnode::unique(0x90, 8),
-        src: Varnode::constant(12, 8),
+    header.push(R2ILOp::CBranch {
+        cond: Varnode::constant(1, 1),
+        target: Varnode::constant(0x1004, 8),
     });
-    right.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
-    });
-    let mut join = R2ILBlock::new(0x100c, 4);
-    join.push(R2ILOp::Copy {
+    let mut exit = R2ILBlock::new(0x1008, 4);
+    exit.push(R2ILOp::Copy {
         dst: Varnode::register(0, 8),
         src: Varnode::constant(0, 8),
     });
-    join.push(R2ILOp::Return {
+    exit.push(R2ILOp::Return {
         target: Varnode::register(0x30, 8),
     });
-    let source = source_owned_from_blocks(&[entry, left, right, join]);
+    let source = source_owned_from_blocks(&[entry, header, exit]);
     let dead = source
         .source()
         .unobserved_merges()
@@ -982,13 +980,13 @@ fn source_certified_dead_phi_accounts_for_value_edges_and_write() {
         .find(|value| {
             source.source().graph().value(*value).is_some_and(|value| {
                 value.canonical_storage.is_some_and(|storage| {
-                    storage.space == CanonicalStorageSpace::Unique
-                        && storage.offset == 0x90
+                    storage.space == CanonicalStorageSpace::Register
+                        && storage.offset == 0x38
                         && storage.size == 8
                 })
             })
         })
-        .expect("unused unique-space merge");
+        .expect("the loop register's unobserved merge");
     let definition = source
         .source()
         .graph()
