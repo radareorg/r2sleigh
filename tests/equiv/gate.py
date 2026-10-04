@@ -32,7 +32,9 @@ status is one of:
                           ``equal`` on (fewer than a quarter of them, see
                           :meth:`Config.floor`), or the harness could not
                           reproduce the original
-``harness-error``         the runtime itself failed, or r2s was never asked
+``harness-error``         the runtime itself failed, r2s was never asked, or
+                          the target's loader would bind an object link
+                          elsewhere (``link.loader_conflicts``)
 ========================  ====================================================
 
 The first eight grade the engine -- a crash, a deadline or a broken contract
@@ -63,6 +65,7 @@ import link
 from dwarf import Dwarf
 from r2s_batch import Answer
 from spec import CallSpec
+from target import X86_64, Target
 from vectors import Run, build_vectors, encode_job
 
 RUN_LABELS = ("original", "identity", "O0", "pattern", "O2", "ubsan")
@@ -88,6 +91,8 @@ class Config:
     keep: bool = False
     min_graded: int | None = None
     compile_timeout: float = link.COMPILE_TIMEOUT
+    # The machine the graded binaries are built for, and how to run them.
+    target: Target = X86_64
 
     def floor(self) -> int:
         """How many graded vectors an ``equal`` or ``residual-trap`` must rest on.
@@ -168,10 +173,19 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         record.status = "compile-error"
         record.evidence = {"variant": "link", "diagnostics": "\n".join(inside)}
         return record
-    identity = link.build_trampoline(config.cc, workdir, spec.address)
+    target = config.target
+    if target.objects_through_loader:
+        conflicts = link.loader_conflicts(link.shim_objects(links, definition), str(binary),
+                                          str(config.runtime), target)
+        if conflicts:
+            # The rendering cannot be run against the objects it names here.
+            record.status = "harness-error"
+            record.evidence = {"cause": "; ".join(conflicts)}
+            return record
+    identity = link.build_trampoline(config.cc, workdir, spec.address, target)
     builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition,
-                                                   link.needed_libraries(str(binary)),
-                                                   spec.address, config.compile_timeout)
+                                                   link.needed_libraries(str(binary), target),
+                                                   spec.address, config.compile_timeout, target)
     record.strict = strict
     if not identity.ok:
         record.status = "harness-error"
@@ -198,9 +212,10 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         *(Run(variant, so_path=str(builds[variant].path), symbol=definition, replaces=True)
           for variant in ("O0", "pattern", "O2", "ubsan")),
     ]
-    vectors = build_vectors(spec, dwarf, config.vectors, record.key)
+    vectors = build_vectors(spec, dwarf, config.vectors, record.key, target.abi)
     job = workdir / "job.bin"
-    job.write_bytes(encode_job(spec, runs, list(PAIRS), vectors, config.timeout_ms))
+    job.write_bytes(encode_job(spec, runs, list(PAIRS), vectors, config.timeout_ms,
+                               abi=target.abi))
     out = workdir / "result.jsonl"
     ok, cause, lines = run_driver(binary, job, out, config, len(vectors))
     if not ok:
@@ -217,7 +232,9 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         }
         return record
     residual = int(record.proof.get("residual", 0) or 0)
-    helpers = ResidualHelpers(str(builds["O0"].path), link.residual_helpers(builds["O0"].path))
+    helpers = ResidualHelpers(str(builds["O0"].path),
+                              link.residual_helpers(builds["O0"].path, target),
+                              target.trap_signal)
     status, evidence, counts = classify(vector_lines, vectors, residual, helpers,
                                         config.floor())
     record.status = status
@@ -239,6 +256,12 @@ def fixed_layout_prefix() -> tuple[str, ...]:
     every run, so two runs of the gate write the same records. Empty where the
     personality cannot be set (some container sandboxes refuse it); the run
     then says so in its config.
+
+    An emulated target runs under the same prefix. qemu-user gives its guest
+    no address randomisation of its own: it places the guest's image, stack
+    and mappings by a first-fit search from fixed bases, so the guest layout
+    is a function of the host addresses qemu's own mappings took, and with the
+    host's randomisation off those are fixed too.
     """
     prefix = ("setarch", os.uname().machine, "-R")
     try:
@@ -250,8 +273,8 @@ def fixed_layout_prefix() -> tuple[str, ...]:
 
 def run_driver(binary: Path, job: Path, out: Path, config: Config,
                vector_count: int) -> tuple[bool, str, list[dict]]:
-    # The runtime's variables are set by env(1), the last program before the
-    # binary: setarch, which runs first, must not load the runtime itself.
+    # The runtime's variables reach the binary alone (Target.run_argv):
+    # setarch, which runs first, and an emulator must not load it themselves.
     assignments = [
         f"LD_PRELOAD={config.runtime}",
         "LD_BIND_NOW=1",
@@ -259,7 +282,7 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
         f"EQUIV_OUT={out}",
         "UBSAN_OPTIONS=print_stacktrace=0:halt_on_error=1:exitcode=86",
     ]
-    argv = [*fixed_layout_prefix(), "/usr/bin/env", *assignments, str(binary)]
+    argv = [*fixed_layout_prefix(), *config.target.run_argv(binary, assignments)]
     budget = max(120.0, vector_count * config.timeout_ms * 22 / 1000.0 + 60.0)
     out.unlink(missing_ok=True)
     try:
@@ -296,15 +319,18 @@ class ResidualHelpers:
 
     object_path: str
     ranges: list[tuple[int, int, str]] = field(default_factory=list)
+    # What __builtin_trap raises on the target: SIGILL (ud2) on x86-64,
+    # SIGTRAP (brk) on AArch64.
+    trap_signal: int = signal.SIGILL
 
     def reached(self, run: dict) -> str | None:
-        """The helper a run died of SIGILL inside, or None.
+        """The helper a run died of the trap signal inside, or None.
 
         A trap is a reached residual only at a program counter inside one of
         these helpers of this object: a ``__builtin_trap`` anywhere else, or a
         stray illegal instruction, is the rendering ending differently.
         """
-        if run.get("outcome") != "signal" or run.get("status") != signal.SIGILL:
+        if run.get("outcome") != "signal" or run.get("status") != self.trap_signal:
             return None
         if str(run.get("fault_object", "")) != self.object_path:
             return None
@@ -575,10 +601,6 @@ def baseline_from(records: list[Record], previous: dict | None = None,
     }
 
 
-def environment_problem() -> str | None:
-    """Why this machine cannot run the gate, or None."""
-    if os.uname().machine not in ("x86_64", "amd64"):
-        return f"runtime equivalence needs x86-64 (this is {os.uname().machine})"
-    if not Path("/proc/self/exe").exists():
-        return "runtime equivalence needs Linux"
-    return None
+def environment_problem(target: Target = X86_64) -> str | None:
+    """Why this machine cannot run the gate for ``target``, or None."""
+    return target.environment_problem()

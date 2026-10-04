@@ -23,6 +23,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from target import X86_64, Target
+
 _DIE = re.compile(r"^\s*<(\d+)><([0-9a-f]+)>: Abbrev Number: (\d+)(?: \((DW_TAG_\w+)\))?")
 _ATTR = re.compile(r"^\s*<[0-9a-f]+>\s+(DW_AT_\w+)\s*:\s?(.*)$")
 _REF = re.compile(r"<0x([0-9a-f]+)>")
@@ -169,9 +171,9 @@ class Dwarf:
         self._types: dict[int | None, TypeInfo] = {}
 
     @classmethod
-    def read(cls, binary: Path) -> "Dwarf":
+    def read(cls, binary: Path, target: Target = X86_64) -> "Dwarf":
         proc = subprocess.run(
-            ["readelf", "--wide", "--debug-dump=info", str(binary)],
+            [target.tool("readelf"), "--wide", "--debug-dump=info", str(binary)],
             capture_output=True,
             text=True,
             check=False,
@@ -461,10 +463,10 @@ def _walk(die: Die):
         stack.extend(reversed(node.children))
 
 
-def function_symbols(binary: Path) -> dict[int, tuple[list[str], int]]:
+def function_symbols(binary: Path, target: Target = X86_64) -> dict[int, tuple[list[str], int]]:
     """``address -> (names, size)`` of every FUNC symbol in the binary's ``.symtab``."""
     proc = subprocess.run(
-        ["readelf", "--wide", "--syms", str(binary)],
+        [target.tool("readelf"), "--wide", "--syms", str(binary)],
         capture_output=True,
         text=True,
         check=False,
@@ -489,30 +491,28 @@ def function_symbols(binary: Path) -> dict[int, tuple[list[str], int]]:
     return symbols
 
 
-_IMMEDIATE = re.compile(r"\$0x([0-9a-f]+)")
-
-
-def code_constants(binary: Path, address: int, size: int, limit: int = 32) -> list[int]:
+def code_constants(binary: Path, address: int, size: int, limit: int = 32,
+                   target: Target = X86_64) -> list[int]:
     """The immediates the original's own instructions compare and compute with.
 
     A boundary written in the source (`x > 100`) is an immediate in the code
-    (`cmp $0x64`). Reading them from the original -- the oracle side, never
-    the rendering -- lets the vectors sit on each side of every such boundary,
-    which is where an off-by-one lives. Returned as signed 64-bit values in
-    first-seen order.
+    (`cmp $0x64`, `cmp w0, #0x64`). Reading them from the original -- the
+    oracle side, never the rendering -- lets the vectors sit on each side of
+    every such boundary, which is where an off-by-one lives. Returned as signed
+    64-bit values in first-seen order.
     """
     if size <= 0:
         return []
     proc = subprocess.run(
-        ["objdump", "-d", "--no-show-raw-insn", f"--start-address=0x{address:x}",
+        [target.tool("objdump"), "-d", "--no-show-raw-insn", f"--start-address=0x{address:x}",
          f"--stop-address=0x{address + size:x}", str(binary)],
         capture_output=True,
         text=True,
         check=False,
     )
     seen: list[int] = []
-    for found in _IMMEDIATE.finditer(proc.stdout):
-        value = int(found.group(1), 16)
+    for value in target.asm.immediates(proc.stdout):
+        value &= (1 << 64) - 1
         if value >= 1 << 63:
             value -= 1 << 64
         if value not in seen:

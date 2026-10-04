@@ -66,13 +66,25 @@ NOINL void st_fill(unsigned char *dst, size_t n, unsigned char v)
 }
 
 /* Eight integer arguments and nine floating ones: the last of each kind is
- * passed on the stack, which is where a thunk that miscounts goes wrong. */
+ * passed on the stack (the integers on x86-64 only), which is where a thunk
+ * that miscounts goes wrong. */
 NOINL int64_t st_many(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f,
                       int32_t g, int64_t h)
 {
     return (int64_t)((uint64_t)a + 3u * (uint64_t)b + 5u * (uint64_t)c + 7u * (uint64_t)d
                      + 11u * (uint64_t)e + 13u * (uint64_t)f + 17u * (uint64_t)(int64_t)g
                      + 19u * (uint64_t)h);
+}
+
+/* Ten integer arguments, the ninth 32 bits wide: past AArch64's eight
+ * argument registers as well as x86-64's six, so on both machines a narrow
+ * integer arrives in a stack word whose upper bits are the caller's. */
+NOINL int64_t st_many_int(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f,
+                          int64_t g, int64_t h, int32_t i, int64_t j)
+{
+    return (int64_t)((uint64_t)a + 2u * (uint64_t)b + 3u * (uint64_t)c + 5u * (uint64_t)d
+                     + 7u * (uint64_t)e + 11u * (uint64_t)f + 13u * (uint64_t)g
+                     + 17u * (uint64_t)h + 19u * (uint64_t)(int64_t)i + 23u * (uint64_t)j);
 }
 
 NOINL double st_many_fp(double a, double b, double c, double d, double e, double f, double g,
@@ -125,6 +137,7 @@ int main(void)
     st_fill(buf, sizeof buf, 1);
     return st_add(1, 2) + (int)st_mix(3, 4) + st_clamp(5) + (int)st_scale(d, 2) + st_print(1, 2)
         + (int)st_len("x") + st_sum_list(&a) + buf[0] + (int)st_many(1, 2, 3, 4, 5, 6, 7, 8)
-        + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + st_say(3) + st_first("x")
+        + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + (int)st_many_int(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+        + st_say(3) + st_first("x")
         + (int)st_cosine(0.5) + st_rsum(&a) + st_ping(&a);
 }

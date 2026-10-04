@@ -9,6 +9,11 @@ as exactly one typed answer per address, that the ratchet blocks what it must,
 and that the whole pipeline -- build, strip, capture, compile, run, compare --
 keeps every known rendering's verdict at every level, and never grades a
 rendering that hands its work back to the original as ``equal``.
+
+The classes that build and run are written once over a target
+(``target.py``): x86-64 where the host is x86-64 Linux, and AArch64 where its
+cross compiler (and, to run, qemu-user) is installed. A class whose target
+cannot run here is skipped with the reason.
 """
 
 from __future__ import annotations
@@ -34,9 +39,15 @@ import selftest  # noqa: E402
 from dwarf import Dwarf  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
+from target import AARCH64, X86_64, Target  # noqa: E402
+from vectors import Vector, encode_job  # noqa: E402
 
 STUB = HERE / "testdata" / "stub_r2s.py"
 CAN_RUN = gate.environment_problem() is None and shutil.which("gcc") is not None
+# Building for AArch64 needs only its cross compiler; running needs qemu-user too.
+CAN_BUILD_AARCH64 = (Path("/proc/self/exe").exists()
+                     and shutil.which(AARCH64.rendering_cc) is not None)
+CAN_RUN_AARCH64 = AARCH64.environment_problem() is None
 
 
 class _StubEnv:
@@ -454,12 +465,102 @@ class CompilerVerdictTests(unittest.TestCase):
                 self.assertEqual(sections[0], sections[1], variant)
 
 
-@unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
-class BuildTests(unittest.TestCase):
+class TargetTests(unittest.TestCase):
+    """What each target says about its machine, without building anything."""
+
+    def test_x86_64_keys_and_directories_are_the_ones_before_the_target_axis(self):
+        self.assertEqual(X86_64.config("gcc", "O0"), "gcc-O0")
+        self.assertEqual(X86_64.directory("rt"), "rt")
+        self.assertEqual(AARCH64.config("clang", "O2"), "aarch64-clang-O2")
+        self.assertEqual(AARCH64.directory("rt"), "rt-aarch64")
+
+    def test_a_narrow_argument_carries_only_the_bits_its_convention_defines(self):
+        garbage = 0xDEADBEEF_CAFEBABE
+        # SysV x86-64: extended to 32 bits by the type's signedness, the rest
+        # the caller's.
+        x86 = X86_64.abi
+        self.assertEqual(x86.argument_word(0xFF, 1, True, garbage), 0xCAFEBABE_FFFFFFFF)
+        self.assertEqual(x86.argument_word(0xFF, 1, False, garbage), 0xCAFEBABE_000000FF)
+        self.assertEqual(x86.argument_word(0x80000000, 4, True, garbage), 0xCAFEBABE_80000000)
+        self.assertEqual(x86.argument_word(7, 8, True, garbage), 7)
+        # AAPCS64: every bit above the type is the caller's.
+        a64 = AARCH64.abi
+        self.assertEqual(a64.argument_word(0xFF, 1, True, garbage), 0xADBEEFCA_FEBABEFF)
+        self.assertEqual(a64.argument_word(0x1234, 2, False, garbage), 0xBEEFCAFE_BABE1234)
+        self.assertEqual(a64.argument_word(5, 4, True, garbage), 0xCAFEBABE_00000005)
+        self.assertEqual(a64.argument_word(7, 8, True, garbage), 7)
+
+    def test_a_job_vector_has_the_runtime_s_layout_of_its_machine(self):
+        # struct job_vector in rt/equiv_rt.c: the seed, struct equiv_regs, and
+        # two 32-bit words. equiv_regs is 320 bytes on x86-64 (six GPRs, eight
+        # XMMs, rax, n_stack, sixteen stack words) and 328 on AArch64 (eight
+        # GPRs, eight Q registers, n_stack, sixteen stack words); equiv_rt.c
+        # asserts the same sizes.
+        spec = CallSpec(name="f", address=0x1000, params=[], ret_kind="int", ret_bytes=4,
+                        ret_spelling="int")
+        for target, size in ((X86_64, 336), (AARCH64, 344)):
+            abi = target.abi
+            vector = Vector(index=0, seed=1, gpr=[0] * len(abi.int_registers),
+                            fp=[bytes(16)] * len(abi.fp_registers), count=0, stack=[])
+            with_vector = encode_job(spec, [], [], [vector], 1000, abi=abi)
+            without = encode_job(spec, [], [], [], 1000, abi=abi)
+            self.assertEqual(len(with_vector) - len(without), size, target.name)
+
+    def test_function_links_jump_through_a_register_no_argument_uses(self):
+        links = [{"ident": "callee", "kind": "function", "addr": 0x401234},
+                 {"ident": "self", "kind": "function", "addr": 0x401000},
+                 {"ident": "table", "kind": "object", "addr": 0x404010}]
+        x86, _ = link.shim_source(links, "sub_f", 0x401000, X86_64)
+        self.assertIn("    movabs $0x401234, %r11\n    jmp *%r11\n", x86)
+        self.assertIn("self:\n    jmp sub_f\n", x86)
+        a64, _ = link.shim_source(links, "sub_f", 0x401000, AARCH64)
+        self.assertIn("    movz x16, #0x1234\n    movk x16, #0x40, lsl #16\n", a64)
+        self.assertIn("    br x16\n", a64)
+        self.assertIn("self:\n    b sub_f\n", a64)
+        for text in (x86, a64):
+            self.assertIn("    .set table, 0x404010\n", text)
+        self.assertEqual(link.shim_objects(links, "sub_f"), [("table", 0x404010)])
+
+    def test_immediates_are_read_in_each_machine_s_syntax(self):
+        x86 = "  401000:\tcmp    $0x64,%edi\n  401003:\tmov    $0xffffffffffffffff,%rax\n"
+        self.assertEqual(X86_64.asm.immediates(x86), [100, (1 << 64) - 1])
+        a64 = ("  4006b0:\tldr\tw0, [sp, #12]\n"
+               "  4006b4:\tcmp\tw0, #0x64\n"
+               "  4006bc:\tmov\tw0, #0x3e8                 \t// #1000\n"
+               "  4006c0:\tfmov\td0, #1.000000000000000000e+00\n")
+        self.assertEqual(AARCH64.asm.immediates(a64), [100, 1000])
+
+    def test_an_emulated_target_hands_its_variables_to_the_guest_only(self):
+        if not AARCH64.emulated():
+            self.skipTest("this host runs AArch64 natively")
+        argv = AARCH64.run_argv(Path("/w/prog"), ["LD_PRELOAD=/w/rt.so", "EQUIV_JOB=/w/job"])
+        self.assertEqual(argv, ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu",
+                                "-E", "LD_PRELOAD=/w/rt.so", "-E", "EQUIV_JOB=/w/job", "/w/prog"])
+        with self.assertRaises(ValueError):
+            AARCH64.run_argv(Path("/w/prog"), ["UBSAN_OPTIONS=a=1,b=2"])
+
+
+class _OnTarget:
+    """Cases written once and run per target (``TARGET``).
+
+    Each target's class is its own ``unittest.TestCase`` with its own skip
+    condition, so one target's absence never hides the other's tests.
+    """
+
+    TARGET: Target = X86_64
+
+_AARCH64_RUN = "AArch64 runtime equivalence needs its cross compiler, sysroot and qemu-aarch64"
+_AARCH64_BUILD = "building for AArch64 needs aarch64-linux-gnu-gcc"
+
+
+class _BuildCases(_OnTarget):
     def test_the_shown_copy_has_a_directory_of_its_own_with_nothing_else_in_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            binary = build.build(HERE / "selftest" / "fixture.c", "gcc", "O0", Path(tmp))
+            binary = build.build(HERE / "selftest" / "fixture.c", "gcc", "O0", Path(tmp),
+                                 self.TARGET)
             self.assertIsNone(binary.error)
+            self.assertEqual(build.elf_machine(binary.stripped, self.TARGET),
+                             self.TARGET.elf_machine)
             self.assertNotEqual(binary.stripped.parent, binary.unstripped.parent)
             self.assertEqual(binary.stripped.name, binary.unstripped.name)
             self.assertEqual(sorted(p.name for p in binary.stripped.parent.iterdir()),
@@ -468,6 +569,25 @@ class BuildTests(unittest.TestCase):
                                       capture_output=True, text=True, check=True).stdout
             self.assertNotIn(".symtab", sections)
             self.assertNotIn(".debug_", sections)
+
+    def test_a_compiler_that_builds_for_another_machine_is_a_failed_build(self):
+        other = AARCH64 if self.TARGET is X86_64 else X86_64
+        wrong = Target(**{**self.TARGET.__dict__, "compilers": other.compilers})
+        if shutil.which(other.compiler("gcc")[0]) is None:
+            self.skipTest(f"no {other.name} compiler to build the wrong machine with")
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = build.build(HERE / "selftest" / "fixture.c", "gcc", "O0", Path(tmp), wrong)
+        self.assertIn(f"not {self.TARGET.elf_machine}", binary.error or "")
+
+
+@unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
+class BuildTests(_BuildCases, unittest.TestCase):
+    pass
+
+
+@unittest.skipUnless(CAN_BUILD_AARCH64, _AARCH64_BUILD)
+class AArch64BuildTests(_BuildCases, unittest.TestCase):
+    TARGET = AARCH64
 
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
@@ -486,16 +606,66 @@ class DwarfTests(unittest.TestCase):
         many = specs["st_many"].params
         self.assertEqual([p.register for p in many[5:]], ["r9", "stack0", "stack1"])
         self.assertEqual(specs["st_many_fp"].params[-1].register, "stack0")
+        self.assertEqual([p.register for p in specs["st_many_int"].params[5:]],
+                         ["r9", "stack0", "stack1", "stack2", "stack3"])
 
 
-@unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
-class SelfTestSuite(unittest.TestCase):
+@unittest.skipUnless(CAN_BUILD_AARCH64, _AARCH64_BUILD)
+class AArch64DwarfTests(unittest.TestCase):
+    """AAPCS64: eight integer registers, eight vector registers, then stack words."""
+
+    def test_the_fixture_signatures_read_back_under_aapcs64(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = selftest.build_fixture(AARCH64.rendering_cc, Path(tmp), AARCH64)
+            dwarf = Dwarf.read(binary, AARCH64)
+            functions = [s for s in dwarf.subprograms() if s.name]
+            specs = {s.name: call_spec(dwarf, s, functions, AARCH64.abi) for s in functions}
+        self.assertEqual(specs["st_add"].describe(), "int st_add(int a@x0, int b@x1)")
+        self.assertEqual(specs["st_scale"].describe(),
+                         "double st_scale(double const* v@x0, int n@x1)")
+        self.assertEqual([p.register for p in specs["st_many"].params[5:]], ["x5", "x6", "x7"])
+        self.assertEqual([p.register for p in specs["st_many_int"].params[6:]],
+                         ["x6", "x7", "stack0", "stack1"])
+        self.assertEqual([p.register for p in specs["st_many_fp"].params[7:]], ["v7", "stack0"])
+        self.assertEqual(specs["st_cosine"].params[0].register, "v0")
+
+
+@unittest.skipUnless(CAN_BUILD_AARCH64, _AARCH64_BUILD)
+class AArch64ObjectLinkTests(unittest.TestCase):
+    """AArch64's object links are bound by the loader, so what it would capture is refused."""
+
+    def test_an_object_link_the_loader_would_bind_elsewhere_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = selftest.build_fixture(AARCH64.rendering_cc, Path(tmp), AARCH64)
+            runtime = link.build_runtime(AARCH64.rendering_cc, HERE / "rt", Path(tmp) / "rt",
+                                         AARCH64)
+            symbols = selftest._all_symbols(binary, AARCH64)
+            # The program exports stderr (copied into it from libc for st_first).
+            program_stderr = next(address for name, address in symbols.items()
+                                  if name.split("@", 1)[0] == "stderr")
+
+            def conflicts(*objects):
+                return link.loader_conflicts(list(objects), str(binary), str(runtime), AARCH64)
+
+            self.assertEqual(conflicts(("st_counter", symbols["st_counter"]),
+                                       ("stderr", program_stderr)), [])
+            moved = conflicts(("stderr", program_stderr + 8))
+            self.assertEqual(len(moved), 1)
+            self.assertIn("the program's own `stderr`", moved[0])
+            library = conflicts(("environ", symbols["st_counter"]))
+            self.assertEqual(len(library), 1)
+            self.assertIn("`environ` of libc.so.6", library[0])
+
+
+class _SelfTestCases(_OnTarget):
     """The gate's precondition: every known verdict comes back."""
 
     def test_every_case_gets_its_known_verdict(self):
+        target = self.TARGET
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = link.build_runtime("gcc", HERE / "rt", Path(tmp) / "rt")
-            config = gate.Config(runtime=runtime)
+            runtime = link.build_runtime(target.rendering_cc, HERE / "rt",
+                                         Path(tmp) / target.directory("rt"), target)
+            config = gate.Config(runtime=runtime, cc=target.rendering_cc, target=target)
             outcomes = selftest.run_self_tests(config, Path(tmp) / "selftest")
         misses = [f"{o.case.name}: {o.why}" for o in outcomes if not o.ok]
         self.assertEqual(misses, [])
@@ -503,7 +673,16 @@ class SelfTestSuite(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
-class PipelineTests(unittest.TestCase):
+class SelfTestSuite(_SelfTestCases, unittest.TestCase):
+    pass
+
+
+@unittest.skipUnless(CAN_RUN_AARCH64, _AARCH64_RUN)
+class AArch64SelfTestSuite(_SelfTestCases, unittest.TestCase):
+    TARGET = AARCH64
+
+
+class _PipelineCases(_OnTarget):
     """The whole gate over the self-test fixture, with r2s replaced by the stub.
 
     Built with GCC at -O0 and -O2 and stripped, asked through the batch runner,
@@ -512,13 +691,14 @@ class PipelineTests(unittest.TestCase):
     original is never equal.
     """
 
-    FUNCTIONS = 18  # seventeen functions and main, per level
+    FUNCTIONS = 19  # eighteen functions and main, per level
 
     def run_gate(self, tmp: Path, *extra: str, **env: str) -> tuple[int, dict]:
         # --out is given relative to the working directory, as a person types
         # it: the runtime runs elsewhere and must be handed absolute paths.
         tmp.mkdir(parents=True, exist_ok=True)
         argv = ["--r2s", str(STUB), "--sources", str(HERE / "selftest" / "fixture.c"),
+                "--target", self.TARGET.name,
                 "--compilers", "gcc", "--opts", "O0,O2", "--out", "out", "--vectors", "24",
                 *extra]
         cwd = os.getcwd()
@@ -546,7 +726,9 @@ class PipelineTests(unittest.TestCase):
         got = {k: r["status"] for k, r in records.items()}
         want = {k: self.known(k.rsplit("::", 1)[1]) for k in records}
         self.assertEqual(got, want)
-        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 15)
+        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 16)
+        configs = {key.split("::")[1] for key in records}
+        self.assertEqual(configs, {self.TARGET.config("gcc", opt) for opt in ("O0", "O2")})
 
     def test_a_rendering_that_delegates_to_the_original_is_never_equal(self):
         # The stub's delegate calls the original's entry by its address, a
@@ -590,6 +772,16 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("SIGABRT", crashed["evidence"]["cause"])
         self.assertEqual({k: r["status"] for k, r in records.items() if k != clamp["key"]},
                          {k: r["status"] for k, r in first.items() if k != clamp["key"]})
+
+
+@unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
+class PipelineTests(_PipelineCases, unittest.TestCase):
+    pass
+
+
+@unittest.skipUnless(CAN_RUN_AARCH64, _AARCH64_RUN)
+class AArch64PipelineTests(_PipelineCases, unittest.TestCase):
+    TARGET = AARCH64
 
 
 if __name__ == "__main__":

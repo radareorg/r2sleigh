@@ -1,7 +1,7 @@
 """The inputs a function is called with, and the job file the runtime reads.
 
-Every vector is a complete machine entry state (argument registers, the AL
-count, stack words) plus the objects its pointers point at, laid out in a
+Every vector is a complete machine entry state (argument registers, x86-64's
+AL count, stack words) plus the objects its pointers point at, laid out in a
 fixed-address arena. Both the original and each rendering see the same state,
 so the vectors never need to be *valid* for the source's contract: a vector the
 original cannot survive (a length that walks off the arena, a NULL it
@@ -13,13 +13,14 @@ Values are chosen to reach boundaries first -- the corpus lengths
 ``MAX`` and ``2^k +- 1`` at every width -- and then at random. Everything is
 derived from a seed text, so a record is reproducible from its key.
 
-A parameter narrower than its register is passed the way the ABI lets a caller
-pass it: bits below 32 extended by the source type's signedness (the de facto
-rule both compilers' callers follow), bits 32..63 arbitrary. An argument
-register the function does not take, and the unused upper lanes of a vector
-register, are arbitrary too. A rendering that reads bits the ABI never gave it
-is therefore caught; the original, which is correct by construction, never
-reads them.
+A parameter narrower than its register is passed the way the target's calling
+convention lets a caller pass it (:meth:`target.Abi.argument_word`): on x86-64
+bits below 32 extended by the source type's signedness (the de facto rule both
+compilers' callers follow) and bits 32..63 arbitrary; under AAPCS64 every bit
+above the type arbitrary. An argument register the function does not take, and
+the unused upper lanes of a vector register, are arbitrary too. A rendering
+that reads bits the ABI never gave it is therefore caught; the original, which
+is correct by construction, never reads them.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from dataclasses import dataclass, field
 
 from dwarf import Dwarf
 from spec import CallSpec, Param
+from target import SYSV_X86_64, Abi
 
 ARENA_BASE = 0x3E00_0000_0000
 ARENA_SIZE = 256 * 1024
@@ -80,24 +82,13 @@ def float_pool() -> list[float]:
             math.inf, -math.inf, math.nan, 7.0, -12.75]
 
 
-def int_register(value: int, size: int, signed: bool, garbage: int) -> int:
-    bits = size * 8
-    v = value & ((1 << bits) - 1)
-    if size < 4:
-        if signed and (v >> (bits - 1)) & 1:
-            v |= 0xFFFFFFFF ^ ((1 << bits) - 1)
-    if size <= 4:
-        v = (v & 0xFFFFFFFF) | ((garbage & 0xFFFFFFFF) << 32)
-    return v & MASK64
-
-
 @dataclass
 class Vector:
     index: int
     seed: int
-    gpr: list[int]
-    xmm: list[bytes]
-    rax: int
+    gpr: list[int]  # the Abi's integer argument registers, in order
+    fp: list[bytes]  # its eight vector argument registers, 16 bytes each
+    count: int  # x86-64's AL: the vector registers used (absent from an AAPCS64 job)
     stack: list[int]
     patches: list[tuple[int, bytes]] = field(default_factory=list)
     shown: list[str] = field(default_factory=list)
@@ -211,7 +202,8 @@ def _pointer_value(param: Param, dwarf: Dwarf, arena: _Arena, rng: random.Random
     return arena.address(offset), "<buffer>"
 
 
-def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str) -> list[Vector]:
+def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str,
+                  abi: Abi = SYSV_X86_64) -> list[Vector]:
     vectors: list[Vector] = []
     widest = max(
         [len(int_pool(p.size, p.signed, spec.constants)) for p in spec.params if p.kind == "int"]
@@ -222,8 +214,8 @@ def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str) -> l
     for index in range(count):
         seed = _seed(f"{seed_text}/{index}")
         rng = random.Random(seed)
-        gpr = [rng.getrandbits(64) for _ in range(6)]
-        xmm = [rng.getrandbits(128).to_bytes(16, "little") for _ in range(8)]
+        gpr = [rng.getrandbits(64) for _ in abi.int_registers]
+        fp = [rng.getrandbits(128).to_bytes(16, "little") for _ in abi.fp_registers]
         stack: list[int] = []
         patches: list[tuple[int, bytes]] = []
         shown: list[str] = []
@@ -235,7 +227,7 @@ def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str) -> l
             if param.kind in ("int", "bool"):
                 if param.kind == "bool":
                     value = (index + j) % 2 if choice >= 0 else rng.randrange(2)
-                    word = int_register(value, 4, False, garbage)
+                    word = abi.argument_word(value, abi.bool_bytes, False, garbage)
                     shown.append(f"{param.name}={value}")
                 else:
                     pool = int_pool(param.size, param.signed, spec.constants)
@@ -245,7 +237,7 @@ def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str) -> l
                         value = rng.choice(pool)
                     else:
                         value = rng.getrandbits(param.size * 8)
-                    word = int_register(value, param.size, param.signed, garbage)
+                    word = abi.argument_word(value, param.size, param.signed, garbage)
                     signed_value = value
                     if param.signed and value >> (param.size * 8 - 1):
                         signed_value = value - (1 << (param.size * 8))
@@ -282,16 +274,17 @@ def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str) -> l
                     data = address
                     shown.append(f"{param.name}={what}")
             register = param.register
-            if register.startswith("xmm"):
-                xmm[int(register[3:])] = data if isinstance(data, bytes) else bytes(16)
+            if register in abi.fp_registers:
+                fp[abi.fp_registers.index(register)] = (data if isinstance(data, bytes)
+                                                        else bytes(16))
             elif register.startswith("stack"):
                 stack.append(int.from_bytes(data[:8], "little") if isinstance(data, bytes)
                              else data & MASK64)
             else:
-                slot = ("rdi", "rsi", "rdx", "rcx", "r8", "r9").index(register)
+                slot = abi.int_registers.index(register)
                 gpr[slot] = data & MASK64 if isinstance(data, int) else 0
         vectors.append(
-            Vector(index=index, seed=seed, gpr=gpr, xmm=xmm, rax=used_sse, stack=stack,
+            Vector(index=index, seed=seed, gpr=gpr, fp=fp, count=used_sse, stack=stack,
                    patches=patches, shown=shown)
         )
     return vectors
@@ -308,8 +301,13 @@ class Run:
 
 
 def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
-               vectors: list[Vector], timeout_ms: int, out_cap: int = 65536) -> bytes:
-    """The binary job ``rt/equiv_rt.c`` reads (``struct job_header`` and after)."""
+               vectors: list[Vector], timeout_ms: int, out_cap: int = 65536,
+               abi: Abi = SYSV_X86_64) -> bytes:
+    """The binary job ``rt/equiv_rt.c`` reads (``struct job_header`` and after).
+
+    ``struct equiv_regs`` is the target's own (:meth:`target.Abi.regs_format`),
+    the layout its thunk loads registers from.
+    """
     out = bytearray()
     guard_start, guard_end = spec.guard()
     out += struct.pack(
@@ -338,14 +336,16 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
                            label)
     for a, b in pairs:
         out += struct.pack("<II", a, b)
+    vector_format = f"<Q{abi.regs_format()}II"
     for vector in vectors:
         stack = vector.stack + [0] * (16 - len(vector.stack))
+        count = [vector.count] if abi.count_register else []
         out += struct.pack(
-            "<Q6Q128sQQ16QII",
+            vector_format,
             vector.seed,
             *vector.gpr,
-            b"".join(vector.xmm),
-            vector.rax,
+            b"".join(vector.fp),
+            *count,
             len(vector.stack),
             *stack,
             len(vector.patches),
