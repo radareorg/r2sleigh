@@ -110,9 +110,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::addr_chain": {
-   "cause": "[PE] The result is narrowed to the inserted byte. The machine does xor eax,eax (0x4013dd), cmp rcx,0x506010, sete al, so RAX = INSERT(zero, ZF, 0). recovered_result (recover_interface.rs:759) takes narrow_zero_extend_input_size, whose Insert arm (:790-794) returns the 1-byte lane size. That yields uint8_t fcn_4013c0(void) for int addr_chain(void). A C function returning uint8_t leaves RAX bits 8..63 ABI-unspecified, while the original defines EAX as 0 or 1.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::affine_probe": {
    "status": "equal"
@@ -142,14 +140,10 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::gate_three": {
-   "cause": "[PE] The result is narrowed to the inserted byte. At 0x40115b-0x40115f the machine does xor eax,eax; or edx,esi; sete al. pdim shows RAX_1 = COPY const:0 and RAX_2 = INSERT(RAX_1, ZF_6, const:0). The Insert arm of narrow_zero_extend_input_size (recover_interface.rs:790-794) returns the 1-byte lane, so the rendering is uint8_t fcn_401150 while the source returns int. Bits 8..31 of EAX are unspecified in the C rendering but 0 in the original.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::global_eq_guard": {
-   "cause": "[PE] The result is narrowed to the inserted byte. At 0x40123c-0x401241 the machine does xor eax,eax; cmp ecx,0xb; sete al, which is INSERT(zero, flag, 0). recover_interface.rs:790-794 then yields uint8_t for an int function, so the upper result bytes are ABI-unspecified in the rendering.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::half_stride": {
    "status": "equal"
@@ -180,14 +174,10 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::opaque_self_xor": {
-   "cause": "[PE] The result is narrowed to the inserted byte. At 0x40120c-0x401214 the machine does xor eax,eax; cmp ecx,[0x404028]; setne al. recover_interface.rs:790-794 then renders uint8_t for int opaque_self_xor.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::paired_sum_diff": {
-   "cause": "[PE] The result width is narrowed to the lane of an INSERT whose base bytes are defined. The machine runs `xor eax,eax; ... sete al; ret`, so all of RAX is written (bits 8..63 = 0). The lift gives RAX_1 = COPY 0 (the zero idiom, which the lifter records as a 64-bit constant copy) and RAX_2 = INSERT(RAX_1, ZF_5, 0). recovered_result calls narrow_zero_extend_input_size, whose Insert arm treats an Insert at position 0 as a zero-extension and returns the lane size (1 byte), whatever the base is. The function is therefore declared `uint8_t fcn_401180(...)`. Compiled, the rendering defines only AL, so...",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::pure_zero_guard": {
    "status": "equal"
@@ -205,9 +195,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::slot_eq_guard": {
-   "cause": "[PE] The result is narrowed to the inserted byte. At 0x401258-0x40125d the machine does xor eax,eax; cmp ecx,0xb; sete al. recover_interface.rs:790-794 then renders uint8_t for int slot_eq_guard.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::tail_guard": {
    "status": "equal"
@@ -225,9 +213,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::addr_chain": {
-   "cause": "[PE] The same as clang-O1: the xor eax,eax; cmp; sete al result is narrowed to uint8_t by the Insert arm of narrow_zero_extend_input_size (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::affine_probe": {
    "status": "equal"
@@ -257,14 +243,10 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::gate_three": {
-   "cause": "[PE] The same as clang-O1: xor eax,eax then sete al becomes INSERT(0, ZF, 0), which is narrowed to uint8_t (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::global_eq_guard": {
-   "cause": "[PE] The same as clang-O1: the sete into a zeroed EAX is narrowed to uint8_t (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::half_stride": {
    "status": "equal"
@@ -295,14 +277,10 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::opaque_self_xor": {
-   "cause": "[PE] The same as clang-O1: the setne into a zeroed EAX is narrowed to uint8_t (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::paired_sum_diff": {
-   "cause": "[PE] Identical to clang-O1. `xor eax,eax; or edi,ecx; sete al; ret` gives RAX = INSERT(COPY 0, ZF, 0). narrow_zero_extend_input_size's Insert arm narrows the recovered result to 1 byte (`uint8_t fcn_401170`), which drops the zero bytes 1..3 that the machine defines and that the int caller reads.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::pure_zero_guard": {
    "status": "equal"
@@ -320,9 +298,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::slot_eq_guard": {
-   "cause": "[PE] The same as clang-O1: the sete into a zeroed EAX is narrowed to uint8_t (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::tail_guard": {
    "status": "equal"
@@ -1388,8 +1364,8 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_stack_buffer": {
-   "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": null,
+   "reason": "r2sleigh_residual_i64",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_stash": {
@@ -2070,9 +2046,7 @@
    "status": "equal"
   },
   "tests/gold/flag_materialisation.c::clang-O1::gt": {
-   "cause": "[PE] The result is narrowed to the inserted byte. At 0x401110-0x401114 the machine does xor eax,eax; cmp edi,esi; setg al, i.e. INSERT(0, flag, 0). The Insert arm of narrow_zero_extend_input_size (recover_interface.rs:790-794) renders `uint8_t fcn_401110(...) { return (int32_t)ESI_0 < (int32_t)EDI_0; }` for int gt, so the upper EAX bytes are unspecified.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/flag_materialisation.c::clang-O1::sum_carry": {
    "status": "equal"
@@ -2084,9 +2058,7 @@
    "status": "equal"
   },
   "tests/gold/flag_materialisation.c::clang-O2::gt": {
-   "cause": "[PE] The same as clang-O1 gt: xor eax,eax; cmp; setg al is narrowed to uint8_t by the Insert arm (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/flag_materialisation.c::clang-O2::sum_carry": {
    "status": "equal"
@@ -2122,9 +2094,7 @@
    "status": "equal"
   },
   "tests/gold/flag_materialisation.c::gcc-O2::gt": {
-   "cause": "[PE] gcc -O2 uses the same idiom (0x401124 xor eax,eax; cmp edi,esi; setg al), so the result is narrowed to uint8_t (recover_interface.rs:790-794).",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/flag_materialisation.c::gcc-O2::sum_carry": {
    "status": "equal"
@@ -2157,9 +2127,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::main": {
-   "cause": "[P4 memory] Frame aggregates whose addresses escape are split into separate C objects, and two of the pieces overlap. Item items[2] (80 bytes, entry-relative [-104,-24)) becomes __uint128_t stack_m104, stack_m88, stack_m56 and stack_m40, plus uint8_t stack_m72[16] ([-72,-56)) and uint8_t stack_m64[8] ([-64,-56)). stack_m64 lies inside stack_m72. Result out becomes stack_m136 and stack_m120. The machine stores &items[1] (lea rax,[rsp+0x48]) into items[0].next ([rsp+0x40]). That escaping address re-inserts a -64 root inside the 16-byte movaps span at -72: this is the ordering bug recorded in critique:mem...",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::mem_scan2": {
    "status": "equal"
@@ -2187,9 +2155,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O2::main": {
-   "cause": "[PE result width] main returns `manual_sink == 0`, compiled `xor eax,eax; ...; sete al`; the rendering narrows the result to uint8_t (an INSERT lane) although the machine defined the base bytes, so the upper bytes of eax are whatever each build leaves and the -O0 and -O2 renderings disagree. The frame is right since P4.1 (items[2] is one 80-byte object, &items[1] is stack_m104 + 40) and its accesses are byte copies. Was differs on the split items array.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O2::mem_scan2": {
    "status": "equal"
