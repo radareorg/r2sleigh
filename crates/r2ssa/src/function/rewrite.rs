@@ -235,7 +235,7 @@ impl SSAFunction {
                 }
             }
             for op in block.ops_mut() {
-                *op = crate::optimize::map_sources_in_op(op, &substitute);
+                *op = op.map_sources(&substitute);
             }
         }
     }
@@ -490,7 +490,7 @@ impl SSAFunction {
                     }
                 }
                 for op in block.ops_mut() {
-                    *op = crate::optimize::map_sources_in_op(op, &replace);
+                    *op = op.map_sources(&replace);
                 }
             }
         }

@@ -13,7 +13,6 @@ use std::collections::HashMap;
 
 use super::SSAFunction;
 use crate::op::SSAOp;
-use crate::optimize::map_sources_in_op;
 use crate::var::SSAVar;
 
 /// What one forwarding pass did.
@@ -72,7 +71,7 @@ impl SSAFunction {
                 }
             }
             for op in block.ops_mut() {
-                let mapped = map_sources_in_op(op, &map);
+                let mapped = op.map_sources(&map);
                 if mapped != *op {
                     stats.reads_forwarded += moved_reads(op, &mapped);
                     *op = mapped;

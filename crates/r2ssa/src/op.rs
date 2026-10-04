@@ -13,186 +13,174 @@ use r2il::{MemoryOrdering, SpaceId};
 /// Each operation uses SSAVar which includes version numbers, enabling
 /// precise tracking of definitions and uses for dataflow analysis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SSAOp {
+pub enum SSAOp<V = SSAVar> {
     // ========== SSA-specific Operations ==========
     /// Phi function: merges values from different control flow paths.
     /// `dst = phi(sources[0], sources[1], ...)`
-    Phi { dst: SSAVar, sources: Vec<SSAVar> },
+    Phi { dst: V, sources: Vec<V> },
 
     // ========== Data Movement ==========
     /// Copy src to dst: dst = src
-    Copy { dst: SSAVar, src: SSAVar },
+    Copy { dst: V, src: V },
 
     /// Load from memory: `dst = *[space]addr`
-    Load {
-        dst: SSAVar,
-        space: SpaceId,
-        addr: SSAVar,
-    },
+    Load { dst: V, space: SpaceId, addr: V },
 
     /// Store to memory: `*[space]addr = val`
-    Store {
-        space: SpaceId,
-        addr: SSAVar,
-        val: SSAVar,
-    },
+    Store { space: SpaceId, addr: V, val: V },
 
     /// One repeated string operation, as the block it is (`r2il::R2ILOp::BlockTransfer`).
-    BlockTransfer(Box<BlockTransferOp>),
+    BlockTransfer(Box<BlockTransferOp<V>>),
 
     /// Memory fence/barrier.
     Fence { ordering: MemoryOrdering },
 
     /// Load-linked from memory.
     LoadLinked {
-        dst: SSAVar,
+        dst: V,
         space: SpaceId,
-        addr: SSAVar,
+        addr: V,
         ordering: MemoryOrdering,
     },
 
     /// Store-conditional to memory.
     StoreConditional {
-        result: Option<SSAVar>,
+        result: Option<V>,
         space: SpaceId,
-        addr: SSAVar,
-        val: SSAVar,
+        addr: V,
+        val: V,
         ordering: MemoryOrdering,
     },
 
     /// Atomic compare-and-swap.
-    AtomicCAS(Box<AtomicCasOp>),
+    AtomicCAS(Box<AtomicCasOp<V>>),
 
     /// Guarded memory load.
     LoadGuarded {
-        dst: SSAVar,
+        dst: V,
         space: SpaceId,
-        addr: SSAVar,
-        guard: SSAVar,
+        addr: V,
+        guard: V,
         ordering: MemoryOrdering,
     },
 
     /// Guarded memory store.
     StoreGuarded {
         space: SpaceId,
-        addr: SSAVar,
-        val: SSAVar,
-        guard: SSAVar,
+        addr: V,
+        val: V,
+        guard: V,
         ordering: MemoryOrdering,
     },
 
     // ========== Integer Arithmetic ==========
     /// Integer addition: dst = a + b
-    IntAdd { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntAdd { dst: V, a: V, b: V },
 
     /// Integer subtraction: dst = a - b
-    IntSub { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSub { dst: V, a: V, b: V },
 
     /// Integer multiplication: dst = a * b
-    IntMult { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntMult { dst: V, a: V, b: V },
 
     /// Unsigned integer division: dst = a / b
-    IntDiv { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntDiv { dst: V, a: V, b: V },
 
     /// Signed integer division: dst = a / b (signed)
-    IntSDiv { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSDiv { dst: V, a: V, b: V },
 
     /// Unsigned integer remainder: dst = a % b
-    IntRem { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntRem { dst: V, a: V, b: V },
 
     /// Signed integer remainder: dst = a % b (signed)
-    IntSRem { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSRem { dst: V, a: V, b: V },
 
     /// Two's complement negation: dst = -src
-    IntNegate { dst: SSAVar, src: SSAVar },
+    IntNegate { dst: V, src: V },
 
     /// Addition with carry: dst = a + b + carry
-    IntCarry { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntCarry { dst: V, a: V, b: V },
 
     /// Signed carry (overflow): dst = overflow(a + b)
-    IntSCarry { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSCarry { dst: V, a: V, b: V },
 
     /// Signed borrow: dst = borrow(a - b)
-    IntSBorrow { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSBorrow { dst: V, a: V, b: V },
 
     // ========== Logical Operations ==========
     /// Bitwise AND: dst = a & b
-    IntAnd { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntAnd { dst: V, a: V, b: V },
 
     /// Bitwise OR: dst = a | b
-    IntOr { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntOr { dst: V, a: V, b: V },
 
     /// Bitwise XOR: dst = a ^ b
-    IntXor { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntXor { dst: V, a: V, b: V },
 
     /// Bitwise NOT: dst = ~src
-    IntNot { dst: SSAVar, src: SSAVar },
+    IntNot { dst: V, src: V },
 
     // ========== Shift Operations ==========
     /// Left shift: dst = a << b
-    IntLeft { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntLeft { dst: V, a: V, b: V },
 
     /// Logical right shift: dst = a >> b (unsigned)
-    IntRight { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntRight { dst: V, a: V, b: V },
 
     /// Arithmetic right shift: dst = a >> b (signed)
-    IntSRight { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSRight { dst: V, a: V, b: V },
 
     // ========== Comparison Operations ==========
     /// Equality: dst = (a == b) ? 1 : 0
-    IntEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntEqual { dst: V, a: V, b: V },
 
     /// Inequality: dst = (a != b) ? 1 : 0
-    IntNotEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntNotEqual { dst: V, a: V, b: V },
 
     /// Unsigned less than: dst = (a < b) ? 1 : 0
-    IntLess { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntLess { dst: V, a: V, b: V },
 
     /// Signed less than: dst = (a < b) ? 1 : 0 (signed)
-    IntSLess { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSLess { dst: V, a: V, b: V },
 
     /// Unsigned less or equal: dst = (a <= b) ? 1 : 0
-    IntLessEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntLessEqual { dst: V, a: V, b: V },
 
     /// Signed less or equal: dst = (a <= b) ? 1 : 0 (signed)
-    IntSLessEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    IntSLessEqual { dst: V, a: V, b: V },
 
     // ========== Extension Operations ==========
     /// Zero extension: dst = zext(src)
-    IntZExt { dst: SSAVar, src: SSAVar },
+    IntZExt { dst: V, src: V },
 
     /// Sign extension: dst = sext(src)
-    IntSExt { dst: SSAVar, src: SSAVar },
+    IntSExt { dst: V, src: V },
 
     // ========== Boolean Operations ==========
     /// Boolean NOT: dst = !src
-    BoolNot { dst: SSAVar, src: SSAVar },
+    BoolNot { dst: V, src: V },
 
     /// Boolean AND: dst = a && b
-    BoolAnd { dst: SSAVar, a: SSAVar, b: SSAVar },
+    BoolAnd { dst: V, a: V, b: V },
 
     /// Boolean OR: dst = a || b
-    BoolOr { dst: SSAVar, a: SSAVar, b: SSAVar },
+    BoolOr { dst: V, a: V, b: V },
 
     /// Boolean XOR: dst = a ^^ b
-    BoolXor { dst: SSAVar, a: SSAVar, b: SSAVar },
+    BoolXor { dst: V, a: V, b: V },
 
     // ========== Bit Manipulation ==========
     /// Concatenate two values: dst = (hi << lo.size*8) | lo
-    Piece { dst: SSAVar, hi: SSAVar, lo: SSAVar },
+    Piece { dst: V, hi: V, lo: V },
 
     /// Extract a portion of a value: `dst = src[offset:size]`
-    Subpiece {
-        dst: SSAVar,
-        src: SSAVar,
-        offset: u32,
-    },
+    Subpiece { dst: V, src: V, offset: u32 },
 
     /// Population count (number of 1 bits): dst = popcount(src)
-    PopCount { dst: SSAVar, src: SSAVar },
+    PopCount { dst: V, src: V },
 
     /// Count leading zeros: dst = clz(src)
-    Lzcount { dst: SSAVar, src: SSAVar },
+    Lzcount { dst: V, src: V },
 
     // ========== Control Flow ==========
     /// Unconditional branch to target.
@@ -203,34 +191,34 @@ pub enum SSAOp {
     /// alone, so it is how a fact recorded against the raw input finds this
     /// operation again.
     Branch {
-        target: SSAVar,
+        target: V,
         #[serde(default)]
         instruction: Option<u64>,
     },
 
     /// Conditional branch: if (cond) goto target
-    CBranch { target: SSAVar, cond: SSAVar },
+    CBranch { target: V, cond: V },
 
     /// Indirect branch: goto *target
     BranchInd {
-        target: SSAVar,
+        target: V,
         #[serde(default)]
         instruction: Option<u64>,
     },
 
     /// Multiway branch on `selector`; the block's terminator carries the cases.
-    Switch { selector: SSAVar },
+    Switch { selector: V },
 
     /// Call a subroutine
     Call {
-        target: SSAVar,
+        target: V,
         #[serde(default)]
         instruction: Option<u64>,
     },
 
     /// Indirect call: call *target
     CallInd {
-        target: SSAVar,
+        target: V,
         #[serde(default)]
         instruction: Option<u64>,
     },
@@ -239,7 +227,7 @@ pub enum SSAOp {
     ///
     /// Decompiler-safe SSA emits this after calls for return/caller-saved
     /// registers so later reads cannot reuse pre-call versions.
-    CallDefine { dst: SSAVar },
+    CallDefine { dst: V },
 
     /// The carrier a call boundary leaves holding the value it found there.
     ///
@@ -255,7 +243,7 @@ pub enum SSAOp {
     /// callee's return refunds it. The callee is not part of this function, so
     /// without this the refund never happens and the caller's stack pointer
     /// drifts by one return-address slot at every call it makes.
-    CallRestore { dst: SSAVar, src: SSAVar },
+    CallRestore { dst: V, src: V },
 
     /// A carrier a call boundary may read, as the convention names it.
     ///
@@ -270,78 +258,78 @@ pub enum SSAOp {
     /// convention's argument registers, so the set is bounded by the
     /// architecture rather than by the function's size, and a carrier the
     /// callee does not actually take is a read of a value that is live anyway.
-    CallUse { src: SSAVar },
+    CallUse { src: V },
 
     /// Return from subroutine
-    Return { target: SSAVar },
+    Return { target: V },
 
     // ========== Floating Point ==========
     /// Float addition: dst = a + b
-    FloatAdd { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatAdd { dst: V, a: V, b: V },
 
     /// Float subtraction: dst = a - b
-    FloatSub { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatSub { dst: V, a: V, b: V },
 
     /// Float multiplication: dst = a * b
-    FloatMult { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatMult { dst: V, a: V, b: V },
 
     /// Float division: dst = a / b
-    FloatDiv { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatDiv { dst: V, a: V, b: V },
 
     /// Float negation: dst = -src
-    FloatNeg { dst: SSAVar, src: SSAVar },
+    FloatNeg { dst: V, src: V },
 
     /// Float absolute value: dst = |src|
-    FloatAbs { dst: SSAVar, src: SSAVar },
+    FloatAbs { dst: V, src: V },
 
     /// Float square root: dst = sqrt(src)
-    FloatSqrt { dst: SSAVar, src: SSAVar },
+    FloatSqrt { dst: V, src: V },
 
     /// Float ceiling: dst = ceil(src)
-    FloatCeil { dst: SSAVar, src: SSAVar },
+    FloatCeil { dst: V, src: V },
 
     /// Float floor: dst = floor(src)
-    FloatFloor { dst: SSAVar, src: SSAVar },
+    FloatFloor { dst: V, src: V },
 
     /// Float round: dst = round(src)
-    FloatRound { dst: SSAVar, src: SSAVar },
+    FloatRound { dst: V, src: V },
 
     /// Float is NaN: dst = isnan(src)
-    FloatNaN { dst: SSAVar, src: SSAVar },
+    FloatNaN { dst: V, src: V },
 
     /// Float equality: dst = (a == b) ? 1 : 0
-    FloatEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatEqual { dst: V, a: V, b: V },
 
     /// Float not equal: dst = (a != b) ? 1 : 0
-    FloatNotEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatNotEqual { dst: V, a: V, b: V },
 
     /// Float less than: dst = (a < b) ? 1 : 0
-    FloatLess { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatLess { dst: V, a: V, b: V },
 
     /// Float less or equal: dst = (a <= b) ? 1 : 0
-    FloatLessEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
+    FloatLessEqual { dst: V, a: V, b: V },
 
     /// Convert int to float: dst = (float)src
-    Int2Float { dst: SSAVar, src: SSAVar },
+    Int2Float { dst: V, src: V },
 
     /// Convert float to int: dst = (int)src
-    Float2Int { dst: SSAVar, src: SSAVar },
+    Float2Int { dst: V, src: V },
 
     /// Convert float to different size float: dst = (float_new_size)src
-    FloatFloat { dst: SSAVar, src: SSAVar },
+    FloatFloat { dst: V, src: V },
 
     /// Truncate float to int: dst = trunc(src)
-    Trunc { dst: SSAVar, src: SSAVar },
+    Trunc { dst: V, src: V },
 
     // ========== Special Operations ==========
     /// Call a user-defined operation (CALLOTHER in P-code)
     CallOther {
         /// Optional output varnode
-        output: Option<SSAVar>,
+        output: Option<V>,
         /// User-defined operation index
         userop: u32,
         /// Input arguments
-        inputs: Vec<SSAVar>,
+        inputs: Vec<V>,
     },
 
     /// No operation (placeholder)
@@ -351,68 +339,60 @@ pub enum SSAOp {
     Unimplemented,
 
     /// CPU identification (CPUID-like)
-    CpuId { dst: SSAVar },
+    CpuId { dst: V },
 
     /// Insert a breakpoint
     Breakpoint,
 
     /// Pointer addition: dst = base + (index * element_size)
     PtrAdd {
-        dst: SSAVar,
-        base: SSAVar,
-        index: SSAVar,
+        dst: V,
+        base: V,
+        index: V,
         element_size: u32,
     },
 
     /// Pointer subtraction: dst = base - (index * element_size)
     PtrSub {
-        dst: SSAVar,
-        base: SSAVar,
-        index: SSAVar,
+        dst: V,
+        base: V,
+        index: V,
         element_size: u32,
     },
 
     /// Segment calculation: dst = segment:offset
-    SegmentOp {
-        dst: SSAVar,
-        segment: SSAVar,
-        offset: SSAVar,
-    },
+    SegmentOp { dst: V, segment: V, offset: V },
 
     /// New (allocation, used in high-level analysis)
-    New { dst: SSAVar, src: SSAVar },
+    New { dst: V, src: V },
 
     /// Cast (type cast, used in high-level analysis)
-    Cast { dst: SSAVar, src: SSAVar },
+    Cast { dst: V, src: V },
 
     /// Extract (bit field extraction)
-    Extract {
-        dst: SSAVar,
-        src: SSAVar,
-        position: SSAVar,
-    },
+    Extract { dst: V, src: V, position: V },
 
     /// Insert (bit field insertion)
-    Insert(Box<InsertOp>),
+    Insert(Box<InsertOp<V>>),
 
     /// Conditional merge of two values from instruction-local P-code control.
-    Select(Box<SelectOp>),
+    Select(Box<SelectOp<V>>),
 }
 
 /// A repeated string operation, as one block operation.
 ///
 /// Held out of line for the same reason as [`SelectOp`]: four variables.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockTransferOp {
+pub struct BlockTransferOp<V = SSAVar> {
     pub space: SpaceId,
     pub kind: r2il::BlockTransferKind,
-    pub destination: SSAVar,
-    pub source: SSAVar,
-    pub count: SSAVar,
-    pub direction: SSAVar,
+    pub destination: V,
+    pub source: V,
+    pub count: V,
+    pub direction: V,
     pub element_size: u32,
     /// A scan's or a compare's count reached and the last element or pair it compared.
-    pub answer: Option<SSAVar>,
+    pub answer: Option<V>,
 }
 
 impl BlockTransferOp {
@@ -424,12 +404,12 @@ impl BlockTransferOp {
 ///
 /// Held out of line for the same reason as [`SelectOp`]: four variables.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AtomicCasOp {
-    pub dst: SSAVar,
+pub struct AtomicCasOp<V = SSAVar> {
+    pub dst: V,
     pub space: SpaceId,
-    pub addr: SSAVar,
-    pub expected: SSAVar,
-    pub replacement: SSAVar,
+    pub addr: V,
+    pub expected: V,
+    pub replacement: V,
     pub ordering: MemoryOrdering,
 }
 
@@ -437,11 +417,11 @@ pub struct AtomicCasOp {
 ///
 /// Held out of line for the same reason as [`SelectOp`]: four variables.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InsertOp {
-    pub dst: SSAVar,
-    pub src: SSAVar,
-    pub value: SSAVar,
-    pub position: SSAVar,
+pub struct InsertOp<V = SSAVar> {
+    pub dst: V,
+    pub src: V,
+    pub value: V,
+    pub position: V,
 }
 
 /// A conditional choice between two values.
@@ -451,11 +431,65 @@ pub struct InsertOp {
 /// those four set the width of every operation the function holds, of the
 /// graph's copy of them and of normalization's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SelectOp {
-    pub dst: SSAVar,
-    pub cond: SSAVar,
-    pub if_true: SSAVar,
-    pub if_false: SSAVar,
+pub struct SelectOp<V = SSAVar> {
+    pub dst: V,
+    pub cond: V,
+    pub if_true: V,
+    pub if_false: V,
+}
+
+impl<V> BlockTransferOp<V> {
+    /// The same operation over other operands; see [`SSAOp::map`].
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> BlockTransferOp<W> {
+        BlockTransferOp {
+            space: self.space,
+            kind: self.kind,
+            destination: f(&self.destination),
+            source: f(&self.source),
+            count: f(&self.count),
+            direction: f(&self.direction),
+            element_size: self.element_size,
+            answer: self.answer.as_ref().map(&mut *f),
+        }
+    }
+}
+
+impl<V> AtomicCasOp<V> {
+    /// The same operation over other operands; see [`SSAOp::map`].
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> AtomicCasOp<W> {
+        AtomicCasOp {
+            dst: f(&self.dst),
+            space: self.space,
+            addr: f(&self.addr),
+            expected: f(&self.expected),
+            replacement: f(&self.replacement),
+            ordering: self.ordering,
+        }
+    }
+}
+
+impl<V> InsertOp<V> {
+    /// The same operation over other operands; see [`SSAOp::map`].
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> InsertOp<W> {
+        InsertOp {
+            dst: f(&self.dst),
+            src: f(&self.src),
+            value: f(&self.value),
+            position: f(&self.position),
+        }
+    }
+}
+
+impl<V> SelectOp<V> {
+    /// The same operation over other operands; see [`SSAOp::map`].
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> SelectOp<W> {
+        SelectOp {
+            dst: f(&self.dst),
+            cond: f(&self.cond),
+            if_true: f(&self.if_true),
+            if_false: f(&self.if_false),
+        }
+    }
 }
 
 /// The name a block operation is printed under, and the comparison that stops it.
@@ -473,7 +507,452 @@ pub(crate) const fn block_transfer_spelling(
     }
 }
 
-impl SSAOp {
+impl<V> SSAOp<V> {
+    /// The same operation with each source mapped by `f` and its
+    /// destination kept. The destination is told apart by where it is held,
+    /// not by its value.
+    pub fn map_sources(&self, f: impl Fn(&V) -> V) -> SSAOp<V>
+    where
+        V: Clone,
+    {
+        let dst = self.dst().map(std::ptr::from_ref);
+        self.map(&mut |operand: &V| {
+            if Some(std::ptr::from_ref(operand)) == dst {
+                operand.clone()
+            } else {
+                f(operand)
+            }
+        })
+    }
+
+    /// The same operation over other operands: each operand, destination
+    /// and source alike, mapped by `f` in field order; everything else kept.
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> SSAOp<W> {
+        use SSAOp::*;
+        match self {
+            Phi { dst, sources } => Phi {
+                dst: f(dst),
+                sources: sources.iter().map(&mut *f).collect(),
+            },
+            Copy { dst, src } => Copy {
+                dst: f(dst),
+                src: f(src),
+            },
+            Load { dst, space, addr } => Load {
+                dst: f(dst),
+                space: *space,
+                addr: f(addr),
+            },
+            Store { space, addr, val } => Store {
+                space: *space,
+                addr: f(addr),
+                val: f(val),
+            },
+            BlockTransfer(op) => BlockTransfer(Box::new(op.map(f))),
+            Fence { ordering } => Fence {
+                ordering: *ordering,
+            },
+            LoadLinked {
+                dst,
+                space,
+                addr,
+                ordering,
+            } => LoadLinked {
+                dst: f(dst),
+                space: *space,
+                addr: f(addr),
+                ordering: *ordering,
+            },
+            StoreConditional {
+                result,
+                space,
+                addr,
+                val,
+                ordering,
+            } => StoreConditional {
+                result: result.as_ref().map(&mut *f),
+                space: *space,
+                addr: f(addr),
+                val: f(val),
+                ordering: *ordering,
+            },
+            AtomicCAS(op) => AtomicCAS(Box::new(op.map(f))),
+            LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard,
+                ordering,
+            } => LoadGuarded {
+                dst: f(dst),
+                space: *space,
+                addr: f(addr),
+                guard: f(guard),
+                ordering: *ordering,
+            },
+            StoreGuarded {
+                space,
+                addr,
+                val,
+                guard,
+                ordering,
+            } => StoreGuarded {
+                space: *space,
+                addr: f(addr),
+                val: f(val),
+                guard: f(guard),
+                ordering: *ordering,
+            },
+            IntAdd { dst, a, b } => IntAdd {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSub { dst, a, b } => IntSub {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntMult { dst, a, b } => IntMult {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntDiv { dst, a, b } => IntDiv {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSDiv { dst, a, b } => IntSDiv {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntRem { dst, a, b } => IntRem {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSRem { dst, a, b } => IntSRem {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntNegate { dst, src } => IntNegate {
+                dst: f(dst),
+                src: f(src),
+            },
+            IntCarry { dst, a, b } => IntCarry {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSCarry { dst, a, b } => IntSCarry {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSBorrow { dst, a, b } => IntSBorrow {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntAnd { dst, a, b } => IntAnd {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntOr { dst, a, b } => IntOr {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntXor { dst, a, b } => IntXor {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntNot { dst, src } => IntNot {
+                dst: f(dst),
+                src: f(src),
+            },
+            IntLeft { dst, a, b } => IntLeft {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntRight { dst, a, b } => IntRight {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSRight { dst, a, b } => IntSRight {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntEqual { dst, a, b } => IntEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntNotEqual { dst, a, b } => IntNotEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntLess { dst, a, b } => IntLess {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSLess { dst, a, b } => IntSLess {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntLessEqual { dst, a, b } => IntLessEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntSLessEqual { dst, a, b } => IntSLessEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            IntZExt { dst, src } => IntZExt {
+                dst: f(dst),
+                src: f(src),
+            },
+            IntSExt { dst, src } => IntSExt {
+                dst: f(dst),
+                src: f(src),
+            },
+            BoolNot { dst, src } => BoolNot {
+                dst: f(dst),
+                src: f(src),
+            },
+            BoolAnd { dst, a, b } => BoolAnd {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            BoolOr { dst, a, b } => BoolOr {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            BoolXor { dst, a, b } => BoolXor {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            Piece { dst, hi, lo } => Piece {
+                dst: f(dst),
+                hi: f(hi),
+                lo: f(lo),
+            },
+            Subpiece { dst, src, offset } => Subpiece {
+                dst: f(dst),
+                src: f(src),
+                offset: *offset,
+            },
+            PopCount { dst, src } => PopCount {
+                dst: f(dst),
+                src: f(src),
+            },
+            Lzcount { dst, src } => Lzcount {
+                dst: f(dst),
+                src: f(src),
+            },
+            Branch {
+                target,
+                instruction,
+            } => Branch {
+                target: f(target),
+                instruction: *instruction,
+            },
+            CBranch { target, cond } => CBranch {
+                target: f(target),
+                cond: f(cond),
+            },
+            BranchInd {
+                target,
+                instruction,
+            } => BranchInd {
+                target: f(target),
+                instruction: *instruction,
+            },
+            Switch { selector } => Switch {
+                selector: f(selector),
+            },
+            Call {
+                target,
+                instruction,
+            } => Call {
+                target: f(target),
+                instruction: *instruction,
+            },
+            CallInd {
+                target,
+                instruction,
+            } => CallInd {
+                target: f(target),
+                instruction: *instruction,
+            },
+            CallDefine { dst } => CallDefine { dst: f(dst) },
+            CallRestore { dst, src } => CallRestore {
+                dst: f(dst),
+                src: f(src),
+            },
+            CallUse { src } => CallUse { src: f(src) },
+            Return { target } => Return { target: f(target) },
+            FloatAdd { dst, a, b } => FloatAdd {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatSub { dst, a, b } => FloatSub {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatMult { dst, a, b } => FloatMult {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatDiv { dst, a, b } => FloatDiv {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatNeg { dst, src } => FloatNeg {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatAbs { dst, src } => FloatAbs {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatSqrt { dst, src } => FloatSqrt {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatCeil { dst, src } => FloatCeil {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatFloor { dst, src } => FloatFloor {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatRound { dst, src } => FloatRound {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatNaN { dst, src } => FloatNaN {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatEqual { dst, a, b } => FloatEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatNotEqual { dst, a, b } => FloatNotEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatLess { dst, a, b } => FloatLess {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            FloatLessEqual { dst, a, b } => FloatLessEqual {
+                dst: f(dst),
+                a: f(a),
+                b: f(b),
+            },
+            Int2Float { dst, src } => Int2Float {
+                dst: f(dst),
+                src: f(src),
+            },
+            Float2Int { dst, src } => Float2Int {
+                dst: f(dst),
+                src: f(src),
+            },
+            FloatFloat { dst, src } => FloatFloat {
+                dst: f(dst),
+                src: f(src),
+            },
+            Trunc { dst, src } => Trunc {
+                dst: f(dst),
+                src: f(src),
+            },
+            CallOther {
+                output,
+                userop,
+                inputs,
+            } => CallOther {
+                output: output.as_ref().map(&mut *f),
+                userop: *userop,
+                inputs: inputs.iter().map(&mut *f).collect(),
+            },
+            Nop => Nop,
+            Unimplemented => Unimplemented,
+            CpuId { dst } => CpuId { dst: f(dst) },
+            Breakpoint => Breakpoint,
+            PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } => PtrAdd {
+                dst: f(dst),
+                base: f(base),
+                index: f(index),
+                element_size: *element_size,
+            },
+            PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } => PtrSub {
+                dst: f(dst),
+                base: f(base),
+                index: f(index),
+                element_size: *element_size,
+            },
+            SegmentOp {
+                dst,
+                segment,
+                offset,
+            } => SegmentOp {
+                dst: f(dst),
+                segment: f(segment),
+                offset: f(offset),
+            },
+            New { dst, src } => New {
+                dst: f(dst),
+                src: f(src),
+            },
+            Cast { dst, src } => Cast {
+                dst: f(dst),
+                src: f(src),
+            },
+            Extract { dst, src, position } => Extract {
+                dst: f(dst),
+                src: f(src),
+                position: f(position),
+            },
+            Insert(op) => Insert(Box::new(op.map(f))),
+            Select(op) => Select(Box::new(op.map(f))),
+        }
+    }
     /// What `r2il::eval` computes this operation's value with, from its `sources` in order.
     pub fn operation(&self) -> Option<r2il::eval::Operation> {
         use SSAOp::*;
@@ -541,7 +1020,7 @@ impl SSAOp {
     }
 
     /// Get the destination variable if this operation has one.
-    pub fn dst(&self) -> Option<&SSAVar> {
+    pub fn dst(&self) -> Option<&V> {
         use SSAOp::*;
         match self {
             Phi { dst, .. }
@@ -637,7 +1116,7 @@ impl SSAOp {
     }
 
     /// Visit all source variables used by this operation in operand order.
-    pub fn for_each_source<'a, F: FnMut(&'a SSAVar)>(&'a self, mut f: F) {
+    pub fn for_each_source<'a, F: FnMut(&'a V)>(&'a self, mut f: F) {
         use SSAOp::*;
         match self {
             Phi { sources, .. } => {
@@ -802,7 +1281,7 @@ impl SSAOp {
     }
 
     /// Get all source variables used by this operation.
-    pub fn sources(&self) -> Vec<&SSAVar> {
+    pub fn sources(&self) -> Vec<&V> {
         let mut sources = Vec::new();
         self.for_each_source(|src| sources.push(src));
         sources
@@ -937,7 +1416,7 @@ impl SSAOp {
     }
 }
 
-impl std::fmt::Display for SSAOp {
+impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SSAOp::Phi { dst, sources } => {
@@ -1155,6 +1634,62 @@ impl std::fmt::Display for SSAOp {
 mod tests {
     use super::*;
 
+    /// Mapping every operand to itself gives the operation back, and every
+    /// operand is visited once, in field order, whatever holds it: a field,
+    /// an `Option`, a `Vec`, or an operation held out of line.
+    #[test]
+    fn map_visits_every_operand_once_in_field_order() {
+        let v = |name: &str| SSAVar::new(name, 1, 8);
+        let ops: Vec<SSAOp> = vec![
+            SSAOp::IntAdd {
+                dst: v("a"),
+                a: v("b"),
+                b: v("c"),
+            },
+            SSAOp::Phi {
+                dst: v("a"),
+                sources: vec![v("b"), v("c"), v("d")],
+            },
+            SSAOp::CallOther {
+                output: Some(v("a")),
+                userop: 7,
+                inputs: vec![v("b"), v("c")],
+            },
+            SSAOp::Load {
+                dst: v("a"),
+                space: SpaceId::Ram,
+                addr: v("b"),
+            },
+            SSAOp::Select(Box::new(SelectOp {
+                dst: v("a"),
+                cond: v("b"),
+                if_true: v("c"),
+                if_false: v("d"),
+            })),
+            SSAOp::Nop,
+        ];
+        for op in &ops {
+            assert_eq!(&op.map(&mut SSAVar::clone), op);
+            let mut seen = Vec::new();
+            let numbered = op.map(&mut |var: &SSAVar| {
+                seen.push(var.name().to_owned());
+                seen.len()
+            });
+            let expected = (1..=seen.len()).collect::<Vec<_>>();
+            let mut got = numbered.dst().into_iter().copied().collect::<Vec<_>>();
+            got.extend(numbered.sources().into_iter().copied());
+            got.sort_unstable();
+            assert_eq!(got, expected, "{op}");
+            let names = seen.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                names, sorted,
+                "field order is a, b, c, d in each fixture: {op}"
+            );
+        }
+    }
+
     #[test]
     fn test_dst_extraction() {
         let dst = SSAVar::new("RAX", 1, 8);
@@ -1166,7 +1701,7 @@ mod tests {
         };
         assert_eq!(op.dst(), Some(&dst));
 
-        let op = SSAOp::Nop;
+        let op: SSAOp = SSAOp::Nop;
         assert_eq!(op.dst(), None);
     }
 
@@ -1188,7 +1723,7 @@ mod tests {
         };
         assert!(linked.has_observable_effects(false));
 
-        let call_other = SSAOp::CallOther {
+        let call_other: SSAOp = SSAOp::CallOther {
             output: None,
             userop: 1,
             inputs: Vec::new(),
