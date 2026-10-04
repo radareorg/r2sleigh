@@ -628,8 +628,8 @@ impl DecompilePrepFacts {
         parameters: &BTreeMap<u32, crate::semantic::SourceFormalParameterFact>,
     ) {
         let prep = self;
-        prep.formal_parameters.clear();
-        prep.formal_parameter_bases.clear();
+        prep.formal_parameters = crate::dense::IdMap::new(graph.values.len());
+        prep.formal_parameter_bases = crate::dense::IdMap::new(graph.values.len());
         for (slot, parameter) in parameters {
             let Ok(index) = usize::try_from(*slot) else {
                 continue;
@@ -646,9 +646,9 @@ impl DecompilePrepFacts {
             if parameter.index != *slot || !(entry_value || projection) {
                 continue;
             }
-            prep.formal_parameters.insert(value.var.clone(), index);
+            prep.formal_parameters.insert(parameter.value, index);
             if parameter.graph_storage == parameter.abi_storage {
-                prep.formal_parameter_bases.insert(value.var.clone(), index);
+                prep.formal_parameter_bases.insert(parameter.value, index);
             }
         }
     }

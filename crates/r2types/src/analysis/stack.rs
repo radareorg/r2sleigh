@@ -7,7 +7,7 @@ pub(crate) fn canonicalize_param_home_stack_slots(
     register_params: &[crate::context::ExternalRegisterParamSpec],
     stack_slots: &mut BTreeMap<StackSlotKey, ExternalStackVarSpec>,
     ssa_blocks: &[SSABlock],
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<super::FrameRoots<'_>>,
     registers: &crate::RegisterIdentity,
 ) {
     if register_params.is_empty() || ssa_blocks.is_empty() {
@@ -20,17 +20,13 @@ pub(crate) fn canonicalize_param_home_stack_slots(
         for op in block.ops() {
             match op {
                 SSAOp::IntAdd { dst, .. } => {
-                    let slot_key = prep_facts
-                        .and_then(|facts| facts.stack_address_root_of(dst))
-                        .copied();
+                    let slot_key = prep_facts.and_then(|roots| roots(dst));
                     if let Some(slot_key) = slot_key {
                         slot_addr_by_var.insert(dst.display_name(), slot_key);
                     }
                 }
                 SSAOp::IntSub { dst, .. } => {
-                    let slot_key = prep_facts
-                        .and_then(|facts| facts.stack_address_root_of(dst))
-                        .copied();
+                    let slot_key = prep_facts.and_then(|roots| roots(dst));
                     if let Some(slot_key) = slot_key {
                         slot_addr_by_var.insert(dst.display_name(), slot_key);
                     }
@@ -43,11 +39,7 @@ pub(crate) fn canonicalize_param_home_stack_slots(
                     let Some(source_slot_key) = slot_addr_by_var
                         .get(&addr.display_name())
                         .cloned()
-                        .or_else(|| {
-                            prep_facts
-                                .and_then(|facts| facts.stack_address_root_of(addr))
-                                .copied()
-                        })
+                        .or_else(|| prep_facts.and_then(|roots| roots(addr)))
                     else {
                         continue;
                     };

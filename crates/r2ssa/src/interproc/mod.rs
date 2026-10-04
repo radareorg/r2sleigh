@@ -2729,11 +2729,10 @@ fn classify_memory_access_location(
 /// before it scales, which the address facts keep as a term of its own; the
 /// value view says whose bits it extends, and how.
 fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
-    let var = prepared.value_var(value)?;
-    if let Some(index) = prepared.formal_parameter_of(var) {
+    if let Some(index) = prepared.formal_parameter_of(value) {
         return Some((index, None));
     }
-    let view = prepared.decompile_prep_facts().view(var);
+    let view = prepared.decompile_prep_facts().view(value);
     let index = prepared.formal_parameter_of_view(&view)?;
     match view.extension {
         crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
@@ -2875,14 +2874,13 @@ fn classify_address_root(
 fn address_candidates(prepared: &SsaArtifact, value_id: ValueId) -> Vec<ValueId> {
     let mut candidates = vec![value_id];
     let graph = prepared.graph();
-    if let Some(var) = prepared.value_var(value_id) {
-        let facts = prepared.decompile_prep_facts();
-        for root in [facts.canonical_root(var), facts.same_integer_root(var)] {
-            if let Some(root) = graph.value_id_for_var(root)
-                && !candidates.contains(&root)
-            {
-                candidates.push(root);
-            }
+    let facts = prepared.decompile_prep_facts();
+    for root in [
+        crate::view::class_value(graph, Some(&facts.views), value_id),
+        facts.same_integer_root(value_id),
+    ] {
+        if !candidates.contains(&root) {
+            candidates.push(root);
         }
     }
     candidates

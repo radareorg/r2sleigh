@@ -171,14 +171,12 @@ impl ValueContent {
                         width: width(&value.var),
                     };
                     views
-                        .derived_view(&value.var)
-                        .and_then(|view| {
-                            Some(ContentView {
-                                root: graph.value_id_for_var(&view.root)?.0,
-                                prefix: view.prefix_bits,
-                                extension: view.extension,
-                                width: own.width,
-                            })
+                        .derived_view(value.id)
+                        .map(|view| ContentView {
+                            root: view.root.0,
+                            prefix: view.prefix_bits,
+                            extension: view.extension,
+                            width: own.width,
                         })
                         .unwrap_or(own)
                 })

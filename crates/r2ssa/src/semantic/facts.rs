@@ -1500,7 +1500,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 .map(|(start, _)| *start)
                 .chain(callee_spans.unbounded.iter().copied())
                 .collect();
-            let boundaries = FrameBoundaries::of(facts, function, graph, self.machine_context);
+            let boundaries = FrameBoundaries::of(facts, graph, self.machine_context);
             for (start, end) in callee_spans.spans {
                 self.callee_write_spans
                     .entry(start)
@@ -1510,7 +1510,6 @@ impl<'a> ObjectModelBuilder<'a> {
             let evidenced = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
-                function,
                 graph,
                 self.stack_pointer_carrier,
                 values,
@@ -1531,8 +1530,8 @@ impl<'a> ObjectModelBuilder<'a> {
                     self.ensure_stack_object(root);
                 }
             }
-            for var in facts.stack_address_roots.keys() {
-                let _ = self.object_for_address_value(graph, var, SpaceId::Ram);
+            for value in facts.stack_address_roots.keys() {
+                let _ = self.object_for_address_value(graph, value, SpaceId::Ram);
             }
         }
         let parameter_indices = self
@@ -1562,22 +1561,23 @@ impl<'a> ObjectModelBuilder<'a> {
             self.ensure_pointee_chain(root, &path);
         }
 
-        for block in function.named_blocks() {
-            for op in block.ops() {
-                match op {
-                    SSAOp::Load { addr, space, .. }
-                    | SSAOp::Store { addr, space, .. }
-                    | SSAOp::LoadLinked { addr, space, .. }
-                    | SSAOp::StoreConditional { addr, space, .. }
-                    | SSAOp::LoadGuarded { addr, space, .. }
-                    | SSAOp::StoreGuarded { addr, space, .. } => {
-                        let _ = self.object_for_address_value(graph, addr, *space);
-                    }
-                    SSAOp::AtomicCAS(swap) => {
-                        let _ = self.object_for_address_value(graph, &swap.addr, swap.space);
-                    }
-                    _ => {}
+        for inst in &graph.insts {
+            let crate::InstPayload::Op(op) = &inst.payload else {
+                continue;
+            };
+            match *op {
+                SSAOp::Load { addr, space, .. }
+                | SSAOp::Store { addr, space, .. }
+                | SSAOp::LoadLinked { addr, space, .. }
+                | SSAOp::StoreConditional { addr, space, .. }
+                | SSAOp::LoadGuarded { addr, space, .. }
+                | SSAOp::StoreGuarded { addr, space, .. } => {
+                    let _ = self.object_for_address_value(graph, addr, space);
                 }
+                SSAOp::AtomicCAS(ref swap) => {
+                    let _ = self.object_for_address_value(graph, swap.addr, swap.space);
+                }
+                _ => {}
             }
         }
 
@@ -1646,12 +1646,13 @@ impl<'a> ObjectModelBuilder<'a> {
     fn object_for_address_value(
         &mut self,
         graph: &SsaGraph,
-        value: &SSAVar,
+        value_id: ValueId,
         space: SpaceId,
     ) -> ObjectId {
-        let Some(value_id) = graph.value_id_for_var(value) else {
+        if graph.value(value_id).is_none() {
             return self.ensure_escaped_unknown(space);
-        };
+        }
+        let value = value_id;
         let key = MemoryObjectKey {
             value: value_id,
             space,
@@ -1725,12 +1726,12 @@ impl<'a> ObjectModelBuilder<'a> {
                 self.ensure_parameter_object(expression.parameter)
             } else if let Some(expression) = self.addresses.pointee_expression(value_id) {
                 self.ensure_pointee_chain(expression.root, &expression.path)
-            } else if let Some(address) = resolve_const_value(self.facts, value) {
+            } else if let Some(address) = resolve_const_value(graph, self.facts, value) {
                 self.ensure_global_object(GlobalObjectKey { space, address })
             } else {
                 self.ensure_escaped_unknown(space)
             }
-        } else if let Some(address) = resolve_const_value(self.facts, value) {
+        } else if let Some(address) = resolve_const_value(graph, self.facts, value) {
             self.ensure_global_object(GlobalObjectKey { space, address })
         } else {
             self.ensure_escaped_unknown(space)
@@ -1749,8 +1750,8 @@ impl<'a> ObjectModelBuilder<'a> {
         let result = self
             .displaced_parent(graph, value_id)
             .and_then(|(parent, delta)| {
-                let parent_var = graph.value(parent)?.var.clone();
-                let object = self.object_for_address_value(graph, &parent_var, SpaceId::Ram);
+                graph.value(parent)?;
+                let object = self.object_for_address_value(graph, parent, SpaceId::Ram);
                 if !matches!(
                     self.objects.get(&object).map(|fact| &fact.kind),
                     Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
@@ -1770,14 +1771,14 @@ impl<'a> ObjectModelBuilder<'a> {
     /// The stack address this one is computed from, and by how much.
     fn displaced_parent(&self, graph: &SsaGraph, value_id: ValueId) -> Option<(ValueId, i64)> {
         let inst = graph.inst(graph.def_inst(value_id)?)?;
-        let rooted = |var: &SSAVar| resolve_stack_root(self.facts, var).is_some();
+        let rooted = |id: &ValueId| resolve_stack_root(self.facts, *id).is_some();
         let var = |id: &ValueId| graph.var(*id);
         match &inst.payload {
             crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
                 match (
-                    rooted(var(a)),
+                    rooted(a),
                     var(b).constant_bits(),
-                    rooted(var(b)),
+                    rooted(b),
                     var(a).constant_bits(),
                 ) {
                     (true, Some(delta), _, _) => Some((*a, delta as i64)),
@@ -1787,18 +1788,18 @@ impl<'a> ObjectModelBuilder<'a> {
             }
             crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. }) => {
                 let delta = var(b).constant_bits()?;
-                rooted(var(a)).then(|| (*a, (delta as i64).wrapping_neg()))
+                rooted(a).then(|| (*a, (delta as i64).wrapping_neg()))
             }
             crate::InstPayload::Op(
                 crate::SSAOp::Copy { src, .. }
                 | crate::SSAOp::Cast { src, .. }
                 | crate::SSAOp::CallRestore { src, .. },
-            ) => rooted(var(src)).then_some((*src, 0)),
+            ) => rooted(src).then_some((*src, 0)),
             crate::InstPayload::Phi { .. } => inst
                 .inputs
                 .iter()
                 .copied()
-                .find(|input| graph.value(*input).is_some_and(|value| rooted(&value.var)))
+                .find(|input| graph.value(*input).is_some() && rooted(input))
                 .map(|input| (input, 0)),
             _ => None,
         }
@@ -1833,12 +1834,12 @@ impl<'a> ObjectModelBuilder<'a> {
                 crate::InstPayload::Phi { .. } => (*inst.inputs.first()?, None),
                 _ => return None,
             };
-            let base_var = graph.value(base)?.var.clone();
+            graph.value(base)?;
             // A base nothing proves an object starts at reaches its object
             // at the first byte its index takes, and is that object at a
             // negative displacement: `buf[i - 1]` is `buf` from one below.
             let contained = index.and_then(|index| {
-                let position = resolve_stack_root(self.facts, &base_var)?;
+                let position = resolve_stack_root(self.facts, base)?;
                 if self.evidenced_roots.contains(&position) {
                     return None;
                 }
@@ -1877,7 +1878,7 @@ impl<'a> ObjectModelBuilder<'a> {
                     );
                     object
                 }
-                None => self.object_for_address_value(graph, &base_var, SpaceId::Ram),
+                None => self.object_for_address_value(graph, base, SpaceId::Ram),
             };
             if !matches!(
                 self.objects.get(&object).map(|fact| &fact.kind),
@@ -1943,9 +1944,8 @@ impl<'a> ObjectModelBuilder<'a> {
             return None;
         };
         let rooted = |id: &ValueId| {
-            let var = graph.var(*id);
-            resolve_stack_root(self.facts, var).is_some()
-                || resolve_indexed_stack_root(self.facts, var).is_some()
+            resolve_stack_root(self.facts, *id).is_some()
+                || resolve_indexed_stack_root(self.facts, *id).is_some()
         };
         match (rooted(a), rooted(b)) {
             (true, false) => Some(*b),

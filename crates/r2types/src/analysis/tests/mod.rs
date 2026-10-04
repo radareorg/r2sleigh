@@ -162,22 +162,20 @@ fn test_signature_spec(param_name: &str, param_bits: u32) -> FunctionSignatureSp
     }
 }
 
-fn three_prepared_frame_slot_roots() -> r2ssa::DecompilePrepFacts {
-    r2ssa::DecompilePrepFacts {
-        stack_address_roots: [(1, -8), (2, -12), (3, -16)]
-            .into_iter()
-            .map(|(version, offset)| {
-                (
-                    SSAVar::new("tmp:slot", version, 8),
-                    r2ssa::StackAddressRoot {
-                        base: r2ssa::StackAddressBase::FramePointer,
-                        offset,
-                    },
-                )
-            })
-            .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    }
+fn three_prepared_frame_slot_roots() -> std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>
+{
+    [(1, -8), (2, -12), (3, -16)]
+        .into_iter()
+        .map(|(version, offset)| {
+            (
+                SSAVar::new("tmp:slot", version, 8),
+                r2ssa::StackAddressRoot {
+                    base: r2ssa::StackAddressBase::FramePointer,
+                    offset,
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>()
 }
 
 /// Storage that an access states only the width of is a type C spells at

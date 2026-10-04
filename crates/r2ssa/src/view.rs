@@ -32,6 +32,12 @@
 //! constant folder computes it as `(c >> 8k) & mask`, and until it has, the
 //! lane is its own value.
 //!
+//! The views are an index over dense ids: a function's [`VarId`]s, for the
+//! passes that run before it is sealed, or a sealed graph's [`ValueId`]s,
+//! which is what the prep facts and every later stage hold. Each id's width
+//! and constant bits are kept beside the views, so a question about an id
+//! reads no name.
+//!
 //! **Cost.** One pass over the operations builds the definitions, Tarjan's
 //! algorithm orders the values that read another's view by strongly connected
 //! component in `O(V + E)`, and each component is evaluated after every
@@ -42,12 +48,16 @@
 //! them disagree. A phi falls at most once and every other value only follows
 //! its input, so the component settles after at most one pass per fallen phi
 //! plus one -- the lattice `{unvisited, view, own}` has height two, which is
-//! the whole termination argument, and no pass is counted.
+//! the whole termination argument, and no pass is counted. Every lookup after
+//! the solve is `O(1)`.
 
 use std::collections::HashMap;
 
+use crate::dense::{DenseId, IdMap, IdVec};
 use crate::function::SSAFunction;
+use crate::graph::{SsaGraph, ValueId};
 use crate::op::{SSAOp, var_facts};
+use crate::value_table::VarId;
 use crate::var::SSAVar;
 
 /// What the bits of a value above its view's prefix are.
@@ -64,26 +74,17 @@ pub enum ViewExtension {
 }
 
 /// A value's bits, stated relative to the root they were read from.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ValueView {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValueView<I> {
     /// The value whose low bits these are.
-    pub root: SSAVar,
+    pub root: I,
     /// How many of the low bits are the root's.
     pub prefix_bits: u32,
     /// What the bits above the prefix are.
     pub extension: ViewExtension,
 }
 
-impl ValueView {
-    /// A value that is its own root.
-    pub fn own(var: &SSAVar) -> Self {
-        Self {
-            root: var.clone(),
-            prefix_bits: bits(var),
-            extension: ViewExtension::Exact,
-        }
-    }
-
+impl<I> ValueView<I> {
     /// Whether this view states the value's every bit from its root's low
     /// `prefix_bits`: nothing above the prefix is left unstated.
     pub fn determines_value(&self) -> bool {
@@ -100,67 +101,202 @@ pub enum ViewRelation {
     Derived,
 }
 
+/// The one name every value with the same bits at the same width is given:
+/// a value of the function, or the literal a constant root determines, which
+/// need not be a value the function holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Representative<I> {
+    Value(I),
+    Literal { bits: u64, size: u32 },
+}
+
+impl<I: Copy> Representative<I> {
+    /// The representative, where it is a value of the function.
+    pub fn value(self) -> Option<I> {
+        match self {
+            Self::Value(id) => Some(id),
+            Self::Literal { .. } => None,
+        }
+    }
+}
+
+/// An id's width in bytes and, for a constant, its bits.
+type Facts = (u32, Option<u64>);
+
 /// The view of every value of one function, and each value's representative.
 ///
 /// A value is recorded only where its view is not its own. The representative
-/// is the one variable every value with the same bits at the same width is
+/// is the one value every value with the same bits at the same width is
 /// named by: the root itself when the value is the root's whole width, the
 /// literal a constant root determines, and otherwise the first value of the
 /// class in definition order. A value whose view leaves bits unstated is its
 /// own representative.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ValueViews {
-    views: HashMap<SSAVar, ValueView>,
-    representatives: HashMap<SSAVar, SSAVar>,
+#[derive(Debug, Clone)]
+pub struct ValueViews<I> {
+    views: IdMap<I, ValueView<I>>,
+    representatives: IdMap<I, Representative<I>>,
+    facts: IdVec<I, Facts>,
 }
 
-impl ValueViews {
-    /// Compute the view of every value `function` defines.
+impl<I: DenseId> PartialEq for ValueViews<I> {
+    fn eq(&self, other: &Self) -> bool {
+        self.views == other.views
+            && self.representatives == other.representatives
+            && self.facts == other.facts
+    }
+}
+
+impl<I: DenseId> Eq for ValueViews<I> {}
+
+impl<I: DenseId> Default for ValueViews<I> {
+    fn default() -> Self {
+        Self {
+            views: IdMap::new(0),
+            representatives: IdMap::new(0),
+            facts: IdVec::from_fn(0, |_| (0, None)),
+        }
+    }
+}
+
+impl ValueViews<VarId> {
+    /// The view of every variable `function` defines, over its own ids: for
+    /// the passes that rewrite it before it is sealed.
     pub(crate) fn compute(function: &SSAFunction) -> Self {
-        Solver::new(function).solve()
+        let table = function.values();
+        let facts = IdVec::from_fn(table.len(), |id| var_facts(table.var(id)));
+        let mut nodes = Vec::new();
+        let mut definitions = Vec::new();
+        // The entry lanes first: they are the caller's values, in hand
+        // before the body defines anything, so they come first in definition
+        // order as the representative of their class. A lane no operation
+        // names is no value of the function, and names none.
+        for (lane, root) in function.entry_lanes() {
+            if let (Some(lane), Some(root)) = (table.id_of(lane), table.id_of(root)) {
+                nodes.push(lane);
+                definitions.push(Definition::Step(root, lane_step(&facts, lane, root)));
+            }
+        }
+        for block in function.blocks() {
+            for phi in block.phis() {
+                nodes.push(phi.dst);
+                definitions.push(Definition::Phi(
+                    phi.sources.iter().map(|(_, source)| *source).collect(),
+                ));
+            }
+            for (dst, src, step) in block
+                .ops()
+                .iter()
+                .filter_map(|op| step_of(op, |id| facts[*id]))
+            {
+                nodes.push(*dst);
+                definitions.push(Definition::Step(*src, step));
+            }
+        }
+        Solver::over(nodes, definitions, facts).solve()
+    }
+}
+
+impl ValueViews<ValueId> {
+    /// The same fact over a graph's values: what the prep facts hold, and
+    /// what every pass that reads the graph asks, by the same rules.
+    pub(crate) fn of_graph(graph: &SsaGraph) -> Self {
+        let facts = IdVec::from_fn(graph.values.len(), |id: ValueId| {
+            var_facts(&graph.values[id.0 as usize].var)
+        });
+        let mut nodes = Vec::new();
+        let mut definitions = Vec::new();
+        // The entry lanes first, as over a function.
+        for (lane, root) in &graph.entry_lanes {
+            if let (Some(lane), Some(root)) =
+                (graph.value_id_for_var(lane), graph.value_id_for_var(root))
+            {
+                nodes.push(lane);
+                definitions.push(Definition::Step(root, lane_step(&facts, lane, root)));
+            }
+        }
+        for inst in &graph.insts {
+            if let Some((dst, definition)) = graph_definition(&facts, inst) {
+                nodes.push(dst);
+                definitions.push(definition);
+            }
+        }
+        Solver::over(nodes, definitions, facts).solve()
+    }
+}
+
+impl<I: DenseId + std::hash::Hash> ValueViews<I> {
+    /// An id's width in bits.
+    fn bits(&self, id: I) -> u32 {
+        self.facts
+            .get(id)
+            .map_or(0, |(size, _)| size.saturating_mul(8))
     }
 
-    /// The same fact, read off a graph rather than the function it was
-    /// built from: the passes that hold only the graph ask it here, by the
-    /// same rules, instead of keeping rules of their own.
-    pub(crate) fn of_graph(graph: &crate::graph::SsaGraph) -> Self {
-        Solver::from_graph(graph).solve()
+    /// An id's width in bytes.
+    pub fn size(&self, id: I) -> u32 {
+        self.facts.get(id).map_or(0, |(size, _)| *size)
     }
 
-    /// The view of `var`: its own where nothing derives it.
-    pub fn view(&self, var: &SSAVar) -> ValueView {
-        self.views
-            .get(var)
-            .cloned()
-            .unwrap_or_else(|| ValueView::own(var))
+    /// The bits of a constant id.
+    pub fn constant(&self, id: I) -> Option<u64> {
+        self.facts.get(id).and_then(|(_, bits)| *bits)
     }
 
-    /// The recorded view of `var`, where it is not its own.
-    pub fn derived_view(&self, var: &SSAVar) -> Option<&ValueView> {
-        self.views.get(var)
+    /// The view of `id`: its own where nothing derives it.
+    pub fn view(&self, id: I) -> ValueView<I> {
+        self.views.get(id).copied().unwrap_or(ValueView {
+            root: id,
+            prefix_bits: self.bits(id),
+            extension: ViewExtension::Exact,
+        })
     }
 
-    /// The variable every value with `var`'s bits at `var`'s width is named by.
-    pub fn representative<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        self.representatives.get(var).unwrap_or(var)
+    /// The recorded view of `id`, where it is not its own.
+    pub fn derived_view(&self, id: I) -> Option<&ValueView<I>> {
+        self.views.get(id)
     }
 
-    /// The representative of `var`, where it is not `var` itself.
-    pub fn representative_of(&self, var: &SSAVar) -> Option<&SSAVar> {
-        self.representatives.get(var)
+    /// The representative every value with `id`'s bits at `id`'s width is
+    /// named by.
+    pub fn representative(&self, id: I) -> Representative<I> {
+        self.representatives
+            .get(id)
+            .copied()
+            .unwrap_or(Representative::Value(id))
     }
 
-    /// Every value with a representative other than itself, and that representative.
-    pub fn representatives(&self) -> impl Iterator<Item = (&SSAVar, &SSAVar)> {
-        self.representatives.iter()
+    /// The representative of `id`, where it is not `id` itself.
+    pub fn representative_of(&self, id: I) -> Option<Representative<I>> {
+        self.representatives.get(id).copied()
+    }
+
+    /// The representative of `id` where it is a value -- `id` itself when
+    /// it has none -- and `None` where it is a literal no value holds.
+    pub fn representative_value(&self, id: I) -> Option<I> {
+        self.representative(id).value()
+    }
+
+    /// Every value with a representative other than itself, and that
+    /// representative, in id order.
+    pub fn representatives(&self) -> impl Iterator<Item = (I, Representative<I>)> + '_ {
+        self.representatives.iter().map(|(id, rep)| (id, *rep))
+    }
+
+    /// The constant bits `id`'s representative is, where it is a literal or
+    /// a constant value.
+    pub fn representative_constant(&self, id: I) -> Option<(u64, u32)> {
+        match self.representative(id) {
+            Representative::Literal { bits, size } => Some((bits, size)),
+            Representative::Value(value) => Some((self.constant(value)?, self.size(value))),
+        }
     }
 
     /// Whether `a` and `b` are the same bits at the same width.
-    pub fn same_bits(&self, a: &SSAVar, b: &SSAVar) -> bool {
+    pub fn same_bits(&self, a: I, b: I) -> bool {
         if a == b {
             return true;
         }
-        if a.size != b.size {
+        if self.size(a) != self.size(b) {
             return false;
         }
         let (left, right) = (self.view(a), self.view(b));
@@ -169,7 +305,7 @@ impl ValueViews {
 
     /// How `derived`, a value computed from `source`, relates to it: the same
     /// bits, or something else computed from them.
-    pub fn relation(&self, derived: &SSAVar, source: &SSAVar) -> ViewRelation {
+    pub fn relation(&self, derived: I, source: I) -> ViewRelation {
         if self.same_bits(derived, source) {
             ViewRelation::Identity
         } else {
@@ -177,8 +313,8 @@ impl ValueViews {
         }
     }
 
-    /// The value `var` is a copy of: its root, where `var` carries every bit
-    /// of the root and nothing else, at the root's own width; otherwise `var`.
+    /// The value `id` is a copy of: its root, where `id` carries every bit
+    /// of the root and nothing else, at the root's own width; otherwise `id`.
     ///
     /// Unlike the representative, which may be any member of a class, the
     /// root dominates every value it is the copy root of: each transparent
@@ -186,79 +322,98 @@ impl ValueViews {
     /// root only when every input already has it, so the root dominates every
     /// predecessor and so the phi. A pass that rewrites the graph may name it
     /// in their place.
-    pub fn copy_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        match self.views.get(var) {
+    pub fn copy_root(&self, id: I) -> I {
+        match self.views.get(id) {
             Some(view)
                 if view.extension == ViewExtension::Exact
-                    && view.prefix_bits == bits(var)
-                    && bits(&view.root) == bits(var) =>
+                    && view.prefix_bits == self.bits(id)
+                    && self.bits(view.root) == self.bits(id) =>
             {
-                &view.root
+                view.root
             }
-            _ => var,
+            _ => id,
         }
     }
 
-    /// The value `var` equals as an unsigned integer: its root, where `var`
-    /// holds the root's whole width with zeros above; otherwise `var`.
+    /// The value `id` equals as an unsigned integer: its root, where `id`
+    /// holds the root's whole width with zeros above; otherwise `id`.
     ///
     /// This is the chain of copies and zero extensions a literal or an
     /// address is read through: a zero-extended pointer is still the pointer,
     /// and a truncated or sign-extended one is not.
-    pub fn same_integer_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        match self.views.get(var) {
+    pub fn same_integer_root(&self, id: I) -> I {
+        match self.views.get(id) {
             Some(view)
-                if view.prefix_bits == bits(&view.root)
+                if view.prefix_bits == self.bits(view.root)
                     && matches!(view.extension, ViewExtension::Exact | ViewExtension::Zero) =>
             {
-                &view.root
+                view.root
             }
-            _ => var,
+            _ => id,
         }
     }
 }
 
-/// The graph value naming `var`'s copy class -- the values with its bits at
-/// its width: the representative where the graph holds it, else `var`'s own.
-pub(crate) fn class_value(
-    graph: &crate::graph::SsaGraph,
-    views: Option<&ValueViews>,
-    var: &SSAVar,
-) -> Option<crate::graph::ValueId> {
-    views
-        .map(|views| views.representative(var))
-        .and_then(|representative| graph.value_id_for_var(representative))
-        .or_else(|| graph.value_id_for_var(var))
-}
-
 /// Every graph value's copy-class value, indexed by value: one `O(V)` table
-/// for the passes that ask per value.
-pub(crate) fn class_values(
-    graph: &crate::graph::SsaGraph,
-    views: Option<&ValueViews>,
-) -> Vec<crate::graph::ValueId> {
+/// for the passes that ask per value. A class whose representative is a
+/// literal the graph holds is named by that value; a literal it does not
+/// hold names no value, and the value names itself.
+pub(crate) fn class_values(graph: &SsaGraph, views: Option<&ValueViews<ValueId>>) -> Vec<ValueId> {
     graph
         .values
         .iter()
-        .map(|value| class_value(graph, views, &value.var).unwrap_or(value.id))
+        .map(|value| class_value(graph, views, value.id))
         .collect()
 }
 
-/// The width of a value, in bits.
-fn bits(var: &SSAVar) -> u32 {
-    var.size.saturating_mul(8)
+/// The graph value naming `value`'s copy class -- the values with its bits
+/// at its width: the representative where the graph holds it, else `value`.
+pub(crate) fn class_value(
+    graph: &SsaGraph,
+    views: Option<&ValueViews<ValueId>>,
+    value: ValueId,
+) -> ValueId {
+    let Some(views) = views else {
+        return value;
+    };
+    match views.representative(value) {
+        Representative::Value(representative) => representative,
+        Representative::Literal { bits, size } => graph
+            .value_id_for_var(&SSAVar::constant(bits, size))
+            .unwrap_or(value),
+    }
+}
+
+/// `value`'s class, normalized so that two values with the same bits at the
+/// same width compare equal: a literal the graph holds is that value, and a
+/// literal it does not hold stays a literal.
+pub(crate) fn class_key(
+    graph: &SsaGraph,
+    views: &ValueViews<ValueId>,
+    value: ValueId,
+) -> Representative<ValueId> {
+    match views.representative(value) {
+        Representative::Literal { bits, size } => graph
+            .value_id_for_var(&SSAVar::constant(bits, size))
+            .map_or(
+                Representative::Literal { bits, size },
+                Representative::Value,
+            ),
+        held => held,
+    }
 }
 
 /// A view in its canonical form: a prefix no wider than the value or the
 /// root, `Exact` exactly when the prefix is the whole value, and no view at
 /// all where no bit is the root's.
-fn normalized(
-    root: &SSAVar,
+fn normalized<I>(
+    root: I,
+    root_bits: u32,
     prefix: u32,
     extension: ViewExtension,
     width: u32,
-) -> Option<ValueView> {
-    let prefix = prefix.min(width).min(bits(root));
+) -> Option<ValueView<I>> {
+    let prefix = prefix.min(width).min(root_bits);
     if prefix == 0 {
         return None;
     }
@@ -271,7 +426,7 @@ fn normalized(
         extension
     };
     Some(ValueView {
-        root: root.clone(),
+        root,
         prefix_bits: prefix,
         extension,
     })
@@ -295,8 +450,8 @@ enum Step {
 /// How an entry-lane formal reads its root: the root's low bits, as a
 /// `Subpiece` at offset zero would. Nothing defines the formal -- it is the
 /// caller's value -- but its bits are the root's.
-fn lane_step(lane: &SSAVar, root: &SSAVar) -> Step {
-    match lane.size == root.size {
+fn lane_step<I: DenseId>(facts: &IdVec<I, Facts>, lane: I, root: I) -> Step {
+    match facts[lane].0 == facts[root].0 {
         true => Step::Copy,
         false => Step::Low,
     }
@@ -380,18 +535,24 @@ pub(crate) fn preserves_integer<V>(
 }
 
 /// The view of an output, given its input's view.
-fn transfer(step: Step, input: &ValueView, output: &SSAVar) -> Option<ValueView> {
-    let width = bits(output);
+fn transfer<I: DenseId>(
+    facts: &IdVec<I, Facts>,
+    step: Step,
+    input: &ValueView<I>,
+    output: I,
+) -> Option<ValueView<I>> {
+    let width = facts[output].0.saturating_mul(8);
     let ValueView {
         root,
         prefix_bits: prefix,
         extension,
-    } = input;
+    } = *input;
+    let root_bits = facts[root].0.saturating_mul(8);
     match step {
-        Step::Copy => Some(input.clone()),
+        Step::Copy => Some(*input),
         // A narrower read keeps the prefix it still covers, and above that
         // whatever the input stated up to its own width.
-        Step::Low => normalized(root, *prefix, *extension, width),
+        Step::Low => normalized(root, root_bits, prefix, extension, width),
         Step::ZeroExtend => {
             let above = match extension {
                 ViewExtension::Exact | ViewExtension::Zero => ViewExtension::Zero,
@@ -399,7 +560,7 @@ fn transfer(step: Step, input: &ValueView, output: &SSAVar) -> Option<ValueView>
                 // neither; the prefix still holds.
                 ViewExtension::Sign | ViewExtension::Unknown => ViewExtension::Unknown,
             };
-            normalized(root, *prefix, above, width)
+            normalized(root, root_bits, prefix, above, width)
         }
         Step::SignExtend => {
             let above = match extension {
@@ -409,82 +570,46 @@ fn transfer(step: Step, input: &ValueView, output: &SSAVar) -> Option<ValueView>
                 ViewExtension::Zero => ViewExtension::Zero,
                 ViewExtension::Unknown => ViewExtension::Unknown,
             };
-            normalized(root, *prefix, above, width)
+            normalized(root, root_bits, prefix, above, width)
         }
-        Step::LowLane => normalized(root, *prefix, ViewExtension::Unknown, width),
+        Step::LowLane => normalized(root, root_bits, prefix, ViewExtension::Unknown, width),
     }
 }
 
 /// How a value is defined, for the solver.
-enum Definition<'a> {
-    Phi(Vec<&'a SSAVar>),
-    Step(&'a SSAVar, Step),
+enum Definition<I> {
+    Phi(Vec<I>),
+    Step(I, Step),
 }
 
-struct Solver<'a> {
+struct Solver<I> {
     /// Every value the view can derive, in definition order.
-    nodes: Vec<&'a SSAVar>,
-    definitions: Vec<Definition<'a>>,
-    index: HashMap<&'a SSAVar, usize>,
+    nodes: Vec<I>,
+    definitions: Vec<Definition<I>>,
+    index: IdMap<I, usize>,
+    facts: IdVec<I, Facts>,
 }
 
-impl<'a> Solver<'a> {
-    fn new(function: &'a SSAFunction) -> Self {
-        let mut nodes = Vec::new();
-        let mut definitions = Vec::new();
-        // The entry lanes first: they are the caller's values, in hand
-        // before the body defines anything, so they come first in definition
-        // order as the representative of their class.
-        for (lane, root) in function.entry_lanes() {
-            nodes.push(lane);
-            definitions.push(Definition::Step(root, lane_step(lane, root)));
+impl<I: DenseId + std::hash::Hash> Solver<I> {
+    fn over(nodes: Vec<I>, definitions: Vec<Definition<I>>, facts: IdVec<I, Facts>) -> Self {
+        let mut index = IdMap::new(facts.len());
+        for (at, node) in nodes.iter().enumerate() {
+            index.insert(*node, at);
         }
-        let var = |id: &crate::VarId| function.var(*id);
-        for block in function.blocks() {
-            for phi in block.phis() {
-                nodes.push(var(&phi.dst));
-                definitions.push(Definition::Phi(
-                    phi.sources.iter().map(|(_, source)| var(source)).collect(),
-                ));
-            }
-            for (dst, src, step) in block
-                .ops()
-                .iter()
-                .filter_map(|op| step_of(op, |id| var_facts(var(id))))
-            {
-                nodes.push(var(dst));
-                definitions.push(Definition::Step(var(src), step));
-            }
-        }
-        Self::over(nodes, definitions)
-    }
-
-    fn from_graph(graph: &'a crate::graph::SsaGraph) -> Self {
-        // The entry lanes first, as from a function.
-        let (nodes, definitions) = graph
-            .entry_lanes
-            .iter()
-            .map(|(lane, root)| (lane, Definition::Step(root, lane_step(lane, root))))
-            .chain(
-                graph
-                    .insts
-                    .iter()
-                    .filter_map(|inst| graph_definition(graph, inst)),
-            )
-            .unzip();
-        Self::over(nodes, definitions)
-    }
-
-    fn over(nodes: Vec<&'a SSAVar>, definitions: Vec<Definition<'a>>) -> Self {
-        let index = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, var)| (*var, index))
-            .collect();
         Self {
             nodes,
             definitions,
             index,
+            facts,
+        }
+    }
+
+    /// A value's own view: its every bit, its own root.
+    fn own(&self, id: I) -> ValueView<I> {
+        ValueView {
+            root: id,
+            prefix_bits: self.facts[id].0.saturating_mul(8),
+            extension: ViewExtension::Exact,
         }
     }
 
@@ -492,13 +617,13 @@ impl<'a> Solver<'a> {
         match &self.definitions[node] {
             Definition::Phi(sources) => sources
                 .iter()
-                .filter_map(|source| self.index.get(source).copied())
+                .filter_map(|source| self.index.get(*source).copied())
                 .collect(),
-            Definition::Step(source, _) => self.index.get(source).copied().into_iter().collect(),
+            Definition::Step(source, _) => self.index.get(*source).copied().into_iter().collect(),
         }
     }
 
-    fn solve(self) -> ValueViews {
+    fn solve(self) -> ValueViews<I> {
         let count = self.nodes.len();
         let mut work = Work {
             state: vec![None; count],
@@ -530,26 +655,24 @@ impl<'a> Solver<'a> {
             self.settle(component, &readers, &mut work);
         }
 
-        let views = work
-            .state
-            .into_iter()
-            .enumerate()
-            .filter_map(|(node, view)| {
-                let var = self.nodes[node];
-                view.filter(|view| view.root != *var)
-                    .map(|view| (var.clone(), view))
-            })
-            .collect::<HashMap<_, _>>();
-        let representatives = representatives(&self.nodes, &views);
+        let mut views = IdMap::new(self.facts.len());
+        for (node, view) in work.state.into_iter().enumerate() {
+            let id = self.nodes[node];
+            if let Some(view) = view.filter(|view| view.root != id) {
+                views.insert(id, view);
+            }
+        }
+        let representatives = representatives(&self.nodes, &views, &self.facts);
         ValueViews {
             views,
             representatives,
+            facts: self.facts,
         }
     }
 
     /// Evaluate one component to its fixed point. Every component it reads
     /// is settled already, so only its own members move.
-    fn settle(&self, component: &[usize], readers: &[Vec<usize>], work: &mut Work) {
+    fn settle(&self, component: &[usize], readers: &[Vec<usize>], work: &mut Work<I>) {
         work.pending.extend(component.iter().rev().copied());
         for member in component {
             work.queued[*member] = true;
@@ -573,7 +696,7 @@ impl<'a> Solver<'a> {
 
     /// Evaluate what is pending until nothing moves; a value that moves
     /// queues its readers.
-    fn drain(&self, readers: &[Vec<usize>], work: &mut Work) {
+    fn drain(&self, readers: &[Vec<usize>], work: &mut Work<I>) {
         while let Some(node) = work.pending.pop() {
             work.queued[node] = false;
             let next = self.evaluate(node, &work.state, &mut work.fallen);
@@ -597,46 +720,48 @@ impl<'a> Solver<'a> {
 
     /// The view of an input: the solver's state for a value it derives, the
     /// value's own for any other.
-    fn input_view(&self, var: &SSAVar, state: &[Option<ValueView>]) -> Option<ValueView> {
-        match self.index.get(var) {
-            Some(index) => state[*index].clone(),
-            None => Some(ValueView::own(var)),
+    fn input_view(&self, id: I, state: &[Option<ValueView<I>>]) -> Option<ValueView<I>> {
+        match self.index.get(id) {
+            Some(index) => state[*index],
+            None => Some(self.own(id)),
         }
     }
 
     fn evaluate(
         &self,
         node: usize,
-        state: &[Option<ValueView>],
+        state: &[Option<ValueView<I>>],
         fallen: &mut [bool],
-    ) -> Option<ValueView> {
-        let var = self.nodes[node];
+    ) -> Option<ValueView<I>> {
+        let id = self.nodes[node];
         if fallen[node] {
-            return Some(ValueView::own(var));
+            return Some(self.own(id));
         }
         let sources = match &self.definitions[node] {
             Definition::Step(source, step) => {
-                let input = self.input_view(source, state)?;
-                return Some(transfer(*step, &input, var).unwrap_or_else(|| ValueView::own(var)));
+                let input = self.input_view(*source, state)?;
+                return Some(
+                    transfer(&self.facts, *step, &input, id).unwrap_or_else(|| self.own(id)),
+                );
             }
             Definition::Phi(sources) => sources,
         };
         // An input not reached yet is assumed to agree.
         let mut views = sources
             .iter()
-            .filter_map(|source| self.input_view(source, state));
+            .filter_map(|source| self.input_view(*source, state));
         let first = views.next()?;
         if views.all(|view| view == first) {
             return Some(first);
         }
         fallen[node] = true;
-        Some(ValueView::own(var))
+        Some(self.own(id))
     }
 }
 
 /// The solver's state, and its worklist.
-struct Work {
-    state: Vec<Option<ValueView>>,
+struct Work<I> {
+    state: Vec<Option<ValueView<I>>>,
     /// Phis that have fallen to their own root, for good.
     fallen: Vec<bool>,
     /// Whether a value is on `pending`; every flag is clear between
@@ -646,23 +771,16 @@ struct Work {
 }
 
 /// How one graph instruction defines its output, where the view reads it.
-fn graph_definition<'a>(
-    graph: &'a crate::graph::SsaGraph,
-    inst: &'a crate::graph::GraphInst,
-) -> Option<(&'a SSAVar, Definition<'a>)> {
+fn graph_definition(
+    facts: &IdVec<ValueId, Facts>,
+    inst: &crate::graph::GraphInst,
+) -> Option<(ValueId, Definition<ValueId>)> {
     match &inst.payload {
         crate::graph::InstPayload::Phi { .. } => {
-            let output = graph.value(inst.output?)?;
-            let sources = inst
-                .inputs
-                .iter()
-                .filter_map(|input| graph.value(*input))
-                .map(|input| &input.var)
-                .collect();
-            Some((&output.var, Definition::Phi(sources)))
+            Some((inst.output?, Definition::Phi(inst.inputs.clone())))
         }
-        crate::graph::InstPayload::Op(op) => step_of(op, |id| var_facts(graph.var(*id)))
-            .map(|(dst, src, step)| (graph.var(*dst), Definition::Step(graph.var(*src), step))),
+        crate::graph::InstPayload::Op(op) => step_of(op, |id| facts[*id])
+            .map(|(dst, src, step)| (*dst, Definition::Step(*src, step))),
     }
 }
 
@@ -751,41 +869,48 @@ impl Tarjan {
 }
 
 /// The representative of every value whose view is not its own.
-fn representatives(
-    order: &[&SSAVar],
-    views: &HashMap<SSAVar, ValueView>,
-) -> HashMap<SSAVar, SSAVar> {
-    let mut first_of_class = HashMap::<(&SSAVar, u32, u32, ViewExtension), &SSAVar>::new();
-    let mut representatives = HashMap::new();
-    for var in order {
-        let Some(view) = views.get(*var) else {
+fn representatives<I: DenseId + std::hash::Hash>(
+    order: &[I],
+    views: &IdMap<I, ValueView<I>>,
+    facts: &IdVec<I, Facts>,
+) -> IdMap<I, Representative<I>> {
+    let bits = |id: I| facts[id].0.saturating_mul(8);
+    // The first value of each class, keyed by the class: its root, width,
+    // prefix and extension. Only looked up, never iterated.
+    let mut first_of_class = HashMap::<(I, u32, u32, ViewExtension), I>::new();
+    let mut representatives = IdMap::new(facts.len());
+    for id in order {
+        let Some(view) = views.get(*id) else {
             continue;
         };
-        let width = bits(var);
-        let representative = if view.prefix_bits == width && bits(&view.root) == width {
-            view.root.clone()
+        let width = bits(*id);
+        let representative = if view.prefix_bits == width && bits(view.root) == width {
+            Representative::Value(view.root)
         } else if !view.determines_value() {
             continue;
-        } else if let Some(literal) = literal_of_view(view, width) {
-            SSAVar::constant(literal, var.size)
+        } else if let Some(literal) = literal_of_view(view, facts[view.root].1, width) {
+            Representative::Literal {
+                bits: literal,
+                size: facts[*id].0,
+            }
         } else {
             let first = *first_of_class
-                .entry((&view.root, width, view.prefix_bits, view.extension))
-                .or_insert(*var);
-            if first == *var {
+                .entry((view.root, width, view.prefix_bits, view.extension))
+                .or_insert(*id);
+            if first == *id {
                 continue;
             }
-            first.clone()
+            Representative::Value(first)
         };
-        representatives.insert((*var).clone(), representative);
+        representatives.insert(*id, representative);
     }
     representatives
 }
 
 /// The literal a view of a constant determines at `width` bits, where it fits
-/// a constant.
-fn literal_of_view(view: &ValueView, width: u32) -> Option<u64> {
-    let constant = u128::from(view.root.constant_bits()?);
+/// a constant. `root_bits` is the root's constant, where it is one.
+fn literal_of_view<I>(view: &ValueView<I>, root_bits: Option<u64>, width: u32) -> Option<u64> {
+    let constant = u128::from(root_bits?);
     let mask = |bits: u32| {
         if bits >= 128 {
             u128::MAX
@@ -813,14 +938,24 @@ fn literal_of_view(view: &ValueView, width: u32) -> Option<u64> {
 mod tests {
     use super::*;
 
-    fn step_of_var(op: &SSAOp) -> Option<(&SSAVar, &SSAVar, Step)> {
-        step_of(op, var_facts)
+    /// A table of ids with the given width and constant bits each, for
+    /// asking the view's rules about values no function holds.
+    fn facts(values: &[(u32, Option<u64>)]) -> IdVec<VarId, Facts> {
+        IdVec::from_fn(values.len(), |id: VarId| values[id.0 as usize])
+    }
+
+    fn own(facts: &IdVec<VarId, Facts>, id: u32) -> ValueView<VarId> {
+        ValueView {
+            root: VarId(id),
+            prefix_bits: facts[VarId(id)].0 * 8,
+            extension: ViewExtension::Exact,
+        }
+    }
+
+    fn literal(facts: &IdVec<VarId, Facts>, view: &ValueView<VarId>, width: u32) -> Option<u64> {
+        literal_of_view(view, facts[view.root].1, width)
     }
     use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
-
-    fn var(name: &str, version: u32, size: u32) -> SSAVar {
-        SSAVar::new(name, version, size)
-    }
 
     fn reg(offset: u64, size: u32) -> Varnode {
         Varnode::new(SpaceId::Register, offset, size)
@@ -876,7 +1011,8 @@ mod tests {
         let facts = function.prep_facts_for_test();
         let facts = &facts;
         let high = defined(&function, 16, 4);
-        let literal = crate::semantic::resolve_const_value(Some(facts), &high);
+        let literal =
+            crate::semantic::resolve_const_value(&facts.graph, Some(facts), facts.value(&high));
         assert_ne!(
             literal,
             Some(0x5566_7788),
@@ -923,10 +1059,13 @@ mod tests {
             .and_then(|block| block.phis().first().map(|phi| phi.dst.clone()))
             .expect("the two copies merge");
         // The merge is the constant: both arms agree on it.
-        assert_eq!(facts.canonical_root(&merged), &SSAVar::constant(0x1234, 2));
+        assert_eq!(
+            class_key(&facts.graph, &facts.views, facts.value(&merged)),
+            Representative::Value(facts.value(&SSAVar::constant(0x1234, 2)))
+        );
         let high = defined(&function, 32, 1);
         assert_ne!(
-            crate::semantic::resolve_const_value(Some(facts), &high),
+            crate::semantic::resolve_const_value(&facts.graph, Some(facts), facts.value(&high)),
             Some(0x34),
             "AH of 0x1234 is 0x12, not the low byte"
         );
@@ -988,8 +1127,12 @@ mod tests {
                 _ => None,
             })
             .expect("the high half");
-        assert!(!facts.same_bits(&sign_word, first_load));
-        assert_eq!(facts.canonical_root(&sign_word), &sign_word);
+        let value = |var: &SSAVar| facts.value(var);
+        assert!(!facts.same_bits(value(&sign_word), value(first_load)));
+        assert_eq!(
+            facts.canonical_root(value(&sign_word)),
+            Representative::Value(value(&sign_word))
+        );
         let read_back = ops
             .iter()
             .find_map(|op| match op {
@@ -997,77 +1140,84 @@ mod tests {
                 _ => None,
             })
             .expect("the low lane");
-        assert!(facts.same_bits(&read_back, second_load));
-        assert_eq!(facts.canonical_root(&read_back), second_load);
+        assert!(facts.same_bits(value(&read_back), value(second_load)));
+        assert_eq!(
+            facts.canonical_root(value(&read_back)),
+            Representative::Value(value(second_load))
+        );
     }
 
     #[test]
     fn a_sign_word_is_not_the_value_it_was_extended_from() {
-        let t = var("tmp:t", 1, 8);
-        let wide = var("tmp:wide", 1, 16);
-        let sign = var("RDX", 3, 8);
-        let low = var("RAX", 3, 8);
-        let high = transfer(Step::SignExtend, &ValueView::own(&t), &wide).expect("a view");
+        // t: 8 bytes, wide: 16, sign: 8, low: 8.
+        let table = facts(&[(8, None), (16, None), (8, None), (8, None)]);
+        let (t, wide, sign, low) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let high = transfer(&table, Step::SignExtend, &own(&table, 0), wide).expect("a view");
         assert_eq!(high.root, t);
         assert_eq!(high.extension, ViewExtension::Sign);
+        let width = |id: &VarId| table[*id];
         // SUBPIECE(SEXT(t), 8) has no step at all: the lane is its own value.
         assert!(
-            step_of_var(&SSAOp::Subpiece {
-                dst: sign,
-                src: wide.clone(),
-                offset: 8,
-            })
+            step_of(
+                &SSAOp::Subpiece {
+                    dst: sign,
+                    src: wide,
+                    offset: 8,
+                },
+                width
+            )
             .is_none()
         );
         // SUBPIECE(SEXT(t), 0) is t again.
-        let (_, _, step) = step_of_var(&SSAOp::Subpiece {
-            dst: low.clone(),
+        let subpiece = SSAOp::Subpiece {
+            dst: low,
             src: wide,
             offset: 0,
-        })
-        .expect("a low lane");
-        let back = transfer(step, &high, &low).expect("a view");
-        assert_eq!(back, ValueView::own(&t));
+        };
+        let (_, _, step) = step_of(&subpiece, width).expect("a low lane");
+        let back = transfer(&table, step, &high, low).expect("a view");
+        assert_eq!(back, own(&table, 0));
     }
 
     #[test]
     fn a_zero_extended_lane_read_back_at_its_width_is_the_lane() {
-        let loaded = var("tmp:load", 1, 4);
-        let x0 = var("X0", 1, 8);
-        let w0 = var("W0", 1, 4);
-        let wide = transfer(Step::ZeroExtend, &ValueView::own(&loaded), &x0).expect("a view");
+        // loaded: 4 bytes, x0: 8, w0: 4.
+        let table = facts(&[(4, None), (8, None), (4, None)]);
+        let wide = transfer(&table, Step::ZeroExtend, &own(&table, 0), VarId(1)).expect("a view");
         assert_eq!(wide.extension, ViewExtension::Zero);
         assert_eq!(wide.prefix_bits, 32);
-        let narrow = transfer(Step::Low, &wide, &w0).expect("a view");
-        assert_eq!(narrow, ValueView::own(&loaded));
+        let narrow = transfer(&table, Step::Low, &wide, VarId(2)).expect("a view");
+        assert_eq!(narrow, own(&table, 0));
     }
 
     #[test]
     fn a_constant_view_determines_only_the_bits_it_covers() {
-        let constant = SSAVar::constant(0x1122_3344_5566_7788, 8);
-        let low =
-            transfer(Step::Low, &ValueView::own(&constant), &var("tmp:l", 1, 4)).expect("a view");
-        assert_eq!(literal_of_view(&low, 32), Some(0x5566_7788));
-        let byte = SSAVar::constant(0x80, 1);
-        let extended = transfer(
-            Step::SignExtend,
-            &ValueView::own(&byte),
-            &var("tmp:s", 1, 4),
-        )
-        .expect("a view");
-        assert_eq!(literal_of_view(&extended, 32), Some(0xffff_ff80));
-        let unknown =
-            transfer(Step::LowLane, &ValueView::own(&byte), &var("tmp:u", 1, 4)).expect("a view");
-        assert_eq!(literal_of_view(&unknown, 32), None);
-        // A display name spelled like a constant supplies no bits; the bits
-        // are what makes a constant, whatever it is named.
-        let named = var("const:0x1234", 0, 8);
-        let named_low =
-            transfer(Step::Low, &ValueView::own(&named), &var("tmp:n", 1, 4)).expect("a view");
-        assert_eq!(literal_of_view(&named_low, 32), None);
-        let renamed = SSAVar::constant(0x1234, 8).renamed("not-a-constant");
-        let renamed_low =
-            transfer(Step::Low, &ValueView::own(&renamed), &var("tmp:r", 1, 4)).expect("a view");
-        assert_eq!(literal_of_view(&renamed_low, 32), Some(0x1234));
+        // 0: the constant 0x1122334455667788; 1: a four-byte lane of it;
+        // 2: the byte 0x80; 3, 4: four-byte results; 5: a value whose name
+        // spells a constant but which holds no bits.
+        let table = facts(&[
+            (8, Some(0x1122_3344_5566_7788)),
+            (4, None),
+            (1, Some(0x80)),
+            (4, None),
+            (4, None),
+            (8, None),
+        ]);
+        let low = transfer(&table, Step::Low, &own(&table, 0), VarId(1)).expect("a view");
+        assert_eq!(literal(&table, &low, 32), Some(0x5566_7788));
+        let extended =
+            transfer(&table, Step::SignExtend, &own(&table, 2), VarId(3)).expect("a view");
+        assert_eq!(literal(&table, &extended, 32), Some(0xffff_ff80));
+        let unknown = transfer(&table, Step::LowLane, &own(&table, 2), VarId(4)).expect("a view");
+        assert_eq!(literal(&table, &unknown, 32), None);
+        // The bits are what makes a constant, whatever it is named: a value
+        // with none supplies none.
+        let named_low = transfer(&table, Step::Low, &own(&table, 5), VarId(1)).expect("a view");
+        assert_eq!(literal(&table, &named_low, 32), None);
+        assert_eq!(var_facts(&SSAVar::new("const:0x1234", 0, 8)).1, None);
+        assert_eq!(
+            var_facts(&SSAVar::constant(0x1234, 8).renamed("not-a-constant")).1,
+            Some(0x1234)
+        );
     }
 }

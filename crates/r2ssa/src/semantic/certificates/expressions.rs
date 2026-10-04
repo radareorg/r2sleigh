@@ -419,14 +419,20 @@ pub(crate) fn expression_phi_has_single_canonical_root(
     // bits at the same width, as the view states them. A representative the
     // graph holds no value for -- the literal a constant lane determines --
     // is compared as the variable it is.
-    let mut roots = inst.inputs.iter().filter_map(|input| {
-        let var = graph.value(*input).map(|value| &value.var)?;
-        Some((prep_facts.canonical_root(var), *input))
-    });
+    let mut roots = inst
+        .inputs
+        .iter()
+        .filter(|input| graph.value(**input).is_some())
+        .map(|input| {
+            (
+                crate::view::class_key(graph, &prep_facts.views, *input),
+                *input,
+            )
+        });
     let Some((first_root, first_input)) = roots.next() else {
         return false;
     };
-    let first = graph.value_id_for_var(first_root).unwrap_or(first_input);
+    let first = crate::view::class_value(graph, Some(&prep_facts.views), first_input);
     if expression_value_depends_on_memory_read(graph, first) {
         return false;
     }

@@ -32,29 +32,27 @@ fn stack_width_evidence_requires_exact_ram_space() {
         base: ExternalStackBase::StackPointer,
         offset: -16,
     };
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [
-            (
-                ram_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: ram_slot.offset,
-                },
-            ),
-            (
-                custom_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: custom_slot.offset,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+    let prep_facts = [
+        (
+            ram_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: ram_slot.offset,
+            },
+        ),
+        (
+            custom_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: custom_slot.offset,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
 
-    let widths = canonical_stack_access_widths(&blocks, Some(&prep_facts));
+    let widths =
+        canonical_stack_access_widths(&blocks, Some(&|var: &SSAVar| prep_facts.get(var).copied()));
     assert_eq!(widths.get(&ram_slot), Some(&BTreeSet::from([4])));
     assert!(!widths.contains_key(&custom_slot));
 }
@@ -72,18 +70,15 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
         }],
         Vec::new(),
     )];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [(
-            addr,
-            r2ssa::StackAddressRoot {
-                base: r2ssa::StackAddressBase::StackPointer,
-                offset: -16,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+    let prep_facts = [(
+        addr,
+        r2ssa::StackAddressRoot {
+            base: r2ssa::StackAddressBase::StackPointer,
+            offset: -16,
+        },
+    )]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let mut parsed_context = ParsedExternalContext::default();
     parsed_context.stack_slots.insert(
         StackSlotKey {
@@ -187,18 +182,15 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
         ],
         Vec::new(),
     )];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [(
-            addr,
-            r2ssa::StackAddressRoot {
-                base: r2ssa::StackAddressBase::StackPointer,
-                offset: -15,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+    let prep_facts = [(
+        addr,
+        r2ssa::StackAddressRoot {
+            base: r2ssa::StackAddressBase::StackPointer,
+            offset: -15,
+        },
+    )]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let slot_key = StackSlotKey {
         base: ExternalStackBase::StackPointer,
         offset: -15,
@@ -290,27 +282,24 @@ fn prepared_direct_stack_base_store_is_a_parameter_home() {
         ],
         Vec::new(),
     )];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [
-            (
-                stack_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -16,
-                },
-            ),
-            (
-                custom_stack_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -24,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+    let prep_facts = [
+        (
+            stack_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -16,
+            },
+        ),
+        (
+            custom_stack_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -24,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let signature = FunctionSignatureSpec {
         ret_type: Some(CTypeLike::Int {
             bits: 32,
@@ -340,7 +329,7 @@ fn prepared_direct_stack_base_store_is_a_parameter_home() {
         &register_params,
         &mut stack_slots,
         &blocks,
-        Some(&prep_facts),
+        Some(&|var: &SSAVar| prep_facts.get(var).copied()),
         &aarch64_register_identity(),
     );
 

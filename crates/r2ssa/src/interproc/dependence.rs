@@ -522,8 +522,7 @@ fn formal_values(prepared: &SsaArtifact, abi: &AbiProfile) -> Vec<(ValueId, usiz
     prep.formal_parameter_bases
         .iter()
         .chain(prep.formal_parameters.iter())
-        .filter_map(|(var, index)| {
-            let value = graph.value_id_for_var(var)?;
+        .filter_map(|(value, index)| {
             let entry = graph.def_inst(value).is_none();
             if !entry && graph.formal_projection_storage(value).is_none() {
                 return None;

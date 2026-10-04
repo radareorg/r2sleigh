@@ -128,7 +128,7 @@ pub(crate) fn exact_stack_pointer_offset(
         ReachingStorageState::PreservedEntry => Some(0),
         ReachingStorageState::Value(value) => graph
             .value(value)
-            .and_then(|value| resolve_entry_stack_root(prep, &value.var))
+            .and_then(|value| resolve_entry_stack_root(prep, value.id))
             .filter(|root| root.base == StackAddressBase::StackPointer)
             .map(|root| root.offset),
         ReachingStorageState::Unknown | ReachingStorageState::Conflict => None,
@@ -726,7 +726,7 @@ pub(crate) fn collect_stack_geometry_certificate(
     let stack_root = |value: ValueId| {
         graph
             .value(value)
-            .and_then(|value| resolve_entry_stack_root(Some(prep), &value.var))
+            .and_then(|value| resolve_entry_stack_root(Some(prep), value.id))
     };
     // A constant that arrived through a copy is still a constant. `add x29,
     // sp, #0x60` lifts to a copy of the immediate into a temporary and an add
@@ -1225,12 +1225,12 @@ pub(crate) fn collect_stack_reload_source_certificates(
     // view's answer; no operation is assumed to preserve them.
     let views = prep.map(|facts| &facts.views);
     let relation_to_reload = |output: ValueId, reload: ValueId| {
-        let (Some(output), Some(reload)) = (graph.value(output), graph.value(reload)) else {
+        if graph.value(output).is_none() || graph.value(reload).is_none() {
             return ViewRelation::Derived;
-        };
+        }
         match views {
-            Some(views) => views.relation(&output.var, &reload.var),
-            None if output.var == reload.var => ViewRelation::Identity,
+            Some(views) => views.relation(output, reload),
+            None if output == reload => ViewRelation::Identity,
             None => ViewRelation::Derived,
         }
     };
@@ -1386,11 +1386,10 @@ pub(crate) fn canonical_stack_source_value(
     graph: &SsaGraph,
     source: ValueId,
 ) -> ValueId {
-    let Some(var) = graph.value(source).map(|value| &value.var) else {
+    if graph.value(source).is_none() {
         return source;
-    };
-    let root = canonical_value_root(prep, var);
-    graph.value_id_for_var(root).unwrap_or(source)
+    }
+    crate::view::class_value(graph, prep.map(|prep| &prep.views), source)
 }
 
 pub(crate) fn collect_stack_call_argument_values(

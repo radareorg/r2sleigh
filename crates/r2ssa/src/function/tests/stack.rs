@@ -844,13 +844,14 @@ fn test_decompile_prep_facts_refuse_display_named_stack_roots() {
         facts.stack_address_roots.is_empty(),
         "display names cannot establish stack roots without typed carrier evidence"
     );
+    let value = |name: &str| facts.value(&SSAVar::new(name, 1, 8));
     assert_eq!(
-        facts.canonical_root_of(&SSAVar::new("tmp:2", 1, 8)),
-        Some(&SSAVar::new("tmp:1", 1, 8))
+        facts.canonical_root_of(value("tmp:2")),
+        Some(value("tmp:1"))
     );
     assert_eq!(
-        facts.canonical_root_of(&SSAVar::new("tmp:4", 1, 8)),
-        Some(&SSAVar::new("tmp:3", 1, 8))
+        facts.canonical_root_of(value("tmp:4")),
+        Some(value("tmp:3"))
     );
 }
 
@@ -952,7 +953,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
         .filter_map(|op| op.dst())
         .filter_map(|dst| {
             typed_facts
-                .stack_address_root_of(dst)
+                .stack_address_root_of(typed.graph().value_id_for_var(dst)?)
                 .copied()
                 .map(|root| (typed_function.canonical_storage_for_var(dst), root))
         })
@@ -965,7 +966,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
         .filter_map(|op| op.dst())
         .filter_map(|dst| {
             typed_facts
-                .entry_stack_address_root_of(dst)
+                .entry_stack_address_root_of(typed.graph().value_id_for_var(dst)?)
                 .copied()
                 .map(|root| (typed_function.canonical_storage_for_var(dst), root))
         })
@@ -1026,7 +1027,13 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
             .iter()
             .filter_map(SSAOp::dst)
             .filter(|dst| dst.size == 4)
-            .all(|dst| typed_facts.entry_stack_address_root_of(dst).is_none()),
+            .all(|dst| {
+                typed
+                    .graph()
+                    .value_id_for_var(dst)
+                    .and_then(|dst| typed_facts.entry_stack_address_root_of(dst))
+                    .is_none()
+            }),
         "narrow copy/cast/add/sub values cannot carry entry-SP authority"
     );
     assert!(entry_op_roots.iter().any(|(_, root)| {
@@ -1458,8 +1465,9 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
         .expect("load address");
     let facts = artifact.decompile_prep_facts();
 
-    assert!(facts.stack_address_root_of(new_dst).is_none());
-    assert!(facts.stack_address_root_of(load_addr).is_none());
+    let value = |var: &SSAVar| artifact.graph().value_id_for_var(var).expect("a value");
+    assert!(facts.stack_address_root_of(value(new_dst)).is_none());
+    assert!(facts.stack_address_root_of(value(load_addr)).is_none());
     assert!(facts.entry_stack_address_roots.is_empty());
     let object = artifact
         .object_for_var(load_addr, SpaceId::Ram)
@@ -1506,18 +1514,16 @@ fn test_decompile_prep_facts_refuse_renamed_stack_carriers() {
         ],
     );
     let facts = func.prep_facts_for_test();
+    let value = |name: &str| facts.value(&SSAVar::new(name, 1, 8));
     assert_eq!(
-        facts.stack_address_root_of(&SSAVar::new("runtime.materialized.rsp", 1, 8)),
+        facts.stack_address_root_of(value("runtime.materialized.rsp")),
         None
     );
     assert_eq!(
-        facts.stack_address_root_of(&SSAVar::new("runtime.materialized.rbp", 1, 8)),
+        facts.stack_address_root_of(value("runtime.materialized.rbp")),
         None
     );
-    assert_eq!(
-        facts.stack_address_root_of(&SSAVar::new("tmp:fp_slot", 1, 8)),
-        None
-    );
+    assert_eq!(facts.stack_address_root_of(value("tmp:fp_slot")), None);
 }
 
 #[test]

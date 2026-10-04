@@ -841,10 +841,16 @@ fn merged_context_and_summary_callee_facts(
     facts
 }
 
+/// Where in the frame a variable of the analysed blocks points, as the prep
+/// facts prove it. The type analysis still reads its blocks by name; this
+/// is the one question it asks of the prep facts, which are keyed by the
+/// sealed graph's values (doc/adr-one-ir.md, F2.3 stage 5).
+pub(crate) type FrameRoots<'a> = &'a dyn Fn(&SSAVar) -> Option<r2ssa::StackAddressRoot>;
+
 fn build_type_analysis_inner(
     mut input: DerivedTypeAnalysisInput<'_>,
     semantic_inputs: Option<DerivedTypeAnalysisSemanticInputs<'_>>,
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<FrameRoots<'_>>,
     machine_profile: Option<&PreparedMachineVarProfile>,
     registers: &crate::RegisterIdentity,
 ) -> DerivedTypeAnalysis {
@@ -1296,8 +1302,9 @@ fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalys
 #[cfg(test)]
 fn build_type_analysis_with_prep_facts(
     input: DerivedTypeAnalysisInput<'_>,
-    prep_facts: &r2ssa::DecompilePrepFacts,
+    frame_roots: &BTreeMap<SSAVar, r2ssa::StackAddressRoot>,
 ) -> DerivedTypeAnalysis {
+    let prep_facts = &|var: &SSAVar| frame_roots.get(var).copied();
     let machine = detached_x86_64_test_machine_profile();
     build_type_analysis_inner(
         input,
@@ -1399,10 +1406,17 @@ pub fn build_source_owned_type_analysis(
     let semantic_inputs = Some(DerivedTypeAnalysisSemanticInputs {
         local_field_accesses: &local_field_accesses,
     });
+    let frame_roots = |var: &SSAVar| {
+        source
+            .graph()
+            .value_id_for_var(var)
+            .and_then(|value| source.decompile_prep_facts().stack_address_root_of(value))
+            .copied()
+    };
     let derived = build_type_analysis_inner(
         derived_input,
         semantic_inputs,
-        Some(source.decompile_prep_facts()),
+        Some(&frame_roots),
         Some(&machine_profile),
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
     );
@@ -1934,7 +1948,7 @@ fn profile_minimum_stride(fields: &BTreeMap<u64, String>, ptr_bits: u32) -> Opti
 
 fn canonical_stack_access_widths(
     ssa_blocks: &[SSABlock],
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<FrameRoots<'_>>,
 ) -> BTreeMap<StackSlotKey, BTreeSet<u32>> {
     let Some(prep_facts) = prep_facts else {
         return BTreeMap::new();
@@ -1957,7 +1971,7 @@ fn canonical_stack_access_widths(
         if size == 0 {
             continue;
         }
-        let Some(root) = prep_facts.stack_address_root_of(addr).copied() else {
+        let Some(root) = prep_facts(addr) else {
             continue;
         };
         widths.entry(root).or_default().insert(size);
@@ -1967,7 +1981,7 @@ fn canonical_stack_access_widths(
 
 fn canonical_stack_access_signedness(
     ssa_blocks: &[SSABlock],
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<FrameRoots<'_>>,
     arch_name: Option<&str>,
 ) -> BTreeMap<StackSlotKey, BTreeSet<ScalarSignednessEvidence>> {
     let Some(prep_facts) = prep_facts else {
@@ -1996,7 +2010,7 @@ fn canonical_stack_access_signedness(
         let Some(observed) = scalar_signedness.get(value) else {
             continue;
         };
-        let Some(root) = prep_facts.stack_address_root_of(addr).copied() else {
+        let Some(root) = prep_facts(addr) else {
             continue;
         };
         signedness

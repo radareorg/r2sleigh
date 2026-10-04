@@ -206,7 +206,11 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
 
     for (index, dst) in restored.iter().enumerate() {
         assert_eq!(
-            facts.entry_stack_address_root_of(dst).copied(),
+            prepared
+                .graph()
+                .value_id_for_var(dst)
+                .and_then(|dst| facts.entry_stack_address_root_of(dst))
+                .copied(),
             Some(StackAddressRoot {
                 base: StackAddressBase::StackPointer,
                 offset: 0,
@@ -221,6 +225,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
         .ops()
         .iter()
         .filter_map(|op| op.dst())
+        .filter_map(|dst| prepared.graph().value_id_for_var(dst))
         .filter_map(|dst| facts.entry_stack_address_root_of(dst).copied())
         .filter(|root| {
             root.base == StackAddressBase::StackPointer && matches!(root.offset, -16 | -24 | -32)
@@ -464,7 +469,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
             .value(parameter.value)
             .and_then(|value| prepared
                 .decompile_prep_facts()
-                .formal_parameter_of(&value.var)),
+                .formal_parameter_of(value.id)),
         Some(0),
     );
 

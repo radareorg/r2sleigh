@@ -513,6 +513,7 @@ impl SSAFunction {
 
     pub(crate) fn collect_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(
         &self,
+        graph: &crate::graph::SsaGraph,
         function_interface: Option<&SourceFunctionInterface>,
         control: &C,
     ) -> Result<DecompilePrepFacts, SsaExecutionStopReason> {
@@ -557,9 +558,14 @@ impl SSAFunction {
         });
         // Identity first: every stack-root question below names a value by its
         // representative, and the representative is the view's answer.
+        let values = graph.values.len();
         let mut facts = DecompilePrepFacts {
-            views: crate::view::ValueViews::compute(self),
-            ..DecompilePrepFacts::default()
+            views: crate::view::ValueViews::of_graph(graph),
+            stack_address_roots: crate::dense::IdMap::new(values),
+            entry_stack_address_roots: crate::dense::IdMap::new(values),
+            indexed_stack_address_roots: crate::dense::IdMap::new(values),
+            formal_parameters: crate::dense::IdMap::new(values),
+            formal_parameter_bases: crate::dense::IdMap::new(values),
         };
         control.poll()?;
         let mut declared_stack_bases = BTreeMap::new();
@@ -591,20 +597,22 @@ impl SSAFunction {
                 declared_stack_bases.insert(slot.base_storage(), slot.base());
             }
         }
-        for var in self.canonical_storage_by_var.keys() {
-            if var.version != 0 {
+        // The entry values of the declared bases are the seeds: a value of
+        // the graph at version zero whose storage is one of them.
+        for value in &graph.values {
+            if value.var.version != 0 || !self.canonical_storage_by_var.contains_key(&value.var) {
                 continue;
             }
-            let Some(storage) = self.canonical_storage_for_var(var) else {
+            let Some(storage) = self.canonical_storage_for_var(&value.var) else {
                 continue;
             };
             if let Some(base) = declared_stack_bases.get(&storage).copied() {
                 facts
                     .stack_address_roots
-                    .insert(var.clone(), StackAddressRoot { base, offset: 0 });
+                    .insert(value.id, StackAddressRoot { base, offset: 0 });
                 if entry_stack_roots_are_stable && base == StackAddressBase::StackPointer {
                     facts.entry_stack_address_roots.insert(
-                        var.clone(),
+                        value.id,
                         StackAddressRoot {
                             base: StackAddressBase::StackPointer,
                             offset: 0,
@@ -616,13 +624,12 @@ impl SSAFunction {
         // Every stack root, solved once from the seeds above
         // (`stack_roots`, doc/adr-fixpoint.md K2).
         control.poll()?;
-        match super::stack_roots::solve(
-            self,
-            &facts.views,
-            facts.stack_address_roots.clone(),
-            facts.entry_stack_address_roots.clone(),
-            entry_stack_address_size,
-        ) {
+        let seeds = super::stack_roots::Seeds {
+            exact: facts.stack_address_roots.clone(),
+            entry: facts.entry_stack_address_roots.clone(),
+            entry_size: entry_stack_address_size,
+        };
+        match super::stack_roots::solve(graph, self.entry, &facts.views, seeds) {
             Ok(roots) => {
                 facts.stack_address_roots = roots.exact;
                 facts.entry_stack_address_roots = roots.entry;

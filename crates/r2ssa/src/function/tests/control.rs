@@ -1479,11 +1479,11 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
     let merge = func.named_block(0x100c).expect("merge block");
     assert_eq!(merge.phis().len(), 1, "expected trivial merge phi");
 
-    let const_root = SSAVar::constant(0x42, 8);
-    let phi_dst = &merge.phis()[0].dst;
+    let const_root = facts.value(&SSAVar::constant(0x42, 8));
+    let phi_dst = facts.value(&merge.phis()[0].dst);
     assert_eq!(
         facts.canonical_root_of(phi_dst),
-        Some(&const_root),
+        Some(const_root),
         "merge phi should collapse to the shared constant root"
     );
 
@@ -1502,8 +1502,17 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
         .and_then(|op| op.dst().cloned())
         .expect("right copy dst");
 
-    assert_eq!(facts.canonical_root_of(&left_dst), Some(&const_root));
-    assert_eq!(facts.canonical_root_of(&right_dst), Some(&const_root));
+    assert_eq!(
+        facts.canonical_root_of(facts.value(&left_dst)),
+        Some(const_root)
+    );
+    assert_eq!(
+        facts.canonical_root_of(facts.value(&right_dst)),
+        Some(const_root)
+    );
     // A constant is its own representative.
-    assert_eq!(facts.canonical_root(&const_root), &const_root);
+    assert_eq!(
+        facts.canonical_root(const_root),
+        crate::view::Representative::Value(const_root)
+    );
 }

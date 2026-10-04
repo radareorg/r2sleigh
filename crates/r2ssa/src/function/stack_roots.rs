@@ -35,20 +35,22 @@
 //! value is the stack pointer, and seeded for a second. Two such masks are
 //! two origins nothing here can tell apart, and neither is rooted.
 
-use std::collections::BTreeMap;
-
-use super::{SSAFunction, StackAddressBase, StackAddressRoot};
+use super::{StackAddressBase, StackAddressRoot};
+use crate::dense::{Csr, IdMap};
 use crate::fixpoint::Exhausted;
+use crate::graph::{InstPayload, SsaGraph, ValueId};
 use crate::op::SSAOp;
-use crate::var::SSAVar;
-use crate::view::ValueViews;
+use crate::view::{Representative, ValueViews};
+
+/// A root for some of a graph's values.
+pub(crate) type RootMap = IdMap<ValueId, StackAddressRoot>;
 
 /// The solved roots.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Roots {
-    pub exact: BTreeMap<SSAVar, StackAddressRoot>,
-    pub entry: BTreeMap<SSAVar, StackAddressRoot>,
-    pub indexed: BTreeMap<SSAVar, StackAddressRoot>,
+    pub exact: RootMap,
+    pub entry: RootMap,
+    pub indexed: RootMap,
 }
 
 /// A value's root, as the solve has it so far.
@@ -79,98 +81,104 @@ impl Rooted {
 }
 
 /// An operation that can root its output.
-enum Rule<'a> {
-    Merge(Vec<&'a SSAVar>),
-    Copy(&'a SSAVar),
-    Add(&'a SSAVar, &'a SSAVar),
-    Sub(&'a SSAVar, &'a SSAVar),
+enum Rule {
+    Merge(Vec<ValueId>),
+    Copy(ValueId),
+    Add(ValueId, ValueId),
+    Sub(ValueId, ValueId),
 }
 
 /// The values a root can flow to, in definition order, with each one's
 /// rule and who reads it.
-struct Flow<'a> {
-    order: Vec<SSAVar>,
-    rules: BTreeMap<SSAVar, Rule<'a>>,
-    readers: BTreeMap<SSAVar, Vec<SSAVar>>,
+struct Flow {
+    order: Vec<ValueId>,
+    rules: IdMap<ValueId, Rule>,
+    readers: Csr<ValueId, ValueId>,
 }
 
-impl<'a> Flow<'a> {
-    fn of(function: &'a SSAFunction, views: &ValueViews) -> Self {
-        let mut flow = Self {
-            order: Vec::new(),
-            rules: BTreeMap::new(),
-            readers: BTreeMap::new(),
-        };
-        let var = |id: &crate::VarId| function.var(*id);
-        for block in function.blocks() {
-            for phi in block.phis() {
-                let sources = phi.sources.iter().map(|(_, source)| var(source)).collect();
-                flow.define(var(&phi.dst), Rule::Merge(sources), views);
-            }
-            for op in block.ops() {
-                let (dst, rule) = match op {
+impl Flow {
+    fn of(graph: &SsaGraph, views: &ValueViews<ValueId>) -> Self {
+        let mut order = Vec::new();
+        let mut rules = IdMap::new(graph.values.len());
+        let mut reads = Vec::new();
+        for inst in &graph.insts {
+            let Some(dst) = inst.output else {
+                continue;
+            };
+            let rule = match &inst.payload {
+                InstPayload::Phi { .. } => Rule::Merge(inst.inputs.clone()),
+                InstPayload::Op(op) => match *op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
                     | SSAOp::CallRestore { dst, src }
-                        if var(dst).size == var(src).size =>
+                        if views.size(dst) == views.size(src) =>
                     {
-                        (var(dst), Rule::Copy(var(src)))
+                        Rule::Copy(src)
                     }
-                    SSAOp::IntAdd { dst, a, b } => (var(dst), Rule::Add(var(a), var(b))),
-                    SSAOp::IntSub { dst, a, b } => (var(dst), Rule::Sub(var(a), var(b))),
+                    SSAOp::IntAdd { a, b, .. } => Rule::Add(a, b),
+                    SSAOp::IntSub { a, b, .. } => Rule::Sub(a, b),
                     _ => continue,
-                };
-                flow.define(dst, rule, views);
+                },
+            };
+            // `dst` reads each operand and the operand's representative,
+            // whose root an operand also answers with.
+            let inputs = match &rule {
+                Rule::Merge(sources) => sources.clone(),
+                Rule::Copy(src) => vec![*src],
+                Rule::Add(a, b) | Rule::Sub(a, b) => vec![*a, *b],
+            };
+            for input in inputs {
+                reads.push((input, dst));
+                if let Some(representative) = views.representative_value(input) {
+                    reads.push((representative, dst));
+                }
             }
+            order.push(dst);
+            rules.insert(dst, rule);
         }
-        flow
-    }
-
-    /// Record `dst`'s rule, and that it reads each operand and the
-    /// operand's representative, whose root an operand also answers with.
-    fn define(&mut self, dst: &SSAVar, rule: Rule<'a>, views: &ValueViews) {
-        let inputs = match &rule {
-            Rule::Merge(sources) => sources.clone(),
-            Rule::Copy(src) => vec![*src],
-            Rule::Add(a, b) | Rule::Sub(a, b) => vec![*a, *b],
-        };
-        for input in inputs {
-            for read in [input, views.representative(input)] {
-                self.readers
-                    .entry(read.clone())
-                    .or_default()
-                    .push(dst.clone());
-            }
+        Self {
+            order,
+            rules,
+            readers: Csr::from_pairs(graph.values.len(), reads),
         }
-        self.order.push(dst.clone());
-        self.rules.insert(dst.clone(), rule);
     }
 }
 
-/// Solve every root of `function` from its `exact` and `entry` seeds.
-/// `entry_size` is the entry stack pointer's width, where entry roots are
-/// solved at all.
+/// What the entry states: the roots its declared bases have, in the
+/// declared coordinates and in the entry stack pointer's, and that
+/// pointer's width where entry roots are solved at all.
+pub(super) struct Seeds {
+    pub exact: RootMap,
+    pub entry: RootMap,
+    pub entry_size: Option<u32>,
+}
+
+/// Solve every root of `graph` from its seeds.
 pub(super) fn solve(
-    function: &SSAFunction,
-    views: &ValueViews,
-    mut exact_seeds: BTreeMap<SSAVar, StackAddressRoot>,
-    mut entry_seeds: BTreeMap<SSAVar, StackAddressRoot>,
-    entry_size: Option<u32>,
+    graph: &SsaGraph,
+    entry: u64,
+    views: &ValueViews<ValueId>,
+    seeds: Seeds,
 ) -> Result<Roots, Exhausted> {
-    let flow = Flow::of(function, views);
+    let Seeds {
+        exact: mut exact_seeds,
+        entry: mut entry_seeds,
+        entry_size,
+    } = seeds;
+    let flow = Flow::of(graph, views);
     let mut exact = rooted(&flow, views, &exact_seeds, None)?;
-    if let Some(origin) = realigned(function, views, &exact, entry_size) {
+    if let Some(origin) = realigned(graph, entry, views, &exact, entry_size) {
         let root = StackAddressRoot {
             base: StackAddressBase::Realigned,
             offset: 0,
         };
-        exact_seeds.insert(origin.clone(), root);
+        exact_seeds.insert(origin, root);
         entry_seeds.insert(origin, root);
         exact = rooted(&flow, views, &exact_seeds, None)?;
     }
     let entry = match entry_size {
         Some(size) => rooted(&flow, views, &entry_seeds, Some(size))?,
-        None => BTreeMap::new(),
+        None => IdMap::new(graph.values.len()),
     };
     let indexed = indexed(&flow, views, &exact)?;
     Ok(Roots {
@@ -183,12 +191,12 @@ pub(super) fn solve(
 /// The settled root of every value `flow` reaches from `seeds`. Where
 /// `width` is given, only values that wide carry a root.
 fn rooted(
-    flow: &Flow<'_>,
-    views: &ValueViews,
-    seeds: &BTreeMap<SSAVar, StackAddressRoot>,
+    flow: &Flow,
+    views: &ValueViews<ValueId>,
+    seeds: &RootMap,
     width: Option<u32>,
-) -> Result<BTreeMap<SSAVar, StackAddressRoot>, Exhausted> {
-    let fits = |var: &SSAVar| width.is_none_or(|width| var.size == width);
+) -> Result<RootMap, Exhausted> {
+    let fits = |id: ValueId| width.is_none_or(|width| views.size(id) == width);
     let cells = crate::fixpoint::sparse(
         "stack-roots",
         2,
@@ -196,26 +204,26 @@ fn rooted(
         &flow.readers,
         Rooted::Pending,
         |dst, cells| {
-            let of = |var: &SSAVar| value_of(var, views, seeds, cells);
+            let of = |id: ValueId| value_of(id, views, seeds, cells);
             match &flow.rules[dst] {
                 _ if !fits(dst) => Rooted::Not,
-                Rule::Merge(sources) if sources.iter().all(|source| fits(source)) => sources
+                Rule::Merge(sources) if sources.iter().all(|source| fits(*source)) => sources
                     .iter()
-                    .fold(Rooted::Pending, |held, source| held.meet(of(source))),
-                Rule::Copy(src) if fits(src) => of(src),
-                Rule::Add(a, b) if fits(a) && fits(b) => displaced(of(a), delta(b, views), 1)
-                    .meet_either(displaced(of(b), delta(a, views), 1)),
-                Rule::Sub(a, b) if fits(a) && fits(b) => displaced(of(a), delta(b, views), -1),
+                    .fold(Rooted::Pending, |held, source| held.meet(of(*source))),
+                Rule::Copy(src) if fits(*src) => of(*src),
+                Rule::Add(a, b) if fits(*a) && fits(*b) => displaced(of(*a), delta(*b, views), 1)
+                    .meet_either(displaced(of(*b), delta(*a, views), 1)),
+                Rule::Sub(a, b) if fits(*a) && fits(*b) => displaced(of(*a), delta(*b, views), -1),
                 _ => Rooted::Not,
             }
         },
     )?;
     let mut roots = seeds.clone();
-    roots.extend(
-        cells
-            .into_iter()
-            .filter_map(|(var, cell)| Some((var, cell.root()?))),
-    );
+    for (id, cell) in cells.iter() {
+        if let Some(root) = cell.root() {
+            roots.insert(id, root);
+        }
+    }
     Ok(roots)
 }
 
@@ -252,19 +260,23 @@ impl Rooted {
 }
 
 /// A value's root: its own, or its representative's, which carries the same
-/// bits; a seed or a constant answers at once.
+/// bits; a seed or a constant answers at once. A literal representative is
+/// no position.
 fn value_of(
-    var: &SSAVar,
-    views: &ValueViews,
-    seeds: &BTreeMap<SSAVar, StackAddressRoot>,
-    cells: &BTreeMap<SSAVar, Rooted>,
+    id: ValueId,
+    views: &ValueViews<ValueId>,
+    seeds: &RootMap,
+    cells: &IdMap<ValueId, Rooted>,
 ) -> Rooted {
-    let own = |var: &SSAVar| match seeds.get(var) {
+    let own = |id: ValueId| match seeds.get(id) {
         Some(root) => Rooted::At(*root),
-        None => cells.get(var).copied().unwrap_or(Rooted::Not),
+        None => cells.get(id).copied().unwrap_or(Rooted::Not),
     };
-    let representative = views.representative(var);
-    match (own(var), own(representative)) {
+    let representative = match views.representative(id) {
+        Representative::Value(representative) => own(representative),
+        Representative::Literal { .. } => Rooted::Not,
+    };
+    match (own(id), representative) {
         (Rooted::At(root), _) | (_, Rooted::At(root)) => Rooted::At(root),
         (Rooted::Pending, _) | (_, Rooted::Pending) => Rooted::Pending,
         (Rooted::Not, Rooted::Not) => Rooted::Not,
@@ -273,14 +285,19 @@ fn value_of(
 
 /// The constant a value displaces an address by, read through a copy: an
 /// AArch64 `add x29, sp, 0x60` materialises the `0x60` in a temporary.
-pub(super) fn delta(var: &SSAVar, views: &ValueViews) -> Option<i64> {
-    signed(var).or_else(|| signed(views.representative(var)))
+pub(super) fn delta(id: ValueId, views: &ValueViews<ValueId>) -> Option<i64> {
+    views
+        .constant(id)
+        .and_then(|bits| signed(bits, views.size(id)))
+        .or_else(|| {
+            let (bits, size) = views.representative_constant(id)?;
+            signed(bits, size)
+        })
 }
 
 /// A constant read as a signed displacement at its own width.
-fn signed(var: &SSAVar) -> Option<i64> {
-    let value = var.constant_bits()?;
-    let bits = var.size.checked_mul(8)?;
+fn signed(value: u64, size: u32) -> Option<i64> {
+    let bits = size.checked_mul(8)?;
     match bits {
         64 => Some(value as i64),
         1..=63 => {
@@ -296,51 +313,53 @@ fn signed(var: &SSAVar) -> Option<i64> {
     }
 }
 
+/// A value's exact root, or its representative's.
+fn exact_of(id: ValueId, views: &ValueViews<ValueId>, exact: &RootMap) -> Option<StackAddressRoot> {
+    exact
+        .get(id)
+        .or_else(|| exact.get(views.representative_value(id)?))
+        .copied()
+}
+
 /// The one value an `and` realigns the stack pointer into, where exactly
 /// one does.
 fn realigned(
-    function: &SSAFunction,
-    views: &ValueViews,
-    exact: &BTreeMap<SSAVar, StackAddressRoot>,
+    graph: &SsaGraph,
+    entry: u64,
+    views: &ValueViews<ValueId>,
+    exact: &RootMap,
     entry_size: Option<u32>,
-) -> Option<SSAVar> {
-    let aligns = |value: &SSAVar, mask: &SSAVar| {
-        let root = exact
-            .get(value)
-            .or_else(|| exact.get(views.representative(value)));
+) -> Option<ValueId> {
+    let aligns = |value: ValueId, mask: ValueId| {
         let alignment = delta(mask, views).and_then(i64::checked_neg);
-        root.is_some_and(|root| root.base == StackAddressBase::StackPointer)
+        exact_of(value, views, exact)
+            .is_some_and(|root| root.base == StackAddressBase::StackPointer)
             && alignment.is_some_and(|alignment| {
                 alignment >= 2 && alignment.unsigned_abs().is_power_of_two()
             })
     };
-    let var = |id: &crate::VarId| function.var(*id);
-    let mut candidates = function
-        .blocks()
-        .iter()
-        .flat_map(|block| block.ops())
-        .filter_map(|op| match op {
-            SSAOp::IntAnd { dst, a, b }
-                if entry_size == Some(var(dst).size)
-                    && (aligns(var(a), var(b)) || aligns(var(b), var(a))) =>
-            {
-                Some(var(dst).clone())
-            }
-            _ => None,
-        });
+    let mut candidates = graph.insts.iter().filter_map(|inst| match inst.payload {
+        InstPayload::Op(SSAOp::IntAnd { dst, a, b })
+            if entry_size == Some(views.size(dst)) && (aligns(a, b) || aligns(b, a)) =>
+        {
+            Some(dst)
+        }
+        _ => None,
+    });
     let origin = candidates.next()?;
     if candidates.next().is_some() {
         r2il::refusal_evidence!(
             "stack-root-realign",
             "{:#x}: more than one mask realigns the stack pointer",
-            function.entry
+            entry
         );
         return None;
     }
     r2il::refusal_evidence!(
         "stack-root-realign",
-        "{:#x}: {origin} is the realigned frame's origin",
-        function.entry
+        "{:#x}: {} is the realigned frame's origin",
+        entry,
+        graph.values[origin.0 as usize].var
     );
     Some(origin)
 }
@@ -349,16 +368,11 @@ fn realigned(
 /// where one operand is inside it and the other is an index nothing folds:
 /// `buf + i`, `buf + i + 4`, `buf + i - 3`.
 fn indexed(
-    flow: &Flow<'_>,
-    views: &ValueViews,
-    exact: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Result<BTreeMap<SSAVar, StackAddressRoot>, Exhausted> {
-    let exact_of = |var: &SSAVar| {
-        exact
-            .get(var)
-            .or_else(|| exact.get(views.representative(var)))
-            .copied()
-    };
+    flow: &Flow,
+    views: &ValueViews<ValueId>,
+    exact: &RootMap,
+) -> Result<RootMap, Exhausted> {
+    let exact_of = |id: ValueId| exact_of(id, views, exact);
     let cells = crate::fixpoint::sparse(
         "indexed-stack-roots",
         2,
@@ -369,47 +383,51 @@ fn indexed(
             if exact_of(dst).is_some() {
                 return Rooted::Not;
             }
-            let indexed_of = |var: &SSAVar| {
-                let own = |var: &SSAVar| cells.get(var).copied().unwrap_or(Rooted::Not);
-                own(var).meet_either(own(views.representative(var)))
+            let indexed_of = |id: ValueId| {
+                let own = |id: ValueId| cells.get(id).copied().unwrap_or(Rooted::Not);
+                let representative = views.representative_value(id).map_or(Rooted::Not, own);
+                own(id).meet_either(representative)
             };
             // Inside an object: exactly placed in it, or already indexed.
-            let inside = |var: &SSAVar| match exact_of(var) {
+            let inside = |id: ValueId| match exact_of(id) {
                 Some(root) => Rooted::At(root),
-                None => indexed_of(var),
+                None => indexed_of(id),
             };
             // An index nothing folds and that is no position in an object.
-            let opaque = |var: &SSAVar| {
-                delta(var, views).is_none()
-                    && exact_of(var).is_none()
-                    && indexed_of(var) == Rooted::Not
+            let opaque = |id: ValueId| {
+                delta(id, views).is_none()
+                    && exact_of(id).is_none()
+                    && indexed_of(id) == Rooted::Not
             };
             match &flow.rules[dst] {
                 Rule::Add(a, b) => {
-                    let by_index = |base: &SSAVar, index: &SSAVar| match opaque(index) {
+                    let by_index = |base: ValueId, index: ValueId| match opaque(index) {
                         true => inside(base),
                         false => Rooted::Not,
                     };
                     let by_constant =
-                        |base: &SSAVar, constant: &SSAVar| match delta(constant, views) {
+                        |base: ValueId, constant: ValueId| match delta(constant, views) {
                             Some(_) => indexed_of(base),
                             None => Rooted::Not,
                         };
-                    by_index(a, b)
-                        .meet_either(by_index(b, a))
-                        .meet_either(by_constant(a, b))
-                        .meet_either(by_constant(b, a))
+                    by_index(*a, *b)
+                        .meet_either(by_index(*b, *a))
+                        .meet_either(by_constant(*a, *b))
+                        .meet_either(by_constant(*b, *a))
                 }
-                Rule::Sub(a, b) => match delta(b, views) {
-                    Some(_) => indexed_of(a),
+                Rule::Sub(a, b) => match delta(*b, views) {
+                    Some(_) => indexed_of(*a),
                     None => Rooted::Not,
                 },
                 Rule::Merge(_) | Rule::Copy(_) => Rooted::Not,
             }
         },
     )?;
-    Ok(cells
-        .into_iter()
-        .filter_map(|(var, cell)| Some((var, cell.root()?)))
-        .collect())
+    let mut roots = IdMap::new(exact.len().max(cells.len()));
+    for (id, cell) in cells.iter() {
+        if let Some(root) = cell.root() {
+            roots.insert(id, root);
+        }
+    }
+    Ok(roots)
 }

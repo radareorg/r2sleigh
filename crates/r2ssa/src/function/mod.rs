@@ -31,8 +31,10 @@ use crate::cfg::{CFG, CFGEdge};
 use crate::control::{
     SsaExecutionStopReason, SsaPrepareError, SsaWorkControl, UncheckedSsaWorkControl,
 };
+use crate::dense::IdMap;
 use crate::domtree::DomTree;
 use crate::graph::SsaGraph;
+use crate::graph::ValueId;
 use crate::integrity::{SsaIntegrityError, validate_ssa_function};
 #[cfg(test)]
 use crate::machine_context::{SourceCallArgumentSpec, SourceCallResult};
@@ -111,10 +113,12 @@ pub struct StackAddressRoot {
 
 /// Decompiler-prep analysis facts derived from SSA.
 ///
-/// Collected once, when a function is sealed, from the blocks the sealed
-/// function keeps; nothing changes those blocks after, so the facts never
-/// describe blocks that no longer exist.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Collected once, when a function is sealed, over the graph of the blocks
+/// the sealed function keeps; nothing changes those blocks after, so the
+/// facts never describe blocks that no longer exist. Every fact is an index
+/// over the graph's values (doc/adr-one-ir.md): a lookup is `O(1)` and reads
+/// no name.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
     /// Which values carry the same bits, and each value's representative.
     ///
@@ -122,12 +126,12 @@ pub struct DecompilePrepFacts {
     /// shares identity with another only where their bits are equal at full
     /// width, so an extension or a lane at a non-zero offset is never the
     /// value it was read from.
-    pub views: crate::view::ValueViews,
-    pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
+    pub views: crate::view::ValueViews<crate::graph::ValueId>,
+    pub stack_address_roots: IdMap<crate::graph::ValueId, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
     /// dataflow. Unlike `stack_address_roots`, these roots are never rebased
     /// to a source-declared frame-pointer coordinate system.
-    pub entry_stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
+    pub entry_stack_address_roots: IdMap<crate::graph::ValueId, StackAddressRoot>,
     /// Addresses that lie inside a stack object at an offset the machine
     /// computes rather than states.
     ///
@@ -138,11 +142,24 @@ pub struct DecompilePrepFacts {
     /// root recorded here names the object the index is into -- the base and
     /// the constant part -- and says nothing about which element, which is
     /// exactly what is known.
-    pub indexed_stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
+    pub indexed_stack_address_roots: IdMap<crate::graph::ValueId, StackAddressRoot>,
     /// Entry SSA values bound to canonical ABI parameter slots.
-    pub formal_parameters: BTreeMap<SSAVar, usize>,
+    pub formal_parameters: IdMap<crate::graph::ValueId, usize>,
     /// Full-width entry ABI values that may serve as parameter address bases.
-    pub formal_parameter_bases: BTreeMap<SSAVar, usize>,
+    pub formal_parameter_bases: IdMap<crate::graph::ValueId, usize>,
+}
+
+impl Default for DecompilePrepFacts {
+    fn default() -> Self {
+        Self {
+            views: crate::view::ValueViews::default(),
+            stack_address_roots: IdMap::new(0),
+            entry_stack_address_roots: IdMap::new(0),
+            indexed_stack_address_roots: IdMap::new(0),
+            formal_parameters: IdMap::new(0),
+            formal_parameter_bases: IdMap::new(0),
+        }
+    }
 }
 
 /// Unforgeable run-local identity for one immutable SSA artifact.
@@ -970,25 +987,28 @@ impl SsaArtifact {
     ///
     /// Two owners, each for its own evidence. The address facts are
     /// collected over the prep facts, so writing their answer back into the
-    /// prep facts left the two describing different functions. O(log n).
-    pub fn formal_parameter_of(&self, var: &SSAVar) -> Option<usize> {
+    /// prep facts left the two describing different functions. O(1).
+    pub fn formal_parameter_of(&self, value: ValueId) -> Option<usize> {
         self.decompile_prep_facts()
-            .formal_parameter_of(var)
-            .or_else(|| self.addressed_formal(var))
+            .formal_parameter_of(value)
+            .or_else(|| self.addressed_formal(value))
     }
 
     /// The formal whose bits a view names: the root itself, or a formal that
     /// is exactly those bits of the root -- `esi` of `rsi`, which a widening
     /// of `esi` views as `rsi`'s low 32 bits. O(formals).
-    pub fn formal_parameter_of_view(&self, view: &crate::view::ValueView) -> Option<usize> {
+    pub fn formal_parameter_of_view(
+        &self,
+        view: &crate::view::ValueView<ValueId>,
+    ) -> Option<usize> {
         let prep = self.decompile_prep_facts();
-        let names = |formal: &SSAVar| {
+        let names = |formal: ValueId| {
             let lane = prep.view(formal);
             lane.root == view.root
                 && lane.prefix_bits == view.prefix_bits
                 && lane.extension == crate::view::ViewExtension::Exact
         };
-        self.formal_parameter_of(&view.root).or_else(|| {
+        self.formal_parameter_of(view.root).or_else(|| {
             self.formal_parameters()
                 .find_map(|(formal, index)| names(formal).then_some(index))
         })
@@ -996,28 +1016,25 @@ impl SsaArtifact {
 
     /// Every value that is a formal, with its parameter: the entry's first,
     /// then the address facts', each in its own order.
-    pub fn formal_parameters(&self) -> impl Iterator<Item = (&SSAVar, usize)> + '_ {
+    pub fn formal_parameters(&self) -> impl Iterator<Item = (ValueId, usize)> + '_ {
         let prep = self.decompile_prep_facts();
-        let graph = self.graph();
         let entry = prep
             .formal_parameters
             .iter()
-            .map(|(var, index)| (var, *index));
+            .map(|(value, index)| (value, *index));
         let addressed = self
             .addresses()
             .parameter_expressions
             .iter()
             .filter(|(_, expression)| expression.terms.is_empty() && expression.offset == 0)
             .filter_map(move |(value, expression)| {
-                let var = &graph.value(*value)?.var;
-                (!prep.formal_parameters.contains_key(var)).then_some((var, expression.parameter))
+                (!prep.formal_parameters.contains(*value)).then_some((*value, expression.parameter))
             });
         entry.chain(addressed)
     }
 
     /// The parameter a value holds exactly, by the address facts.
-    fn addressed_formal(&self, var: &SSAVar) -> Option<usize> {
-        let value = self.graph().value_id_for_var(var)?;
+    fn addressed_formal(&self, value: ValueId) -> Option<usize> {
         let expression = self.addresses().parameter_expression(value)?;
         (expression.terms.is_empty() && expression.offset == 0).then_some(expression.parameter)
     }
@@ -1539,12 +1556,9 @@ impl SsaArtifact {
         value_id: crate::graph::ValueId,
     ) -> Option<StackAddressRoot> {
         let facts = self.decompile_prep_facts();
-        let value = self.value_var(value_id)?;
-        facts.stack_address_root_of(value).copied().or_else(|| {
+        facts.stack_address_root_of(value_id).copied().or_else(|| {
             let root = canonical_root_value_id(self, value_id);
-            self.value_var(root)
-                .and_then(|root| facts.stack_address_root_of(root))
-                .copied()
+            facts.stack_address_root_of(root).copied()
         })
     }
 
@@ -1591,15 +1605,12 @@ impl SsaArtifact {
         value_id: crate::graph::ValueId,
     ) -> Option<StackAddressRoot> {
         let facts = self.decompile_prep_facts();
-        let value = self.value_var(value_id)?;
         facts
-            .entry_stack_address_root_of(value)
+            .entry_stack_address_root_of(value_id)
             .copied()
             .or_else(|| {
                 let root = canonical_root_value_id(self, value_id);
-                self.value_var(root)
-                    .and_then(|root| facts.entry_stack_address_root_of(root))
-                    .copied()
+                facts.entry_stack_address_root_of(root).copied()
             })
     }
 
@@ -2395,14 +2406,11 @@ pub(crate) fn canonical_root_value_id(
     prepared: &SsaArtifact,
     value_id: crate::graph::ValueId,
 ) -> crate::graph::ValueId {
-    let facts = prepared.decompile_prep_facts();
-    let Some(start) = prepared.value_var(value_id) else {
-        return value_id;
-    };
-    prepared
-        .graph()
-        .value_id_for_var(facts.canonical_root(start))
-        .unwrap_or(value_id)
+    crate::view::class_value(
+        prepared.graph(),
+        Some(&prepared.decompile_prep_facts().views),
+        value_id,
+    )
 }
 
 impl Deref for SsaArtifact {
@@ -2414,47 +2422,50 @@ impl Deref for SsaArtifact {
 }
 
 impl DecompilePrepFacts {
-    /// The representative of `var`'s bit-identity class, where it is not `var`.
-    pub fn canonical_root_of(&self, var: &SSAVar) -> Option<&SSAVar> {
-        self.views.representative_of(var)
+    /// The value naming `value`'s bit-identity class, where it is not
+    /// `value` and the class is named by a value rather than a literal.
+    pub fn canonical_root_of(&self, value: ValueId) -> Option<ValueId> {
+        self.views
+            .representative_of(value)
+            .and_then(crate::view::Representative::value)
     }
 
-    /// The variable every value with `var`'s bits at `var`'s width is named
-    /// by: an `O(1)` lookup into the view (`crate::view`).
-    pub fn canonical_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        self.views.representative(var)
+    /// The representative every value with `value`'s bits at its width is
+    /// named by: an `O(1)` lookup into the view (`crate::view`).
+    pub fn canonical_root(&self, value: ValueId) -> crate::view::Representative<ValueId> {
+        self.views.representative(value)
     }
 
-    /// The bits `var` is read from, stated relative to their root.
-    pub fn view(&self, var: &SSAVar) -> crate::view::ValueView {
-        self.views.view(var)
+    /// The bits `value` is read from, stated relative to their root.
+    pub fn view(&self, value: ValueId) -> crate::view::ValueView<ValueId> {
+        self.views.view(value)
     }
 
     /// Whether `a` and `b` are the same bits at the same width.
-    pub fn same_bits(&self, a: &SSAVar, b: &SSAVar) -> bool {
+    pub fn same_bits(&self, a: ValueId, b: ValueId) -> bool {
         self.views.same_bits(a, b)
     }
 
-    /// The value `var` equals as an unsigned integer: the root of its chain of
-    /// copies and zero extensions, or `var` itself.
-    pub fn same_integer_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        self.views.same_integer_root(var)
+    /// The value `value` equals as an unsigned integer: the root of its
+    /// chain of copies and zero extensions, or `value` itself.
+    pub fn same_integer_root(&self, value: ValueId) -> ValueId {
+        self.views.same_integer_root(value)
     }
 
-    pub fn indexed_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
-        self.indexed_stack_address_roots.get(var)
+    pub fn indexed_stack_address_root_of(&self, value: ValueId) -> Option<&StackAddressRoot> {
+        self.indexed_stack_address_roots.get(value)
     }
 
-    pub fn stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
-        self.stack_address_roots.get(var)
+    pub fn stack_address_root_of(&self, value: ValueId) -> Option<&StackAddressRoot> {
+        self.stack_address_roots.get(value)
     }
 
-    pub fn entry_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
-        self.entry_stack_address_roots.get(var)
+    pub fn entry_stack_address_root_of(&self, value: ValueId) -> Option<&StackAddressRoot> {
+        self.entry_stack_address_roots.get(value)
     }
 
-    pub fn formal_parameter_of(&self, var: &SSAVar) -> Option<usize> {
-        self.formal_parameters.get(var).copied()
+    pub fn formal_parameter_of(&self, value: ValueId) -> Option<usize> {
+        self.formal_parameters.get(value).copied()
     }
 }
 
@@ -2611,7 +2622,7 @@ pub(crate) fn same_content_reads(
 /// carried. Both are one class (`view::class_values`), and the text reads it.
 pub(crate) fn uncertified_call_reads(
     graph: &SsaGraph,
-    views: Option<&crate::view::ValueViews>,
+    views: Option<&crate::view::ValueViews<ValueId>>,
     boundaries: &crate::semantic::SourceBoundaryFacts,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
     let class = crate::view::class_values(graph, views);
@@ -2780,11 +2791,15 @@ impl SSAFunction {
 
 #[cfg(test)]
 impl SSAFunction {
-    /// The prep facts of this function as it stands, with no interface, for
-    /// a test that reads them off a function it does not seal.
-    pub(crate) fn prep_facts_for_test(&self) -> DecompilePrepFacts {
-        self.collect_decompile_prep_facts_with_control(None, &UncheckedSsaWorkControl)
-            .expect("an unchecked control never stops")
+    /// The prep facts of this function as it stands, with no interface, and
+    /// the graph they are keyed by, for a test that reads them off a
+    /// function it does not seal.
+    pub(crate) fn prep_facts_for_test(&self) -> TestPrep {
+        let graph = SsaGraph::from_function_with_storage(self);
+        let facts = self
+            .collect_decompile_prep_facts_with_control(&graph, None, &UncheckedSsaWorkControl)
+            .expect("an unchecked control never stops");
+        TestPrep { graph, facts }
     }
 
     /// One block, open for change, for a test that writes a fixture a block
@@ -4168,3 +4183,29 @@ mod forward;
 
 #[cfg(test)]
 mod tests;
+
+/// Prep facts and the graph whose values key them, for a test.
+#[cfg(test)]
+pub(crate) struct TestPrep {
+    pub(crate) graph: SsaGraph,
+    pub(crate) facts: DecompilePrepFacts,
+}
+
+#[cfg(test)]
+impl TestPrep {
+    /// The graph's value for a variable the test names.
+    pub(crate) fn value(&self, var: &SSAVar) -> ValueId {
+        self.graph
+            .value_id_for_var(var)
+            .unwrap_or_else(|| panic!("{var} is a value of the graph"))
+    }
+}
+
+#[cfg(test)]
+impl Deref for TestPrep {
+    type Target = DecompilePrepFacts;
+
+    fn deref(&self) -> &DecompilePrepFacts {
+        &self.facts
+    }
+}

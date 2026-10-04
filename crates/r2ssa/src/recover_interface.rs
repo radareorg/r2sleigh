@@ -2337,10 +2337,7 @@ pub fn recovered_stack_slots(prepared: &crate::SsaArtifact) -> Vec<RecoveredStac
         let parameter = certificate
             .stored_values
             .iter()
-            .find_map(|value| {
-                let var = prepared.value_var(*value)?;
-                facts.formal_parameter_of(var)
-            })
+            .find_map(|value| facts.formal_parameter_of(*value))
             .and_then(|index| u32::try_from(index).ok());
         slots.push(RecoveredStackSlot {
             offset: certificate.offset,

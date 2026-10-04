@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
 
+use crate::graph::InstPayload;
 use crate::view::ValueViews;
 use crate::{
     CanonicalStorageId, SSAFunction, SSAOp, SSAVar, SourceMachineContext, SsaGraph,
@@ -259,8 +260,7 @@ struct AddressCollector<'a> {
     graph: &'a SsaGraph,
     /// Which values carry the same bits; absent only where no preparation
     /// ran, and then there is no formal to propagate either.
-    views: Option<&'a ValueViews>,
-    definitions: HashMap<SSAVar, SSAOp>,
+    views: Option<&'a ValueViews<ValueId>>,
     /// Each value's expression as the solve has it: absent while nothing
     /// has ruled one in or out.
     expressions: BTreeMap<ValueId, Cell>,
@@ -308,12 +308,6 @@ impl<'a> AddressCollector<'a> {
         graph: &'a SsaGraph,
         _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
-        let definitions = function
-            .named_blocks()
-            .iter()
-            .flat_map(|block| block.ops().iter())
-            .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
-            .collect();
         let mut expressions = BTreeMap::new();
         if let Some(prep) = prep {
             // Every formal, not only those that arrived at their ABI storage's
@@ -324,35 +318,32 @@ impl<'a> AddressCollector<'a> {
             // through it stated a reach nothing could scale. The storage kept
             // beside the index is still the value's own, so a consumer that
             // maps storage back to an argument sees what it saw before.
-            for (var, parameter) in prep
+            for (value, parameter) in prep
                 .formal_parameter_bases
                 .iter()
                 .chain(prep.formal_parameters.iter())
             {
-                if let Some(value) = graph.value_id_for_var(var) {
-                    expressions
-                        .entry(value)
-                        .or_insert_with(|| AddressExpression {
-                            base: AddressBase::Parameter {
-                                index: *parameter,
-                                storage: graph
-                                    .value(value)
-                                    .and_then(|value| value.canonical_storage),
-                            },
-                            terms: Vec::new(),
-                            offset: 0,
-                        });
-                }
+                expressions
+                    .entry(value)
+                    .or_insert_with(|| AddressExpression {
+                        base: AddressBase::Parameter {
+                            index: *parameter,
+                            storage: graph.value(value).and_then(|value| value.canonical_storage),
+                        },
+                        terms: Vec::new(),
+                        offset: 0,
+                    });
             }
         }
-        let load_count = function
-            .named_blocks()
+        let load_count = graph
+            .insts
             .iter()
-            .flat_map(|block| block.ops().iter())
-            .filter(|op| {
+            .filter(|inst| {
                 matches!(
-                    op,
-                    SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+                    inst.payload,
+                    InstPayload::Op(
+                        SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+                    )
                 )
             })
             .count();
@@ -361,7 +352,6 @@ impl<'a> AddressCollector<'a> {
             prep,
             graph,
             views: prep.map(|prep| &prep.views),
-            definitions,
             seeded: expressions.keys().copied().collect(),
             expressions: expressions
                 .into_iter()
@@ -396,26 +386,17 @@ impl<'a> AddressCollector<'a> {
         let mut readers = BTreeMap::<ValueId, BTreeSet<usize>>::new();
         let mut slots = 0usize;
         for (index, &addr) in order.iter().enumerate() {
-            let Some(block) = self.function.named_block(addr) else {
-                continue;
-            };
-            let read = block
-                .phis()
-                .iter()
-                .flat_map(|phi| phi.sources.iter().map(|(_, source)| source))
-                .chain(block.ops().iter().flat_map(SSAOp::sources));
-            for var in read {
-                for var in [var, self.same_integer_root(var)] {
-                    if let Some(value) = self.graph.value_id_for_var(var) {
+            for inst in self.block_insts(addr) {
+                for input in &inst.inputs {
+                    for value in [*input, self.same_integer_root(*input)] {
                         readers.entry(value).or_default().insert(index);
                     }
                 }
+                slots += usize::from(matches!(
+                    inst.payload,
+                    InstPayload::Op(SSAOp::Store { .. } | SSAOp::StoreGuarded { .. })
+                ));
             }
-            slots += block
-                .ops()
-                .iter()
-                .filter(|op| matches!(op, SSAOp::Store { .. } | SSAOp::StoreGuarded { .. }))
-                .count();
         }
         let budget = order
             .len()
@@ -441,13 +422,13 @@ impl<'a> AddressCollector<'a> {
                 return AddressProvenanceFacts::default();
             }
             let block_addr = order[index];
-            let Some(block) = self.function.named_block(block_addr) else {
+            if self.graph.block_id_for_addr(block_addr).is_none() {
                 continue;
-            };
+            }
             let Some(mut spills) = self.entering(block_addr) else {
                 continue;
             };
-            let moved = self.transfer_ops(&block, &mut spills);
+            let moved = self.transfer_ops(block_addr, &mut spills);
             for value in moved {
                 work.extend(readers.get(&value).into_iter().flatten().copied());
             }
@@ -527,102 +508,111 @@ impl<'a> AddressCollector<'a> {
         }))
     }
 
+    /// The instructions of the block at `addr`, phis first, in order.
+    fn block_insts(&self, addr: u64) -> impl Iterator<Item = &'a crate::graph::GraphInst> + 'a {
+        let graph = self.graph;
+        graph
+            .block_id_for_addr(addr)
+            .and_then(|block| graph.blocks.get(block.0 as usize))
+            .into_iter()
+            .flat_map(move |block| block.insts.iter().filter_map(move |inst| graph.inst(*inst)))
+    }
+
     /// Derive one block's values and its slots, in program order, from the
     /// slots it is entered with; returns the values whose cell moved.
-    fn transfer_ops(&mut self, block: &crate::block::SSABlock, stack: &mut Spills) -> Vec<ValueId> {
+    fn transfer_ops(&mut self, block_addr: u64, stack: &mut Spills) -> Vec<ValueId> {
         let mut moved = Vec::new();
-        for phi in block.phis() {
-            // What the sources known so far agree on.
-            let derived = phi
-                .sources
-                .iter()
-                .map(|(_, source)| self.cell_for_var(source))
-                .fold(Derived::Pending, |held, source| match (held, source) {
-                    (Derived::Pending, other) | (other, Derived::Pending) => other,
-                    (Derived::Expr(a), Derived::Expr(b)) if a == b => Derived::Expr(a),
-                    _ => Derived::Not,
-                });
-            self.settle(&phi.dst, derived, &mut moved);
-        }
-        for op in block.ops() {
-            match op {
-                SSAOp::Store { space, addr, val }
-                | SSAOp::StoreGuarded {
-                    space, addr, val, ..
-                } => {
-                    if let Some(root) = self.stack_root(addr) {
-                        // A store replaces whatever any read of the place
-                        // would have found, at every width.
-                        stack.retain(|slot, _| slot.root != root || slot.space != *space);
-                        let slot = SpillSlotKey {
-                            root,
-                            space: *space,
-                            width: val.size,
-                        };
-                        match self.cell_for_var(val) {
-                            Derived::Expr(expression) => {
-                                stack.insert(slot, Held::Expr(expression));
-                            }
-                            Derived::Pending => {
-                                stack.insert(slot, Held::Pending);
-                            }
-                            Derived::Not => {}
-                        }
+        for inst in self.block_insts(block_addr) {
+            let Some(dst) = inst.output else {
+                if let InstPayload::Op(
+                    SSAOp::Store { space, addr, val }
+                    | SSAOp::StoreGuarded {
+                        space, addr, val, ..
+                    },
+                ) = inst.payload
+                {
+                    self.store(space, addr, val, stack);
+                }
+                continue;
+            };
+            let derived = match &inst.payload {
+                // What the sources known so far agree on.
+                InstPayload::Phi { .. } => inst
+                    .inputs
+                    .iter()
+                    .map(|source| self.cell(*source))
+                    .fold(Derived::Pending, |held, source| match (held, source) {
+                        (Derived::Pending, other) | (other, Derived::Pending) => other,
+                        (Derived::Expr(a), Derived::Expr(b)) if a == b => Derived::Expr(a),
+                        _ => Derived::Not,
+                    }),
+                InstPayload::Op(
+                    SSAOp::Load { dst, space, addr }
+                    | SSAOp::LoadLinked {
+                        dst, space, addr, ..
                     }
-                }
-                SSAOp::Load { dst, space, addr }
-                | SSAOp::LoadLinked {
-                    dst, space, addr, ..
-                }
-                | SSAOp::LoadGuarded {
-                    dst, space, addr, ..
-                } => {
-                    let slot = self.stack_root(addr).and_then(|root| {
-                        stack.get(&SpillSlotKey {
-                            root,
-                            space: *space,
-                            width: dst.size,
-                        })
-                    });
-                    let derived = match slot {
-                        Some(Held::Expr(expression)) => Derived::Expr(expression.clone()),
-                        Some(Held::Pending) => Derived::Pending,
-                        None if *space == SpaceId::Ram => match self.cell_for_var(addr) {
-                            // The value read at a known address, taken as a
-                            // pointer: its own address is one step further
-                            // along the chain from the parameter.
-                            Derived::Expr(expression)
-                                if expression.path_len() < self.load_count =>
-                            {
-                                expression
-                                    .dereferenced(dst.size)
-                                    .map_or(Derived::Not, Derived::Expr)
-                            }
-                            Derived::Pending => Derived::Pending,
-                            _ => Derived::Not,
-                        },
-                        None => Derived::Not,
-                    };
-                    self.settle(dst, derived, &mut moved);
-                    continue;
-                }
-                _ => {}
-            }
-            if let Some(dst) = op.dst() {
-                let derived = self.derive_op_expression(op);
-                self.settle(dst, derived, &mut moved);
-            }
+                    | SSAOp::LoadGuarded {
+                        dst, space, addr, ..
+                    },
+                ) => self.load(*dst, *space, *addr, stack),
+                InstPayload::Op(op) => self.derive_op_expression(op),
+            };
+            self.settle(dst, derived, &mut moved);
         }
         moved
+    }
+
+    /// A store replaces whatever any read of the place would have found, at
+    /// every width, and the slot then holds the stored value's expression.
+    fn store(&self, space: SpaceId, addr: ValueId, val: ValueId, stack: &mut Spills) {
+        let Some(root) = self.stack_root(addr) else {
+            return;
+        };
+        stack.retain(|slot, _| slot.root != root || slot.space != space);
+        let slot = SpillSlotKey {
+            root,
+            space,
+            width: self.graph.var(val).size,
+        };
+        match self.cell(val) {
+            Derived::Expr(expression) => {
+                stack.insert(slot, Held::Expr(expression));
+            }
+            Derived::Pending => {
+                stack.insert(slot, Held::Pending);
+            }
+            Derived::Not => {}
+        }
+    }
+
+    /// A load reads its slot's expression, or, at a known address in RAM,
+    /// one step further along the chain from the parameter.
+    fn load(&self, dst: ValueId, space: SpaceId, addr: ValueId, stack: &Spills) -> Derived {
+        let width = self.graph.var(dst).size;
+        let slot = self
+            .stack_root(addr)
+            .and_then(|root| stack.get(&SpillSlotKey { root, space, width }));
+        match slot {
+            Some(Held::Expr(expression)) => Derived::Expr(expression.clone()),
+            Some(Held::Pending) => Derived::Pending,
+            None if space == SpaceId::Ram => match self.cell(addr) {
+                // The value read at a known address, taken as a pointer: its
+                // own address is one step further along the chain from the
+                // parameter.
+                Derived::Expr(expression) if expression.path_len() < self.load_count => expression
+                    .dereferenced(width)
+                    .map_or(Derived::Not, Derived::Expr),
+                Derived::Pending => Derived::Pending,
+                _ => Derived::Not,
+            },
+            None => Derived::Not,
+        }
     }
 
     /// Record what was derived for `var`, never rising: a cell only moves
     /// from pending to one expression to none, and two different
     /// expressions for one value meet to none.
-    fn settle(&mut self, var: &SSAVar, derived: Derived, moved: &mut Vec<ValueId>) {
-        let Some(value) = self.graph.value_id_for_var(var) else {
-            return;
-        };
+    fn settle(&mut self, value: ValueId, derived: Derived, moved: &mut Vec<ValueId>) {
         if self.seeded.contains(&value) {
             return;
         }
@@ -637,47 +627,44 @@ impl<'a> AddressCollector<'a> {
         moved.push(value);
     }
 
-    fn derive_op_expression(&mut self, op: &SSAOp) -> Derived {
-        match op {
+    fn derive_op_expression(&mut self, op: &SSAOp<ValueId>) -> Derived {
+        match *op {
             SSAOp::IntAdd { a, b, .. } => self.derive_additive_expression(a, b, 1, 1),
             SSAOp::PtrAdd {
                 base,
                 index,
                 element_size,
                 ..
-            } => self.derive_additive_expression(base, index, 1, i128::from(*element_size)),
+            } => self.derive_additive_expression(base, index, 1, i128::from(element_size)),
             SSAOp::IntSub { a, b, .. } => self.derive_additive_expression(a, b, -1, 1),
             SSAOp::PtrSub {
                 base,
                 index,
                 element_size,
                 ..
-            } => self.derive_additive_expression(base, index, -1, i128::from(*element_size)),
+            } => self.derive_additive_expression(base, index, -1, i128::from(element_size)),
             // Any other definition is its same-integer root's address, where
             // the view says it has one: a copy, a same-width cast or a zero
             // extension of a full-width root. A narrowed, sign-extended or
             // otherwise converted pointer is a scalar the body computes with.
-            op => {
-                let Some(dst) = op.dst() else {
+            ref op => {
+                let Some(dst) = op.dst().copied() else {
                     return Derived::Not;
                 };
-                let root = self.same_integer_root(dst).clone();
-                match root != *dst {
-                    true => self.cell_for_var(&root),
+                let root = self.same_integer_root(dst);
+                match root != dst {
+                    true => self.cell(root),
                     false => Derived::Not,
                 }
             }
         }
     }
 
-    /// The same integer root `var` has, by the view.
-    fn same_integer_root<'v>(&self, var: &'v SSAVar) -> &'v SSAVar
-    where
-        'a: 'v,
-    {
+    /// The same integer root `value` has, by the view.
+    fn same_integer_root(&self, value: ValueId) -> ValueId {
         match self.views {
-            Some(views) => views.same_integer_root(var),
-            None => var,
+            Some(views) => views.same_integer_root(value),
+            None => value,
         }
     }
 
@@ -687,20 +674,20 @@ impl<'a> AddressCollector<'a> {
     /// addresses are not one.
     fn derive_additive_expression(
         &mut self,
-        left: &SSAVar,
-        right: &SSAVar,
+        left: ValueId,
+        right: ValueId,
         right_sign: i128,
         right_scale: i128,
     ) -> Derived {
-        let (left_cell, right_cell) = (self.cell_for_var(left), self.cell_for_var(right));
+        let (left_cell, right_cell) = (self.cell(left), self.cell(right));
         let derived = match (&left_cell, &right_cell) {
             (Derived::Expr(_), Derived::Expr(_)) => return Derived::Not,
             (Derived::Expr(base), _) => self
-                .scalar_for_var(right)
+                .scalar_for_value(right)
                 .and_then(|delta| delta.scale(right_sign.checked_mul(right_scale)?))
                 .and_then(|delta| add_delta(base.clone(), delta)),
             (_, Derived::Expr(base)) if right_sign > 0 => self
-                .scalar_for_var(left)
+                .scalar_for_value(left)
                 .and_then(|delta| add_delta(base.clone(), delta)),
             (Derived::Pending, _) | (_, Derived::Pending) => return Derived::Pending,
             _ => None,
@@ -708,37 +695,20 @@ impl<'a> AddressCollector<'a> {
         derived.map_or(Derived::Not, Derived::Expr)
     }
 
-    /// What the solve has for `var` so far.
-    fn cell_for_var(&self, var: &SSAVar) -> Derived {
-        let Some(value) = self.graph.value_id_for_var(var) else {
-            return Derived::Not;
-        };
+    /// What the solve has for `value` so far.
+    fn cell(&self, value: ValueId) -> Derived {
         match self.expressions.get(&value) {
             Some(Cell::Expr(expression)) => Derived::Expr(expression.clone()),
             Some(Cell::Not) => Derived::Not,
             // A value nothing defines -- an entry value no formal seeded --
             // is no address the analysis can state, and never will be.
-            None if !self.definitions.contains_key(var) && !self.defined_by_phi(value) => {
-                Derived::Not
-            }
+            None if self.graph.def_inst(value).is_none() => Derived::Not,
             None => Derived::Pending,
         }
     }
 
-    fn defined_by_phi(&self, value: ValueId) -> bool {
-        self.graph.def_inst(value).is_some()
-    }
-
-    fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
-        let prep = self.prep?;
-        prep.stack_address_root_of(var)
-            .or_else(|| prep.stack_address_root_of(prep.canonical_root(var)))
-            .copied()
-    }
-
-    fn scalar_for_var(&mut self, var: &SSAVar) -> Option<AffineScalar> {
-        let value = self.graph.value_id_for_var(var)?;
-        self.scalar_for_value(value)
+    fn stack_root(&self, value: ValueId) -> Option<StackAddressRoot> {
+        crate::semantic::resolve_stack_root(self.prep, value)
     }
 
     fn scalar_for_value(&mut self, value: ValueId) -> Option<AffineScalar> {
@@ -762,30 +732,32 @@ impl<'a> AddressCollector<'a> {
         // The same integer as its root: the root's form where the widths
         // agree, and where the root was widened, its unsigned value as one
         // term -- the root's form holds only modulo its own width.
-        let root = self.same_integer_root(&var).clone();
-        if root != var {
-            if root.size == var.size {
-                return self.scalar_for_var(&root);
+        let root = self.same_integer_root(value);
+        if root != value {
+            if self.graph.var(root).size == var.size {
+                return self.scalar_for_value(root);
             }
-            return Some(match self.graph.value_id_for_var(&root) {
-                Some(root) => AffineScalar::term(root),
-                None => AffineScalar::term(value),
-            });
+            return Some(AffineScalar::term(root));
         }
-        let Some(op) = self.definitions.get(&var).cloned() else {
+        let graph = self.graph;
+        let Some(InstPayload::Op(op)) = graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .map(|inst| &inst.payload)
+        else {
             return Some(AffineScalar::term(value));
         };
-        match op {
-            SSAOp::IntNegate { src, .. } => self.scalar_for_var(&src)?.scale(-1),
+        match *op {
+            SSAOp::IntNegate { src, .. } => self.scalar_for_value(src)?.scale(-1),
             SSAOp::IntAdd { a, b, .. } => self
-                .scalar_for_var(&a)?
-                .combine(self.scalar_for_var(&b)?, 1),
+                .scalar_for_value(a)?
+                .combine(self.scalar_for_value(b)?, 1),
             SSAOp::IntSub { a, b, .. } => self
-                .scalar_for_var(&a)?
-                .combine(self.scalar_for_var(&b)?, -1),
+                .scalar_for_value(a)?
+                .combine(self.scalar_for_value(b)?, -1),
             SSAOp::IntMult { a, b, .. } => {
-                let left = self.scalar_for_var(&a)?;
-                let right = self.scalar_for_var(&b)?;
+                let left = self.scalar_for_value(a)?;
+                let right = self.scalar_for_value(b)?;
                 if left.terms.is_empty() {
                     right.scale(left.constant)
                 } else if right.terms.is_empty() {
@@ -795,12 +767,12 @@ impl<'a> AddressCollector<'a> {
                 }
             }
             SSAOp::IntLeft { a, b, .. } => {
-                let shift = self.scalar_for_var(&b)?;
+                let shift = self.scalar_for_value(b)?;
                 if !shift.terms.is_empty() {
                     return None;
                 }
                 let shift = u32::try_from(shift.constant).ok()?;
-                self.scalar_for_var(&a)?.scale(1i128.checked_shl(shift)?)
+                self.scalar_for_value(a)?.scale(1i128.checked_shl(shift)?)
             }
             _ => Some(AffineScalar::term(value)),
         }

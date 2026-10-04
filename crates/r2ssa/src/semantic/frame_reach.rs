@@ -139,10 +139,10 @@ fn containing(frame: &BTreeMap<ObjectId, Option<i64>>, offset: i64) -> Option<Ob
 }
 
 /// Where a frame address points, entry-relative, when the prep facts place it.
-fn entry_offset(facts: &DecompilePrepFacts, var: &SSAVar) -> Option<i64> {
+fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
     facts
-        .stack_address_root_of(var)
-        .or_else(|| facts.indexed_stack_address_root_of(var))
+        .stack_address_root_of(value)
+        .or_else(|| facts.indexed_stack_address_root_of(value))
         .filter(|root| root.base == StackAddressBase::StackPointer)
         .map(|root| root.offset)
 }
@@ -157,8 +157,8 @@ fn escaped_objects(
 ) -> (BTreeSet<ObjectId>, bool) {
     let frame_address = |value: ValueId| {
         graph.value(value).is_some_and(|value| {
-            facts.stack_address_root_of(&value.var).is_some()
-                || facts.indexed_stack_address_root_of(&value.var).is_some()
+            facts.stack_address_root_of(value.id).is_some()
+                || facts.indexed_stack_address_root_of(value.id).is_some()
         })
     };
     let mut tainted = BTreeSet::new();
@@ -218,7 +218,7 @@ fn escaping_object(
     frame: &BTreeMap<ObjectId, Option<i64>>,
     value: ValueId,
 ) -> Option<ObjectId> {
-    let offset = entry_offset(facts, &graph.value(value)?.var)?;
+    let offset = entry_offset(facts, graph.value(value)?.id)?;
     containing(frame, offset)
 }
 
@@ -295,7 +295,7 @@ fn call_reaches(
             let sp = match states.get(&call) {
                 Some(ReachingStorageState::Value(value)) => graph
                     .value(*value)
-                    .and_then(|value| entry_offset(facts, &value.var)),
+                    .and_then(|value| entry_offset(facts, value.id)),
                 _ => None,
             };
             let interface = instruction

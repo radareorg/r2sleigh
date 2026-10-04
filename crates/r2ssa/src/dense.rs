@@ -211,6 +211,15 @@ impl<I: DenseId, T> IdMap<I, T> {
     }
 }
 
+impl<'a, I: DenseId, T> IntoIterator for &'a IdMap<I, T> {
+    type Item = (I, &'a T);
+    type IntoIter = Box<dyn Iterator<Item = (I, &'a T)> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
 /// Two maps are equal when they hold the same values for the same ids,
 /// whatever order the values were inserted in.
 impl<I: DenseId, T: PartialEq> PartialEq for IdMap<I, T> {

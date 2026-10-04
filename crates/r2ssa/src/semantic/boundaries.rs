@@ -42,7 +42,7 @@ pub(crate) fn variadic_callsite_argument_count(
     // A compiler that merges two `fprintf` calls leaves one call site whose
     // format argument is a phi of two literals. The count is a property of the
     // format, so formats that agree prove it exactly as a single one does.
-    if resolve_const_value(prep, format_var).is_none() {
+    if resolve_const_value(graph, prep, format_value).is_none() {
         return merged_format_literal_argument_count(
             FormatLiteralContext {
                 function,
@@ -57,29 +57,30 @@ pub(crate) fn variadic_callsite_argument_count(
             format_argument_index,
         );
     }
-    let format_literal_address = resolve_const_value(prep, format_var).ok_or_else(|| {
-        r2il::refusal_evidence!(
-            "variadic-format-literal",
-            "format argument {format_argument_index} at {:?} is {:?} (root {:?}), \
+    let format_literal_address =
+        resolve_const_value(graph, prep, format_value).ok_or_else(|| {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "format argument {format_argument_index} at {:?} is {:?} (root {:?}), \
                  graph literal {:?}, defined by {:?}",
-            interface
-                .arguments()
-                .get(format_argument_index)
-                .map(|argument| argument.location()),
-            format_var,
-            canonical_value_root(prep, format_var),
-            resolve_graph_literal_value(graph, prep, format_var),
-            graph
-                .value(format_value)
-                .and_then(|value| graph.def_inst(value.id))
-                .and_then(|id| graph.inst(id))
-                .map(|inst| format!("{:?}", inst.payload)
-                    .chars()
-                    .take(80)
-                    .collect::<String>())
-        );
-        VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
-    })?;
+                interface
+                    .arguments()
+                    .get(format_argument_index)
+                    .map(|argument| argument.location()),
+                format_var,
+                prep.map(|prep| prep.canonical_root(format_value)),
+                resolve_graph_literal_value(graph, prep, format_value),
+                graph
+                    .value(format_value)
+                    .and_then(|value| graph.def_inst(value.id))
+                    .and_then(|id| graph.inst(id))
+                    .map(|inst| format!("{:?}", inst.payload)
+                        .chars()
+                        .take(80)
+                        .collect::<String>())
+            );
+            VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
+        })?;
     let format = machine_context
         .source_string_literal(format_literal_address)
         .ok_or_else(|| {
@@ -138,10 +139,10 @@ pub(crate) fn reaching_format_literals(
     if !seen.insert(value) {
         return true;
     }
-    let Some(var) = graph.value(value).map(|value| &value.var) else {
+    if graph.value(value).is_none() {
         return false;
-    };
-    if let Some(address) = resolve_const_value(prep, var) {
+    }
+    if let Some(address) = resolve_const_value(graph, prep, value) {
         found.insert(address);
         return true;
     }
@@ -149,7 +150,7 @@ pub(crate) fn reaching_format_literals(
         r2il::refusal_evidence!(
             "variadic-format-literal",
             "reaching format walk stops at {value:?} ({}), which nothing in this function defines",
-            var.display_name()
+            graph.var(value).display_name()
         );
         return false;
     };
@@ -183,7 +184,7 @@ pub(crate) fn reaching_format_literals(
             r2il::refusal_evidence!(
                 "variadic-format-literal",
                 "reaching format walk stops at {value:?} ({}), defined by {}",
-                var.display_name(),
+                graph.var(value).display_name(),
                 format!("{op:?}").chars().take(60).collect::<String>()
             );
             false
@@ -666,21 +667,22 @@ pub(crate) fn reaching_stack_slot_value(
     if !visited.insert(block_addr) {
         return None;
     }
-    let block = function.named_block(block_addr)?;
+    let block = function.get_block(block_addr)?;
+    let var = |id: crate::VarId| function.var(id);
     for op in block.ops().get(..boundary)?.iter().rev() {
-        match op {
-            SSAOp::Copy { dst, src } if query.promoted && dst.name() == query.slot_name => {
-                if dst.size != query.size_bytes {
+        match *op {
+            SSAOp::Copy { dst, src } if query.promoted && var(dst).name() == query.slot_name => {
+                if var(dst).size != query.size_bytes {
                     r2il::refusal_evidence!(
                         "call-argument-stack-store",
                         "({block_addr:#x}) promoted slot {} is {} bytes, the argument is {}",
                         query.slot_name,
-                        dst.size,
+                        var(dst).size,
                         query.size_bytes
                     );
                     return None;
                 }
-                return graph.value_id_for_var(src);
+                return graph.value_of(src);
             }
             SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
                 if !query.promoted =>
@@ -697,10 +699,14 @@ pub(crate) fn reaching_stack_slot_value(
                 addr,
                 val,
             } if !query.promoted => {
-                let Some(root) = resolve_entry_stack_root(prep, addr) else {
+                let Some(root) = graph
+                    .value_of(addr)
+                    .and_then(|addr| resolve_entry_stack_root(prep, addr))
+                else {
                     r2il::refusal_evidence!(
                         "call-argument-stack-store",
-                        "({block_addr:#x}) store through {addr} has no root (wanted {:?} {})",
+                        "({block_addr:#x}) store through {} has no root (wanted {:?} {})",
+                        var(addr),
                         query.base,
                         query.entry_offset
                     );
@@ -709,28 +715,27 @@ pub(crate) fn reaching_stack_slot_value(
                 if root.base != query.base || root.offset != query.entry_offset {
                     continue;
                 }
-                if val.size != query.size_bytes {
+                if var(val).size != query.size_bytes {
                     r2il::refusal_evidence!(
                         "call-argument-stack-store",
                         "({block_addr:#x}) store at entry offset {} is {} bytes, slot is {}",
                         query.entry_offset,
-                        val.size,
+                        var(val).size,
                         query.size_bytes
                     );
                     return None;
                 }
-                return graph.value_id_for_var(val);
+                return graph.value_of(val);
             }
             _ => {}
         }
     }
     if query.promoted
-        && let Some(phi) = block
-            .phis()
-            .iter()
-            .find(|phi| phi.dst.name() == query.slot_name && phi.dst.size == query.size_bytes)
+        && let Some(phi) = block.phis().iter().find(|phi| {
+            var(phi.dst).name() == query.slot_name && var(phi.dst).size == query.size_bytes
+        })
     {
-        return graph.value_id_for_var(&phi.dst);
+        return graph.value_of(phi.dst);
     }
     let predecessors = function.predecessors(block_addr);
     if predecessors.is_empty() {
@@ -744,7 +749,7 @@ pub(crate) fn reaching_stack_slot_value(
     }
     let mut agreed = None;
     for predecessor in predecessors {
-        let boundary = function.named_block(predecessor)?.ops().len();
+        let boundary = function.get_block(predecessor)?.ops().len();
         let value = reaching_stack_slot_value(
             function,
             prep,

@@ -552,12 +552,10 @@ fn memory_access_provenance_rejects_distinct_location_ambiguity() {
 
 #[test]
 fn display_names_do_not_resolve_constants_or_stack_roots() {
+    // The resolvers take graph values, so a name cannot reach them at all;
+    // what is left to say is that a name supplies no constant bits.
     let named_constant = SSAVar::new("ram:0x401000", 0, 8);
     assert_eq!(super::const_value(&named_constant), None);
-    assert_eq!(super::resolve_const_value(None, &named_constant), None);
-
-    let named_stack_pointer = SSAVar::new("rsp", 0, 8);
-    assert_eq!(super::resolve_stack_root(None, &named_stack_pointer), None);
 
     let canonical_constant = SSAVar::constant(0x401000, 8).renamed("unrelated-display-name");
     assert_eq!(super::const_value(&canonical_constant), Some(0x401000));

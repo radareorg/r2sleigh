@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::SSAFunction;
+use crate::dense::{Csr, DenseId, IdMap};
 
 /// A state that joins: `join` moves `self` up to cover `other` and says
 /// whether it moved.
@@ -150,46 +151,58 @@ pub fn forward_on_edges<S: Clone + PartialEq>(
 /// is taken in; `readers` names, for each value, the values computed from
 /// it. Every cell starts at `start` -- the optimistic top of a descending
 /// lattice -- and `eval` must only move a cell down. `height` bounds how
-/// many times one cell can move.
-pub fn sparse<K: Ord + Clone, L: Clone + PartialEq>(
+/// many times one cell can move. The cells are a dense map over the values
+/// in `order`; a value outside it has no cell.
+///
+/// Work is a min-heap of definition ranks with a flag per rank, so a value
+/// is queued at most once at a time and taken in definition order:
+/// `O((V + E) · height · log V)` in all.
+pub fn sparse<I: DenseId, L: Clone + PartialEq>(
     pass: &'static str,
     height: usize,
-    order: &[K],
-    readers: &BTreeMap<K, Vec<K>>,
+    order: &[I],
+    readers: &Csr<I, I>,
     start: L,
-    mut eval: impl FnMut(&K, &BTreeMap<K, L>) -> L,
-) -> Result<BTreeMap<K, L>, Exhausted> {
-    let rank = order
+    mut eval: impl FnMut(I, &IdMap<I, L>) -> L,
+) -> Result<IdMap<I, L>, Exhausted> {
+    let bound = order
         .iter()
-        .enumerate()
-        .map(|(index, key)| (key.clone(), index))
-        .collect::<BTreeMap<_, _>>();
+        .map(|id| id.index() + 1)
+        .max()
+        .unwrap_or(0)
+        .max(readers.len());
+    let mut rank = IdMap::new(bound);
+    let mut cells = IdMap::new(bound);
+    for (index, id) in order.iter().enumerate() {
+        rank.insert(*id, index);
+        cells.insert(*id, start.clone());
+    }
     let budget = order.len().saturating_mul(height.saturating_add(1)).max(1);
-    let mut cells = order
-        .iter()
-        .map(|key| (key.clone(), start.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let mut work = (0..order.len()).collect::<BTreeSet<_>>();
+    let mut queued = vec![true; order.len()];
+    let mut work = (0..order.len())
+        .map(std::cmp::Reverse)
+        .collect::<std::collections::BinaryHeap<_>>();
     let mut visits = 0usize;
-    while let Some(index) = work.pop_first() {
+    while let Some(std::cmp::Reverse(index)) = work.pop() {
+        queued[index] = false;
         visits += 1;
         if visits > budget {
             r2il::refusal_evidence!("fixpoint", "{pass}: {budget} value visits were not enough");
             return Err(Exhausted { pass, budget });
         }
-        let key = &order[index];
-        let next = eval(key, &cells);
-        if cells.get(key) == Some(&next) {
+        let id = order[index];
+        let next = eval(id, &cells);
+        if cells.get(id) == Some(&next) {
             continue;
         }
-        cells.insert(key.clone(), next);
-        work.extend(
-            readers
-                .get(key)
-                .into_iter()
-                .flatten()
-                .filter_map(|reader| rank.get(reader).copied()),
-        );
+        cells.insert(id, next);
+        for reader in readers.get(id) {
+            if let Some(&at) = rank.get(*reader)
+                && !std::mem::replace(&mut queued[at], true)
+            {
+                work.push(std::cmp::Reverse(at));
+            }
+        }
     }
     Ok(cells)
 }

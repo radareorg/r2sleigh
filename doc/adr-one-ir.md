@@ -221,3 +221,29 @@ byte-identical, and deletes what it replaces:
     optimiser's definition maps are rebuilt once per pass, O(n), rather
     than kept incrementally by `apply_edits`. That stays until a pass
     measurably needs it.
+- **F2.3 stage 5, in parts**:
+  - 5a (`99f92add`): `IdMap` keeps a four-byte slot per id and packs its
+    entries, so a sparse fact with large values no longer costs a value
+    cell per id. Iteration in id order goes through a presence bitset.
+  - 5b: the prep facts are indexes over the sealed graph's values.
+    `ValueViews<I>` is generic over a dense id: a function's `VarId`s for
+    the optimiser, or a graph's `ValueId`s for everything after the seal.
+    Each id's width and constant bits are kept beside the views, and a
+    representative is `Representative::Value(id)` or
+    `Representative::Literal { bits, size }`, since the literal a constant
+    class determines need not be a value of the function. The stack roots,
+    entry roots, indexed roots and formals are `IdMap<ValueId, _>`, solved
+    on a dense `fixpoint::sparse`: `IdMap` cells, `Csr` readers, and a
+    min-heap of definition ranks with a queued flag. The `resolve_*`
+    helpers, the address-provenance collector, the evidenced stack roots,
+    the call-entering stack pointer and the object model read graph
+    instructions and ask by value. `class_key` normalises a class so that
+    a literal the graph holds compares equal to that value, as the names
+    did.
+  - Transitional after 5b: `predicates.rs` still keys its compare
+    definitions by `SSAVar` and asks through `graph.value_id_for_var`.
+    r2types' type analysis still reads named blocks and asks the frame
+    through one `FrameRoots` lookup, built from the prep facts and the
+    graph in production and from a map in its own tests. r2dec's prepared
+    semantics asks through `value_of` and `canonical_root_var` until the
+    printer reads values (doc/adr-renderer-printer.md).

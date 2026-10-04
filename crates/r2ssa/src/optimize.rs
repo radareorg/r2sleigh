@@ -915,17 +915,6 @@ fn definitions(func: &SSAFunction) -> IdMap<VarId, Op> {
     defs
 }
 
-/// Each variable's copy root as the value view states it, by id: the view
-/// is computed once per pass and read in O(1) per question.
-fn copy_roots(func: &SSAFunction, views: &crate::view::ValueViews) -> IdVec<VarId, VarId> {
-    let table = func.values();
-    IdVec::from_fn(table.len(), |id| {
-        table
-            .id_of(views.copy_root(table.var(id)))
-            .expect("a copy root is a variable of the function")
-    })
-}
-
 fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let mut changed = false;
     let block_addrs = func.block_addrs().to_vec();
@@ -1065,8 +1054,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     // the store, and the store a copy of the register. The value view's copy
     // root, which dominates the copy, so the fused switch may branch on it.
     let views = crate::view::ValueViews::compute(func);
-    let roots = copy_roots(func, &views);
-    let root = |var: VarId| roots[var];
+    let root = |var: VarId| views.copy_root(var);
     // `x == c`, or the zero flag of `x - c` where the difference also lands in
     // a register and so was left as the flag fold found it.
     let against_constant = |a: VarId, b: VarId| {
@@ -1219,7 +1207,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                     // One selector is one value's bits, whichever copy of
                     // them a test reads: the copies of an extension share
                     // its view, not a root any of them can be named by.
-                    if !views.same_bits(func.var(test.selector), func.var(head.selector))
+                    if !views.same_bits(test.selector, head.selector)
                         || cases.iter().any(|(value, _)| *value == test.value)
                     {
                         r2il::refusal_evidence!(
@@ -1403,7 +1391,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
 struct FlagFacts<'f> {
     func: &'f SSAFunction,
     defs: IdMap<VarId, Op>,
-    roots: IdVec<VarId, VarId>,
+    views: crate::view::ValueViews<VarId>,
     kept: IdSet<VarId>,
     combined: IdSet<VarId>,
 }
@@ -1463,7 +1451,7 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
     let views = crate::view::ValueViews::compute(func);
     let facts = FlagFacts {
         func,
-        roots: copy_roots(func, &views),
+        views,
         defs,
         kept,
         combined,
@@ -1515,7 +1503,7 @@ fn fold_condition_codes(op: &Op, facts: &FlagFacts<'_>) -> Option<Op> {
     // A flag read through the copies the machine makes of it: arm64 tests
     // `ZR`, which is a copy of the `tmpZR` the subtraction wrote. The value
     // view's copy root is the end of that chain, however long.
-    let define_through_copies = |var: VarId| define(facts.roots[var]);
+    let define_through_copies = |var: VarId| define(facts.views.copy_root(var));
     // The sign flag: `(a - b) <s 0`.
     let sign_flag = |var: VarId| match define_through_copies(var)? {
         SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(*zero) => subtraction(*d),

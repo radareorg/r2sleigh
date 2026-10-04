@@ -820,12 +820,9 @@ fn is_call_argument(source_owned: &SourceOwnedFunctionFacts, value: ValueId) -> 
     callsites.by_callsite.values().any(|facts| {
         facts.argument_values.iter().any(|argument| {
             argument.value == value
-                || graph
-                    .value(argument.value)
-                    .zip(graph.value(value))
-                    .is_some_and(|(argument, address)| {
-                        identity.same_bits(&argument.var, &address.var)
-                    })
+                || (graph.value(argument.value).is_some()
+                    && graph.value(value).is_some()
+                    && identity.same_bits(argument.value, value))
         })
     })
 }
@@ -1410,8 +1407,8 @@ fn declared_formal_type(
         return None;
     }
     let source = source_owned.source();
-    let var = &source.graph().value(value)?.var;
-    let index = source.formal_parameter_of(var)?;
+    source.graph().value(value)?;
+    let index = source.formal_parameter_of(value)?;
     let ty = facts
         .merged_signature
         .as_ref()?

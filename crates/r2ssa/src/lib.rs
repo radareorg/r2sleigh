@@ -187,4 +187,4 @@ pub use strided::StridedInterval;
 pub use value_table::{ValueTable, VarId};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
-pub use view::{ValueView, ValueViews, ViewExtension, ViewRelation};
+pub use view::{Representative, ValueView, ValueViews, ViewExtension, ViewRelation};

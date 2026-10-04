@@ -18,7 +18,7 @@ use crate::var::SSAVar;
 /// instruction's branch skips the instruction's own operations, so the
 /// transfer it decides stands after it. `r2il::guarded_transfer` is where the
 /// machine graph reads the same shape, and this is the SSA form of it.
-pub fn branch_condition(block: &SSABlock) -> Option<(usize, &SSAVar)> {
+pub fn branch_condition<V>(block: &SSABlock<V>) -> Option<(usize, &V)> {
     let terminal = block.ops.len().checked_sub(1)?;
     let mut branches = block
         .ops

@@ -53,10 +53,11 @@ fn operand_facts(graph: &SsaGraph) -> impl Fn(&ValueId) -> (u32, Option<u64>) + 
 /// preparation has a root for the value, what the root states counts too:
 /// the root relation closes over phis, which no walk over definitions does.
 fn literal_of(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) -> Option<u64> {
+    let id = value;
     let value = graph.value(value)?;
     facts
-        .map(|facts| facts.canonical_root(&value.var))
-        .and_then(|root| root.constant_bits())
+        .and_then(|facts| facts.views.representative_constant(id))
+        .map(|(bits, _)| bits)
         .or_else(|| value.var.constant_bits())
         .or_else(|| {
             value

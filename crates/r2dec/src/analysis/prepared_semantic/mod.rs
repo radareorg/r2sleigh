@@ -267,7 +267,7 @@ impl PreparedSemanticView {
         prepared: &SsaArtifact,
         var: &SSAVar,
     ) -> Option<crate::symbol::SymbolId> {
-        let slot = prepared.formal_parameter_of(var)?;
+        let slot = prepared.formal_parameter_of(value_of(prepared, var)?)?;
         let slot = u32::try_from(slot).ok()?;
         let disposition = match self.binding_names.as_ref()?.require_parameter_slot(slot) {
             Ok(disposition) => disposition,
@@ -666,10 +666,8 @@ fn populate_authorized_stack_owner_names(
 
 fn populate_stack_offsets(view: &mut PreparedSemanticView, prepared: &SsaArtifact) {
     let prep = prepared.decompile_prep_facts();
-    for var in prep.stack_address_roots.keys() {
-        if let Some(offset) = prep.stack_address_root_of(var).map(|root| root.offset) {
-            view.insert_stack_offset(prepared, var, offset);
-        }
+    for (value, root) in &prep.stack_address_roots {
+        view.insert_stack_offset(prepared, prepared.graph().var(value), root.offset);
     }
     for (key, object_id) in &prepared.objects().value_objects {
         if key.space != r2il::SpaceId::Ram {
@@ -1223,9 +1221,8 @@ fn prepared_direct_stack_load_offset(
     let offset = view
         .stack_offset_for_var(prepared, addr)
         .or_else(|| stack_offset_for_value(prepared, addr))?;
-    prepared
-        .decompile_prep_facts()
-        .stack_address_root_of(addr)
+    value_of(prepared, addr)
+        .and_then(|addr| prepared.decompile_prep_facts().stack_address_root_of(addr))
         .map(|_| offset)
         .or_else(|| {
             view.owner_expr_for_var(prepared, addr)
@@ -2169,12 +2166,7 @@ fn prepared_stack_program_expr_for_object_offset(
 fn prepared_stack_object_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option<r2ssa::ObjectId> {
     prepared
         .object_for_var(var, r2il::SpaceId::Ram)
-        .or_else(|| {
-            prepared.object_for_var(
-                prepared.decompile_prep_facts().canonical_root(var),
-                r2il::SpaceId::Ram,
-            )
-        })
+        .or_else(|| prepared.object_for_var(&canonical_root_var(prepared, var), r2il::SpaceId::Ram))
 }
 
 fn prepared_stack_program_expr_for_var(
@@ -2236,10 +2228,7 @@ fn stack_offset_for_value(prepared: &SsaArtifact, value: &SSAVar) -> Option<i64>
     let object = prepared
         .object_for_var(value, r2il::SpaceId::Ram)
         .or_else(|| {
-            prepared.object_for_var(
-                prepared.decompile_prep_facts().canonical_root(value),
-                r2il::SpaceId::Ram,
-            )
+            prepared.object_for_var(&canonical_root_var(prepared, value), r2il::SpaceId::Ram)
         })?;
     let fact = prepared.objects().object(object)?;
     stack_offset_for_object_kind(&fact.kind)
@@ -2281,11 +2270,7 @@ fn expr_for_compare_operand_with_width(
         return Some(expr);
     }
 
-    let root = inputs
-        .prepared
-        .decompile_prep_facts()
-        .canonical_root(&var)
-        .clone();
+    let root = canonical_root_var(inputs.prepared, &var);
     if let Some(expr) = compare_style_operand_expr(inputs.prepared, &root, compare_width) {
         return Some(expr);
     }
@@ -2825,9 +2810,8 @@ fn prepared_scaled_index_owner_expr(
 }
 
 fn is_prepared_stack_address_carrier(prepared: &SsaArtifact, value: &SSAVar) -> bool {
-    if prepared
-        .decompile_prep_facts()
-        .stack_address_root_of(value)
+    if value_of(prepared, value)
+        .and_then(|value| prepared.decompile_prep_facts().stack_address_root_of(value))
         .is_some()
     {
         return true;
@@ -3293,5 +3277,25 @@ fn normalize_prepared_inline_expr(expr: CExpr, depth: u32) -> CExpr {
                 .collect(),
         ),
         other => other,
+    }
+}
+
+/// The sealed graph's value for a variable the renderer names. The prep
+/// facts are keyed by value (doc/adr-one-ir.md, F2.3 stage 5); the renderer
+/// reads names until it reads values (doc/adr-renderer-printer.md).
+fn value_of(prepared: &SsaArtifact, var: &SSAVar) -> Option<r2ssa::ValueId> {
+    prepared.graph().value_id_for_var(var)
+}
+
+/// The variable every value with `var`'s bits at its width is named by:
+/// the representative value's variable, or the constant a literal class
+/// determines; `var` itself where the graph holds no value for it.
+fn canonical_root_var(prepared: &SsaArtifact, var: &SSAVar) -> SSAVar {
+    let Some(value) = value_of(prepared, var) else {
+        return var.clone();
+    };
+    match prepared.decompile_prep_facts().canonical_root(value) {
+        r2ssa::Representative::Value(root) => prepared.graph().var(root).clone(),
+        r2ssa::Representative::Literal { bits, size } => SSAVar::constant(bits, size),
     }
 }

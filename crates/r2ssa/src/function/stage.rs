@@ -159,8 +159,9 @@ impl Prepared {
         &self,
         control: &C,
     ) -> Result<DecompilePrepFacts, SsaExecutionStopReason> {
+        let graph = SsaGraph::from_function_with_storage(&self.ir);
         self.ir
-            .collect_decompile_prep_facts_with_control(None, control)
+            .collect_decompile_prep_facts_with_control(&graph, None, control)
     }
 
     /// Seal the function: the fixed sequence that rewrites the blocks for
@@ -208,6 +209,7 @@ impl Prepared {
         }
         let mut prep = ir
             .collect_decompile_prep_facts_with_control(
+                &graph,
                 InterfaceQuestions::new(machine_context).for_frame_geometry(),
                 &crate::control::UncheckedSsaWorkControl,
             )

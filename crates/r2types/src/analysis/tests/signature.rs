@@ -153,27 +153,24 @@ fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
         ],
         Vec::new(),
     )];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [
-            (
-                home_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -8,
-                },
-            ),
-            (
-                return_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -4,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+    let prep_facts = [
+        (
+            home_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -8,
+            },
+        ),
+        (
+            return_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -4,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let mut stack_slots = [(-8, "var_8h"), (-4, "var_ch")]
         .into_iter()
         .map(|(offset, name)| {
@@ -208,7 +205,7 @@ fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
         &register_params,
         &mut stack_slots,
         &ssa_blocks,
-        Some(&prep_facts),
+        Some(&|var: &SSAVar| prep_facts.get(var).copied()),
         &aarch64_register_identity(),
     );
 

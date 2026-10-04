@@ -247,10 +247,11 @@ pub fn interior_stack_object_address(
     let value = if objects.interior_offset(value).is_some() {
         value
     } else {
-        let graph = artifact.graph();
-        let var = &graph.value(value)?.var;
-        let root = artifact.decompile_prep_facts().canonical_root(var);
-        graph.value_id_for_var(root)?
+        artifact.graph().value(value)?;
+        artifact
+            .decompile_prep_facts()
+            .canonical_root(value)
+            .value()?
     };
     let offset = objects.interior_offset(value)?;
     if objects.address_is_indexed(value) || offset < 0 {
@@ -1332,12 +1333,12 @@ impl Importer<'_> {
     /// The frame position `value` holds, through the copies that carried it.
     fn stack_root_of(&self, value: ValueId) -> Option<StackAddressRoot> {
         let facts = self.artifact.decompile_prep_facts();
-        let var = &self.artifact.graph().value(value)?.var;
-        if let Some(root) = facts.stack_address_root_of(var) {
+        self.artifact.graph().value(value)?;
+        if let Some(root) = facts.stack_address_root_of(value) {
             return Some(*root);
         }
         facts
-            .stack_address_root_of(facts.canonical_root(var))
+            .stack_address_root_of(facts.canonical_root(value).value()?)
             .copied()
     }
 

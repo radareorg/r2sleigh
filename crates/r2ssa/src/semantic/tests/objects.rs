@@ -70,7 +70,10 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
         .expect("stack address");
     let mut stack_facts = DecompilePrepFacts::default();
     stack_facts.stack_address_roots.insert(
-        stack_addr.clone(),
+        stack
+            .graph()
+            .value_id_for_var(&stack_addr)
+            .expect("the address is a value"),
         StackAddressRoot {
             base: StackAddressBase::StackPointer,
             offset: -8,
