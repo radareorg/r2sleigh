@@ -42,11 +42,16 @@ preservation proof once depended on how a clobber list was spelled (M1b).
 - **Cost.** O(ops × W) once per sealed function, W the widest value in bytes;
   O(1) lookup.
 
+## Done
+
+- B0 (`0ca2d79d`, B0b): `r2ssa::bytes`, one rule per operation checked
+  against `r2il::eval`; demand, observation and written lanes read it and
+  their three transfers are deleted. The census stayed byte-identical,
+  although observation became as precise as demand (or, xor, sign
+  extension).
+
 ## Left
 
-- B0: `r2ssa::bytes` with its eval check; `demand.rs`, `deadphi.rs` and
-  `lanes.rs` read it. Exit: their three transfers are deleted; the census is
-  byte-identical.
 - B1: one closure index for demand and observation. Exit: `Demand` and
   `ProvenProgramObservations` are two root sets over one computation.
 - B2: r2dec's dead values from the index. Exit: `unread_defined_values` is

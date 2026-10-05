@@ -72,114 +72,28 @@ struct Closure {
 
 pub(crate) use crate::bytes::ByteMask;
 
-/// The bytes of a constant `size_bytes` wide that are not zero, which are the
-/// only bytes an `and` with it lets through; zero above its eighth byte.
-fn nonzero_bytes_of(bits: u64, size_bytes: u32) -> ByteMask {
-    let mut mask = 0u64;
-    for byte in 0..size_bytes.min(8) {
-        if (bits >> (8 * byte)) & 0xff != 0 {
-            mask |= 1 << byte;
-        }
-    }
-    ByteMask::Bytes(mask)
-}
-
-/// What an observation of `observed` bytes of a value asks of each input.
-///
-/// A slice, a concatenation, a widening, a copy, a merge and a mask with a
-/// constant each read only some bytes of what feeds them; everything else is
-/// taken to read all of its operands. A byte no observation reaches is not
-/// observed, which is what stops a byte the program overwrote from admitting
-/// the caller's register as a parameter.
-///
-/// Every rule here may name more bytes than an input has; the closure trims
-/// each mask to its value's width, and a value whose width is unknown is
-/// taken whole.
+/// What an observation of `observed` bytes of a value asks of each input, by
+/// the one byte relation (`crate::bytes`); the closure trims each mask to its
+/// input's width.
 fn observed_input_bytes(
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
     observed: ByteMask,
-) -> Vec<(ValueId, ByteMask)> {
-    use crate::graph::InstPayload;
-    let size_of = |value: ValueId| graph.value(value).map(|value| value.var.size);
-    let constant = |value: ValueId| {
-        graph
-            .value(value)
-            .and_then(|value| value.var.constant_bits())
+) -> impl Iterator<Item = (ValueId, ByteMask)> {
+    let rule = match &inst.payload {
+        crate::graph::InstPayload::Phi { .. } => None,
+        crate::graph::InstPayload::Op(op) => Some(crate::bytes::rule(op, |value| {
+            let var = graph.var(*value);
+            (var.size, var.constant_bits())
+        })),
     };
-    // Every byte, which the closure trims to the input's own width.
-    let whole = |value: ValueId| (value, ByteMask::All);
-    let inputs = &inst.inputs;
-    match &inst.payload {
-        InstPayload::Phi { .. } => inputs.iter().map(|input| (*input, observed)).collect(),
-        InstPayload::Op(op) => match op {
-            crate::SSAOp::Copy { .. } if inputs.len() == 1 => vec![(inputs[0], observed)],
-            crate::SSAOp::Subpiece { offset, .. } if inputs.len() == 1 => {
-                vec![(inputs[0], observed.shifted_up(*offset))]
-            }
-            crate::SSAOp::Piece { .. } if inputs.len() == 2 => match size_of(inputs[1]) {
-                Some(lo_bytes) => vec![
-                    (inputs[0], observed.shifted_down(lo_bytes)),
-                    (inputs[1], observed.intersection(ByteMask::whole(lo_bytes))),
-                ],
-                None => inputs.iter().map(|input| whole(*input)).collect(),
-            },
-            crate::SSAOp::IntZExt { .. } if inputs.len() == 1 => {
-                let source = size_of(inputs[0]).map_or(ByteMask::All, ByteMask::whole);
-                vec![(inputs[0], observed.intersection(source))]
-            }
-            // A lane written into a value: the bytes the lane covers are the
-            // lane's, shifted down to it, and the rest are the base's. Exact
-            // where the lane sits at a whole byte and the value fits a mask.
-            crate::SSAOp::Insert(_) if inputs.len() == 3 => {
-                let lane = constant(inputs[2])
-                    .filter(|bits| bits % 8 == 0)
-                    .and_then(|bits| u32::try_from(bits / 8).ok())
-                    .zip(size_of(inputs[1]))
-                    .zip(inst.output.and_then(size_of).filter(|size| *size <= 64));
-                let covered = lane
-                    .filter(|((offset, lane_bytes), size)| {
-                        offset
-                            .checked_add(*lane_bytes)
-                            .is_some_and(|end| end <= *size)
-                    })
-                    .map(|((offset, lane_bytes), size)| {
-                        let mask = ByteMask::whole(lane_bytes).shifted_up(offset);
-                        (offset, size, mask)
-                    });
-                match covered {
-                    Some((offset, size, covered @ ByteMask::Bytes(covered_bits))) => {
-                        let observed = observed.intersection(ByteMask::whole(size));
-                        vec![
-                            (
-                                inputs[0],
-                                observed.intersection(ByteMask::Bytes(!covered_bits)),
-                            ),
-                            (
-                                inputs[1],
-                                observed.intersection(covered).shifted_down(offset),
-                            ),
-                            whole(inputs[2]),
-                        ]
-                    }
-                    _ => inputs.iter().map(|input| whole(*input)).collect(),
-                }
-            }
-            crate::SSAOp::IntAnd { .. } if inputs.len() == 2 => {
-                let mask_of = |value: ValueId| {
-                    constant(value)
-                        .zip(size_of(value))
-                        .map(|(bits, size)| nonzero_bytes_of(bits, size))
-                };
-                match (mask_of(inputs[0]), mask_of(inputs[1])) {
-                    (None, Some(mask)) => vec![(inputs[0], observed.intersection(mask))],
-                    (Some(mask), None) => vec![(inputs[1], observed.intersection(mask))],
-                    _ => inputs.iter().map(|input| (*input, observed)).collect(),
-                }
-            }
-            _ => inputs.iter().map(|input| whole(*input)).collect(),
-        },
-    }
+    inst.inputs.iter().enumerate().map(move |(index, input)| {
+        let read = match rule {
+            None => observed,
+            Some(rule) => rule.backward(index, observed).unwrap_or(ByteMask::All),
+        };
+        (*input, read)
+    })
 }
 
 /// Every value some root depends on, with the bytes of it that dependence
