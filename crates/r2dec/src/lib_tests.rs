@@ -1820,13 +1820,13 @@ fn a_body_that_rendered_nothing_says_so_rather_than_reading_as_empty() {
 #[test]
 fn normal_residual_comments_hide_debug_ids_and_raw_storage_tokens() {
     let comment = sanitize_comment_text(
-        "uncertified expression value ValueId(125) from ObjectId(9) via eax_1 var_8h var_ch fake_stack_slot t6a80 tmp:2c280_2",
+        "uncertified expression value ValueId(125) from ObjectId(9) via EAX_1 var_8h var_ch fake_stack_slot t6a80 tmp:2c280_2",
     );
 
     for raw in [
         "ValueId",
         "ObjectId",
-        "eax_1",
+        "EAX_1",
         "var_8h",
         "var_ch",
         "fake_stack_slot",

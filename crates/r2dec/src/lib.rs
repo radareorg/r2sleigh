@@ -209,98 +209,14 @@ fn is_ssa_versioned_register_label(name: &str) -> bool {
     let Some((base, suffix)) = name.rsplit_once('_') else {
         return false;
     };
-    let upper_ssa_label = !base.is_empty()
+    // An SSA label: an uppercase register base and a version.
+    !base.is_empty()
         && !suffix.is_empty()
         && suffix.bytes().all(|byte| byte.is_ascii_digit())
         && base.bytes().any(|byte| byte.is_ascii_alphabetic())
         && base
             .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
-    upper_ssa_label || is_known_lowercase_register_version_label(base, suffix)
-}
-
-fn is_known_lowercase_register_version_label(base: &str, suffix: &str) -> bool {
-    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    let lower = base.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "rax"
-            | "eax"
-            | "ax"
-            | "al"
-            | "ah"
-            | "rbx"
-            | "ebx"
-            | "bx"
-            | "bl"
-            | "bh"
-            | "rcx"
-            | "ecx"
-            | "cx"
-            | "cl"
-            | "ch"
-            | "rdx"
-            | "edx"
-            | "dx"
-            | "dl"
-            | "dh"
-            | "rsi"
-            | "esi"
-            | "si"
-            | "sil"
-            | "rdi"
-            | "edi"
-            | "di"
-            | "dil"
-            | "rbp"
-            | "ebp"
-            | "bp"
-            | "bpl"
-            | "rsp"
-            | "esp"
-            | "sp"
-            | "spl"
-            | "rip"
-            | "eip"
-            | "pc"
-            | "x0"
-            | "w0"
-            | "x1"
-            | "w1"
-            | "x2"
-            | "w2"
-            | "x3"
-            | "w3"
-            | "r0"
-            | "r1"
-            | "r2"
-            | "r3"
-            | "a0"
-            | "a1"
-            | "v0"
-            | "v1"
-    ) || x86_extended_register_label(&lower)
-}
-
-fn x86_extended_register_label(lower: &str) -> bool {
-    let Some(rest) = lower.strip_prefix('r') else {
-        return false;
-    };
-    let digit_len = rest
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digit_len == 0 {
-        return false;
-    }
-    let (digits, suffix) = rest.split_at(digit_len);
-    digits
-        .parse::<u8>()
-        .ok()
-        .is_some_and(|index| (8..=15).contains(&index))
-        && matches!(suffix, "" | "b" | "w" | "d")
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
 }
 
 #[cfg(test)]

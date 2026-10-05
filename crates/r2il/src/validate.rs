@@ -1511,21 +1511,6 @@ pub fn effective_arch_address_size(arch: &ArchSpec) -> u32 {
         return arch.addr_size;
     }
 
-    if let Some(pc_size) = arch
-        .registers
-        .iter()
-        .find(|r| {
-            matches!(
-                r.name.to_ascii_lowercase().as_str(),
-                "pc" | "ip" | "eip" | "rip"
-            )
-        })
-        .map(|r| r.size)
-        .filter(|size| *size > 1)
-    {
-        return pc_size;
-    }
-
     if let Some(default_size) = arch
         .spaces
         .iter()

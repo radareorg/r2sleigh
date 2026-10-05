@@ -2974,11 +2974,12 @@ mod tests {
     }
 
     #[test]
-    fn architecture_snapshot_uses_r2il_effective_address_size_fallback() {
+    fn architecture_snapshot_takes_its_width_from_the_default_space() {
         let mut arch = ArchSpec::new("fallback-address-size");
         arch.addr_size = 1;
         arch.add_register(RegisterDef::new("pc", 0, 8));
         arch.add_space(AddressSpace::new(SpaceId::Custom(9), "fallback", 1));
+        arch.add_space(AddressSpace::ram(8));
         let context = SourceMachineContext::from_blocks(&[], Some(&arch));
         let model = context.memory_model();
 
