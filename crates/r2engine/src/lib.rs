@@ -549,6 +549,14 @@ impl EngineExecutionControl {
         self.deadline = Some(deadline);
     }
 
+    /// Whether anything checking this control could have stopped by now: cancellation is sticky and the deadline only passes.
+    pub fn stopped(&self) -> bool {
+        self.cancellation.is_cancelled()
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
     fn refusal_reason(&self, phase: EnginePhase) -> Option<String> {
         if self.cancellation.is_cancelled() {
             return Some(format!(
@@ -1593,7 +1601,7 @@ pub(crate) struct EngineFunctionDecompileRequest {
 /// The analysis is the same either way; this decides only what is rendered
 /// from it, which is why it travels with the rendering rather than with the
 /// request that computes the facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum RenderTier {
     #[default]
     C,

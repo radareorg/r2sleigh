@@ -403,6 +403,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             analysed: self.db.query_stats::<analysis::Analysed>(),
             sealed: self.db.query_stats::<analysis::Sealed>(),
             callee_reads: self.db.query_stats::<analysis::CalleeReads>(),
+            rendered: self.db.query_stats::<analysis::Rendered>(),
         }
     }
 

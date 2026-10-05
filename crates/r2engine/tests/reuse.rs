@@ -420,3 +420,45 @@ fn a_listing_asks_a_held_callee_what_its_parameters_take_without_preparing_it() 
         "the listing prepared a callee whose summary was held"
     );
 }
+
+#[test]
+fn a_rendering_is_redrawn_without_analysing_again() {
+    // `pdd` on one function, another, then the first: the session redraws what it rendered.
+    let mut program = opened();
+    let text = |program: &mut OpenProgram<Literal>, entry| {
+        let rendering = program.rendered(entry, r2engine::RenderTier::C);
+        rendering.expect("it renders").response.output.into_text()
+    };
+    let first = text(&mut program, ONE);
+    text(&mut program, TWO);
+    assert_eq!(text(&mut program, ONE), first);
+    let stats = program.analysis_stats();
+    assert_eq!(
+        (stats.rendered.computed, stats.rendered.reused),
+        (2, 1),
+        "the first function was rendered again"
+    );
+    // `mov eax, 1` becomes `mov eax, 3`: the rendering read it.
+    program.source_mut().write(ONE + 1, &[0x03]);
+    assert_ne!(text(&mut program, ONE), first);
+}
+
+#[test]
+fn a_rendering_the_request_stopped_is_not_held() {
+    let mut program = opened();
+    let cancellation = r2engine::EngineCancellationToken::default();
+    program.begin_request(r2engine::EngineExecutionControl::with_cancellation(
+        cancellation.clone(),
+    ));
+    cancellation.cancel();
+    let _ = program.rendered(ONE, r2engine::RenderTier::C);
+    let rendering = program
+        .rendered(ONE, r2engine::RenderTier::C)
+        .expect("a fresh request renders");
+    assert!(!rendering.response.output.into_text().is_empty());
+    assert_eq!(
+        program.analysis_stats().analysed.computed,
+        2,
+        "the stopped analysis was served"
+    );
+}

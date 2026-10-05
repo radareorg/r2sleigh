@@ -17,7 +17,7 @@ use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
     Stop, Unread, WalkedBody, Work,
 };
-use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
+use crate::{EngineDecompileResponse, RenderTier, SealedFunctionAnalysis};
 
 /// One function listed block by block, and why the analysis its lines would
 /// carry was refused, where it was.
@@ -142,10 +142,14 @@ pub struct AnalysisRefused {
     pub unresolved: Vec<u64>,
 }
 
-/// A function rendered at one tier, and the analysis it was rendered from.
+/// A function rendered at one tier, with what of its analysis the rendering is shown with.
+#[derive(Clone)]
 pub struct Rendering {
-    pub prepared: Arc<Prepared>,
     pub response: EngineDecompileResponse,
+    /// The name the C defines the function under.
+    pub definition: String,
+    /// The callees the analysis could not read.
+    pub unread: Vec<crate::native::Unread>,
 }
 
 impl Rendering {
@@ -153,8 +157,7 @@ impl Rendering {
     ///
     /// `name` is the program's name for the function at `entry`.
     pub fn answer(&self, name: &str, entry: u64) -> crate::RenderedFunctionJson {
-        let function = self.prepared.artifact().artifact().function();
-        let definition = r2dec::rendered_name_of(function.name.as_deref(), entry);
+        let definition = self.definition.clone();
         crate::RenderedFunctionJson::of(&self.response, name, entry, definition)
     }
 }
@@ -246,8 +249,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
         let sealed = match self.sealing(entry) {
             super::analysis::Sealing::Sealed(sealed) => sealed.0,
-            super::analysis::Sealing::Refused(refused) => {
-                return Ok(Err(Box::new((*refused).clone())));
+            super::analysis::Sealing::Refused { response, .. } => {
+                return Ok(Err(Box::new((*response).clone())));
             }
             super::analysis::Sealing::Unanalysed => {
                 return Err("the function has no analysis to seal".to_owned());
@@ -264,12 +267,13 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// One function rendered at one tier.
     pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
         self.start_request();
-        let prepared = self.prepare(entry)?;
-        let render = |sealed: &_| EngineSession::new().render_sealed(sealed, tier, self.control());
-        let response = self
-            .read_sealed(entry, &prepared, render)?
-            .unwrap_or_else(|refused| *refused);
-        Ok(Rendering { prepared, response })
+        self.ensure_current()?;
+        self.assembled()?;
+        let key = (entry, self.view().thumb_at(entry), tier);
+        let render = self.db.get::<super::analysis::Rendered>(&key);
+        let render = render.map_err(|cycle| format!("{cycle:?}"))?;
+        let drawn = render.0.as_ref().map_err(Clone::clone)?;
+        Ok(Rendering::clone(&drawn.rendering))
     }
 
     /// What one function is, read off the sealed analysis every rendering draws from.

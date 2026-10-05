@@ -1,11 +1,12 @@
 //! One function's analysis, its callees' reads and its sealing, as queries (doc/adr-query-database.md, Q2).
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{ProgramInputs, Source, View};
-use crate::SealedFunctionAnalysis;
 use crate::native::{CalleeRead, NativeRefusal, Prepared, Unreadable};
 use crate::query::db::{Db, Hold, Query};
+use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
 
 /// A shared answer compared by identity: a recomputed analysis is a new one, never backdated.
 pub(super) struct Shared<T>(pub(super) Arc<T>);
@@ -99,14 +100,17 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
     }
 }
 
-/// The type analysis sealed from one function's analysis; a refusal may be the request's stop, so none is held.
+/// The type analysis sealed from one function's analysis.
 pub(super) struct Sealed;
 
-/// A sealing, a refusal, or no analysis to seal.
+/// A sealing, a refusal and whether the request's control could have caused it, or no analysis to seal.
 #[derive(Clone)]
 pub(super) enum Sealing {
     Sealed(Shared<SealedFunctionAnalysis>),
-    Refused(std::rc::Rc<crate::EngineDecompileResponse>),
+    Refused {
+        response: Rc<EngineDecompileResponse>,
+        stopped: bool,
+    },
     Unanalysed,
 }
 
@@ -140,23 +144,99 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
         let sealed = crate::isolation::isolated(|| {
             crate::native::sealed(&target, key.0, prepared, &control)
         });
-        match sealed {
-            Ok(Ok(sealed)) => Sealing::Sealed(Shared(Arc::new(sealed))),
-            Ok(Err(refused)) => Sealing::Refused(std::rc::Rc::from(refused)),
-            Err(panicked) => {
-                Sealing::Refused(std::rc::Rc::new(crate::panicked_decompile_response(
-                    prepared.name(),
-                    &panicked,
-                    crate::EnginePhase::Types,
-                )))
-            }
+        let response = match sealed {
+            Ok(Ok(sealed)) => return Sealing::Sealed(Shared(Arc::new(sealed))),
+            Ok(Err(refused)) => Rc::from(refused),
+            Err(panicked) => Rc::new(crate::panicked_decompile_response(
+                prepared.name(),
+                &panicked,
+                crate::EnginePhase::Types,
+            )),
+        };
+        Sealing::Refused {
+            response,
+            stopped: control.stopped(),
         }
     }
 
     fn hold(value: &Sealing) -> Hold {
         match value {
-            Sealing::Sealed(_) => Hold::Held,
-            _ => Hold::Stopped,
+            Sealing::Refused { stopped: true, .. } => Hold::Stopped,
+            _ => Hold::Held,
+        }
+    }
+}
+
+/// One function rendered at one tier: a session redraws what it rendered.
+pub(super) struct Rendered;
+
+/// A rendering, or why the function has none.
+#[derive(Clone)]
+pub(super) struct Render(pub(super) Result<Rc<Drawn>, String>);
+
+/// A rendering and whether the request's control could have cut it short.
+pub(super) struct Drawn {
+    pub(super) rendering: super::Rendering,
+    stopped: bool,
+}
+
+impl PartialEq for Render {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((&self.0, &other.0), (Ok(one), Ok(other)) if Rc::ptr_eq(one, other))
+    }
+}
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
+    type Key = (u64, bool, RenderTier);
+    type Value = Render;
+    const NAME: &'static str = "rendered";
+    /// A rendering is the C text and its facts, far smaller than the analysis it is read from.
+    const CAPACITY: Option<usize> = Some(16);
+
+    fn compute(
+        db: &Db<ProgramInputs<S>>,
+        &(entry, thumb, tier): &(u64, bool, RenderTier),
+    ) -> Render {
+        let analysis = db
+            .get::<Analysed>(&(entry, thumb))
+            .expect("an analysis asks for no rendering");
+        let prepared = match &analysis.0 {
+            Ok(prepared) => prepared,
+            Err(refusal) => return Render(Err(refusal.to_string())),
+        };
+        let function = prepared.artifact().artifact().function();
+        let definition = r2dec::rendered_name_of(function.name.as_deref(), entry);
+        let unread = prepared.unread().to_vec();
+        let sealing = db
+            .get::<Sealed>(&(entry, thumb))
+            .expect("a sealing asks for no rendering");
+        let control = db.inputs().control.clone();
+        let response = match &*sealing {
+            Sealing::Sealed(sealed) => {
+                let render = || EngineSession::new().render_sealed(&sealed.0, tier, &control);
+                crate::isolation::isolated(render).unwrap_or_else(|panicked| {
+                    let phase = crate::EnginePhase::Structuring;
+                    crate::panicked_decompile_response(&sealed.0.function_name, &panicked, phase)
+                })
+            }
+            Sealing::Refused { response, .. } => EngineDecompileResponse::clone(response),
+            Sealing::Unanalysed => {
+                return Render(Err("the function has no analysis to render".to_owned()));
+            }
+        };
+        let rendering = super::Rendering {
+            response,
+            definition,
+            unread,
+        };
+        let stopped = control.stopped();
+        Render(Ok(Rc::new(Drawn { rendering, stopped })))
+    }
+
+    fn hold(value: &Render) -> Hold {
+        match &value.0 {
+            Ok(drawn) if drawn.stopped => Hold::Stopped,
+            _ => Hold::Held,
         }
     }
 }

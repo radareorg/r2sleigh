@@ -84,6 +84,15 @@ engine. Commands, the visual mode and the agent surface all ask it.
 - Q4a: the reference index is the `ReferenceIndex` query over the View,
   which also lists, decodes and asks pointer parameters; the reference
   cache is deleted, and `revision(db)` and `endian` have one owner.
+- Q4b: a value dropped past a table's capacity keeps its dependencies,
+  so what read it stays good, and a value computed again from unmoved
+  reads keeps its `changed_at`. `Rendered(entry, thumb, tier)` holds
+  sixteen renderings with the name they define and the callees left
+  unread, so a redraw reads no analysis; a sealing refusal is held unless
+  the request's control could have caused it
+  (`EngineExecutionControl::stopped`: cancellation is sticky and the
+  deadline only passes). Measured: six render commands over two 0pack
+  functions in one session, 11.1 s to 4.9 s.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.

@@ -1351,7 +1351,13 @@ fn low_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr, RenderTier::Values)?;
-    let ssa = rendering.prepared.artifact().artifact().function().dump();
+    let ssa = session
+        .program
+        .prepared(addr)?
+        .artifact()
+        .artifact()
+        .function()
+        .dump();
     Ok(format!("{ssa}\n{}", rendering.response.output.into_text()))
 }
 
@@ -1383,11 +1389,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     // A callee whose analysis panicked is a defect in the engine, not a fact
     // about the program, so it is printed with the rendering it degraded
     // rather than only in the ledger `pddo` prints.
-    let panicked = rendering
-        .prepared
-        .unread()
-        .iter()
-        .filter(|callee| callee.panicked());
+    let panicked = rendering.unread.iter().filter(|callee| callee.panicked());
     for callee in panicked {
         if !out.ends_with('\n') {
             out.push('\n');
@@ -1428,10 +1430,10 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
         );
     };
     let mut out = format!("{}\n", ledger.report());
-    if !rendering.prepared.unread().is_empty() {
+    if !rendering.unread.is_empty() {
         out.push_str("\ncallees not read\n");
     }
-    for callee in rendering.prepared.unread() {
+    for callee in &rendering.unread {
         out.push_str(&format!("  {callee}\n"));
     }
     Ok(out)

@@ -169,7 +169,8 @@ impl Dep {
 }
 
 struct Entry<V> {
-    value: Rc<V>,
+    /// None once dropped past the query's capacity; its dependencies stay, so what read it stays good.
+    value: Option<Rc<V>>,
     deps: Rc<[Dep]>,
     verified_at: u64,
     changed_at: u64,
@@ -318,14 +319,14 @@ impl<I: Inputs + 'static> Db<I> {
                 continue;
             }
             let changed_at = match entries.get(&key) {
-                Some(held) if held.verified_at == now => continue,
-                Some(held) if *held.value == value => held.changed_at,
+                Some(held) if held.verified_at == now && held.value.is_some() => continue,
+                Some(held) if held.value.as_deref() == Some(&value) => held.changed_at,
                 _ => now,
             };
             entries.insert(
                 key,
                 Entry {
-                    value: Rc::new(value),
+                    value: Some(Rc::new(value)),
                     deps: Rc::clone(&deps),
                     verified_at: now,
                     changed_at,
@@ -412,12 +413,9 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
     /// The held answer and its dependencies where none has moved, checked without computing this query.
     fn green(&self, db: &Db<I>, key: &Q::Key) -> Result<Option<Green<Q::Value>>, Cycle> {
         let now = db.inputs.byte_revision();
-        let Some((value, deps, verified_at)) = self.entries.borrow().get(key).map(|entry| {
-            (
-                Rc::clone(&entry.value),
-                Rc::clone(&entry.deps),
-                entry.verified_at,
-            )
+        let Some((value, deps, verified_at)) = self.entries.borrow().get(key).and_then(|entry| {
+            let value = entry.value.as_ref().map(Rc::clone)?;
+            Some((value, Rc::clone(&entry.deps), entry.verified_at))
         }) else {
             return Ok(None);
         };
@@ -452,50 +450,73 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         stamp
     }
 
-    /// Drop the oldest answers past the query's capacity; a dropped answer is recomputed when asked.
+    /// Drop the oldest values past the query's capacity, keeping what each read; a dropped value is recomputed when asked.
     fn bound(entries: &mut BTreeMap<Q::Key, Entry<Q::Value>>) {
         let Some(capacity) = Q::CAPACITY else {
             return;
         };
-        while entries.len() > capacity {
-            let oldest = entries.iter().min_by_key(|(_, entry)| entry.stamp);
-            let Some(oldest) = oldest.map(|(key, _)| key.clone()) else {
-                return;
-            };
-            entries.remove(&oldest);
+        let mut valued = entries
+            .values_mut()
+            .filter(|entry| entry.value.is_some())
+            .collect::<Vec<_>>();
+        let excess = valued.len().saturating_sub(capacity);
+        if excess > 0 {
+            valued.sort_unstable_by_key(|entry| entry.stamp);
+            valued
+                .into_iter()
+                .take(excess)
+                .for_each(|entry| entry.value = None);
         }
     }
 
-    /// Recheck the held answer at `key`, recomputing where something it read has moved; its value and `changed_at`, none where it stopped.
-    fn check(&self, db: &Db<I>, key: &Q::Key) -> Result<(Rc<Q::Value>, Option<u64>), Cycle> {
+    /// The held entry's `changed_at` where nothing it read has moved since it was verified; none where something has.
+    fn fresh(&self, db: &Db<I>, key: &Q::Key) -> Result<Option<u64>, Cycle> {
         let now = db.inputs.byte_revision();
-        let (value, verified_at, changed_at, deps) = {
+        let (verified_at, changed_at, deps) = {
             let entries = self.entries.borrow();
             let entry = entries.get(key).expect("checked only where held");
-            let value = Rc::clone(&entry.value);
-            (
-                value,
-                entry.verified_at,
-                entry.changed_at,
-                Rc::clone(&entry.deps),
-            )
+            (entry.verified_at, entry.changed_at, Rc::clone(&entry.deps))
         };
         if verified_at == now {
-            self.count(|stats| stats.reused += 1);
-            db.stats.borrow_mut().reused += 1;
-            return Ok((value, Some(changed_at)));
+            return Ok(Some(changed_at));
         }
-        for dep in deps.iter() {
-            if dep.moved_since(db, verified_at)? {
-                self.count(|stats| stats.recomputed += 1);
-                return self.execute(db, key);
-            }
+        // The first dependency that moved or cycled decides; none is checked past it.
+        let mut checked = deps.iter().map(|dep| dep.moved_since(db, verified_at));
+        if checked
+            .find(|moved| !matches!(moved, Ok(false)))
+            .transpose()?
+            .is_some()
+        {
+            return Ok(None);
         }
-        self.count(|stats| stats.reused += 1);
-        db.stats.borrow_mut().reused += 1;
         if let Some(entry) = self.entries.borrow_mut().get_mut(key) {
             entry.verified_at = now;
         }
+        Ok(Some(changed_at))
+    }
+
+    /// Recheck the held answer at `key`, recomputing where something it read has moved or its value was dropped; its value and `changed_at`, none where it stopped.
+    fn check(&self, db: &Db<I>, key: &Q::Key) -> Result<(Rc<Q::Value>, Option<u64>), Cycle> {
+        let Some(changed_at) = self.fresh(db, key)? else {
+            self.count(|stats| stats.recomputed += 1);
+            return self.execute(db, key);
+        };
+        let value = self
+            .entries
+            .borrow()
+            .get(key)
+            .and_then(|entry| entry.value.clone());
+        let Some(value) = value else {
+            // Computed again from what it read before, the answer is the one dropped: it has not changed.
+            let (value, held) = self.execute(db, key)?;
+            let mut entries = self.entries.borrow_mut();
+            if let Some(entry) = entries.get_mut(key).filter(|_| held.is_some()) {
+                entry.changed_at = changed_at;
+            }
+            return Ok((value, held.map(|_| changed_at)));
+        };
+        self.count(|stats| stats.reused += 1);
+        db.stats.borrow_mut().reused += 1;
         Ok((value, Some(changed_at)))
     }
 
@@ -532,16 +553,20 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         }
         let now = db.inputs.byte_revision();
         let (value, changed_at) = match entries.remove(key) {
-            Some(old) if *old.value == value => {
+            Some(Entry {
+                value: Some(old),
+                changed_at,
+                ..
+            }) if *old == value => {
                 db.stats.borrow_mut().backdated += 1;
-                (old.value, old.changed_at)
+                (old, changed_at)
             }
             _ => (Rc::new(value), now),
         };
         entries.insert(
             key.clone(),
             Entry {
-                value: Rc::clone(&value),
+                value: Some(Rc::clone(&value)),
                 deps: deps.into(),
                 verified_at: now,
                 changed_at,
@@ -561,7 +586,11 @@ impl<Q: Query<I>, I: Inputs + 'static> AnyTable<I> for Table<Q, I> {
         if !self.entries.borrow().contains_key(key) {
             return Ok(None);
         }
-        self.check(db, key).map(|(_, changed_at)| changed_at)
+        // A dropped value need not be recomputed to say its dependents are good.
+        match self.fresh(db, key)? {
+            Some(changed_at) => Ok(Some(changed_at)),
+            None => self.execute(db, key).map(|(_, changed_at)| changed_at),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -759,11 +788,24 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_dependency_counts_as_moved() {
+    fn a_dropped_value_keeps_its_reads_for_what_read_it() {
         let mut db = Db::new(Memory::new(vec![1; 16]));
         assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 4);
-        // Doubled holds one answer, so this drops the one Quadrupled read.
+        // Doubled holds one value, so this drops the one Quadrupled read.
         assert_eq!(*db.get::<Doubled>(&8).unwrap(), 2);
+        db.inputs_mut().write(12, 3);
+        let computed = db.stats().computed;
+        assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 4);
+        assert_eq!(
+            db.stats().computed,
+            computed,
+            "a write it never read recomputes nothing"
+        );
+        // Refilling the dropped value from unmoved reads leaves what read it good.
+        assert_eq!(*db.get::<Doubled>(&7).unwrap(), 2);
+        let computed = db.stats().computed;
+        assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 4);
+        assert_eq!(db.stats().computed, computed);
         db.inputs_mut().write(7, 5);
         assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 20);
     }

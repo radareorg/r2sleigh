@@ -28,6 +28,7 @@ pub struct AnalysisStats {
     pub analysed: db::QueryStats,
     pub sealed: db::QueryStats,
     pub callee_reads: db::QueryStats,
+    pub rendered: db::QueryStats,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
