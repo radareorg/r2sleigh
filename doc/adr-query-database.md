@@ -45,13 +45,18 @@ engine. Commands, the visual mode and the agent surface all ask it.
 
 ## Left
 
-- Q2: decode, walk, lift and seal per function as queries. Exit: the
-  `query::memo` types `Memo`, `Moved` and `PerRevision` are deleted.
+- Order (2026-10-06): Q3's returns and survey land before Q2, since the
+  analysis reads both. Callees over a maximal walk (every callee returns but
+  those declared not to) give components independent of returns; each
+  component's returns is one query, and a callee outside it is another
+  component's answer.
+- Q2: decode, walk, lift and seal per function as queries. Exit: `Memo` and
+  `Moved` are deleted.
 - Q3: the discovery survey and entry modes (moved here from Q1, because they
-  read the call-graph returns), plus returns, pointers and callee reads, solved
-  by component together with P6. Exit: the `survey` cache, `modes_at`,
-  `modes_revision`, `Mutex<Pointers>`, `Mutex<Returns>` and `callee_reads` are
-  deleted.
+  read the call-graph returns), plus returns, solved by component together
+  with P6; pointers and callee reads read the analysis, so they follow Q2.
+  Exit: the `survey` cache, `modes_at`, `modes_revision`, `Mutex<Returns>`,
+  then `Mutex<Pointers>` and `PerRevision` (`callee_reads`) are deleted.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.
