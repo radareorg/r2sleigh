@@ -232,48 +232,40 @@ impl<S: Source + 'static> OpenProgram<S> {
     fn prepare(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
         self.ensure_current()?;
         self.assembled()?;
-        let target = self.target(entry)?;
-        self.analysed(&target, entry)
-            .map_err(|refusal| refusal.to_string())
+        self.analysed(entry).map_err(|refusal| refusal.to_string())
     }
 
     /// Read one prepared function's sealed type analysis; a refusal may be this request's stop, so it is not held.
     ///
-    /// Sealing and reading are isolation boundaries: a panic in either is this
-    /// function's refusal, saying where it was raised, and a sealing that
-    /// unwound is never held. The refusal names the phase its boundary begins
-    /// at: sealing is the type analysis on, reading is everything after it.
+    /// Reading is an isolation boundary: a panic in it is this function's refusal at the structuring phase.
     fn read_sealed<R>(
         &self,
         entry: u64,
         prepared: &Arc<Prepared>,
         read: impl FnOnce(&SealedFunctionAnalysis) -> R,
     ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
-        let target = self.target(entry)?;
-        let refused = |phase| {
-            move |panicked: crate::isolation::Panicked| {
-                let name = prepared.name();
-                Box::new(crate::panicked_decompile_response(name, &panicked, phase))
+        let sealed = match self.sealing(entry) {
+            super::analysis::Sealing::Sealed(sealed) => sealed.0,
+            super::analysis::Sealing::Refused(refused) => {
+                return Ok(Err(Box::new((*refused).clone())));
+            }
+            super::analysis::Sealing::Unanalysed => {
+                return Err("the function has no analysis to seal".to_owned());
             }
         };
-        let seal = || {
-            isolated(|| crate::native::sealed(&target, entry, prepared, &self.control))
-                .unwrap_or_else(|panicked| Err(refused(crate::EnginePhase::Types)(panicked)))
+        let refused = |panicked: crate::isolation::Panicked| {
+            let name = prepared.name();
+            let phase = crate::EnginePhase::Structuring;
+            Box::new(crate::panicked_decompile_response(name, &panicked, phase))
         };
-        let read = |sealed: &SealedFunctionAnalysis| {
-            isolated(|| read(sealed)).map_err(refused(crate::EnginePhase::Structuring))
-        };
-        Ok(self
-            .memo
-            .read_sealed(prepared, seal, read)
-            .and_then(|read| read))
+        Ok(isolated(|| read(&sealed)).map_err(refused))
     }
 
     /// One function rendered at one tier.
     pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
         self.start_request();
         let prepared = self.prepare(entry)?;
-        let render = |sealed: &_| EngineSession::new().render_sealed(sealed, tier, &self.control);
+        let render = |sealed: &_| EngineSession::new().render_sealed(sealed, tier, self.control());
         let response = self
             .read_sealed(entry, &prepared, render)?
             .unwrap_or_else(|refused| *refused);
@@ -388,7 +380,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.ensure_current()?;
         self.assembled()?;
         let target = self.target(entry)?;
-        let reason = match self.analysed(&target, entry) {
+        let reason = match self.analysed(entry) {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, &prepared)) {
                 Ok(listing) => {

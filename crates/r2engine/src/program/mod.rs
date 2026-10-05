@@ -6,6 +6,7 @@
 //! and keeps it current as the bytes move. It never opens anything, so the
 //! whole derivation runs just as well over a program built from byte literals.
 
+mod analysis;
 pub mod info;
 pub mod naming;
 mod pointers;
@@ -32,7 +33,7 @@ use std::rc::Rc;
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
 use crate::query::db::{Db, Inputs, Query};
-use crate::query::{Consulted, Decoders, Memo, Moved, Revision};
+use crate::query::{Decoders, Revision};
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
@@ -60,19 +61,11 @@ pub struct OpenProgram<S: Source + 'static> {
     modes: std::cell::RefCell<Option<Rc<BTreeMap<u64, bool>>>>,
     /// Whether the machine's conventions were assembled when it loaded, and why not.
     assembly: Result<(), String>,
-    /// What this session has already worked out about one function, and the type analysis sealed from it.
-    memo: Memo<Prepared, crate::SealedFunctionAnalysis>,
-    /// The control for the request in hand: its cancellation, its deadline and
-    /// the work it has spent. Held here so a caller can reach it while the
-    /// request runs, which is the whole point of having one.
-    control: crate::EngineExecutionControl,
     /// The control a caller set for the next request, which that request
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
     /// Which parameters of each callee take an address, read once per callee and revision.
     pointers: std::sync::Mutex<pointers::Pointers>,
-    /// What each callee's body proves, read once per callee and state of the program.
-    callee_reads: crate::query::PerRevision<crate::native::CalleeRead>,
     /// The reference index, and the state of the program it was read at.
     references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
 }
@@ -91,11 +84,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             imports: Rc::new(BTreeMap::new()),
             modes: std::cell::RefCell::default(),
             assembly: Err("the program's machine is not loaded".to_owned()),
-            memo: Memo::default(),
-            control: crate::EngineExecutionControl::default(),
             next: None,
             pointers: std::sync::Mutex::default(),
-            callee_reads: crate::query::PerRevision::default(),
             references: None,
             db: Db::new(ProgramInputs {
                 defined: definitions(container),
@@ -133,6 +123,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                     })
                     .collect(),
                 assembled: None,
+                control: crate::EngineExecutionControl::default(),
                 source,
                 slots,
                 machine: None,
@@ -357,35 +348,26 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub(super) fn comes_back(&self, callee: u64) -> bool {
         self.view().comes_back(callee)
     }
+    /// One function's analysis, done once per state of what it read (the `Analysed` query).
+    fn analysed(&self, entry: u64) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
+        let key = (entry, self.view().thumb_at(entry));
+        let analysis = self.db.get::<analysis::Analysed>(&key);
+        analysis.map_or_else(
+            |cycle| Err(NativeRefusal::Prepare(format!("{cycle:?}"))),
+            |analysis| analysis.0.clone(),
+        )
+    }
 
-    /// One function's analysis, done once per state of this program.
-    ///
-    /// Every tier is a rendering of this. Asking for the C and then for the
-    /// ledger behind it, or for the prepared function and then for its values,
-    /// used to walk and prepare the same body twice.
-    fn analysed(
-        &self,
-        target: &NativeTarget<'_>,
-        entry: u64,
-    ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
-        let moved = Moved {
-            written: &|since, range| self.source().written_since(since, range),
-            returns: &|callee| self.comes_back(callee),
-        };
-        self.memo
-            .analysed_since(self.revision(), entry, &moved, || {
-                let recording = Recording {
-                    program: self,
-                    consulted: std::cell::RefCell::default(),
-                };
-                let analysis = crate::native::analysed(target, &recording, entry);
-                analysis.map(|analysis| (analysis, recording.consulted.into_inner()))
-            })
+    /// One function's sealed type analysis, by the same key as its analysis.
+    fn sealing(&self, entry: u64) -> analysis::Sealing {
+        let key = (entry, self.view().thumb_at(entry));
+        let sealing = self.db.get::<analysis::Sealed>(&key);
+        sealing.map_or(analysis::Sealing::Unanalysed, |sealing| (*sealing).clone())
     }
 
     /// The control the request in hand runs under, or the last one ran under.
     pub fn control(&self) -> &crate::EngineExecutionControl {
-        &self.control
+        &self.db.inputs().control
     }
 
     /// Set the control the next request runs under; that request consumes it.
@@ -399,7 +381,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Start a request under the control a caller set, or a fresh one.
     fn start_request(&mut self) {
-        self.control = self.next.take().unwrap_or_default();
+        self.db.inputs_mut().control = self.next.take().unwrap_or_default();
     }
 
     /// The register a storage names, as this machine spells it.
@@ -421,13 +403,12 @@ impl<S: Source + 'static> OpenProgram<S> {
             .map(|register| register.name.to_lowercase())
     }
 
-    /// What the memo has been asked and what it holds.
-    pub fn memo_stats(&self) -> crate::query::MemoStats {
-        let (callee_hits, callees_read) = self.callee_reads.counts();
-        crate::query::MemoStats {
-            callee_hits,
-            callees_read,
-            ..self.memo.stats()
+    /// What the analysis queries have computed and served.
+    pub fn analysis_stats(&self) -> crate::query::AnalysisStats {
+        crate::query::AnalysisStats {
+            analysed: self.db.query_stats::<analysis::Analysed>(),
+            sealed: self.db.query_stats::<analysis::Sealed>(),
+            callee_reads: self.db.query_stats::<analysis::CalleeReads>(),
         }
     }
 
@@ -505,7 +486,7 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn control(&self) -> crate::EngineExecutionControl {
         // The token and the meter are shared: the request's own control, not a copy.
-        self.control.clone()
+        self.db.inputs().control.clone()
     }
 
     fn name_at(&self, vaddr: u64) -> Option<String> {
@@ -542,127 +523,6 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.target(vaddr).ok()
-    }
-}
-
-/// The program as one derivation reads it, logging the bytes it read and each callee's return it was told.
-struct Recording<'a, S: Source + 'static> {
-    program: &'a OpenProgram<S>,
-    consulted: std::cell::RefCell<Consulted>,
-}
-
-impl<S: Source + 'static> crate::body::Program for Recording<'_, S> {
-    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let read = self.program.source().read(vaddr, max)?;
-        // Only what is mapped: no write can land in the unmapped rest.
-        self.consulted
-            .borrow_mut()
-            .read
-            .push(vaddr..vaddr.saturating_add(read.len() as u64));
-        Some(read)
-    }
-
-    fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
-        crate::body::Program::region(self.program, vaddr)
-    }
-
-    fn is_entry(&self, vaddr: u64) -> bool {
-        crate::body::Program::is_entry(self.program, vaddr)
-    }
-
-    fn returns(&self, callee: u64) -> bool {
-        let answer = self.program.comes_back(callee);
-        self.consulted.borrow_mut().returns.push((callee, answer));
-        answer
-    }
-
-    // What a slot holds is the container's statement, fixed for the revision
-    // the derivation is keyed by, so it is not a consulted answer.
-    fn returns_through(&self, slot: u64) -> bool {
-        crate::body::Program::returns_through(self.program, slot)
-    }
-
-    fn return_address_register(&self) -> Option<r2il::Varnode> {
-        crate::body::Program::return_address_register(self.program)
-    }
-
-    fn mode_register(&self) -> Option<r2il::Varnode> {
-        crate::body::Program::mode_register(self.program)
-    }
-}
-
-impl<S: Source + 'static> crate::native::Program for Recording<'_, S> {
-    fn control(&self) -> crate::EngineExecutionControl {
-        crate::native::Program::control(self.program)
-    }
-
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        self.program.name_at(vaddr)
-    }
-
-    fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.program.holds_static_data(vaddr)
-    }
-
-    fn loader_writes(&self) -> &[LoaderWrite] {
-        crate::native::Program::loader_writes(self.program)
-    }
-
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        crate::native::Program::immutable(self.program, range)
-    }
-
-    fn holds_code(&self, vaddr: u64) -> bool {
-        crate::native::Program::holds_code(self.program, vaddr)
-    }
-
-    fn extents(&self) -> &r2types::ProgramExtents {
-        self.program.extents()
-    }
-
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        self.program.import_at(vaddr)
-    }
-
-    fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
-        self.program.target_at(vaddr)
-    }
-
-    fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
-        crate::native::Program::frame_saves(self.program, entry)
-    }
-
-    /// Held per state of the program, with what deriving it read: a root that
-    /// reads a held callee consulted those bytes and returns as surely as the
-    /// root that derived it did, and its own memo has to know.
-    fn read_callee(
-        &self,
-        address: u64,
-        read: &mut dyn FnMut() -> crate::native::CalleeRead,
-    ) -> std::sync::Arc<crate::native::CalleeRead> {
-        let revision = self.program.revision();
-        let cache = &self.program.callee_reads;
-        if let Some((answer, consulted)) = cache.get(revision, address) {
-            let mut own = self.consulted.borrow_mut();
-            own.read.extend(consulted.read);
-            own.returns.extend(consulted.returns);
-            return answer;
-        }
-        let (reads, returns) = {
-            let own = self.consulted.borrow();
-            (own.read.len(), own.returns.len())
-        };
-        let answer = std::sync::Arc::new(read());
-        cache.derived();
-        if answer.facts.is_ok() {
-            let own = self.consulted.borrow();
-            let consulted = Consulted {
-                read: own.read[reads..].to_vec(),
-                returns: own.returns[returns..].to_vec(),
-            };
-            cache.hold(revision, address, std::sync::Arc::clone(&answer), consulted);
-        }
-        answer
     }
 }
 
@@ -777,6 +637,8 @@ pub(crate) struct ProgramInputs<S> {
     /// container states it; this can switch inside one function, as a veneer
     /// does.
     mapped: BTreeMap<u64, bool>,
+    /// The control of the request in hand: read by a query's work, never a dependency of its answer.
+    pub(crate) control: crate::EngineExecutionControl,
     /// What a native request needs of the machine, assembled once it is loaded.
     assembled: Option<Assembled>,
     /// Which import each slot the loader fills stands for. A stub's tail

@@ -112,7 +112,12 @@ pub trait Program: crate::body::Program {
     /// against a body of its own callees or of whichever root calls it, so
     /// what it proves is a fact about the callee and the state of the program,
     /// and a program that holds one per state need derive it only once.
-    fn read_callee(&self, _address: u64, read: &mut dyn FnMut() -> CalleeRead) -> Arc<CalleeRead> {
+    fn read_callee(
+        &self,
+        _address: u64,
+        _thumb: bool,
+        read: &mut dyn FnMut() -> CalleeRead,
+    ) -> Arc<CalleeRead> {
         Arc::new(read())
     }
 }
@@ -752,6 +757,30 @@ pub(crate) fn callee_summary(
     r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared).ok()
 }
 
+/// What one callee's body proves, read with this decoder; the query `CalleeReads` holds it.
+pub(crate) fn callee_read(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    address: u64,
+) -> CalleeRead {
+    let native = match machine(target) {
+        Ok(machine) => Native {
+            target,
+            program,
+            machine,
+            control: program.control().ssa_execution_control(),
+        },
+        Err(_) => {
+            return CalleeRead {
+                interface: None,
+                facts: Err(Unreadable::NotPrepared),
+            };
+        }
+    };
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    read_callee(&native, target, address, ptr_bits)
+}
+
 /// What one callee's body proves, read under the same isolation boundary as its preparation.
 fn read_callee(
     native: &Native<'_>,
@@ -808,7 +837,8 @@ fn read_callees(
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        let read = native.program.read_callee(*address, &mut || {
+        let thumb = target.cpu == "thumb";
+        let read = native.program.read_callee(*address, thumb, &mut || {
             read_callee(native, target, *address, ptr_bits)
         });
         // Taking the interface keeps the call rendered as a call.

@@ -120,15 +120,16 @@ impl<S: Source + 'static> OpenProgram<S> {
     ) -> (BTreeMap<CanonicalStorageId, Support>, bool) {
         // A callee some root has read already carries its summary; otherwise it
         // is prepared for this alone, which costs less than reading it whole.
-        let held = self
-            .callee_reads
-            .get(self.revision(), address)
-            .and_then(|(read, _)| {
-                read.facts
-                    .as_ref()
-                    .ok()
-                    .map(|facts| facts.summary().clone())
-            });
+        let key = (address, target.cpu == "thumb");
+        let read = self
+            .db
+            .held::<super::analysis::CalleeReads>(&key)
+            .ok()
+            .flatten();
+        let held = read.and_then(|read| {
+            let facts = read.0.facts.as_ref().ok();
+            facts.map(|facts| facts.summary().clone())
+        });
         let Some(summary) = held.or_else(|| crate::native::callee_summary(target, self, address))
         else {
             return (BTreeMap::new(), false);

@@ -191,9 +191,22 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
 }
 
 impl<S: Source + 'static> crate::native::Program for View<'_, S> {
-    /// A query is no request's: nothing stops it but its own budgets.
+    /// The request's control, which can stop the work but never enters an answer.
     fn control(&self) -> crate::EngineExecutionControl {
-        crate::EngineExecutionControl::default()
+        self.db.inputs().control.clone()
+    }
+
+    fn read_callee(
+        &self,
+        address: u64,
+        thumb: bool,
+        _read: &mut dyn FnMut() -> crate::native::CalleeRead,
+    ) -> std::sync::Arc<crate::native::CalleeRead> {
+        let read = self
+            .db
+            .get::<super::analysis::CalleeReads>(&(address, thumb));
+        let read = read.expect("a callee's read asks for no other root");
+        std::sync::Arc::clone(&read.0)
     }
 
     fn name_at(&self, vaddr: u64) -> Option<String> {

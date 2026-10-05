@@ -18,10 +18,15 @@ fn every_tier_of_one_function_is_rendered_from_one_analysis() {
         let rendering = program.rendered(ONE, tier).expect("it renders");
         assert!(!rendering.response.output.into_text().is_empty());
     }
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.replacements),
-        (1, 2, 0),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
+        // Two tiers and the one sealing reuse the analysis the first tier computed.
+        (1, 3, 0),
         "three tiers walked and prepared the same body more than once"
     );
 }
@@ -37,10 +42,15 @@ fn afi_afv_and_pdd_read_one_type_analysis() {
         .rendered(ONE, r2engine::RenderTier::C)
         .expect("it renders");
     assert!(!rendering.response.output.into_text().is_empty());
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.sealed),
-        (1, 2, 1),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.sealed.computed
+        ),
+        // Two commands and the one sealing reuse the analysis the first computed.
+        (1, 3, 1),
         "each command ran its own type analysis of one prepared function"
     );
 }
@@ -74,7 +84,7 @@ fn a_patch_makes_the_held_analysis_stale() {
     // `mov eax, 1` becomes `mov eax, 3`: a byte this analysis read.
     program.source_mut().write(ONE + 1, &[0x03]);
     program.prepared(ONE).expect("it prepares");
-    assert_eq!(program.memo_stats().replacements, 1);
+    assert_eq!(program.analysis_stats().analysed.recomputed, 1);
 }
 
 #[test]
@@ -86,9 +96,13 @@ fn a_patch_after_a_hit_still_makes_the_held_analysis_stale() {
     program.prepared(ONE).expect("it is served");
     program.source_mut().write(ONE + 1, &[0x03]);
     program.prepared(ONE).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.replacements),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
         (2, 1, 1),
         "a write to bytes this analysis read was served the old analysis"
     );
@@ -103,9 +117,13 @@ fn a_patch_to_another_function_leaves_this_one_standing() {
     program.prepared(ONE).expect("it prepares");
     program.source_mut().write(TWO + 1, &[0x05]);
     program.prepared(ONE).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.replacements),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
         (1, 1, 0),
         "a patch to another function threw this analysis away"
     );
@@ -125,8 +143,8 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
         .expect("it lists");
     assert_eq!(answer.value.len(), 6);
     assert_eq!(
-        program.memo_stats(),
-        r2engine::query::MemoStats::default(),
+        program.analysis_stats(),
+        r2engine::query::AnalysisStats::default(),
         "a listing asked the engine to analyse a function"
     );
 }
@@ -145,7 +163,7 @@ fn a_patch_that_names_a_string_makes_every_held_analysis_stale() {
     // The table changed and the stubs did not.
     assert_ne!(after.names, before.names);
     assert_eq!(after.entries, before.entries);
-    assert_eq!(program.memo_stats().replacements, 1);
+    assert_eq!(program.analysis_stats().analysed.recomputed, 1);
 }
 
 #[test]
@@ -167,8 +185,15 @@ fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
     program.prepared(ONE).expect("it prepares");
     assert!(program.imports().is_empty());
     assert_ne!(program.revision().entries, before);
-    let stats = program.memo_stats();
-    assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
+    let stats = program.analysis_stats();
+    assert_eq!(
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
+        (2, 0, 1)
+    );
 }
 
 #[test]
@@ -183,7 +208,8 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
     let _ = program.prepared(THUMB_LEAF);
     assert_ne!(program.revision().entries, before);
-    assert_eq!(program.memo_stats().replacements, 1);
+    // The leaf is read in another instruction set, a new key: the old analysis is never served.
+    assert_eq!(program.analysis_stats().analysed.computed, 2);
     let called = program
         .functions()
         .expect("discovery runs")
@@ -329,8 +355,15 @@ fn a_patch_that_stops_a_callee_s_callee_returning_makes_the_caller_stale() {
     // `one` becomes `jmp one`, a byte the caller's analysis never read.
     program.source_mut().write(ONE, &[0xeb, 0xfe]);
     assert_eq!(ends(&mut program), Some(CALLER + 5));
-    let stats = program.memo_stats();
-    assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
+    let stats = program.analysis_stats();
+    assert_eq!(
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
+        (2, 0, 1)
+    );
 }
 
 #[test]
@@ -342,18 +375,18 @@ fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
     let mut program = opened();
     program.prepared(CALLER).expect("it prepares");
     program.prepared(PASSES).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.callees_read, stats.callee_hits),
+        (stats.callee_reads.computed, stats.callee_reads.reused),
         (1, 1),
         "the second caller prepared the shared callee again"
     );
     // `mov eax, 1` becomes `mov eax, 3` in the callee alone.
     program.source_mut().write(ONE + 1, &[0x03]);
     program.prepared(PASSES).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.replacements, stats.callees_read),
+        (stats.analysed.recomputed, stats.callee_reads.computed),
         (1, 2),
         "a root that read a held callee did not see a write to that callee"
     );
@@ -374,12 +407,15 @@ fn a_listing_asks_a_held_callee_what_its_parameters_take_without_preparing_it() 
     let mut program =
         OpenProgram::of(Literal::of_code(code.leak(), &functions).with_data_after(common::HANDED));
     program.prepared(common::HANDS).expect("it prepares");
-    let before = program.memo_stats();
-    assert_eq!((before.callees_read, before.callee_hits), (1, 0));
-    program.function_listing(common::HANDS).expect("it lists");
-    let after = program.memo_stats();
+    let before = program.analysis_stats();
     assert_eq!(
-        (after.callees_read, after.callee_hits),
+        (before.callee_reads.computed, before.callee_reads.reused),
+        (1, 0)
+    );
+    program.function_listing(common::HANDS).expect("it lists");
+    let after = program.analysis_stats();
+    assert_eq!(
+        (after.callee_reads.computed, after.callee_reads.reused),
         (1, 1),
         "the listing prepared a callee whose summary was held"
     );

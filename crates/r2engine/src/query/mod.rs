@@ -16,13 +16,19 @@
 pub mod annotate;
 pub mod db;
 pub mod decode;
-pub mod memo;
 pub mod proved;
 pub mod records;
 pub mod references;
 
 pub use decode::listing;
-pub use memo::{Consulted, Memo, MemoStats, Moved, PerRevision};
+
+/// What the analysis queries have computed and served.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnalysisStats {
+    pub analysed: db::QueryStats,
+    pub sealed: db::QueryStats,
+    pub callee_reads: db::QueryStats,
+}
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
 pub use records::{

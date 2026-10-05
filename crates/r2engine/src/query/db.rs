@@ -97,6 +97,17 @@ impl<K: Debug + PartialEq + 'static> CycleKey for K {
     }
 }
 
+/// What one query's table has done.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryStats {
+    /// Answers computed, a first time or again.
+    pub computed: u64,
+    /// Answers served without computing.
+    pub reused: u64,
+    /// Answers computed again because something they read moved.
+    pub recomputed: u64,
+}
+
 /// What the database has done, for tests and for traces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DbStats {
@@ -161,6 +172,7 @@ struct Table<Q: Query<I>, I: Inputs> {
     running: RefCell<BTreeSet<Q::Key>>,
     /// The next entry's stamp.
     clock: std::cell::Cell<u64>,
+    stats: std::cell::Cell<QueryStats>,
     query: PhantomData<fn(&I) -> Q>,
 }
 
@@ -218,6 +230,16 @@ impl<I: Inputs + 'static> Db<I> {
 
     pub fn stats(&self) -> DbStats {
         *self.stats.borrow()
+    }
+
+    /// What `Q`'s table has done.
+    pub fn query_stats<Q: Query<I>>(&self) -> QueryStats {
+        let tables = self.tables.borrow();
+        let Some(table) = tables.get(&TypeId::of::<Q>()) else {
+            return QueryStats::default();
+        };
+        let typed = table.as_any().downcast_ref::<Table<Q, I>>();
+        typed.map_or_else(QueryStats::default, |typed| typed.stats.get())
     }
 
     /// Record that the query running reads `range`.
@@ -310,6 +332,7 @@ impl<I: Inputs + 'static> Db<I> {
                 entries: RefCell::new(BTreeMap::new()),
                 running: RefCell::new(BTreeSet::new()),
                 clock: std::cell::Cell::new(0),
+                stats: std::cell::Cell::default(),
                 query: PhantomData,
             })
         }))
@@ -401,8 +424,15 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
                 entry.verified_at = now;
             }
         }
+        self.count(|stats| stats.reused += 1);
         db.stats.borrow_mut().reused += 1;
         Ok(Some((value, deps)))
+    }
+
+    fn count(&self, change: impl FnOnce(&mut QueryStats)) {
+        let mut stats = self.stats.get();
+        change(&mut stats);
+        self.stats.set(stats);
     }
 
     fn tick(&self) -> u64 {
@@ -440,14 +470,17 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             )
         };
         if verified_at == now {
+            self.count(|stats| stats.reused += 1);
             db.stats.borrow_mut().reused += 1;
             return Ok((value, Some(changed_at)));
         }
         for dep in deps.iter() {
             if dep.moved_since(db, verified_at)? {
+                self.count(|stats| stats.recomputed += 1);
                 return self.execute(db, key);
             }
         }
+        self.count(|stats| stats.reused += 1);
         db.stats.borrow_mut().reused += 1;
         if let Some(entry) = self.entries.borrow_mut().get_mut(key) {
             entry.verified_at = now;
@@ -471,6 +504,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         };
         let value = Q::compute(db, key);
         let (deps, tainted) = frame.finish();
+        self.count(|stats| stats.computed += 1);
         db.stats.borrow_mut().computed += 1;
         let mut entries = self.entries.borrow_mut();
         if tainted || Q::stopped(&value) {

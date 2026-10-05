@@ -64,13 +64,17 @@ engine. Commands, the visual mode and the agent surface all ask it.
   dependencies; the least fixpoint is unique, so a deposited answer equals a
   computed one. P6's summaries may still want components; they decide that
   with their own measurement.
-- Q2: decode, walk, lift and seal per function as queries. Exit: `Memo` and
-  `Moved` are deleted.
+- Q2 (Q2a, Q2b): a stop of the request is typed (`NativeRefusal::Stopped`,
+  `Unreadable::Stopped`); a query names its stops, which are returned and
+  never held, nor is what read one; a query may bound its table. The
+  request's control is an input read by work and never by an answer.
+  `Analysed` (capacity one), `CalleeReads` and `Sealed` replace the memo;
+  `Memo`, `Moved`, `Consulted`, `PerRevision` and `Recording` are deleted.
 - Q3: the discovery survey and entry modes (moved here from Q1, because they
   read the call-graph returns), plus returns, solved by component together
   with P6; pointers and callee reads read the analysis, so they follow Q2.
   Exit: the `survey` cache, `modes_at`, `modes_revision`, `Mutex<Returns>`,
-  then `Mutex<Pointers>` and `PerRevision` (`callee_reads`) are deleted.
+  then `Mutex<Pointers>` is deleted.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.
