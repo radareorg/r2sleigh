@@ -1591,8 +1591,13 @@ pub fn embedded_arch_and_disassembler(
 pub struct EmbeddedMachine {
     pub arch: r2il::ArchSpec,
     pub disasm: Disassembler,
-    /// Ghidra's compiler specification, which names the stack pointer.
+    /// The compiler specification of the platform's usual toolchain: the
+    /// stack pointer, the return address and the prototype models.
     pub compiler_spec: &'static str,
+    /// The Windows toolchain's specification, where the language's
+    /// definitions (`.ldefs`, compiler id `windows`) name one: a PE runs
+    /// under its prototypes rather than the usual toolchain's.
+    pub windows_compiler_spec: Option<&'static str>,
     /// The processor context this machine decodes in, as the snapshot's
     /// machine tuple spells it: `arm` and `thumb` share one instruction set
     /// and one architecture name, and only this tells the trusted lift apart.
@@ -1601,13 +1606,11 @@ pub struct EmbeddedMachine {
 
 /// Load the embedded machine an architecture name selects.
 ///
-/// The compiler specification is the one for the platform's usual toolchain.
-/// Today only the stack pointer is read from it, and every specification for
-/// one processor agrees about that; the prototype models, which do differ, are
-/// not read here.
+/// It carries the compiler specification of the platform's usual toolchain
+/// and, where the language has one, the Windows toolchain's.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    let (sla, pspec, cspec, name, cpu) = embedded_specification(&arch_name.to_ascii_lowercase())
-        .ok_or_else(|| {
+    let (sla, pspec, (cspec, windows), name, cpu) =
+        embedded_specification(&arch_name.to_ascii_lowercase()).ok_or_else(|| {
             LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
         })?;
     let (arch, disasm) = embedded_arch_and_disassembler(sla, pspec, name)?;
@@ -1615,6 +1618,7 @@ pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
         arch,
         disasm,
         compiler_spec: cspec,
+        windows_compiler_spec: windows,
         cpu,
     })
 }
@@ -1633,7 +1637,7 @@ pub fn embedded_thumb_machine(arch_name: &str) -> Option<Result<EmbeddedMachine>
 type EmbeddedSpecification = (
     &'static [u8],
     &'static str,
-    &'static str,
+    (&'static str, Option<&'static str>),
     &'static str,
     &'static str,
 );
@@ -1644,7 +1648,10 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
         "x86-64" | "x86_64" | "x64" | "amd64" => Some((
             sleigh_config::processor_x86::SLA_X86_64,
             sleigh_config::processor_x86::PSPEC_X86_64,
-            sleigh_config::processor_x86::CSPEC_X86_64_GCC,
+            (
+                sleigh_config::processor_x86::CSPEC_X86_64_GCC,
+                Some(sleigh_config::processor_x86::CSPEC_X86_64_WIN),
+            ),
             "x86-64",
             "x86",
         )),
@@ -1652,7 +1659,10 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
         "x86" | "x86-32" | "i386" | "i686" => Some((
             sleigh_config::processor_x86::SLA_X86,
             sleigh_config::processor_x86::PSPEC_X86,
-            sleigh_config::processor_x86::CSPEC_X86GCC,
+            (
+                sleigh_config::processor_x86::CSPEC_X86GCC,
+                Some(sleigh_config::processor_x86::CSPEC_X86WIN),
+            ),
             "x86",
             "x86",
         )),
@@ -1660,7 +1670,10 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
         "aarch64" | "arm64" | "arm64e" => Some((
             sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
             sleigh_config::processor_aarch64::PSPEC_AARCH64,
-            sleigh_config::processor_aarch64::CSPEC_AARCH64,
+            (
+                sleigh_config::processor_aarch64::CSPEC_AARCH64,
+                Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN),
+            ),
             "aarch64",
             "arm",
         )),
@@ -1668,7 +1681,10 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
         "arm" | "arm32" => Some((
             sleigh_config::processor_arm::SLA_ARM8_LE,
             sleigh_config::processor_arm::PSPEC_ARMT,
-            sleigh_config::processor_arm::CSPEC_ARM,
+            (
+                sleigh_config::processor_arm::CSPEC_ARM,
+                Some(sleigh_config::processor_arm::CSPEC_ARM_WIN),
+            ),
             "ARM",
             "arm",
         )),
@@ -1678,7 +1694,10 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
         "arm-thumb" | "thumb" => Some((
             sleigh_config::processor_arm::SLA_ARM8_LE,
             sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
-            sleigh_config::processor_arm::CSPEC_ARM,
+            (
+                sleigh_config::processor_arm::CSPEC_ARM,
+                Some(sleigh_config::processor_arm::CSPEC_ARM_WIN),
+            ),
             "ARM",
             "thumb",
         )),

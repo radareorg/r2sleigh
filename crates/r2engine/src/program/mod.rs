@@ -319,11 +319,21 @@ impl<S: Source + 'static> OpenProgram<S> {
         // fact, so a static ELF that names no C library has it too; which
         // library's declarations apply is `platform`'s question.
         let psabi = kernel(container);
+        // A PE runs under the Windows toolchain's prototypes where the
+        // language names one; anything else under the usual toolchain's.
+        let specification = match container.format {
+            Format::Pe => machine
+                .windows_compiler_spec
+                .unwrap_or(machine.compiler_spec),
+            _ => machine.compiler_spec,
+        };
+        let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
+            .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
+        // M1b moves what a call does onto the profile, once a callee is
+        // asked about every register it may leave alone rather than a list.
         let call_effect = conventions.default_convention().and_then(|convention| {
             crate::native::call_effect(&machine.arch, bits, psabi, convention)
         });
-        let compiler = r2sleigh_lift::profile::LanguageProfile::parse(machine.compiler_spec)
-            .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
         // The specification names the register; the architecture says where it
         // lives, and the lift spells writes to it in those coordinates.
         let link = compiler.return_address.as_ref().and_then(|name| {

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use r2abi::{Convention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
-use r2sleigh_lift::profile::LanguageProfile;
+use r2sleigh_lift::profile::{EntryClass, LanguageProfile, SpecStorage};
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect, SourceConventionSlots,
     SourceDataObject, SourceEndianness, SourceMachineRoles, SourceRoleRegisterNames,
@@ -1868,12 +1868,21 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
             None,
         ));
 
-    let mut argument_slots = Vec::with_capacity(target.convention.args.len());
-    for slot in &target.convention.args {
-        argument_slots.push(storage(target.arch, slot.name())?);
+    // The default prototype's general-purpose register entries, in order:
+    // its argument registers, and its first result register. A float or a
+    // hidden-return entry is no integer argument slot.
+    let prototype = target
+        .compiler
+        .default_prototype()
+        .ok_or(NativeRefusal::Machine(
+            "the compiler specification states no prototype",
+        ))?;
+    let mut argument_slots = Vec::new();
+    for name in general_registers(&prototype.inputs) {
+        argument_slots.push(storage(target.arch, name)?);
     }
-    let result_slot = match target.convention.return_register() {
-        Some(slot) => Some(storage(target.arch, slot.name())?),
+    let result_slot = match general_registers(&prototype.outputs).first() {
+        Some(name) => Some(storage(target.arch, name)?),
         None => None,
     };
     // Where an argument past the registers goes is the compiler specification's
@@ -1897,6 +1906,18 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
         call_effect: target.call_effect.cloned(),
     })
+}
+
+/// A prototype's general-purpose register entries, in order.
+fn general_registers(entries: &[r2sleigh_lift::profile::PrototypeEntry]) -> Vec<&str> {
+    entries
+        .iter()
+        .filter(|entry| entry.class == EntryClass::General)
+        .filter_map(|entry| match &entry.storage {
+            SpecStorage::Register(name) => Some(name.as_str()),
+            SpecStorage::Address { .. } => None,
+        })
+        .collect()
 }
 
 /// What a call does here: what the convention says it destroys and restores,

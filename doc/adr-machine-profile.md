@@ -70,6 +70,14 @@ what an architecture is.**
     the convention preserves), and it moves to r2ssa as that fact;
   - the syscall number register and library prototypes stay radare2's
     data in r2abi, keyed by the profile's language rather than a name;
+  - the red zone, the direction flag's state across a call and the
+    registers a platform reserves are the psABIs', which no specification
+    in the bundle states: they stay r2abi's table of cited rows;
+  - a prototype's `killedbycall` is what a call certainly destroys, not
+    the caller-saved set: x86-64 gcc's lists `RAX`, `RDX`, `XMM0` and no
+    other, and AArch64's only `x8`-`x18`. The engine's call effect is
+    exhaustive ("every register not preserved or reserved may change"), so
+    nothing may rely on an enumeration of clobbered registers (M1b);
   - whether a narrow register write zeroes the rest is r2ssa's
     (`Written::is_conventional_extension`), already structural.
 - **Consumers read it**: `SourceMachineRoles`, `SourceConventionSlots` and
@@ -82,7 +90,8 @@ what an architecture is.**
 | Step | Change | Deletes |
 |------|--------|---------|
 | M0 | `LanguageProfile` in r2sleigh-lift: `.ldefs`, full `.cspec` (prototypes, killedbycall, unaffected, global), `.dwarf`, register lanes from `.sla`; a test that every listed language parses and states a stack pointer, a return address and a default prototype | `CompilerSpec`'s partial parse; the two `.pspec` program counter parsers |
-| M1 | `native::machine()` builds roles, convention slots and call effects from the profile | r2abi `Conventions` and its sdb files; `platform_registers` |
+| M1a | Argument and result slots from the default prototype's general register entries; a PE runs under the language's Windows specification | the slots' sdb source |
+| M1b | A callee is asked whether it leaves alone every register a caller may read that the convention does not preserve, not a fixed list; then call effects from the profile (preserved: `unaffected` less the return address register; clobbered: argument, result and `killedbycall` registers and the return address register, less what is preserved) | r2abi `Conventions` and its sdb files |
 | M2 | r2ssa reads roles and slots only | `abi.rs` alias tables, `from_arch_spec`, `call_argument_register_defs`/`return_read_register_defs` by name, `call_moves_stack_pointer` by family, the direction-flag class check |
 | M3 | r2types reads the profile through the facts | `prepare.rs` alias and frame tables, `arrays.rs` prefixes, `signature_infer` convention inference by name, `assumptions.rs` lists |
 | M4 | r2dec spells from the profile's register file | the label list, per-architecture `sp`/`fp`/argument/result names, the x86-64 default |

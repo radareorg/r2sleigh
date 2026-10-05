@@ -63,7 +63,9 @@ struct Machine {
     conventions: Conventions,
     /// What each convention says a call does to this machine's registers.
     effects: BTreeMap<String, Option<SourceCallEffect>>,
-    compiler: LanguageProfile,
+    /// The compiler specification each convention runs under: Microsoft x64
+    /// (`ms`) under the Windows toolchain's, every other under the usual one.
+    compilers: BTreeMap<String, LanguageProfile>,
     prototypes: Prototypes,
     declarations: r2abi::Declarations,
 }
@@ -77,6 +79,19 @@ impl Machine {
     fn on(sleigh: &str, family: &str, bits: u32, platform: Platform) -> Self {
         let embedded = r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine");
         let conventions = Conventions::for_arch(family, bits).expect("conventions");
+        let compilers = conventions
+            .names()
+            .map(|name| {
+                let specification = match name {
+                    "ms" => embedded
+                        .windows_compiler_spec
+                        .expect("a Windows specification"),
+                    _ => embedded.compiler_spec,
+                };
+                let profile = LanguageProfile::parse(specification).expect("parses");
+                (name.to_owned(), profile)
+            })
+            .collect::<BTreeMap<_, _>>();
         let effects = conventions
             .names()
             .map(|name| {
@@ -87,13 +102,11 @@ impl Machine {
                 )
             })
             .collect();
-        let compiler =
-            LanguageProfile::parse(embedded.compiler_spec).expect("the specification parses");
         Self {
             embedded,
             conventions,
             effects,
-            compiler,
+            compilers,
             prototypes: Prototypes::embedded(),
             declarations: r2abi::Declarations::default(),
         }
@@ -116,7 +129,7 @@ impl Machine {
             cpu: self.embedded.cpu,
             convention: self.conventions.get(name).expect("the named convention"),
             call_effect: self.effects[name].as_ref(),
-            compiler: &self.compiler,
+            compiler: &self.compilers[name],
             prototypes: &self.prototypes,
             declarations: &self.declarations,
         }
@@ -184,7 +197,16 @@ impl Program for Fixture {
 #[test]
 fn a_function_is_decompiled_from_bytes_alone() {
     let machine = Machine::new("x86-64", "x86-64", 64);
-    assert_eq!(machine.compiler.stack_pointer.as_deref(), Some("RSP"));
+    assert_eq!(
+        machine
+            .compilers
+            .values()
+            .next()
+            .expect("a compiler")
+            .stack_pointer
+            .as_deref(),
+        Some("RSP")
+    );
 
     let target = machine.target();
     let program = Fixture {
@@ -547,7 +569,16 @@ const AARCH64_ADD_ONE: &[u8] = &[
 fn a_function_is_decompiled_on_aarch64_too() {
     let machine = Machine::new("aarch64", "aarch64", 64);
     // The stack pointer is the specification's to name on every machine.
-    assert_eq!(machine.compiler.stack_pointer.as_deref(), Some("sp"));
+    assert_eq!(
+        machine
+            .compilers
+            .values()
+            .next()
+            .expect("a compiler")
+            .stack_pointer
+            .as_deref(),
+        Some("sp")
+    );
 
     let target = machine.target();
     let program = Fixture {
