@@ -135,9 +135,9 @@ Order
 -----
 
 0. **G0**: the gates real.
-1. **B**: one byte relation (blocks M1d, P4, P5 and R).
+1. **B**: one byte relation (blocks P4, P5 and R).
 2. **L**: layering, beside B.
-3. **M** (M1d–M6), beside **F2.1–F2.5** and **Q1–Q2**.
+3. **M** (M2–M6), beside **F2.1–F2.5** and **Q1–Q2**.
 4. **R1**: expressions as terms.
 5. **P4**, then **P5**, then **R** (R0, R2–R4).
 6. **Q3–Q4** with **P6**, then **I**.
