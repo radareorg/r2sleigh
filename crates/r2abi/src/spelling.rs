@@ -264,7 +264,7 @@ fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
             "off64_t" => Some((Signed, Width::Bits(64))),
             _ => None,
         }),
-        Platform::Unknown => None,
+        Platform::Windows | Platform::Unknown => None,
     })
 }
 

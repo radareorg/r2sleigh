@@ -747,8 +747,10 @@ struct Lift<'a> {
     program_counter: Option<Varnode>,
     /// The first byte of the stack, above everything the program maps; every byte from it on is mapped.
     stack: u64,
-    /// The registers the default convention says a callee may destroy.
-    clobbered: Vec<Varnode>,
+    /// The registers a call leaves as it found them: what the default
+    /// prototype preserves and what the platform reserves. Every other
+    /// register may come back changed.
+    kept: Vec<Varnode>,
     endian: Endianness,
     names: BTreeMap<(u64, u32), String>,
     registers: BTreeMap<String, Varnode>,
@@ -797,17 +799,7 @@ impl<'a> Lift<'a> {
             .into_iter()
             .chain(tracked)
             .collect::<Vec<_>>();
-        let conventions = r2abi::Conventions::for_arch(&machine.arch.name, container.arch.bits);
-        let clobbered = conventions
-            .as_ref()
-            .and_then(r2abi::Conventions::default_convention)
-            .map_or_else(Vec::new, |convention| {
-                convention
-                    .clobbered
-                    .iter()
-                    .filter_map(|name| named(name))
-                    .collect()
-            });
+        let kept = kept_across_a_call(machine, container.arch.bits);
         let ops = || body.blocks.iter().flat_map(|block| &block.lifted.ops);
         let around = |constant: u64| {
             let constant = u128::from(constant);
@@ -837,7 +829,7 @@ impl<'a> Lift<'a> {
             pinned,
             program_counter,
             stack,
-            clobbered,
+            kept,
             endian,
             names: names.collect(),
             registers,
@@ -1574,11 +1566,10 @@ impl Following {
             _ => None,
         };
         match op {
-            // A register the convention clobbers holds nothing of the caller's once the callee runs.
+            // A register the call does not keep holds nothing of the caller's once the callee runs.
             R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
-                let clobbered =
-                    |held: &Varnode| lift.clobbered.iter().any(|register| covers(register, held));
-                self.holders.retain(|held| !clobbered(held));
+                let kept = |held: &Varnode| lift.kept.iter().any(|register| covers(register, held));
+                self.holders.retain(kept);
                 return self.holders.is_empty().then_some(Ok(()));
             }
             // The claim is the function's: what leaves it is not built on inside it.
@@ -1596,4 +1587,23 @@ impl Following {
         }
         None
     }
+}
+
+/// The registers a call leaves as it found them under the default
+/// prototype: what it preserves and what the platform reserves.
+fn kept_across_a_call(machine: &r2sleigh_lift::EmbeddedMachine, bits: u32) -> Vec<Varnode> {
+    let compiler = r2sleigh_lift::profile::LanguageProfile::parse(machine.compiler_spec)
+        .expect("the compiler specification parses");
+    let effect =
+        r2engine::native::call_effect(&machine.arch, bits, r2abi::Platform::Unknown, &compiler);
+    effect
+        .iter()
+        .flat_map(|effect| effect.preserved().iter().chain(effect.system_reserved()))
+        .map(|storage| Varnode {
+            space: SpaceId::Register,
+            offset: storage.offset,
+            size: storage.size,
+            meta: None,
+        })
+        .collect()
 }

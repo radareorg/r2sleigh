@@ -140,11 +140,11 @@ impl<'a> Placement<'a> {
             let slot = match self.class(declared.graph, parameter.ty) {
                 Ok(Class::Float) => {
                     floats += 1;
-                    self.target
-                        .convention
-                        .float_args
+                    self.machine
+                        .slots
+                        .float_argument_slots()
                         .get(floats - 1)
-                        .and_then(|slot| storage(self.target.arch, slot.name()).ok())
+                        .copied()
                 }
                 Ok(Class::Integer) => {
                     integers += 1;
@@ -184,12 +184,7 @@ impl<'a> Placement<'a> {
             return (SourceFunctionReturn::Void, None);
         }
         let storage = match self.class(declared.graph, returns) {
-            Ok(Class::Float) => self
-                .target
-                .convention
-                .float_return
-                .as_ref()
-                .and_then(|slot| storage(self.target.arch, slot.name()).ok()),
+            Ok(Class::Float) => self.machine.slots.float_result_slot(),
             Ok(Class::Integer) => self.machine.slots.result_slot(),
             Err(reason) => {
                 r2il::refusal_evidence!(

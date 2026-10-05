@@ -3549,6 +3549,11 @@ pub struct SourceConventionSlots {
     abi_class: SourceAbiClass,
     argument_slots: Box<[CanonicalStorageId]>,
     result_slot: Option<CanonicalStorageId>,
+    /// The floating-point argument registers, in order, counted apart from
+    /// the integer ones.
+    float_argument_slots: Box<[CanonicalStorageId]>,
+    /// Where a floating-point result is left.
+    float_result_slot: Option<CanonicalStorageId>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
@@ -3613,6 +3618,33 @@ impl SourceConventionSlots {
         self
     }
 
+    /// Record the floating-point slots, refusing what is no register.
+    pub fn with_float_slots(
+        mut self,
+        arguments: impl IntoIterator<Item = CanonicalStorageId>,
+        result: Option<CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let arguments = arguments.into_iter().collect::<Box<[_]>>();
+        if arguments
+            .iter()
+            .chain(&result)
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        self.float_argument_slots = arguments;
+        self.float_result_slot = result;
+        Ok(self)
+    }
+
+    pub const fn float_argument_slots(&self) -> &[CanonicalStorageId] {
+        &self.float_argument_slots
+    }
+
+    pub const fn float_result_slot(&self) -> Option<CanonicalStorageId> {
+        self.float_result_slot
+    }
+
     /// Whether the variadic tail starts on the stack whatever registers are
     /// free, as Apple's arm64 ABI has it.
     pub const fn variadic_tail_on_stack(&self) -> bool {
@@ -3654,6 +3686,8 @@ impl SourceConventionSlots {
             abi_class,
             argument_slots: argument_slots.into_boxed_slice(),
             result_slot,
+            float_argument_slots: Box::default(),
+            float_result_slot: None,
             stack_arguments: None,
             variadic_tail_on_stack: false,
         })

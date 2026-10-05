@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2abi::{Convention, Prototypes};
+use r2abi::{CallingConvention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{EntryClass, LanguageProfile, SpecStorage};
@@ -134,9 +134,14 @@ pub struct NativeTarget<'a> {
     /// tuple spells it. `arm` and `thumb` share an architecture, and this is
     /// the one fact the trusted lift has to tell them apart.
     pub cpu: &'a str,
-    /// The convention every function is assumed to use, which is the one the
-    /// data declares as the default until something says otherwise.
-    pub convention: &'a Convention,
+    /// What the platform's ABI says of the convention every function is
+    /// assumed to use that the compiler specification does not: its name,
+    /// its red zone, where a variadic tail goes.
+    pub convention: &'a CallingConvention,
+    /// radare2's convention data, read now only for the floating-point
+    /// argument and result registers; M1d takes those from the compiler
+    /// specification and deletes it.
+    pub float_convention: &'a r2abi::Convention,
     /// What that convention says a call does here, resolved once by [`call_effect`].
     pub call_effect: Option<&'a SourceCallEffect>,
     pub compiler: &'a LanguageProfile,
@@ -1851,7 +1856,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         r2sleigh_lift::profile::StackGrowth::Lower => SourceStackGrowth::LowerAddresses,
         r2sleigh_lift::profile::StackGrowth::Higher => SourceStackGrowth::HigherAddresses,
     };
-    let redzone = u32::try_from(target.convention.redzone_bytes).unwrap_or(0);
+    let redzone = target.convention.red_zone_bytes;
     let roles = SourceMachineRoles::new(Some(return_address), Some(stack_pointer))
         .and_then(|roles| {
             roles.with_stack_allocation_contract(
@@ -1868,33 +1873,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
             None,
         ));
 
-    // The default prototype's general-purpose register entries, in order:
-    // its argument registers, and its first result register. A float or a
-    // hidden-return entry is no integer argument slot.
-    let prototype = target
-        .compiler
-        .default_prototype()
-        .ok_or(NativeRefusal::Machine(
-            "the compiler specification states no prototype",
-        ))?;
-    let mut argument_slots = Vec::new();
-    for name in general_registers(&prototype.inputs) {
-        argument_slots.push(storage(target.arch, name)?);
-    }
-    let result_slot = match general_registers(&prototype.outputs).first() {
-        Some(name) => Some(storage(target.arch, name)?),
-        None => None,
-    };
-    // Where an argument past the registers goes is the compiler specification's
-    // own statement: its stack parameter entry carries the first offset and the
-    // step between entries.
-    let stack_arguments = target
-        .compiler
-        .stack_arguments
-        .and_then(|(offset, align)| r2source::SourceStackArgumentPlacement::new(offset, align));
-    let slots = SourceConventionSlots::new(&target.convention.name, argument_slots, result_slot)
-        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
-        .with_stack_arguments(stack_arguments);
+    let slots = convention_slots(target)?;
 
     Ok(NativeMachine {
         arch_id: family.to_owned(),
@@ -1908,11 +1887,65 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
     })
 }
 
-/// A prototype's general-purpose register entries, in order.
-fn general_registers(entries: &[r2sleigh_lift::profile::PrototypeEntry]) -> Vec<&str> {
+/// Where the convention leaves each argument and result: the compiler
+/// specification's registers and stack placement, and what the ABI adds.
+fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, NativeRefusal> {
+    // The default prototype's general-purpose register entries, in order:
+    // its argument registers, and its first result register. A float or a
+    // hidden-return entry is no integer argument slot.
+    let prototype = target
+        .compiler
+        .default_prototype()
+        .ok_or(NativeRefusal::Machine(
+            "the compiler specification states no prototype",
+        ))?;
+    let place = |names: Vec<&str>| {
+        names
+            .into_iter()
+            .map(|name| storage(target.arch, name))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let argument_slots = place(registers_of(&prototype.inputs, EntryClass::General))?;
+    let result_slot = place(registers_of(&prototype.outputs, EntryClass::General))?
+        .first()
+        .copied();
+    // Each float slot the data spells as one register of this machine, up to
+    // the first it does not: a declared float past that is not placed.
+    let float_slots = target
+        .float_convention
+        .float_args
+        .iter()
+        .map_while(|slot| storage(target.arch, slot.name()).ok())
+        .collect::<Vec<_>>();
+    let float_result = target
+        .float_convention
+        .float_return
+        .as_ref()
+        .and_then(|slot| storage(target.arch, slot.name()).ok());
+    // Where an argument past the registers goes is the compiler specification's
+    // own statement: its stack parameter entry carries the first offset and the
+    // step between entries.
+    let stack_arguments = target
+        .compiler
+        .stack_arguments
+        .and_then(|(offset, align)| r2source::SourceStackArgumentPlacement::new(offset, align));
+    Ok(
+        SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
+            .and_then(|slots| slots.with_float_slots(float_slots, float_result))
+            .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
+            .with_stack_arguments(stack_arguments)
+            .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack),
+    )
+}
+
+/// A prototype's register entries of one class, in order.
+fn registers_of(
+    entries: &[r2sleigh_lift::profile::PrototypeEntry],
+    class: EntryClass,
+) -> Vec<&str> {
     entries
         .iter()
-        .filter(|entry| entry.class == EntryClass::General)
+        .filter(|entry| entry.class == class)
         .filter_map(|entry| match &entry.storage {
             SpecStorage::Register(name) => Some(name.as_str()),
             SpecStorage::Address { .. } => None,
@@ -1981,6 +2014,9 @@ pub fn call_effect(
         };
         into.extend(covered_runs(storage, row));
     }
+    // A specification may restate what an ABI row adds: Windows x64 lists DF.
+    preserved.sort_unstable();
+    preserved.dedup();
     let mut clobbered = registers(
         &mut prototype
             .inputs

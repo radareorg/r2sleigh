@@ -276,6 +276,8 @@ pub enum Platform {
     Android,
     /// Apple's platforms, whose C library is libSystem's.
     Darwin,
+    /// Windows, whose ABI is Microsoft's; no C library here declares its own.
+    Windows,
     /// Nothing the container states names one.
     Unknown,
 }
@@ -292,7 +294,7 @@ impl Prototypes {
             Platform::Linux => Some(EMBEDDED_LINUX),
             Platform::Android => Some(EMBEDDED_ANDROID),
             Platform::Darwin => Some(EMBEDDED_DARWIN),
-            Platform::Unknown => None,
+            Platform::Windows | Platform::Unknown => None,
         };
         Self::parse_all([EMBEDDED].into_iter().chain(own), platform)
     }

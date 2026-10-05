@@ -36,6 +36,8 @@ struct Assembled {
     /// Which architecture and compiler specification this was built for, so a
     /// second instruction set in one program gets its own rather than this one.
     machine: (String, &'static str),
+    convention: &'static r2abi::CallingConvention,
+    /// radare2's convention data, for the float slots alone until M1d.
     conventions: r2abi::Conventions,
     /// What the default convention says a call does; both instruction sets share one register file.
     call_effect: Option<r2source::SourceCallEffect>,
@@ -312,13 +314,15 @@ impl<S: Source + 'static> OpenProgram<S> {
         }
         let container = self.source().container();
         let bits = container.arch.bits;
-        let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
-            .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
         // The system's ABI says which register it reserves for the thread
         // pointer and which control registers it makes callee-saved. A system
         // fact, so a static ELF that names no C library has it too; which
         // library's declarations apply is `platform`'s question.
+        let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
+            .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
         let psabi = kernel(container);
+        let convention = r2abi::calling_convention(key.0.as_str(), bits, psabi)
+            .ok_or_else(|| format!("no calling convention for {} {bits}", key.0))?;
         // A PE runs under the Windows toolchain's prototypes where the
         // language names one; anything else under the usual toolchain's.
         let specification = match container.format {
@@ -363,6 +367,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let prototypes = r2abi::Prototypes::embedded_for(platform(container));
         self.assembled = Some(Assembled {
             machine: key,
+            convention,
             conventions,
             call_effect,
             compiler,
@@ -393,7 +398,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             arch: &machine.arch,
             disasm: &machine.disasm,
             cpu: machine.cpu,
-            convention: assembled
+            convention: assembled.convention,
+            float_convention: assembled
                 .conventions
                 .default_convention()
                 .ok_or("the convention data names no default")?,
@@ -819,6 +825,7 @@ pub(super) fn kernel(container: &Container) -> r2abi::Platform {
     use r2abi::Platform;
     match container.format {
         Format::MachO => Platform::Darwin,
+        Format::Pe => Platform::Windows,
         Format::Elf => {
             let other = container.platform.iter().any(
                 |evidence| matches!(evidence, PlatformEvidence::OsAbi(abi) if *abi != ELFOSABI_GNU),

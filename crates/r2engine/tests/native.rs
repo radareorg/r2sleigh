@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{Conventions, Platform, Prototypes};
+use r2abi::{CallingConvention, Conventions, Platform, Prototypes, calling_convention};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
@@ -60,14 +60,22 @@ const SPILLED_SWITCH: &[u8] = &[
 /// One embedded machine with what the engine reads beside it.
 struct Machine {
     embedded: EmbeddedMachine,
-    conventions: Conventions,
-    /// What each convention says a call does to this machine's registers.
-    effects: BTreeMap<String, Option<SourceCallEffect>>,
-    /// The compiler specification each convention runs under: Microsoft x64
-    /// (`ms`) under the Windows toolchain's, every other under the usual one.
-    compilers: BTreeMap<String, LanguageProfile>,
+    /// The name of the convention the platform defaults to.
+    default: &'static str,
+    /// Each convention the machine is tried under, by radare2's name for it:
+    /// the default, and Microsoft x64 under the Windows toolchain's
+    /// specification where the language has one and it differs.
+    conventions: BTreeMap<&'static str, Under>,
     prototypes: Prototypes,
     declarations: r2abi::Declarations,
+}
+
+/// One convention and what the engine reads beside it.
+struct Under {
+    convention: &'static CallingConvention,
+    floats: r2abi::Convention,
+    compiler: LanguageProfile,
+    effect: Option<SourceCallEffect>,
 }
 
 impl Machine {
@@ -78,34 +86,32 @@ impl Machine {
     /// The machine as a platform's ABI describes it, beyond its conventions.
     fn on(sleigh: &str, family: &str, bits: u32, platform: Platform) -> Self {
         let embedded = r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine");
-        let conventions = Conventions::for_arch(family, bits).expect("conventions");
-        let compilers = conventions
-            .names()
-            .map(|name| {
-                let specification = match name {
-                    "ms" => embedded
-                        .windows_compiler_spec
-                        .expect("a Windows specification"),
-                    _ => embedded.compiler_spec,
-                };
-                let profile = LanguageProfile::parse(specification).expect("parses");
-                (name.to_owned(), profile)
-            })
-            .collect::<BTreeMap<_, _>>();
-        let effects = compilers
-            .iter()
-            .map(|(name, profile)| {
-                (
-                    name.clone(),
-                    call_effect(&embedded.arch, bits, platform, profile),
-                )
-            })
-            .collect();
+        let under = |platform: Platform, specification: &str| {
+            let compiler = LanguageProfile::parse(specification).expect("parses");
+            let convention = calling_convention(family, bits, platform).expect("a convention");
+            let floats = Conventions::for_arch(family, bits)
+                .and_then(|conventions| conventions.get(convention.name).cloned())
+                .expect("the convention data names it");
+            Under {
+                convention,
+                floats,
+                effect: call_effect(&embedded.arch, bits, platform, &compiler),
+                compiler,
+            }
+        };
+        let default = under(platform, embedded.compiler_spec);
+        let name = default.convention.name;
+        let mut conventions = BTreeMap::from([(name, default)]);
+        if let Some(windows) = embedded.windows_compiler_spec {
+            let ms = under(Platform::Windows, windows);
+            if ms.convention.name != name {
+                conventions.insert(ms.convention.name, ms);
+            }
+        }
         Self {
             embedded,
+            default: name,
             conventions,
-            effects,
-            compilers,
             prototypes: Prototypes::embedded(),
             declarations: r2abi::Declarations::default(),
         }
@@ -113,25 +119,28 @@ impl Machine {
 
     /// The machine under its default convention.
     fn target(&self) -> NativeTarget<'_> {
-        self.under(
-            self.conventions
-                .default_name()
-                .expect("a default convention"),
-        )
+        self.under(self.default)
     }
 
     /// The machine under one named convention.
     fn under(&self, name: &str) -> NativeTarget<'_> {
+        let under = &self.conventions[name];
         NativeTarget {
             arch: &self.embedded.arch,
             disasm: &self.embedded.disasm,
             cpu: self.embedded.cpu,
-            convention: self.conventions.get(name).expect("the named convention"),
-            call_effect: self.effects[name].as_ref(),
-            compiler: &self.compilers[name],
+            convention: under.convention,
+            float_convention: &under.floats,
+            call_effect: under.effect.as_ref(),
+            compiler: &under.compiler,
             prototypes: &self.prototypes,
             declarations: &self.declarations,
         }
+    }
+
+    /// The compiler specification of the default convention.
+    fn compiler(&self) -> &LanguageProfile {
+        &self.conventions[self.default].compiler
     }
 }
 
@@ -196,16 +205,7 @@ impl Program for Fixture {
 #[test]
 fn a_function_is_decompiled_from_bytes_alone() {
     let machine = Machine::new("x86-64", "x86-64", 64);
-    assert_eq!(
-        machine
-            .compilers
-            .values()
-            .next()
-            .expect("a compiler")
-            .stack_pointer
-            .as_deref(),
-        Some("RSP")
-    );
+    assert_eq!(machine.compiler().stack_pointer.as_deref(), Some("RSP"));
 
     let target = machine.target();
     let program = Fixture {
@@ -568,16 +568,7 @@ const AARCH64_ADD_ONE: &[u8] = &[
 fn a_function_is_decompiled_on_aarch64_too() {
     let machine = Machine::new("aarch64", "aarch64", 64);
     // The stack pointer is the specification's to name on every machine.
-    assert_eq!(
-        machine
-            .compilers
-            .values()
-            .next()
-            .expect("a compiler")
-            .stack_pointer
-            .as_deref(),
-        Some("sp")
-    );
+    assert_eq!(machine.compiler().stack_pointer.as_deref(), Some("sp"));
 
     let target = machine.target();
     let program = Fixture {
@@ -2900,13 +2891,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
         ("arm", "arm", 32),
     ] {
         let machine = Machine::new(sleigh, family, bits);
-        let name = machine
-            .conventions
-            .default_convention()
-            .expect("a default convention")
-            .name
-            .clone();
-        let prototype = machine.compilers[&name]
+        let prototype = machine
+            .compiler()
             .default_prototype()
             .expect("a default prototype");
         let named = prototype
@@ -2922,7 +2908,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             })
             .collect::<Vec<_>>();
         assert!(!named.is_empty(), "{sleigh}");
-        let effect = machine.effects[&name]
+        let effect = machine.conventions[machine.default]
+            .effect
             .as_ref()
             .expect("the default prototype states a call effect");
         for register in named {
