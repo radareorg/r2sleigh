@@ -234,7 +234,7 @@ fn a_logical_low_byte_return_renders() {
             None,
         ),
     );
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
     assert!(
         !output.contains("fallback") && !output.contains("native rendering refused"),
         "an exact logical low-byte result must render: {output}"
@@ -375,7 +375,7 @@ fn a_restored_stack_pointer_renders() {
         prepared,
         (r2types::DecompileRouteKind::Standard, "restore route", None),
     );
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let output = decompiler.decompile_input(&input);
     // The restore performs nothing and says so: its two sides are one
     // object, licensed by the convention, so both its read and its write
@@ -494,7 +494,7 @@ fn an_unused_restored_stack_pointer_renders() {
         prepared,
         (r2types::DecompileRouteKind::Standard, "restore route", None),
     );
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
     assert!(
         !output.contains("native render refusal"),
         "an unused restored carrier must not refuse the function: {output}"
@@ -611,56 +611,6 @@ fn signature_spec(
             })
             .collect(),
     }
-}
-
-#[test]
-fn test_decompiler_config_default() {
-    let config = DecompilerConfig::default();
-    assert_eq!(config.ptr_size, 64);
-    assert_eq!(config.sp_name, "rsp");
-    assert_eq!(config.fp_name, "rbp");
-}
-
-#[test]
-fn test_decompiler_config_x86() {
-    let config = DecompilerConfig::x86();
-    assert_eq!(config.ptr_size, 32);
-    assert_eq!(config.sp_name, "esp");
-    assert_eq!(config.fp_name, "ebp");
-}
-
-#[test]
-fn test_decompiler_config_arm() {
-    let config = DecompilerConfig::arm();
-    assert_eq!(config.ptr_size, 32);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "fp");
-}
-
-#[test]
-fn test_decompiler_config_aarch64() {
-    let config = DecompilerConfig::aarch64();
-    assert_eq!(config.ptr_size, 64);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "x29");
-    assert_eq!(config.arg_regs[0], "x0");
-    assert_eq!(config.ret_regs[0], "x0");
-}
-
-#[test]
-fn test_decompiler_config_riscv32() {
-    let config = DecompilerConfig::riscv32();
-    assert_eq!(config.ptr_size, 32);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "s0");
-}
-
-#[test]
-fn test_decompiler_config_riscv64() {
-    let config = DecompilerConfig::riscv64();
-    assert_eq!(config.ptr_size, 64);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "s0");
 }
 
 #[test]
@@ -904,7 +854,7 @@ fn split_block_observation_is_not_assigned_to_its_first_child() {
             CStmt::Return(Some(CExpr::IntLit(2))),
         ]))
         .expect("block observation");
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let body = decompiler.stmt_to_vec(block);
     let mut function = CFunction::new(
         "split",
@@ -960,7 +910,7 @@ fn an_engine_chosen_fallback_route_does_not_pre_empt_native_lowering() {
         ),
     );
 
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
 
     assert!(
         output.starts_with("/* r2dec refused stable_demo: operation lowering refusal:"),
@@ -996,7 +946,7 @@ fn a_facts_owned_fallback_route_does_not_pre_empt_native_lowering() {
         ),
     );
 
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
 
     assert!(
         output.starts_with("/* r2dec refused stable_demo: operation lowering refusal:"),
@@ -1190,7 +1140,7 @@ fn raw_fallback_comments_regenerate_and_sanitize_hostile_text() {
         ),
     );
 
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
     assert!(
         output.contains("r2dec refused bad____int_injected:"),
         "a hostile source name must render as one C identifier: {output}"
@@ -1227,7 +1177,7 @@ fn a_fallback_route_residualizes_the_tree_to_comments() {
         ),
     );
 
-    let audit = audited(&Decompiler::new(DecompilerConfig::x86_64()), &input);
+    let audit = audited(&Decompiler::new(DecompilerConfig::default()), &input);
     let built = audit.rendered().function();
 
     assert!(
@@ -1268,7 +1218,7 @@ fn malformed_return_boundary_refuses_before_effect_audit() {
         ),
     );
 
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let audited = audited(&decompiler, &input);
     assert_eq!(
         audited.render_refusal(),
@@ -1356,7 +1306,7 @@ fn native_standard_path_renders_its_internal_build() {
             .map(|fact| fact.value),
         Some(return_value)
     );
-    let config = DecompilerConfig::x86_64();
+    let config = DecompilerConfig::default();
     let public_decompiler = Decompiler::new(config.clone());
     let internal_decompiler =
         Decompiler::new(config.clone()).with_context(input.context_projection());
@@ -1529,7 +1479,7 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
         peers[2].clone(),
     ];
     let (baseline_spans, baseline_input) = exact_diamond_input(&baseline_blocks);
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let baseline = audited(&decompiler, &baseline_input);
     let baseline_binding_signature = binding_signature(&baseline_input);
     let baseline_values = baseline_input
@@ -1634,7 +1584,7 @@ fn rendering_adds_no_work_control_decision_after_its_final_poll() {
             None,
         ),
     );
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let baseline = CountingControl {
         polls: std::cell::Cell::new(0),
         stop_at: None,
@@ -1698,7 +1648,7 @@ fn audited_partial_retains_the_same_product_without_extra_polls() {
             None,
         ),
     );
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
 
     let baseline_control = CountingControl {
         polls: std::cell::Cell::new(0),

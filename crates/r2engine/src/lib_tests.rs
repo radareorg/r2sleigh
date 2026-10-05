@@ -460,8 +460,6 @@ fn engine_render_target_canonicalizes_arch_without_renderer_config_type() {
 
     let riscv = EngineRenderTarget::for_arch_name("riscv32", 32).to_decompiler_config();
     assert_eq!(riscv.ptr_size, 32);
-    assert_eq!(riscv.fp_name, "s0");
-    assert_eq!(riscv.arg_regs.first().map(String::as_str), Some("a0"));
 
     let mut arm64 = r2il::ArchSpec::new("arm64");
     arm64.addr_size = 8;

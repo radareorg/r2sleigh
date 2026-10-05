@@ -1940,7 +1940,7 @@ mod tests {
             .with_name("seventh"),
         );
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
+        let audit = audited(crate::DecompilerConfig::default(), &input);
         assert_eq!(audit.render_refusal(), None, "{}", audit.output());
         let signature = audit
             .output()
@@ -1999,7 +1999,7 @@ mod tests {
         };
         let fixture = SourceOwnedPreparedFixture::new_with_context(prepared, context);
         let input = crate::DecompilerInput::new(fixture.facts);
-        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
+        let audit = audited(crate::DecompilerConfig::default(), &input);
         assert_eq!(audit.render_refusal(), None, "{}", audit.output());
         let output = audit.output();
         assert!(
@@ -2045,7 +2045,7 @@ mod tests {
                 returns_value,
             );
             let input = crate::DecompilerInput::new(prepared.facts.clone());
-            let audit = audited(crate::DecompilerConfig::x86_64(), &input);
+            let audit = audited(crate::DecompilerConfig::default(), &input);
             assert_eq!(audit.render_refusal(), None, "{}", audit.output());
             let output = audit.output();
             assert!(
@@ -2067,7 +2067,7 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(std::slice::from_ref(&thunk), &arch)
             .with_name("unresolved_dispatch");
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
+        let audit = audited(crate::DecompilerConfig::default(), &input);
         assert!(
             !audit.output().contains("fileno(") && !audit.output().contains("import stub"),
             "{}",
@@ -2109,7 +2109,7 @@ mod tests {
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch).with_name("gap_between");
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
+        let audit = audited(crate::DecompilerConfig::default(), &input);
         let output = audit.output();
 
         assert_eq!(audit.render_refusal(), None, "{output}");
@@ -2175,13 +2175,13 @@ mod tests {
         }));
 
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
+        let audit = audited(crate::DecompilerConfig::default(), &input);
 
         // An operation the machine projection cannot represent is marked
         // where it stands rather than taking the function down with it. The
         // cells it owns move from the refused column, which nothing in the
         // output accounted for, to the gap column, which the output states.
-        let product = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
+        let product = crate::Decompiler::new(crate::DecompilerConfig::default())
             .build_product_from_input_with_control(
                 &input,
                 &r2ssa::SsaExecutionControl::default(),

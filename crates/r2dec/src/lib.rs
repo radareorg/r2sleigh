@@ -1200,18 +1200,6 @@ fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunc
         ))
 }
 
-pub fn normalize_sig_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
-    let arch = arch?;
-    let lower = arch.name.to_ascii_lowercase();
-    if matches!(lower.as_str(), "x86-64" | "x86_64" | "x64" | "amd64") {
-        return Some("x86-64".to_string());
-    }
-    if matches!(lower.as_str(), "x86" | "x86-32" | "i386" | "i686") {
-        return Some("x86".to_string());
-    }
-    Some(arch.name.clone())
-}
-
 /// Decompiler configuration.
 #[derive(Debug, Clone)]
 pub struct DecompilerConfig {
@@ -1219,156 +1207,20 @@ pub struct DecompilerConfig {
     pub codegen: CodeGenConfig,
     /// Pointer size in bits.
     pub ptr_size: u32,
-    /// Stack pointer register name.
-    pub sp_name: String,
-    /// Frame pointer register name.
-    pub fp_name: String,
-    /// Ordered argument registers for the active ABI.
-    pub arg_regs: Vec<String>,
-    /// Return-value registers for the active ABI.
-    pub ret_regs: Vec<String>,
 }
 
 impl Default for DecompilerConfig {
     fn default() -> Self {
-        Self {
-            codegen: CodeGenConfig::default(),
-            ptr_size: 64,
-            sp_name: "rsp".to_string(),
-            fp_name: "rbp".to_string(),
-            arg_regs: vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ],
-            ret_regs: vec![
-                "rax".to_string(),
-                "eax".to_string(),
-                "xmm0".to_string(),
-                "xmm0_qa".to_string(),
-                "xmm0_qb".to_string(),
-                "st0".to_string(),
-            ],
-        }
+        Self::for_pointer_bits(64)
     }
 }
 
 impl DecompilerConfig {
-    pub fn for_arch_name(arch_name: &str, ptr_bits: u32) -> Self {
-        match (arch_name, ptr_bits) {
-            ("x86", 32) | ("x86-32", _) => Self::x86(),
-            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => Self::x86_64(),
-            ("arm", _) | ("ARM", _) if ptr_bits == 32 => Self::arm(),
-            ("aarch64", _) | ("arm64", _) | ("ARM64", _) => Self::aarch64(),
-            ("riscv32", _) | ("rv32", _) | ("rv32gc", _) => Self::riscv32(),
-            ("riscv64", _) | ("rv64", _) | ("rv64gc", _) => Self::riscv64(),
-            ("riscv", _) if ptr_bits == 32 => Self::riscv32(),
-            ("riscv", _) => Self::riscv64(),
-            _ => Self::unrecognized(ptr_bits),
-        }
-    }
-
-    /// A target whose registers this renderer does not know.
-    ///
-    /// Falling back to the defaults meant falling back to x86-64: an
-    /// unrecognized target was rendered with rsp, rbp and the SysV argument
-    /// registers, naming registers it does not have. Naming none of them is
-    /// the honest answer, and it leaves the residual machinery to say so.
-    fn unrecognized(ptr_bits: u32) -> Self {
+    /// A configuration for a machine whose pointers are this wide.
+    pub fn for_pointer_bits(ptr_size: u32) -> Self {
         Self {
-            ptr_size: ptr_bits,
-            sp_name: String::new(),
-            fp_name: String::new(),
-            arg_regs: Vec::new(),
-            ret_regs: Vec::new(),
-            ..Self::default()
-        }
-    }
-
-    pub fn for_arch(arch: Option<&r2il::ArchSpec>) -> (String, u32, Self) {
-        let arch_name = normalize_sig_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-        let ptr_bits = arch.map(|spec| spec.addr_size * 8).unwrap_or(64);
-        let config = Self::for_arch_name(&arch_name, ptr_bits);
-        (arch_name, ptr_bits, config)
-    }
-
-    /// Create a configuration for 32-bit x86.
-    pub fn x86() -> Self {
-        Self {
-            ptr_size: 32,
-            sp_name: "esp".to_string(),
-            fp_name: "ebp".to_string(),
-            arg_regs: vec![],
-            ret_regs: vec!["eax".to_string(), "xmm0".to_string(), "st0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for 64-bit x86.
-    pub fn x86_64() -> Self {
-        Self::default()
-    }
-
-    /// Create a configuration for ARM.
-    pub fn arm() -> Self {
-        Self {
-            ptr_size: 32,
-            sp_name: "sp".to_string(),
-            fp_name: "fp".to_string(),
-            arg_regs: ["r0", "r1", "r2", "r3"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["r0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for AArch64.
-    pub fn aarch64() -> Self {
-        Self {
-            ptr_size: 64,
-            sp_name: "sp".to_string(),
-            fp_name: "x29".to_string(),
-            arg_regs: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["x0".to_string(), "w0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for RISC-V RV32.
-    pub fn riscv32() -> Self {
-        Self {
-            ptr_size: 32,
-            sp_name: "sp".to_string(),
-            fp_name: "s0".to_string(),
-            arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["a0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for RISC-V RV64.
-    pub fn riscv64() -> Self {
-        Self {
-            ptr_size: 64,
-            sp_name: "sp".to_string(),
-            fp_name: "s0".to_string(),
-            arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["a0".to_string()],
-            ..Default::default()
+            codegen: CodeGenConfig::default(),
+            ptr_size,
         }
     }
 }
@@ -3678,7 +3530,7 @@ impl Decompiler {
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
-            arg_regs: self.config.arg_regs.clone(),
+            arg_regs: prepared.machine_context().argument_register_names(),
         };
         let prepared_semantic_view = match analysis::PreparedSemanticView::build_with_bindings(
             symbols,

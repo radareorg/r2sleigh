@@ -67,7 +67,7 @@ fn engine_public_api_never_exposes_renderer_config_or_context_types() {
             let allowed_config_adapter = rel == "lib.rs"
                 && renderer_config
                 && (line.contains("to_decompiler_config")
-                    || line.contains("r2dec::DecompilerConfig::for_arch_name"));
+                    || line.contains("r2dec::DecompilerConfig::for_pointer_bits"));
             let allowed_private_render_bridge = rel == "lib.rs"
                 && (renderer_context || renderer_input || route_context_adapter)
                 && !line.contains("pub ");

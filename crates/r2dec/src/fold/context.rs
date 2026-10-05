@@ -244,21 +244,13 @@ impl GapReason {
 }
 
 impl FoldArchConfig {
+    /// A test machine of this width stating no argument registers.
     #[cfg(test)]
-    pub(crate) fn for_ptr_size(ptr_size: u32) -> Self {
-        let arg_regs = if ptr_size == 64 {
-            vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ]
-        } else {
-            vec![]
-        };
-        Self { ptr_size, arg_regs }
+    pub(crate) const fn for_ptr_size(ptr_size: u32) -> Self {
+        Self {
+            ptr_size,
+            arg_regs: Vec::new(),
+        }
     }
 }
 

@@ -448,7 +448,7 @@ impl EngineRenderTarget {
     }
 
     fn to_decompiler_config(&self) -> r2dec::DecompilerConfig {
-        r2dec::DecompilerConfig::for_arch_name(&self.arch_name, self.ptr_bits)
+        r2dec::DecompilerConfig::for_pointer_bits(self.ptr_bits)
     }
 }
 
