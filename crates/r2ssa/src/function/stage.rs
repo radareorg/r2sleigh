@@ -27,7 +27,7 @@ use std::ops::Deref;
 use crate::control::{SsaExecutionStopReason, SsaPrepareError, SsaWorkControl};
 use crate::graph::SsaGraph;
 use crate::integrity::{SsaIntegrityError, validate_ssa_function};
-use crate::machine_context::{SourceFunctionInterface, SourceMachineContext};
+use crate::machine_context::SourceMachineContext;
 
 use super::{DecompilePrepFacts, InterfaceQuestions, SSAFunction};
 
@@ -66,17 +66,17 @@ impl Lifted {
     pub(crate) fn prepare<C: SsaWorkControl + ?Sized>(
         mut self,
         config: &crate::optimize::DecompilePrepConfig,
-        function_interface: Option<&SourceFunctionInterface>,
+        return_carrier: Option<r2source::CanonicalStorageId>,
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         control.poll()?;
         // What each operation wrote, before an optimisation folds it away.
         self.ir.capture_written();
         let config: crate::optimize::OptimizationConfig = config.into();
-        crate::optimize::optimize_function_with_interface_and_control(
+        crate::optimize::optimize_function_with_return_and_control(
             &mut self.ir,
             &config,
-            function_interface,
+            return_carrier,
             control,
         )?;
         self.validate().map_err(super::integrity_refusal)

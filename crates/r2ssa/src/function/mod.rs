@@ -203,12 +203,20 @@ impl std::hash::Hash for SsaArtifactAuthority {
 /// Whole-model coherence hid the interface from SSA construction entirely, so
 /// one unattributed frame slot cost the argument carriers and the return
 /// projection too. Each use below asks only the question it depends on.
+///
+/// Construction reads only what is known before it runs. Where the source
+/// states no interface, that is the calling convention: its argument
+/// registers and its result register are the carriers at the boundary
+/// whatever this function's own signature turns out to be. An interface
+/// recovered from the body comes after construction and is read at the
+/// seal, so one build serves both recovery and the artifact.
 #[derive(Clone, Copy)]
 pub(crate) struct InterfaceQuestions<'a> {
     interface: Option<&'a SourceFunctionInterface>,
     return_boundary: bool,
     argument_placement: bool,
     frame_geometry: bool,
+    convention: Option<&'a SourceConventionSlots>,
 }
 
 impl<'a> InterfaceQuestions<'a> {
@@ -219,6 +227,7 @@ impl<'a> InterfaceQuestions<'a> {
             return_boundary: abi.return_boundary_is_coherent(),
             argument_placement: abi.argument_placement_is_coherent(),
             frame_geometry: abi.frame_geometry_is_coherent(),
+            convention: None,
         }
     }
 
@@ -229,6 +238,63 @@ impl<'a> InterfaceQuestions<'a> {
             return_boundary: false,
             argument_placement: false,
             frame_geometry: false,
+            convention: None,
+        }
+    }
+
+    /// No interface the source states: construction asks the convention.
+    fn before_recovery(convention: &'a SourceConventionSlots) -> Self {
+        Self {
+            convention: Some(convention),
+            ..Self::none()
+        }
+    }
+
+    /// The registers at this function's boundary that every caller reads
+    /// or writes whole: the interface's argument and result registers, or,
+    /// with none stated, the convention's.
+    pub(crate) fn construction_carriers(self) -> Vec<CanonicalStorageId> {
+        let register = |storage: &CanonicalStorageId| {
+            (storage.space == CanonicalStorageSpace::Register).then_some(*storage)
+        };
+        if let Some(convention) = self.convention {
+            return convention
+                .argument_slots()
+                .iter()
+                .chain(convention.result_slot().as_ref())
+                .filter_map(register)
+                .collect();
+        }
+        self.for_argument_placement()
+            .into_iter()
+            .flat_map(|interface| {
+                interface
+                    .parameters()
+                    .iter()
+                    .filter_map(crate::SourceAbiParameterSpec::register_storage)
+            })
+            .chain(
+                self.for_return_boundary()
+                    .and_then(|interface| match interface.return_kind() {
+                        crate::SourceFunctionReturn::Register { storage } => Some(storage),
+                        crate::SourceFunctionReturn::Void
+                        | crate::SourceFunctionReturn::Unproven => None,
+                    }),
+            )
+            .collect()
+    }
+
+    /// The register a caller reads the result from, whose merges in a
+    /// returning block keep their sources: the interface's, where it
+    /// describes it coherently, or the convention's.
+    pub(crate) fn return_carrier(self) -> Option<CanonicalStorageId> {
+        match self.convention {
+            Some(convention) => convention
+                .result_slot()
+                .filter(|slot| slot.space == CanonicalStorageSpace::Register),
+            None => self
+                .for_return_boundary()
+                .and_then(crate::optimize::coherent_return_carrier),
         }
     }
 
@@ -2200,6 +2266,14 @@ impl TrustedSsaArtifact {
         // `unavailable`, the return boundary is incomplete, and the renderer
         // refuses with no way to tell which link gave up. That was the largest
         // single refusal cause in the corpus, so each link says so.
+        // Construction reads the source's interface where it states one and
+        // the convention where it does not; a recovered interface is read
+        // from the seal on.
+        // Without one, the function is built once, against the convention,
+        // and that build is both what recovery reads and what is sealed:
+        // nothing construction reads differs between the two contexts.
+        let stated_interface = source.function_interface().is_some();
+        let mut built = None;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None => 'recovered: {
@@ -2216,12 +2290,8 @@ impl TrustedSsaArtifact {
                     "the capture carried no function interface; recovering one from {} blocks",
                     blocks.len()
                 );
-                // Recover against the same decompile-normalized SSA shape the
-                // final artifact will use. The generic SSA constructor can
-                // number a call differently from decompile preparation after
-                // call-result and register-alias operations are inserted; an
-                // exact source callsite then fails to correlate in the
-                // provisional pass even though it correlates in the final one.
+                // Recovery reads the decompile-normalized build the artifact
+                // seals, so a call it numbers is the call the artifact numbers.
                 let mut provisional_machine_context =
                     SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
                         blocks.as_slice(),
@@ -2241,7 +2311,7 @@ impl TrustedSsaArtifact {
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
                         Some(&arch),
-                        InterfaceQuestions::none(),
+                        InterfaceQuestions::before_recovery(source.convention_slots()),
                         &provisional_machine_context,
                         &callees,
                         Some(&declared_successors),
@@ -2262,13 +2332,16 @@ impl TrustedSsaArtifact {
                 // carrier handed straight to its callee. The latter is still
                 // a parameter even though implicit call reads leave no source
                 // operation behind.
-                // The preliminary function is analysed and dropped, never
-                // sealed, so its prep facts are its own and go with it.
+                // This build is the one the artifact seals. The prep facts
+                // read here are recovery's own: the seal rewrites the blocks
+                // (boundary constants, lane projections, demand) and derives
+                // its facts afresh from the rewritten function.
+                let preliminary = built.insert(preliminary);
                 let Ok(preliminary_prep) = preliminary.provisional_prep_facts(control) else {
                     break 'recovered None;
                 };
                 let recovered = crate::recover_interface::recover_interface_with_context(
-                    &preliminary,
+                    preliminary,
                     &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
@@ -2339,15 +2412,24 @@ impl TrustedSsaArtifact {
             source.image().string_literals().len()
         );
         machine_context.bind_source_string_literals(source.image().string_literals());
-        let mut function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-            blocks.as_slice(),
-            Some(&arch),
-            InterfaceQuestions::new(&machine_context),
-            &machine_context,
-            &callees,
-            Some(&declared_successors),
-            control,
-        )?;
+        let mut function = match built {
+            Some(built) => built,
+            None => {
+                let questions = match stated_interface {
+                    true => InterfaceQuestions::new(&machine_context),
+                    false => InterfaceQuestions::before_recovery(source.convention_slots()),
+                };
+                SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+                    blocks.as_slice(),
+                    Some(&arch),
+                    questions,
+                    &machine_context,
+                    &callees,
+                    Some(&declared_successors),
+                    control,
+                )?
+            }
+        };
         // What the source calls this function. A name radare2 derived from the
         // entry address restates the address and is left absent, so consumers
         // that would only spell it back out are not misled into thinking the

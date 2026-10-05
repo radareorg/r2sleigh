@@ -158,24 +158,7 @@ impl SSAFunction {
         // every caller reads the result register and writes the argument
         // registers, so the whole of each is used even where the body's own
         // operations name only a lane of one.
-        let abi_carriers = questions
-            .for_argument_placement()
-            .into_iter()
-            .flat_map(|interface| {
-                interface
-                    .parameters()
-                    .iter()
-                    .filter_map(crate::SourceAbiParameterSpec::register_storage)
-            })
-            .chain(questions.for_return_boundary().and_then(|interface| {
-                match interface.return_kind() {
-                    crate::SourceFunctionReturn::Register { storage } => Some(storage),
-                    crate::SourceFunctionReturn::Void | crate::SourceFunctionReturn::Unproven => {
-                        None
-                    }
-                }
-            }))
-            .collect::<Vec<_>>();
+        let abi_carriers = questions.construction_carriers();
 
         let cfg = lifted_cfg(blocks, declared_successors)?;
         // Which frame slots behave like variables. Asked of the lifted text,
@@ -249,7 +232,7 @@ impl SSAFunction {
         // the declared stack bases.
         let prepared = Lifted::new(func).prepare(
             &crate::optimize::DecompilePrepConfig::default(),
-            questions.for_return_boundary(),
+            questions.return_carrier(),
             control,
         )?;
         phase("prepared", prepared.num_blocks());

@@ -87,13 +87,17 @@ pub(crate) fn optimize_function_with_control<C: SsaWorkControl + ?Sized>(
     config: &OptimizationConfig,
     control: &C,
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
-    optimize_function_with_interface_and_control(func, config, None, control)
+    optimize_function_with_return_and_control(func, config, None, control)
 }
 
-pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?Sized>(
+/// Optimise, keeping every source of a merge of `return_carrier` in a
+/// returning block as it is: what the function hands back is read whole
+/// there, so a constant folded into one source is no longer a value of
+/// the carrier the caller reads.
+pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Sized>(
     func: &mut SSAFunction,
     config: &OptimizationConfig,
-    function_interface: Option<&SourceFunctionInterface>,
+    return_carrier: Option<CanonicalStorageId>,
     control: &C,
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
     control.poll()?;
@@ -127,13 +131,7 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
         if config.enable_sccp {
             let (consts, executable_edges) = sccp_with_control(func, control)?;
             control.poll()?;
-            if apply_sccp_results(
-                func,
-                &consts,
-                &executable_edges,
-                function_interface,
-                &mut stats,
-            ) {
+            if apply_sccp_results(func, &consts, &executable_edges, return_carrier, &mut stats) {
                 changed = true;
             }
         }
@@ -615,16 +613,12 @@ fn eval_const_op(
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TerminalStorageProjection {
-    carrier: CanonicalStorageId,
-    logical: CanonicalStorageId,
-}
-
-fn coherent_return_projection(
-    function_interface: Option<&SourceFunctionInterface>,
-) -> Option<TerminalStorageProjection> {
-    let interface = function_interface?;
+/// The register a source interface states the result in, where its logical
+/// value describes that register coherently: the whole of it, or the low
+/// bits of an integer.
+pub(crate) fn coherent_return_carrier(
+    interface: &SourceFunctionInterface,
+) -> Option<CanonicalStorageId> {
     let SourceFunctionReturn::Register { storage } = interface.return_kind() else {
         return None;
     };
@@ -645,8 +639,8 @@ fn coherent_return_projection(
     {
         return None;
     }
-    let logical = match carrier.kind() {
-        SourceCarrierKind::Full if carrier.size_bits() == storage_bits => storage,
+    match carrier.kind() {
+        SourceCarrierKind::Full if carrier.size_bits() == storage_bits => Some(storage),
         SourceCarrierKind::LowBits
             if carrier.size_bits() < storage_bits
                 && matches!(
@@ -654,31 +648,21 @@ fn coherent_return_projection(
                     SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
                 ) =>
         {
-            CanonicalStorageId {
-                space: storage.space,
-                offset: storage.offset,
-                size: u32::try_from(carrier.size_bits() / 8).ok()?,
-            }
+            Some(storage)
         }
-        _ => return None,
-    };
-    Some(TerminalStorageProjection {
-        carrier: storage,
-        logical,
-    })
+        _ => None,
+    }
 }
 
 /// The plan that reads every constant SCCP proved where its value was read.
 fn replace_sources_with_constants(
     func: &SSAFunction,
     consts: &IdMap<VarId, u64>,
-    function_interface: Option<&SourceFunctionInterface>,
+    return_storage: Option<CanonicalStorageId>,
     stats: &mut OptimizationStats,
 ) -> EditPlan {
     let mut plan = EditPlan::new();
     let mut values = Minting::new(func.values());
-    let return_storage =
-        coherent_return_projection(function_interface).map(|projection| projection.carrier);
 
     for &addr in func.block_addrs() {
         let is_return_block = func
@@ -739,13 +723,13 @@ fn apply_sccp_results(
     func: &mut SSAFunction,
     consts: &IdMap<VarId, u64>,
     executable_edges: &HashSet<(u64, u64)>,
-    function_interface: Option<&SourceFunctionInterface>,
+    return_carrier: Option<CanonicalStorageId>,
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let mut cfg_changed = false;
 
-    let constants = replace_sources_with_constants(func, consts, function_interface, stats);
+    let constants = replace_sources_with_constants(func, consts, return_carrier, stats);
     if !constants.is_empty() {
         changed = true;
     }
