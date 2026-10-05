@@ -2769,3 +2769,46 @@ fn a_sealed_function_s_prep_facts_describe_its_own_blocks() {
         "the graph was built from the sealed blocks"
     );
 }
+
+/// A register the convention's list never names is still one a call may
+/// change, so a callee's body answers for it: a leaf that never touches it
+/// preserves it, and a body whose own call reaches a callee that does not
+/// prove it kept loses it, though nothing in that body mentions it.
+#[test]
+fn a_callee_answers_for_every_register_a_call_may_change_not_a_list() {
+    let mut arch = call_preservation_arch();
+    arch.add_register(RegisterDef::new("r10", 40, 8));
+    let r10 = call_preservation_storage(40, 8);
+    let ret = R2ILOp::Return {
+        target: make_const(0, 8),
+    };
+    let preserved = |ops: Vec<R2ILOp>, callees: CalleePreservedCarriers| {
+        SsaArtifact::for_decompile_with(
+            &[call_preservation_block(ops)],
+            DecompileInputs {
+                arch: Some(&arch),
+                call_effect: call_preservation_effect(),
+                callee_preserved_carriers: callees,
+                ..Default::default()
+            },
+        )
+        .expect("artifact")
+        .facts()
+        .boundaries
+        .preserved_call_carriers
+        .clone()
+    };
+    assert!(preserved(vec![ret.clone()], BTreeMap::new()).contains(&r10));
+    let call = R2ILOp::Call {
+        target: make_ram(0x2000, 8),
+    };
+    let keeps = |kept: &[CanonicalStorageId]| {
+        BTreeMap::from([(0x2000, kept.iter().copied().collect::<BTreeSet<_>>())])
+    };
+    let general = call_preservation_storage(8, 8);
+    let through_unknown = preserved(vec![call.clone(), ret.clone()], keeps(&[general]));
+    assert!(!through_unknown.contains(&r10), "{through_unknown:?}");
+    assert!(through_unknown.contains(&general), "{through_unknown:?}");
+    let through_keeper = preserved(vec![call, ret], keeps(&[general, r10]));
+    assert!(through_keeper.contains(&r10), "{through_keeper:?}");
+}

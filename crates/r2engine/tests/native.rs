@@ -9,8 +9,8 @@ use common::TABLE_SWITCH;
 use r2abi::{Conventions, Platform, Prototypes};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
-use r2sleigh_lift::profile::LanguageProfile;
-use r2source::SourceCallEffect;
+use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
+use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
 use r2ssa::{InstPayload, SSAOp};
 
 const BASE: u64 = 0x1000;
@@ -92,13 +92,12 @@ impl Machine {
                 (name.to_owned(), profile)
             })
             .collect::<BTreeMap<_, _>>();
-        let effects = conventions
-            .names()
-            .map(|name| {
-                let convention = conventions.get(name).expect("named convention");
+        let effects = compilers
+            .iter()
+            .map(|(name, profile)| {
                 (
-                    name.to_owned(),
-                    call_effect(&embedded.arch, bits, platform, convention),
+                    name.clone(),
+                    call_effect(&embedded.arch, bits, platform, profile),
                 )
             })
             .collect();
@@ -2890,9 +2889,10 @@ fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
     );
 }
 
-/// Every register a shipped default convention names is one register of its machine, so none is dropped.
+/// Every register a default prototype names is one register of its
+/// machine, and the call effect states it: none is dropped on the way.
 #[test]
-fn every_register_a_default_convention_names_is_one_of_its_machine() {
+fn every_register_a_default_prototype_names_is_one_of_its_machine() {
     for (sleigh, family, bits) in [
         ("x86-64", "x86-64", 64),
         ("x86", "x86", 32),
@@ -2900,40 +2900,50 @@ fn every_register_a_default_convention_names_is_one_of_its_machine() {
         ("arm", "arm", 32),
     ] {
         let machine = Machine::new(sleigh, family, bits);
-        let convention = machine
+        let name = machine
             .conventions
             .default_convention()
-            .expect("a default convention");
-        let unplaced = convention
-            .clobbered
+            .expect("a default convention")
+            .name
+            .clone();
+        let prototype = machine.compilers[&name]
+            .default_prototype()
+            .expect("a default prototype");
+        let named = prototype
+            .inputs
             .iter()
-            .chain(&convention.preserved)
-            .filter(|name| {
-                let named = machine.embedded.arch.registers.iter();
-                named
-                    .filter(|register| register.name.eq_ignore_ascii_case(name))
-                    .count()
-                    != 1
+            .chain(&prototype.outputs)
+            .map(|entry| &entry.storage)
+            .chain(&prototype.killed_by_call)
+            .chain(&prototype.unaffected)
+            .filter_map(|storage| match storage {
+                SpecStorage::Register(name) => Some(name.as_str()),
+                SpecStorage::Address { .. } => None,
             })
             .collect::<Vec<_>>();
-        assert!(
-            unplaced.is_empty(),
-            "{sleigh}/{}: {unplaced:?}",
-            convention.name
-        );
-        let effect = machine.effects[&convention.name]
+        assert!(!named.is_empty(), "{sleigh}");
+        let effect = machine.effects[&name]
             .as_ref()
-            .expect("the default convention states a call effect");
-        assert_eq!(
-            effect.clobbered().len(),
-            convention.clobbered.len(),
-            "{sleigh}"
-        );
-        assert_eq!(
-            effect.preserved().len(),
-            convention.preserved.len(),
-            "{sleigh}"
-        );
+            .expect("the default prototype states a call effect");
+        for register in named {
+            let placed = machine
+                .embedded
+                .arch
+                .registers
+                .iter()
+                .filter(|candidate| candidate.name.eq_ignore_ascii_case(register))
+                .map(|candidate| CanonicalStorageId {
+                    space: CanonicalStorageSpace::Register,
+                    offset: candidate.offset,
+                    size: candidate.size,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(placed.len(), 1, "{sleigh}: {register}");
+            assert!(
+                effect.clobbered().contains(&placed[0]) || effect.preserved().contains(&placed[0]),
+                "{sleigh}: {register} is in neither list"
+            );
+        }
     }
 }
 
@@ -3743,7 +3753,8 @@ fn a_parameter_every_read_of_which_is_rewritten_away_is_still_declared() {
 }
 
 /// A stack-protector check around a call: the canary is read through the
-/// thread pointer before the call and again after it.
+/// thread pointer before the call and again after it. The callee calls
+/// through a register, so its own body proves nothing about `fs` either.
 const CANARY_AROUND_A_CALL: &[u8] = &[
     0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
     0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
@@ -3754,7 +3765,7 @@ const CANARY_AROUND_A_CALL: &[u8] = &[
     0x48, 0x83, 0xc4, 0x18, // 1025 add rsp, 0x18
     0xc3, // 1029 ret
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 102a padding
-    0x31, 0xc0, // 1030 xor eax, eax
+    0xff, 0xd7, // 1030 call rdi
     0xc3, // 1032 ret
 ];
 

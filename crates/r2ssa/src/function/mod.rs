@@ -837,7 +837,9 @@ impl SsaArtifact {
             callee_preserved_carriers,
             callee_interfaces,
         } = inputs;
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+        let callees =
+            CalleeBoundaries::from_interfaces(arch, &callee_preserved_carriers, &callee_interfaces);
+        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
             arch,
             function_interface,
@@ -847,16 +849,13 @@ impl SsaArtifact {
             call_site_interfaces,
             tail_call_identities,
         );
+        machine_context.set_callee_preserved(callees.preserved().clone());
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks,
             arch,
             InterfaceQuestions::new(&machine_context),
             &machine_context,
-            &CalleeBoundaries::from_interfaces(
-                arch,
-                &callee_preserved_carriers,
-                &callee_interfaces,
-            ),
+            &callees,
             None,
             &UncheckedSsaWorkControl,
         )
@@ -2384,6 +2383,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_frame_saves(source.image().frame_saves());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
@@ -3338,8 +3338,11 @@ impl CalleeBoundaries {
             };
             // The same boundary cannot both hand a register back untouched and
             // name it as what it returns.
+            let overlaps = |carrier: &CanonicalStorageId| {
+                crate::semantic::register_storages_overlap(*carrier, storage)
+            };
             if let Some(carriers) = preserved.get_mut(address) {
-                carriers.retain(|carrier| carrier.location() != storage.location());
+                carriers.retain(|carrier| !overlaps(carrier));
             }
             let Some(name) = names
                 .as_ref()
@@ -3363,6 +3366,11 @@ impl CalleeBoundaries {
             results,
             return_addresses,
         }
+    }
+
+    /// What each callee proves it leaves alone, less its own result carrier.
+    pub(crate) const fn preserved(&self) -> &CalleePreservedCarriers {
+        &self.preserved
     }
 
     /// The carrier each callee proves holds the address the call pushed.

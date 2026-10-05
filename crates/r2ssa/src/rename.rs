@@ -1019,9 +1019,10 @@ fn append_call_boundary_defs(
     });
     for identity in clobbered.union(&results) {
         let storage = identity.storage;
+        // The callee's proof names whole registers; a lane of one it keeps is kept.
         if callee
             .preserved
-            .is_some_and(|preserved| preserved.contains(&storage))
+            .is_some_and(|preserved| crate::semantic::covers(preserved, storage))
         {
             continue;
         }

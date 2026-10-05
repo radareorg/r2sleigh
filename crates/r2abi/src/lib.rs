@@ -20,7 +20,7 @@ pub mod syscalls;
 pub mod types;
 
 pub use declarations::{DataObject, Declarations};
-pub use platform::{PlatformRegister, RegisterDuty, platform_registers};
+pub use platform::{PlatformRegister, RegisterDuty, architecture_registers, platform_registers};
 pub use prototypes::{
     Arrival, FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
     dwarf_frame_register, dwarf_register,

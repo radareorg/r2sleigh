@@ -114,6 +114,28 @@ const AARCH64_DARWIN: [PlatformRegister; 1] = [PlatformRegister {
                register x18. Don't use this register.\"",
 }];
 
+/// The direction flag, which every x86 psABI requires clear on entry to and
+/// return from a function: a conforming callee hands it back as it found it.
+const X86_DIRECTION_FLAG: [PlatformRegister; 1] = [PlatformRegister {
+    register: "df",
+    duty: RegisterDuty::CalleeSaved,
+    bits: None,
+    citation: "System V AMD64 psABI 1.0, section 3.2.1: \"The direction flag DF in the \
+               %rFLAGS register must be clear (set to \u{201c}forward\u{201d} direction) on \
+               function entry and return\"; System V i386 ABI 1.1, section 2.2.1, the same of \
+               %eflags; Microsoft x64 software conventions: \"On function exit and on \
+               function entry ... the direction flag in the CPU flags register is expected \
+               to be cleared\"",
+}];
+
+/// The duties an architecture's ABIs assign on every platform alike.
+pub fn architecture_registers(arch: &str) -> &'static [PlatformRegister] {
+    match crate::family(arch) {
+        Some("x86") => &X86_DIRECTION_FLAG,
+        _ => &[],
+    }
+}
+
 /// The duties a platform's ABI assigns beyond its calling convention's lists.
 ///
 /// The architecture is named as the engine names it; `bits` is the width the

@@ -562,6 +562,12 @@ pub struct SourceMachineContext {
     call_effect: Option<SourceCallEffect>,
     /// What a call in this body may leave changed: the set construction defines after every call.
     call_clobbered_carriers: Box<[CanonicalStorageId]>,
+    /// Every register a call may change: each register of the file no wider
+    /// one contains, that the call effect neither preserves nor reserves.
+    /// What a callee's body is asked to prove it leaves alone.
+    call_universe: Box<[CanonicalStorageId]>,
+    /// What each direct callee's own body proves it leaves alone, by entry.
+    callee_preserved: crate::function::CalleePreservedCarriers,
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
     register_projections: Box<[RegisterProjection]>,
@@ -611,6 +617,43 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
             size: varnode.size,
         })
         .collect()
+}
+
+/// Every register a call may change: each register of the file that no
+/// wider one contains, less what the call effect preserves or reserves.
+///
+/// The effect is exhaustive -- every register it neither preserves nor
+/// reserves may come back changed -- so this is the set a callee's summary
+/// has to answer for, whatever list of clobbers the convention spells.
+/// `O(r log r)` in the register file.
+fn call_universe(effect: &SourceCallEffect, arch: &ArchSpec) -> Box<[CanonicalStorageId]> {
+    let mut registers = arch
+        .registers
+        .iter()
+        .filter(|register| register.size != 0)
+        .map(|register| (register.offset, register.size))
+        .collect::<Vec<_>>();
+    // Widest first at each offset, so a register is kept only when nothing
+    // kept before it already reaches past its end.
+    registers.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    let mut universe = Vec::new();
+    let mut covered_to = 0u64;
+    for (offset, size) in registers {
+        let end = offset.saturating_add(u64::from(size));
+        if end <= covered_to {
+            continue;
+        }
+        covered_to = covered_to.max(end);
+        let storage = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        if effect.clobbers(storage) {
+            universe.push(storage);
+        }
+    }
+    universe.into_boxed_slice()
 }
 
 /// What a call in this body may leave changed: the clobber list, and every
@@ -1004,6 +1047,12 @@ impl SourceMachineContext {
                 .as_ref()
                 .map(|effect| clobbered_by_a_call(effect, &observed))
                 .unwrap_or_default(),
+            call_universe: call_effect
+                .as_ref()
+                .zip(arch)
+                .map(|(effect, arch)| call_universe(effect, arch))
+                .unwrap_or_default(),
+            callee_preserved: BTreeMap::new(),
             call_effect,
             register_geometry_state,
             register_projections,
@@ -1213,6 +1262,24 @@ impl SourceMachineContext {
     /// The registers a call in this body may leave changed; empty without a call effect.
     pub const fn call_clobbered_carriers(&self) -> &[CanonicalStorageId] {
         &self.call_clobbered_carriers
+    }
+
+    /// Every register a call may change; see the field.
+    pub(crate) const fn call_universe(&self) -> &[CanonicalStorageId] {
+        &self.call_universe
+    }
+
+    /// What the direct callee at `target` proves it leaves alone, where its
+    /// body was read.
+    pub(crate) fn callee_preserved(&self, target: u64) -> Option<&BTreeSet<CanonicalStorageId>> {
+        self.callee_preserved.get(&target)
+    }
+
+    pub(crate) fn set_callee_preserved(
+        &mut self,
+        preserved: crate::function::CalleePreservedCarriers,
+    ) {
+        self.callee_preserved = preserved;
     }
 
     /// What the convention says a call does to the registers.

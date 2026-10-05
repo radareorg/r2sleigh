@@ -814,7 +814,10 @@ pub(crate) fn preserved_call_carriers(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
 ) -> BTreeSet<CanonicalStorageId> {
-    let candidates = machine_context.call_clobbered_carriers();
+    // Every register a call may change, not the convention's list of
+    // clobbers: a caller reading any of them after a call to this body needs
+    // the same proof, and a list names only some.
+    let candidates = machine_context.call_universe();
     if candidates.is_empty() {
         return BTreeSet::new();
     }
@@ -833,19 +836,53 @@ pub(crate) fn preserved_call_carriers(
         return BTreeSet::new();
     }
     let mut preserved = candidates.iter().copied().collect::<BTreeSet<_>>();
-    for inst in &graph.insts {
-        if inst.output.is_none() {
-            continue;
-        }
-        let Some(written) = inst.canonical_storage else {
-            continue;
+    // A call inside this body leaves alone only what its own callee proves
+    // it does. The call defines only the registers this body touches, so the
+    // rest of the universe is answered here: a register no instruction
+    // writes survives an inner call only when that callee's body says so.
+    for op in function.blocks().iter().flat_map(|block| block.ops()) {
+        let inner = match op {
+            SSAOp::Call { target, .. } => graph
+                .value_of(*target)
+                .and_then(|value| graph.value(value))
+                .and_then(|value| value.canonical_storage)
+                .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
+                .and_then(|storage| machine_context.callee_preserved(storage.offset)),
+            SSAOp::CallInd { .. } => None,
+            _ => continue,
         };
-        preserved.retain(|storage| !register_storages_overlap(written, *storage));
+        preserved.retain(|storage| inner.is_some_and(|kept| covers(kept, *storage)));
         if preserved.is_empty() {
-            break;
+            return preserved;
         }
     }
+    // The distinct storages written, once each: the universe is the whole
+    // register file, so matching it per instruction would cost `O(I * U)`
+    // where `O(I log w + w * U)` answers the same question.
+    let written = graph
+        .insts
+        .iter()
+        .filter(|inst| inst.output.is_some())
+        .filter_map(|inst| inst.canonical_storage)
+        .collect::<BTreeSet<_>>();
+    preserved.retain(|storage| {
+        !written
+            .iter()
+            .any(|written| register_storages_overlap(*written, *storage))
+    });
     preserved
+}
+
+/// Whether some storage of `kept` covers every byte of `storage`.
+pub(crate) fn covers(kept: &BTreeSet<CanonicalStorageId>, storage: CanonicalStorageId) -> bool {
+    kept.iter().any(|kept| storage_contains(*kept, storage))
+}
+
+/// Whether `outer` covers every byte of `inner`.
+pub(crate) fn storage_contains(outer: CanonicalStorageId, inner: CanonicalStorageId) -> bool {
+    outer.space == inner.space
+        && outer.offset <= inner.offset
+        && inner.offset + u64::from(inner.size) <= outer.offset + u64::from(outer.size)
 }
 
 pub(crate) fn projected_logical_register_storage(

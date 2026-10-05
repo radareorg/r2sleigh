@@ -1920,23 +1920,28 @@ fn general_registers(entries: &[r2sleigh_lift::profile::PrototypeEntry]) -> Vec<
         .collect()
 }
 
-/// What a call does here: what the convention says it destroys and restores,
-/// and what the platform's ABI adds -- the registers it reserves to the system
-/// and the control registers it makes callee-saved.
+/// What a call does here, from the compiler specification's default
+/// prototype and what the ABIs add -- the registers a platform reserves to
+/// the system and the control registers it makes callee-saved.
 ///
-/// Every name is placed by the lifter's register naming, the one owner of
-/// where the lifted architecture puts a register the source spells. A name the
-/// arch lacks costs precision, never soundness: an unplaced preserved or
-/// reserved register reads as clobbered by every call.
+/// Preserved is the prototype's `unaffected` less the return address
+/// register: the stack pointer and the callee-saved registers. Clobbered is
+/// what the prototype names a call reading or writing -- its argument and
+/// result registers and its `killedbycall` -- and the return address
+/// register, less anything preserved or reserved. That list is not exhaustive and need
+/// not be: the effect clobbers every register it does not preserve or
+/// reserve, and a callee is asked about all of them (r2ssa's call universe).
+///
+/// Every name is placed by the lifter's register naming. A name the arch
+/// lacks costs precision, never soundness: an unplaced preserved or reserved
+/// register reads as clobbered by every call.
 pub fn call_effect(
     arch: &ArchSpec,
     bits: u32,
     platform: r2abi::Platform,
-    convention: &Convention,
+    profile: &LanguageProfile,
 ) -> Option<SourceCallEffect> {
-    if convention.clobbered.is_empty() && convention.preserved.is_empty() {
-        return None;
-    }
+    let prototype = profile.default_prototype()?;
     let place = |name: &str| {
         let placed =
             r2sleigh_lift::lifted_register_storage(arch, name).filter(|storage| storage.size != 0);
@@ -1944,20 +1949,29 @@ pub fn call_effect(
             r2il::refusal_evidence!(
                 "call-effect",
                 "{}: {} names no single register of {}",
-                convention.name,
+                prototype.name,
                 name,
                 arch.name
             );
         }
         placed
     };
-    let mut preserved = convention
-        .preserved
-        .iter()
-        .filter_map(|name| place(name))
-        .collect::<Vec<_>>();
+    let registers = |storages: &mut dyn Iterator<Item = &SpecStorage>| {
+        storages
+            .filter_map(|storage| match storage {
+                SpecStorage::Register(name) => place(name),
+                SpecStorage::Address { .. } => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let link = profile.return_address.as_deref().and_then(place);
+    let mut preserved = registers(&mut prototype.unaffected.iter());
+    preserved.retain(|storage| Some(*storage) != link);
     let mut system_reserved = Vec::new();
-    for row in r2abi::platform_registers(&arch.name, bits, platform) {
+    let rows = r2abi::architecture_registers(&arch.name)
+        .iter()
+        .chain(r2abi::platform_registers(&arch.name, bits, platform));
+    for row in rows {
         let Some(storage) = place(row.register) else {
             continue;
         };
@@ -1967,15 +1981,36 @@ pub fn call_effect(
         };
         into.extend(covered_runs(storage, row));
     }
-    SourceCallEffect::new(
-        convention.clobbered.iter().filter_map(|name| place(name)),
-        preserved,
-    )
-    .and_then(|effect| effect.with_system_reserved(system_reserved))
-    .inspect_err(|error| {
-        r2il::refusal_evidence!("call-effect", "{}: {error:?}", convention.name);
-    })
-    .ok()
+    let mut clobbered = registers(
+        &mut prototype
+            .inputs
+            .iter()
+            .chain(&prototype.outputs)
+            .map(|entry| &entry.storage)
+            .chain(&prototype.killed_by_call),
+    );
+    clobbered.extend(link);
+    // A register a platform reserves is one the prototype's own lists may
+    // still name -- AArch64's `killedbycall` lists x18, which Apple reserves.
+    let kept = preserved
+        .iter()
+        .chain(&system_reserved)
+        .copied()
+        .collect::<Vec<_>>();
+    clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));
+    SourceCallEffect::new(clobbered, preserved)
+        .and_then(|effect| effect.with_system_reserved(system_reserved))
+        .inspect_err(|error| {
+            r2il::refusal_evidence!("call-effect", "{}: {error:?}", prototype.name);
+        })
+        .ok()
+}
+
+/// Whether two storages share a byte.
+fn overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
+    left.space == right.space
+        && left.offset < right.offset + u64::from(right.size)
+        && right.offset < left.offset + u64::from(left.size)
 }
 
 /// The runs of whole bytes of `storage` a platform row's duty covers.
