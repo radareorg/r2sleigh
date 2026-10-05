@@ -99,6 +99,10 @@ engine. Commands, the visual mode and the agent surface all ask it.
   names, stubs and modes are deleted, so every reader asks the database
   and none reads a stale table. `StatedNames` is what the container names
   with no decoder, which is all `start` needs: `iS` loads no machine.
+- Q4d: `Revision` and the revision an `Answer` carried are deleted: no
+  reader compared it once every answer moved onto the database. The tests
+  that read its axes now say what those axes protected, as analyses
+  computed or reused.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.

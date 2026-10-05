@@ -24,20 +24,6 @@ pub(super) fn endian<S: Source>(source: &S) -> r2il::Endianness {
     }
 }
 
-/// Which state of this program every answer is about.
-pub(super) fn revision<S: Source + 'static>(db: &Db<ProgramInputs<S>>) -> crate::query::Revision {
-    let source = &db.inputs().source;
-    crate::query::Revision {
-        program: source.identity(),
-        bytes: source.byte_revision(),
-        // When the table last differed: anything that read only a name stays good across most patches.
-        names: db.changed_at::<Names>(&()).unwrap_or(0),
-        // The entries a write can move: the import stubs, and the modes.
-        entries: db.changed_at::<Imports>(&()).unwrap_or(0)
-            + db.changed_at::<super::requests::Modes>(&()).unwrap_or(0),
-    }
-}
-
 /// One open program, read through its database.
 pub(crate) struct View<'a, S: Source + 'static> {
     pub(super) db: &'a Db<ProgramInputs<S>>,

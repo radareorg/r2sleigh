@@ -8,7 +8,7 @@
 use r2sleigh_lift::Continuation;
 
 use super::records::{Answered, Line, Listing, Stop};
-use super::{Answer, Completion, Revision, Work};
+use super::{Answer, Completion, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
@@ -16,12 +16,7 @@ const DECODE_WINDOW: usize = 16;
 /// Decode a run of instructions, saying as much about each as `work` allows.
 ///
 /// A line keeps the decoder context the line before it left, as the walk does; a run's first line starts afresh.
-pub fn listing(
-    answered: &Answered<'_>,
-    request: Listing,
-    work: Work,
-    revision: Revision,
-) -> Answer<Vec<Line>> {
+pub fn listing(answered: &Answered<'_>, request: Listing, work: Work) -> Answer<Vec<Line>> {
     let mut run = Run::read(answered, request, work);
     let mut beyond = Lookahead {
         answered,
@@ -37,7 +32,6 @@ pub fn listing(
     super::annotate::over_run(answered, work, &lifted, &mut beyond, &mut run.lines);
     Answer {
         value: run.lines,
-        revision,
         completion: run.completion,
     }
 }
@@ -330,7 +324,6 @@ mod tests {
                 stop: Stop::After(count),
             },
             work,
-            Revision::default(),
         )
     }
 
@@ -381,7 +374,6 @@ mod tests {
                 stop: Stop::After(2),
             },
             Work::Decode,
-            Revision::default(),
         );
         assert_eq!(answer.value[0].bytes.len(), 4);
         assert_eq!(answer.value[1].address, BASE + 4);
@@ -673,7 +665,7 @@ mod tests {
             start: BASE,
             stop: Stop::At(BASE + code.len() as u64),
         };
-        let lines = listing(&answered, request, work, Revision::default()).value;
+        let lines = listing(&answered, request, work).value;
         let kinds = |line: &Line| {
             line.annotations
                 .iter()
@@ -753,13 +745,7 @@ mod tests {
             start: BASE,
             stop: Stop::After(1),
         };
-        let line = &listing(
-            &answered,
-            request,
-            Work::InstructionLocal,
-            Revision::default(),
-        )
-        .value[0];
+        let line = &listing(&answered, request, Work::InstructionLocal).value[0];
         assert!(
             line.annotations.iter().any(|annotation| annotation.kind
                 == AnnotationKind::Reads {

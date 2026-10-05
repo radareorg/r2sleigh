@@ -32,8 +32,8 @@ use std::rc::Rc;
 
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
+use crate::query::Decoders;
 use crate::query::db::{Db, Inputs, Query};
-use crate::query::{Decoders, Revision};
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
@@ -380,11 +380,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             callee_reads: self.db.query_stats::<analysis::CalleeReads>(),
             rendered: self.db.query_stats::<analysis::Rendered>(),
         }
-    }
-
-    /// Which state of this program every answer is about.
-    pub fn revision(&self) -> Revision {
-        view::revision(&self.db)
     }
 
     /// The decoder the code at this address is written in: whichever is

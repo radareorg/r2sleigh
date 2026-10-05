@@ -56,28 +56,6 @@ fn afi_afv_and_pdd_read_one_type_analysis() {
 }
 
 #[test]
-fn deriving_the_tables_the_first_time_is_not_a_change() {
-    let mut program = opened();
-    program.prepared(ONE).expect("it prepares");
-    let revision = program.revision();
-    assert_eq!((revision.names, revision.entries), (0, 0));
-}
-
-#[test]
-fn a_patch_that_renames_nothing_leaves_every_name_and_entry_revision() {
-    // A write to code moves the bytes, and the name table read out of them
-    // comes out equal, so nothing that read only a name or an entry is stale.
-    let mut program = opened();
-    program.prepared(ONE).expect("it prepares");
-    let before = program.revision();
-    program.source_mut().write(ONE + 1, &[0x03]);
-    program.prepared(ONE).expect("it prepares");
-    let after = program.revision();
-    assert_ne!(after.bytes, before.bytes);
-    assert_eq!((after.names, after.entries), (before.names, before.entries));
-}
-
-#[test]
 fn a_patch_makes_the_held_analysis_stale() {
     let mut program = opened();
     program.prepared(ONE).expect("it prepares");
@@ -155,14 +133,9 @@ fn a_patch_that_names_a_string_makes_every_held_analysis_stale() {
     // name anywhere is a new program to it even though no byte it read moved.
     let mut program = OpenProgram::of(Literal::new().with_data());
     program.prepared(ONE).expect("it prepares");
-    let before = program.revision();
     program.source_mut().write(TEXT, b"hello\0");
     program.prepared(ONE).expect("it prepares");
     assert_eq!(program.names().text_at(TEXT), Some("hello"));
-    let after = program.revision();
-    // The table changed and the stubs did not.
-    assert_ne!(after.names, before.names);
-    assert_eq!(after.entries, before.entries);
     assert_eq!(program.analysis_stats().analysed.recomputed, 1);
 }
 
@@ -179,12 +152,10 @@ fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
             .map(|stub| stub.symbol.as_str()),
         Some("puts")
     );
-    let before = program.revision().entries;
     // `jmp [rip + 2]` becomes `jmp [rip + 0x10]`, which reads no slot.
     program.source_mut().write(STUB + 2, &[0x10]);
     program.prepared(ONE).expect("it prepares");
     assert!(program.imports().is_empty());
-    assert_ne!(program.revision().entries, before);
     let stats = program.analysis_stats();
     assert_eq!(
         (
@@ -202,12 +173,8 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
     // bytes are untouched, but the instruction set it is read in moved.
     let mut program = OpenProgram::of(Literal::arm_thumb());
     program.prepared(THUMB_LEAF).expect("it prepares");
-    let before = program.revision().entries;
-    // Discovering the instruction sets the first time is no change.
-    assert_eq!(before, 0);
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
     let _ = program.prepared(THUMB_LEAF);
-    assert_ne!(program.revision().entries, before);
     // The leaf is read in another instruction set, a new key: the old analysis is never served.
     assert_eq!(program.analysis_stats().analysed.computed, 2);
     let called = program
@@ -217,10 +184,10 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
         .find(|one| one.address == THUMB_CALLED)
         .map(|one| one.thumb);
     assert_eq!(called, Some(false));
-    // A write that moves no function's instruction set moves nothing.
+    // A write that moves no function's instruction set leaves the leaf's analysis standing.
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
-    program.functions().expect("discovery runs");
-    assert_eq!(program.revision().entries, before + 1);
+    let _ = program.prepared(THUMB_LEAF);
+    assert_eq!(program.analysis_stats().analysed.computed, 2);
 }
 
 /// `mov eax, [rip + 0xffa]; ret` at 0x1000: the value of the object at 0x2000.

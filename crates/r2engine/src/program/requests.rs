@@ -197,11 +197,7 @@ impl Decoders for Walked<'_> {
 }
 
 /// A body's blocks listed in address order, each one run folded across its instructions.
-fn listed_by_block(
-    answered: &Answered<'_>,
-    blocks: &[r2il::R2ILBlock],
-    revision: crate::query::Revision,
-) -> Answer<Vec<Line>> {
+fn listed_by_block(answered: &Answered<'_>, blocks: &[r2il::R2ILBlock]) -> Answer<Vec<Line>> {
     let mut extents = blocks
         .iter()
         .filter(|block| block.size > 0)
@@ -209,13 +205,13 @@ fn listed_by_block(
         .collect::<Vec<_>>();
     extents.sort_unstable();
     extents.dedup();
-    let mut whole = Answer::complete(Vec::new(), revision);
+    let mut whole = Answer::complete(Vec::new());
     for (start, end) in extents {
         let listing = Listing {
             start,
             stop: Stop::At(end),
         };
-        let answer = crate::query::listing(answered, listing, Work::Function, revision);
+        let answer = crate::query::listing(answered, listing, Work::Function);
         whole.value.extend(answer.value);
         if whole.completion == Completion::Complete {
             whole.completion = answer.completion;
@@ -311,7 +307,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             &self.answered(None),
             request,
             Work::BlockLocal,
-            self.revision(),
         ))
     }
 
@@ -418,7 +413,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             ..self.answered(Some(&proved))
         };
         FunctionListing {
-            lines: listed_by_block(&answered, &lifted, self.revision()),
+            lines: listed_by_block(&answered, &lifted),
             refused: None,
         }
     }
@@ -453,7 +448,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             ..self.answered(None)
         };
         let listing = FunctionListing {
-            lines: listed_by_block(&answered, &lifted, self.revision()),
+            lines: listed_by_block(&answered, &lifted),
             refused: Some(AnalysisRefused { reason, unresolved }),
         };
         Ok((listing, shape))
@@ -563,7 +558,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let index = self.db.get::<ReferenceIndex>(&());
         let index = index.map_err(|cycle| format!("{cycle:?}"))?;
         let index = index.as_ref().clone()?;
-        Ok(Answer::complete(index.0, self.revision()))
+        Ok(Answer::complete(index.0))
     }
 
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
@@ -622,7 +617,6 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     if walked.is_empty() {
         return Ok(index.finish(coverage));
     }
-    let revision = super::view::revision(view.db);
     let walker = super::returns::Walking::new(view.clone(), true)?;
     for (&entry, walked) in walked {
         // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
@@ -643,7 +637,7 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
         }
         let machine = walker.machine(thumb).ok_or("no machine")?;
         let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, body.blocks, revision) {
+        match claimed_by(view, decoder, body.blocks) {
             Ok(lines) => {
                 coverage.read.push(entry);
                 index.read(entry, lines);
@@ -664,7 +658,6 @@ fn claimed_by<S: Source + 'static>(
         &r2sleigh_lift::EmbeddedMachine,
     ),
     blocks: Vec<crate::body::BodyBlock>,
-    revision: crate::query::Revision,
 ) -> Result<Vec<Line>, Unread> {
     let lifted = blocks
         .into_iter()
@@ -683,7 +676,7 @@ fn claimed_by<S: Source + 'static>(
         holdings: false,
         parameters: Some(view),
     };
-    let lines = listed_by_block(&answered, &lifted, revision).value;
+    let lines = listed_by_block(&answered, &lifted).value;
     // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
     if body.failed() {
         return Err(Unread::NoSsa);
