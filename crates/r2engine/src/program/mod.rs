@@ -36,9 +36,6 @@ use crate::query::{Consulted, Decoders, Memo, Moved, Revision};
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
-    /// Which architecture and compiler specification this was built for, so a
-    /// second instruction set in one program gets its own rather than this one.
-    machine: (String, &'static str),
     convention: &'static r2abi::CallingConvention,
     /// What the default convention says a call does; both instruction sets share one register file.
     call_effect: Option<r2source::SourceCallEffect>,
@@ -64,6 +61,8 @@ pub struct OpenProgram<S: Source + 'static> {
     /// How many times discovery's entry modes have differed, until the
     /// survey moves onto a query (Q3).
     modes_revision: u64,
+    /// Whether the machine's conventions were assembled when it loaded, and why not.
+    assembly: Result<(), String>,
     /// What this session has already worked out about one function, and the type analysis sealed from it.
     memo: Memo<Prepared, crate::SealedFunctionAnalysis>,
     /// The control for the request in hand: its cancellation, its deadline and
@@ -98,6 +97,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             imports: Rc::new(BTreeMap::new()),
             modes_at: None,
             modes_revision: 0,
+            assembly: Err("the program's machine is not loaded".to_owned()),
             memo: Memo::default(),
             control: crate::EngineExecutionControl::default(),
             next: None,
@@ -185,6 +185,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             let inputs = self.db.inputs_mut();
             inputs.machine = Some(machine);
             inputs.thumb_machine = thumb;
+            // Before any query runs: no answer is ever computed without it.
+            self.assembly = self.assemble();
         }
         self.imports = self
             .db
@@ -268,26 +270,20 @@ impl<S: Source + 'static> OpenProgram<S> {
         }
         Ok(())
     }
+    /// Whether what a native request needs of the machine was assembled when it loaded.
+    fn ensure_assembled(&mut self, _addr: u64) -> Result<(), String> {
+        self.assembly.clone()
+    }
 
-    /// Assemble what a native request needs, once per program and machine.
-    ///
-    /// All of it is constant while one program is open, and rebuilding it per
-    /// command cost two milliseconds -- almost all of it parsing the embedded
-    /// prototype table -- on every `pdd`, `pdil`, `afl` and `ax`.
-    fn ensure_assembled(&mut self, addr: u64) -> Result<(), String> {
+    /// Assemble what a native request needs, once per program: constant while it is open.
+    fn assemble(&mut self) -> Result<(), String> {
         let machine = self
-            .machine_at(addr)
-            .ok_or("no Sleigh specification for this architecture")?;
-        let key = (machine.arch.name.clone(), machine.compiler_spec);
-        if self
             .db
             .inputs()
-            .assembled
+            .machine
             .as_ref()
-            .is_some_and(|held| held.machine == key)
-        {
-            return Ok(());
-        }
+            .ok_or("no Sleigh specification for this architecture")?;
+        let arch = machine.arch.name.clone();
         let container = self.source().container();
         let bits = container.arch.bits;
         // The system's ABI says which register it reserves for the thread
@@ -295,8 +291,8 @@ impl<S: Source + 'static> OpenProgram<S> {
         // fact, so a static ELF that names no C library has it too; which
         // library's declarations apply is `platform`'s question.
         let psabi = kernel(container);
-        let convention = r2abi::calling_convention(key.0.as_str(), bits, psabi)
-            .ok_or_else(|| format!("no calling convention for {} {bits}", key.0))?;
+        let convention = r2abi::calling_convention(&arch, bits, psabi)
+            .ok_or_else(|| format!("no calling convention for {arch} {bits}"))?;
         // A PE runs under the Windows toolchain's prototypes where the
         // language names one; anything else under the usual toolchain's.
         let specification = match container.format {
@@ -346,7 +342,6 @@ impl<S: Source + 'static> OpenProgram<S> {
         // declarations are read by address, beside these, not merged in.
         let prototypes = r2abi::Prototypes::embedded_for(platform(container));
         self.db.inputs_mut().assembled = Some(Assembled {
-            machine: key,
             convention,
             call_effect,
             compiler,
