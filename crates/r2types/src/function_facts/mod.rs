@@ -1312,7 +1312,7 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             .find(|candidate| candidate.index() == *index)?;
         let graph_value = source.graph().value(parameter.value)?;
         // The formal's value is the carrier's entry value, or the projection
-        // minted for a lane of it (doc/adr-register-identity.md §8, 6).
+        // minted for a lane of it (doc/adr-register-identity.md §6).
         let entry_value = graph_value.canonical_storage == Some(parameter.graph_storage)
             && graph_value.var.size == parameter.graph_storage.size
             && graph_value.var.version == 0

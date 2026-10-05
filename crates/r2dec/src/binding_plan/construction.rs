@@ -1315,7 +1315,7 @@ impl BindingPlan {
             // A member with no defining instruction entered this function
             // already holding its value, so the object exists from entry; so
             // does a lane of an entry register, which is minted from its root
-            // (doc/adr-register-identity.md §8, 6).
+            // (doc/adr-register-identity.md §6).
             let caller_supplied = super::rules::is_caller_supplied(
                 source_owned,
                 graph,

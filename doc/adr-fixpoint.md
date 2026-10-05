@@ -1,113 +1,52 @@
 # ADR: one fixpoint driver
 
-Status: accepted; r2ssa done (ROADMAP K), r2types loops to C3 and r2dec loops to R
-
-## Context
-
-A census found about 45 iterative computations in r2ssa, r2types, r2dec,
-r2engine and r2rewrite that repeat "until nothing changes". Each states its
-own termination, or does not:
-
-- **About a dozen are sound already**: worklists over a lattice with a stated
-  height, such as value ranges (`values.rs`, with widening), views, demand,
-  dead phis, SCCP and discovery.
-- **About 25 rescan the whole function each round** with no stated lattice.
-  Examples: memory SSA (`semantic/objects.rs`), stack roots
-  (`function/rewrite.rs`), compare propagation (`semantic/predicates.rs`),
-  and the r2types and r2dec expression passes.
-- **Six stop at a cap and keep a partial result without saying so**:
-  `optimize.rs` (whose build paths pass 1, against its own comment),
-  r2types `globals` and `arrays` (6 rounds), r2dec `prepared_semantic`
-  (4 rounds), and `control_domains` (which skips the remaining blocks).
-- **About ten may not be monotone**, because they overwrite instead of
-  joining, roll back, or mint and never retract:
-  - memory SSA mints a phi in the first round where inputs disagree and keeps
-    it if they later agree. It also reads an unreached predecessor as the
-    entry value, so every loop header gets phis whether or not the loop
-    stores;
-  - `address.rs` re-derives each block from its known predecessors;
-  - `call_results.rs` writes certificates while still iterating;
-  - `interproc` call-argument state reads an unreached predecessor as
-    `Unknown`.
-
-A computation whose termination is a comment, or a round count, is a
-computation whose answer depends on how long it was allowed to run.
+Status: done for r2ssa (ROADMAP K); r2types' loops go with C3, r2dec's with R
 
 ## Decision
 
-**One driver, `r2ssa::fixpoint`.** A forward dataflow over a function's
-blocks:
+A computation whose termination is a comment or a round count has an answer
+that depends on how long it was allowed to run. Every iteration therefore
+runs on one driver, `r2ssa::fixpoint`, or is a worklist whose termination is
+stated where it is written.
 
-- The state type implements `Join`: a join that says whether it moved.
-- An unreached block is bottom, absent from the solution, and contributes
-  nothing to a join. It never stands for "entry" or "unknown".
-- Work is a set of blocks keyed by reverse-postorder index, so the order is
-  deterministic and each round visits only what changed.
-- The caller states the lattice height `h`. The budget is
-  `blocks × (h + 1)` block visits, which no monotone transfer over a
-  lattice of height `h` can exceed. Exceeding it is a typed `Exhausted`
-  error carrying refusal evidence, and the caller refuses. A result is never
-  partial and silent.
+- The state implements `Join`, a join that says whether it moved.
+- An unreached block is bottom: absent from the solution, contributing nothing
+  to a join. It never stands for "entry" or "unknown".
+- Work is a set of blocks keyed by RPO index, so order is deterministic and a
+  round visits only what changed.
+- The caller states the lattice height `h`; the budget is `blocks × (h + 1)`
+  visits, which no monotone transfer can exceed. Exceeding it is a typed
+  `Exhausted` error carrying refusal evidence, and the caller refuses. A
+  result is never partial and silent.
+- Entry points: `fixpoint::forward` (block dataflow), `forward_on_edges`, and
+  `fixpoint::sparse` (def-use, over `IdMap` cells and `Csr` readers). Further
+  variants are added when the first pass needs them.
+- A pass moved onto the driver states its lattice, iterates with symbolic
+  identities and numbers them once at the end, and joins rather than
+  overwrites. A pass that cannot be made monotone is replaced by a direct
+  algorithm.
+- Allowed forms for an iterating r2ssa pass: on the driver; a coupled
+  optimistic worklist with a stated budget; a worklist that touches only what
+  a change affects; one pass with the reason stated; or budgeted
+  meaning-preserving rewriting that says when it stops.
+- Out of K: the r2types confidence loops (`globals`, `arrays`, `structs`)
+  rank candidates by `u8` scores and are rewritten in C3; the r2dec loops
+  (`placement`, `rules`, `recording`, `prepared_semantic`) belong to the
+  renderer R replaces. They are not ported only to be deleted.
 
-A backward variant and a sparse (def-use) variant are added when the first
-pass that needs them moves onto the driver, not before.
+## Done
 
-**Each pass moved onto it states its lattice.** Iterating with symbolic
-identities and numbering once at the end replaces minting identities
-mid-iteration. A pass that overwrites is rewritten to join, or is shown not
-to be a fixpoint at all and replaced by a direct algorithm.
+- K0: `r2ssa::fixpoint` with `Join`, the height-derived budget and `Exhausted`.
+- K1: memory SSA on the driver (`semantic/objects.rs`); each (block, location) slot is unreached, one version, or `Phi(block, location)`, numbered after convergence. Lazy phi minting and loop-header phis from unreached back edges are gone.
+- K2: the non-monotone passes rewritten: stack roots (`function/stack_roots.rs`, optimistic on the sparse driver), call-result certificates, control domains, `interproc` call-argument state, `predicates.rs`, and `address.rs` (values and spill slots solved together, optimistically).
+- K3: `optimize.rs` runs one stated order of passes to a fixpoint; a run at its budget (one round per operation) leaves a correct, less simplified function and says so. Its silent round cap is deleted.
+- Already-sound passes keep their own written termination arguments: value ranges, views, demand, dead phis, liveness, SCCP, dominators, `interproc` summaries, the loop-carrier worklist.
 
-**Out of K:**
-- The r2types confidence loops (`globals`, `arrays`, `structs`) rank
-  candidates by `u8` scores; they are rewritten in C3.
-- The r2dec loops (`placement`, `rules`, `recording`, `prepared_semantic`)
-  belong to the renderer that R replaces.
-- K records these and does not port them only to delete them later.
+## Left
 
-## Migration
-
-| Step | Change | Deletes |
-|------|--------|---------|
-| K0 | `r2ssa::fixpoint`: forward block dataflow, `Join`, a budget from the stated height, `Exhausted` as a typed refusal — **done** | — |
-| K1 | Memory SSA on the driver. Each (block, location) slot is a three-level lattice: unreached, then one version, then `Phi(block, location)`. Versions stay symbolic while iterating and are numbered after convergence; uses, defs and phis come from one pass over the converged states | lazy phi minting, phis that outlive their merge, the loop-header phi from an unreached back edge — **done** |
-| K2 | The non-monotone r2ssa passes, rewritten to join or replaced: `rewrite.rs` stack roots (**done**: `function/stack_roots.rs`, optimistic on the sparse driver; the census is byte-identical), `address.rs`, `call_results.rs`, `interproc` call-argument state, `predicates.rs`, `control_domains` — **done**, `address.rs` included: value expressions and spill slots are solved together, optimistically, and a value's change re-reads every block that reads it | overwriting updates, writes during iteration, silent skips |
-| K3 | `optimize.rs`: one stated order of passes run to a fixpoint, instead of a round count. Every round preserves meaning, so a run at its budget (one round per operation) leaves a correct, less simplified function and says so — **done** | `max_iterations` and its silent stop |
+- r2types `globals` and `arrays` still stop after 6 rounds (`for _ in 0..6`). Exit: rewritten in C3 with a stated lattice or deleted.
+- r2dec `prepared_semantic` still stops after 4 rounds. Exit: deleted with R.
 
 ## Consequences
 
-- K1 may remove phis that were spurious, so a load through a loop with no
-  store reads the version that reached it. The stack-reload certificates and
-  the equal-value grouping may then prove more. Every such change is read
-  in the census and judged by the equivalence gate.
-- Cost: each driven pass costs at most `blocks × (h + 1)` transfers. The
-  dense rescans become worklists.
-
-## As landed
-
-All of r2ssa's iterating passes are now in one of these forms:
-
-- **On the driver.** Memory SSA, stack roots (optimistic and sparse),
-  call-result certificates, control domains, and the call-argument state.
-- **A coupled optimistic worklist with a stated budget.** Address
-  provenance, which solves values and spill slots together.
-- **A worklist that touches only what a change can affect.** The dispatch
-  slice, stack geometry, renderable loop phis, and the copy closure in the
-  condition-code fold.
-- **One pass, with the reason stated.** Compare definitions and their
-  source aliases, because no phi carries them.
-- **Budgeted rewriting that keeps meaning and says when it stops.** The
-  optimiser's rounds and `inst_combine`'s steps.
-
-The passes the census found sound already keep their own termination
-arguments: value ranges, views, demand, dead phis, liveness, SCCP,
-dominators, `interproc` summaries, and the loop-carrier worklist, whose
-argument is now written down.
-
-On the census, every change except K1 and K3 is byte-identical.
-
-- K1 removes spurious loop-header memory phis. Its equivalence result is
-  identical, and it leaves an R item: how the renderer binds a certified
-  reload.
-- K3 runs the optimiser to its fixpoint, which folds arm64 signed-compare
-  flags to the comparison in 8 binaries.
-
+- K1 removed spurious loop-header memory phis, so a load through a loop with no store reads the version that reached it; how the renderer binds such a certified reload is an R item.

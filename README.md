@@ -1,10 +1,12 @@
 r2sleigh
 ========
 
-A binary analysis engine and certifying decompiler, in Rust, with `r2s` as its
-shell. Semantics come from Ghidra's Sleigh specifications rather than from
+A binary analysis engine and certifying decompiler in Rust, with `r2s` as its
+shell. Semantics come from Ghidra's Sleigh specifications rather than
 hand-written per-architecture models, and the decompiler refuses rather than
-guessing when it cannot prove what it would print.
+guesses when it cannot prove what it would print. `r2s` speaks radare2's
+command language with no radare2 in the process; radare2 is the differential
+target the engine is graded against.
 
 ```
 bytes --> Sleigh --> r2il (low) --> r2ssa (medium) --> r2dec (high) --> C
@@ -13,147 +15,84 @@ bytes --> Sleigh --> r2il (low) --> r2ssa (medium) --> r2dec (high) --> C
         ELF/Mach-O/DWARF          type inference       term rewriting
 ```
 
-`r2s` opens a binary, walks and lifts it, and answers with no radare2 in the
-process. radare2 remains the differential target this engine is graded against,
-and general fixes found while grading it go upstream as their own pull requests.
-
 Quick start
 -----------
 
 ```bash
 cargo build --release -p r2s --features sleigh
+
+target/release/r2s -q -c 'afl' /bin/ls                    # functions, and why each is believed
+target/release/r2s -q -c 'iz' /bin/ls                     # strings
+target/release/r2s -q -c 'axt 0x100003f10' /bin/ls        # references to an address
+target/release/r2s -q -c 's main; pdd' /bin/ls            # decompile
+target/release/r2s -q -c 's main; wx 9090; pdd' /bin/ls   # patch in memory, then decompile
+target/release/r2s -q -c 's main; pd 16' /bin/ls          # disassemble
+target/release/r2s /bin/ls                                # interactive; V for the visual mode
 ```
 
-```bash
-# Every function the engine finds, with why each one is believed
-target/release/r2s -q -c 'afl' /bin/ls
-
-# Every address the binary names, and every string it holds
-target/release/r2s -q -c 'f' /bin/ls
-target/release/r2s -q -c 'iz' /bin/ls
-
-# Every reference the program makes, and every one naming an address
-target/release/r2s -q -c 'ax' /bin/ls
-target/release/r2s -q -c 'axt 0x100003f10' /bin/ls
-
-# Patch a byte and decompile what the patched program does. The file on disk
-# is untouched; `wc` lists the patches and `wcr` takes them back.
-target/release/r2s -q -c 's main; wx 9090; pdd' /bin/ls
-
-# Decompile one
-target/release/r2s -q -c 's main; pdd' /bin/ls
-
-# Disassemble, radare2's spelling
-target/release/r2s -q -c 's main; pd 16' /bin/ls
-```
-
-Each tier of the IL prints on its own, so a defect belongs to exactly one
-lowering:
-
-```bash
-target/release/r2s -q -c 's main; pdil' /bin/ls   # r2il, as lifted
-target/release/r2s -q -c 's main; pdim' /bin/ls   # r2ssa, with binding plan
-target/release/r2s -q -c 's main; pdih' /bin/ls   # the r2dec tree
-```
-
-The Sleigh toolchain has its own binary:
-
-```bash
-cargo build --release -p r2sleigh-cli --features x86
-r2sleigh disasm --arch x86-64 --bytes "4889e500000000000000000000000000"
-```
+Each IL tier prints on its own, so a defect belongs to one lowering: `pdil`
+(r2il as lifted), `pdim` (r2ssa with its binding plan), `pdih` (the r2dec
+tree). `R2DEC_TRACE_REFUSAL=1` names the predicate and site behind a refusal.
 
 Architectures
 -------------
 
 | Architecture | Feature | Status |
 |--------------|---------|--------|
-| x86-64       | `x86`   | Decompiles |
-| x86 (32-bit) | `x86`   | Decompiles |
-| aarch64      | `arm`   | Decompiles |
-| ARM 32-bit   | `arm`   | Disassembles; `pdd` not yet admitted |
-| RISC-V 32/64 | `riscv` | Lifts |
-| MIPS         | `mips`  | Lifts |
-
-Depth before breadth: x86 and ARM come first and stay first.
+| x86-64, x86 | `x86` | decompiles |
+| aarch64 | `arm` | decompiles |
+| ARM 32-bit | `arm` | disassembles; `pdd` not yet admitted |
+| RISC-V, MIPS | `riscv`, `mips` | lift |
 
 Crates
 ------
 
 | Crate | Purpose |
 |-------|---------|
-| `r2s` | The shell: a radare2-compatible command surface |
-| `r2image` | ELF and Mach-O parsing, and DWARF through `gimli` |
-| `r2abi` | Calling conventions and library prototypes |
-| `r2il` | Core IL: `Varnode`, `SpaceId`, `R2ILOp`, `R2ILBlock` |
-| `r2sleigh-lift` | Sleigh and P-code to r2il |
-| `r2sleigh-export` | Instruction exporter (lift/ssa/defuse/dec) |
-| `r2sleigh-cli` | Sleigh toolchain: compile, disasm, info |
-| `r2ssa` | SSA: control flow, dominators, liveness, slicing, value ranges |
-| `r2source` | The facts a capture owns, and their contracts |
-| `r2types` | Type inference: constraint solver, signatures, shapes |
-| `r2rewrite` | Term rewriting over the medium tier |
-| `r2dec` | Structuring, binding, certification and C rendering |
-| `r2engine` | Request orchestration, discovery, the native route |
+| `r2s` | The shell: radare2's command language over the engine |
+| `r2s-tui` | The visual mode |
+| `r2engine` | Query orchestration, discovery, routes, summaries |
+| `r2image` | ELF and Mach-O parsing, DWARF through `gimli` |
+| `r2abi` | Library prototypes, syscalls, cited ABI rows |
+| `r2sleigh-lift` | Sleigh decoding to r2il; the machine profile from the `.cspec` |
+| `r2il` | The low IL (`Varnode`, `R2ILOp`, `R2ILBlock`) and its semantics |
+| `r2ssa` | The IR: SSA, indexes, liveness, values, memory, certificates |
+| `r2source` | Contracts between the layers |
+| `r2types` | Type inference, layouts, signatures |
+| `r2rewrite` | Term rewriting with proved rules |
+| `r2dec` | Structuring, binding and C rendering |
+| `r2sleigh-cli`, `r2sleigh-export` | The Sleigh toolchain and the instruction exporter |
+
+Extending
+---------
+
+- **An opcode**: `R2ILOp` in `crates/r2il/src/opcode.rs`, its P-code
+  translation in `crates/r2sleigh-lift/src/translate.rs`, text in `text.rs`,
+  `SSAOp` in `crates/r2ssa/src/op.rs`, lowering in
+  `crates/r2dec/src/fold/op_lower/`.
+- **An architecture**: a trusted language in `crates/r2sleigh-lift`
+  (`TrustedSleighProfile`, `embedded_machine`) whose compiler specification
+  the `LanguageProfile` parses; nothing below the lifter matches its name
+  ([doc/adr-machine-profile.md](doc/adr-machine-profile.md)).
+- **A command**: one entry in `VERBS` in `crates/r2s/src/commands.rs`, spelled
+  as radare2 spells it.
 
 Documentation
 -------------
 
-| Document | Description |
-|----------|-------------|
+| Document | What |
+|----------|------|
+| [ROADMAP.md](ROADMAP.md) | What is done, what is left, in order |
+| [AGENTS.md](AGENTS.md) | Working rules: ownership, anti-hack standard, validation bar |
+| [BUILDING.md](BUILDING.md) | Build, features, profiles, troubleshooting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Issues, commits, pull requests |
 | [doc/engine-vision.md](doc/engine-vision.md) | What this is becoming, and why |
-| [BUILDING.md](BUILDING.md) | Build instructions and troubleshooting |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Code style and pull requests |
-| [DEVELOPERS.md](DEVELOPERS.md) | Architecture overview and module map |
-| [ROADMAP.md](ROADMAP.md) | Ordered execution list |
-| [doc/certifying_decompiler.md](doc/certifying_decompiler.md) | Obligations, certificates, refusal |
-| [doc/r2il.md](doc/r2il.md) | Intermediate language design |
-| [doc/ssa.md](doc/ssa.md) | SSA construction and optimization |
-| [doc/decompiler.md](doc/decompiler.md) | Decompiler pipeline |
-| [doc/types.md](doc/types.md) | Type inference |
-| [doc/testing.md](doc/testing.md) | Testing strategy |
-
-Testing
--------
-
-```bash
-# --no-fail-fast, always: without it one crate's failure hides the rest
-cargo test --workspace --all-features --no-fail-fast
-
-# Every named function renders, and reads nothing that was never written
-python3 scripts/certify_render.py --bins <radare2>/test/bins/elf --limit 24 --functions 8
-
-# The same commands through radare2 and through r2s, diffed
-python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30
-```
-
-R2IL format
------------
-
-- `R2PSTC07` is the sole format identity; there is no version field and no
-  compatibility branch.
-- Saving emits `R2PSTC07 || payload_length_u64_le || postcard(ArchSpec)`, and
-  the reader requires exact payload consumption.
-- `ArchSpec::register_projections` is the source-owned, name-free register
-  geometry table. Empty means unavailable; otherwise it is sorted, complete for
-  unique declared storages, and validated as coherent overlap components.
-- Endianness has exactly two architecture-level authorities,
-  `instruction_endianness` and `memory_endianness`.
-- Memory semantics carry explicit ordering: `Fence`, `LoadLinked` /
-  `StoreConditional`, `AtomicCAS`, `LoadGuarded` / `StoreGuarded`.
-
-Export action and format pairs are strict and fail explicitly rather than
-falling back: `lift` takes `json` and `text`; `ssa` and `defuse`
-take `json` and `text`; `dec` takes `c_like`, `json` and `text`.
+| [doc/testing.md](doc/testing.md) | Gates and where a test goes |
+| `doc/r2il.md`, `doc/ssa.md`, `doc/decompiler.md`, `doc/types.md` | The tiers |
+| `doc/adr-*.md` | One design decision each, linked from the roadmap |
 
 Requirements
 ------------
 
-- Rust 1.85+ (edition 2024)
-- radare2, only to run the differential harnesses
-- Z3, optional
-
-License
--------
-
-LGPL-3.0-only
+Rust 1.85+ (edition 2024). radare2 only for the differential harnesses. Z3
+optional. License: LGPL-3.0-only.

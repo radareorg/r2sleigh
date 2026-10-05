@@ -1,136 +1,103 @@
 # ADR: one machine profile
 
-Status: proposed (ROADMAP M, before P4; decision D15)
-
-## Context
-
-What an architecture is -- its registers and their lanes, its stack
-pointer and return address, its calling conventions, what a call kills and
-what it preserves, its pointer size, its thread pointer -- is decided in
-about sixty places below the lifter, by matching an architecture's name or
-a register's name. A survey of 2026-10-05 found them in every crate:
-
-| Crate | Sites | What they decide |
-|---|---|---|
-| r2ssa | 10 | register alias tables (`abi.rs`), the family by name (`MachineArchitectureFamily::from_arch_spec`), call argument and return reads by register name, whether a call moves the stack pointer, the direction flag |
-| r2types | 9 | argument alias tables, stack and frame bases, x86-only convention inference, SysV/AAPCS64 argument lists |
-| r2dec | 8 | a register label list, `sp`/`fp`/argument/result names per architecture, parameter ranking by name |
-| r2engine | 13 | the program counter by name, family to pointer size and back, the assembled machine by name |
-| r2abi | 6 | conventions from radare2's sdb keyed by (family, bits), DWARF register numbers, platform registers, the syscall register |
-| r2image | 6 | DWARF stack pointer per architecture, ARM by name, the architecture map that refuses RISC-V |
-| r2source | 2 | convention spellings |
-
-Two owners answer the same question in places: a call's arguments and what
-it preserves come from radare2's sdb (r2abi `Conventions`), while the stack
-pointer, the return address and the stack arguments come from the Ghidra
-compiler specification (`CompilerSpec`). RISC-V cannot reach the trusted
-path at all: no embedded machine, no arm in the lifter's tuple gate, and
-r2image refuses it.
-
-The Sleigh bundle the lifter already embeds (`sleigh-config`) states all of
-it, per language:
-
-- `.ldefs`: the language id (processor, endianness, size, variant), the
-  compiler specification per compiler (`gcc`, `windows`, `default`,
-  `swift`, `golang`) and the DWARF register mapping file;
-- `.sla`: the register file, with every register's offset and size, so
-  every lane is a projection of the register holding it;
-- `.pspec`: the program counter and the registers tracked at entry (x86's
-  `DF=0`);
-- `.cspec`: the stack pointer and its growth, the return address (a
-  register, or a stack slot), the pointer size, the prototypes -- input
-  and output entries with their storage and extension, `killedbycall`,
-  `unaffected` -- and `global` storage (MXCSR; RISC-V's `gp`, `tp`);
-- `.dwarf`: DWARF register numbers, with the stack pointer marked.
+Status: in progress (ROADMAP M, before P4; decision D15)
 
 ## Decision
 
-**One typed `LanguageProfile` per (language, compiler), derived from the
-trusted bundle, owned by r2sleigh-lift, and the only source below it of
-what an architecture is.**
+There is one typed `LanguageProfile` per (language, compiler). It is derived
+from the trusted Sleigh bundle that `sleigh-config` embeds, owned by
+r2sleigh-lift (`crates/r2sleigh-lift/src/profile.rs`), and it is the only
+source below the lifter of what an architecture is. No crate below the lifter
+matches an architecture name or a register name.
 
-- **Fields**, each from the file that states it:
-  - registers: name, storage, the containing register (the lane relation);
-  - program counter, tracked entry values (`.pspec`);
-  - stack pointer and growth, return address (register or stack slot),
-    pointer size, endianness;
-  - conventions: each prototype's argument and result entries in order
-    (integer and float), stack argument placement, `killedbycall`,
-    `unaffected`, `global`;
-  - DWARF register numbers and the DWARF stack pointer (`.dwarf`).
-- **Selection** is by the container's (machine, bits, endianness) mapped to
-  a language id through the `.ldefs` external names (`gnu`), and the
-  compiler by the container's platform (`windows` for PE, `default`/`gcc`
-  otherwise). The trusted set stays an allowlist -- a language is trusted
-  because it is listed, not because its files parse -- but it is a list of
-  language ids, not a match arm per architecture.
+- **Fields, each read from the file that states it:**
+  - `.cspec`: the stack pointer and its growth, the return address (a register
+    or a stack slot), the pointer size, and the prototypes (input and output
+    entries in order, with storage, class and extension; `killedbycall`;
+    `unaffected`), plus `global` storage.
+  - `.pspec`: the program counter and the registers tracked at entry.
+  - `.sla`: the register file, where every lane is a projection of the
+    register that holds it.
+  - `.ldefs`: the language id and the compiler specification for each
+    compiler.
+  - `.dwarf`: DWARF register numbers, with the stack pointer marked.
+- **Selection.** The container's (machine, bits, endianness) maps to a
+  language id through the `.ldefs` external names, and the compiler is chosen
+  by platform (`windows` for PE, otherwise `default`/`gcc`). The trusted set
+  stays an allowlist of language ids, not a match arm per architecture.
 - **Not in the bundle, and not guessed:**
-  - the frame pointer is a fact about the body: promote.rs already proves
-    it (an address derived from the stack pointer, copied into a register
-    the convention preserves), and it moves to r2ssa as that fact;
-  - the syscall number register and library prototypes stay radare2's
-    data in r2abi, keyed by the profile's language rather than a name;
-  - the red zone, the direction flag's state across a call and the
-    registers a platform reserves are the psABIs', which no specification
-    in the bundle states: they stay r2abi's table of cited rows;
-  - a prototype's `killedbycall` is what a call certainly destroys, not
-    the caller-saved set: x86-64 gcc's lists `RAX`, `RDX`, `XMM0` and no
-    other, and AArch64's only `x8`-`x18`. The engine's call effect is
-    exhaustive ("every register not preserved or reserved may change"), so
-    nothing may rely on an enumeration of clobbered registers (M1b);
-  - whether a narrow register write zeroes the rest is r2ssa's
-    (`Written::is_conventional_extension`), already structural.
-- **Consumers read it**: `SourceMachineRoles`, `SourceConventionSlots` and
-  `SourceCallEffect` are built from the profile in `r2engine::native`; r2ssa,
-  r2types and r2dec read those or the profile; `MachineArchitectureFamily`
-  is deleted; r2abi's convention sdb files are deleted.
+  - the frame pointer is a fact about the body (a stack-pointer-derived
+    address copied into a preserved register), proved in r2ssa;
+  - the syscall register and library prototypes stay radare2's data in
+    r2abi, keyed by language rather than by name;
+  - the convention's name, red zone, variadic-tail placement, the direction
+    flag across a call and platform-reserved registers are r2abi's cited ABI
+    rows, keyed by (architecture, width, platform);
+  - `killedbycall` is what a call certainly destroys, not the caller-saved
+    set. The call effect is exhaustive (every register neither preserved nor
+    reserved may change), so nothing relies on an enumerated clobber list;
+  - whether a narrow write zeroes the rest is r2ssa's structural fact
+    (`Written::is_conventional_extension`).
+- **Consumers.** `SourceMachineRoles`, `SourceConventionSlots` and
+  `SourceCallEffect` are built from the profile in `r2engine::native`. r2ssa,
+  r2types and r2dec read those or the profile.
+- **Where the sdb and the `.cspec` disagree,** the difference is listed and
+  judged, and the bundle is the authority. Each step leaves the census
+  byte-identical or names every line that moved.
 
-## Migration
+## Done
 
-| Step | Change | Deletes |
-|------|--------|---------|
-| M0 | `LanguageProfile` in r2sleigh-lift: `.ldefs`, full `.cspec` (prototypes, killedbycall, unaffected, global), `.dwarf`, register lanes from `.sla`; a test that every listed language parses and states a stack pointer, a return address and a default prototype | `CompilerSpec`'s partial parse; the two `.pspec` program counter parsers |
-| M1a | Argument and result slots from the default prototype's general register entries; a PE runs under the language's Windows specification | the slots' sdb source |
-| M1b | A callee is asked whether it leaves alone every register a caller may read that the convention does not preserve, not a fixed list; then call effects from the profile (preserved: `unaffected` less the return address register; clobbered: argument, result and `killedbycall` registers and the return address register, less what is preserved or reserved) | the sdb's clobber and preserve lists; the x86 direction flag becomes a cited ABI row |
-| M1c | The convention's name, red zone and variadic tail placement from r2abi's cited ABI rows, by platform (a PE is Windows) | the sdb's reads but its float slots |
-| M1d | Float argument and result slots from the prototype's float entries, which name lanes (`XMM0_Qa`), with a slot read as a lane of the register family's program root wherever a boundary is matched | r2abi `Conventions` and its sdb files |
-| M2 | r2ssa reads roles and slots only | `abi.rs` alias tables, `from_arch_spec`, `call_argument_register_defs`/`return_read_register_defs` by name, `call_moves_stack_pointer` by family, the direction-flag class check |
-| M3 | r2types reads the profile through the facts | `prepare.rs` alias and frame tables, `arrays.rs` prefixes, `signature_infer` convention inference by name, `assumptions.rs` lists |
-| M4 | r2dec spells from the profile's register file | the label list, per-architecture `sp`/`fp`/argument/result names, the x86-64 default |
-| M5 | r2image and r2engine | the DWARF tables, `map_architecture`'s refusal of RISC-V, family to bits and back, the program counter by name |
-| M6 | RISC-V 64 end to end, from its `.ldefs` and `riscv64-fp.cspec` | — |
+- M0 (80b8e559): `LanguageProfile` parses the whole `.cspec`; r2abi's `CompilerSpec` is deleted.
+- M1a (36f1d7b2): argument and result slots from the default prototype; a PE runs under the Windows `.cspec`.
+- M1b (797e11f2): call effects from the prototype; callees are asked about the whole call universe.
+- M1c (5a205ad2): convention name, red zone and variadic tail from r2abi's cited ABI rows by platform.
+
+## Left
+
+- M0 remainder: `.ldefs` selection, `.sla` lanes, `.pspec` tracked values and
+  `.dwarf` numbers in the profile (the Windows pairing is a static table in
+  the embedded machine today). Exit: read where M2–M5 need them.
+- M1d: float slots from the prototype's float entries (below). Exit: r2abi
+  `Conventions` and its convention sdb files deleted.
+- M2: r2ssa reads roles and slots only. Exit: `abi.rs` alias tables,
+  `MachineArchitectureFamily::from_arch_spec`, `call_argument_register_defs`/
+  `return_read_register_defs` by name, `call_moves_stack_pointer` by family
+  and the direction-flag class check deleted.
+- M3: r2types reads the profile through the facts. Exit: `prepare.rs` alias
+  and frame tables, `arrays.rs` prefixes, `signature_infer`'s convention
+  inference by name and the `assumptions.rs` lists deleted.
+- M4: r2dec spells from the profile's register file. Exit: the label list,
+  per-architecture `sp`/`fp`/argument/result names and the x86-64 default
+  deleted.
+- M5: r2image and r2engine. Exit: the DWARF tables, `map_architecture`'s
+  RISC-V refusal, family-to-bits and back, and the program counter by name
+  deleted.
+- M6: RISC-V 64 end to end from its `.ldefs` and `riscv64-fp.cspec`. Exit: it
+  renders with no arm added in r2ssa, r2types or r2dec.
 
 ## M1d: a slot is a lane of the program root
 
-The specification states where a float travels exactly: x86-64 gcc's
-float entries are `XMM0_Qa`..`XMM7_Qa`, eight bytes each, where radare2's
-data said `xmm0`. Taking the lanes as slots (tried 2026-10-05) moved only
-functions with declared floats, and showed why they cannot be slots as
-the contract reads them today: rename defines each register family at
-its program root (the narrowest declared register holding every range
-the function touches), so the call to `avg` defines `XMM0` (16 bytes)
-and the result slot `XMM0_Qa` matches no `CALLDEF`
-(`call_result_values_after_call` asks for equal storage). The sdb's
-`xmm0` matched by coincidence of width, and fails the same way in any
-function whose root is `ZMM0`. The rule M1d adopts: a boundary slot is
-matched against the definition of the program root that contains it,
-and the slot's offset and width become the logical carrier
-(`SourceCarrierKind::LowBits` at the lane's offset), at every boundary
-that matches slots -- parameters, call arguments, call results and
-returns. Two fixes found on the way belong to it: a constant has no
-definition to elide and must never be an unobserved value
-(`deadphi.rs`), and the return certificate's full-width case must accept
-a value that is a lift temporary, which names no register
-(`certificates/returns.rs`).
+The specification names float slots as lanes: x86-64 gcc's float entries are
+`XMM0_Qa`..`XMM7_Qa` (eight bytes each), where radare2's data said `xmm0`.
+Rename defines each register family at its program root (the narrowest
+declared register that holds every range the function touches), so a call
+defines `XMM0` (or `ZMM0`) and a lane slot matches no `CALLDEF`, because
+`call_result_values_after_call` asks for equal storage. The sdb's `xmm0`
+matched only by coincidence of width.
+
+- **Rule:** a boundary slot is matched against the definition of the program
+  root that contains it. The slot's offset and width become the logical
+  carrier (`SourceCarrierKind::LowBits` at the lane's offset). This applies at
+  every boundary that matches slots: parameters, call arguments, call results
+  and returns.
+- **Two fixes belong to it:** a constant has no definition to elide and must
+  never be an unobserved value (`deadphi.rs`); and the return certificate's
+  full-width case must accept a lift temporary, which names no register
+  (`certificates/returns.rs`).
 
 ## Consequences
 
-- Exit: no architecture or register name matched below the lifter; the
-  tables deleted; RISC-V renders with no arm added in r2ssa, r2types or
-  r2dec.
-- Each step keeps the census byte-identical or names every line that moved
-  and why. Where the sdb and the `.cspec` disagree (for instance on what a
-  call preserves), the difference is listed and judged, and the bundle is
-  the authority.
-- A new architecture is a language id added to the trusted list and its
-  bundle, nothing else.
+- Name-matching sites to remove (survey of 2026-10-05): r2ssa 10, r2types 9,
+  r2dec 8, r2engine 13, r2abi 6, r2image 6, r2source 2.
+- A new architecture is a language id added to the trusted list, with its
+  bundle, and nothing else.

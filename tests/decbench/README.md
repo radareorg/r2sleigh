@@ -9,7 +9,7 @@ least one of the three.
 
 **No valid number exists yet.** Everything this directory recorded before
 2026-09-25 -- `baseline.json`, the tables that used to be here, and the figures
-in `doc/decbench-plan.md` and `doc/beat-angr-end-to-end.md` -- was measured
+in the since-deleted planning documents -- was measured
 through the deleted radare2 plugin with `decbench run`, which hands the
 decompiler the unstripped `-g` binary. r2sleigh read that binary's DWARF (the
 prototypes, parameter and local names and types that `type_match` is scored

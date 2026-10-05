@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Count the casts in rendered C: doc/phase1-design.md section 1.
+"""Count the casts in rendered C.
 
 usage: tests/corpus/cast_census.py <file of rendered C>
   tests/coverage/sweep_binary.sh ./binary > sweep.txt; tests/corpus/cast_census.py sweep.txt

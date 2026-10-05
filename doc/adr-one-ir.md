@@ -1,296 +1,77 @@
 # ADR: one IR, indexed once
 
-Status: proposed (ROADMAP F2, decisions D11–D12)
-
-## Context
-
-F1 gave every operation and value a stable id, and K put iteration on one
-driver. The representation those ids index is still scattered, and every pass
-rebuilds what it needs:
-
-- **Rebuilt indexes.** Outside tests, preparation builds the graph twice
-  (again after the demand release changes operands, `function/stage.rs`),
-  computes liveness twice (the second time with what the facts collected
-  from the first said about shared content and uncertified call reads), and
-  interface recovery prepares a whole provisional fact set before the real
-  preparation (`recover_interface.rs`: graph, liveness, spans and
-  `PreparedFunctionFacts`). r2dec computes dominators twice more over its own
-  control graph (`structure/place.rs`, `structure/certify.rs`). Tests build
-  the graph at 39 further sites, because nothing smaller answers their
-  questions. Each rebuild answers a question the function already
-  determines, and the liveness rebuild is a dependency cycle (liveness,
-  spans, facts, liveness) solved by running it twice.
-- **Side tables instead of indexes.** 684 maps and sets in production code
-  are keyed by a function's own entities (`SSAVar`, `ValueId`, `InstId`,
-  `BlockId`, `OpId`, the optimiser's `VarKey`): 373 in r2ssa, 240 in r2dec
-  and 71 in r2types, as `ENTITY_KEYED_MAP` counted them on 2026-10-04. Every
-  lookup is a tree walk or a hash of a name, every pass builds its own, and
-  two passes that need the same relation build it twice.
-- **Names as identity.** `SSAVar` (a name, a version, a width and a
-  disambiguator) still keys facts, although a value's identity is its
-  `ValueId`. The optimiser hashes `VarKey` strings.
-- **Facts in bags.** `DecompilePrepFacts` has 6 fields,
-  `PreparedFunctionFacts` 15 and `PreparedFunctionCertificates` 24, each a
-  set of maps assembled by its own pass. Nothing says which pass owns which
-  relation, so the same relation reappears in several. Frame objects have
-  twelve owners (doc/adr-frame-model.md).
-- **Seven representations of one function**: the blocks, the graph (built
-  twice), the views (three times), the machine projection (per plan build),
-  the term arena (per inlining round), the binding plan (per render round),
-  and the liveness models.
-
-The cost is not only time. A fact computed twice can be computed two ways,
-and each copy is a place for the two to disagree.
+Status: in progress (ROADMAP F2, decisions D11–D12)
 
 ## Decision
 
-**The sealed function is the IR, and everything about it is an index over its
-ids.**
+The sealed function is the IR, and everything about it is an index over its
+ids. Every rebuilt graph, liveness pass or side table answers a question the
+function already determines, and each copy is a place for two answers to
+disagree.
 
-1. **Dense identity.** `OpId`, `InstId`, `ValueId` and `BlockId` are dense
-   `u32`s fixed at seal. Facts about them live in dense containers:
-   - `IdVec<I, T>`: a value for every id, a `Vec<T>` indexed by it;
-   - `IdMap<I, T>`: a value for some ids, a `Vec<Option<T>>`;
-   - `IdSet<I>`: a bitset;
-   - `Csr<I, T>`: compressed adjacency for def-use, predecessors and
-     successors.
+- **Dense identity.** `OpId`, `InstId`, `ValueId` and `BlockId` are dense
+  `u32`s fixed at seal. Facts about them live in `r2ssa::dense`, generic over
+  the id type so a value fact cannot be indexed by an instruction: `IdVec`
+  (every id), `IdMap` (some ids), `IdSet` (bitset) and `Csr` (adjacency).
+  Iteration is in id order, so it is deterministic by construction.
+- **No entity-keyed maps.** A `BTreeMap`/`HashMap` keyed by `SSAVar`,
+  `ValueId`, `InstId`, `BlockId` or `OpId` is not allowed in r2ssa, r2types or
+  r2dec; the `entity_keyed_map` Dylint enforces it. `SSAVar` is a value's
+  presentation, and nothing is keyed by it. Exceptions say why at their item.
+  The ones that stay: a few ids attached to one entity (a certificate's member
+  set, a return block's values, a component's liveness segments, an affine
+  form's terms), where a dense map would cost O(values) per entity; the
+  renaming, lane and value-table index maps, which run before the value table
+  exists or are its interning index; the per-block value-range maps, which P5
+  rebuilds as an index.
+- **One index layer.** `Sealed` owns a `FunctionIndex`; each index is computed
+  at most once, on first use, from the IR and the indexes it declares as
+  inputs: structure (RPO, dominators with frontiers, loops, def-use, use
+  sites), values (views, constants and ranges, written lanes, demand),
+  lifetime (one liveness model over locations, storage spans) and memory (the
+  frame model, memory SSA). A pass reads the index; it never builds its own.
+- **Analyses are declared.** An iterating index runs on the fixpoint driver
+  (doc/adr-fixpoint.md) with its lattice, height and transfer over dense
+  cells. Certificates are views over indexes plus the decisions only they make.
+- **A builder before the seal.** `Lifted` and `Prepared` are a mutable
+  builder with an incremental def-use, so the optimiser and demand pass edit
+  through plans without a graph; the seal freezes it. No graph exists before
+  the seal.
+- **Other representations become indexes or go.** The machine projection and
+  the term arena become indexes; the binding plan and journal go with R
+  (doc/adr-renderer-printer.md).
+- **Operands are ids.** The function's blocks hold `SSAOp<VarId>` over one
+  `ValueTable` (id, storage, width, version, name). `VarId` is the function's
+  own id, minted while it is edited; the graph's `ValueId` numbers the sealed
+  values in first-seen order. They are distinct types, mapped by a dense
+  vector. A plan that names a variable not yet in the table mints it through a
+  `Minting`, and asserts the table length it was made against.
+- **Cost.** Seal O(n log n) once; each index O(n), or O(n × height) for a
+  lattice analysis, once per sealed function; every lookup O(1). If F2.3 needs
+  semantic changes rather than re-keying in more than about 40 files, stop
+  and reassess.
 
-   They are generic over the id type (`r2ssa::dense`), so a value fact
-   cannot be indexed by an instruction.
+## Done
 
-   Iteration order is id order, which is deterministic by construction. A
-   `BTreeMap` or `HashMap` keyed by a function's own entity is not allowed in
-   r2ssa, r2types or r2dec; a Dylint enforces it, the way the existing lints
-   enforce the other seams. `SSAVar` stays as the presentation of a value,
-   and nothing is keyed by it.
+- F2.0 (`15ac7a9c`): `r2ssa::dense` and the `ENTITY_KEYED_MAP` Dylint.
+- F2.1, in part: `DomTree` is Cooper–Harvey–Kennedy over dense RPO numbers with O(1) `dominates` (`15ac7a9c`); natural loops are one index read by loop facts and placement (`8741ba40`); `SsaQueryIndex` is deleted (`f634efbf`); r2dec's placement reads the function's `domtree()`.
+- F2.2, in part: liveness is computed once, after the boundaries that refine it (`09f23ac1`); merges are pruned by pre-SSA liveness, closing the temporary and flag half of #56 (`f9111a28`).
+- F2.3 stage 1 (`94bc999f`): `SSAOp<V = SSAVar>` with one operand `map`.
+- F2.3 stage 2 (`39f44fec`): the graph's payload is `SSAOp<ValueId>`.
+- F2.3 stage 3 (`3aaaca78` for 3a): `SSABlock<V>`/`PhiNode<V>` generic; blocks hold `SSAOp<VarId>` over the `ValueTable`; fixtures write by name through `NamedBlockMut`, passes through `BlockMut`.
+- F2.3 stage 4: the optimiser runs on ids; `VarKey` is deleted; SCCP's lattice is an `IdVec`, its uses a `Csr`; plans are over ids.
+- F2.3 stage 5a (`99f92add`): `IdMap` packs its entries behind a presence bitset.
+- F2.3 stage 5b: prep facts are indexes over sealed values; `ValueViews<I>` is generic over a dense id; stack, entry and indexed roots and formals are `IdMap`s solved on `fixpoint::sparse`.
+- F2.3 stage 5c: compare definitions are `IdMap<ValueId, _>`; lifted storage is a `ValueTable` column; seal passes that take the first match read one snapshot ordered by variable, so the match does not depend on interning order.
+- F2.3 stage 5d (`074b464d`, `e95ed4be`, `d03f2a46`, `5c746e2f`, `d5332f02`): every function-wide r2ssa map keyed by `ValueId`/`InstId` is dense; `CallSiteFacts::by_inst` is the one call-instruction-to-site map.
+- Provisional preparation (`74bf9088`, `5b1a9206`): a function with no stated interface is built once, from what is known before construction; recovery is invariant under lane rooting (`ByteMask::extent_bytes`).
+- F2.6 (`ef1ff6a2`, `5f49496a`): `entity_keyed_map` is denied in r2ssa and r2types, with a CI job; signedness is one core over ids (`c30eb1d0`); `Written::is_conventional_extension` replaces register-name matches.
 
-2. **One index layer.** `Sealed` owns a `FunctionIndex`. Each index is
-   computed at most once, on first use (a `OnceCell` per index), from the IR
-   and from the indexes it depends on:
-   - structure: reverse postorder, the dominator tree with dominance
-     frontiers, loops, def-use (CSR), use sites;
-   - values: views and representatives, constants and ranges (P5), written
-     lanes (PE), demand;
-   - lifetime: liveness (one model over locations) and storage spans;
-   - memory: the frame model (P4) and memory SSA.
+## Left
 
-   Each index declares its inputs as other indexes, so the dependency order is
-   static and no index is computed twice. A pass that needs a relation reads
-   the index; it does not build a graph or a map of its own.
-
-3. **Analyses are declared.** Every iterating index is an analysis on the
-   fixpoint driver (doc/adr-fixpoint.md): its lattice, its height and its
-   transfer, over dense cells. Non-iterating indexes are one pass in a stated
-   order. Certificates are views over indexes plus the decisions only they
-   make.
-
-4. **Before the seal, a builder.** `Lifted` and `Prepared` are a mutable
-   builder over the same arena, with an incremental def-use, so the
-   optimiser and the demand pass edit through plans without rebuilding a
-   graph. The seal freezes the builder into the IR; no graph exists before
-   it. The provisional graph that demand borrows today is replaced by the
-   builder's own def-use.
-
-5. **The other representations become indexes or go.** The machine
-   projection and r2rewrite's term arena become indexes over the IR. The
-   binding plan and the journal go with R (doc/adr-renderer-printer.md). The
-   liveness models merge into one model over locations; flag and temporary
-   phis nothing reads are pruned by it (issues #47, #50, #56).
-
-## Migration
-
-Each step keeps the census byte-identical unless it says otherwise, and
-deletes what it replaces.
-
-| Step | Change | Deletes |
-|------|--------|---------|
-| F2.0 | Dense containers (`IdVec`, `IdMap`, `IdSet`, `Csr` in `r2ssa::dense`); the Dylint against entity-keyed maps (`ENTITY_KEYED_MAP`), warning only | — |
-| F2.1 | `FunctionIndex` on `Sealed`: reverse postorder, dominators, loops, def-use; every reader takes `&Sealed` or the index; r2dec's structuring reads the dominators from it | the second graph build (with F2.4), r2dec's two `DomTree::compute`, the test-only graph builds where the index answers |
-| F2.2 | One liveness model over locations, as an index whose inputs include shared content and certified call reads, so it is computed once; dead flag and temporary phis pruned by it | the second liveness pass and `compute_with_relocations`; the duplicate live-in computation in `phi.rs`; closes #47, #50, #56 |
-| F2.3 | Prep facts, prepared facts and certificates re-expressed as indexes over dense containers; interface recovery reads the indexes it needs instead of a provisional preparation | every `SSAVar`-keyed and `VarKey`-keyed map in r2ssa; the provisional preparation in `recover_interface.rs` |
-| F2.4 | The builder before the seal, with an incremental def-use; optimiser and demand on it | the provisional graph; the per-pass `defs` maps the optimiser builds |
-| F2.5 | Machine projection and term arena as indexes | their per-round rebuilds |
-| F2.6 | The Dylint made fatal in r2ssa, then in r2types | — |
-
-### F2.3 and F2.4 in stages
-
-Operations name their operands by `SSAVar`, a name, a version, a width and
-a disambiguator. About 2,300 `SSAOp::` matches and 1,450 `SSAVar` uses
-across 113 files read the IR that way, and the graph keeps a second copy of
-every operation so that it can also say each operand's `ValueId`. The
-target is one IR whose operands are value ids, with names a presentation
-table. It is reached in stages. Each stage compiles, keeps the census
-byte-identical, and deletes what it replaces:
-
-1. `SSAOp<V = SSAVar>`, generic over its operand. Every match keeps its
-   syntax; only code that reads an operand's name changes.
-2. The graph's payload is `SSAOp<ValueId>`, so the graph no longer copies
-   names, and graph readers resolve a name only to print it.
-3. The function's blocks hold `SSAOp<ValueId>` and one value table that
-   renaming fills: id, storage, width, version and name. The graph becomes
-   the function's def-use index rather than a second copy of it, and is
-   built at the seal from ids alone.
-4. The optimiser and the demand pass run on ids: `VarKey` and every
-   `SSAVar`-keyed map in them become `IdVec`/`IdMap`, and the per-pass
-   `defs` maps become the builder's incremental def-use.
-5. The certificates' `SSAVar`-keyed maps become dense. `ENTITY_KEYED_MAP`
-   is made fatal in r2ssa once its count there is zero.
-
-## Consequences
-
-- **Cost targets.** The seal costs O(n log n) once. Each index costs O(n), or
-  O(n × height) for a lattice analysis, once per sealed function. A lookup is
-  O(1), where today it is O(log n) on a name or a hash of one.
-- **Ownership becomes checkable.** Every relation has one index, and two
-  passes that need it share it. A second implementation of a relation is
-  visible as a second index, and is a bug.
-- **Risk.** F2.3 touches most of r2ssa's certificates. It goes one index at a
-  time, behind the census, and deletes each side table as its index lands.
-  The tripwire is the ADR's own: if F2.3 needs semantic changes rather than
-  re-keying in more than about 40 files, stop and reassess.
-- **Prerequisite for P4, Q and R.** The frame model is an index; the query
-  database caches sealed functions with their indexes; the printer reads
-  indexes only.
-
-## As landed
-
-- **F2.0** (`15ac7a9c`): `r2ssa::dense` and the `ENTITY_KEYED_MAP` Dylint,
-  warning only. It counted 684 entity-keyed maps on 2026-10-04.
-- **F2.1, in part**:
-  - `DomTree` is Cooper, Harvey and Kennedy's over dense reverse-postorder
-    numbers, and `dominates` is O(1) from preorder intervals; a property test
-    holds it to the data-flow definition (`15ac7a9c`).
-  - The natural loops are one index of the function, read by the loop facts
-    and by placement (`8741ba40`).
-  - The function's second def-use index, `SsaQueryIndex`, is deleted
-    (`f634efbf`).
-  - Remaining: a `FunctionIndex` holding these on `Sealed`, and the
-    test-only graph builds.
-- **F2.2, in part**:
-  - Fact collection computes liveness once, after the prefix and the
-    boundaries that refine it, and the artifact keeps that one model
-    (`09f23ac1`). Collapsing the two passes exposed a call read the old
-    second pass wrongly ignored: the argument had been copied, and the call
-    read the value the copy carried.
-  - Merges are pruned by pre-SSA liveness (`f9111a28`), closing the Sleigh
-    temporary and rewritten-flag half of #56.
-  - Remaining: byte-granular liveness over locations, so a lane write that
-    every reader sees whole defines the register (the `RDX` merge in
-    `fnv1a32`); r2dec's relocated liveness folded into the one model; #47
-    and #50.
-- **F2.3, in stages**:
-  - Stage 1 (`94bc999f`): `SSAOp<V = SSAVar>` with one `map` over operands
-    in field order, replacing the hand-written source mapper.
-  - Stage 2 (`39f44fec`): the graph's payload is `SSAOp<ValueId>`. Graph
-    readers resolve a name only to print it.
-  - Stage 3a (`3aaaca78`): `SSABlock<V>` and `PhiNode<V>` are generic, as an
-    operation is.
-  - Stage 3b: the function's blocks hold `SSAOp<VarId>` over one
-    `ValueTable` that construction and renaming fill. `VarId` is the
-    function's own id, not the graph's `ValueId`: a function is edited
-    before it is sealed and mints values as it goes, while the graph numbers
-    the sealed function's values in first-seen order so that every
-    `ValueId` the census prints is unchanged. The two are distinct types,
-    so mixing them does not compile, and the graph maps one to the other
-    through a dense vector, O(1) per lookup. Forwarding and the boundary
-    rewrites run on ids with `IdMap`/`IdSet`. Fixtures still write programs
-    by name through `NamedBlockMut`, which interns as it writes. Passes edit
-    ids through `BlockMut` directly.
-  - Transitional, and stage 4 and 5 work rather than a resting state:
-    `SSAFunction::named`, `named_block`, `named_blocks`, `named_ops` and
-    `SsaGraph::named_op` clone a block or an operation with its operands
-    spelled as variables, for readers still keyed by name. At stage 3b
-    there were 126 such reads in r2ssa's library code, 23 in r2dec and 4
-    in r2types. Each one is a reader whose facts are keyed by `SSAVar`. It
-    is deleted when its maps are re-keyed by id in stage 4, for the
-    optimiser and the demand pass, or in stage 5, for the certificates.
-  - Stage 4: the optimiser runs on ids. `VarKey`, which hashed a copied
-    name string per lookup, is deleted. SCCP's lattice is an `IdVec`, its
-    use lists a `Csr`, and its constants an `IdMap`. Definitions, the kept
-    and combined flag sets and the copy roots are dense, built once per
-    pass. A plan is now over ids too: a pass that names a variable the
-    function does not hold yet, such as a folded constant, numbers it past
-    the table through a `Minting`, and the plan carries those variables to
-    the table when it applies. The table's length when the plan was made is
-    asserted, so a plan cannot be applied to a function it was not made
-    against. The demand pass was already on graph values; its one release
-    edit mints through the same path.
-  - Left for stage 5: `ValueViews` is still keyed by `SSAVar`. Its readers
-    are the certificates, which stage 5 re-keys. Until then the optimiser
-    asks it through one dense `VarId` to copy-root vector per pass. The
-    optimiser's definition maps are rebuilt once per pass, O(n), rather
-    than kept incrementally by `apply_edits`. That stays until a pass
-    measurably needs it.
-- **F2.3 stage 5, in parts**:
-  - 5a (`99f92add`): `IdMap` keeps a four-byte slot per id and packs its
-    entries, so a sparse fact with large values no longer costs a value
-    cell per id. Iteration in id order goes through a presence bitset.
-  - 5b: the prep facts are indexes over the sealed graph's values.
-    `ValueViews<I>` is generic over a dense id: a function's `VarId`s for
-    the optimiser, or a graph's `ValueId`s for everything after the seal.
-    Each id's width and constant bits are kept beside the views, and a
-    representative is `Representative::Value(id)` or
-    `Representative::Literal { bits, size }`, since the literal a constant
-    class determines need not be a value of the function. The stack roots,
-    entry roots, indexed roots and formals are `IdMap<ValueId, _>`, solved
-    on a dense `fixpoint::sparse`: `IdMap` cells, `Csr` readers, and a
-    min-heap of definition ranks with a queued flag. The `resolve_*`
-    helpers, the address-provenance collector, the evidenced stack roots,
-    the call-entering stack pointer and the object model read graph
-    instructions and ask by value. `class_key` normalises a class so that
-    a literal the graph holds compares equal to that value, as the names
-    did.
-  - 5c, in parts: the compare definitions are `IdMap<ValueId, _>` read off
-    graph instructions in block order. Each variable's lifted storage is a
-    column of the `ValueTable`, its one owner, instead of a
-    `BTreeMap<SSAVar, CanonicalStorageId>` beside it, and the graph builder
-    reads it by id. The seal's passes that take the first match among the
-    stored variables read one snapshot ordered by variable, so the match
-    does not depend on interning order.
-  - Transitional after 5c: r2types' type analysis still reads named blocks and asks the frame
-    through one `FrameRoots` lookup, built from the prep facts and the
-    graph in production and from a map in its own tests. r2dec's prepared
-    semantics asks through `value_of` and `canonical_root_var` until the
-    printer reads values (doc/adr-renderer-printer.md).
-  - 5d, the certificate and fact maps (`074b464d`, `e95ed4be`,
-    `d03f2a46`, `5c746e2f`, `d5332f02`): every function-wide map or set
-    in r2ssa keyed by a `ValueId` or `InstId` is an `IdMap`/`IdSet`. That
-    covers the certificates, the object model's address facts, memory
-    SSA, the boundary returns, inductions and member runs, the
-    dead-merge and observation closures, address provenance, the
-    renderable-expression closure, the graph's instruction and formal
-    maps, the obligation inventory, live-out, frame reach and the
-    dependence sources. Their count in r2ssa's library code fell from 149
-    to 61, and the census stayed byte-identical through every step.
-    `CallSiteFacts::by_inst` is the one map from a call instruction to its
-    site; the certificates' copy and the call-result collector's rebuild
-    are deleted. `IdSet` equality is by members, `IdMap` has `retain`
-    (asked in id order), consuming iteration in id order, and serde in an
-    ordered map's shape.
-  - Ordered maps that stay, and why:
-    - a certificate's own member sets, a return block's values, a
-      component's per-block liveness segments and an affine form's terms
-      are a few ids attached to one entity, where a dense map costs
-      O(values) per entity;
-    - the renaming, lane and value-table index maps keyed by `SSAVar` run
-      before the value table exists, or are the table's interning index;
-    - the per-block value-range maps are P5's to rebuild as an index.
-- **F2.3, the provisional preparation** (`74bf9088`, `5b1a9206`): a
-  function the source states no interface for is built once. Construction
-  reads only what is known before it runs -- the source's interface, or
-  the calling convention's argument and result registers -- so the build
-  recovery reads is the build the seal rewrites. Recovery is invariant
-  under how lanes are rooted: an `Insert` gives the observed bytes inside
-  its lane to the lane and the rest to its base, and a parameter is the
-  low lane through the most significant observed byte
-  (`ByteMask::extent_bytes`). Recovery still collects its own prepared
-  facts over the build and the seal collects them again after its
-  rewrites; sharing them is the query database's (Q), not a mode flag on
-  the collector.
-- **F2.6** (`ef1ff6a2`, `5f49496a`): `entity_keyed_map` is denied in
-  r2ssa and r2types, and a CI job runs the Dylint on both. The exceptions
-  say why at their item; the local struct and stack-slot type analyses,
-  which still read named blocks, are marked transitional with P9 as the
-  owner. Scalar signedness is one core over ids (`c30eb1d0`), and whether
-  a zero extension is the architecture's is r2ssa's
-  (`Written::is_conventional_extension`), not a match on register names.
+- F2.1: a `FunctionIndex` on `Sealed` holding RPO, dominators, loops and def-use, and the test-only graph builds replaced by it. Exit: no `SsaGraph` built outside the seal.
+- F2.2: byte-granular liveness over locations (a lane write every reader sees whole defines the register), `ValueLiveness::compute_with_relocations` and r2dec's relocated liveness folded into the one model, #47 and #50. Exit: one liveness model, those issues closed.
+- F2.3 transitional readers, left over from stages 4 and 5: `SSAFunction::named`, `named_block`, `named_blocks`, `named_ops` and `SsaGraph::named_op` serve readers still keyed by name; r2types' local struct and stack-slot analyses read named blocks and ask the frame through `FrameRoots` (P9 owns their move); r2dec's prepared semantics asks through `value_of` and `canonical_root_var` until the printer reads values. Exit: those accessors deleted.
+- F2.4: the builder with an incremental def-use. The seal still builds the graph twice when the demand pass releases a base (`function/stage.rs`), and the optimiser rebuilds its definition maps once per pass, O(n), until a pass measurably needs better. Exit: one graph build per function.
+- F2.5: machine projection and term arena as indexes. Exit: no per-round rebuild.
+- Recovery and the seal each collect prepared facts; sharing them belongs to the query database (Q), not a collector flag.

@@ -2639,7 +2639,7 @@ pub struct SSAFunction {
     block_order: Vec<u64>,
     /// Entry-lane projections: the value standing for a lane of a register as
     /// the function was entered with it, defined at entry as a `Subpiece` of
-    /// the family root's entry value (doc/adr-register-identity.md §8, 6).
+    /// the family root's entry value (doc/adr-register-identity.md §6).
     /// Keyed by the projection's variable, valued by the lane's storage.
     formal_projections: crate::dense::IdMap<VarId, CanonicalStorageId>,
     /// Entry roots rebuilt from their declared lanes: the value a read of the

@@ -1,92 +1,67 @@
 # ADR: one query database for the program
 
-Status: proposed (ROADMAP Q, decision D13)
-
-## Context
-
-A program-level fact is computed on demand and kept, and today each one has a
-cache of its own, kept current by hand:
-
-- `query::memo::Memo` for per-function analyses, keyed by entry with a
-  `Moved` range check;
-- `PerRevision` for callee reads;
-- `Mutex<Pointers>` and `Mutex<Returns>`, each with its own revision check;
-- `references: Option<(Revision, Arc<_>)>`;
-- the discovery survey, held per `(identity, byte_revision)` since this
-  month, after every `afl` was found re-walking the whole program (42 s each
-  on libc);
-- the entry modes, with `modes_at` and `entries_revision` maintained beside
-  them;
-- the names table, with `names_revision`.
-
-`Revision` has four axes because no one axis says what an answer depended on.
-Every public request begins with `ensure_current()`, and each cache decides
-for itself whether a write touched it. A cache that forgets a dependency
-returns a stale answer; one that over-invalidates throws away work. Nothing
-checks either.
+Status: in progress (ROADMAP Q, decision D13)
 
 ## Decision
 
-**Every derived fact about the program is a query in one database.** The
-engine holds the database. A command, the visual mode and the agent surface
-ask it.
+Every derived fact about the program is a query in one database, held by the
+engine. Commands, the visual mode and the agent surface all ask it.
 
-- **Inputs** are the only state that changes:
-  - the container, which is fixed while the program is open;
-  - the bytes, revisioned per written range;
-  - later, the user's facts: names, types, comments (V6).
-
-  An input changes only by an explicit write.
+- **Inputs** are the only state that changes, and only by an explicit write:
+  the container (fixed while the program is open), the bytes (revisioned per
+  written range), and later the user's facts (names, types, comments; V6).
 - **Queries** are pure functions of inputs and other queries, each with a
-  typed key and an `Arc` value:
-  - decode an address;
-  - the discovery survey;
-  - walk a body;
-  - lift it;
-  - seal it, with its index (doc/adr-one-ir.md);
-  - a function's summary;
-  - its rendering;
-  - the reference index;
-  - the names table.
+  typed key and a shared value: decoding an address, the discovery survey,
+  walking, lifting and sealing a body (with its index, doc/adr-one-ir.md), a
+  function's summary, its rendering, the reference index and the names table.
 - **Dependencies are recorded, not declared.** While a query runs, the
-  database records every input range and every query it read. On the next
-  request it reuses the value if no recorded dependency changed, checking
-  bottom-up the way salsa and rustc's query system do (red-green). A write
-  invalidates exactly the queries that read the range written, transitively.
-- **Cycles are values.** Interprocedural facts (returns, summaries) form
-  cycles over the call graph. One query solves a strongly connected component
-  of the call graph on the fixpoint driver and returns every member's answer.
-  The members' queries read that component's answer. No query recurses into
-  itself (P6).
-- **Determinism.** Queries are pure and their order of evaluation is
-  irrelevant to their values. The database is the only place a computed fact
-  is kept: no `Mutex` table, `OnceLock` or memo anywhere else in r2engine.
-  The Dylint against entity-keyed maps (D12) gets a sibling against `Mutex`
-  and `RwLock` state outside the database.
-- **Implementation.** A small engine of its own in r2engine, not the `salsa`
-  crate:
-  - the dependency recording is about 500 lines;
-  - salsa's macros would spread through every crate that defines a query;
-  - the inputs here are byte ranges, which salsa does not model.
+  database records every byte range and every query it read. A repeated
+  request is revalidated red-green, bottom-up: it is reused when nothing it
+  read changed, and a recomputed value equal to the old one keeps its
+  `changed_at`, so its dependents stay good. A write invalidates exactly the
+  queries that read the written range, transitively.
+- **Cycles are values.** A query that reaches itself gets `Cycle` instead of
+  recursing. Interprocedural facts (returns, summaries) are solved by one
+  query per strongly connected component of the call graph, on the fixpoint
+  driver, and each member's query reads that component's answer (P6).
+- **Determinism and single ownership.** Queries are pure, so evaluation order
+  does not affect values. The database is the only place a computed fact is
+  kept: no `Mutex` table, `OnceLock` or private memo elsewhere in r2engine. A
+  Dylint against `Mutex`/`RwLock` state outside the database joins the
+  entity-keyed-map lint (D11).
+- **Implementation.** A small engine in r2engine
+  (`crates/r2engine/src/query/db.rs`), not the `salsa` crate: salsa's macros
+  would spread into every crate that defines a query, and salsa does not model
+  byte-range inputs. Revisit this if the engine grows past about a thousand
+  lines.
 
-  This is re-evaluated if the engine grows past a thousand lines.
+## Done
 
-## Migration
+- Q0 (deda98de): `Db`, `Inputs`, `Query`, dependency recording, red-green
+  revalidation, and the property test `a_session_answers_as_a_fresh_open`.
+- Q1, first half (2bf3f0a3): the name table and the import stubs are queries
+  read through `Recorded`. `derived_at`, `names_revision` and
+  `entries_revision` are deleted.
 
-| Step | Change | Deletes |
-|------|--------|---------|
-| Q0 | The database: inputs (container, bytes by range), query keys, dependency recording, red-green revalidation; a property test that a random sequence of writes and requests answers as a fresh open does | — |
-| Q1 | Discovery, the survey, entry modes and the names table as queries | the survey cache, `modes_at`, `entries_revision`, `names_revision` |
-| Q2 | Decode, walk, lift and seal per function as queries | `query::memo::Memo`, `Moved`, `PerRevision` |
-| Q3 | Returns, pointers and callee reads as queries, cycles by component (with P6) | `Mutex<Pointers>`, `Mutex<Returns>`, `callee_reads` |
-| Q4 | References and renderings as queries; `ensure_current` and `Revision`'s four axes deleted | the reference cache, `Revision` |
+## Left
+
+- Q2: decode, walk, lift and seal per function as queries. Exit: the
+  `query::memo` types `Memo`, `Moved` and `PerRevision` are deleted.
+- Q3: the discovery survey and entry modes (moved here from Q1, because they
+  read the call-graph returns), plus returns, pointers and callee reads, solved
+  by component together with P6. Exit: the `survey` cache, `modes_at`,
+  `modes_revision`, `Mutex<Pointers>`, `Mutex<Returns>` and `callee_reads` are
+  deleted.
+- Q4: references and renderings as queries. Exit: the reference cache,
+  `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
+  r2engine.
+- Exit for the whole of Q: the random-write property test holds over the real
+  program inputs, and no cache exists outside the database.
 
 ## Consequences
 
-- Exit: a session of random writes and requests equals a fresh open (the
-  property test). There is no cache outside the database.
 - Every answer can say what it was computed from, which A's `explain` needs.
-- The visual mode's worker caches nothing of its own; it asks the database,
-  which answers a repeated request at once.
-- Parallel evaluation becomes possible because queries are pure. It is not
-  part of Q.
+- The visual mode's worker keeps no cache of its own. It asks the database,
+  which answers a repeated request immediately.
+- Queries are pure, so they could be evaluated in parallel. That is not part
+  of Q, and the database is single-threaded (`Rc`/`RefCell`) today.

@@ -1,61 +1,59 @@
 # ADR: floating-point values travel as their own type
 
-## Context
+Status: done (placement moves to the compiler specification at M1d)
 
-The lifter produces every p-code floating operation (`FLOAT_ADD` through
-`TRUNC`), and nothing after it did. The machine projection had no floating
-type or expression kind, so a `FloatMult` was an `UnsupportedOperation` and
-its function refused; worse, where the interface named the wrong carrier the
-floating body was dead and was elided, and `fp_interpolate` rendered as
-`return (double)X0_0;`. The capture placed a `double` parameter in `x0` and
-a `double` return in `x0`, because radare2's convention tables name only the
-integer sequences and the capture used them for every class.
+## Decision
 
-## Decisions
-
-1. **Placement is by class.** A parameter whose type is a floating scalar is
-   placed in the convention's floating sequence (`fparg`, addressed as index
-   `R_ANAL_CC_MAXARG + n`) at its own position; integer parameters keep their
-   own count. The carrier is the listed register of the operand's width
-   (`{d0,s0,v0,q0}`), or the low lane of a wider home (`xmm0`). A floating
-   return comes back in `fpret0`, which the radare2 fork now names per
-   convention. A floating operand past the floating registers is not placed.
-2. **`MachineType::Float { width_bits }`**, for 32 and 64 bits. Any other
+1. **Placement is by class.** A floating-scalar parameter is placed in the
+   convention's floating sequence at its own position, and integer parameters
+   keep their own count. The carrier is the register of the operand's width
+   (`{d0,s0,v0,q0}`) or the low lane of a wider home (`xmm0`). A floating
+   result is returned in the convention's float result slot. A floating
+   operand past the floating registers is not placed. The slots are carried
+   on `SourceConventionSlots::float_argument_slots`/`float_result_slot`. They
+   are read from r2abi's sdb (`fparg`, `fpret0`) until M1d moves them to the
+   `.cspec`'s float entries (doc/adr-machine-profile.md).
+2. **`MachineType::Float { width_bits }`** covers 32 and 64 bits; any other
    width refuses at the projection. A value is interned per `(value, type)`,
-   as booleans already are, so one register read as bits and as a double is
-   two nodes and the typed boundary decides the spelling.
+   so one register read as bits and as a double is two nodes, and the typed
+   boundary decides the spelling.
 3. **Distinct kinds, not modes.** `FloatArithmetic`, `FloatUnary` and
    `FloatCompare` are their own expression and term kinds, and the casts are
-   `IntegerToFloat`, `FloatToInteger` and `FloatToFloat`. Every integer
-   rewrite rule (`x + 0`, literal folding, reassociation, width masking) is
-   false over IEEE values, and a distinct kind keeps each from firing by
-   construction rather than by a guard in every rule. The evaluator computes
-   them exactly with `f32`/`f64`, whose default rounding is the machine's.
-4. **`SSAOp::Trunc` is p-code `TRUNC`**, a float-to-integer conversion toward
-   zero, and is lowered as `FloatToInteger`. It was lowered as an integer
-   truncation, which is `SUBPIECE`'s job; the integer-narrowing arms that
-   listed it are corrected.
-5. **C spelling.** Arithmetic and comparison are the C operators, which are
-   the IEEE operations under default rounding; `fmadd` is what Sleigh makes
-   of it, a multiply and an add. Negation is `-x`. Absolute value, square
-   root, ceiling, floor and NaN tests are the compiler builtins
-   (`__builtin_fabs`, with `f` for `float`), which need no header. Round is
-   `floor(x + 0.5)`, which is p-code's definition. A constant spells as the
-   shortest round-trip literal, `f`-suffixed at 32 bits; infinities as
-   `__builtin_inf()`; the canonical quiet NaN as `__builtin_nan("")` and any
-   other NaN payload refuses. A conversion the machine states is a C cast; a
-   floating value met at an integer boundary, or the reverse, is a
-   reinterpretation and spells through `r2sleigh_float_from_bits_64` and its
-   inverses in the intrinsic header, never as `(double)x`.
+   `IntegerToFloat`, `FloatToInteger` and `FloatToFloat`. Integer rewrite
+   rules (`x + 0`, literal folding, reassociation, width masking) are false
+   over IEEE values, and distinct kinds keep them from firing by construction.
+   The evaluator computes with `f32`/`f64` under default rounding.
+4. **`SSAOp::Trunc` is p-code `TRUNC`,** a float-to-integer conversion toward
+   zero, lowered as `FloatToInteger`. Integer narrowing is `SUBPIECE`.
+5. **C spelling.**
+   - Arithmetic and comparison use the C operators. `fmadd` is a multiply and
+     an add, as Sleigh lifts it. Negation is `-x`.
+   - Absolute value, square root, ceiling, floor, round and the NaN test are
+     helpers in the intrinsic header (`r2sleigh_float_{abs,sqrt,ceil,floor,
+     round,isnan}_{32,64}`). Absolute value clears the sign bit, the NaN test
+     is `x != x`, and the others call the compiler builtins. Round is p-code's
+     `floor(x + 0.5)`, evaluated in double at every width.
+   - A constant is the shortest round-trip literal, with an `f` suffix at 32
+     bits. Infinities are `__builtin_inf[f]()`, the canonical quiet NaN is
+     `__builtin_nan[f]("")`, and any other NaN payload refuses.
+   - A conversion the machine states is a C cast. A floating value met at an
+     integer boundary, or the reverse, is a reinterpretation through
+     `r2sleigh_float_from_bits_{32,64}` / `r2sleigh_float_to_bits_{32,64}`,
+     never `(double)x`.
 6. **Declared type.** A binding with no stated type is declared `double` or
-   `float` when its definition is floating, or when every read of every
-   member is floating; otherwise the machine word, and the floating reads
+   `float` when its definition is floating, or when every read of every member
+   is floating. Otherwise it is the machine word, and floating reads
    reinterpret.
 
-## Consequences
+## Done
 
-The four `stress_test` floating fixtures render on arm64 and x86-64;
-`fp_magnitude` stops refusing at the wire because its `float` parameters now
-have four-byte carriers. `bzip2`'s `compress` and `BZ2_compressBlock` pass the
-floating layer and stop at the next class each. Variadic floating operands on Darwin
-arm64 render from their stack slots. x87 80-bit values still refuse.
+- All six decisions landed. The `stress_test` floating fixtures render on
+  arm64 and x86-64, and Darwin arm64 variadic floating operands render from
+  their stack slots.
+
+## Left
+
+- M1d: float slots from the `.cspec` as lanes of the program root. Exit:
+  r2abi's `fparg`/`fpret` reads are deleted.
+- x87 80-bit values still refuse. Exit: an 80-bit `MachineType::Float` with
+  an exact evaluator, or a stated permanent refusal.

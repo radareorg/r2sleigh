@@ -14,6 +14,9 @@ Phases:
   4. Local Dylint lint: tools/dylints/r2sleigh_lints
   5. Every Kani harness in the repo
   6. Targeted cargo mutants for crates/r2ssa/src/var.rs
+  7. Harness contracts
+  8. Certification gate contracts
+  9. Equivalence gate
 
 Environment:
   R2SLEIGH_MUTANTS_JOBS     Jobs for cargo mutants, default: 2

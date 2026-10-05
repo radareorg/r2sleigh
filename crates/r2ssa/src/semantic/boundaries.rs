@@ -1444,7 +1444,7 @@ pub(crate) fn unique_entry_values_by_storage(
             .or_insert(Some(value.id));
     }
     // A lane of an entry register is the projection minted for it
-    // (doc/adr-register-identity.md §8, 6), the one value every entry read of
+    // (doc/adr-register-identity.md §6), the one value every entry read of
     // that lane is.
     for (value, storage) in graph.formal_projections() {
         values

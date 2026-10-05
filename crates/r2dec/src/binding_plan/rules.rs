@@ -1728,7 +1728,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
         };
         // A lane of an entry register is the formal it was minted for: the
         // declaration is its only spelling, so it is never folded into a
-        // reader (doc/adr-register-identity.md §8, 6).
+        // reader (doc/adr-register-identity.md §6).
         if graph.formal_projection_storage(value.id).is_some() {
             rejected("formal projection");
             continue;

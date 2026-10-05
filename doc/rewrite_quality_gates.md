@@ -1,54 +1,39 @@
-# Rewrite Quality Gates
+Quality gate
+============
 
-`scripts/quality-gate.sh` is the local quality gate for rewrite work. It is
-deliberately conservative: a missing tool is a failed gate with an install
-hint, not a skipped check.
-
-Run it from the repository root:
-
-```bash
-scripts/quality-gate.sh
-```
-
-To inspect the command sequence without running the expensive phases:
+`scripts/quality-gate.sh` is the local gate for rewrite and
+architecture-sensitive work. It changes no tracked source, and a missing tool
+fails the gate with an install hint rather than skipping a check. It
+complements the validation bar in [AGENTS.md](../AGENTS.md); it does not
+replace it.
 
 ```bash
-scripts/quality-gate.sh --dry-run
+scripts/quality-gate.sh                  # run it
+scripts/quality-gate.sh --dry-run        # print the commands only
+scripts/quality-gate.sh --strict-dylint  # deny Dylint warnings (or R2SLEIGH_STRICT_DYLINT=1)
 ```
 
-To make existing Dylint findings fatal for a cleaned slice:
+Phases
+------
 
-```bash
-scripts/quality-gate.sh --strict-dylint
-```
+| # | Phase | Runs |
+|---|-------|------|
+| 1 | Tools | checks every tool below is installed |
+| 2 | Dependencies | `cargo machete --with-metadata --skip-target-dir`; `cargo +nightly udeps --workspace --all-targets --all-features` |
+| 3 | Format and lint | `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cargo test -p r2rewrite` |
+| 4 | Dylint | `tools/dylints/r2sleigh_lints` over the workspace |
+| 5 | Kani | every crate whose `src` contains a `kani::proof` harness |
+| 6 | Mutants | `cargo mutants` on `crates/r2ssa/src/var.rs`, output in `target/quality-gate/mutants-r2ssa-var` |
+| 7 | Harness contracts | the Python unit tests of `tests/equiv` and `tests/decbench`, and `tests/test_no_plugin.py` |
+| 8 | Certification contracts | `scripts/test_certify_render.py` |
+| 9 | Equivalence | builds `r2s`, then `tests/equiv/run_equiv.py` against `tests/equiv/baseline.json` |
 
-## Scope
+Equivalence runs last because it exits 3 until a baseline is blessed
+([testing.md](testing.md)). `R2SLEIGH_MUTANTS_JOBS` (default 2) and
+`R2SLEIGH_MUTANTS_TIMEOUT` (default 300 s) tune local resource use only.
 
-The gate is read-only with respect to tracked sources. It combines local tooling
-with the equivalence gate over the corpus; it still does not replace
-the broader workspace, plugin, or radare2 validation required by `AGENTS.md`.
-
-The current phases are:
-
-1. Tool availability checks.
-2. Dependency checks with `cargo machete --with-metadata --skip-target-dir` and
-   `cargo +nightly udeps --workspace --all-targets --all-features`.
-3. Formatting and linting with `cargo fmt --all -- --check` and
-   `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
-4. Local Dylint linting through `tools/dylints/r2sleigh_lints`.
-5. Every Kani harness in every crate that has one, so none can stop compiling unnoticed.
-6. Targeted mutation testing for `crates/r2ssa/src/var.rs`.
-7. The harness contracts (`tests/equiv`, `tests/decbench`, and
-   `tests/test_no_plugin.py`).
-9. The equivalence gate, last: every corpus and gold function rendered from
-   its stripped build and run beside its original, held to
-   `tests/equiv/baseline.json` (no function leaves `equal`; a new `differs`,
-   `uninit` or `ub` blocks). It replaces the plugin-driven 54-cell cutover
-   corpus, which could no longer run once the plugin was deleted.
-
-## Required Tools
-
-Install the optional gate tools explicitly:
+Tools
+-----
 
 ```bash
 cargo install cargo-machete
@@ -58,62 +43,18 @@ cargo install --locked kani-verifier
 cargo install --locked cargo-mutants
 rustup toolchain install nightly
 rustup component add rustfmt clippy
-rustup toolchain install nightly-2026-04-16 \
-  --component rustc-dev \
-  --component llvm-tools-preview
+rustup toolchain install nightly-2026-04-16 --component rustc-dev --component llvm-tools-preview
 ```
 
-The pinned Dylint toolchain comes from
-`tools/dylints/r2sleigh_lints/rust-toolchain`; update that file only as part of
-an intentional Dylint maintenance change.
+The Dylint toolchain is pinned in `tools/dylints/r2sleigh_lints/rust-toolchain`.
 
-## Mutation Settings
+Reading failures
+----------------
 
-Mutation testing is intentionally narrow and deterministic:
-
-```bash
-cargo mutants --no-config \
-  --manifest-path crates/r2ssa/Cargo.toml \
-  --file crates/r2ssa/src/var.rs \
-  --baseline run \
-  --jobs 2 \
-  --timeout 300 \
-  --no-times \
-  --output target/quality-gate/mutants-r2ssa-var
-```
-
-Use environment variables to tune only local resource usage:
-
-```bash
-R2SLEIGH_MUTANTS_JOBS=4 R2SLEIGH_MUTANTS_TIMEOUT=600 scripts/quality-gate.sh
-```
-
-## Interpreting Failures
-
-Missing tools fail before the gate starts expensive phases. Install the reported
-tool and rerun the script.
-
-`cargo machete` and `cargo udeps` failures require checking whether the
-dependency is genuinely unused or used through a pattern that the tool cannot
-see.
-
-Dylint warnings are reported by default because the current tree still has
-known architectural debt. Use `--strict-dylint` or
-`R2SLEIGH_STRICT_DYLINT=1` when a touched slice is clean enough to deny
-warnings. A strict failure usually means code is classifying semantic storage
-or address facts with string prefixes instead of typed contracts.
-
-Kani failures are proof failures for existing harnesses. Fix the invariant or
-tighten the proof; do not delete a harness to make the gate pass.
-
-Surviving mutants in `r2ssa` variable handling mean tests do not pin the
-expected behavior tightly enough. Add focused tests before accepting the rewrite.
-
-The equivalence phase fails without a blessed baseline and never writes one:
-bless it with `--write-baseline` only after reading `records.json`, with a cause
-recorded for every record that is not `equal`. Until then `run_equiv.py` exits 3
-("no baseline") and the gate stops there, which is why the phase is the last
-one: every other phase has already run and reported.
-
-This gate does not replace the full validation bar in `AGENTS.md`; run the
-crate and plugin checks there when the touched subsystem requires it.
+- **machete / udeps**: check whether the dependency is really unused.
+- **Dylint**: warnings are reported by default because known debt remains;
+  use `--strict-dylint` on a cleaned slice. A strict failure usually means
+  semantic storage or address facts are classified by string prefix instead of
+  a typed contract.
+- **Kani**: fix the invariant or tighten the proof; never delete a harness.
+- **Mutants**: a survivor means the tests do not pin the behaviour.

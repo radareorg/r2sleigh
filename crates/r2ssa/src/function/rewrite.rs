@@ -12,7 +12,7 @@ impl SSAFunction {
     /// entry-lane read the renamer produced -- one `Subpiece` per reading
     /// instruction -- becomes a copy of the one projection. The projection has
     /// no register storage of its own: it is a temporary the boundary facts
-    /// know by this table (doc/adr-register-identity.md §8, 6).
+    /// know by this table (doc/adr-register-identity.md §6).
     /// Start a scratch register's lane writes from zero rather than from what
     /// the caller left in it.
     ///
