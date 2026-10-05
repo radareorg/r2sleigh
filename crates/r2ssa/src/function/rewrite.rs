@@ -284,6 +284,21 @@ impl SSAFunction {
             );
             lanes.entry((root, offset, lane.size)).or_default();
         }
+        // A lane a call's interface passes is met the same way, where it first meets an entry root (B3).
+        let argument_lanes = machine_context
+            .call_site_interfaces()
+            .values()
+            .flat_map(|interface| interface.arguments())
+            .filter_map(|argument| argument.register_storage());
+        for lane in argument_lanes {
+            let root = entry_roots
+                .iter()
+                .copied()
+                .find(|root| *root != lane && machine_context.is_low_lane_of(lane, *root));
+            if let Some(root) = root {
+                lanes.entry((root, 0, lane.size)).or_default();
+            }
+        }
         if lanes.is_empty() {
             return;
         }

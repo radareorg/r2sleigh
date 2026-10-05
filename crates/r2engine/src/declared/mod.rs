@@ -81,7 +81,8 @@ pub(crate) struct Restatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
     Integer,
-    Float,
+    /// A float of this many bytes.
+    Float(u32),
 }
 
 /// The machine one declaration is placed in.
@@ -118,7 +119,7 @@ impl<'a> Placement<'a> {
         };
         match (resolved, scalar_bits) {
             (Some(Type::Scalar(scalar)), bits) if scalar.kind == ScalarKind::Float => match bits {
-                Some(32 | 64) => Ok(Class::Float),
+                Some(bits @ (32 | 64)) => Ok(Class::Float(bits / 8)),
                 bits => Err(format!("a {bits:?}-bit float's class is the convention's")),
             },
             (Some(Type::Pointer { .. }), _) => Ok(Class::Integer),
@@ -126,6 +127,17 @@ impl<'a> Placement<'a> {
             // integer takes two, which is the convention's to place.
             (_, Some(bits)) if bits <= self.model.pointer_bits => Ok(Class::Integer),
             (other, _) => Err(format!("no register class for {other:?}")),
+        }
+    }
+
+    /// A value narrower than its register takes its low bytes, as a Sleigh pentry places it.
+    fn low_lane(&self, slot: CanonicalStorageId, bytes: u32) -> CanonicalStorageId {
+        match self.target.arch.memory_endianness {
+            r2il::Endianness::Little if bytes < slot.size => CanonicalStorageId {
+                size: bytes,
+                ..slot
+            },
+            _ => slot,
         }
     }
 
@@ -144,13 +156,10 @@ impl<'a> Placement<'a> {
         let mut placed = Vec::with_capacity(declared.prototype.parameters.len());
         for parameter in &declared.prototype.parameters {
             let slot = match self.class(declared.graph, parameter.ty) {
-                Ok(Class::Float) => {
+                Ok(Class::Float(bytes)) => {
                     floats += 1;
-                    self.machine
-                        .slots
-                        .float_argument_slots()
-                        .get(floats - 1)
-                        .copied()
+                    let slot = self.machine.slots.float_argument_slots().get(floats - 1);
+                    slot.map(|slot| self.low_lane(*slot, bytes))
                 }
                 Ok(Class::Integer) => {
                     integers += 1;
@@ -190,7 +199,11 @@ impl<'a> Placement<'a> {
             return (SourceFunctionReturn::Void, None);
         }
         let storage = match self.class(declared.graph, returns) {
-            Ok(Class::Float) => self.machine.slots.float_result_slot(),
+            Ok(Class::Float(bytes)) => self
+                .machine
+                .slots
+                .float_result_slot()
+                .map(|slot| self.low_lane(slot, bytes)),
             Ok(Class::Integer) => self.machine.slots.result_slot(),
             Err(reason) => {
                 r2il::refusal_evidence!(

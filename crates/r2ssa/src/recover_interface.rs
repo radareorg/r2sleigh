@@ -560,11 +560,21 @@ fn passed_through_entry_storages(
 /// A convention slot names the full register; a function may read only its low
 /// half (`w0` of `x0`). Both are the same argument, so containment rather than
 /// equality decides.
-fn read_covers_slot(read: CanonicalStorageId, slot: CanonicalStorageId) -> bool {
-    read.space == slot.space
-        && read.offset == slot.offset
-        && read.size > 0
-        && read.size <= slot.size
+/// What a read observes of a slot: the read itself inside it, or the slot where it is the low lane of the read's root.
+fn observed_in_slot(
+    read: CanonicalStorageId,
+    slot: CanonicalStorageId,
+    machine_context: Option<&crate::SourceMachineContext>,
+) -> Option<CanonicalStorageId> {
+    if read.space != slot.space || read.offset != slot.offset || read.size == 0 {
+        return None;
+    }
+    if read.size <= slot.size {
+        return Some(read);
+    }
+    machine_context
+        .is_some_and(|context| context.is_low_lane_of(slot, read))
+        .then_some(slot)
 }
 
 /// The widest low slice that contributes to a recovered result.
@@ -1155,25 +1165,25 @@ fn recover_interface_inner(
             reads.push(storage);
         }
     }
-    let mut parameters = Vec::new();
-    for slot in slots.argument_slots() {
-        // The widest read that lands in this slot. A callee that both spills
-        // the whole register and uses its low half proves the wider one, and
-        // taking the widest keeps the recovered width from depending on which
-        // read the scan happened to see first.
-        let observed = reads
+    // The slots fill in order, and the first unread one ends them.
+    let in_order = |class: &[CanonicalStorageId]| {
+        class
             .iter()
-            .copied()
-            .filter(|read| read_covers_slot(*read, *slot))
-            .max_by_key(|read| read.size);
-        let Some(observed) = observed else {
-            break;
-        };
-        parameters.push(RecoveredParameter {
-            slot: *slot,
-            observed,
-        });
-    }
+            .map_while(|slot| {
+                // The widest read, so the width does not depend on scan order.
+                let observed = reads
+                    .iter()
+                    .filter_map(|read| observed_in_slot(*read, *slot, machine_context))
+                    .max_by_key(|read| read.size)?;
+                Some(RecoveredParameter {
+                    slot: *slot,
+                    observed,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let parameters = in_order(slots.argument_slots());
+    let integers = parameters.len();
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}",
@@ -1191,7 +1201,7 @@ fn recover_interface_inner(
         && result_is_the_return_address(graph, &facts, &live_out, return_mechanism);
     // The convention fills every register slot before the argument area, so
     // a stack slot is a parameter only once each register slot is proven.
-    let stack_parameters = if parameters.len() == slots.argument_slots().len() {
+    let stack_parameters = if integers == slots.argument_slots().len() {
         // A convention with no argument registers takes its step from the
         // stack entry the specification declares instead.
         let slot_bytes = slots.argument_slots().first().map_or_else(

@@ -1250,10 +1250,12 @@ pub(crate) fn reaching_abi_value_before(
             .values
             .iter()
             .filter(|value| {
-                graph.def_inst(value.id).is_none()
+                // The caller's value: a root's entry value, or the projection a formal lane minted (B3).
+                let entry = graph.def_inst(value.id).is_none()
                     && value.var.version == 0
-                    && value.var.size == storage.size
-                    && value.canonical_storage == Some(storage)
+                    && value.canonical_storage == Some(storage);
+                let lane = graph.formal_projection_storage(value.id) == Some(storage);
+                value.var.size == storage.size && (entry || lane)
             })
             .map(|value| value.id)
             .collect::<Vec<_>>();

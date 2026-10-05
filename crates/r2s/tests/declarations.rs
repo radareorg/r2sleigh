@@ -150,3 +150,20 @@ fn without_debug_information_nothing_declared_appears() {
         assert!(!out.contains("panicked"), "{address}:\n{out}");
     }
 }
+
+/// A declared `double` argument is passed, whether the caller writes the lane or hands on its own formal (B3).
+#[test]
+fn a_declared_double_argument_reaches_its_call() {
+    for name in ["float_calls_zig_x86_64_O2g", "float_calls_zig_aarch64_O2g"] {
+        let call_store = run(name, "pdd @ sym.call_store");
+        assert!(
+            !call_store.contains("r2sleigh refused"),
+            "{name}:\n{call_store}"
+        );
+        assert!(call_store.contains("store("), "{name}:\n{call_store}");
+        assert!(call_store.contains(", p);"), "{name}:\n{call_store}");
+        let forward = run(name, "pdd @ sym.forward");
+        assert!(forward.contains("store(x, p);"), "{name}:\n{forward}");
+        assert!(!forward.contains("r2sleigh refused"), "{name}:\n{forward}");
+    }
+}

@@ -1355,6 +1355,37 @@ pub(crate) fn collect_prepared_function_certificates(
     }
 }
 
+/// Whether a value is what a register slot holds: its own storage, an entry lane's projection, or a lane inserted there (B3).
+fn holds(graph: &SsaGraph, value: &crate::graph::GraphValue, storage: CanonicalStorageId) -> bool {
+    if value.canonical_storage == Some(storage)
+        || graph.formal_projection_storage(value.id) == Some(storage)
+    {
+        return true;
+    }
+    graph.use_sites(value.id).iter().any(|site| {
+        let Some(inst) = graph.inst(site.inst) else {
+            return false;
+        };
+        let crate::graph::InstPayload::Op(crate::op::SSAOp::Insert(insert)) = &inst.payload else {
+            return false;
+        };
+        let root = inst
+            .output
+            .and_then(|out| graph.value(out)?.canonical_storage);
+        let position = graph
+            .value(insert.position)
+            .and_then(|position| position.var.constant_bits());
+        let (Some(root), Some(bits)) = (root, position) else {
+            return false;
+        };
+        insert.value == value.id
+            && bits % 8 == 0
+            && root.space == storage.space
+            && root.offset.checked_add(bits / 8) == Some(storage.offset)
+            && value.var.size == storage.size
+    })
+}
+
 pub(crate) fn exact_register_call_arguments(
     boundary: &SourceCallBoundaryFact,
     graph: &SsaGraph,
@@ -1400,7 +1431,7 @@ pub(crate) fn exact_register_call_arguments(
         let Some(graph_value) = graph.value(value) else {
             give_up!("slot {} value {:?} is not in the graph", index, value);
         };
-        if graph_value.canonical_storage != Some(storage) {
+        if !holds(graph, graph_value, storage) {
             give_up!(
                 "slot {} wants {:?} but {:?} is at {:?}",
                 index,
