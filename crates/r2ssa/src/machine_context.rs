@@ -1408,6 +1408,19 @@ impl SourceMachineContext {
         self.callee_names.get(&identity).map(String::as_str)
     }
 
+    /// The imports this body calls directly, by entry: the container binds an
+    /// import by its name, so that name says what the callee is.
+    pub(crate) fn imported_callees(&self) -> BTreeMap<u64, String> {
+        self.callee_names
+            .iter()
+            .filter(|(identity, _)| {
+                self.callee_linkage(**identity) == r2source::AdvisoryCalleeLinkage::Imported
+            })
+            .filter(|(identity, _)| identity.target().space == CanonicalStorageSpace::Ram)
+            .map(|(identity, name)| (identity.target().offset, name.clone()))
+            .collect()
+    }
+
     /// Who the site calls, as the source's symbol or relocation said; unknown where it said nothing.
     pub fn callee_linkage(
         &self,
@@ -1627,6 +1640,35 @@ mod tests {
         AddressSpace, RegisterDef, RegisterProjectionDisposition, RegisterProjectionRefusal,
         Varnode,
     };
+
+    /// Only a call the source states imports is described by its callee's name.
+    #[test]
+    fn only_an_imported_callee_is_named_for_its_library_model() {
+        let site = |instruction: u64, target: u64| {
+            SourceCallSiteIdentity::new(
+                instruction,
+                CanonicalStorageId {
+                    space: CanonicalStorageSpace::Ram,
+                    offset: target,
+                    size: 8,
+                },
+            )
+        };
+        let (import, local) = (site(0x1000, 0x2000), site(0x1010, 0x3000));
+        let mut context = SourceMachineContext::from_blocks(&[], None);
+        context.set_callee_names(BTreeMap::from([
+            (import, "free".to_owned()),
+            (local, "free".to_owned()),
+        ]));
+        context.set_callee_linkages(BTreeMap::from([
+            (import, r2source::AdvisoryCalleeLinkage::Imported),
+            (local, r2source::AdvisoryCalleeLinkage::Internal),
+        ]));
+        assert_eq!(
+            context.imported_callees(),
+            BTreeMap::from([(0x2000, "free".to_owned())])
+        );
+    }
 
     fn register_storage(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {

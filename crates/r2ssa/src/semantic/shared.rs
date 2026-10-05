@@ -1656,7 +1656,14 @@ pub(crate) fn callee_write_spans(
             // available here because the callee's body was read before this
             // one was prepared.
             let reach = target.and_then(|target| machine_context.callee_argument_reach(target));
-            let seed = (!name.is_empty())
+            // Only an import is described by its name; a local symbol's name is a hint.
+            let imported = machine_context
+                .raw_call_site_at(*instruction)
+                .is_some_and(|identity| {
+                    machine_context.callee_linkage(identity)
+                        == r2source::AdvisoryCalleeLinkage::Imported
+                });
+            let seed = (imported && !name.is_empty())
                 .then(|| crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name))
                 .flatten();
             // A callee nothing describes -- no body was read, no import is

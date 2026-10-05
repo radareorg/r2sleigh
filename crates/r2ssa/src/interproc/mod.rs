@@ -1350,11 +1350,10 @@ impl PreparedCalleeSummary {
         let local = collect_source_owned_summary_facts(prepared, &abi);
         require_converged_call_carriers(&local)?;
         let callee_names = prepared
-            .display_names()
-            .functions()
-            .iter()
-            .filter(|(addr, _)| local.direct_callees.contains(*addr))
-            .map(|(addr, name)| (*addr, name.clone()))
+            .machine_context()
+            .imported_callees()
+            .into_iter()
+            .filter(|(addr, _)| local.direct_callees.contains(addr))
             .collect();
         Ok(Self {
             id,
@@ -1642,7 +1641,8 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         locals.insert(callee.id, (None, callee.local.clone()));
     }
 
-    let mut names = root.display_names().functions().clone();
+    // Only an import is described by its name; a local symbol's name is a hint.
+    let mut names = root.machine_context().imported_callees();
     for callee in callees {
         for (addr, name) in &callee.callee_names {
             names.entry(*addr).or_insert_with(|| name.clone());
