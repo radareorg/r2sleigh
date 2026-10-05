@@ -5,6 +5,7 @@
 //! the request-level scheduler boundary that decides which artifacts are
 //! needed for a request. Analysis artifacts are built directly for each
 //! source snapshot request.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(cache_outside_query_database))]
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

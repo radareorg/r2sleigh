@@ -103,6 +103,12 @@ engine. Commands, the visual mode and the agent surface all ask it.
   reader compared it once every answer moved onto the database. The tests
   that read its axes now say what those axes protected, as analyses
   computed or reused.
+- Q4e: the Dylint `cache_outside_query_database` is denied in r2engine:
+  a `Mutex`, `RwLock`, `RefCell`, `OnceCell`, `OnceLock` or `LazyLock` in
+  a field, static or signature outside `query::db` and `isolation` fails
+  the build. The two cells left say why they are no cache (the machines,
+  an input loaded on first use; a walked body's def-use, built inside one
+  answer). The retired memo seams are listed in the source invariants.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.

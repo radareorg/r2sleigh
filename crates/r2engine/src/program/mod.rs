@@ -597,6 +597,7 @@ pub(crate) struct ProgramInputs<S> {
     /// slot has to answer for the import too; only a stub is an entry.
     slots: BTreeMap<u64, String>,
     /// The decoders and their assembly, loaded the first time a question needs them; the container decides them, so no write moves them.
+    #[cfg_attr(dylint_lib = "r2sleigh_lints", allow(cache_outside_query_database))]
     machines: std::cell::OnceCell<Result<Machines, String>>,
 }
 

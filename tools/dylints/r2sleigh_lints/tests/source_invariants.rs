@@ -54,6 +54,8 @@ fn r2engine_retired_route_cache_and_mutation_seams_stay_deleted() {
         "prepared evidence is derived by its r2types owner, not set by the engine";
     const CACHE: &str = "an analysis is request-local; no cache stands in for a new one";
     const DETACHED: &str = "no detached report or plan is promoted to authority";
+    const QUERY: &str =
+        "a computed fact is a query the database invalidates, not a table kept by hand";
     let engine = production("crates/r2engine/src");
     assert_retired(
         "r2engine",
@@ -115,6 +117,15 @@ fn r2engine_retired_route_cache_and_mutation_seams_stay_deleted() {
             ("EngineBoundedCfgTypePlan", DETACHED),
             ("semantic_fallback_type_plan", DETACHED),
             ("type_facts_with_summary_projection", DETACHED),
+            ("struct Memo<", QUERY),
+            ("mod memo;", QUERY),
+            ("PerRevision", QUERY),
+            ("struct Recording", QUERY),
+            ("fn memo_stats", QUERY),
+            ("fn ensure_current", QUERY),
+            ("struct Revision", QUERY),
+            ("Mutex<Returns>", QUERY),
+            ("Mutex<Pointers>", QUERY),
         ],
     );
 }

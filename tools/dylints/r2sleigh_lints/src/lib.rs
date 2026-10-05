@@ -2394,6 +2394,14 @@ rustc_session::declare_lint!(
     "a fact about a function's entities is an index over their dense ids, not a map keyed by them"
 );
 
+rustc_session::declare_lint!(
+    /// A cell in an r2engine field, static or signature outside `query::db` is a memo invalidated by hand;
+    /// a computed fact is a `Query` (doc/adr-query-database.md, ROADMAP D11). A cell that is no cache says so with `allow`.
+    pub CACHE_OUTSIDE_QUERY_DATABASE,
+    Warn,
+    "a computed program fact lives only in the query database"
+);
+
 rustc_session::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2576,6 +2584,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
         R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
         ENTITY_KEYED_MAP,
+        CACHE_OUTSIDE_QUERY_DATABASE,
     ]);
     lint_store.register_late_pass(|_| Box::new(R2sleighLintPass));
 }
@@ -2590,6 +2599,18 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
         // check's, which reads the type rustc settled on, written or not;
         // here only signatures, fields and aliases.
         let ty = ty.as_unambig_ty();
+        if !written_inside_a_body(cx, ty.hir_id)
+            && is_cache_owner_span(cx, ty.span)
+            && !clippy_utils::is_in_test(cx.tcx, ty.hir_id)
+            && let Some(cell) = written_interior_cell(cx, ty)
+        {
+            span_lint(
+                cx,
+                CACHE_OUTSIDE_QUERY_DATABASE,
+                ty.span,
+                format!("`{cell}` outside the query database; hold a computed fact as a `Query`"),
+            );
+        }
         if !written_inside_a_body(cx, ty.hir_id)
             && is_entity_index_owner_span(cx, ty.span)
             && !clippy_utils::is_in_test(cx.tcx, ty.hir_id)
@@ -2611,8 +2632,10 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
         if !matches!(local.pat.kind, rustc_hir::PatKind::Wild)
             && is_entity_index_owner_span(cx, local.pat.span)
             && !clippy_utils::is_in_test(cx.tcx, local.hir_id)
-            && let Some(collection) =
-                inferred_entity_keyed_collection(cx, cx.typeck_results().node_type(local.pat.hir_id))
+            && let Some(collection) = inferred_entity_keyed_collection(
+                cx,
+                cx.typeck_results().node_type(local.pat.hir_id),
+            )
         {
             span_lint(
                 cx,
@@ -6241,9 +6264,40 @@ fn is_r2dec_ast_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
 /// The crates whose facts about a function become indexes over its dense ids.
 fn is_entity_index_owner_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
     let filename = format!("{:?}", cx.sess().source_map().span_to_filename(span));
-    ["crates/r2ssa/src/", "crates/r2types/src/", "crates/r2dec/src/"]
+    [
+        "crates/r2ssa/src/",
+        "crates/r2types/src/",
+        "crates/r2dec/src/",
+    ]
+    .iter()
+    .any(|owner| filename.contains(owner))
+}
+
+/// Whether `span` is r2engine's, outside the query database and the panic plumbing.
+fn is_cache_owner_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
+    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(span));
+    filename.contains("crates/r2engine/src/")
+        && !filename.contains("crates/r2engine/src/query/db.rs")
+        && !filename.contains("crates/r2engine/src/isolation.rs")
+}
+
+const INTERIOR_CELLS: &[&str] = &[
+    "Mutex", "RwLock", "RefCell", "OnceCell", "OnceLock", "LazyLock",
+];
+
+/// The cell's name, when `ty` is written as one that can hold a value computed after construction.
+fn written_interior_cell(cx: &LateContext<'_>, ty: &rustc_hir::Ty<'_>) -> Option<&'static str> {
+    let rustc_hir::TyKind::Path(QPath::Resolved(None, path)) = ty.kind else {
+        return None;
+    };
+    let rustc_hir::def::Res::Def(_, cell) = path.res else {
+        return None;
+    };
+    let name = cx.tcx.item_name(cell);
+    INTERIOR_CELLS
         .iter()
-        .any(|owner| filename.contains(owner))
+        .copied()
+        .find(|known| name.as_str() == *known)
 }
 
 /// Whether a written type sits in an expression or a `let` of the item that

@@ -1,0 +1,16 @@
+warning: `Mutex` outside the query database; hold a computed fact as a `Query`
+  --> $DIR/cache_outside_query_database.rs:6:15
+   |
+LL |     pointers: Mutex<BTreeMap<u64, u64>>,
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(cache_outside_query_database)]` on by default
+
+warning: `RefCell` outside the query database; hold a computed fact as a `Query`
+  --> $DIR/cache_outside_query_database.rs:7:13
+   |
+LL |     survey: RefCell<Option<u64>>,
+   |             ^^^^^^^^^^^^^^^^^^^^
+
+warning: 2 warnings emitted
+
