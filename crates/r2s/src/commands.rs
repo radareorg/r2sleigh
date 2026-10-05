@@ -672,7 +672,7 @@ fn patch(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
 }
 
 /// Every byte written over the file's own.
-fn patches(session: &mut Session) -> Result<String, String> {
+fn patches(session: &Session) -> Result<String, String> {
     let mut out = String::from("vaddr      byte\n");
     out.push_str(&"-".repeat(16));
     let mut count = 0usize;
@@ -751,7 +751,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
     for (fact, source) in index.to(wanted) {
         count += 1;
         let text = match &source.line.syntax {
-            Some(_) => crate::listing::spelled(&source.line, names),
+            Some(_) => crate::listing::spelled(&source.line, &names),
             // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
             None => format!("{} {wanted:#010x}", datum(session)),
         };
@@ -864,9 +864,9 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
 /// The strings the name table holds, which it reads only out of sections the
 /// container states hold the program's data, and only where the loader
 /// leaves the bytes alone. Spelled with escapes, one per line.
-pub(crate) fn strings(session: &mut Session) -> Result<Table, String> {
+pub(crate) fn strings(session: &Session) -> Result<Table, String> {
     // The strings are read out of the image, so a patched image has other ones.
-    session.program.ensure_current()?;
+    session.program.loaded()?;
     let found: Vec<(u64, String)> = session
         .program
         .names()
@@ -989,10 +989,10 @@ fn escaped(text: &str) -> String {
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.
-fn flags(session: &mut Session) -> Result<String, String> {
+fn flags(session: &Session) -> Result<String, String> {
     // The linkage stubs are named once there is a decoder to read them with,
     // so asking for the machine first is what makes the listing complete.
-    session.program.ensure_current()?;
+    session.program.loaded()?;
     let mut out = String::from("vaddr       size name\n");
     out.push_str(&"-".repeat(46));
     for (vaddr, name) in session.program.names().iter() {
@@ -1135,9 +1135,9 @@ fn macho_section_type(kind: u32) -> String {
 /// is the address a call to it names; the dynamic table states the imports
 /// where there is one, since the static table repeats them under versioned
 /// names.
-pub(crate) fn symbols(session: &mut Session) -> Result<Table, String> {
+pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
     // The stubs are read out of the code, so there must be a decoder first.
-    session.program.ensure_current()?;
+    session.program.loaded()?;
     let mut table = Table::headed([
         "nth paddr      vaddr      bind   type   size lib name".to_owned(),
         "-".repeat(60),

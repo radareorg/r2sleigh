@@ -232,8 +232,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     }
 
     /// The analysis, within a request already started.
-    fn prepare(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
-        self.ensure_current()?;
+    fn prepare(&self, entry: u64) -> Result<Arc<Prepared>, String> {
+        self.loaded()?;
         self.assembled()?;
         self.analysed(entry).map_err(|refusal| refusal.to_string())
     }
@@ -267,7 +267,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// One function rendered at one tier.
     pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
         self.start_request();
-        self.ensure_current()?;
+        self.loaded()?;
         self.assembled()?;
         let key = (entry, self.view().thumb_at(entry), tier);
         let render = self.db.get::<super::analysis::Rendered>(&key);
@@ -292,7 +292,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// The operations Sleigh produced for one function, before any analysis.
     pub fn lifted(&mut self, entry: u64) -> Result<String, String> {
         self.start_request();
-        self.ensure_current()?;
+        self.loaded()?;
         self.assembled()?;
         crate::native::lifted(&self.target(entry)?, self, entry)
             .map_err(|refusal| refusal.to_string())
@@ -302,7 +302,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// shows. Nothing is walked or prepared.
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
         self.start_request();
-        self.ensure_current()?;
+        self.loaded()?;
         // A machine it cannot assemble still lists, with no callee parameters and nothing saying what a call clobbers.
         if let Err(reason) = self.assembled() {
             r2il::refusal_evidence!("call-effect", "{:#x}: {reason}", request.start);
@@ -380,8 +380,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     }
 
     /// The listing and the shape of the body it lists, within a request already started.
-    fn listed_body(&mut self, entry: u64) -> Result<(FunctionListing, Shape), String> {
-        self.ensure_current()?;
+    fn listed_body(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
+        self.loaded()?;
         self.assembled()?;
         let target = self.target(entry)?;
         let reason = match self.analysed(entry) {
@@ -559,7 +559,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn references(&mut self) -> Result<Answer<Arc<References>>, String> {
         self.start_request();
         // A callee's body is read in the instruction set discovery settled, so that is settled first.
-        self.ensure_current()?;
+        self.loaded()?;
         let index = self.db.get::<ReferenceIndex>(&());
         let index = index.map_err(|cycle| format!("{cycle:?}"))?;
         let index = index.as_ref().clone()?;
@@ -567,8 +567,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     }
 
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
-    pub(super) fn surveyed(&mut self) -> Result<Arc<Survey>, String> {
-        self.ensure_current()?;
+    pub(super) fn surveyed(&self) -> Result<Arc<Survey>, String> {
+        self.loaded()?;
         let answer = self
             .db
             .get::<SurveyQuery>(&())
@@ -586,8 +586,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             call_effect: self
                 .db
                 .inputs()
-                .assembled
-                .as_ref()
+                .assembled()
                 .and_then(|held| held.call_effect.as_ref()),
             proved,
             body: None,
@@ -768,7 +767,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
     const NAME: &'static str = "modes";
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
-        if db.inputs().thumb_machine.is_none() {
+        if db
+            .inputs()
+            .machines()
+            .map_or(true, |machines| machines.thumb.is_none())
+        {
             return BTreeMap::new();
         }
         match db

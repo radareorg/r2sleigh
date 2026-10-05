@@ -93,6 +93,12 @@ engine. Commands, the visual mode and the agent surface all ask it.
   (`EngineExecutionControl::stopped`: cancellation is sticky and the
   deadline only passes). Measured: six render commands over two 0pack
   functions in one session, 11.1 s to 4.9 s.
+- Q4c: the decoders and their assembly are loaded the first time a
+  question needs them (`ProgramInputs::machines`, a cell the container
+  alone decides); `ensure_current` and the open program's copies of the
+  names, stubs and modes are deleted, so every reader asks the database
+  and none reads a stale table. `StatedNames` is what the container names
+  with no decoder, which is all `start` needs: `iS` loads no machine.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.

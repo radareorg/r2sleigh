@@ -15,8 +15,8 @@ fn register(offset: u64, size: u32) -> CanonicalStorageId {
 
 #[test]
 fn a_register_is_spelled_by_the_machine_it_lives_in() {
-    let mut program = opened();
-    program.ensure_current().expect("the machine loads");
+    let program = opened();
+    program.loaded().expect("the machine loads");
     let rax = register(0, 8);
     let eax = register(0, 4);
     let slot = CanonicalStorageId {

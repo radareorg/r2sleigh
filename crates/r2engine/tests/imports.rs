@@ -17,8 +17,8 @@ fn a_lone_stub_begins_at_its_transfer_not_at_the_pad_before_it() {
             stop: Stop::After(1),
         })
         .expect("it lists");
-    let imports: Vec<(u64, &str)> = program
-        .imports()
+    let held = program.imports();
+    let imports: Vec<(u64, &str)> = held
         .iter()
         .map(|(at, stub)| (*at, stub.symbol.as_str()))
         .collect();
@@ -37,10 +37,10 @@ fn a_lone_stub_begins_at_its_transfer_not_at_the_pad_before_it() {
 /// early, and the calls to it found no prototype.)
 #[test]
 fn a_lone_stub_begins_on_its_section_alignment_not_at_padding_that_does_nothing() {
-    let mut program = OpenProgram::of(Literal::plt_nop_padded());
-    program.ensure_current().expect("it is current");
-    let imports: Vec<(u64, &str, u64)> = program
-        .imports()
+    let program = OpenProgram::of(Literal::plt_nop_padded());
+    program.loaded().expect("it is current");
+    let held = program.imports();
+    let imports: Vec<(u64, &str, u64)> = held
         .iter()
         .map(|(at, stub)| (*at, stub.symbol.as_str(), stub.size))
         .collect();
@@ -51,10 +51,10 @@ fn a_lone_stub_begins_on_its_section_alignment_not_at_padding_that_does_nothing(
 fn a_section_of_stubs_is_known_by_what_it_holds_not_by_its_name() {
     // The same `.plt` under another name still holds nothing but a resolver
     // jump and a jump through the import's slot, so its stub is named.
-    let mut program = OpenProgram::of(Literal::plt().renamed(0, ".foo"));
-    program.ensure_current().expect("it is current");
-    let imports: Vec<(u64, &str)> = program
-        .imports()
+    let program = OpenProgram::of(Literal::plt().renamed(0, ".foo"));
+    program.loaded().expect("it is current");
+    let held = program.imports();
+    let imports: Vec<(u64, &str)> = held
         .iter()
         .map(|(at, stub)| (*at, stub.symbol.as_str()))
         .collect();
@@ -73,10 +73,8 @@ fn a_stub_that_builds_its_slot_from_two_halves_is_named_for_the_import() {
     };
     let stub = program.listing(listing).expect("it lists");
     // The fold carries `movw` into `movt`, so the load names the slot and the slot names the import.
-    let imports = program
-        .imports()
-        .iter()
-        .map(|(at, stub)| (*at, stub.symbol.as_str()));
+    let held = program.imports();
+    let imports = held.iter().map(|(at, stub)| (*at, stub.symbol.as_str()));
     assert_eq!(
         imports.collect::<Vec<_>>(),
         [(BASE, "_Exit")],
@@ -101,10 +99,10 @@ fn an_arm_plt0_whose_literal_word_decodes_as_a_conditional_instruction_still_hol
             width: 8,
             kind: r2engine::program::WriteKind::Unknown,
         });
-    let mut program = OpenProgram::of(literal);
-    program.ensure_current().expect("it is current");
-    let imports: Vec<(u64, &str, u64)> = program
-        .imports()
+    let program = OpenProgram::of(literal);
+    program.loaded().expect("it is current");
+    let held = program.imports();
+    let imports: Vec<(u64, &str, u64)> = held
         .iter()
         .map(|(at, stub)| (*at, stub.symbol.as_str(), stub.size))
         .collect();

@@ -42,7 +42,7 @@ pub(crate) fn instruction_painted(
 ) -> (String, Roles) {
     let (mut text, roles) = match line.decoded() {
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
-        true => painted(line, session.program.names()),
+        true => painted(line, &session.program.names()),
     };
     text.push_str(&held(session, line));
     (text, roles)
@@ -58,7 +58,7 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     }
     let (text, roles) = match line.decoded() {
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
-        true => painted(line, session.program.names()),
+        true => painted(line, &session.program.names()),
     };
     let offset = format!("{:#010x}", line.address);
     let (offset, text) = match session.paints() {
@@ -408,7 +408,8 @@ fn called(
     let callee = callee.map_or_else(
         || "indirect call".to_owned(),
         |address| {
-            let name = session.program.names().of(address);
+            let names = session.program.names();
+            let name = names.of(address);
             name.map_or_else(|| format!("{address:#x}"), |name| name.spelled())
         },
     );

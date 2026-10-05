@@ -111,7 +111,7 @@ pub(crate) fn interactive(session: &mut Session, reader: &mut Reader) -> Ended {
         // The names `f` lists, which a command can have added to. The table
         // is complete once there is a decoder to name the linkage stubs
         // with, as `f` knows; without one there is nothing to offer.
-        if session.program.ensure_current().is_ok()
+        if session.program.loaded().is_ok()
             && let Ok(mut held) = names.lock()
         {
             *held = session

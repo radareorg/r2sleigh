@@ -98,8 +98,8 @@ impl<'a, S: Source + 'static> View<'a, S> {
     /// The decoder for one instruction set.
     pub(super) fn machine_in(&self, thumb: bool) -> Option<&'a EmbeddedMachine> {
         match thumb {
-            true => self.db.inputs().thumb_machine.as_ref(),
-            false => self.db.inputs().machine.as_ref(),
+            true => self.db.inputs().machines().ok()?.thumb.as_ref(),
+            false => Some(&self.db.inputs().machines().ok()?.machine),
         }
     }
 
@@ -126,8 +126,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
     ) -> Result<NativeTarget<'a>, String> {
         let inputs = self.db.inputs();
         let assembled = inputs
-            .assembled
-            .as_ref()
+            .assembled()
             .ok_or("the program was not assembled for this address")?;
         Ok(NativeTarget {
             arch: &machine.arch,
@@ -208,12 +207,12 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
-        let assembled = self.db.inputs().assembled.as_ref();
+        let assembled = self.db.inputs().assembled();
         assembled.and_then(|held| held.link.clone())
     }
 
     fn mode_register(&self) -> Option<r2il::Varnode> {
-        let assembled = self.db.inputs().assembled.as_ref();
+        let assembled = self.db.inputs().assembled();
         assembled.and_then(|held| held.mode.clone())
     }
 }

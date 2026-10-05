@@ -48,19 +48,112 @@ struct Assembled {
     mode: Option<r2il::Varnode>,
 }
 
+/// The decoders for a program's instruction sets and what a native request needs of them.
+struct Machines {
+    machine: EmbeddedMachine,
+    /// The same instruction set with TMode set, where the architecture has
+    /// one. Which functions it decodes is what `modes` says.
+    thumb: Option<EmbeddedMachine>,
+    assembled: Result<Assembled, String>,
+}
+
+impl Machines {
+    fn load(container: &Container) -> Result<Self, String> {
+        let arch = container.arch.name.clone();
+        // A PE runs under the Windows toolchain, whose language may differ.
+        let machine = match container.format {
+            Format::Pe => r2sleigh_lift::embedded_windows_machine(&arch),
+            _ => r2sleigh_lift::embedded_machine(&arch),
+        }
+        .map_err(|error| error.to_string())?;
+        // Whether any function is Thumb is discovery's answer, so the
+        // decoder is loaded wherever the architecture has one.
+        let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let assembled = assemble(&machine, container);
+        Ok(Self {
+            machine,
+            thumb,
+            assembled,
+        })
+    }
+}
+
+/// Assemble what a native request needs of the machine, once per program: constant while it is open.
+fn assemble(machine: &EmbeddedMachine, container: &Container) -> Result<Assembled, String> {
+    let arch = machine.arch.name.clone();
+    let bits = container.arch.bits;
+    // The system's ABI says which register it reserves for the thread
+    // pointer and which control registers it makes callee-saved. A system
+    // fact, so a static ELF that names no C library has it too; which
+    // library's declarations apply is `platform`'s question.
+    let psabi = kernel(container);
+    let convention = r2abi::calling_convention(&arch, bits, psabi)
+        .ok_or_else(|| format!("no calling convention for {arch} {bits}"))?;
+    // A PE runs under the Windows toolchain's prototypes where the
+    // language names one; anything else under the usual toolchain's.
+    let specification = match container.format {
+        Format::Pe => machine
+            .windows_compiler_spec
+            .unwrap_or(machine.compiler_spec),
+        _ => machine.compiler_spec,
+    };
+    let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
+        .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
+    let call_effect = crate::native::call_effect(
+        &machine.arch,
+        bits,
+        psabi,
+        &compiler,
+        convention.variadic_count_register,
+    );
+    // The specification names the register; the architecture says where it
+    // lives, and the lift spells writes to it in those coordinates.
+    let link = compiler.return_address.as_ref().and_then(|name| {
+        machine
+            .arch
+            .registers
+            .iter()
+            .find(|register| register.name.eq_ignore_ascii_case(name))
+            .map(|register| r2il::Varnode {
+                space: r2il::SpaceId::Register,
+                offset: register.offset,
+                size: register.size,
+                meta: None,
+            })
+    });
+    let mode = machine
+        .arch
+        .registers
+        .iter()
+        .find(|register| register.name == "ISAModeSwitch")
+        .map(|register| r2il::Varnode {
+            space: r2il::SpaceId::Register,
+            offset: register.offset,
+            size: register.size,
+            meta: None,
+        });
+    // Which C library's own declarations apply is what the container
+    // states of it, and nothing else: `_Exit` is each library's, and
+    // `__fgets_chk` is two interfaces under one name. The program's own
+    // declarations are read by address, beside these, not merged in.
+    let prototypes = r2abi::Prototypes::embedded_for(platform(container));
+    Ok(Assembled {
+        convention,
+        call_effect,
+        compiler,
+        prototypes,
+        link,
+        mode,
+    })
+}
+
 /// One open program: its source, its decoders, and the tables read out of both.
 pub struct OpenProgram<S: Source + 'static> {
     /// The source and the decoders, and every fact derived from them that has
     /// moved onto queries (doc/adr-query-database.md).
     db: Db<ProgramInputs<S>>,
-    /// The name table and the import stubs as of the last `ensure_current`:
-    /// the database's answers, held for the request that reads them.
-    names: Rc<NameDb>,
-    imports: Rc<BTreeMap<u64, naming::Stub>>,
-    /// The survey's modes for the request in hand, asked on first use.
-    modes: std::cell::RefCell<Option<Rc<BTreeMap<u64, bool>>>>,
-    /// Whether the machine's conventions were assembled when it loaded, and why not.
-    assembly: Result<(), String>,
     /// The control a caller set for the next request, which that request
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
@@ -74,12 +167,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             .map(|(slot, symbol)| (slot, symbol.to_owned()))
             .collect();
         Self {
-            // Read from the database by `ensure_current` alone, which is the
-            // first thing every request does.
-            names: Rc::new(NameDb::new()),
-            imports: Rc::new(BTreeMap::new()),
-            modes: std::cell::RefCell::default(),
-            assembly: Err("the program's machine is not loaded".to_owned()),
             next: None,
             db: Db::new(ProgramInputs {
                 defined: definitions(container),
@@ -116,12 +203,10 @@ impl<S: Source + 'static> OpenProgram<S> {
                         _ => None,
                     })
                     .collect(),
-                assembled: None,
                 control: crate::EngineExecutionControl::default(),
                 source,
                 slots,
-                machine: None,
-                thumb_machine: None,
+                machines: std::cell::OnceCell::new(),
             }),
         }
     }
@@ -137,49 +222,16 @@ impl<S: Source + 'static> OpenProgram<S> {
         &mut self.db.inputs_mut().source
     }
 
-    /// Make everything derived from the bytes current.
-    ///
-    /// The machine is loaded once: which instruction set a file is written in
-    /// is a property of the file and no patch changes it. The names and the
-    /// import stubs are read or decoded out of the bytes, so they are derived
-    /// again whenever the source says it is at a different revision.
-    pub fn ensure_current(&mut self) -> Result<(), String> {
-        if self.db.inputs().machine.is_none() {
-            let container = self.source().container();
-            let arch = container.arch.name.clone();
-            // A PE runs under the Windows toolchain, whose language may differ.
-            let machine = match container.format {
-                Format::Pe => r2sleigh_lift::embedded_windows_machine(&arch),
-                _ => r2sleigh_lift::embedded_machine(&arch),
-            }
-            .map_err(|error| error.to_string())?;
-            // Whether any function is Thumb is discovery's answer, so the
-            // decoder is loaded wherever the architecture has one.
-            let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
-                .transpose()
-                .map_err(|error| error.to_string())?;
-            let inputs = self.db.inputs_mut();
-            inputs.machine = Some(machine);
-            inputs.thumb_machine = thumb;
-            // Before any query runs: no answer is ever computed without it.
-            self.assembly = self.assemble();
-        }
-        self.modes.replace(None);
-        self.imports = self
-            .db
-            .get::<Imports>(&())
-            .map_err(|cycle| format!("{cycle:?}"))?;
-        self.names = self
-            .db
-            .get::<Names>(&())
-            .map_err(|cycle| format!("{cycle:?}"))?;
-        Ok(())
+    /// Whether the program's machine loads, and why not: loaded on first use, since which instruction set a file is written in no patch changes.
+    pub fn loaded(&self) -> Result<(), String> {
+        self.db.inputs().machines().map(|_| ())
     }
 
-    /// What this binary calls each address it names, as of the last
-    /// `ensure_current`.
-    pub fn names(&self) -> &NameDb {
-        &self.names
+    /// What this binary calls each address it names.
+    pub fn names(&self) -> Rc<NameDb> {
+        self.db
+            .get::<Names>(&())
+            .expect("the names ask only for the imports")
     }
 
     /// Where a session starts before anything has been sought.
@@ -195,7 +247,10 @@ impl<S: Source + 'static> OpenProgram<S> {
             .iter()
             .find(|entry| entry.kind == EntryKind::Main)
             .or_else(|| entries.first());
-        self.names
+        // `entry0` names an entry the container states, never a stub, so no decoder is loaded to start.
+        let stated = self.db.get::<StatedNames>(&());
+        stated
+            .expect("the stated names ask for nothing")
             .address_of("entry0")
             .or_else(|| declared.map(|entry| entry.vaddr))
             .or_else(|| {
@@ -210,11 +265,12 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// The address a flag spelling names, with `entry0` always the declared
     /// entry: Mach-O names that address `main`, and radare2 answers both.
     pub fn address_named(&mut self, spelling: &str) -> Result<Option<u64>, String> {
-        if let Some(addr) = self.names.address_of(spelling) {
+        let names = self.names();
+        if let Some(addr) = names.address_of(spelling) {
             return Ok(Some(addr));
         }
-        // Import stubs are named only once there is a decoder to read them with.
-        self.ensure_current()?;
+        // Import stubs are named only where there is a decoder to read them with.
+        self.loaded()?;
         let declared = || {
             let entries = &self.source().container().entries;
             entries
@@ -222,97 +278,26 @@ impl<S: Source + 'static> OpenProgram<S> {
                 .find(|entry| entry.kind == EntryKind::Main)
                 .map(|entry| entry.vaddr)
         };
-        Ok(self
-            .names
+        Ok(names
             .address_of(spelling)
             .or_else(|| (spelling == "entry0").then(declared).flatten()))
     }
 
-    /// Which stub stands for which import, as of the last `ensure_current`.
-    pub fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
-        &self.imports
+    /// Which stub stands for which import.
+    pub fn imports(&self) -> Rc<BTreeMap<u64, naming::Stub>> {
+        self.db
+            .get::<Imports>(&())
+            .expect("the imports ask for nothing")
     }
 
     /// Whether what a native request needs of the machine was assembled when it loaded.
     fn assembled(&self) -> Result<(), String> {
-        self.assembly.clone()
-    }
-
-    /// Assemble what a native request needs, once per program: constant while it is open.
-    fn assemble(&mut self) -> Result<(), String> {
-        let machine = self
-            .db
-            .inputs()
-            .machine
+        let machines = self.db.inputs().machines()?;
+        machines
+            .assembled
             .as_ref()
-            .ok_or("no Sleigh specification for this architecture")?;
-        let arch = machine.arch.name.clone();
-        let container = self.source().container();
-        let bits = container.arch.bits;
-        // The system's ABI says which register it reserves for the thread
-        // pointer and which control registers it makes callee-saved. A system
-        // fact, so a static ELF that names no C library has it too; which
-        // library's declarations apply is `platform`'s question.
-        let psabi = kernel(container);
-        let convention = r2abi::calling_convention(&arch, bits, psabi)
-            .ok_or_else(|| format!("no calling convention for {arch} {bits}"))?;
-        // A PE runs under the Windows toolchain's prototypes where the
-        // language names one; anything else under the usual toolchain's.
-        let specification = match container.format {
-            Format::Pe => machine
-                .windows_compiler_spec
-                .unwrap_or(machine.compiler_spec),
-            _ => machine.compiler_spec,
-        };
-        let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
-            .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
-        let call_effect = crate::native::call_effect(
-            &machine.arch,
-            bits,
-            psabi,
-            &compiler,
-            convention.variadic_count_register,
-        );
-        // The specification names the register; the architecture says where it
-        // lives, and the lift spells writes to it in those coordinates.
-        let link = compiler.return_address.as_ref().and_then(|name| {
-            machine
-                .arch
-                .registers
-                .iter()
-                .find(|register| register.name.eq_ignore_ascii_case(name))
-                .map(|register| r2il::Varnode {
-                    space: r2il::SpaceId::Register,
-                    offset: register.offset,
-                    size: register.size,
-                    meta: None,
-                })
-        });
-        let mode = machine
-            .arch
-            .registers
-            .iter()
-            .find(|register| register.name == "ISAModeSwitch")
-            .map(|register| r2il::Varnode {
-                space: r2il::SpaceId::Register,
-                offset: register.offset,
-                size: register.size,
-                meta: None,
-            });
-        // Which C library's own declarations apply is what the container
-        // states of it, and nothing else: `_Exit` is each library's, and
-        // `__fgets_chk` is two interfaces under one name. The program's own
-        // declarations are read by address, beside these, not merged in.
-        let prototypes = r2abi::Prototypes::embedded_for(platform(container));
-        self.db.inputs_mut().assembled = Some(Assembled {
-            convention,
-            call_effect,
-            compiler,
-            prototypes,
-            link,
-            mode,
-        });
-        Ok(())
+            .map(|_| ())
+            .map_err(Clone::clone)
     }
 
     /// Everything about the machine that does not change between functions.
@@ -325,17 +310,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// The program as a query reads it, over the tables this request holds.
     fn view(&self) -> View<'_, S> {
-        let modes = Rc::clone(
-            self.modes
-                .borrow_mut()
-                .get_or_insert_with(|| view::modes(&self.db)),
-        );
-        View::with(
-            &self.db,
-            Rc::clone(&self.names),
-            Rc::clone(&self.imports),
-            modes,
-        )
+        View::new(&self.db, true)
     }
 
     /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
@@ -622,16 +597,26 @@ pub(crate) struct ProgramInputs<S> {
     mapped: BTreeMap<u64, bool>,
     /// The control of the request in hand: read by a query's work, never a dependency of its answer.
     pub(crate) control: crate::EngineExecutionControl,
-    /// What a native request needs of the machine, assembled once it is loaded.
-    assembled: Option<Assembled>,
     /// Which import each slot the loader fills stands for. A stub's tail
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
     slots: BTreeMap<u64, String>,
-    machine: Option<EmbeddedMachine>,
-    /// The same instruction set with TMode set, where the architecture has
-    /// one. Which functions it decodes is what `modes` says.
-    thumb_machine: Option<EmbeddedMachine>,
+    /// The decoders and their assembly, loaded the first time a question needs them; the container decides them, so no write moves them.
+    machines: std::cell::OnceCell<Result<Machines, String>>,
+}
+
+impl<S: Source> ProgramInputs<S> {
+    fn machines(&self) -> Result<&Machines, String> {
+        let loaded = self
+            .machines
+            .get_or_init(|| Machines::load(self.source.container()));
+        loaded.as_ref().map_err(Clone::clone)
+    }
+
+    /// What a native request needs of the machine, where it loaded and was assembled.
+    fn assembled(&self) -> Option<&Assembled> {
+        self.machines().ok()?.assembled.as_ref().ok()
+    }
 }
 
 impl<S: Source + 'static> Inputs for ProgramInputs<S> {
@@ -688,12 +673,25 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Imports {
     const NAME: &'static str = "imports";
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
-        let machine = db
-            .inputs()
-            .machine
-            .as_ref()
-            .expect("the decoder is loaded before anything is asked");
+        // A stub is named by decoding it, so without a decoder there is none.
+        let Ok(machines) = db.inputs().machines() else {
+            return BTreeMap::new();
+        };
+        let machine = &machines.machine;
         naming::imports(&Recorded { db }, &machine.disasm, machine.arch.alignment)
+    }
+}
+
+/// What the container names: its sections, symbols and entries, read with no decoder.
+struct StatedNames;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for StatedNames {
+    type Key = ();
+    type Value = NameDb;
+    const NAME: &'static str = "stated-names";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        naming::of(&Recorded { db })
     }
 }
 
@@ -708,7 +706,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Names {
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         let source = Recorded { db };
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
-        let mut names = naming::of(&source);
+        let stated = db
+            .get::<StatedNames>(&())
+            .expect("the stated names ask for nothing");
+        let mut names = NameDb::clone(&stated);
         naming::name_strings(&mut names, &source);
         naming::name_imports(&mut names, &imports);
         naming::name_slots(
