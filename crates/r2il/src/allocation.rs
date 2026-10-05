@@ -31,54 +31,15 @@ static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 const SIZE_CLASSES: usize = 10;
 static BY_SIZE: [AtomicUsize; SIZE_CLASSES] = [const { AtomicUsize::new(0) }; SIZE_CLASSES];
 
-fn size_class(bytes: usize) -> usize {
-    // 0: <=16, 1: <=32, ... 9: larger than 4096.
-    let mut class = 0;
-    let mut bound = 16;
-    while class + 1 < SIZE_CLASSES && bytes > bound {
-        bound <<= 1;
-        class += 1;
-    }
-    class
-}
-
 /// How many allocations of each size class have been made.
 pub fn allocations_by_size() -> [usize; SIZE_CLASSES] {
     std::array::from_fn(|index| BY_SIZE[index].load(Ordering::Relaxed))
 }
 
 thread_local! {
-    /// Guards the sampler against its own allocations: capturing a backtrace
-    /// allocates, and counting that would recurse without end.
-    static SAMPLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Where the sampled allocations came from, by captured stack.
     static SAMPLED: std::cell::RefCell<std::collections::HashMap<String, usize>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// One in this many allocations is attributed to a stack.
-///
-/// A render makes several million, and a backtrace costs far more than the
-/// allocation it describes, so the sampler reads a few thousand of them. That
-/// is enough to rank the sites and far too few to distort the run.
-const SAMPLE_EVERY: usize = 512;
-
-/// Record where an allocation came from, once every `SAMPLE_EVERY`.
-fn sample_origin(count: usize) {
-    if !count.is_multiple_of(SAMPLE_EVERY) || !SAMPLING_ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
-    SAMPLING.with(|guard| {
-        if guard.get() {
-            return;
-        }
-        guard.set(true);
-        let trace = format!("{}", std::backtrace::Backtrace::force_capture());
-        SAMPLED.with_borrow_mut(|sampled| {
-            *sampled.entry(trace).or_insert(0) += 1;
-        });
-        guard.set(false);
-    });
 }
 
 static SAMPLING_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -110,23 +71,6 @@ pub const fn size_class_bound(class: usize) -> Option<usize> {
     } else {
         Some(16 << class)
     }
-}
-
-/// Record an allocation. Called by the counting allocator, not by hand.
-pub fn record_allocation(bytes: usize) {
-    // Marking here rather than at plugin init means a report can never claim
-    // zero bytes because nobody remembered to announce the allocator.
-    COUNTING.store(1, Ordering::Relaxed);
-    ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-    BY_SIZE[size_class(bytes)].fetch_add(1, Ordering::Relaxed);
-    sample_origin(ALLOCATIONS.load(Ordering::Relaxed));
-    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
-    PEAK.fetch_max(live, Ordering::Relaxed);
-}
-
-/// Record a deallocation. Called by the counting allocator, not by hand.
-pub fn record_deallocation(bytes: usize) {
-    LIVE.fetch_sub(bytes, Ordering::Relaxed);
 }
 
 /// Bytes allocated and not yet freed.

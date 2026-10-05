@@ -9,7 +9,6 @@ use std::mem::size_of;
 use std::path::Path;
 use thiserror::Error;
 
-use crate::opcode::R2ILOp;
 use crate::space::AddressSpace;
 use crate::{Endianness, MAGIC};
 
@@ -453,15 +452,6 @@ fn projection_component_disposition(
     }
 }
 
-/// Instruction pattern and its semantic definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstructionDef {
-    /// Instruction mnemonic
-    pub mnemonic: String,
-    /// P-code operations for this instruction pattern
-    pub ops: Vec<R2ILOp>,
-}
-
 /// Complete architecture specification.
 ///
 /// This is the top-level structure serialized to `.r2il` files.
@@ -571,15 +561,6 @@ impl ArchSpec {
             supervisor_calls: Vec::new(),
             tracked_entry_values: Vec::new(),
         }
-    }
-
-    /// State which registers this architecture returns a value in.
-    pub fn with_return_registers(
-        mut self,
-        registers: impl IntoIterator<Item = RegisterDef>,
-    ) -> Self {
-        self.return_registers = registers.into_iter().collect();
-        self
     }
 
     /// Set instruction endianness.

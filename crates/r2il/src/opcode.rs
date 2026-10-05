@@ -1613,11 +1613,6 @@ impl R2ILBlock {
         self.op_metadata.get(&op_index)
     }
 
-    /// Remove metadata for an operation index.
-    pub fn remove_op_metadata(&mut self, op_index: usize) -> Option<OpMetadata> {
-        self.op_metadata.remove(&op_index)
-    }
-
     /// Set the switch info for this block.
     pub fn set_switch_info(&mut self, info: SwitchInfo) {
         self.switch_info = Some(info);

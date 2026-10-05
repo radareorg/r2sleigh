@@ -85,16 +85,6 @@ impl Varnode {
         self
     }
 
-    /// Set metadata on this varnode.
-    pub fn set_meta(&mut self, meta: VarnodeMetadata) {
-        self.meta = Some(meta);
-    }
-
-    /// Clear metadata on this varnode.
-    pub fn clear_meta(&mut self) {
-        self.meta = None;
-    }
-
     /// Returns true if this is a constant.
     pub fn is_const(&self) -> bool {
         self.space.is_const()
@@ -108,11 +98,6 @@ impl Varnode {
     /// Returns true if this is a RAM location.
     pub fn is_ram(&self) -> bool {
         self.space.is_ram()
-    }
-
-    /// Returns true if this is a temporary.
-    pub fn is_unique(&self) -> bool {
-        self.space.is_unique()
     }
 
     /// Get the constant value if this is a constant varnode.

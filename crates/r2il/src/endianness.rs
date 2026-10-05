@@ -15,18 +15,6 @@ pub enum Endianness {
     Custom,
 }
 
-impl Endianness {
-    /// Returns true if this is big-endian.
-    pub fn is_big(self) -> bool {
-        matches!(self, Self::Big)
-    }
-
-    /// Returns true if this is little-endian.
-    pub fn is_little(self) -> bool {
-        matches!(self, Self::Little)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Endianness;

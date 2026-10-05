@@ -37,11 +37,6 @@ impl SpaceId {
     pub fn is_register(&self) -> bool {
         matches!(self, SpaceId::Register)
     }
-
-    /// Returns true if this is the unique/temporary space.
-    pub fn is_unique(&self) -> bool {
-        matches!(self, SpaceId::Unique)
-    }
 }
 
 impl std::fmt::Display for SpaceId {
