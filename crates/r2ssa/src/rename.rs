@@ -105,9 +105,9 @@ pub struct CallBoundaryConfig {
     /// that register back changed, which outranks the list.
     pub result_by_target: BTreeMap<u64, CallBoundaryDef>,
     /// The carriers a call reads without naming them in an operand.
-    pub argument_regs: Vec<CallBoundaryDef>,
+    pub argument_regs: Vec<CanonicalStorageId>,
     /// The carriers a return reads without naming them in an operand.
-    pub return_regs: Vec<CallBoundaryDef>,
+    pub return_regs: Vec<CanonicalStorageId>,
 }
 
 impl CallBoundaryConfig {
@@ -1163,19 +1163,10 @@ fn append_call_boundary_reads(
     reg_names: Option<&RegisterNameMap>,
 ) -> Vec<(SSAVar, CanonicalStorageId)> {
     let mut read: BTreeSet<RenameIdentity> = BTreeSet::new();
-    for reg in &call_boundaries.argument_regs {
-        match ctx
-            .families
-            .as_deref()
-            .and_then(|families| families.root_slot_for_name(&reg.name))
-        {
-            Some(root) => {
-                let identity = RenameIdentity::for_root_slot(root, reg_names);
-                if ctx.knows_identity(&identity) {
-                    read.insert(identity);
-                }
-            }
-            None => read.extend(ctx.matching_identities_ci(&reg.name, reg.size)),
+    for storage in &call_boundaries.argument_regs {
+        let identity = crate::phi::clobber_identity(*storage, reg_names, ctx.families.as_deref());
+        if ctx.knows_identity(&identity) {
+            read.insert(identity);
         }
     }
     let mut retained = Vec::new();

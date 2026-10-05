@@ -127,6 +127,9 @@ pub struct CallingConvention {
     /// Whether every variadic argument travels on the stack from the first
     /// slot, whatever registers the fixed arguments leave free.
     pub variadic_tail_on_stack: bool,
+    /// The register a call passes a variadic callee's count of vector
+    /// arguments in, which every call may therefore read.
+    pub variadic_count_register: Option<&'static str>,
     /// The documents that state these.
     pub citation: &'static str,
 }
@@ -135,15 +138,18 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     name: "amd64",
     red_zone_bytes: 128,
     variadic_tail_on_stack: false,
+    variadic_count_register: Some("al"),
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
-               modified by signal or interrupt handlers\"",
+               modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
+               hidden argument to specify the number of vector registers used\"",
 };
 
 const MICROSOFT_X64: CallingConvention = CallingConvention {
     name: "ms",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    variadic_count_register: None,
     citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
                defines no red zone",
 };
@@ -152,6 +158,7 @@ const I386_CDECL: CallingConvention = CallingConvention {
     name: "cdecl",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    variadic_count_register: None,
     citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
                defines no red zone",
 };
@@ -160,6 +167,7 @@ const AAPCS64: CallingConvention = CallingConvention {
     name: "arm64",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    variadic_count_register: None,
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"",
@@ -167,6 +175,7 @@ const AAPCS64: CallingConvention = CallingConvention {
 
 const AAPCS64_DARWIN: CallingConvention = CallingConvention {
     variadic_tail_on_stack: true,
+    variadic_count_register: None,
     citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"the caller places \
                the arguments for the variadic portion of a function on the stack\"",
     ..AAPCS64
@@ -176,6 +185,7 @@ const AAPCS32: CallingConvention = CallingConvention {
     name: "arm32",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    variadic_count_register: None,
     citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"",
@@ -185,6 +195,7 @@ const RISCV_LP64: CallingConvention = CallingConvention {
     name: "rvg",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    variadic_count_register: None,
     citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
                no red zone",
 };

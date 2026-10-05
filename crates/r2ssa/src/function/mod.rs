@@ -3275,9 +3275,9 @@ fn decompile_call_boundary_config(
         );
         return Err(SsaPrepareError::NoCallEffect);
     }
-    let Some(arch) = arch else {
+    if arch.is_none() {
         return Ok(None);
-    };
+    }
     // A body that never calls has no call to clobber anything.
     // What a call keeps is what the convention preserves and what the
     // platform reserves to the system alike: neither is a definition the call
@@ -3296,98 +3296,25 @@ fn decompile_call_boundary_config(
         ),
         None => (Vec::new(), Vec::new()),
     };
+    let slots = machine_context.convention_slots();
     let config = CallBoundaryConfig {
         clobbered,
         preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         result_by_target: callees.results,
-        argument_regs: call_argument_register_defs(arch),
-        return_regs: return_read_register_defs(arch),
+        argument_regs: slots
+            .map(|slots| slots.call_reads().to_vec())
+            .unwrap_or_default(),
+        return_regs: slots
+            .map(|slots| slots.return_reads().to_vec())
+            .unwrap_or_default(),
     };
     let inert = config.clobbered.is_empty()
         && config.stack_pointer_restored_by_callee.is_none()
         && config.argument_regs.is_empty()
         && config.return_regs.is_empty();
     Ok((!inert).then_some(config))
-}
-
-/// The registers a call reads without naming them in an operand: the
-/// convention's argument carriers.
-fn call_argument_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
-    let named = |names: &[(&str, u32)]| {
-        names
-            .iter()
-            .map(|(name, size)| CallBoundaryDef {
-                name: (*name).to_string(),
-                size: *size,
-            })
-            .collect()
-    };
-    match arch.name.to_ascii_lowercase().as_str() {
-        "x86-64" | "x86_64" | "x64" | "amd64" => named(&[
-            ("rdi", 8),
-            ("edi", 4),
-            ("rsi", 8),
-            ("esi", 4),
-            ("rdx", 8),
-            ("edx", 4),
-            ("rcx", 8),
-            ("ecx", 4),
-            ("r8", 8),
-            ("r8d", 4),
-            ("r9", 8),
-            ("r9d", 4),
-            ("rax", 8),
-            ("eax", 4),
-        ]),
-        "x86" | "x86-32" | "i386" | "i686" => named(&[("eax", 4)]),
-        "arm" if arch.addr_size == 4 => named(&[("r0", 4), ("r1", 4), ("r2", 4), ("r3", 4)]),
-        "aarch64" | "arm64" => named(&[
-            ("x0", 8),
-            ("w0", 4),
-            ("x1", 8),
-            ("w1", 4),
-            ("x2", 8),
-            ("w2", 4),
-            ("x3", 8),
-            ("w3", 4),
-            ("x4", 8),
-            ("w4", 4),
-            ("x5", 8),
-            ("w5", 4),
-            ("x6", 8),
-            ("w6", 4),
-            ("x7", 8),
-            ("w7", 4),
-            ("x8", 8),
-            ("w8", 4),
-        ]),
-        _ => Vec::new(),
-    }
-}
-
-/// The registers a return reads without naming them in an operand: the
-/// convention's result carriers, plus the stack and frame it hands back.
-fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
-    let named = |names: &[(&str, u32)]| {
-        names
-            .iter()
-            .map(|(name, size)| CallBoundaryDef {
-                name: (*name).to_string(),
-                size: *size,
-            })
-            .collect()
-    };
-    match arch.name.to_ascii_lowercase().as_str() {
-        "x86-64" | "x86_64" | "x64" | "amd64" => {
-            named(&[("rax", 8), ("eax", 4), ("rdx", 8), ("edx", 4)])
-        }
-        "x86" | "x86-32" | "i386" | "i686" => named(&[("eax", 4), ("edx", 4)]),
-        "arm" if arch.addr_size == 4 => named(&[("r0", 4), ("r1", 4)]),
-        "aarch64" | "arm64" => named(&[("x0", 8), ("w0", 4), ("x1", 8), ("w1", 4)]),
-        _ => Vec::new(),
-    }
 }
 
 impl SSAFunction {

@@ -3542,6 +3542,10 @@ pub struct SourceConventionSlots {
     float_argument_slots: Box<[CanonicalStorageId]>,
     /// Where a floating-point result is left.
     float_result_slot: Option<CanonicalStorageId>,
+    /// The registers a call reads without naming them in an operand.
+    call_reads: Box<[CanonicalStorageId]>,
+    /// The registers a return hands back without naming them.
+    return_reads: Box<[CanonicalStorageId]>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
@@ -3625,6 +3629,34 @@ impl SourceConventionSlots {
         Ok(self)
     }
 
+    /// Record what a call and a return read implicitly, refusing what is no register.
+    pub fn with_boundary_reads(
+        mut self,
+        call: impl IntoIterator<Item = CanonicalStorageId>,
+        ret: impl IntoIterator<Item = CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let call = call.into_iter().collect::<Box<[_]>>();
+        let ret = ret.into_iter().collect::<Box<[_]>>();
+        if call
+            .iter()
+            .chain(ret.iter())
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        self.call_reads = call;
+        self.return_reads = ret;
+        Ok(self)
+    }
+
+    pub const fn call_reads(&self) -> &[CanonicalStorageId] {
+        &self.call_reads
+    }
+
+    pub const fn return_reads(&self) -> &[CanonicalStorageId] {
+        &self.return_reads
+    }
+
     pub const fn float_argument_slots(&self) -> &[CanonicalStorageId] {
         &self.float_argument_slots
     }
@@ -3676,6 +3708,8 @@ impl SourceConventionSlots {
             result_slot,
             float_argument_slots: Box::default(),
             float_result_slot: None,
+            call_reads: Box::default(),
+            return_reads: Box::default(),
             stack_arguments: None,
             variadic_tail_on_stack: false,
         })

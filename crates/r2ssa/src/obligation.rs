@@ -2631,10 +2631,21 @@ mod tests {
         entry.push(R2ILOp::Branch {
             target: Varnode::ram(0x3180, 8),
         });
+        let target = Varnode::ram(0x4000, 8);
         let mut block = R2ILBlock::new(0x3180, 4);
         block.push(R2ILOp::Call {
-            target: Varnode::ram(0x4000, 8),
+            target: target.clone(),
         });
+        // The callee's interface says it takes rdi: the call reads it.
+        let interface = call_interface(
+            b"loop-call",
+            direct_call_identity(&mut block, 0, &target),
+            true,
+            [SourceCallArgumentSpec::new(0, register_storage(8, 8))],
+            false,
+            false,
+            SourceCallResult::Void,
+        );
         block.push(R2ILOp::Copy {
             dst: Varnode::register(8, 8),
             src: Varnode::constant(0x42, 8),
@@ -2643,12 +2654,18 @@ mod tests {
             target: Varnode::ram(0x3180, 8),
         });
 
-        let artifact = crate::testing::prepared_under(
+        let reads = r2source::SourceConventionSlots::new("amd64", [], None)
+            .and_then(|slots| slots.with_boundary_reads([register_storage(8, 8)], []))
+            .expect("convention slots");
+        let artifact = SsaArtifact::for_decompile_with(
             &[entry, block],
-            &x86_64_call_arch(),
-            None,
-            Vec::new(),
-            x86_64_call_effect(),
+            crate::DecompileInputs {
+                arch: Some(&x86_64_call_arch()),
+                convention_slots: Some(reads),
+                call_effect: x86_64_call_effect(),
+                call_site_interfaces: vec![interface],
+                ..Default::default()
+            },
         )
         .expect("loop artifact");
         // The copy writes an argument carrier the call reads on the next turn

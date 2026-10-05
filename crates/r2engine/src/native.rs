@@ -1939,6 +1939,14 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
     let float_result = place(registers_of(&prototype.outputs, EntryClass::Float))?
         .first()
         .copied();
+    // What a call reads without an operand naming it: the general argument
+    // registers, the hidden return pointer, and the psABI's variadic count.
+    let mut call_reads = argument_slots.clone();
+    call_reads.extend(place(registers_of(&prototype.inputs, EntryClass::Other))?);
+    if let Some(name) = target.convention.variadic_count_register {
+        call_reads.push(storage(target.arch, name)?);
+    }
+    let return_reads = place(registers_of(&prototype.outputs, EntryClass::General))?;
     // Where an argument past the registers goes is the compiler specification's
     // own statement: its stack parameter entry carries the first offset and the
     // step between entries.
@@ -1949,6 +1957,7 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
     Ok(
         SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
             .and_then(|slots| slots.with_float_slots(float_slots, float_result))
+            .and_then(|slots| slots.with_boundary_reads(call_reads, return_reads))
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
             .with_stack_arguments(stack_arguments)
             .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack),

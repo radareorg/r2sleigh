@@ -1220,8 +1220,10 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
     .expect("exact callsite interface")
     .with_radare2_format_parameter(1)
     .expect("format parameter belongs to the fixed prefix");
+    // A call reads its argument registers without naming them.
     let convention =
         SourceConventionSlots::new("amd64", (0..4).map(slot).collect::<Vec<_>>(), None)
+            .and_then(|slots| slots.with_boundary_reads((0..4).map(slot), []))
             .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,

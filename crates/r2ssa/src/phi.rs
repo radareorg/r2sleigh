@@ -397,9 +397,9 @@ pub fn live_in_by_block(
         reg_names,
         families,
     } = naming;
-    let resolve = |regs: &[crate::rename::CallBoundaryDef]| {
+    let resolve = |regs: &[CanonicalStorageId]| {
         regs.iter()
-            .flat_map(|reg| call_boundary_identities(defs, reg, reg_names, families))
+            .map(|storage| clobber_identity(*storage, reg_names, families))
             .filter(|identity| defs.contains_key(identity))
             .collect::<BTreeSet<_>>()
     };
