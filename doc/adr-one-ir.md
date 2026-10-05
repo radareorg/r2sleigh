@@ -287,5 +287,10 @@ byte-identical, and deletes what it replaces:
   facts over the build and the seal collects them again after its
   rewrites; sharing them is the query database's (Q), not a mode flag on
   the collector.
-- **F2.6 in r2ssa** (`ef1ff6a2`): `entity_keyed_map` is denied in r2ssa
-  and a CI job runs the Dylint there. r2types is next.
+- **F2.6** (`ef1ff6a2`, `5f49496a`): `entity_keyed_map` is denied in
+  r2ssa and r2types, and a CI job runs the Dylint on both. The exceptions
+  say why at their item; the local struct and stack-slot type analyses,
+  which still read named blocks, are marked transitional with P9 as the
+  owner. Scalar signedness is one core over ids (`c30eb1d0`), and whether
+  a zero extension is the architecture's is r2ssa's
+  (`Written::is_conventional_extension`), not a match on register names.
