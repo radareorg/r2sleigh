@@ -84,6 +84,17 @@ for lint in "${lints[@]}"; do
     current="${current}${lint} ${count}
 "
 done
+# Comments are one or two lines (AGENTS.md, Comments): a run of more `//`
+# lines is counted, and the count only falls.
+long_comments=$(find crates tools -name '*.rs' -not -path '*/target/*' -print0 |
+    xargs -0 awk '
+        FNR == 1 { if (run > 2) n++; run = 0 }
+        /^[[:space:]]*\/\// { run++; next }
+        { if (run > 2) n++; run = 0 }
+        END { if (run > 2) n++; print n + 0 }' |
+    awk '{ total += $1 } END { print total + 0 }')
+current="${current}long_comments ${long_comments}
+"
 current=${current%$'\n'}
 
 if [ "${1:-}" = "--bless" ]; then

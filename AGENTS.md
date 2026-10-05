@@ -126,6 +126,15 @@ Structural rules (ROADMAP D11, Dylint-enforced as owners land):
 Large functions hide regressions the census does not show: time release `pdd`
 on the big 0pack/pumasim functions for any change on a hot path.
 
+## Comments
+
+A comment is one or two lines: what the code cannot say for itself, such as
+the invariant, the reason, or the ADR section. Design, derivations, history,
+worked examples and measurements go in the architecture docs (`doc/adr-*.md`)
+and the comment links there. `scripts/structure-report.sh` counts runs of more
+than two `//` lines (`long_comments`), and the count only falls: when you touch
+a long comment, shorten it.
+
 ## radare2
 
 radare2 is the differential target for discovery, naming, decoding and
