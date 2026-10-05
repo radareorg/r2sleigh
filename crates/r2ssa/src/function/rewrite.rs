@@ -165,27 +165,8 @@ impl SSAFunction {
         self.apply_edits(plan);
     }
 
-    /// Replace the values a boundary states: the processor specification's
-    /// tracked registers on entry, and the direction flag on entry and after
-    /// every call, with the zero the convention requires of it.
-    ///
-    /// A repeated string instruction reads the flag to decide which way it
-    /// walks, and no compiled function sets it -- the corpus contains no `cld`
-    /// or `std` at all -- so what it holds where the instruction reads it is
-    /// whatever the caller or the last callee left. Both x86 ABIs require it
-    /// clear on entry and on return, and that is the whole of what makes the
-    /// direction knowable. Substituting the constant here rather than reading
-    /// the fact at the rendering is what lets the arithmetic beside the
-    /// transfer fold: the instruction's own pointer updates are written over
-    /// the flag, and with it a constant they collapse to the extent.
-    ///
-    /// A tracked register states only its entry value: past a call it holds
-    /// what the call effect leaves, which is the entry value where the effect
-    /// preserves it and a call definition where it does not.
-    ///
-    /// Nothing is substituted for a convention that states no such thing, or a
-    /// machine with no such flag, and a function that writes the flag itself
-    /// has a later version neither boundary value reaches.
+    /// Replace each tracked register's entry value with the constant the
+    /// processor specification states; past a call it holds what the call effect leaves.
     #[cfg_attr(
         dylint_lib = "r2sleigh_lints",
         allow(
@@ -194,47 +175,24 @@ impl SSAFunction {
         )
     )]
     pub(crate) fn apply_boundary_constants(&mut self, machine_context: &SourceMachineContext) {
-        let clears = machine_context
-            .convention_slots()
-            .is_some_and(|slots| slots.abi_class().clears_direction_flag());
-        let cleared_flag = machine_context
-            .machine_roles()
-            .direction_flag_storage()
-            .filter(|_| clears);
         let entry_constants = machine_context
             .tracked_entry_values()
             .iter()
             .copied()
-            .chain(cleared_flag.map(|storage| (storage, 0)))
             .collect::<BTreeMap<_, _>>();
-        let storage_of = |id: VarId| self.storage_of(id);
-        // The entry values, and the value each call's clobber leaves in the flag.
         let boundary_values = self
             .values
             .storage_by_var()
             .into_iter()
             .filter(|(var, _)| var.version == 0)
             .filter_map(|(var, storage)| Some((var.clone(), *entry_constants.get(&storage)?)))
-            .chain(
-                self.blocks
-                    .iter()
-                    .flat_map(|block| block.ops())
-                    .filter_map(|op| match op {
-                        SSAOp::CallDefine { dst }
-                            if cleared_flag.is_some() && storage_of(*dst) == cleared_flag =>
-                        {
-                            Some((self.var(*dst).clone(), 0))
-                        }
-                        _ => None,
-                    }),
-            )
             .collect::<BTreeMap<_, _>>();
         if boundary_values.is_empty() {
             return;
         }
         r2il::refusal_evidence!(
             "boundary-constants",
-            "{} boundary values become the constants stated for them: entry {entry_constants:?}, after a call {cleared_flag:?}",
+            "{} entry values become the constants stated for them: {entry_constants:?}",
             boundary_values.len()
         );
         let mut substitutes = IdMap::<VarId, VarId>::new(self.values.len());

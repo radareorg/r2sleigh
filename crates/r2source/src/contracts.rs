@@ -124,34 +124,6 @@ pub enum SourceAbiClass {
 }
 
 impl SourceAbiClass {
-    /// Whether this convention requires the direction flag clear on entry and
-    /// on return from every call.
-    ///
-    /// Both x86 ABIs state it -- System V's psABI in its register usage, and
-    /// Microsoft's x64 convention alongside it -- and the 32-bit conventions
-    /// inherit it from the same platforms. It is what makes a repeated string
-    /// instruction's direction knowable at all: no compiled function in the
-    /// corpus executes `cld` or `std`, so the flag's value where the
-    /// instruction reads it is whatever the caller or the last callee left,
-    /// and this is what each was required to leave.
-    ///
-    /// A convention outside the vocabulary states nothing, and a machine
-    /// without a direction flag never asks.
-    pub const fn clears_direction_flag(self) -> bool {
-        matches!(
-            self,
-            Self::SystemVAMD64
-                | Self::MicrosoftX64
-                | Self::SystemV
-                | Self::Microsoft
-                | Self::Cdecl
-                | Self::Stdcall
-                | Self::Fastcall
-                | Self::Thiscall
-                | Self::Vectorcall
-        )
-    }
-
     /// Classify an exact source spelling without architecture or symbol hints.
     pub fn from_source_spelling(spelling: &str) -> Self {
         let mut normalized = String::with_capacity(spelling.len());
@@ -666,10 +638,6 @@ pub struct SourceRoleRegisterNames {
     return_address: Option<SourceRegisterName>,
     stack_pointer: Option<SourceRegisterName>,
     frame_pointer: Option<SourceRegisterName>,
-    /// The flag that decides which way a repeated string instruction walks.
-    /// A role register like the three above: the machine names it, and what
-    /// its value is on entry is the convention's to say.
-    direction_flag: Option<SourceRegisterName>,
 }
 
 /// One register spelling, stored inline.
@@ -725,7 +693,6 @@ impl SourceRoleRegisterNames {
             return_address: None,
             stack_pointer: None,
             frame_pointer: None,
-            direction_flag: None,
         }
     }
 
@@ -742,7 +709,6 @@ impl SourceRoleRegisterNames {
             return_address: spelled(return_address),
             stack_pointer: spelled(stack_pointer),
             frame_pointer: spelled(frame_pointer),
-            direction_flag: None,
         }
     }
 
@@ -756,10 +722,6 @@ impl SourceRoleRegisterNames {
 
     pub fn frame_pointer(&self) -> Option<&str> {
         self.frame_pointer.as_ref().map(SourceRegisterName::as_str)
-    }
-
-    pub fn direction_flag(&self) -> Option<&str> {
-        self.direction_flag.as_ref().map(SourceRegisterName::as_str)
     }
 }
 
@@ -3349,9 +3311,6 @@ pub struct SourceMachineRoles {
     /// register numbering and mean nothing to the lifted architecture.
     role_register_names: SourceRoleRegisterNames,
     stack_allocation_contract: Option<SourceStackAllocationContract>,
-    /// The flag that decides which way a repeated string instruction walks,
-    /// placed against the lifted architecture.
-    direction_flag_storage: Option<CanonicalStorageId>,
     /// Whether a call pushes its return address, as `<returnaddress>` says.
     #[serde(default)]
     call_pushes_return_address: Option<bool>,
@@ -3792,7 +3751,6 @@ impl SourceMachineRoles {
             stack_pointer_storage,
             role_register_names: SourceRoleRegisterNames::none(),
             stack_allocation_contract: None,
-            direction_flag_storage: None,
             call_pushes_return_address: None,
         })
     }
@@ -3832,11 +3790,6 @@ impl SourceMachineRoles {
         Ok(self)
     }
 
-    /// The direction flag, placed against the lifted architecture.
-    pub const fn direction_flag_storage(&self) -> Option<CanonicalStorageId> {
-        self.direction_flag_storage
-    }
-
     pub const fn call_pushes_return_address(&self) -> Option<bool> {
         self.call_pushes_return_address
     }
@@ -3844,14 +3797,6 @@ impl SourceMachineRoles {
     #[must_use]
     pub const fn with_call_pushes_return_address(mut self, pushes: bool) -> Self {
         self.call_pushes_return_address = Some(pushes);
-        self
-    }
-
-    /// Bind the direction flag's storage, dropping one that is not a
-    /// well-formed register location.
-    #[must_use]
-    pub fn with_direction_flag_storage(mut self, storage: Option<CanonicalStorageId>) -> Self {
-        self.direction_flag_storage = storage.filter(|storage| valid_register_storage(*storage));
         self
     }
 
