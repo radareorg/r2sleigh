@@ -8,7 +8,7 @@ use crate::facts::FunctionSignatureSpec;
 use crate::analysis::{InferredSignature, InferredSignatureParam};
 use crate::model::Signedness;
 use crate::prepare::{prepared_arch_display_name, recover_signature_params_from_prepared_ssa};
-use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
+use crate::signedness::{ScalarSignednessEvidence, scalar_signedness_of};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignatureTypeEvidence {
@@ -117,12 +117,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> Infer
             &param.evidence,
         );
     }
-    refine_parameter_signedness(
-        arch_name,
-        prepared,
-        &recovered_params,
-        &mut canonical_params,
-    );
+    refine_parameter_signedness(prepared, &recovered_params, &mut canonical_params);
 
     let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), &evidence_types);
     let mut inferred = build_inferred_signature(
@@ -226,56 +221,28 @@ fn certified_parameter_pointer_type(
 }
 
 fn refine_parameter_signedness(
-    arch_name: &str,
     prepared: &SsaArtifact,
     recovered_params: &[RecoveredSignatureParam],
     params: &mut [SignatureParamCandidate],
 ) {
-    let parameter_home_aliases = certified_parameter_home_aliases(prepared, recovered_params);
-    let named = prepared.function().named_blocks();
-    let inferred = infer_scalar_signedness(
-        named.iter().flat_map(|block| block.ops().iter()),
-        named
-            .iter()
-            .flat_map(|block| {
-                block
-                    .phis()
-                    .iter()
-                    .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
-            })
-            .chain(
-                prepared
-                    .certificates()
-                    .stack_reloads
-                    .values()
-                    .filter_map(|reload| {
-                        if reload.relation != r2ssa::ViewRelation::Identity
-                            || reload.value_width != reload.memory_width
-                        {
-                            return None;
-                        }
-                        Some((
-                            prepared.value_var(reload.canonical_source)?,
-                            prepared.value_var(reload.value)?,
-                        ))
-                    }),
-            )
-            .chain(
-                parameter_home_aliases
-                    .iter()
-                    .map(|(source, reload)| (source, reload)),
-            ),
-        (!arch_name.is_empty()).then_some(arch_name),
+    let graph = prepared.graph();
+    let inferred = scalar_signedness_of(
+        prepared,
+        true,
+        signedness_aliases(prepared, recovered_params),
     );
     let mut pointee_evidence = HashMap::<(usize, u32), BTreeSet<ScalarSignednessEvidence>>::new();
     for access in prepared.certificates().memory_accesses.values() {
         let Some(index) = certified_memory_parameter(prepared, access) else {
             continue;
         };
-        let Some(value) = access.value.and_then(|value| prepared.value_var(value)) else {
+        let Some(value) = access.value else {
             continue;
         };
-        if value.size != access.width {
+        if graph
+            .value(value)
+            .is_none_or(|value| value.var.size != access.width)
+        {
             continue;
         }
         let Some(observed) = inferred.get(value) else {
@@ -291,7 +258,8 @@ fn refine_parameter_signedness(
         let scalar_observed = recovered_params
             .iter()
             .find(|recovered| recovered.arg_index == param.arg_index)
-            .and_then(|recovered| inferred.get(&recovered.ssa_var));
+            .and_then(|recovered| graph.value_id_for_var(&recovered.ssa_var))
+            .and_then(|value| inferred.get(value));
         let observed = match &mut param.ty {
             CTypeLike::Int { signedness, .. } if *signedness == Signedness::Unknown => {
                 scalar_observed
@@ -322,6 +290,36 @@ fn refine_parameter_signedness(
             _ => {}
         }
     }
+}
+
+/// The same-width aliases parameter signedness flows through beside the
+/// merges: a certified reload and the value it reloads, and a parameter's
+/// home and its reload.
+fn signedness_aliases(
+    prepared: &SsaArtifact,
+    recovered_params: &[RecoveredSignatureParam],
+) -> Vec<(r2ssa::ValueId, r2ssa::ValueId)> {
+    let graph = prepared.graph();
+    prepared
+        .certificates()
+        .stack_reloads
+        .values()
+        .filter(|reload| {
+            reload.relation == r2ssa::ViewRelation::Identity
+                && reload.value_width == reload.memory_width
+        })
+        .map(|reload| (reload.canonical_source, reload.value))
+        .chain(
+            certified_parameter_home_aliases(prepared, recovered_params)
+                .iter()
+                .filter_map(|(source, reload)| {
+                    Some((
+                        graph.value_id_for_var(source)?,
+                        graph.value_id_for_var(reload)?,
+                    ))
+                }),
+        )
+        .collect()
 }
 
 fn certified_parameter_home_aliases(

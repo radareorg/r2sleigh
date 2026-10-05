@@ -303,7 +303,7 @@ pub(crate) fn local_struct_type_slots(
 pub(crate) fn local_pointer_pointee_types(
     blocks: &[SSABlock],
     ptr_bits: u32,
-    scalar_signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
+    scalar_signedness: &crate::signedness::NamedSignedness,
 ) -> HashMap<SSAVar, BTreeSet<String>> {
     let ptr_bytes = (ptr_bits / 8).max(1);
     let mut reverse_edges = HashMap::<SSAVar, BTreeSet<SSAVar>>::new();
@@ -396,7 +396,7 @@ pub(crate) fn local_pointer_pointee_types(
 
 pub(crate) fn local_scalar_type_names(
     var: &SSAVar,
-    signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
+    signedness: &crate::signedness::NamedSignedness,
 ) -> BTreeSet<String> {
     let observed = signedness.get(var);
     if observed.is_none_or(BTreeSet::is_empty) {
@@ -414,7 +414,7 @@ pub(crate) fn local_scalar_type_names(
 pub(crate) fn add_local_scalar_type_votes(
     votes: &mut BTreeMap<String, u32>,
     var: &SSAVar,
-    signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
+    signedness: &crate::signedness::NamedSignedness,
 ) {
     for ty in local_scalar_type_names(var, signedness) {
         *votes.entry(ty).or_insert(0) += 1;
@@ -636,7 +636,6 @@ pub(crate) fn local_expr_for_memory_versions(
 
 pub(crate) fn infer_local_struct_artifacts_from_prepared_ssa(
     prepared: &SsaArtifact,
-    arch_name: Option<&str>,
     ptr_bits: u32,
     diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
@@ -645,10 +644,11 @@ pub(crate) fn infer_local_struct_artifacts_from_prepared_ssa(
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
     let architecture = prepared.machine_context().architecture_family();
     let pointer_arg_slots = collect_prepared_pointer_arg_slot_map(prepared);
+    let written = prepared.function().written();
     let mut artifacts = infer_local_struct_artifacts_from_blocks(
         blocks,
         Some(&memory_versions),
-        arch_name,
+        &|op| written.is_conventional_extension(op),
         architecture,
         &pointer_arg_slots,
         ptr_bits,
@@ -710,23 +710,15 @@ pub(crate) fn prepared_parameter_indexed_accesses(
 pub(crate) fn infer_local_struct_artifacts_from_blocks(
     ssa_blocks: &[SSABlock],
     memory_versions: Option<&LocalMemoryVersionFacts>,
-    arch_name: Option<&str>,
+    conventional_extension: &dyn Fn(r2ssa::OpId) -> bool,
     architecture: r2ssa::MachineArchitectureFamily,
     pointer_arg_slot_map: &HashMap<String, usize>,
     ptr_bits: u32,
     diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
     let type_slots = local_struct_type_slots(ssa_blocks, pointer_arg_slot_map, ptr_bits);
-    let scalar_signedness = infer_scalar_signedness(
-        ssa_blocks.iter().flat_map(|block| block.ops().iter()),
-        ssa_blocks.iter().flat_map(|block| {
-            block
-                .phis()
-                .iter()
-                .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
-        }),
-        arch_name,
-    );
+    let scalar_signedness =
+        crate::signedness::NamedSignedness::of(ssa_blocks, true, conventional_extension);
     let pointer_pointee_types =
         local_pointer_pointee_types(ssa_blocks, ptr_bits, &scalar_signedness);
     let (_, stack_bases, frame_bases) = recover_vars_arch_profile(architecture);

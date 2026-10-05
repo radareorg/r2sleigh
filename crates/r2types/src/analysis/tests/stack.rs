@@ -120,6 +120,7 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
             },
             recovered_vars: &vars,
             ssa_blocks: &blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -233,6 +234,7 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
             },
             recovered_vars: &vars,
             ssa_blocks: &blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -392,6 +394,7 @@ fn stack_var_preference_renames_and_types_generic_stack_slots() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -471,6 +474,7 @@ fn param_home_slots_do_not_surface_as_visible_local_candidates() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -568,6 +572,7 @@ fn unproven_stack_pointer_zero_slot_is_hidden_saved_frame_state() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -660,6 +665,7 @@ fn frame_slots_do_not_cross_apply_to_stack_pointer_temps() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -706,6 +712,7 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts {
             slot_type_overrides: HashMap::from([(
@@ -808,12 +815,7 @@ fn prepared_local_inference_certifies_cross_block_spill_reload() {
     .expect("prepared SSA");
     let mut diagnostics = TypeAnalysisDiagnostics::default();
 
-    let artifacts = infer_local_struct_artifacts_from_prepared_ssa(
-        &prepared,
-        Some("x86-64"),
-        64,
-        &mut diagnostics,
-    );
+    let artifacts = infer_local_struct_artifacts_from_prepared_ssa(&prepared, 64, &mut diagnostics);
 
     assert!(
         artifacts.indexed_accesses.iter().any(|candidate| {
@@ -977,6 +979,7 @@ fn legacy_same_block_spill_reload_requires_memory_ssa() {
         },
         recovered_vars: &[],
         ssa_blocks: &ssa_blocks,
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -1114,6 +1117,7 @@ fn legacy_cross_block_spill_reload_requires_memory_ssa() {
         },
         recovered_vars: &[],
         ssa_blocks: &ssa_blocks,
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,

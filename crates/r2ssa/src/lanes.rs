@@ -121,12 +121,22 @@ pub fn join(a: &[Byte], b: &[Byte]) -> Bytes {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Written {
     by_op: IdMap<OpId, Bytes>,
+    /// The zero extensions that are the architecture's convention rather
+    /// than the program's (`by_convention`), as lifted.
+    conventional: IdSet<OpId>,
 }
 
 impl Written {
     /// What the operation or phi `id` wrote, where it was lifted.
     pub fn of(&self, id: OpId) -> Option<&Bytes> {
         self.by_op.get(id)
+    }
+
+    /// Whether `id` is a zero extension the architecture performs on a write
+    /// of a register's lower half, which says nothing about the signedness
+    /// of the value written.
+    pub fn is_conventional_extension(&self, id: OpId) -> bool {
+        self.conventional.contains(id)
     }
 
     /// Whether nothing was recorded: the function was never prepared.
@@ -143,7 +153,17 @@ impl Written {
         while function.blocks().iter().fold(false, |changed, block| {
             changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
         }) {}
-        Self { by_op }
+        let conventional = function
+            .blocks()
+            .iter()
+            .flat_map(|block| block.sited())
+            .filter(|(_, op)| by_convention(function, &writes, op))
+            .map(|(id, _)| id)
+            .collect();
+        Self {
+            by_op,
+            conventional,
+        }
     }
 }
 

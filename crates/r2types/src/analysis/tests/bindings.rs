@@ -51,6 +51,7 @@ fn visible_binding_merge_prefers_typed_pointer_over_void_pointer() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,

@@ -1,6 +1,7 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
-use r2ssa::{SSAOp, SSAVar};
+use r2ssa::dense::{DenseId, IdMap, IdSet};
+use r2ssa::{SSAOp, ValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ScalarSignednessEvidence {
@@ -21,116 +22,143 @@ impl ScalarSignednessEvidence {
 /// Recover signedness only from operations whose machine semantics distinguish
 /// signed from unsigned values, then flow that evidence backward through exact
 /// same-width aliases. Width alone remains deliberately neutral.
-pub(crate) fn infer_scalar_signedness<'a>(
-    operations: impl IntoIterator<Item = &'a SSAOp>,
-    aliases: impl IntoIterator<Item = (&'a SSAVar, &'a SSAVar)>,
-    arch_name: Option<&str>,
-) -> HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>> {
+///
+/// Each operation comes with whether it is a zero extension the architecture
+/// performs on a write of a register's lower half (r2ssa's
+/// `Written::is_conventional_extension`): that one says nothing about the
+/// value's signedness. `facts` gives a value's width in bytes and whether it
+/// is a literal. Linear in the operations and the aliases, plus the evidence
+/// carried backward, each value moving at most twice.
+pub(crate) fn infer_scalar_signedness<'a, V: DenseId + 'a>(
+    operations: impl IntoIterator<Item = (&'a SSAOp<V>, bool)>,
+    aliases: impl IntoIterator<Item = (V, V)>,
+    facts: impl Fn(V) -> (u32, bool),
+) -> IdMap<V, BTreeSet<ScalarSignednessEvidence>> {
     let operations = operations.into_iter().collect::<Vec<_>>();
-    let condition_values = control_condition_values(&operations);
-    let mut reverse_edges = HashMap::<SSAVar, BTreeSet<SSAVar>>::new();
-    let mut signedness = HashMap::<SSAVar, BTreeSet<ScalarSignednessEvidence>>::new();
+    let condition_values = control_condition_values(&operations, &facts);
+    let mut reverse_edges = IdMap::<V, Vec<V>>::default();
+    let mut signedness = IdMap::<V, BTreeSet<ScalarSignednessEvidence>>::default();
+    let mut link = |source: V, derived: V| {
+        if facts(source).0 == facts(derived).0 {
+            reverse_edges
+                .get_or_insert_with(derived, Vec::new)
+                .push(source);
+        }
+    };
+    let mut seed = |value: V, evidence: ScalarSignednessEvidence| {
+        if !facts(value).1 {
+            signedness
+                .get_or_insert_with(value, BTreeSet::new)
+                .insert(evidence);
+        }
+    };
 
     for (source, derived) in aliases {
-        link_same_width(&mut reverse_edges, source, derived);
+        link(source, derived);
     }
-    for op in operations {
+    for (op, conventional) in operations {
         match op {
             SSAOp::Copy { dst, src } | SSAOp::Cast { dst, src } | SSAOp::New { dst, src } => {
-                link_same_width(&mut reverse_edges, src, dst);
+                link(*src, *dst);
             }
             SSAOp::Phi { dst, sources } => {
                 for source in sources {
-                    link_same_width(&mut reverse_edges, source, dst);
+                    link(*source, *dst);
                 }
             }
-            SSAOp::IntZExt { dst, src } => {
-                if !is_implicit_register_zero_extension(arch_name, dst, src) {
-                    seed_signedness(&mut signedness, src, ScalarSignednessEvidence::Unsigned);
-                }
+            SSAOp::IntZExt { src, .. } if !conventional => {
+                seed(*src, ScalarSignednessEvidence::Unsigned);
             }
-            SSAOp::IntSExt { src, .. } => {
-                seed_signedness(&mut signedness, src, ScalarSignednessEvidence::Signed);
-            }
+            SSAOp::IntSExt { src, .. } => seed(*src, ScalarSignednessEvidence::Signed),
             SSAOp::IntLess { dst, a, b } | SSAOp::IntLessEqual { dst, a, b }
-                if condition_values.contains(dst) =>
+                if condition_values.contains(*dst) =>
             {
-                seed_signedness(&mut signedness, a, ScalarSignednessEvidence::Unsigned);
-                seed_signedness(&mut signedness, b, ScalarSignednessEvidence::Unsigned);
+                seed(*a, ScalarSignednessEvidence::Unsigned);
+                seed(*b, ScalarSignednessEvidence::Unsigned);
             }
             SSAOp::IntSLess { dst, a, b } | SSAOp::IntSLessEqual { dst, a, b }
-                if condition_values.contains(dst) =>
+                if condition_values.contains(*dst) =>
             {
-                seed_signedness(&mut signedness, a, ScalarSignednessEvidence::Signed);
-                seed_signedness(&mut signedness, b, ScalarSignednessEvidence::Signed);
+                seed(*a, ScalarSignednessEvidence::Signed);
+                seed(*b, ScalarSignednessEvidence::Signed);
             }
             SSAOp::IntDiv { a, b, .. } | SSAOp::IntRem { a, b, .. } => {
-                seed_signedness(&mut signedness, a, ScalarSignednessEvidence::Unsigned);
-                seed_signedness(&mut signedness, b, ScalarSignednessEvidence::Unsigned);
+                seed(*a, ScalarSignednessEvidence::Unsigned);
+                seed(*b, ScalarSignednessEvidence::Unsigned);
             }
             SSAOp::IntSDiv { a, b, .. } | SSAOp::IntSRem { a, b, .. } => {
-                seed_signedness(&mut signedness, a, ScalarSignednessEvidence::Signed);
-                seed_signedness(&mut signedness, b, ScalarSignednessEvidence::Signed);
+                seed(*a, ScalarSignednessEvidence::Signed);
+                seed(*b, ScalarSignednessEvidence::Signed);
             }
-            SSAOp::IntRight { a, .. } => {
-                seed_signedness(&mut signedness, a, ScalarSignednessEvidence::Unsigned);
-            }
-            SSAOp::IntSRight { a, .. } => {
-                seed_signedness(&mut signedness, a, ScalarSignednessEvidence::Signed);
-            }
+            SSAOp::IntRight { a, .. } => seed(*a, ScalarSignednessEvidence::Unsigned),
+            SSAOp::IntSRight { a, .. } => seed(*a, ScalarSignednessEvidence::Signed),
             _ => {}
         }
     }
 
-    let mut ready = signedness.keys().cloned().collect::<VecDeque<_>>();
+    // Each value gains at most both kinds of evidence, so it is queued at
+    // most twice and the propagation ends.
+    let mut ready = signedness.keys().collect::<VecDeque<_>>();
     while let Some(derived) = ready.pop_front() {
-        let Some(observed) = signedness.get(&derived).cloned() else {
+        let Some(observed) = signedness.get(derived).cloned() else {
             continue;
         };
-        let Some(sources) = reverse_edges.get(&derived) else {
+        let Some(sources) = reverse_edges.get(derived) else {
             continue;
         };
         for source in sources {
-            let entry = signedness.entry(source.clone()).or_default();
+            let entry = signedness.get_or_insert_with(*source, BTreeSet::new);
             let before = entry.len();
             entry.extend(observed.iter().copied());
             if entry.len() != before {
-                ready.push_back(source.clone());
+                ready.push_back(*source);
             }
         }
     }
     signedness
 }
 
-fn control_condition_values(operations: &[&SSAOp]) -> HashSet<SSAVar> {
-    let mut values = operations
+/// The values a conditional branch tests, and every value they carry the
+/// test from through a copy, a merge or boolean logic: one worklist from
+/// the branches back through the definitions, each value queued once.
+fn control_condition_values<V: DenseId>(
+    operations: &[(&SSAOp<V>, bool)],
+    facts: &impl Fn(V) -> (u32, bool),
+) -> IdSet<V> {
+    let mut definitions = IdMap::<V, usize>::default();
+    for (index, (op, _)) in operations.iter().enumerate() {
+        if let Some(dst) = op.dst() {
+            definitions.get_or_insert_with(*dst, || index);
+        }
+    }
+    let mut values = IdSet::default();
+    let mut pending = operations
         .iter()
-        .filter_map(|op| match op {
-            SSAOp::CBranch { cond, .. } => Some(cond.clone()),
+        .filter_map(|(op, _)| match op {
+            SSAOp::CBranch { cond, .. } => Some(*cond),
             _ => None,
         })
-        .collect::<HashSet<_>>();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for op in operations {
-            let Some(dst) = op.dst() else {
-                continue;
-            };
-            if !values.contains(dst) || !condition_carrier_op(op) {
-                continue;
-            }
-            op.for_each_source(|source| {
-                if !source.is_const() {
-                    changed |= values.insert(source.clone());
-                }
-            });
+        .collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !values.insert(value) {
+            continue;
         }
+        let Some((op, _)) = definitions.get(value).map(|index| operations[*index]) else {
+            continue;
+        };
+        if !condition_carrier_op(op, facts) {
+            continue;
+        }
+        op.for_each_source(|source| {
+            if !facts(*source).1 && !values.contains(*source) {
+                pending.push(*source);
+            }
+        });
     }
     values
 }
 
-fn condition_carrier_op(op: &SSAOp) -> bool {
+fn condition_carrier_op<V: Copy>(op: &SSAOp<V>, facts: &impl Fn(V) -> (u32, bool)) -> bool {
     matches!(
         op,
         SSAOp::Copy { .. }
@@ -146,73 +174,130 @@ fn condition_carrier_op(op: &SSAOp) -> bool {
     ) || matches!(
         op,
         SSAOp::IntAnd { dst, .. } | SSAOp::IntOr { dst, .. } | SSAOp::IntXor { dst, .. }
-            if dst.size == 1
+            if facts(*dst).0 == 1
     )
 }
 
-/// Some ISAs define a narrow register write by zeroing its wider architectural
-/// parent. Lifters expose that state update as `IntZExt`, but it says nothing
-/// about the source-language signedness of the narrow value.
-fn is_implicit_register_zero_extension(
-    arch_name: Option<&str>,
-    dst: &SSAVar,
-    src: &SSAVar,
-) -> bool {
-    if dst.size != 8 || src.size != 4 {
-        return false;
-    }
-    let arch = arch_name.unwrap_or_default().to_ascii_lowercase();
-    let dst = dst.name().to_ascii_lowercase();
-    if arch == "x86-64"
-        || arch == "x86_64"
-        || arch == "x64"
-        || arch == "amd64"
-        || arch.starts_with("x86:64")
-    {
-        return matches!(
-            dst.as_str(),
-            "rax" | "rbx" | "rcx" | "rdx" | "rsi" | "rdi" | "rbp" | "rsp"
-        ) || dst
-            .strip_prefix('r')
-            .and_then(|index| index.parse::<u8>().ok())
-            .is_some_and(|index| (8..=15).contains(&index));
-    }
-    if arch == "aarch64" || arch == "arm64" || arch.starts_with("aarch64:") {
-        return dst == "sp"
-            || dst
-                .strip_prefix('x')
-                .and_then(|index| index.parse::<u8>().ok())
-                .is_some_and(|index| index <= 30);
-    }
-    false
+/// The scalar signedness of a prepared function's values: its graph
+/// operations, with each zero extension the architecture performs set
+/// aside, plus the same-width `aliases`, plus its merges where `merges`.
+pub(crate) fn scalar_signedness_of(
+    source: &r2ssa::SsaArtifact,
+    merges: bool,
+    aliases: impl IntoIterator<Item = (ValueId, ValueId)>,
+) -> IdMap<ValueId, BTreeSet<ScalarSignednessEvidence>> {
+    let graph = source.graph();
+    let written = source.function().written();
+    let operations = graph.insts.iter().filter_map(|inst| match &inst.payload {
+        r2ssa::InstPayload::Op(op) => Some((
+            op,
+            graph
+                .op_for_inst(inst.id)
+                .is_some_and(|op| written.is_conventional_extension(op)),
+        )),
+        r2ssa::InstPayload::Phi { .. } => None,
+    });
+    let merge_links = graph
+        .insts
+        .iter()
+        .filter(|_| merges)
+        .filter_map(|inst| match &inst.payload {
+            r2ssa::InstPayload::Phi { .. } => inst.output.map(|output| (inst, output)),
+            r2ssa::InstPayload::Op(_) => None,
+        })
+        .flat_map(|(inst, output)| inst.inputs.iter().map(move |input| (*input, output)));
+    infer_scalar_signedness(operations, merge_links.chain(aliases), |value| {
+        graph.value(value).map_or((0, false), |value| {
+            (value.var.size, value.var.constant_bits().is_some())
+        })
+    })
 }
 
-fn link_same_width(
-    reverse_edges: &mut HashMap<SSAVar, BTreeSet<SSAVar>>,
-    source: &SSAVar,
-    derived: &SSAVar,
-) {
-    if source.size == derived.size {
-        reverse_edges
-            .entry(derived.clone())
-            .or_default()
-            .insert(source.clone());
-    }
+/// Scalar signedness over named blocks, keyed back by name: the same
+/// evidence for the readers that still take named blocks (the local struct
+/// and stack slot analyses; doc/adr-one-ir.md, transitional until they read
+/// graph values). `conventional` says which operations, by id, are zero
+/// extensions the architecture performs.
+pub(crate) struct NamedSignedness {
+    table: r2ssa::ValueTable,
+    by_var: IdMap<r2ssa::VarId, BTreeSet<ScalarSignednessEvidence>>,
 }
 
-fn seed_signedness(
-    signedness: &mut HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
-    var: &SSAVar,
-    evidence: ScalarSignednessEvidence,
-) {
-    if !var.is_const() {
-        signedness.entry(var.clone()).or_default().insert(evidence);
+impl NamedSignedness {
+    pub(crate) fn of(
+        blocks: &[r2ssa::SSABlock],
+        merges: bool,
+        conventional: &dyn Fn(r2ssa::OpId) -> bool,
+    ) -> Self {
+        let mut table = r2ssa::ValueTable::default();
+        let operations = blocks
+            .iter()
+            .flat_map(|block| block.sited())
+            .map(|(id, op)| (op.map(&mut |var| table.intern(var)), conventional(id)))
+            .collect::<Vec<_>>();
+        let merge_links = blocks
+            .iter()
+            .filter(|_| merges)
+            .flat_map(|block| block.phis())
+            .flat_map(|phi| {
+                phi.sources
+                    .iter()
+                    .map(move |(_, source)| (source, &phi.dst))
+            })
+            .map(|(source, dst)| (table.intern(source), table.intern(dst)))
+            .collect::<Vec<_>>();
+        let by_var = infer_scalar_signedness(
+            operations
+                .iter()
+                .map(|(op, conventional)| (op, *conventional)),
+            merge_links,
+            |id| {
+                let var = table.var(id);
+                (var.size, var.is_const())
+            },
+        );
+        Self { table, by_var }
+    }
+
+    pub(crate) fn get(&self, var: &r2ssa::SSAVar) -> Option<&BTreeSet<ScalarSignednessEvidence>> {
+        self.by_var.get(self.table.id_of(var)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use r2ssa::SSAVar;
+
+    /// The evidence for named operations, interned the way a function's
+    /// value table interns them; `conventional` marks every zero extension
+    /// as the architecture's.
+    fn infer(
+        operations: &[SSAOp],
+        aliases: &[(&SSAVar, &SSAVar)],
+        conventional: bool,
+    ) -> impl Fn(&SSAVar) -> Option<BTreeSet<ScalarSignednessEvidence>> + use<> {
+        let mut table = r2ssa::ValueTable::default();
+        let operations = operations
+            .iter()
+            .map(|op| (op.map(&mut |var| table.intern(var)), conventional))
+            .collect::<Vec<_>>();
+        let aliases = aliases
+            .iter()
+            .map(|(source, derived)| (table.intern(source), table.intern(derived)))
+            .collect::<Vec<_>>();
+        let inferred = infer_scalar_signedness(
+            operations
+                .iter()
+                .map(|(op, conventional)| (op, *conventional)),
+            aliases,
+            |id| {
+                let var = table.var(id);
+                (var.size, var.is_const())
+            },
+        );
+        move |var| inferred.get(table.id_of(var)?).cloned()
+    }
 
     #[test]
     fn exact_alias_propagates_extension_signedness_to_source() {
@@ -223,11 +308,11 @@ mod tests {
             src: reload.clone(),
         }];
 
-        let inferred = infer_scalar_signedness(&operations, [(&source, &reload)], None);
+        let inferred = infer(&operations, &[(&source, &reload)], false);
 
         assert_eq!(
-            inferred.get(&source),
-            Some(&BTreeSet::from([ScalarSignednessEvidence::Unsigned]))
+            inferred(&source),
+            Some(BTreeSet::from([ScalarSignednessEvidence::Unsigned]))
         );
     }
 
@@ -245,28 +330,33 @@ mod tests {
             },
         ];
 
-        let inferred = infer_scalar_signedness(&operations, std::iter::empty(), None);
+        let inferred = infer(&operations, &[], false);
 
         assert_eq!(
-            inferred.get(&value),
-            Some(&BTreeSet::from([
+            inferred(&value),
+            Some(BTreeSet::from([
                 ScalarSignednessEvidence::Signed,
                 ScalarSignednessEvidence::Unsigned,
             ]))
         );
     }
 
+    /// A zero extension r2ssa says the architecture performs -- a write of
+    /// a register's lower half zeroing the rest -- is no evidence about the
+    /// value written; the same extension written by the program is.
     #[test]
-    fn x86_parent_register_zeroing_is_not_unsigned_evidence() {
+    fn a_conventional_zero_extension_is_not_unsigned_evidence() {
         let value = SSAVar::new("loaded", 1, 4);
         let operations = [SSAOp::IntZExt {
             dst: SSAVar::new("RAX", 1, 8),
             src: value.clone(),
         }];
 
-        let inferred = infer_scalar_signedness(&operations, std::iter::empty(), Some("x86-64"));
-
-        assert!(!inferred.contains_key(&value));
+        assert_eq!(infer(&operations, &[], true)(&value), None);
+        assert_eq!(
+            infer(&operations, &[], false)(&value),
+            Some(BTreeSet::from([ScalarSignednessEvidence::Unsigned]))
+        );
     }
 
     #[test]
@@ -290,11 +380,11 @@ mod tests {
             },
         ];
 
-        let inferred = infer_scalar_signedness(&operations, std::iter::empty(), None);
+        let inferred = infer(&operations, &[], false);
 
         assert_eq!(
-            inferred.get(&value),
-            Some(&BTreeSet::from([ScalarSignednessEvidence::Unsigned]))
+            inferred(&value),
+            Some(BTreeSet::from([ScalarSignednessEvidence::Unsigned]))
         );
     }
 
@@ -318,8 +408,8 @@ mod tests {
             },
         ];
 
-        let inferred = infer_scalar_signedness(&operations, std::iter::empty(), None);
+        let inferred = infer(&operations, &[], false);
 
-        assert!(!inferred.contains_key(&value));
+        assert_eq!(inferred(&value), None);
     }
 }

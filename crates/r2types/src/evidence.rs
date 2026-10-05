@@ -20,7 +20,7 @@ use crate::convert::{CTypeLike, to_c_type_like};
 use crate::facts::FunctionType;
 use crate::model::{Signedness, Type, TypeArena, TypeId};
 
-use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
+use crate::signedness::{ScalarSignednessEvidence, scalar_signedness_of};
 use crate::solver::{SolvedTypes, solve_constraints};
 
 /// A node of the recovered type graph.
@@ -247,17 +247,9 @@ impl<'a> EvidenceBuilder<'a> {
     /// Conflicting signed and unsigned uses are both asserted: their meet is
     /// `Bottom`, and readback refuses only that value.
     fn gather_scalar_signedness(&mut self) {
-        let named = self.source.function().named_blocks();
-        let inferred = infer_scalar_signedness(
-            named.iter().flat_map(|block| block.ops().iter()),
-            std::iter::empty(),
-            crate::prepare::prepared_arch_display_name(self.source),
-        );
-        let mut inferred = inferred.into_iter().collect::<Vec<_>>();
-        inferred.sort_by(|(left, _), (right, _)| left.cmp(right));
-
-        for (var, evidence) in inferred {
-            let Some(value) = self.source.graph().value_id_for_var(&var) else {
+        let inferred = scalar_signedness_of(self.source, false, std::iter::empty());
+        for (value, evidence) in inferred {
+            let Some(var) = self.source.graph().value(value).map(|value| &value.var) else {
                 continue;
             };
             let Some(bits) = var.size.checked_mul(8) else {

@@ -138,7 +138,11 @@ fn local_pointee_type_evidence_requires_exact_ram_space() {
         Vec::new(),
     )];
 
-    let types = local_pointer_pointee_types(&blocks, 64, &HashMap::new());
+    let types = local_pointer_pointee_types(
+        &blocks,
+        64,
+        &crate::signedness::NamedSignedness::of(&[], false, &|_| false),
+    );
     assert_eq!(
         types.get(&ram_addr),
         Some(&BTreeSet::from(["int32_t".to_string()]))
