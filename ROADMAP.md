@@ -83,9 +83,9 @@ The program
 
 | Item | Done | Left (exit) |
 |------|------|-------------|
-| **PE** Written-lane result widths ([written-lanes](doc/adr-written-lanes.md)) | result widths | demand pass as an F2 index |
+| **PE** Written-lane result widths ([written-lanes](doc/adr-written-lanes.md)) | result widths | demand pass and `lanes` one relation (an F2 index); parameter widths as `cover(demanded)`; a per-operation proof harness against `r2il::eval`/Kani in the quality gate |
 | **P1.7** Entry lanes are the caller's | done | — |
-| **C** Provenance ([provenance](doc/adr-provenance.md)) | C0–C1 | C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
+| **C** Provenance ([provenance](doc/adr-provenance.md)) | C0; C1 types and the format parameter | C1 r2dec reads the grade (`from_source_signature` deleted); C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
 | **P5** Values as an index | — | XMM lane noise gone; immutable loads fold |
 | **P6** One resolved body per function, as a query | — | `read_callees` deleted; switch arms in the walked body |
 | **I** Unread container facts (CFI, LSDA, IBT, RELRO, init arrays) | — | stripped discovery finds every FDE start |
@@ -93,6 +93,7 @@ The program
 | **P8** Data objects and strings | — | `iz` lists proven strings |
 | **P9** Types over the graph | — | a struct pointer is not `uint32_t*` |
 | **P11** Names and commands | — | every differential disagreement judged |
+| **SD** Structuring quality ([structure-dominator-tree](doc/adr-structure-dominator-tree.md)) | dominator-tree structurer | no more labels than the old structurer; condition chains and irreducible-entry splitting behind a BDD identity check; lexical ancestry as dominance retires `region_does_not_dominate_occurrence` |
 
 ### Surface
 
@@ -118,6 +119,7 @@ The program
 | arm64 equivalence in CI (D6) | `tests/equiv` reports both architectures |
 | Census as a CI job | a structural PR shows its census diff |
 | D11 Dylints: unbudgeted loops, caches outside Q | fatal in r2engine after Q |
+| Hygiene: `long_comments` ratchet (3833), dead code | comments one or two lines; no unreferenced items |
 
 Order
 -----
@@ -133,7 +135,14 @@ deletes more than it adds or says why; leaves the census byte-identical or
 names each moved line; adds no renderer policy while R is open; and violates
 nothing in D11.
 
-After the program, each only once its consumers exist: binary diffing over
+Upstream radare2 (differential target, [radare2-function-walk](doc/adr-radare2-function-walk.md)):
+`ret` given one definition, one read-ahead cache per walk, predecessor in the
+frame, edge-labelled path state, the callee-recursion cap derived. Each its own
+pull request, measured alone.
+
+After the program, each only once its consumers exist: the debugger
+([debugger](doc/debugger.md): D0 target seam, D1 live values, D2 traces; after
+Q, P4, R and M), binary diffing over
 callee summaries, exception-handler recovery, the techniques of #65 (switch
 prover harness, SAILR idioms as r2rewrite rules, library identification,
 Retypd after P9), static rewriting, deobfuscation, trace recording.
@@ -143,9 +152,8 @@ Issues
 
 | Issue | State | Owner |
 |-------|-------|-------|
-| #60 | fixed on x86-64 | close after arm64 equivalence |
 | #47, #50 | one liveness model in r2ssa; consumers remain | F2, R |
-| #56, #63 | fixed | close after review |
+| #63 | fixed on CI | close after review |
 | #58 | widths fixed; pointee types open | P9 |
 | #61 | 85 of 98 traps | P4 (canary), R, P7 |
 | #65 | slice library and switch prover landed | after the program |
@@ -162,3 +170,10 @@ Standing debt
 - `pdd` on 32-bit ARM is not admitted until its Sleigh tuple is verified.
 - Entry condition flags cannot be booleans until the specification carries a flag fact.
 - Float convention slots still come from r2abi's sdb (M1d).
+- M0 rest needs `.ldefs` and `.dwarf` from the bundle, which the `sleigh-config` fork does not embed yet (a change to that repository).
+- `StackObjectRefusal::ParameterHomeWidthMismatch` survives S2; shown genuine or deleted.
+- r2dec's `NormalizedOpSite` rows are positions in an edited copy; keyed by `OpId` (R).
+- `def_use_graph` seals a raw function to answer a listing (F2.1).
+- `seal_body_proven_interface` rewrites the format parameter after the build (C1).
+- x87 80-bit floats refuse ([floating-point](doc/adr-floating-point.md)).
+- Partition-first's conservatism (read closure, `CallRestore`, return carrier, call-use reads) and the semantic-kernel ADR's rewrite against F2 and R go with R.
