@@ -4409,14 +4409,14 @@ fn machine_type_matches_op<V>(op: &SSAOp<V>, ty: &MachineType, output_bits: u32)
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn value_has_boolean_producer(graph: &crate::graph::SsaGraph, value: ValueId) -> bool {
-    #[cfg_attr(
-        dylint_lib = "r2sleigh_lints",
-        allow(
-            entity_keyed_map,
-            reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
-        )
-    )]
     fn visit(
         graph: &crate::graph::SsaGraph,
         value: ValueId,
