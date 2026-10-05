@@ -64,8 +64,6 @@ pub struct OpenProgram<S: Source + 'static> {
     /// The control a caller set for the next request, which that request
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
-    /// Which parameters of each callee take an address, read once per callee and revision.
-    pointers: std::sync::Mutex<pointers::Pointers>,
     /// The reference index, and the state of the program it was read at.
     references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
 }
@@ -85,7 +83,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             modes: std::cell::RefCell::default(),
             assembly: Err("the program's machine is not loaded".to_owned()),
             next: None,
-            pointers: std::sync::Mutex::default(),
             references: None,
             db: Db::new(ProgramInputs {
                 defined: definitions(container),

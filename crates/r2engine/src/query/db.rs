@@ -60,7 +60,7 @@ pub trait Query<I: Inputs>: 'static {
     /// The answer, reading the program only through `db`.
     fn compute(db: &Db<I>, key: &Self::Key) -> Self::Value;
 
-    /// Whether this answer is the request's stop rather than the program's: never held, and neither is what read it.
+    /// Whether this answer is not the program's alone (the request's stop, a cycle's cut): never held, nor what read it.
     fn stopped(_value: &Self::Value) -> bool {
         false
     }

@@ -47,6 +47,9 @@ engine. Commands, the visual mode and the agent surface all ask it.
   `ComesBack` (Q3b), `SurveyQuery` and `Modes` (Q3d) read the program
   through one `View`. `Db::held` and `Db::deposit` share answers;
   `Mutex<Returns>`, the `survey` cache, `modes_at` and `modes_revision` are
+  deleted. `PointerParameters` (Q3e) answers a callee's pointer
+  parameters; a call cycle is the database's `Cycle`, and an answer it cut
+  is a stop, so neither it nor what read it is held. `Mutex<Pointers>` is
   deleted.
 
 ## Left
@@ -73,8 +76,7 @@ engine. Commands, the visual mode and the agent surface all ask it.
 - Q3: the discovery survey and entry modes (moved here from Q1, because they
   read the call-graph returns), plus returns, solved by component together
   with P6; pointers and callee reads read the analysis, so they follow Q2.
-  Exit: the `survey` cache, `modes_at`, `modes_revision`, `Mutex<Returns>`,
-  then `Mutex<Pointers>` is deleted.
+  Left: summaries with P6.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.
