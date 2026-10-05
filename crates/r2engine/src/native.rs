@@ -13,9 +13,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2abi::{CompilerSpec, Convention, Prototypes};
+use r2abi::{Convention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
+use r2sleigh_lift::profile::LanguageProfile;
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect, SourceConventionSlots,
     SourceDataObject, SourceEndianness, SourceMachineRoles, SourceRoleRegisterNames,
@@ -138,7 +139,7 @@ pub struct NativeTarget<'a> {
     pub convention: &'a Convention,
     /// What that convention says a call does here, resolved once by [`call_effect`].
     pub call_effect: Option<&'a SourceCallEffect>,
-    pub compiler: &'a CompilerSpec,
+    pub compiler: &'a LanguageProfile,
     /// What the library functions this program calls take and return. An
     /// import has no body to read an interface off, so without this a call to
     /// one renders with no arguments at all.
@@ -1847,8 +1848,8 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
     // the compiler specification; how far past the stack pointer a leaf may
     // write is a fact about the ABI, so the red zone comes from the convention.
     let growth = match target.compiler.stack_growth {
-        r2abi::StackAllocation::Lower => SourceStackGrowth::LowerAddresses,
-        r2abi::StackAllocation::Higher => SourceStackGrowth::HigherAddresses,
+        r2sleigh_lift::profile::StackGrowth::Lower => SourceStackGrowth::LowerAddresses,
+        r2sleigh_lift::profile::StackGrowth::Higher => SourceStackGrowth::HigherAddresses,
     };
     let redzone = u32::try_from(target.convention.redzone_bytes).unwrap_or(0);
     let roles = SourceMachineRoles::new(Some(return_address), Some(stack_pointer))

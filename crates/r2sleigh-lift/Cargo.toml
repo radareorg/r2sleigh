@@ -10,6 +10,7 @@ r2il = { path = "../r2il" }
 r2source = { path = "../r2source" }
 libsla.workspace = true
 thiserror.workspace = true
+roxmltree = "0.20"
 
 [dependencies.sleigh-config]
 workspace = true

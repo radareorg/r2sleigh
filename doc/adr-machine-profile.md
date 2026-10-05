@@ -45,7 +45,7 @@ it, per language:
 
 ## Decision
 
-**One typed `MachineProfile` per (language, compiler), derived from the
+**One typed `LanguageProfile` per (language, compiler), derived from the
 trusted bundle, owned by r2sleigh-lift, and the only source below it of
 what an architecture is.**
 
@@ -81,7 +81,7 @@ what an architecture is.**
 
 | Step | Change | Deletes |
 |------|--------|---------|
-| M0 | `MachineProfile` in r2sleigh-lift: `.ldefs`, full `.cspec` (prototypes, killedbycall, unaffected, global), `.dwarf`, register lanes from `.sla`; a test that every listed language parses and states a stack pointer, a return address and a default prototype | `CompilerSpec`'s partial parse; the two `.pspec` program counter parsers |
+| M0 | `LanguageProfile` in r2sleigh-lift: `.ldefs`, full `.cspec` (prototypes, killedbycall, unaffected, global), `.dwarf`, register lanes from `.sla`; a test that every listed language parses and states a stack pointer, a return address and a default prototype | `CompilerSpec`'s partial parse; the two `.pspec` program counter parsers |
 | M1 | `native::machine()` builds roles, convention slots and call effects from the profile | r2abi `Conventions` and its sdb files; `platform_registers` |
 | M2 | r2ssa reads roles and slots only | `abi.rs` alias tables, `from_arch_spec`, `call_argument_register_defs`/`return_read_register_defs` by name, `call_moves_stack_pointer` by family, the direction-flag class check |
 | M3 | r2types reads the profile through the facts | `prepare.rs` alias and frame tables, `arrays.rs` prefixes, `signature_infer` convention inference by name, `assumptions.rs` lists |

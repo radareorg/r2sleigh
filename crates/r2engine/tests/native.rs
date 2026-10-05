@@ -6,9 +6,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{CompilerSpec, Conventions, Platform, Prototypes};
+use r2abi::{Conventions, Platform, Prototypes};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
+use r2sleigh_lift::profile::LanguageProfile;
 use r2source::SourceCallEffect;
 use r2ssa::{InstPayload, SSAOp};
 
@@ -62,7 +63,7 @@ struct Machine {
     conventions: Conventions,
     /// What each convention says a call does to this machine's registers.
     effects: BTreeMap<String, Option<SourceCallEffect>>,
-    compiler: CompilerSpec,
+    compiler: LanguageProfile,
     prototypes: Prototypes,
     declarations: r2abi::Declarations,
 }
@@ -86,7 +87,8 @@ impl Machine {
                 )
             })
             .collect();
-        let compiler = CompilerSpec::parse(embedded.compiler_spec);
+        let compiler =
+            LanguageProfile::parse(embedded.compiler_spec).expect("the specification parses");
         Self {
             embedded,
             conventions,

@@ -10,7 +10,6 @@
 //! a `<name>=cc` line declaring that `<name>` is a convention. Every fact about
 //! a convention is spelled `cc.<name>.<what>`.
 
-pub mod compiler_spec;
 pub mod declarations;
 pub mod frames;
 pub mod platform;
@@ -20,7 +19,6 @@ pub mod statement;
 pub mod syscalls;
 pub mod types;
 
-pub use compiler_spec::CompilerSpec;
 pub use declarations::{DataObject, Declarations};
 pub use platform::{PlatformRegister, RegisterDuty, platform_registers};
 pub use prototypes::{

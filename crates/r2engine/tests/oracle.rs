@@ -772,7 +772,8 @@ impl<'a> Lift<'a> {
             })
             .collect::<BTreeMap<_, _>>();
         let named = |name: &str| registers.get(&name.to_lowercase()).cloned();
-        let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
+        let compiler = r2sleigh_lift::profile::LanguageProfile::parse(machine.compiler_spec)
+            .expect("the specification parses");
         let stack_pointer = compiler.stack_pointer.as_deref().and_then(named);
         let stack_pointer = stack_pointer.expect("the compiler specification names it");
         let program_counter = named(machine.disasm.program_counter());

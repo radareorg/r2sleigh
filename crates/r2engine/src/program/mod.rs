@@ -39,7 +39,7 @@ struct Assembled {
     conventions: r2abi::Conventions,
     /// What the default convention says a call does; both instruction sets share one register file.
     call_effect: Option<r2source::SourceCallEffect>,
-    compiler: r2abi::CompilerSpec,
+    compiler: r2sleigh_lift::profile::LanguageProfile,
     prototypes: r2abi::Prototypes,
     /// The register a call returns through, in the coordinates the lift spells.
     link: Option<r2il::Varnode>,
@@ -322,7 +322,8 @@ impl<S: Source + 'static> OpenProgram<S> {
         let call_effect = conventions.default_convention().and_then(|convention| {
             crate::native::call_effect(&machine.arch, bits, psabi, convention)
         });
-        let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
+        let compiler = r2sleigh_lift::profile::LanguageProfile::parse(machine.compiler_spec)
+            .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
         // The specification names the register; the architecture says where it
         // lives, and the lift spells writes to it in those coordinates.
         let link = compiler.return_address.as_ref().and_then(|name| {
