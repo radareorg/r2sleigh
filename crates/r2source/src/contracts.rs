@@ -746,13 +746,6 @@ impl SourceRoleRegisterNames {
         }
     }
 
-    /// Record what the source called the direction flag.
-    #[must_use]
-    pub fn with_direction_flag(mut self, name: Option<&str>) -> Self {
-        self.direction_flag = name.and_then(SourceRegisterName::new);
-        self
-    }
-
     pub fn return_address(&self) -> Option<&str> {
         self.return_address.as_ref().map(SourceRegisterName::as_str)
     }
@@ -3365,11 +3358,6 @@ impl SourceCallPreservedCarriers {
 
     pub const fn frame_pointer(self) -> bool {
         self.frame_pointer
-    }
-
-    /// Whether both carriers that can address a frame survive a call.
-    pub const fn frame_survives_a_call(self) -> bool {
-        self.stack_pointer && self.frame_pointer
     }
 }
 
