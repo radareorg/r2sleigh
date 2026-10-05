@@ -1,0 +1,38 @@
+[package]
+name = "libsla-sys"
+version = "0.1.5"
+edition = "2024"
+description = "System crate for Ghidra Sleigh library libsla"
+categories = ["security", "external-ffi-bindings"]
+links = "sla"
+license = "Apache-2.0"
+repository = "https://github.com/mnemonikr/libsla-sys"
+
+# List includes to avoid including entire Ghidra submodule
+include = [
+    "/build.rs",
+    "/src/*",
+    "/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/*",
+    "/ghidra/Ghidra/Features/Decompiler/src/decompile/zlib/*",
+    "/ghidra/DISCLAIMER.md",
+    "/ghidra/NOTICE",
+    "/ghidra/LICENSE",
+    "/ghidra/licenses/*",
+]
+
+[features]
+
+# Must either be the default linker or defined as the RUSTC_LINKER
+clang = []
+
+# Must build with rustc nightly flag -Z sanitizer=address
+asan = ["clang"]
+ubsan = ["clang"]
+sancov = ["clang"]
+fuzzing = ["asan", "ubsan", "sancov"]
+
+[dependencies]
+cxx = "1.0"
+
+[build-dependencies]
+cxx-build = "1.0"

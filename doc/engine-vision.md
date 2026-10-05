@@ -117,6 +117,5 @@ serialization boundary inside the engine process; analysis is demand-driven
 and invalidated incrementally ([adr-query-database.md](adr-query-database.md));
 and every IL tier is printable.
 
-Open questions: the extension interface (a C ABI, WebAssembly, or r2pipe
-compatibility), and shipping an `r2s` whose `Cargo.toml` patches `libsla`,
-`libsla-sys` and `sleigh-config` to three git forks.
+Open question: the extension interface (a C ABI, WebAssembly, or r2pipe
+compatibility). The Sleigh crates are vendored (`vendor/`).

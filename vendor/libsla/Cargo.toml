@@ -1,0 +1,21 @@
+[package]
+name = "libsla"
+description = "Rust bindings to Ghidra Sleigh library libsla"
+version = "1.2.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mnemonikr/libsla"
+
+[features]
+fuzzing = ["libsla-sys/fuzzing"]
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror = "2.0"
+libsla-sys = { version = "0.1.4" }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+flate2 = "1.1"
+sleigh-config = { version = "1", features = ["x86"] }
+serde_json = { version = "1.0.145" }

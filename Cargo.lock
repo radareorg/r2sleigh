@@ -696,7 +696,6 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libsla"
 version = "1.2.0"
-source = "git+https://github.com/0verflowme/libsla.git?branch=main#ebf9232181426d8945506f7ce804247fffb5428e"
 dependencies = [
  "libsla-sys",
  "thiserror",
@@ -705,7 +704,6 @@ dependencies = [
 [[package]]
 name = "libsla-sys"
 version = "0.1.5"
-source = "git+https://github.com/0verflowme/libsla-sys.git?branch=main#2ddd71acaad1d69c7d7c171bee645a6191001f43"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -1389,7 +1387,6 @@ dependencies = [
 [[package]]
 name = "sleigh-config"
 version = "1.0.1"
-source = "git+https://github.com/0verflowme/sleigh-config.git?branch=main#71551911c023ab34194c7156becf9ada76f78a22"
 dependencies = [
  "heck",
  "sleigh-compiler",

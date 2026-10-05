@@ -1,0 +1,31 @@
+[package]
+name = "sleigh-config"
+version = "1.0.1"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mnemonikr/sleigh-config"
+description = "Precompiled .sla files and other processor configuration files needed to interface with Ghidra SLEIGH"
+categories = ["security", "config", "caching"]
+include = [
+    "/build.rs",
+    "/src/*",
+    "/ghidra/Ghidra/Processors/*/data/languages/*",
+    "/ghidra/DISCLAIMER.md",
+    "/ghidra/NOTICE",
+    "/ghidra/LICENSE",
+    "/ghidra/licenses/*",
+]
+
+[dependencies]
+
+[build-dependencies]
+heck = "0.5"
+sleigh-compiler = { version = "2.0" }
+
+[features]
+# Processors vendored here (vendor/README.md)
+AARCH64 = []
+ARM = []
+MIPS = []
+RISCV = []
+x86 = []

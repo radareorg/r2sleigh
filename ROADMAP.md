@@ -66,7 +66,7 @@ Decisions
 | D16 | One byte relation: every pass that asks which bytes an operation reads or writes reads one relation, and a boundary slot is a lane of a root ([adr-byte-relation](doc/adr-byte-relation.md)) | B |
 | D17 | No new crates: a layer boundary inside a crate is a module boundary enforced by a Dylint; the IR depends on neither the lifter nor type inference | L |
 
-Open: the three patched git forks (`libsla`, `libsla-sys`, `sleigh-config`) are upstreamed or vendored. M0's rest needs `.ldefs` and `.dwarf` from the bundle.
+The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`), so M0's rest reads `.ldefs` and `.dwarf` by changing `vendor/sleigh-config/build.rs`.
 
 The program
 -----------
@@ -81,7 +81,7 @@ The program
 | **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
 | **K** One fixpoint driver | [fixpoint](doc/adr-fixpoint.md) | r2ssa | r2types' loops (with C3), r2dec's (with R) |
 | **F2** One IR, indexed once | [one-ir](doc/adr-one-ir.md) | F2.0; F2.1 and F2.2 in part (dense dominators, loops, liveness once); F2.3; F2.6 (entity-keyed-map Dylint fatal in r2ssa and r2types, in CI) | F2.1 `FunctionIndex` on `Sealed`; F2.2 one byte-granular liveness model (#47, #50); F2.3's name-keyed readers deleted; F2.4 builder with incremental def-use (one graph build); F2.5 projections as indexes |
-| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed by the lifter; M1a slots, M1b call effect, M1c name/red zone/variadic tail from the profile and cited ABI rows | M0 rest (`.ldefs` selection, `.sla` lanes, `.pspec` tracked values, `.dwarf` numbers; needs the forks decision); M1d float slots as lanes of a root (after B3), then delete r2abi `Conventions`; M2–M5 delete the name tables in r2ssa, r2types, r2dec, r2image/r2engine; M6 RISC-V end to end |
+| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed by the lifter; M1a slots, M1b call effect, M1c name/red zone/variadic tail from the profile and cited ABI rows | M0 rest (`.ldefs` selection, `.sla` lanes, `.pspec` tracked values, `.dwarf` numbers; reads them from `vendor/sleigh-config`); M1d float slots as lanes of a root (after B3), then delete r2abi `Conventions`; M2–M5 delete the name tables in r2ssa, r2types, r2dec, r2image/r2engine; M6 RISC-V end to end |
 | **Q** One query database | [query-database](doc/adr-query-database.md) | Q0 the database (red-green, a random-write session equals a fresh open); Q1 in part (names, import stubs) | Q2 decode/walk/lift/seal per function; Q3 discovery survey, entry modes, summaries; Q4 references and renderings; the caches and `Revision` deleted |
 | **P4** One frame model | [frame-model](doc/adr-frame-model.md) | — | one partition, one escape analysis, promotion as an SSA rewrite, canary under its premise; `afv` agrees with `pdd` |
 | **R** Renderer as a printer | [renderer-printer](doc/adr-renderer-printer.md) | — | R1 terms may start before P4; r2dec reads only sealed facts; journal, binding-plan fixpoint and retries deleted; absorbs partition-first's decision 5, access-syntax and the semantic-kernel principles as its invariants |
@@ -182,7 +182,6 @@ Standing debt
 - `pdd` on 32-bit ARM is not admitted until its Sleigh tuple is verified.
 - Entry condition flags cannot be booleans until the specification carries a flag fact.
 - Float convention slots still come from r2abi's sdb (M1d).
-- M0 rest needs `.ldefs` and `.dwarf` from the bundle, which the `sleigh-config` fork does not embed yet (a change to that repository).
 - `StackObjectRefusal::ParameterHomeWidthMismatch` survives S2; shown genuine or deleted.
 - r2dec's `NormalizedOpSite` rows are positions in an edited copy; keyed by `OpId` (R).
 - `def_use_graph` seals a raw function to answer a listing (F2.1).
