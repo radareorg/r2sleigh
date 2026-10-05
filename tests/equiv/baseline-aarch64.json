@@ -1,5 +1,5 @@
 {
- "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed.",
+ "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved.",
  "records": {
   "tests/corpus/branchy.c::aarch64-clang-O0::addr_chain": {
    "status": "equal"
@@ -2396,9 +2396,7 @@
    "status": "refused"
   },
   "tests/gold/review.c::aarch64-clang-O1::classify": {
-   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/review.c::aarch64-clang-O1::copy_name": {
    "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
@@ -2457,9 +2455,7 @@
    "status": "refused"
   },
   "tests/gold/review.c::aarch64-clang-O2::classify": {
-   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/review.c::aarch64-clang-O2::copy_name": {
    "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
@@ -2636,9 +2632,7 @@
    "status": "differs"
   },
   "tests/gold/review.c::aarch64-gcc-O2::classify": {
-   "cause": "[ub, not located] The -O0 and -O2 builds of the rendering disagree (return): the rendering relies on behaviour C leaves undefined; not yet located in the first AArch64 bless.",
-   "reason": "-O0 and -O2 builds disagree return",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O2::copy_name": {
    "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
