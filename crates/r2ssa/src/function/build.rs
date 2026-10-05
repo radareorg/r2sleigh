@@ -382,6 +382,13 @@ impl SSAFunction {
     }
 
     /// Construct SSA over the graph `lifted_cfg` built from the lifted blocks.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+        )
+    )]
     fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
         cfg: CFG,
         arch: Option<&ArchSpec>,

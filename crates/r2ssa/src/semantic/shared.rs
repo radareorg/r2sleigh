@@ -336,6 +336,13 @@ pub(crate) fn modular_memory_ranges_may_overlap(
     modular_intervals_overlap(left_start, left_size, right_start, right_size, modulus)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 pub(crate) fn modular_affine_ranges_may_overlap(
     left_base: i128,
     left: &RelativeMemoryAddress,
@@ -442,6 +449,13 @@ pub(crate) fn induction_constant(graph: &SsaGraph, value: ValueId) -> Option<u64
 /// The depth bound and the visited set are both needed: the bound stops a
 /// legitimately deep expression from costing more than it is worth, and the
 /// set stops a cycle through a merge from recursing forever.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn induction_affine_parts(
     graph: &SsaGraph,
     phi: ValueId,
@@ -468,6 +482,13 @@ pub(crate) fn induction_affine_parts(
     parts
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn induction_affine_parts_of_definition(
     graph: &SsaGraph,
     phi: ValueId,
@@ -529,6 +550,13 @@ pub(crate) fn induction_affine_parts_of_definition(
 /// is the identity, which is not motion and is refused: a value that does not
 /// change is a loop-invariant, and calling it an induction variable would let
 /// a consumer index by something that never advances.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn induction_step_for_update(
     graph: &SsaGraph,
     phi: ValueId,
@@ -2318,6 +2346,13 @@ pub(crate) fn exact_loop_carrier_register_storage(
     })
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn loop_carrier_projection_key(
     graph: &SsaGraph,
     storage_spans: &StorageSpans,
@@ -2373,6 +2408,13 @@ pub(crate) fn expand_loop_carrier_storage_continuations(
     Some(())
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn loop_carrier_member_rows(
     graph: &SsaGraph,
     header: u64,
@@ -2626,6 +2668,13 @@ pub(crate) fn loop_carrier_member_rows(
     )
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn exact_copy_identity_values(graph: &SsaGraph, root: ValueId) -> BTreeSet<ValueId> {
     let mut identities = BTreeSet::from([root]);
     let mut pending = vec![root];
@@ -2682,6 +2731,13 @@ pub(crate) fn loop_condition(
 /// function it reaches, and a cycle ends where it closes. Nothing stops it
 /// early: a value missing from the cone is a proof that `value` does not
 /// depend on it, which is the direction the callers rely on.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn dependence_cone(graph: &SsaGraph, value: ValueId) -> BTreeSet<ValueId> {
     let mut cone = BTreeSet::from([value]);
     let mut pending = vec![value];

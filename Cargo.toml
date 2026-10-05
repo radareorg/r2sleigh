@@ -124,7 +124,7 @@ libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "m
 # allowed here and re-enabled by `scripts/structure-report.sh`, which holds the
 # counts and fails when one rises. `clippy.toml` sets the thresholds.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(dylint_lib, values(any()))"] }
 
 [workspace.lints.clippy]
 excessive_nesting = "allow"

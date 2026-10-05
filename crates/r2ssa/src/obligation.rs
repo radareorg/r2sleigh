@@ -1341,6 +1341,13 @@ fn collect_canonical_instruction_ids(
 type ObligationSeeds =
     crate::dense::IdMap<InstId, BTreeSet<(SemanticObligationKind, SemanticObligationComponent)>>;
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn taint_incomplete_boundary_inputs(
     graph: &SsaGraph,
     boundary_inst: InstId,

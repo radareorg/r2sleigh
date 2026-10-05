@@ -357,6 +357,13 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
     candidates
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn exact_copy_chain_to_storage(
     graph: &SsaGraph,
     start: ValueId,
@@ -424,6 +431,13 @@ pub(crate) fn instruction_strictly_precedes(
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn collect_stack_frame_round_trip_certificates(
     body: Body<'_>,
     derived: Derived<'_>,
@@ -703,6 +717,13 @@ pub(crate) struct StackGeometryContext<'a> {
     pub(crate) declared_slots: &'a DeclaredStackSlots,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn collect_stack_geometry_certificate(
     boundaries: &SourceBoundaryFacts,
     prep: Option<&crate::DecompilePrepFacts>,

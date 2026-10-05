@@ -737,6 +737,13 @@ fn order_touched_blocks(touched: &mut Vec<BlockId>, scratch: &[BlockScratch], st
 /// one sweep over the two components' segments in that block rather than every
 /// pair of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct ComponentLiveness {
     /// Per block, the segments sorted by where they start.
     by_block: BTreeMap<BlockId, Vec<(LiveSegment, ValueId)>>,
@@ -745,6 +752,13 @@ pub struct ComponentLiveness {
 }
 
 impl ComponentLiveness {
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn of(liveness: &ValueLiveness, value: ValueId) -> Self {
         let mut by_block = BTreeMap::<BlockId, Vec<(LiveSegment, ValueId)>>::new();
         let segments = liveness.segments(value);

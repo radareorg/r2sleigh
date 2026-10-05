@@ -175,6 +175,13 @@ impl AddressExpression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 struct AffineScalar {
     terms: BTreeMap<ValueId, i128>,
     constant: i128,
@@ -779,6 +786,13 @@ impl<'a> AddressCollector<'a> {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 fn add_delta(mut base: AddressExpression, delta: AffineScalar) -> Option<AddressExpression> {
     let mut terms = base
         .terms

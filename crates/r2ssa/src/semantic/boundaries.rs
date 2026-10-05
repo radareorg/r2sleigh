@@ -124,6 +124,13 @@ pub(crate) fn variadic_callsite_argument_count(
 /// `None` as soon as a reaching definition is something other than a merge, a
 /// copy, or a constant: a count proved from some of the formats would be a
 /// count proved from none of them.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn reaching_format_literals(
     context: FormatLiteralContext<'_>,
     value: ValueId,

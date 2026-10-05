@@ -208,6 +208,13 @@ fn return_address_object(
 /// read from the same slot -- in a body that never writes it, which would make
 /// the read and the return two different contents -- is the address control
 /// goes back to.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 fn result_is_the_return_address(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
@@ -843,6 +850,13 @@ fn recovered_result(
 /// bytes are all data, while the instruction computed four of them. A value
 /// defined after the lift -- a lane projection -- is read through its inputs;
 /// a cycle among such values, which no record breaks, is data.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn written_bytes(
     written: &crate::lanes::Written,
     graph: &SsaGraph,

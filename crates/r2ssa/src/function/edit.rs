@@ -173,6 +173,13 @@ pub(crate) type Insertion = (Pass, Vec<(SSAOp<VarId>, Option<OpId>)>);
 /// A plan sorted for one walk of one block: what goes at its start, and what
 /// happens at and around each of its operations.
 #[derive(Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the edits of one block: a few operations of one block, where a dense index would cost O(ops) per block"
+    )
+)]
 pub(crate) struct BlockEdits {
     pub(crate) start: Vec<Insertion>,
     pub(crate) at: BTreeMap<OpId, OpEdits>,

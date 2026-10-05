@@ -89,6 +89,13 @@ pub(crate) fn private_stack_objects(
 /// another stack slot is that slot's address and stops the walk; a flag or a
 /// merge computed from the address is followed like any other value, and is
 /// no escape unless what it feeds is.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query; the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn stack_address_escape(
     graph: &SsaGraph,
     access_addresses: &BTreeSet<(InstId, ValueId)>,

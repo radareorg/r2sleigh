@@ -7,6 +7,13 @@ use super::super::*;
 /// and an optional exact stack reload whose complete value-use domain ends at
 /// that control operand are certified for non-rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct MachineReturnControlCertificate {
     pub at: InstId,
     pub storage: CanonicalStorageId,
@@ -74,6 +81,13 @@ pub struct StackReloadSourceCertificate {
     pub load_inst: InstId,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn exact_copy_chain_to_entry_storage(
     graph: &SsaGraph,
     start: ValueId,

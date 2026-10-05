@@ -1057,6 +1057,13 @@ impl SsaArtifact {
     /// A carrier is state a register preserves, and a register is reused, so a
     /// carrier can reach across the point where its storage changed meaning.
     /// Anything that wants to call a carrier one variable has to ask this first.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn carriers_spanning_a_reuse(&self) -> std::collections::BTreeSet<crate::SemanticId> {
         let spans = self.storage_spans();
         let mut spanning = std::collections::BTreeSet::new();
@@ -1086,6 +1093,13 @@ impl SsaArtifact {
     ///
     /// Reuse is a question about one storage holding two meanings, so only the
     /// members in that storage can answer it.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     fn carrier_storage_occupants(
         &self,
         carrier: &crate::semantic::LoopCarrierFact,
@@ -1115,6 +1129,13 @@ impl SsaArtifact {
     /// A register the loop spills to a frame slot and reloads is not what
     /// carried the value; the slot is. Published so a renderer can name one
     /// variable where the machine used two.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn memory_mirrored_carriers(&self) -> std::collections::BTreeSet<crate::SemanticId> {
         let structured = &self.facts.structured;
         let objects = &self.facts.objects;
@@ -1973,6 +1994,13 @@ fn body_proven_format_parameter(shared: &SsaArtifact) -> Option<u32> {
 /// traffic is an elidable save and restore, and a parameter home is a variable
 /// the program uses -- so the identity is established here instead, and claims
 /// only that: the value holds the parameter, not that the traffic may go.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn forwarded_parameter_index(
     shared: &SsaArtifact,
     value: crate::ValueId,
@@ -2622,6 +2650,13 @@ pub(crate) fn same_content_reads(
 /// id: the boundary names the value that reached the argument register, and
 /// copy forwarding may have left the call reading the value that copy
 /// carried. Both are one class (`view::class_values`), and the text reads it.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a use site is an (instruction, operand) pair, not a dense id"
+    )
+)]
 pub(crate) fn uncertified_call_reads(
     graph: &SsaGraph,
     views: Option<&crate::view::ValueViews<ValueId>>,

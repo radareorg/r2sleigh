@@ -857,6 +857,13 @@ impl LoopCarrierEdgeValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct LoopCarrierUpdateFact {
     pub predecessor: u64,
     pub value: ValueId,
@@ -997,6 +1004,13 @@ impl InductionFact {
 /// remain expressions; consumers must not globally replace them with the
 /// carrier because their meaning depends on the edge program point.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct LoopCarrierFact {
     pub id: SemanticId,
     pub loop_id: LoopId,
@@ -1019,6 +1033,13 @@ impl LoopCarrierFact {
     ///
     /// The rows are sealed in [`StructuredLoopFact::validate_carrier_members`];
     /// this projection deliberately contains no second membership algorithm.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn coalescing_values(&self) -> BTreeSet<ValueId> {
         // A member whose only role is sharing a run with a real member is not
         // the carrier's claim: the run is the span's, and the span offers it to
@@ -1044,6 +1065,13 @@ impl LoopCarrierFact {
     /// Entry and update sites must be inputs of this carrier's header phi.
     /// Dominating initializer sites must be inputs of a phi whose output is
     /// one of this carrier's certified identity values.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn validate(&self, graph: &SsaGraph) -> bool {
         let Some(phi_inst) = graph.def_inst(self.phi) else {
             return false;
@@ -1136,6 +1164,13 @@ pub struct TripGuard {
 
 /// `Σ coefficient·value + constant` modulo `2^width_bits`, over values the function is entered with.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 pub struct EntryAffineForm {
     pub width_bits: u32,
     /// Nonzero coefficients by entry value.
@@ -2215,6 +2250,13 @@ pub(crate) struct LoopCarrierPeerCandidate {
     pub(crate) updates: Vec<LoopCarrierUpdateFact>,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) type LoopCarrierMemberRoles = BTreeMap<ValueId, BTreeSet<LoopCarrierMemberRole>>;
 
 /// What the memory annotations say one raw sub-effect touches.

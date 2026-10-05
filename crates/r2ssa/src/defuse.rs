@@ -9,6 +9,13 @@ use crate::var::SSAVar;
 
 /// Information about where a variable is defined and used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 pub struct DefUseInfo {
     /// Presentation-only map from displayed variable names to definition sites.
     ///

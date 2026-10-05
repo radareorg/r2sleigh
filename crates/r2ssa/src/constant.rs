@@ -74,6 +74,13 @@ fn literal_of(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: Value
 /// is read several copies later; they are the same value, and the proof only
 /// connects them when both are named by their origin rather than by whichever
 /// temporary happened to be holding them.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn root_of(graph: &SsaGraph, value: ValueId) -> ValueId {
     let mut current = value;
     let mut seen = BTreeSet::new();

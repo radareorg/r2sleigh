@@ -23,6 +23,13 @@ use crate::graph::{SsaGraph, ValueId};
 
 /// The values a function hands back to its caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct FunctionLiveOut {
     values: crate::dense::IdSet<ValueId>,
     /// The values each returning block hands back, by the block's address.
@@ -52,6 +59,13 @@ fn covers_fully(write: CanonicalStorageId, return_storage: CanonicalStorageId) -
 
 impl FunctionLiveOut {
     /// Work out what leaves through the return registers of every returning block.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn compute(
         func: &SSAFunction,
         graph: &SsaGraph,
@@ -104,6 +118,13 @@ impl FunctionLiveOut {
     /// a block already visited is not walked twice.
     ///
     /// Answers whether any definition was found, and whether a path was clobbered.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     fn collect_reaching(
         &mut self,
         func: &SSAFunction,

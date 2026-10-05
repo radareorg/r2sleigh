@@ -445,6 +445,13 @@ pub(crate) fn expression_phi_has_single_canonical_root(
 /// and each value is expanded once, so the walk is linear in it. A depth bound
 /// here would answer "no memory read" for a dependence it declined to look
 /// at, which is the one answer that must never be guessed.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn expression_value_depends_on_memory_read(graph: &SsaGraph, value: ValueId) -> bool {
     let mut stack = vec![value];
     let mut visited = BTreeSet::new();

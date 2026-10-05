@@ -14,6 +14,13 @@ pub struct ReturnValueCertificate {
     pub source_logical_value: Option<SourceLogicalValue>,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn collect_machine_return_control_certificates(
     boundaries: &SourceBoundaryFacts,
     graph: &SsaGraph,

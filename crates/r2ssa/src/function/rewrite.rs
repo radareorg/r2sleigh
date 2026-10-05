@@ -24,6 +24,13 @@ impl SSAFunction {
     /// read by nothing but the inserts themselves -- and the convention names
     /// no carrier there, so nobody passed anything in it -- the chain starts
     /// at zero and the rendering has no uninitialised read.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "ordered by variable on purpose: the first match must not depend on interning order (doc/adr-one-ir.md, 5c)"
+        )
+    )]
     pub(crate) fn zero_scratch_insert_roots(&mut self, abi_carriers: &[CanonicalStorageId]) {
         // A candidate's bits reach nothing but inserts. A merge passes the
         // same undefined bits along, so a use as a phi source is followed to
@@ -179,6 +186,13 @@ impl SSAFunction {
     /// Nothing is substituted for a convention that states no such thing, or a
     /// machine with no such flag, and a function that writes the flag itself
     /// has a later version neither boundary value reaches.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "ordered by variable on purpose: the first match must not depend on interning order (doc/adr-one-ir.md, 5c)"
+        )
+    )]
     pub(crate) fn apply_boundary_constants(&mut self, machine_context: &SourceMachineContext) {
         let clears = machine_context
             .convention_slots()
@@ -245,6 +259,13 @@ impl SSAFunction {
         }
     }
 
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "ordered by variable on purpose: the first match must not depend on interning order (doc/adr-one-ir.md, 5c)"
+        )
+    )]
     pub(crate) fn mint_entry_lane_projections(&mut self, machine_context: &SourceMachineContext) {
         let is_root_entry = |var: &SSAVar, storage: Option<CanonicalStorageId>| {
             var.version == 0

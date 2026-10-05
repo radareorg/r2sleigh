@@ -150,6 +150,13 @@ pub(crate) fn member_run_slices(
     (members.len() > 1).then_some(members)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn collect_unstructured_cycle_blocks(
     graph: &SsaGraph,
     loops: &BTreeMap<LoopId, StructuredLoopFact>,

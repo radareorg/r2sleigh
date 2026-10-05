@@ -406,6 +406,13 @@ impl Default for RenameContext {
 
 /// Result of renaming a function.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 pub struct RenamedFunction {
     /// SSA operations for each block (block addr -> ops).
     pub blocks: HashMap<u64, Vec<SSAOp>>,
@@ -959,6 +966,13 @@ fn record_renamed_op_storage(
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 fn record_canonical_storage(
     storage_by_var: &mut BTreeMap<SSAVar, CanonicalStorageId>,
     ambiguous_vars: &mut BTreeSet<SSAVar>,

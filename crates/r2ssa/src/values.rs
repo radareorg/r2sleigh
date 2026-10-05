@@ -99,6 +99,13 @@ pub struct InstructionBound {
 }
 
 /// The instruction's own operations transferred in `O(k)`, earlier values at top, over a graph no pass folded constants into.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 pub fn instruction_bound(
     graph: &SsaGraph,
     instruction: u64,
@@ -126,6 +133,13 @@ pub fn instruction_bound(
 }
 
 /// Whether the instruction alone leaves a value unbounded at the width it wrote, following its zero extensions back.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn spans_width_written(
     graph: &SsaGraph,
     local: &BTreeMap<ValueId, StridedInterval>,
@@ -463,6 +477,13 @@ const fn mask_of(width_bits: u32) -> u64 {
 /// chain from each instruction would gather, gathered once.
 ///
 /// An assumption holds at `B` only where its edge dominates `B` (doc/ssa.md, "Branch assumptions").
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn assumptions_by_block(
     function: &crate::SSAFunction,
     graph: &SsaGraph,
@@ -547,6 +568,13 @@ fn class_of(class: &[ValueId], value: ValueId) -> ValueId {
 /// Narrow what a block holds by one comparison, taken the way `truth` says.
 ///
 /// `held` is keyed by copy class.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn assume(
     held: &mut BTreeMap<ValueId, StridedInterval>,
     graph: &SsaGraph,
@@ -596,6 +624,13 @@ fn selected_arm(
 ///
 /// `None` where the side has no range yet or where the comparison leaves it
 /// exactly as it was, so the caller inserts only what it has learned.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn narrowed_side(
     held: &std::collections::BTreeMap<ValueId, StridedInterval>,
     solved: Solved<'_>,

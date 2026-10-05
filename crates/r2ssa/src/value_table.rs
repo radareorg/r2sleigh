@@ -35,6 +35,13 @@ impl crate::dense::DenseId for VarId {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 pub struct ValueTable {
     vars: Vec<SSAVar>,
     /// The lifted storage each variable was read from or written to, where
@@ -155,6 +162,13 @@ impl VarId {
 /// carries them as [`Minted`], and they join the table when it applies.
 ///
 /// Interning is `O(1)` expected per variable, as the table's own is.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 pub(crate) struct Minting<'t> {
     table: &'t ValueTable,
     vars: Vec<SSAVar>,
