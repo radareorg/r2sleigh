@@ -1231,8 +1231,14 @@ pub(super) fn rewrite_inlining_partition(
         // rather than of the version -- at -O0 the value an address is built
         // from is a reload, and the solution typed whichever version it could
         // see.
+        // Asked once per leaf the rewriter imports, and the answer is the
+        // object's, so it is worked out once per object this round.
+        let pointer_of_group = std::cell::RefCell::new(vec![None; components.len()]);
         let declared_pointers = |value: ValueId| {
-            declared_pointer_of_object(source_owned, &groups, &group_members, value)
+            let group = *groups.get(value.0 as usize)?;
+            let members = group_members.get(&group)?;
+            *pointer_of_group.borrow_mut()[group as usize]
+                .get_or_insert_with(|| declared_pointer_of_object(source_owned, members))
         };
         // Absorbed exactly as the rendering absorbs, so a value is proven constant only through producers this round folds.
         let round_canonical = r2rewrite::canonicalize_with(
@@ -1341,13 +1347,8 @@ pub(super) fn rewrite_inlining_partition(
 /// `len[buf]`. The signature is the one statement of what a formal is.
 fn declared_pointer_of_object(
     source_owned: &SourceOwnedFunctionFacts,
-    pre_partition: &[u32],
-    group_members: &BTreeMap<u32, Vec<ValueId>>,
-    value: ValueId,
+    members: &[ValueId],
 ) -> Option<bool> {
-    let source = source_owned.source();
-    let group = pre_partition.get(value.0 as usize).copied()?;
-    let members = group_members.get(&group)?;
     let mut agreed: Option<bool> = None;
     let mut agree = |answer: bool| -> Option<bool> {
         match agreed {
@@ -1383,7 +1384,6 @@ fn declared_pointer_of_object(
         };
         agree(answer)?;
     }
-    let _ = source;
     agreed
 }
 
