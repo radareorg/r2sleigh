@@ -275,3 +275,17 @@ byte-identical, and deletes what it replaces:
     - the renaming, lane and value-table index maps keyed by `SSAVar` run
       before the value table exists, or are the table's interning index;
     - the per-block value-range maps are P5's to rebuild as an index.
+- **F2.3, the provisional preparation** (`74bf9088`, `5b1a9206`): a
+  function the source states no interface for is built once. Construction
+  reads only what is known before it runs -- the source's interface, or
+  the calling convention's argument and result registers -- so the build
+  recovery reads is the build the seal rewrites. Recovery is invariant
+  under how lanes are rooted: an `Insert` gives the observed bytes inside
+  its lane to the lane and the rest to its base, and a parameter is the
+  low lane through the most significant observed byte
+  (`ByteMask::extent_bytes`). Recovery still collects its own prepared
+  facts over the build and the seal collects them again after its
+  rewrites; sharing them is the query database's (Q), not a mode flag on
+  the collector.
+- **F2.6 in r2ssa** (`ef1ff6a2`): `entity_keyed_map` is denied in r2ssa
+  and a CI job runs the Dylint there. r2types is next.
