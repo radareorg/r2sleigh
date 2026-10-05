@@ -2160,6 +2160,9 @@ pub(crate) struct ReachingAbiPolicy {
 #[derive(Clone, Copy)]
 pub(crate) struct ReachingAbi<'a> {
     pub(crate) function: &'a SSAFunction,
+    /// The register geometry, which says when the storage wanted is the low
+    /// lane of a root a call defines; `None` answers only exact storage.
+    pub(crate) machine_context: Option<&'a crate::SourceMachineContext>,
     pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) storage: CanonicalStorageId,

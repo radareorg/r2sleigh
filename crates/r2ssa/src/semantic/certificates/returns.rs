@@ -409,6 +409,18 @@ pub(crate) fn exact_logical_return_projection(
         {
             Some((boundary.value, storage.size, Some(logical)))
         }
+        // The slot is the low lane of the root the value defines (a double in
+        // XMM0_Qa reached as XMM0): the lane at the slot's width, as below.
+        SourceCarrierKind::Full
+            if physical_value.var.size > storage.size
+                && physical_value
+                    .canonical_storage
+                    .zip(machine_context)
+                    .is_some_and(|(root, context)| context.is_low_lane_of(storage, root)) =>
+        {
+            let input = exact_logical_lane_input(graph, boundary.value, storage.size);
+            Some((input.unwrap_or(boundary.value), storage.size, Some(logical)))
+        }
         // A float is a scalar in the carrier's low lane exactly as an integer
         // is: a `double` returned in a 128-bit vector register is its low half.
         SourceCarrierKind::LowBits

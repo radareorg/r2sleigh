@@ -964,6 +964,7 @@ pub(crate) fn reaching_stack_pointer_before(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
+        machine_context: None,
         prep,
         graph,
         storage,
@@ -999,6 +1000,7 @@ pub(crate) fn reaching_abi_value_in_block_with_policy(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
+        machine_context: Some(machine_context),
         prep,
         graph,
         storage,
@@ -1057,6 +1059,7 @@ pub(crate) fn reaching_abi_value_before(
 ) -> Option<ReachingAbiPath> {
     let ReachingAbi {
         function,
+        machine_context,
         prep,
         graph,
         storage,
@@ -1128,15 +1131,17 @@ pub(crate) fn reaching_abi_value_before(
             continue;
         }
         if dst_storage != storage {
-            // A call defines every clobbered carrier and every alias of it
-            // as one event: `CallDefine RAX` and `CallDefine EAX` are the
-            // same clobber seen at two widths, not a full write followed by a
-            // partial one. The alias is skipped so the walk reaches the
-            // carrier's own definition in the same group.
+            // A call defines the program root, never an alias of it: the root's
+            // value answers its low lane (doc/adr-byte-relation.md, B3), and
+            // any other lane fails closed below.
             if matches!(op, SSAOp::CallDefine { .. })
-                && contained_register_storage_offset(storage, dst_storage).is_some()
+                && machine_context
+                    .is_some_and(|context| context.is_low_lane_of(storage, dst_storage))
             {
-                continue;
+                return graph
+                    .inst(producer)
+                    .and_then(|inst| inst.output)
+                    .map(|value| ReachingAbiPath::Reaches(ReachingAbiState::Value(value)));
             }
             // A lane write into the root: the value at the boundary is the
             // inserted value when the lane is the storage wanted, an older
