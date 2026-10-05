@@ -7,7 +7,7 @@
 //! frame address by what the call pushed, from the frame pointer by where the
 //! prologue points it.
 
-use r2abi::{FrameBase, FrameRole, Prototype};
+use r2abi::{FrameBase, Prototype};
 use r2source::{
     CanonicalStorageId, SourceLogicalValue, SourceStackSlotName, SourceStackSlotRole,
     SourceStackSlotSpec, StackAddressBase,
@@ -62,15 +62,14 @@ impl Placement<'_> {
                 frame_pointer: None,
             }),
             FrameBase::Register(number) => {
-                let bits = crate::engine_effective_ptr_bits(self.target.arch);
-                let (role, name) =
-                    r2abi::dwarf_frame_register(self.target.arch.name.as_str(), bits, number)?;
-                // A base that is the stack pointer inside the body is a
-                // distance from a value the body moves.
-                if role != FrameRole::FramePointer {
+                // Only the convention's frame pointer: the stack pointer moves inside the body.
+                let name = self.target.dwarf.name_of(number)?;
+                let frame_pointer = self.target.convention.frame_pointer?;
+                let placed = storage(self.target.arch, frame_pointer).ok()?;
+                let storage = storage(self.target.arch, name).ok()?;
+                if placed != storage {
                     return None;
                 }
-                let storage = storage(self.target.arch, name).ok()?;
                 Some(Origin {
                     base: StackAddressBase::FramePointer,
                     storage,

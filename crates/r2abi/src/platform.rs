@@ -130,6 +130,8 @@ pub struct CallingConvention {
     /// The register a call passes a variadic callee's count of vector
     /// arguments in, which every call may therefore read.
     pub variadic_count_register: Option<&'static str>,
+    /// The register a frame-keeping function holds its frame base in.
+    pub frame_pointer: Option<&'static str>,
     /// The documents that state these.
     pub citation: &'static str,
 }
@@ -138,39 +140,43 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     name: "amd64",
     red_zone_bytes: 128,
     variadic_tail_on_stack: false,
+    frame_pointer: Some("rbp"),
     variadic_count_register: Some("al"),
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
-               hidden argument to specify the number of vector registers used\"",
+               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"",
 };
 
 const MICROSOFT_X64: CallingConvention = CallingConvention {
     name: "ms",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    frame_pointer: Some("rbp"),
     variadic_count_register: None,
     citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
-               defines no red zone",
+               defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer",
 };
 
 const I386_CDECL: CallingConvention = CallingConvention {
     name: "cdecl",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    frame_pointer: Some("ebp"),
     variadic_count_register: None,
     citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
-               defines no red zone",
+               defines no red zone; its register table gives %ebp the frame pointer role",
 };
 
 const AAPCS64: CallingConvention = CallingConvention {
     name: "arm64",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    frame_pointer: Some("x29"),
     variadic_count_register: None,
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"",
+               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer",
 };
 
 const AAPCS64_DARWIN: CallingConvention = CallingConvention {
@@ -185,19 +191,21 @@ const AAPCS32: CallingConvention = CallingConvention {
     name: "arm32",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    frame_pointer: Some("r11"),
     variadic_count_register: None,
     citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"",
+               by [SP, stack-base - 1]\"; AAPCS32 leaves the frame pointer to the platform, and GCC in ARM state keeps it in r11, the APCS fp",
 };
 
 const RISCV_LP64: CallingConvention = CallingConvention {
     name: "rvg",
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
+    frame_pointer: Some("s0"),
     variadic_count_register: None,
     citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
-               no red zone",
+               no red zone; \"Register Convention\": x8 \"s0/fp Saved register/frame pointer\"",
 };
 
 /// The default calling convention a program for this architecture and

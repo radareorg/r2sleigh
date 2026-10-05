@@ -402,6 +402,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             convention: assembled.convention,
             call_effect: assembled.call_effect.as_ref(),
             compiler: &assembled.compiler,
+            dwarf: &machine.dwarf,
             prototypes: &assembled.prototypes,
             declarations: &self.source().container().declarations,
         })

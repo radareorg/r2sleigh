@@ -217,18 +217,15 @@ impl<'a> Placement<'a> {
     /// another register at the first instruction, or passed nowhere, the
     /// prototype is not this body's interface.
     fn arrivals_hold(&self, declared: Declared<'_>, placed: &[CanonicalStorageId]) -> bool {
-        let bits = crate::engine_effective_ptr_bits(self.target.arch);
         for (index, (parameter, slot)) in
             declared.prototype.parameters.iter().zip(placed).enumerate()
         {
             let held = match parameter.arrival {
                 None => true,
                 Some(Arrival::Unpassed) => false,
-                Some(Arrival::Register(number)) => {
-                    r2abi::dwarf_register(&self.target.arch.name, bits, number)
-                        .and_then(|name| storage(self.target.arch, name).ok())
-                        .is_none_or(|arrived| arrived.offset == slot.offset)
-                }
+                Some(Arrival::Register(number)) => (self.target.dwarf.name_of(number))
+                    .and_then(|name| storage(self.target.arch, name).ok())
+                    .is_none_or(|arrived| arrived.offset == slot.offset),
             };
             if !held {
                 r2il::refusal_evidence!(

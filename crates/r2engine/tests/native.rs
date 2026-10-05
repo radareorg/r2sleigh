@@ -133,6 +133,7 @@ impl Machine {
             convention: under.convention,
             call_effect: under.effect.as_ref(),
             compiler: &under.compiler,
+            dwarf: &self.embedded.dwarf,
             prototypes: &self.prototypes,
             declarations: &self.declarations,
         }

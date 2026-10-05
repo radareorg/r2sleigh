@@ -122,68 +122,6 @@ pub struct Local {
     pub scopes: Vec<std::ops::Range<u64>>,
 }
 
-/// What role a machine gives one DWARF register number.
-///
-/// Only the two that a frame base can name are answered, and only for the
-/// machines this engine lifts. The numbering is each platform's ABI document,
-/// which is also where radare2's own copy of this comes from; a number no
-/// document here assigns is evidence of nothing rather than a guess.
-pub fn dwarf_frame_register(
-    arch: &str,
-    bits: u32,
-    number: u16,
-) -> Option<(FrameRole, &'static str)> {
-    let (frame_pointer, stack_pointer) = match (crate::family(arch)?, bits) {
-        ("x86", 64) => ((6, "rbp"), (7, "rsp")),
-        ("x86", 32) => ((5, "ebp"), (4, "esp")),
-        ("arm", 64) => ((29, "x29"), (31, "sp")),
-        ("arm", 32) => ((11, "r11"), (13, "sp")),
-        _ => return None,
-    };
-    match number {
-        number if number == frame_pointer.0 => Some((FrameRole::FramePointer, frame_pointer.1)),
-        number if number == stack_pointer.0 => Some((FrameRole::StackPointer, stack_pointer.1)),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameRole {
-    FramePointer,
-    StackPointer,
-}
-
-/// The integer register one DWARF register number names, as radare2 spells
-/// it.
-///
-/// The numbering is each platform's ABI document again. Only the integer
-/// file is answered, which is where a declaration can say an integer or
-/// pointer parameter arrives; a number past it is evidence of nothing here.
-pub fn dwarf_register(arch: &str, bits: u32, number: u16) -> Option<&'static str> {
-    const X86_64: [&str; 16] = [
-        "rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12",
-        "r13", "r14", "r15",
-    ];
-    const X86: [&str; 8] = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
-    const AARCH64: [&str; 32] = [
-        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
-        "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
-        "x27", "x28", "x29", "x30", "sp",
-    ];
-    const ARM: [&str; 16] = [
-        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
-        "lr", "pc",
-    ];
-    let table: &[&'static str] = match (crate::family(arch)?, bits) {
-        ("x86", 64) => &X86_64,
-        ("x86", 32) => &X86,
-        ("arm", 64) => &AARCH64,
-        ("arm", 32) => &ARM,
-        _ => return None,
-    };
-    table.get(usize::from(number)).copied()
-}
-
 /// One declared parameter: what it is, and what the declaration calls it.
 ///
 /// The type decides how the call is read; the name decides only how it is

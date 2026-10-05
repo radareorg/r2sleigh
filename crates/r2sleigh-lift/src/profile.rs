@@ -181,6 +181,65 @@ impl LanguageProfile {
 /// callee's own coordinates, where the transfer has already spent
 /// `stackshift` bytes on the return address, so that much is taken off to
 /// name the slot from the stack pointer entering the call.
+/// A language's DWARF register numbering, as its `.dwarf` file states it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DwarfRegisters {
+    names: std::collections::BTreeMap<u16, String>,
+    stack_pointer: Option<u16>,
+}
+
+impl DwarfRegisters {
+    /// Read `register_mapping` entries; `auto_count` numbers a run by the name's trailing digits.
+    pub fn parse(text: &str) -> Self {
+        let mut registers = Self::default();
+        let Ok(document) = roxmltree::Document::parse(text) else {
+            return registers;
+        };
+        let mappings = document
+            .descendants()
+            .filter(|node| node.has_tag_name("register_mapping"));
+        for node in mappings {
+            let number = node
+                .attribute("dwarf")
+                .and_then(|text| text.parse::<u16>().ok());
+            let (Some(number), Some(name)) = (number, node.attribute("ghidra")) else {
+                continue;
+            };
+            if node.attribute("stackpointer") == Some("true") {
+                registers.stack_pointer = Some(number);
+            }
+            let count = node
+                .attribute("auto_count")
+                .and_then(|text| text.parse().ok());
+            registers.names.extend(run(number, name, count));
+        }
+        registers
+    }
+
+    /// The register a DWARF number names.
+    pub fn name_of(&self, number: u16) -> Option<&str> {
+        self.names.get(&number).map(String::as_str)
+    }
+
+    /// The number the stack pointer has.
+    pub const fn stack_pointer(&self) -> Option<u16> {
+        self.stack_pointer
+    }
+}
+
+/// The registers one mapping numbers: itself, or a run counted on from its trailing digits.
+fn run(number: u16, name: &str, count: Option<u16>) -> Vec<(u16, String)> {
+    let Some(count) = count else {
+        return vec![(number, name.to_string())];
+    };
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    let first = name[base.len()..].parse::<u16>().unwrap_or(0);
+    (0..count)
+        .filter_map(|step| Some((number.checked_add(step)?, first.checked_add(step)?)))
+        .map(|(numbered, index)| (numbered, format!("{base}{index}")))
+        .collect()
+}
+
 fn stack_arguments(prototype: roxmltree::Node<'_, '_>) -> Option<(i64, u32)> {
     let shift = prototype.attribute("stackshift")?.parse::<i64>().ok()?;
     let input = prototype
@@ -286,6 +345,23 @@ mod tests {
 
     fn parse(text: &str) -> LanguageProfile {
         LanguageProfile::parse(text).expect("parses")
+    }
+
+    #[test]
+    fn a_dwarf_numbering_expands_its_runs_and_names_the_stack_pointer() {
+        let registers = DwarfRegisters::parse(
+            r#"<dwarf><register_mappings>
+                <register_mapping dwarf="0" ghidra="x0" auto_count="31"/>
+                <register_mapping dwarf="31" ghidra="sp" stackpointer="true"/>
+                <register_mapping dwarf="8" ghidra="R8" auto_count="8"/>
+            </register_mappings></dwarf>"#,
+        );
+        assert_eq!(registers.name_of(29), Some("x29"));
+        assert_eq!(registers.name_of(31), Some("sp"));
+        assert_eq!(registers.stack_pointer(), Some(31));
+        // A later run overwrites what an earlier one numbered, as Ghidra's does.
+        assert_eq!(registers.name_of(15), Some("R15"));
+        assert_eq!(registers.name_of(40), None);
     }
 
     #[test]

@@ -85,6 +85,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                         cspec_data.push(format!("{mod_name}::{var_name}"));
                     }
 
+                    // A DWARF register numbering or the language definitions.
+                    Some(ext) if ext == "dwarf" || ext == "ldefs" => {
+                        let prefix = ext.to_str().unwrap().to_uppercase();
+                        let var_name = format!("{prefix}_{var_name}");
+                        let output_path = Path::new(&out_dir).join(lang_entry.file_name());
+                        std::fs::copy(lang_entry.path(), &output_path)?;
+                        writeln!(
+                            &mut config_vars_file,
+                            r##"pub const {var_name}: &'static str = include_str!(r#"{path}"#);"##,
+                            path = output_path.display()
+                        )?;
+                    }
+
                     // No match, nothing to do
                     _ => (),
                 } // End match

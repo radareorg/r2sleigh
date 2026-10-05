@@ -141,6 +141,8 @@ pub struct NativeTarget<'a> {
     /// What that convention says a call does here, resolved once by [`call_effect`].
     pub call_effect: Option<&'a SourceCallEffect>,
     pub compiler: &'a LanguageProfile,
+    /// The language's DWARF register numbering.
+    pub dwarf: &'a r2sleigh_lift::profile::DwarfRegisters,
     /// What the library functions this program calls take and return. An
     /// import has no body to read an interface off, so without this a call to
     /// one renders with no arguments at all.

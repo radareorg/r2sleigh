@@ -17,8 +17,7 @@ pub use platform::{
     platform_registers,
 };
 pub use prototypes::{
-    Arrival, FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
-    dwarf_frame_register, dwarf_register,
+    Arrival, FrameBase, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
 };
 pub use syscalls::Syscalls;
 pub use types::{
