@@ -140,9 +140,7 @@ Upstream radare2 (differential target, [radare2-function-walk](doc/adr-radare2-f
 frame, edge-labelled path state, the callee-recursion cap derived. Each its own
 pull request, measured alone.
 
-After the program, each only once its consumers exist: the debugger
-([debugger](doc/debugger.md): D0 target seam, D1 live values, D2 traces; after
-Q, P4, R and M), binary diffing over
+After the program, each only once its consumers exist: binary diffing over
 callee summaries, exception-handler recovery, the techniques of #65 (switch
 prover harness, SAILR idioms as r2rewrite rules, library identification,
 Retypd after P9), static rewriting, deobfuscation, trace recording.
