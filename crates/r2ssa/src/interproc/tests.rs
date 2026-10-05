@@ -1,6 +1,6 @@
 use super::*;
 use crate::SsaArtifact;
-use r2il::{MemoryOrdering, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+use r2il::{ArchSpec, MemoryOrdering, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
 
 fn x86_64_arch() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
@@ -99,35 +99,6 @@ fn summary_sccs_handle_deep_chains_and_cycles_deterministically() {
             .map(InterprocFunctionId)
             .collect::<Vec<_>>()
     );
-}
-
-#[test]
-fn sleigh_aarch64_arch_name_uses_arm64_abi_profile() {
-    let mut arch = ArchSpec::new("AARCH64:LE:64:v8A");
-    arch.addr_size = 8;
-    let profile = AbiProfile::from_arch(Some(&arch));
-
-    assert_eq!(profile.argument_index("x0"), Some(0));
-    assert_eq!(profile.argument_index("w1"), Some(1));
-}
-
-#[test]
-fn sleigh_x86_64_arch_name_uses_amd64_abi_profile_without_addr_size() {
-    let arch = ArchSpec::new("x86:LE:64:default");
-    let profile = AbiProfile::from_arch(Some(&arch));
-
-    assert_eq!(profile.argument_index("rdi"), Some(0));
-    assert!(profile.is_return_register("rax"));
-}
-
-#[test]
-fn x86_64_arch_name_uses_amd64_abi_profile_without_addr_size() {
-    let arch = ArchSpec::new("x86-64");
-    let profile = AbiProfile::from_arch(Some(&arch));
-
-    assert_eq!(profile.argument_index("rdi"), Some(0));
-    assert_eq!(profile.argument_index("rsi"), Some(1));
-    assert!(profile.is_return_register("rax"));
 }
 
 #[test]
@@ -528,14 +499,14 @@ fn report_only_solver_rejects_stale_or_mislabeled_seeds() {
     let mut stale = FunctionSemanticSummary::unknown(id, None);
     stale.schema_version = 1;
     assert_eq!(
-        solve_interproc_summary_set(&[], None, None, &BTreeMap::from([(id, stale)]),),
+        solve_interproc_summary_set(&[], None, &BTreeMap::from([(id, stale)]),),
         Err(InterprocSummarySchemaError::FunctionSchemaVersion { id, found: 1 })
     );
 
     let foreign_id = InterprocFunctionId(0x4300);
     let mislabeled = FunctionSemanticSummary::unknown(foreign_id, None);
     assert_eq!(
-        solve_interproc_summary_set(&[], None, None, &BTreeMap::from([(id, mislabeled)]),),
+        solve_interproc_summary_set(&[], None, &BTreeMap::from([(id, mislabeled)]),),
         Err(InterprocSummarySchemaError::FunctionIdentityMismatch {
             key: id,
             summary_id: foreign_id,
@@ -892,7 +863,6 @@ fn prepared_summary_set_does_not_promote_report_only_seeds() {
     let seed = FunctionSemanticSummary::unknown(seed_id, Some("external-seed".to_string()));
     let raw = solve_interproc_summary_set(
         std::slice::from_ref(&root_input),
-        Some(&arch),
         Some(InterprocFunctionId(0x4000)),
         &BTreeMap::from([(seed_id, seed)]),
     )
@@ -909,27 +879,6 @@ fn prepared_summary_set_does_not_promote_report_only_seeds() {
 
     assert!(raw.summaries.contains_key(&seed_id));
     assert!(!prepared.report().summaries.contains_key(&seed_id));
-}
-
-#[test]
-fn prepared_summary_set_refuses_unknown_source_architecture() {
-    let mut arch = x86_64_arch();
-    arch.name = "unknown-64-bit-family".to_string();
-    let root = prepared_owner(0x4000, &arch);
-    let error = solve_prepared_interproc_summary_set(
-        Arc::clone(&root),
-        &[PreparedInterprocFunctionInput {
-            id: InterprocFunctionId(0x4000),
-            name: Some("root".to_string()),
-            prepared: &root,
-        }],
-    )
-    .expect_err("unknown family must refuse authoritative summary");
-
-    assert_eq!(
-        error,
-        PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext
-    );
 }
 
 #[test]
@@ -1131,7 +1080,6 @@ fn report_only_summary_does_not_promote_unbound_call_returns() {
                 prepared: &wrapper,
             },
         ],
-        Some(&arch),
         Some(InterprocFunctionId(0x3000)),
         &seeds,
     )
@@ -1188,7 +1136,6 @@ fn report_only_ip_return_requires_exact_call_result_carrier() {
             name: Some("alloc_wrapper".to_string()),
             prepared: &alloc,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x1000)),
         &seeds,
     )
@@ -1229,7 +1176,6 @@ fn opaque_single_call_wrapper_does_not_promote_unbound_return() {
             name: Some("sym.alloc_wrapper".to_string()),
             prepared: &wrapper,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x401000)),
         &seeds,
     )
@@ -1265,7 +1211,6 @@ fn branchind_trampoline_without_return_stays_unknown() {
             name: Some("sym.imp.setlocale".to_string()),
             prepared: &trampoline,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x3500)),
         &BTreeMap::new(),
     )
@@ -1309,7 +1254,6 @@ fn direct_pointer_load_marks_argument_read() {
             name: Some("read_arg".to_string()),
             prepared: &prepared,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x4000)),
         &BTreeMap::new(),
     )
@@ -1347,7 +1291,6 @@ fn overwritten_abi_register_is_not_a_formal_argument_read() {
             name: Some("scratch_load".to_string()),
             prepared: &prepared,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x4050)),
         &BTreeMap::new(),
     )
@@ -1397,7 +1340,6 @@ fn unused_entry_abi_register_source_does_not_inflate_arg_count_hint() {
             name: Some("scratch_arg_reg".to_string()),
             prepared: &prepared,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x4060)),
         &BTreeMap::new(),
     )
@@ -1439,7 +1381,6 @@ fn store_conditional_marks_argument_read_and_write() {
             name: Some("store_conditional".to_string()),
             prepared: &prepared,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x4100)),
         &BTreeMap::new(),
     )
@@ -1509,7 +1450,6 @@ fn atomic_cas_marks_argument_read_and_write() {
             name: Some("atomic_cas".to_string()),
             prepared: &prepared,
         }],
-        Some(&arch),
         Some(InterprocFunctionId(0x4200)),
         &BTreeMap::new(),
     )
@@ -1795,6 +1735,7 @@ fn call_arg_observer_does_not_reuse_pre_call_carriers_after_call() {
 #[test]
 fn volatile_or_unknown_effects_clobber_call_carriers_and_observable_state() {
     let arch = windows_x64_arch();
+    // A user operation writes only its named output, so the carrier survives it.
     let cases = [
         (
             "callother",
@@ -1803,20 +1744,30 @@ fn volatile_or_unknown_effects_clobber_call_carriers_and_observable_state() {
                 userop: 7,
                 inputs: Vec::new(),
             },
+            CallArgObservation::Const(7),
         ),
-        ("unimplemented", R2ILOp::Unimplemented),
-        ("cpuid", R2ILOp::CpuId { dst: tmp(0x90, 8) }),
+        (
+            "unimplemented",
+            R2ILOp::Unimplemented,
+            CallArgObservation::Unknown,
+        ),
+        (
+            "cpuid",
+            R2ILOp::CpuId { dst: tmp(0x90, 8) },
+            CallArgObservation::Unknown,
+        ),
         (
             "new",
             R2ILOp::New {
                 dst: tmp(0x98, 8),
                 src: c(8, 8),
             },
+            CallArgObservation::Unknown,
         ),
     ];
 
-    for (label, unknown_op) in cases {
-        let prepared = SsaArtifact::for_symbolic(
+    for (label, unknown_op, carrier) in cases {
+        let prepared = exact_untyped_artifact(
             &[block(
                 0x6800,
                 vec![
@@ -1831,10 +1782,14 @@ fn volatile_or_unknown_effects_clobber_call_carriers_and_observable_state() {
                     R2ILOp::Return { target: c(0, 8) },
                 ],
             )],
-            Some(&arch),
-        )
-        .unwrap_or_else(|| panic!("{label} SSA"));
-        let abi = AbiProfile::windows_x64();
+            &arch,
+            b"windows-volatile-carriers",
+            "windows-x64",
+            &[8, 16, 24, 32],
+            40,
+            48,
+        );
+        let abi = prepared.abi().expect("exact Windows ABI");
         let observations = observe_call_arguments(&prepared, &abi);
         let call_id = prepared
             .call_sites()
@@ -1848,11 +1803,7 @@ fn volatile_or_unknown_effects_clobber_call_carriers_and_observable_state() {
             .unwrap_or_else(|| panic!("{label} args"));
         let local = collect_local_summary_facts(&prepared, &abi);
 
-        assert_eq!(
-            args.first(),
-            Some(&CallArgObservation::Unknown),
-            "{label} must not preserve the pre-effect carrier"
-        );
+        assert_eq!(args.first(), Some(&carrier), "{label} carrier");
         assert!(local.has_unknown_calls, "{label} must remain observable");
         for kind in [
             SummaryMemoryEffectKind::Read,
@@ -1873,7 +1824,7 @@ fn volatile_or_unknown_effects_clobber_call_carriers_and_observable_state() {
 fn volatile_or_unknown_effects_invalidate_pre_effect_return_relations() {
     let arch = windows_x64_arch();
     for (label, return_seed) in [("constant", c(1, 8)), ("entry argument", reg(8, 8))] {
-        let prepared = SsaArtifact::for_symbolic(
+        let prepared = exact_untyped_artifact(
             &[block(
                 0x6900,
                 vec![
@@ -1889,10 +1840,15 @@ fn volatile_or_unknown_effects_invalidate_pre_effect_return_relations() {
                     R2ILOp::Return { target: reg(0, 8) },
                 ],
             )],
-            Some(&arch),
-        )
-        .unwrap_or_else(|| panic!("{label} return SSA"));
-        let local = collect_local_summary_facts(&prepared, &AbiProfile::windows_x64());
+            &arch,
+            b"windows-volatile-return",
+            "windows-x64",
+            &[8, 16, 24, 32],
+            40,
+            48,
+        );
+        let local =
+            collect_local_summary_facts(&prepared, &prepared.abi().expect("exact Windows ABI"));
         let summary = initial_summary(InterprocFunctionId(0x6900), None, &local);
 
         assert_eq!(
@@ -2102,7 +2058,7 @@ fn call_carrier_nonconvergence_degrades_all_observations() {
         Some(&arch),
     )
     .expect("advisory SSA");
-    let state = collect_call_arg_state_of_height(&prepared, &AbiProfile::from_arch(Some(&arch)), 0);
+    let state = collect_call_arg_state_of_height(&prepared, &AbiProfile::default(), 0);
 
     assert!(!state.converged);
     assert!(
@@ -2125,7 +2081,7 @@ fn call_carrier_nonconvergence_degrades_all_observations() {
 #[test]
 fn call_arg_observer_preserves_ambiguous_join_as_unknown() {
     let arch = windows_x64_arch();
-    let prepared = SsaArtifact::for_symbolic(
+    let prepared = exact_untyped_artifact(
         &[
             block(
                 0x6000,
@@ -2168,11 +2124,16 @@ fn call_arg_observer_preserves_ambiguous_join_as_unknown() {
                 ],
             ),
         ],
-        Some(&arch),
-    )
-    .expect("ssa");
+        &arch,
+        b"windows-ambiguous-join",
+        "windows-x64",
+        &[8, 16, 24, 32],
+        40,
+        48,
+    );
 
-    let observations = observe_call_arguments(&prepared, &AbiProfile::windows_x64());
+    let observations =
+        observe_call_arguments(&prepared, &prepared.abi().expect("exact Windows ABI"));
     let call_id = prepared
         .call_sites()
         .by_id

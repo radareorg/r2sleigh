@@ -12,7 +12,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2il::{ArchSpec, MemoryOrdering, SpaceId};
+use r2il::{MemoryOrdering, SpaceId};
 use serde::{Deserialize, Serialize};
 
 use crate::abi::AbiProfile;
@@ -886,16 +886,15 @@ fn summary_arg_count_hint(inputs: SummaryArgCountInputs<'_>) -> Option<usize> {
 /// must not authorize type facts or certification.
 pub fn solve_interproc_summary_set(
     functions: &[InterprocFunctionInput<'_>],
-    arch: Option<&ArchSpec>,
     root: Option<InterprocFunctionId>,
     seed_summaries: &BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
 ) -> Result<InterprocSummarySet, InterprocSummarySchemaError> {
     validate_function_summary_map(seed_summaries)?;
-    let abi = AbiProfile::from_arch(arch);
     let mut locals = BTreeMap::new();
     let mut current = seed_summaries.clone();
 
     for function in functions {
+        let abi = function.prepared.abi().unwrap_or_default();
         let local = collect_local_summary_facts(function.prepared, &abi);
         current
             .entry(function.id)
