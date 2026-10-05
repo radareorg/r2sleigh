@@ -193,13 +193,15 @@ impl BlockOrigins {
             R2ILOp::Copy { src, .. } => self.of(src),
             // ARM clears the low bit of a loaded target before branching to it: the bit selects the instruction set, so the value still names its slot.
             R2ILOp::IntAnd { a, b, dst }
-                if b.space == SpaceId::Const && b.offset == truncated(u64::MAX << 1, dst.size) =>
+                if self.constant_of(b) == Some(truncated(u64::MAX << 1, dst.size)) =>
             {
                 match self.of(a)? {
                     slot @ ValueOrigin::LoadedSlot(_) => Some(slot),
                     ValueOrigin::Constant { .. } => self.arithmetic(op),
                 }
             }
+            // Adding zero is the identity: RISC-V's `jalr` adds its zero offset before the mask.
+            R2ILOp::IntAdd { a, b, .. } if self.constant_of(b) == Some(0) => self.of(a),
             R2ILOp::Load {
                 dst,
                 space: SpaceId::Ram,
@@ -212,6 +214,11 @@ impl BlockOrigins {
             // Every other operation the evaluator models folds wherever its operands do, so `movw`/`movt` build one number.
             _ => self.arithmetic(op),
         }
+    }
+
+    /// The number a varnode holds here, whether written as a literal or folded.
+    fn constant_of(&self, varnode: &Varnode) -> Option<u64> {
+        self.of(varnode)?.constant()
     }
 
     /// What `r2il::eval` says an operation computes over the numbers the block folded its operands to.
@@ -250,6 +257,49 @@ mod tests {
             block.push(op);
         }
         block
+    }
+
+    #[test]
+    fn a_target_offset_by_zero_and_masked_still_names_its_slot() {
+        // auipc t3; ld t3, slot; jalr t1, t3, 0 as Sleigh lifts it: ea = (t3 + zero) & ~one.
+        let unique = |offset| Varnode::unique(offset, 8);
+        let (loaded, zero, sum, mask, ea) = (
+            Varnode::register(0, 8),
+            unique(8),
+            unique(0x10),
+            unique(0x18),
+            unique(0x20),
+        );
+        let block = block(vec![
+            R2ILOp::Load {
+                dst: loaded.clone(),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x6c7f8, 8),
+            },
+            R2ILOp::Copy {
+                dst: zero.clone(),
+                src: Varnode::constant(0, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: sum.clone(),
+                a: loaded,
+                b: zero,
+            },
+            R2ILOp::IntNot {
+                dst: mask.clone(),
+                src: Varnode::constant(1, 8),
+            },
+            R2ILOp::IntAnd {
+                dst: ea.clone(),
+                a: sum,
+                b: mask,
+            },
+            R2ILOp::BranchInd { target: ea },
+        ]);
+        assert_eq!(
+            crate::terminal_indirect_loaded_slot(&block, 5).map(|slot| slot.offset),
+            Some(0x6c7f8)
+        );
     }
 
     #[test]

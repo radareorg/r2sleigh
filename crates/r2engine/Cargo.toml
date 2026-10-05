@@ -20,6 +20,7 @@ serde_json.workspace = true
 default = []
 x86 = ["r2sleigh-lift/x86"]
 arm = ["r2sleigh-lift/arm"]
+riscv = ["r2sleigh-lift/riscv"]
 
 [dev-dependencies]
 proptest = "1.6"

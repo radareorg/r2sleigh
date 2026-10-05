@@ -24,7 +24,7 @@ crossterm.workspace = true
 
 [features]
 default = []
-sleigh = ["r2engine/x86", "r2engine/arm"]
+sleigh = ["r2engine/x86", "r2engine/arm", "r2engine/riscv"]
 
 [lints]
 workspace = true

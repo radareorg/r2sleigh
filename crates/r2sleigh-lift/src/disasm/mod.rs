@@ -266,6 +266,8 @@ impl TrustedSleighProfile {
             ("arm", "arm", 32, SourceEndianness::Little) => Ok(Self::ArmCortexLe),
             #[cfg(feature = "arm")]
             ("arm", "thumb", 32, SourceEndianness::Little) => Ok(Self::ArmThumbLe),
+            #[cfg(feature = "riscv")]
+            ("riscv", "riscv", 64, SourceEndianness::Little) => Ok(Self::RiscV64Gc),
             _ => Err(LiftError::Unsupported(format!(
                 "no manually verified trusted Sleigh profile for source tuple {}/{}/{}/{:?}",
                 arch_id, cpu_id, bits, endianness
@@ -1695,6 +1697,17 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
             dwarf: sleigh_config::processor_arm::DWARF_ARMNEON,
             name: "ARM",
             cpu: "thumb",
+        }),
+        // RV64GC under the LP64D ABI, the usual Linux target.
+        #[cfg(feature = "riscv")]
+        "riscv64" | "riscv" | "rv64" => Some(EmbeddedSpecification {
+            sla: sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+            pspec: sleigh_config::processor_riscv::PSPEC_RV64GC,
+            cspec: sleigh_config::processor_riscv::CSPEC_RISCV64_FP,
+            windows_cspec: None,
+            dwarf: sleigh_config::processor_riscv::DWARF_RISCV64,
+            name: "riscv64",
+            cpu: "riscv",
         }),
         _ => None,
     }

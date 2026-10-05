@@ -1219,6 +1219,7 @@ fn map_architecture(
         object::Architecture::I386 => "x86",
         object::Architecture::Aarch64 | object::Architecture::Aarch64_Ilp32 => "AArch64",
         object::Architecture::Arm => "ARM",
+        object::Architecture::Riscv64 => "riscv64",
         other => return Err(ImageError::UnsupportedArchitecture(other)),
     };
     Ok(Arch {
