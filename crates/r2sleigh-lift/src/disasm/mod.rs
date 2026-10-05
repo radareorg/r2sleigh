@@ -1608,9 +1608,19 @@ pub struct EmbeddedMachine {
 /// It carries the compiler specification of the platform's usual toolchain
 /// and, where the language has one, the Windows toolchain's.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    let spec = embedded_specification(&arch_name.to_ascii_lowercase()).ok_or_else(|| {
-        LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
-    })?;
+    machine_of(arch_name, false)
+}
+
+/// The machine a Windows program for this architecture runs on, where its language differs.
+pub fn embedded_windows_machine(arch_name: &str) -> Result<EmbeddedMachine> {
+    machine_of(arch_name, true)
+}
+
+fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
+    let spec =
+        embedded_specification(&arch_name.to_ascii_lowercase(), windows).ok_or_else(|| {
+            LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
+        })?;
     let (arch, disasm) = embedded_arch_and_disassembler(spec.sla, spec.pspec, spec.name)?;
     Ok(EmbeddedMachine {
         arch,
@@ -1660,7 +1670,15 @@ struct Selection {
     cpu: &'static str,
 }
 
-fn selection(arch_name: &str) -> Option<Selection> {
+/// AppleSilicon is the superset decoder; it names no Windows compiler, which v8A does.
+fn selection(
+    arch_name: &str,
+    #[cfg_attr(
+        not(feature = "arm"),
+        expect(unused_variables, reason = "only AArch64 has a Windows language")
+    )]
+    windows: bool,
+) -> Option<Selection> {
     #[cfg(feature = "x86")]
     let x86 = Bundle {
         files: sleigh_config::processor_x86::FILES,
@@ -1700,6 +1718,10 @@ fn selection(arch_name: &str) -> Option<Selection> {
         #[cfg(feature = "x86")]
         "x86" | "x86-32" | "i386" | "i686" => select(x86, "x86:LE:32:default", None, "x86", "x86"),
         #[cfg(feature = "arm")]
+        "aarch64" | "arm64" | "arm64e" if windows => {
+            select(aarch64, "AARCH64:LE:64:v8A", None, "aarch64", "arm")
+        }
+        #[cfg(feature = "arm")]
         "aarch64" | "arm64" | "arm64e" => select(
             aarch64,
             "AARCH64:LE:64:AppleSilicon",
@@ -1722,8 +1744,8 @@ fn selection(arch_name: &str) -> Option<Selection> {
 }
 
 /// The embedded data one lower-cased architecture name selects, read through its language definition.
-fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
-    let chosen = selection(arch_name)?;
+fn embedded_specification(arch_name: &str, windows: bool) -> Option<EmbeddedSpecification> {
+    let chosen = selection(arch_name, windows)?;
     let Bundle { files, slas } = chosen.bundle;
     let file = |name: &str| {
         files

@@ -43,7 +43,7 @@ pub use disasm::{
 };
 pub use disasm::{
     EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
-    lifted_register_storage,
+    embedded_windows_machine, lifted_register_storage,
 };
 use r2il::ArchSpec;
 use r2il::Endianness;

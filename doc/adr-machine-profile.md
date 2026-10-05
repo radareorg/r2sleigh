@@ -52,7 +52,7 @@ matches an architecture name or a register name.
 - M1b (797e11f2): call effects from the prototype; callees are asked about the whole call universe.
 - M1c (5a205ad2): convention name, red zone and variadic tail from r2abi's cited ABI rows by platform.
 - M1d: float slots are the prototype's float entries (lanes such as `XMM0_Qa`), matched against the program root that holds them (B3, doc/adr-byte-relation.md); r2abi `Conventions` and its sdb files are deleted.
-- M0 rest: `.pspec` tracked values, `.dwarf` numbers (M5) and `.ldefs` selection: a machine names one language id, and its sla, pspec, compiler specs and DWARF file are read from that `<language>` entry. AppleSilicon names no Windows compiler, so an arm64 PE runs under the default cspec.
+- M0 rest: `.pspec` tracked values, `.dwarf` numbers (M5) and `.ldefs` selection: a machine names one language id, and its sla, pspec, compiler specs and DWARF file are read from that `<language>` entry. AppleSilicon names no Windows compiler, so a PE selects AArch64 v8A, which names `AARCH64_win.cspec`.
 
 ## Left
 

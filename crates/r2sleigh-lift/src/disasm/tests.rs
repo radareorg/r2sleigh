@@ -1341,3 +1341,16 @@ fn fixed_value_pcode_uses_the_typed_sleigh_translation() {
         })
     );
 }
+
+/// A Windows AArch64 program runs under the v8A language, the one whose definition names a Windows compiler.
+#[cfg(feature = "arm")]
+#[test]
+fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
+    let windows = embedded_windows_machine("aarch64").expect("v8A");
+    assert_eq!(
+        windows.windows_compiler_spec,
+        Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN)
+    );
+    let usual = embedded_machine("aarch64").expect("AppleSilicon");
+    assert_eq!(usual.windows_compiler_spec, None);
+}

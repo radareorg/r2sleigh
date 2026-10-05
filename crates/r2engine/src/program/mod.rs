@@ -198,9 +198,14 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// again whenever the source says it is at a different revision.
     pub fn ensure_current(&mut self) -> Result<(), String> {
         if self.db.inputs().machine.is_none() {
-            let arch = self.source().container().arch.name.clone();
-            let machine =
-                r2sleigh_lift::embedded_machine(&arch).map_err(|error| error.to_string())?;
+            let container = self.source().container();
+            let arch = container.arch.name.clone();
+            // A PE runs under the Windows toolchain, whose language may differ.
+            let machine = match container.format {
+                Format::Pe => r2sleigh_lift::embedded_windows_machine(&arch),
+                _ => r2sleigh_lift::embedded_machine(&arch),
+            }
+            .map_err(|error| error.to_string())?;
             // Whether any function is Thumb is discovery's answer, so the
             // decoder is loaded wherever the architecture has one.
             let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
