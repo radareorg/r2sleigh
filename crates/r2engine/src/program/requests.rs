@@ -586,7 +586,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             return Ok(index.finish(coverage));
         }
         let program = &*self;
-        let walker = super::returns::Walking::new(program, true)?;
+        let walker = super::returns::Walking::new(program.view(), true)?;
         for (&entry, walked) in walked {
             // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
             let lifted = walked.clone().and_then(|thumb| {
@@ -656,7 +656,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         // specification, so one assembly serves either decoder.
         self.ensure_assembled(first)?;
         let program = &*self;
-        let walker = super::returns::Walking::new(program, true)?;
+        let walker = super::returns::Walking::new(program.view(), true)?;
         let found = crate::discovery::functions(program, seeds, &walker);
         let extents = found
             .walks
@@ -681,8 +681,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             .into_iter()
             .map(|(entry, walk)| (entry, walk.map(|walk| walk.thumb)))
             .collect();
-        let at = (self.source().identity(), self.source().byte_revision());
-        self.hold_returns(at, found.returns);
         if self.db.inputs().thumb_machine.is_some() {
             let modes = found
                 .functions

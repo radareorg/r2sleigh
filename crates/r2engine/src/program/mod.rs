@@ -12,6 +12,9 @@ mod pointers;
 mod requests;
 mod returns;
 pub mod source;
+mod view;
+
+use view::View;
 
 pub use requests::{
     AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge, Rendering,
@@ -72,8 +75,6 @@ pub struct OpenProgram<S: Source + 'static> {
     next: Option<crate::EngineExecutionControl>,
     /// Which parameters of each callee take an address, read once per callee and revision.
     pointers: std::sync::Mutex<pointers::Pointers>,
-    /// Whether control comes back from each function, derived on first use per state of the bytes.
-    returns: std::sync::Mutex<returns::Returns>,
     /// What each callee's body proves, read once per callee and state of the program.
     callee_reads: crate::query::PerRevision<crate::native::CalleeRead>,
     /// The reference index, and the state of the program it was read at.
@@ -101,7 +102,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             control: crate::EngineExecutionControl::default(),
             next: None,
             pointers: std::sync::Mutex::default(),
-            returns: std::sync::Mutex::default(),
             callee_reads: crate::query::PerRevision::default(),
             references: None,
             survey: None,
@@ -362,30 +362,17 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// Assembled once and handed out, so a caller holds one description of the
     /// program rather than building its own from the parts.
     fn target(&self, addr: u64) -> Result<NativeTarget<'_>, String> {
-        self.target_of(
-            self.machine_at(addr)
-                .ok_or("no Sleigh specification for this architecture")?,
-        )
+        self.view().target(addr)
     }
 
-    fn target_of<'a>(&'a self, machine: &'a EmbeddedMachine) -> Result<NativeTarget<'a>, String> {
-        let assembled = self
-            .db
-            .inputs()
-            .assembled
-            .as_ref()
-            .ok_or("the program was not assembled for this address")?;
-        Ok(NativeTarget {
-            arch: &machine.arch,
-            disasm: &machine.disasm,
-            cpu: machine.cpu,
-            convention: assembled.convention,
-            call_effect: assembled.call_effect.as_ref(),
-            compiler: &assembled.compiler,
-            dwarf: &machine.dwarf,
-            prototypes: &assembled.prototypes,
-            declarations: &self.source().container().declarations,
-        })
+    /// The program as a query reads it, over the tables this request holds.
+    fn view(&self) -> View<'_, S> {
+        View::with(&self.db, Rc::clone(&self.names), Rc::clone(&self.imports))
+    }
+
+    /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
+    pub(super) fn comes_back(&self, callee: u64) -> bool {
+        self.view().comes_back(callee)
     }
 
     /// One function's analysis, done once per state of this program.
@@ -478,26 +465,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// nearest below it of a mapping symbol and a function discovery placed,
     /// the container's statement winning a tie.
     fn machine_at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
-        self.machine_in(self.thumb_at(vaddr))
-    }
-
-    /// Whether the code at this address is Thumb, as `machine_at` decides it.
-    fn thumb_at(&self, vaddr: u64) -> bool {
-        let stated = self.db.inputs().mapped.range(..=vaddr).next_back();
-        let derived = self.db.inputs().modes.range(..=vaddr).next_back();
-        match (stated, derived) {
-            (Some((at, thumb)), Some((from, _))) if at >= from => *thumb,
-            (_, Some((_, thumb))) | (Some((_, thumb)), None) => *thumb,
-            (None, None) => false,
-        }
-    }
-
-    /// The decoder for one instruction set.
-    fn machine_in(&self, thumb: bool) -> Option<&EmbeddedMachine> {
-        match thumb {
-            true => self.db.inputs().thumb_machine.as_ref(),
-            false => self.db.inputs().machine.as_ref(),
-        }
+        self.view().machine_at(vaddr)
     }
 
     /// How this program spells a word in memory.
@@ -522,33 +490,15 @@ impl<S: Source + 'static> Decoders for OpenProgram<S> {
 
 impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        self.source().read(vaddr, max)
+        self.view().read(vaddr, max)
     }
 
-    /// The segment the container states holds this address. Read from the
-    /// container alone, so no write moves it and nothing need record asking.
     fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
-        let segment = self.source().container().segment_at(vaddr)?;
-        let (start, end) = segment.range();
-        Some(crate::body::Region {
-            start,
-            end,
-            file_end: segment.file_end(),
-            execute: segment.permissions.execute,
-            write: segment.permissions.write,
-        })
+        self.view().region(vaddr)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
-        // A stub is a function of the program's as much as a body is: control
-        // that reaches one has left the function it came from.
-        self.imports.contains_key(&vaddr)
-            || self
-                .db
-                .inputs()
-                .defined
-                .get(&vaddr)
-                .is_some_and(|function| *function)
+        self.view().is_entry(vaddr)
     }
 
     fn returns(&self, callee: u64) -> bool {
@@ -556,47 +506,30 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
     }
 
     fn returns_through(&self, slot: u64) -> bool {
-        self.returns_through_slot(slot)
+        self.view().returns_through(slot)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
-        self.db
-            .inputs()
-            .assembled
-            .as_ref()
-            .and_then(|held| held.link.clone())
+        self.view().return_address_register()
     }
 
     fn mode_register(&self) -> Option<r2il::Varnode> {
-        self.db
-            .inputs()
-            .assembled
-            .as_ref()
-            .and_then(|held| held.mode.clone())
+        self.view().mode_register()
     }
 }
 
 impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn control(&self) -> crate::EngineExecutionControl {
-        // The token and the meter are shared, so this is the request's own
-        // control rather than a copy that nothing could stop.
+        // The token and the meter are shared: the request's own control, not a copy.
         self.control.clone()
     }
 
     fn name_at(&self, vaddr: u64) -> Option<String> {
-        // The plain name, with no namespace on it: this keys the prototype
-        // table and spells a call, where a listing asks the same entry for
-        // `sym.imp.printf`. A slot the loader fills is not in the table --
-        // only a stub is an address the program transfers to -- so it is
-        // asked for separately.
-        self.names
-            .text_at(vaddr)
-            .map(str::to_owned)
-            .or_else(|| self.db.inputs().slots.get(&vaddr).cloned())
+        self.view().name_at(vaddr)
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.db.inputs().static_data.holds(vaddr)
+        self.view().holds_static_data(vaddr)
     }
 
     fn loader_writes(&self) -> &[LoaderWrite] {
@@ -604,32 +537,15 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     }
 
     fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source().container().immutable(range)
+        self.view().immutable(range)
     }
 
     fn holds_code(&self, vaddr: u64) -> bool {
-        match &self.db.inputs().code {
-            Some(code) => code.holds(vaddr),
-            None => crate::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
-        }
+        self.view().holds_code(vaddr)
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
-        self.source()
-            .container()
-            .unwind
-            .at(entry)
-            .map(|frame| {
-                frame
-                    .saves
-                    .iter()
-                    .map(|(register, entry_offset)| r2source::SourceFrameSave {
-                        register: *register,
-                        entry_offset: *entry_offset,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.view().frame_saves(entry)
     }
 
     fn extents(&self) -> &r2types::ProgramExtents {
@@ -637,11 +553,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {
-        self.imports
-            .get(&vaddr)
-            .map(|stub| &stub.symbol)
-            .or_else(|| self.db.inputs().slots.get(&vaddr))
-            .cloned()
+        self.view().import_at(vaddr)
     }
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
@@ -683,7 +595,7 @@ impl<S: Source + 'static> crate::body::Program for Recording<'_, S> {
     // What a slot holds is the container's statement, fixed for the revision
     // the derivation is keyed by, so it is not a consulted answer.
     fn returns_through(&self, slot: u64) -> bool {
-        self.program.returns_through_slot(slot)
+        crate::body::Program::returns_through(self.program, slot)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

@@ -7,4 +7,4 @@ assigning_clones 10
 needless_pass_by_ref_mut 11
 clone_on_ref_ptr 3
 mut_mut 0
-long_comments 3797
+long_comments 3796

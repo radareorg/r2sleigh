@@ -100,9 +100,40 @@ pub struct DbStats {
     pub backdated: u64,
 }
 
+/// A held answer found good, with what it depends on.
+type Green<V> = (Rc<V>, Rc<[Dep]>);
+
+/// What one running query has read, and which held answers' dependencies it has already taken.
+#[derive(Default)]
+struct Frame {
+    deps: Vec<Dep>,
+    taken: BTreeSet<*const Dep>,
+}
+
+#[derive(Clone)]
 enum Dep {
     Bytes(Range<u64>),
     Query { table: TypeId, key: Rc<dyn Any> },
+}
+
+impl Dep {
+    /// Whether what this dependency names has moved since `verified_at`.
+    fn moved_since<I: Inputs + 'static>(
+        &self,
+        db: &Db<I>,
+        verified_at: u64,
+    ) -> Result<bool, Cycle> {
+        Ok(match self {
+            Dep::Bytes(range) => db.inputs.written_since(verified_at, range),
+            Dep::Query { table, key } => {
+                let table = db.tables.borrow().get(table).map(Rc::clone);
+                let table = table.expect("a recorded query's table exists");
+                table
+                    .verify(db, key.as_ref())?
+                    .is_none_or(|changed| changed > verified_at)
+            }
+        })
+    }
 }
 
 struct Entry<V> {
@@ -132,7 +163,7 @@ pub struct Db<I: Inputs> {
     inputs: I,
     tables: RefCell<HashMap<TypeId, Rc<dyn AnyTable<I>>>>,
     /// The dependencies of each query running, innermost last.
-    frames: RefCell<Vec<Vec<Dep>>>,
+    frames: RefCell<Vec<Frame>>,
     stats: RefCell<DbStats>,
 }
 
@@ -204,6 +235,60 @@ impl<I: Inputs + 'static> Db<I> {
         Ok(Rc::clone(&entry.value))
     }
 
+    /// `Q`'s answer at `key` where held and good; never computes, and records the answer's own dependencies, so no cycle closes.
+    pub fn held<Q: Query<I>>(&self, key: &Q::Key) -> Result<Option<Rc<Q::Value>>, Cycle> {
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        let Some((value, deps)) = typed.green(self, key)? else {
+            return Ok(None);
+        };
+        // Deposits share one list, so each list is taken once per frame.
+        if let Some(frame) = self.frames.borrow_mut().last_mut()
+            && frame.taken.insert(deps.as_ptr())
+        {
+            frame.deps.extend(deps.iter().cloned());
+        }
+        Ok(Some(value))
+    }
+
+    /// Hold answers a computation found besides its own, depending on what it has read; each must equal a direct computation.
+    pub fn deposit<Q: Query<I>>(&self, answers: impl IntoIterator<Item = (Q::Key, Q::Value)>) {
+        let deps: Rc<[Dep]> = match self.frames.borrow().last() {
+            Some(frame) => coalesced(frame.deps.clone()).into(),
+            None => return,
+        };
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        let now = self.inputs.byte_revision();
+        let running = typed.running.borrow();
+        let mut entries = typed.entries.borrow_mut();
+        for (key, value) in answers {
+            if running.contains(&key) {
+                continue;
+            }
+            let changed_at = match entries.get(&key) {
+                Some(held) if held.verified_at == now => continue,
+                Some(held) if *held.value == value => held.changed_at,
+                _ => now,
+            };
+            entries.insert(
+                key,
+                Entry {
+                    value: Rc::new(value),
+                    deps: Rc::clone(&deps),
+                    verified_at: now,
+                    changed_at,
+                },
+            );
+        }
+    }
+
     fn table<Q: Query<I>>(&self) -> Rc<dyn AnyTable<I>> {
         let mut tables = self.tables.borrow_mut();
         Rc::clone(tables.entry(TypeId::of::<Q>()).or_insert_with(|| {
@@ -217,7 +302,7 @@ impl<I: Inputs + 'static> Db<I> {
 
     fn record(&self, dep: Dep) {
         if let Some(frame) = self.frames.borrow_mut().last_mut() {
-            frame.push(dep);
+            frame.deps.push(dep);
         }
     }
 }
@@ -234,7 +319,7 @@ impl<I: Inputs + 'static, K: Ord> Running<'_, I, K> {
         if let Some(key) = self.key.take() {
             self.running.borrow_mut().remove(&key);
         }
-        coalesced(self.db.frames.borrow_mut().pop().unwrap_or_default())
+        coalesced(self.db.frames.borrow_mut().pop().unwrap_or_default().deps)
     }
 }
 
@@ -287,21 +372,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             return Ok(changed_at);
         }
         for dep in deps.iter() {
-            let moved = match dep {
-                Dep::Bytes(range) => db.inputs.written_since(verified_at, range),
-                Dep::Query { table, key } => {
-                    let table = db
-                        .tables
-                        .borrow()
-                        .get(table)
-                        .map(Rc::clone)
-                        .expect("a recorded query's table exists");
-                    table
-                        .verify(db, key.as_ref())?
-                        .is_none_or(|changed| changed > verified_at)
-                }
-            };
-            if moved {
+            if dep.moved_since(db, verified_at)? {
                 return self.execute(db, key);
             }
         }
@@ -312,6 +383,36 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         Ok(changed_at)
     }
 
+    /// The held answer and its dependencies where none has moved, checked without computing this query.
+    fn green(&self, db: &Db<I>, key: &Q::Key) -> Result<Option<Green<Q::Value>>, Cycle> {
+        let now = db.inputs.byte_revision();
+        let Some((value, deps, verified_at)) = self.entries.borrow().get(key).map(|entry| {
+            (
+                Rc::clone(&entry.value),
+                Rc::clone(&entry.deps),
+                entry.verified_at,
+            )
+        }) else {
+            return Ok(None);
+        };
+        if verified_at != now {
+            // The first dependency that moved or cycled decides; none is checked past it.
+            let mut checked = deps.iter().map(|dep| dep.moved_since(db, verified_at));
+            if checked
+                .find(|moved| !matches!(moved, Ok(false)))
+                .transpose()?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            if let Some(entry) = self.entries.borrow_mut().get_mut(key) {
+                entry.verified_at = now;
+            }
+        }
+        db.stats.borrow_mut().reused += 1;
+        Ok(Some((value, deps)))
+    }
+
     /// Run the query at `key` and hold its answer; its `changed_at`.
     fn execute(&self, db: &Db<I>, key: &Q::Key) -> Result<u64, Cycle> {
         if !self.running.borrow_mut().insert(key.clone()) {
@@ -320,7 +421,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
                 key: Rc::new(key.clone()),
             });
         }
-        db.frames.borrow_mut().push(Vec::new());
+        db.frames.borrow_mut().push(Frame::default());
         let frame = Running {
             db,
             running: &self.running,
@@ -434,6 +535,51 @@ mod tests {
         const NAME: &'static str = "even";
         fn compute(db: &Db<Memory>, key: &(u64, u64)) -> bool {
             db.get::<Sum>(key).expect("acyclic").is_multiple_of(2)
+        }
+    }
+
+    /// The sum of the bytes up to `at`, built on any shorter prefix already held, depositing each prefix it passes.
+    struct Prefix;
+    impl Query<Memory> for Prefix {
+        type Key = u64;
+        type Value = u64;
+        const NAME: &'static str = "prefix";
+        fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
+            let held = |shorter| db.held::<Prefix>(&shorter).expect("never computes");
+            let start = (0..at)
+                .rev()
+                .find_map(|shorter| Some((shorter + 1, *held(shorter)?)));
+            let (from, mut sum) = start.unwrap_or((0, 0));
+            let mut found = Vec::new();
+            for index in from..=at {
+                sum += u64::from(read(db, index..index + 1)[0]);
+                found.push((index, sum));
+            }
+            found.pop();
+            db.deposit::<Prefix>(found);
+            sum
+        }
+    }
+
+    #[test]
+    fn a_held_or_deposited_answer_equals_a_computed_one() {
+        let mut db = Db::new(Memory::new((1..=16).collect()));
+        assert_eq!(*db.get::<Prefix>(&9).unwrap(), 55);
+        // Nothing held at 3 was computed, only deposited, and a miss records nothing.
+        assert_eq!(db.held::<Prefix>(&3).unwrap().map(|sum| *sum), Some(10));
+        assert_eq!(db.held::<Prefix>(&12).unwrap(), None);
+        let computed = db.stats().computed;
+        assert_eq!(*db.get::<Prefix>(&12).unwrap(), 91);
+        assert_eq!(db.stats().computed, computed + 1);
+        // A write below a deposit invalidates it, and the answers stay a fresh open's.
+        db.inputs_mut().write(2, 100);
+        assert_eq!(db.held::<Prefix>(&3).unwrap(), None);
+        let fresh = Db::new(db.inputs().clone());
+        for at in [3, 9, 12] {
+            assert_eq!(
+                *db.get::<Prefix>(&at).unwrap(),
+                *fresh.get::<Prefix>(&at).unwrap()
+            );
         }
     }
 
@@ -555,6 +701,11 @@ mod tests {
                         proptest::prop_assert_eq!(
                             *db.get::<Pointer>(&at).unwrap(),
                             *fresh.get::<Pointer>(&at).unwrap()
+                        );
+                        // Prefixes peek and deposit, so what each depends on follows the order asked; the value does not.
+                        proptest::prop_assert_eq!(
+                            *db.get::<Prefix>(&at).unwrap(),
+                            *fresh.get::<Prefix>(&at).unwrap()
                         );
                     }
                 }
