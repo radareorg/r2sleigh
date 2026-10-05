@@ -70,126 +70,18 @@ struct Closure {
     parents: crate::dense::IdMap<ValueId, ValueId>,
 }
 
-/// The bytes of a value an observation reaches, one bit per byte.
-///
-/// Bit `b` stands for byte `b`, least significant first, so a slice offset, a
-/// tile width, a widening and a constant's surviving bytes are all counted in
-/// the one unit a value's size is counted in. One word names 64 bytes; a
-/// value wider than that, and any shift that would carry an observed byte out
-/// of the word, is [`ByteMask::All`]. Saturating to every byte is the side
-/// this may err on: an unobserved byte called observed costs a formal or a
-/// merge that was not needed, while an observed byte called unobserved drops
-/// an argument the program reads and leaves its read uninitialised.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ByteMask {
-    /// Exactly these bytes, bit `b` for byte `b`.
-    Bytes(u64),
-    /// Every byte of the value, however wide.
-    All,
-}
+pub(crate) use crate::bytes::ByteMask;
 
-impl ByteMask {
-    /// No byte.
-    pub const NONE: Self = Self::Bytes(0);
-
-    /// Every byte of a value `size_bytes` wide.
-    pub const fn whole(size_bytes: u32) -> Self {
-        match size_bytes {
-            0..64 => Self::Bytes((1u64 << size_bytes) - 1),
-            64 => Self::Bytes(u64::MAX),
-            _ => Self::All,
+/// The bytes of a constant `size_bytes` wide that are not zero, which are the
+/// only bytes an `and` with it lets through; zero above its eighth byte.
+fn nonzero_bytes_of(bits: u64, size_bytes: u32) -> ByteMask {
+    let mut mask = 0u64;
+    for byte in 0..size_bytes.min(8) {
+        if (bits >> (8 * byte)) & 0xff != 0 {
+            mask |= 1 << byte;
         }
     }
-
-    /// The bytes of a constant `size_bytes` wide that are not zero, which
-    /// are the only bytes an `and` with it lets through.
-    ///
-    /// A constant carries at most eight bytes of bits and is zero above them.
-    fn nonzero_bytes_of(bits: u64, size_bytes: u32) -> Self {
-        let mut mask = 0u64;
-        for byte in 0..size_bytes.min(8) {
-            if (bits >> (8 * byte)) & 0xff != 0 {
-                mask |= 1 << byte;
-            }
-        }
-        Self::Bytes(mask)
-    }
-
-    /// Whether the mask names no byte at all.
-    pub const fn is_empty(self) -> bool {
-        matches!(self, Self::Bytes(0))
-    }
-
-    /// The bytes in either mask.
-    #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Bytes(a), Self::Bytes(b)) => Self::Bytes(a | b),
-            _ => Self::All,
-        }
-    }
-
-    /// The bytes in both masks.
-    #[must_use]
-    pub const fn intersection(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Bytes(a), Self::Bytes(b)) => Self::Bytes(a & b),
-            (Self::All, other) | (other, Self::All) => other,
-        }
-    }
-
-    /// The same bytes `bytes` places more significant, as a slice at offset
-    /// `bytes` asks of the value it is cut from.
-    ///
-    /// A byte carried past the word saturates to every byte rather than
-    /// falling off.
-    #[must_use]
-    pub const fn shifted_up(self, bytes: u32) -> Self {
-        match self {
-            Self::Bytes(0) => Self::NONE,
-            Self::Bytes(mask) if bytes < 64 && mask.leading_zeros() >= bytes => {
-                Self::Bytes(mask << bytes)
-            }
-            _ => Self::All,
-        }
-    }
-
-    /// The same bytes `bytes` places less significant, as a concatenation
-    /// asks of its high tile when the low tile is `bytes` wide.
-    ///
-    /// A byte below the shift belongs to the low tile. An exact mask names
-    /// nothing at or above byte 64, so nothing observed falls off the top.
-    #[must_use]
-    pub const fn shifted_down(self, bytes: u32) -> Self {
-        match self {
-            Self::Bytes(mask) => Self::Bytes(if bytes < 64 { mask >> bytes } else { 0 }),
-            Self::All => Self::All,
-        }
-    }
-
-    /// How many least significant bytes cover every byte the mask names:
-    /// through the most significant one, gaps included, since a lane starts
-    /// at byte zero. `None` for no byte, or a mask saturated past what one
-    /// word can say.
-    ///
-    /// It depends only on which bytes are read, not on how wide the value
-    /// that holds them is, so a register read through its whole root and
-    /// through a narrower lane of it gives one answer.
-    pub const fn extent_bytes(self) -> Option<u32> {
-        match self {
-            Self::Bytes(0) | Self::All => None,
-            Self::Bytes(mask) => Some(64 - mask.leading_zeros()),
-        }
-    }
-}
-
-impl std::fmt::Display for ByteMask {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Bytes(mask) => write!(f, "{mask:#x}"),
-            Self::All => f.write_str("all"),
-        }
-    }
+    ByteMask::Bytes(mask)
 }
 
 /// What an observation of `observed` bytes of a value asks of each input.
@@ -277,7 +169,7 @@ fn observed_input_bytes(
                 let mask_of = |value: ValueId| {
                     constant(value)
                         .zip(size_of(value))
-                        .map(|(bits, size)| ByteMask::nonzero_bytes_of(bits, size))
+                        .map(|(bits, size)| nonzero_bytes_of(bits, size))
                 };
                 match (mask_of(inputs[0]), mask_of(inputs[1])) {
                     (None, Some(mask)) => vec![(inputs[0], observed.intersection(mask))],

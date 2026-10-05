@@ -30,6 +30,7 @@ use r2source::{CanonicalStorageId, CanonicalStorageSpace};
 
 use crate::SSAFunction;
 use crate::arena::OpId;
+use crate::bytes::Rule;
 use crate::dense::{IdMap, IdSet};
 use crate::op::SSAOp;
 use crate::value_table::VarId;
@@ -329,31 +330,30 @@ pub(crate) fn transfer<V>(
         (true, true) => Byte::fill(Fill::Sign),
         (false, sign) => Byte::Widened { sign },
     };
-    let mut out = match op {
-        SSAOp::Copy { src, .. } => input(src),
-        SSAOp::IntZExt { src, .. } => extended(input(src), size, fill(false)),
-        SSAOp::IntSExt { src, .. } => extended(input(src), size, fill(true)),
-        SSAOp::Subpiece { src, offset, .. } => {
-            input(src).into_iter().skip(*offset as usize).collect()
-        }
-        SSAOp::Piece { hi, lo, .. } => {
-            let mut bytes = input(lo);
-            bytes.extend(input(hi));
+    // The one byte relation (`crate::bytes`), read forward.
+    let sources = op.sources();
+    let mut out = match crate::bytes::rule(op, &facts) {
+        Rule::Copy => input(sources[0]),
+        Rule::Extend { sign, .. } => extended(input(sources[0]), size, fill(sign)),
+        Rule::Slice { offset } => input(sources[0])
+            .into_iter()
+            .skip(offset as usize)
+            .collect(),
+        Rule::Concat { .. } => {
+            let mut bytes = input(sources[1]);
+            bytes.extend(input(sources[0]));
             bytes
         }
-        SSAOp::Insert(insert) => match lane(facts(&insert.position).1) {
-            Some(first) => {
-                let mut bytes = input(&insert.src);
-                for (at, byte) in input(&insert.value).into_iter().enumerate() {
-                    if let Some(slot) = bytes.get_mut(first + at) {
-                        *slot = byte;
-                    }
+        Rule::Insert { first, .. } => {
+            let mut bytes = input(sources[0]);
+            for (at, byte) in input(sources[1]).into_iter().enumerate() {
+                if let Some(slot) = bytes.get_mut(first as usize + at) {
+                    *slot = byte;
                 }
-                bytes
             }
-            None => Vec::new(),
-        },
-        _ => Vec::new(),
+            bytes
+        }
+        Rule::Lanewise { .. } | Rule::Whole => Vec::new(),
     };
     out.resize(size, Byte::Data);
     out
@@ -365,15 +365,6 @@ fn extended(mut bytes: Bytes, size: usize, fill: Byte) -> Bytes {
         bytes.resize(size, fill);
     }
     bytes
-}
-
-/// The first byte an INSERT writes, where its position is a byte-aligned
-/// constant.
-fn lane(position: Option<u64>) -> Option<usize> {
-    let bits = position?;
-    (bits % 8 == 0)
-        .then(|| usize::try_from(bits / 8).ok())
-        .flatten()
 }
 
 /// How many bytes of a result carrier hold what the function put there: one

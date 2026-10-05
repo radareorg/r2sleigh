@@ -35,6 +35,7 @@
 //! done with the proof rather than a pattern.
 
 use crate::SSAFunction;
+use crate::bytes::ByteMask;
 use crate::cfg::BlockTerminator;
 use crate::function::EditPlan;
 use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
@@ -49,13 +50,6 @@ const fn whole(size: u32) -> u64 {
     } else {
         (1u64 << size) - 1
     }
-}
-
-/// The bytes of a constant that are not zero, as a byte mask.
-fn nonzero_bytes(bits: u64) -> u64 {
-    (0..8)
-        .filter(|byte| (bits >> (byte * 8)) & 0xff != 0)
-        .fold(0, |mask, byte| mask | (1 << byte))
 }
 
 /// The bytes an INSERT's value occupies in its result, where its position is
@@ -155,71 +149,29 @@ fn kind(graph: &SsaGraph, inst: &GraphInst) -> Kind {
     }
 }
 
-/// The bytes of each input an exact operation reads when `demanded` of its
-/// output is read, in input order.
-fn transfer(
-    graph: &SsaGraph,
-    inst: &GraphInst,
-    demanded: u64,
-    size: impl Fn(ValueId) -> u32,
-) -> Vec<u64> {
-    let of = |index: usize| {
-        inst.inputs
-            .get(index)
-            .map_or(0, |value| whole(size(*value)))
-    };
+/// The bytes of input `index` an exact operation reads when `demanded` of its
+/// output is read, by the one byte relation (`crate::bytes`).
+fn read_by(graph: &SsaGraph, inst: &GraphInst, index: usize, demanded: u64) -> ByteMask {
+    let out = ByteMask::Bytes(demanded);
     match &inst.payload {
-        InstPayload::Phi { .. } => (0..inst.inputs.len())
-            .map(|index| demanded & of(index))
-            .collect(),
-        InstPayload::Op(op) => match op {
-            // A byte the constant operand clears is zero whatever the other
-            // operand holds there, so the other is not read at that byte.
-            SSAOp::IntAnd { a, b, .. } => {
-                let kept = |other: &ValueId| match size(*other) <= 8 {
-                    true => graph
-                        .var(*other)
-                        .constant_bits()
-                        .map_or(u64::MAX, nonzero_bytes),
-                    false => u64::MAX,
-                };
-                vec![demanded & kept(b) & of(0), demanded & kept(a) & of(1)]
-            }
-            SSAOp::Copy { .. }
-            | SSAOp::IntZExt { .. }
-            | SSAOp::IntOr { .. }
-            | SSAOp::IntXor { .. } => (0..inst.inputs.len())
-                .map(|index| demanded & of(index))
-                .collect(),
-            SSAOp::IntSExt { src, .. } => {
-                let within = whole(size(*src));
-                let sign = match demanded & !within {
-                    0 => 0,
-                    _ => 1u64.checked_shl(size(*src).saturating_sub(1)).unwrap_or(0),
-                };
-                vec![(demanded & within) | sign]
-            }
-            SSAOp::Subpiece { offset, .. } => {
-                vec![demanded.checked_shl(*offset).unwrap_or(0) & of(0)]
-            }
-            SSAOp::Piece { lo, .. } => vec![
-                demanded.checked_shr(size(*lo)).unwrap_or(0) & of(0),
-                demanded & of(1),
-            ],
-            SSAOp::Insert(insert) => {
-                let Some((first, lane)) =
-                    inserted_lane(graph.var(insert.value), graph.var(insert.position))
-                else {
-                    return vec![of(0), of(1), of(2)];
-                };
-                vec![
-                    demanded & !lane & of(0),
-                    demanded.checked_shr(first).unwrap_or(0) & of(1),
-                    of(2),
-                ]
-            }
-            _ => (0..inst.inputs.len()).map(of).collect(),
-        },
+        InstPayload::Phi { .. } => out,
+        InstPayload::Op(op) => {
+            let facts = |value: &ValueId| {
+                let var = graph.var(*value);
+                (var.size, var.constant_bits())
+            };
+            crate::bytes::rule(op, facts)
+                .backward(index, out)
+                .unwrap_or(ByteMask::All)
+        }
+    }
+}
+
+/// A mask as the word this pass keeps, trimmed to a value `size` bytes wide.
+fn word(mask: ByteMask, size: u32) -> u64 {
+    match mask.intersection(ByteMask::whole(size)) {
+        ByteMask::Bytes(bytes) => bytes,
+        ByteMask::All => u64::MAX,
     }
 }
 
@@ -278,16 +230,17 @@ impl Demand {
             let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
                 continue;
             };
-            let masks = match kind(graph, inst) {
-                Kind::Exact => transfer(graph, inst, demand.bytes(value), size),
-                Kind::Pure => inst
-                    .inputs
-                    .iter()
-                    .map(|input| whole(size(*input)))
-                    .collect(),
+            let exact = match kind(graph, inst) {
+                Kind::Exact => true,
+                Kind::Pure => false,
                 Kind::Effect => continue,
             };
-            for (input, mask) in inst.inputs.iter().zip(masks) {
+            let demanded = demand.bytes(value);
+            for (index, input) in inst.inputs.iter().enumerate() {
+                let mask = match exact {
+                    true => word(read_by(graph, inst, index, demanded), size(*input)),
+                    false => whole(size(*input)),
+                };
                 demand.raise(*input, mask, &mut pending);
             }
         }
