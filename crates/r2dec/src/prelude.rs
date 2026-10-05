@@ -829,7 +829,16 @@ int main(void)
         for helper in &helpers {
             unit.push_str(&helper.definition());
         }
-        unit.push_str(CHECKS);
+        // A residual traps when called, so it is referenced, not run.
+        let referenced = helpers
+            .iter()
+            .map(|helper| format!("    (void)&{};\n", helper.name()))
+            .collect::<String>();
+        unit.push_str(&CHECKS.replacen(
+            "int main(void)\n{\n",
+            &format!("int main(void)\n{{\n{referenced}"),
+            1,
+        ));
         let dir = std::env::temp_dir().join(format!(
             "r2dec-prelude-{}-{:?}",
             std::process::id(),

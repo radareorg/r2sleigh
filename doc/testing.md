@@ -46,6 +46,8 @@ and `run_coverage.sh` builds and uses the release binary.
 | How much of each corpus binary renders, against a baseline? | `./tests/coverage/run_coverage.sh [--accept-baseline]` |
 | Does the rendered C compute what the binary computes (x86-64 Linux)? | `tests/equiv/run_equiv.py --r2s target/debug/r2s --baseline tests/equiv/baseline.json` |
 | What does DecBench score, on its own protocol? | `tests/decbench/run_decbench.sh` (see its README) |
+| Did any rendering move, base against head? | `python3 scripts/census.py run --r2s <r2s> --out <dir>` per side, then `census.py diff <base> <head> --report <file>` (CI: Census + Timing vs Base) |
+| Did a large function get slower? | `python3 scripts/census.py time --r2s <base> --r2s <head> --bins <radare2>/test/bins/elf` (fails above 1.3x in CI) |
 | How robust is one large binary? | `tests/coverage/sweep_binary.sh <binary>` |
 | How does a stage's cost grow with the body? | `R2SLEIGH_TIMING=1 tests/coverage/sweep_binary.sh <bin>`, then `tests/corpus/growth_fit.py` / `work_fit.py` |
 
