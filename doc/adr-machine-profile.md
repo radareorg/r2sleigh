@@ -93,12 +93,35 @@ what an architecture is.**
 | M1a | Argument and result slots from the default prototype's general register entries; a PE runs under the language's Windows specification | the slots' sdb source |
 | M1b | A callee is asked whether it leaves alone every register a caller may read that the convention does not preserve, not a fixed list; then call effects from the profile (preserved: `unaffected` less the return address register; clobbered: argument, result and `killedbycall` registers and the return address register, less what is preserved or reserved) | the sdb's clobber and preserve lists; the x86 direction flag becomes a cited ABI row |
 | M1c | The convention's name, red zone and variadic tail placement from r2abi's cited ABI rows, by platform (a PE is Windows) | the sdb's reads but its float slots |
-| M1d | Float argument and result slots from the prototype's float entries, which name lanes (`XMM0_Qa`); the return certificate, the binding plan's dead values and lane inserts made to agree on a lane slot first | r2abi `Conventions` and its sdb files |
+| M1d | Float argument and result slots from the prototype's float entries, which name lanes (`XMM0_Qa`), with a slot read as a lane of the register family's program root wherever a boundary is matched | r2abi `Conventions` and its sdb files |
 | M2 | r2ssa reads roles and slots only | `abi.rs` alias tables, `from_arch_spec`, `call_argument_register_defs`/`return_read_register_defs` by name, `call_moves_stack_pointer` by family, the direction-flag class check |
 | M3 | r2types reads the profile through the facts | `prepare.rs` alias and frame tables, `arrays.rs` prefixes, `signature_infer` convention inference by name, `assumptions.rs` lists |
 | M4 | r2dec spells from the profile's register file | the label list, per-architecture `sp`/`fp`/argument/result names, the x86-64 default |
 | M5 | r2image and r2engine | the DWARF tables, `map_architecture`'s refusal of RISC-V, family to bits and back, the program counter by name |
 | M6 | RISC-V 64 end to end, from its `.ldefs` and `riscv64-fp.cspec` | — |
+
+## M1d: a slot is a lane of the program root
+
+The specification states where a float travels exactly: x86-64 gcc's
+float entries are `XMM0_Qa`..`XMM7_Qa`, eight bytes each, where radare2's
+data said `xmm0`. Taking the lanes as slots (tried 2026-10-05) moved only
+functions with declared floats, and showed why they cannot be slots as
+the contract reads them today: rename defines each register family at
+its program root (the narrowest declared register holding every range
+the function touches), so the call to `avg` defines `XMM0` (16 bytes)
+and the result slot `XMM0_Qa` matches no `CALLDEF`
+(`call_result_values_after_call` asks for equal storage). The sdb's
+`xmm0` matched by coincidence of width, and fails the same way in any
+function whose root is `ZMM0`. The rule M1d adopts: a boundary slot is
+matched against the definition of the program root that contains it,
+and the slot's offset and width become the logical carrier
+(`SourceCarrierKind::LowBits` at the lane's offset), at every boundary
+that matches slots -- parameters, call arguments, call results and
+returns. Two fixes found on the way belong to it: a constant has no
+definition to elide and must never be an unobserved value
+(`deadphi.rs`), and the return certificate's full-width case must accept
+a value that is a lift temporary, which names no register
+(`certificates/returns.rs`).
 
 ## Consequences
 
