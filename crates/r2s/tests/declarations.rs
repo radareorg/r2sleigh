@@ -118,6 +118,10 @@ fn two_functions_of_one_name_are_each_declared_by_their_own_unit() {
         "{second}"
     );
     assert!(second.contains("total"), "{second}");
+    // The double leaves in XMM0's low lane, which is the convention's slot:
+    // returned as the value, not rebuilt from the vector register.
+    assert!(second.contains("return total;"), "{second}");
+    assert!(!second.contains("__uint128_t"), "{second}");
     assert!(!second.contains("doubled"), "{second}");
 }
 

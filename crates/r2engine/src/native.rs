@@ -138,10 +138,6 @@ pub struct NativeTarget<'a> {
     /// assumed to use that the compiler specification does not: its name,
     /// its red zone, where a variadic tail goes.
     pub convention: &'a CallingConvention,
-    /// radare2's convention data, read now only for the floating-point
-    /// argument and result registers; M1d takes those from the compiler
-    /// specification and deletes it.
-    pub float_convention: &'a r2abi::Convention,
     /// What that convention says a call does here, resolved once by [`call_effect`].
     pub call_effect: Option<&'a SourceCallEffect>,
     pub compiler: &'a LanguageProfile,
@@ -1909,19 +1905,10 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
     let result_slot = place(registers_of(&prototype.outputs, EntryClass::General))?
         .first()
         .copied();
-    // Each float slot the data spells as one register of this machine, up to
-    // the first it does not: a declared float past that is not placed.
-    let float_slots = target
-        .float_convention
-        .float_args
-        .iter()
-        .map_while(|slot| storage(target.arch, slot.name()).ok())
-        .collect::<Vec<_>>();
-    let float_result = target
-        .float_convention
-        .float_return
-        .as_ref()
-        .and_then(|slot| storage(target.arch, slot.name()).ok());
+    let float_slots = place(registers_of(&prototype.inputs, EntryClass::Float))?;
+    let float_result = place(registers_of(&prototype.outputs, EntryClass::Float))?
+        .first()
+        .copied();
     // Where an argument past the registers goes is the compiler specification's
     // own statement: its stack parameter entry carries the first offset and the
     // step between entries.

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{CallingConvention, Conventions, Platform, Prototypes, calling_convention};
+use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
@@ -73,7 +73,6 @@ struct Machine {
 /// One convention and what the engine reads beside it.
 struct Under {
     convention: &'static CallingConvention,
-    floats: r2abi::Convention,
     compiler: LanguageProfile,
     effect: Option<SourceCallEffect>,
 }
@@ -89,12 +88,8 @@ impl Machine {
         let under = |platform: Platform, specification: &str| {
             let compiler = LanguageProfile::parse(specification).expect("parses");
             let convention = calling_convention(family, bits, platform).expect("a convention");
-            let floats = Conventions::for_arch(family, bits)
-                .and_then(|conventions| conventions.get(convention.name).cloned())
-                .expect("the convention data names it");
             Under {
                 convention,
-                floats,
                 effect: call_effect(&embedded.arch, bits, platform, &compiler),
                 compiler,
             }
@@ -130,7 +125,6 @@ impl Machine {
             disasm: &self.embedded.disasm,
             cpu: self.embedded.cpu,
             convention: under.convention,
-            float_convention: &under.floats,
             call_effect: under.effect.as_ref(),
             compiler: &under.compiler,
             prototypes: &self.prototypes,

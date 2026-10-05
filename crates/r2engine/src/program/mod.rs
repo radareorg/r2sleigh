@@ -37,8 +37,6 @@ struct Assembled {
     /// second instruction set in one program gets its own rather than this one.
     machine: (String, &'static str),
     convention: &'static r2abi::CallingConvention,
-    /// radare2's convention data, for the float slots alone until M1d.
-    conventions: r2abi::Conventions,
     /// What the default convention says a call does; both instruction sets share one register file.
     call_effect: Option<r2source::SourceCallEffect>,
     compiler: r2sleigh_lift::profile::LanguageProfile,
@@ -318,8 +316,6 @@ impl<S: Source + 'static> OpenProgram<S> {
         // pointer and which control registers it makes callee-saved. A system
         // fact, so a static ELF that names no C library has it too; which
         // library's declarations apply is `platform`'s question.
-        let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
-            .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
         let psabi = kernel(container);
         let convention = r2abi::calling_convention(key.0.as_str(), bits, psabi)
             .ok_or_else(|| format!("no calling convention for {} {bits}", key.0))?;
@@ -368,7 +364,6 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.assembled = Some(Assembled {
             machine: key,
             convention,
-            conventions,
             call_effect,
             compiler,
             prototypes,
@@ -399,10 +394,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             disasm: &machine.disasm,
             cpu: machine.cpu,
             convention: assembled.convention,
-            float_convention: assembled
-                .conventions
-                .default_convention()
-                .ok_or("the convention data names no default")?,
             call_effect: assembled.call_effect.as_ref(),
             compiler: &assembled.compiler,
             prototypes: &assembled.prototypes,

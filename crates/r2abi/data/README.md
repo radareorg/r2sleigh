@@ -6,8 +6,6 @@ of it: they are keyed differently, scoped differently, and carry records
 radare2 does not. Each difference is listed below, so a refresh from radare2
 is a merge that keeps them rather than a copy that drops them.
 
-- `cc-*.sdb.txt`: what each calling convention does with arguments, results
-  and saved registers.
 - `types.sdb.txt`: the portable table, what a library function takes and
   returns wherever it is linked. A record belongs here only when every C
   library r2abi scopes (glibc, bionic, Darwin's libSystem) declares that
@@ -110,10 +108,6 @@ Where radare2 scopes differently:
   `__platform_bzero`, the function libsystem_c re-exports as `_bzero`
   (`dyld_info -exports` on both), so it is `bzero` under a second name, and
   clang emits calls to it for `bzero` and zeroing `memset` on x86-64.
-- `cc-arm-64.sdb.txt` spells the arm64 vector clobbers `q0..q7,q16..q31` and
-  preserves only `d8..d15`, the low halves AAPCS64 keeps.
-- The x86 conventions with a `preserve` list end it with `df`, since every x86
-  ABI requires the direction flag clear on entry and on return.
 
 ## Refreshing
 
@@ -121,6 +115,6 @@ Diff radare2's `libr/anal/d/` against these files, and take a change only
 through the rules above: translate its keys through the table, put a record in
 the table of the C library that declares it, and keep the local edits. Then
 run `cargo test -p r2abi`: the tests read the embedded tables and assert what
-they say about `amd64`, `ms`, `arm64`, `printf`, `__strcpy_chk` and each
+they say about `printf`, `__strcpy_chk` and each
 library's `__fgets_chk`, so a refresh that changes those facts fails rather
 than passing silently.

@@ -51,14 +51,13 @@ matches an architecture name or a register name.
 - M1a (36f1d7b2): argument and result slots from the default prototype; a PE runs under the Windows `.cspec`.
 - M1b (797e11f2): call effects from the prototype; callees are asked about the whole call universe.
 - M1c (5a205ad2): convention name, red zone and variadic tail from r2abi's cited ABI rows by platform.
+- M1d: float slots are the prototype's float entries (lanes such as `XMM0_Qa`), matched against the program root that holds them (B3, doc/adr-byte-relation.md); r2abi `Conventions` and its sdb files are deleted.
 
 ## Left
 
 - M0 remainder: `.ldefs` selection, `.sla` lanes, `.pspec` tracked values and
   `.dwarf` numbers in the profile (the Windows pairing is a static table in
   the embedded machine today). Exit: read where M2–M5 need them.
-- M1d: float slots from the prototype's float entries (below). Exit: r2abi
-  `Conventions` and its convention sdb files deleted.
 - M2: r2ssa reads roles and slots only. Exit: `abi.rs` alias tables,
   `MachineArchitectureFamily::from_arch_spec`, `call_argument_register_defs`/
   `return_read_register_defs` by name, `call_moves_stack_pointer` by family
@@ -74,26 +73,6 @@ matches an architecture name or a register name.
   deleted.
 - M6: RISC-V 64 end to end from its `.ldefs` and `riscv64-fp.cspec`. Exit: it
   renders with no arm added in r2ssa, r2types or r2dec.
-
-## M1d: a slot is a lane of the program root
-
-The specification names float slots as lanes: x86-64 gcc's float entries are
-`XMM0_Qa`..`XMM7_Qa` (eight bytes each), where radare2's data said `xmm0`.
-Rename defines each register family at its program root (the narrowest
-declared register that holds every range the function touches), so a call
-defines `XMM0` (or `ZMM0`) and a lane slot matches no `CALLDEF`, because
-`call_result_values_after_call` asks for equal storage. The sdb's `xmm0`
-matched only by coincidence of width.
-
-- **Rule:** a boundary slot is matched against the definition of the program
-  root that contains it. The slot's offset and width become the logical
-  carrier (`SourceCarrierKind::LowBits` at the lane's offset). This applies at
-  every boundary that matches slots: parameters, call arguments, call results
-  and returns.
-- **Two fixes belong to it:** a constant has no definition to elide and must
-  never be an unobserved value (`deadphi.rs`); and the return certificate's
-  full-width case must accept a lift temporary, which names no register
-  (`certificates/returns.rs`).
 
 ## Consequences
 

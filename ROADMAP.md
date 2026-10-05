@@ -76,12 +76,12 @@ The program
 | Item | ADR | Done | Left |
 |------|-----|------|------|
 | **G0** Gates real | [testing](doc/testing.md) | — | the census, release A/B timing and equivalence diff are scripts in the repo and CI jobs, with a time budget on the large functions; the two clang-21 failures fixed |
-| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure | B3 slots as lanes of a root; B4 liveness over locations (B2, r2dec's dead values, moved into R2: the inventory must own liveness first) |
+| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure; B3 call results, returns and reaching values match the program root | B3 rest (parameters, arguments); B4 liveness over locations (B2, r2dec's dead values, moved into R2: the inventory must own liveness first) |
 | **L** Layering | — | — | L1 the body walk and decoding move to r2engine (r2ssa stops depending on r2sleigh-lift); L2 `CTypeLike`/`Signedness` move to r2source (r2rewrite stops depending on r2types); L3 interproc summaries move to r2engine; L4 r2sleigh-export merges into r2sleigh-cli; L5 r2ssa's IR and facts layers as modules with a Dylint boundary |
 | **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
 | **K** One fixpoint driver | [fixpoint](doc/adr-fixpoint.md) | r2ssa | r2types' loops (with C3), r2dec's (with R) |
 | **F2** One IR, indexed once | [one-ir](doc/adr-one-ir.md) | F2.0; F2.1 and F2.2 in part (dense dominators, loops, liveness once); F2.3; F2.6 (entity-keyed-map Dylint fatal in r2ssa and r2types, in CI) | F2.1 `FunctionIndex` on `Sealed`; F2.2 one byte-granular liveness model (#47, #50); F2.3's name-keyed readers deleted; F2.4 builder with incremental def-use (one graph build); F2.5 projections as indexes |
-| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed by the lifter; M1a slots, M1b call effect, M1c name/red zone/variadic tail from the profile and cited ABI rows | M0 rest (`.ldefs` selection, `.sla` lanes, `.pspec` tracked values, `.dwarf` numbers; reads them from `vendor/sleigh-config`); M1d float slots as lanes of a root (after B3), then delete r2abi `Conventions`; M2–M5 delete the name tables in r2ssa, r2types, r2dec, r2image/r2engine; M6 RISC-V end to end |
+| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed by the lifter; M1a slots, M1b call effect, M1c name/red zone/variadic tail from the profile and cited ABI rows; M1d float slots from the specification, r2abi `Conventions` deleted | M0 rest (`.ldefs` selection, `.sla` lanes, `.pspec` tracked values, `.dwarf` numbers; reads them from `vendor/sleigh-config`);  M2–M5 delete the name tables in r2ssa, r2types, r2dec, r2image/r2engine; M6 RISC-V end to end |
 | **Q** One query database | [query-database](doc/adr-query-database.md) | Q0 the database (red-green, a random-write session equals a fresh open); Q1 in part (names, import stubs) | Q2 decode/walk/lift/seal per function; Q3 discovery survey, entry modes, summaries; Q4 references and renderings; the caches and `Revision` deleted |
 | **P4** One frame model | [frame-model](doc/adr-frame-model.md) | — | one partition, one escape analysis, promotion as an SSA rewrite, canary under its premise; `afv` agrees with `pdd` |
 | **R** Renderer as a printer | [renderer-printer](doc/adr-renderer-printer.md) | — | R1 terms may start before P4; r2dec reads only sealed facts; journal, binding-plan fixpoint and retries deleted; absorbs partition-first's decision 5, access-syntax and the semantic-kernel principles as its invariants |
@@ -181,7 +181,6 @@ Standing debt
 - Pointer parameters take the width every access reads, so `Rec *` renders as `uint32_t *` (P9).
 - `pdd` on 32-bit ARM is not admitted until its Sleigh tuple is verified.
 - Entry condition flags cannot be booleans until the specification carries a flag fact.
-- Float convention slots still come from r2abi's sdb (M1d).
 - `StackObjectRefusal::ParameterHomeWidthMismatch` survives S2; shown genuine or deleted.
 - r2dec's `NormalizedOpSite` rows are positions in an edited copy; keyed by `OpId` (R).
 - `def_use_graph` seals a raw function to answer a listing (F2.1).

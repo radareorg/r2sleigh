@@ -52,6 +52,11 @@ preservation proof once depended on how a clobber list was spelled (M1b).
 - B1: `bytes::closure` is the one backward closure; `Demand` runs it from the
   return values and every effect's inputs, observation from its obligations.
 
+- B3 (`3b60c019` and the next commit): one identity per family at every
+  boundary (`root_slot_for_name`); call results, the reaching-value search
+  and the return certificate match a slot against the program root whose low
+  lane it is (`is_low_lane_of`). M1d's float lanes render.
+
 ## Left
 
 - B2 moves into R (doc/adr-renderer-printer.md, R2). Measured over the
@@ -62,7 +67,6 @@ preservation proof once depended on how a clobber list was spelled (M1b).
   `LiveObligation`; never-read values as `UnsupportedUnknown`. The inventory
   has to own that liveness, with one checker, before r2dec can read it. Exit
   (in R2): `unread_defined_values` is deleted.
-- B3: slots as lanes of a root at every boundary. Exit: no boundary match by
-  storage equality; M1d's float lanes render (`two_units_O0g` `helper`,
-  `rv_O0g` `main` and `avg`).
+- B3 rest: parameters and call arguments matched the same way, where a lane
+  slot first meets them. Exit: no boundary match by storage equality.
 - B4: liveness over locations reads it (F2.2). Exit: #47 and #50 closed.
