@@ -1843,7 +1843,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
 pub(crate) fn call_result_values_after_call(
     function: &SSAFunction,
     graph: &SsaGraph,
-    _machine_context: &SourceMachineContext,
+    machine_context: &SourceMachineContext,
     block_addr: u64,
     call_op_index: usize,
     storage: CanonicalStorageId,
@@ -1872,18 +1872,25 @@ pub(crate) fn call_result_values_after_call(
                         .saturating_add(relative_index),
                 )?,
             )?;
+            // The definition of the slot itself, or of the program root whose
+            // low lane the slot is (doc/adr-byte-relation.md, B3).
             let graph_inst = graph.inst(inst)?;
-            if function.var(*dst).size != storage.size
-                || graph_inst.canonical_storage != Some(storage)
-            {
-                return None;
-            }
-            graph_inst.output
+            let defined = graph_inst.canonical_storage?;
+            let exact = defined == storage && function.var(*dst).size == storage.size;
+            let rooted = defined.space == storage.space
+                && function.var(*dst).size == defined.size
+                && machine_context.is_low_lane_of(storage, defined);
+            (exact || rooted)
+                .then_some(graph_inst.output?)
+                .map(|value| (value, defined))
         })
         .collect::<Vec<_>>();
     match candidates.as_slice() {
-        [value] => Some(vec![CallBoundaryValueFact {
-            slot: CallBoundarySlot::Register { index: 0, storage },
+        [(value, defined)] => Some(vec![CallBoundaryValueFact {
+            slot: CallBoundarySlot::Register {
+                index: 0,
+                storage: *defined,
+            },
             value: *value,
         }]),
         _ => None,

@@ -1315,6 +1315,24 @@ impl SourceMachineContext {
             .and_then(|index| self.register_projections.get(index))
     }
 
+    /// Whether `lane` is the least significant bytes of `root` by the register
+    /// geometry, so a slot naming the lane is a slot of the root's low bytes.
+    pub(crate) fn is_low_lane_of(
+        &self,
+        lane: CanonicalStorageId,
+        root: CanonicalStorageId,
+    ) -> bool {
+        let bound = |storage| match self.register_projection(storage)?.disposition {
+            r2il::RegisterProjectionDisposition::Bound { carrier, slice } => Some((carrier, slice)),
+            r2il::RegisterProjectionDisposition::Refused { .. } => None,
+        };
+        lane.size <= root.size
+            && matches!(
+                (bound(lane), bound(root)),
+                (Some((a, lane)), Some((b, root))) if a == b && lane.lsb_bit_offset == root.lsb_bit_offset
+            )
+    }
+
     /// Every call site of the raw lifted input, by instruction.
     pub const fn raw_call_sites(&self) -> &BTreeMap<u64, SourceCallSiteIdentity> {
         &self.raw_call_sites

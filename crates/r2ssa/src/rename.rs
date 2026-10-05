@@ -1052,7 +1052,7 @@ fn callee_result_identities(
     let mut identities: BTreeSet<RenameIdentity> = match ctx
         .families
         .as_deref()
-        .and_then(|families| families.widest_slot_for_name(&reg.name))
+        .and_then(|families| families.root_slot_for_name(&reg.name))
     {
         Some(root) => BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]),
         None => ctx
@@ -1167,7 +1167,7 @@ fn append_call_boundary_reads(
         match ctx
             .families
             .as_deref()
-            .and_then(|families| families.widest_slot_for_name(&reg.name))
+            .and_then(|families| families.root_slot_for_name(&reg.name))
         {
             Some(root) => {
                 let identity = RenameIdentity::for_root_slot(root, reg_names);

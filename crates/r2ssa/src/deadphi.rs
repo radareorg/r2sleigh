@@ -179,7 +179,9 @@ impl DeadPhis {
             .values
             .iter()
             .filter(|value| {
-                !observed.contains(value.id)
+                // A constant has no definition to elide; it is spelled where read.
+                value.var.constant_bits().is_none()
+                    && !observed.contains(value.id)
                     && graph
                         .def_inst(value.id)
                         .and_then(|inst| obligations.instruction_for_inst(inst))

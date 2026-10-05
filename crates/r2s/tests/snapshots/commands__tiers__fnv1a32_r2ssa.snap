@@ -1,6 +1,5 @@
 ---
 source: crates/r2s/tests/commands.rs
-assertion_line: 513
 expression: run.out
 ---
 Function: fnv1a32
@@ -111,7 +110,7 @@ Frame: 2 objects, 0 escaped
   o1 slot sp+0x0 private
   o2 slot sp+0x8 private
 Values:
-  const:0_0 elided UnobservedValue
+  const:0_0 inline TermId(0)
   CF_1 elided UnobservedValue
   OF_1 elided UnobservedValue
   RSI_0 bound b0
@@ -119,10 +118,10 @@ Values:
   const:0_0 inline TermId(6)
   SF_1 elided UnobservedValue
   ZF_1 inline TermId(122)
-  const:ff_0 elided UnobservedValue
+  const:ff_0 inline TermId(9)
   tmp:2c200_1 elided UnobservedValue
   tmp:2c280_1 elided UnobservedValue
-  const:1_0 elided UnobservedValue
+  const:1_0 inline TermId(13)
   tmp:2c300_1 elided UnobservedValue
   PF_1 elided UnobservedValue
   ram:401360_0 elided DirectControlTarget
@@ -161,10 +160,10 @@ Values:
   tmp:lane:401348:e:3_1 inline TermId(125)
   RAX_3 elided UnobservedValue
   tmp:lane:401348:10:4_1 elided UnobservedValue
-  const:0_0 elided UnobservedValue
+  const:0_0 inline TermId(72)
   SF_4 elided UnobservedValue
   ZF_4 elided UnobservedValue
-  const:ff_0 elided UnobservedValue
+  const:ff_0 inline TermId(75)
   tmp:2c200_1 elided UnobservedValue
   tmp:2c280_4 elided UnobservedValue
   tmp:2c300_4 elided UnobservedValue

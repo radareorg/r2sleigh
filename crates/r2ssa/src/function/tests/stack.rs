@@ -776,16 +776,16 @@ fn widest_slot_is_one_canonical_identity_per_register() {
         ("DIL", 0x38, 1),
     ]);
 
-    let widest = families.widest_slot_for_name("rdi").expect("rdi is named");
+    let widest = families.root_slot_for_name("rdi").expect("rdi is named");
     assert_eq!(widest.width, 8);
     for alias in ["edi", "di", "dil", "RDI"] {
         assert_eq!(
-            families.widest_slot_for_name(alias).expect(alias),
+            families.root_slot_for_name(alias).expect(alias),
             widest,
             "{alias}"
         );
     }
-    assert!(families.widest_slot_for_name("rsi").is_none());
+    assert!(families.root_slot_for_name("rsi").is_none());
 }
 
 #[test]

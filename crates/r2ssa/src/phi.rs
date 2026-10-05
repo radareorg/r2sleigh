@@ -287,7 +287,7 @@ pub fn call_boundary_identities(
 ) -> BTreeSet<RenameIdentity> {
     // A convention register is one family: whatever width it is named at,
     // the identity it defines or reads is the family's root.
-    if let Some(root) = families.and_then(|families| families.widest_slot_for_name(&reg.name)) {
+    if let Some(root) = families.and_then(|families| families.root_slot_for_name(&reg.name)) {
         return BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]);
     }
     let needle = reg.name.to_ascii_lowercase();

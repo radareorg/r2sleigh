@@ -3900,10 +3900,11 @@ impl RegisterFamilyInfo {
         }
     }
 
-    /// The widest register containing the named one: the canonical identity of
-    /// the family, which every alias of it shares.
-    pub fn widest_slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
-        self.widest_slot_containing(self.member_for_name(name)?)
+    /// The program root containing the named register: the identity of its
+    /// family in this function, as `root_slot_containing` answers for storage.
+    pub fn root_slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
+        let member = self.member_for_name(name)?;
+        self.root_slot_containing(member.offset, member.width)
     }
 
     fn member_for_name(&self, name: &str) -> Option<RegisterFamilyMember> {
