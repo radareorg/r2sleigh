@@ -951,6 +951,7 @@ version = "0.1.0"
 name = "r2dec"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "r2il",
  "r2rewrite",
  "r2source",
