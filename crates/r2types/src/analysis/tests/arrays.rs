@@ -223,34 +223,48 @@ fn typed_stack_pointer_index_access_certifies_scalar_array_index() {
         Vec::new(),
     )];
 
-    let analysis = build_type_analysis(TypeAnalysisInput {
-        function_name: "sym.alloc_and_copy",
-        ptr_bits: 64,
-        inferred_signature: InferredSignature {
-            function_name: "sym.alloc_and_copy".to_string(),
-            signature: "int8_t * sym.alloc_and_copy (int8_t * src, size_t len)".to_string(),
-            ret_type: "int8_t *".to_string(),
-            params: vec![
-                InferredSignatureParam {
-                    name: "src".to_string(),
-                    param_type: "int8_t *".to_string(),
-                },
-                InferredSignatureParam {
-                    name: "len".to_string(),
-                    param_type: "size_t".to_string(),
-                },
-            ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
+    // r2ssa proves both slot addresses are frame-pointer offsets.
+    let frame_roots = BTreeMap::from([
+        (SSAVar::new("buf_slot_addr", 1, 8), buf_slot),
+        (
+            SSAVar::new("len_slot_addr", 1, 8),
+            StackSlotKey {
+                base: ExternalStackBase::FramePointer,
+                offset: -0x20,
+            },
+        ),
+    ]);
+    let analysis = build_type_analysis_with_prep_facts(
+        TypeAnalysisInput {
+            function_name: "sym.alloc_and_copy",
+            ptr_bits: 64,
+            inferred_signature: InferredSignature {
+                function_name: "sym.alloc_and_copy".to_string(),
+                signature: "int8_t * sym.alloc_and_copy (int8_t * src, size_t len)".to_string(),
+                ret_type: "int8_t *".to_string(),
+                params: vec![
+                    InferredSignatureParam {
+                        name: "src".to_string(),
+                        param_type: "int8_t *".to_string(),
+                    },
+                    InferredSignatureParam {
+                        name: "len".to_string(),
+                        param_type: "size_t".to_string(),
+                    },
+                ],
+                callconv: "amd64".to_string(),
+                arch: "x86-64".to_string(),
+            },
+            recovered_vars: &[],
+            ssa_blocks: &ssa_blocks,
+            conventional_extension: &|_| false,
+            parsed_context,
+            local_structs: LocalStructArtifacts::default(),
+            interproc_summary_set: None,
+            diagnostics: TypeAnalysisDiagnostics::default(),
         },
-        recovered_vars: &[],
-        ssa_blocks: &ssa_blocks,
-        conventional_extension: &|_| false,
-        parsed_context,
-        local_structs: LocalStructArtifacts::default(),
-        interproc_summary_set: None,
-        diagnostics: TypeAnalysisDiagnostics::default(),
-    });
+        &frame_roots,
+    );
 
     assert!(
         analysis

@@ -3,48 +3,38 @@
 use super::super::*;
 use super::*;
 
+/// Parameters take the convention's argument registers in order, whatever the architecture.
 #[test]
-fn abi_register_params_cover_aarch64_as_well_as_sysv64() {
-    // radare2 reports `arch="aarch64"` with the calling-convention field
-    // left empty. Requiring a named convention meant arm64 functions got no
-    // register parameters at all, which switched off the whole parameter
-    // home machinery: no ParamHome slots, so no hidden-home bindings, so an
-    // empty stack alias map, so frame accesses rendered as raw pointer
-    // arithmetic instead of named locals.
-    let signature = |arch: &str, callconv: &str| super::InferredSignature {
+fn abi_register_params_are_the_stated_argument_registers() {
+    let signature = super::InferredSignature {
         function_name: "f".to_string(),
         signature: "int f(long a, long b, long c)".to_string(),
         ret_type: "int".to_string(),
-        params: vec![
-            super::InferredSignatureParam {
-                name: "a".to_string(),
+        params: ["a", "b", "c"]
+            .map(|name| super::InferredSignatureParam {
+                name: name.to_string(),
                 param_type: "int64_t".to_string(),
-            },
-            super::InferredSignatureParam {
-                name: "b".to_string(),
-                param_type: "int64_t".to_string(),
-            },
-            super::InferredSignatureParam {
-                name: "c".to_string(),
-                param_type: "int64_t".to_string(),
-            },
-        ],
-        callconv: callconv.to_string(),
-        arch: arch.to_string(),
+            })
+            .to_vec(),
+        callconv: String::new(),
+        arch: String::new(),
     };
-    let regs = |arch: &str, callconv: &str| {
-        super::inferred_signature_abi_register_params(&signature(arch, callconv), 64)
+    let regs = |stated: &[&str]| {
+        let stated = stated
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        super::inferred_signature_abi_register_params(&signature, &stated, 64)
             .into_iter()
             .map(|param| param.reg)
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(regs("aarch64", ""), vec!["x0", "x1", "x2"]);
-    assert_eq!(regs("arm64", "aapcs"), vec!["x0", "x1", "x2"]);
-    assert_eq!(regs("x86-64", "amd64"), vec!["rdi", "rsi", "rdx"]);
+    assert_eq!(regs(&["x0", "x1", "x2", "x3"]), vec!["x0", "x1", "x2"]);
+    assert_eq!(regs(&["rdi", "rsi"]), vec!["rdi", "rsi"]);
     assert!(
-        regs("mips", "").is_empty(),
-        "an architecture with no table here still yields nothing"
+        regs(&[]).is_empty(),
+        "a convention that states none binds none"
     );
 }
 
@@ -2624,8 +2614,8 @@ fn prepared_phi_refuses_conflicting_parameter_type_classes() {
         &blocks,
         None,
         &|_| false,
-        r2ssa::MachineArchitectureFamily::AArch64,
-        &collect_pointer_arg_slot_map(r2ssa::MachineArchitectureFamily::AArch64, 64),
+        None,
+        &super::aapcs64_argument_slots(),
         64,
         &mut diagnostics,
     );

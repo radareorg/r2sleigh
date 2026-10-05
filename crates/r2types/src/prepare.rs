@@ -99,86 +99,6 @@ pub fn type_hint_from_value_metadata(
     scalar_metadata_type_hint(scalar_kind?, size)
 }
 
-pub type ArgAliasMap = &'static [(&'static str, &'static [&'static str])];
-pub type BaseRegList = &'static [&'static str];
-
-pub const X86_ARG_REGS: &[(&str, &[&str])] = &[
-    ("rdi", &["rdi", "edi", "di", "dil"]),
-    ("rsi", &["rsi", "esi", "si", "sil"]),
-    ("rdx", &["rdx", "edx", "dx", "dl", "dh"]),
-    ("rcx", &["rcx", "ecx", "cx", "cl", "ch"]),
-    ("r8", &["r8", "r8d", "r8w", "r8b"]),
-    ("r9", &["r9", "r9d", "r9w", "r9b"]),
-];
-const RISCV_ARG_REGS: &[(&str, &[&str])] = &[
-    ("a0", &["a0", "x10"]),
-    ("a1", &["a1", "x11"]),
-    ("a2", &["a2", "x12"]),
-    ("a3", &["a3", "x13"]),
-    ("a4", &["a4", "x14"]),
-    ("a5", &["a5", "x15"]),
-    ("a6", &["a6", "x16"]),
-    ("a7", &["a7", "x17"]),
-];
-const ARM64_ARG_REGS: &[(&str, &[&str])] = &[
-    ("x0", &["x0", "w0"]),
-    ("x1", &["x1", "w1"]),
-    ("x2", &["x2", "w2"]),
-    ("x3", &["x3", "w3"]),
-    ("x4", &["x4", "w4"]),
-    ("x5", &["x5", "w5"]),
-    ("x6", &["x6", "w6"]),
-    ("x7", &["x7", "w7"]),
-];
-const ARM32_ARG_REGS: &[(&str, &[&str])] = &[
-    ("r0", &["r0"]),
-    ("r1", &["r1"]),
-    ("r2", &["r2"]),
-    ("r3", &["r3"]),
-];
-const MIPS_ARG_REGS: &[(&str, &[&str])] = &[
-    ("a0", &["a0", "$a0", "r4"]),
-    ("a1", &["a1", "$a1", "r5"]),
-    ("a2", &["a2", "$a2", "r6"]),
-    ("a3", &["a3", "$a3", "r7"]),
-];
-const X86_STACK_BASES: &[&str] = &["rbp", "rsp", "ebp", "esp"];
-pub const X86_FRAME_BASES: &[&str] = &["rbp", "ebp"];
-const RISCV_STACK_BASES: &[&str] = &["sp", "s0", "fp", "x2", "x8"];
-const RISCV_FRAME_BASES: &[&str] = &["s0", "fp", "x8"];
-const ARM64_STACK_BASES: &[&str] = &["sp", "x29", "fp"];
-const ARM64_FRAME_BASES: &[&str] = &["x29", "fp"];
-const ARM32_STACK_BASES: &[&str] = &["sp", "r11", "fp"];
-const ARM32_FRAME_BASES: &[&str] = &["r11", "fp"];
-const MIPS_STACK_BASES: &[&str] = &["sp", "$sp", "fp", "$fp", "s8", "$s8"];
-const MIPS_FRAME_BASES: &[&str] = &["fp", "$fp", "s8", "$s8"];
-const GENERIC_STACK_BASES: &[&str] = &["sp", "fp", "bp", "s0", "x2", "x8", "rbp", "rsp"];
-const GENERIC_FRAME_BASES: &[&str] = &["fp", "bp", "s0", "x8", "rbp"];
-
-pub fn recover_vars_arch_profile(
-    architecture: r2ssa::MachineArchitectureFamily,
-) -> (ArgAliasMap, BaseRegList, BaseRegList) {
-    use r2ssa::MachineArchitectureFamily;
-
-    match architecture {
-        MachineArchitectureFamily::X86 => (&[], X86_STACK_BASES, X86_FRAME_BASES),
-        MachineArchitectureFamily::X86_64 => (X86_ARG_REGS, X86_STACK_BASES, X86_FRAME_BASES),
-        MachineArchitectureFamily::Arm => (ARM32_ARG_REGS, ARM32_STACK_BASES, ARM32_FRAME_BASES),
-        MachineArchitectureFamily::AArch64 => {
-            (ARM64_ARG_REGS, ARM64_STACK_BASES, ARM64_FRAME_BASES)
-        }
-        MachineArchitectureFamily::RiscV32 | MachineArchitectureFamily::RiscV64 => {
-            (RISCV_ARG_REGS, RISCV_STACK_BASES, RISCV_FRAME_BASES)
-        }
-        MachineArchitectureFamily::Mips32 | MachineArchitectureFamily::Mips64 => {
-            (MIPS_ARG_REGS, MIPS_STACK_BASES, MIPS_FRAME_BASES)
-        }
-        MachineArchitectureFamily::PowerPc32
-        | MachineArchitectureFamily::PowerPc64
-        | MachineArchitectureFamily::Unknown => (&[], GENERIC_STACK_BASES, GENERIC_FRAME_BASES),
-    }
-}
-
 /// A key that identifies one SSA variable across its width views.
 ///
 /// This deliberately does *not* include `size`. The maps it keys pool the
@@ -589,18 +509,5 @@ mod tests {
 
         assert_eq!(hint.rank, TypeHintRank::Pointer);
         assert_eq!(hint.ty, "void *");
-    }
-
-    #[test]
-    fn x86_argument_profile_is_selected_by_typed_machine_family() {
-        let (x86_args, x86_stack, _) =
-            recover_vars_arch_profile(r2ssa::MachineArchitectureFamily::X86);
-        let (x86_64_args, x86_64_stack, _) =
-            recover_vars_arch_profile(r2ssa::MachineArchitectureFamily::X86_64);
-
-        assert!(x86_args.is_empty());
-        assert_eq!(x86_stack, X86_STACK_BASES);
-        assert_eq!(x86_64_args, X86_ARG_REGS);
-        assert_eq!(x86_64_stack, X86_STACK_BASES);
     }
 }

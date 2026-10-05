@@ -11,6 +11,27 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The operation a fixture names by its block and its place in the block.
+/// System V's integer argument registers, in order, as a prepared machine spells them.
+pub(super) fn system_v_argument_registers() -> Vec<String> {
+    ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+        .map(str::to_string)
+        .to_vec()
+}
+
+/// System V's integer argument registers, by slot.
+pub(super) fn system_v_argument_slots() -> HashMap<String, usize> {
+    system_v_argument_registers()
+        .into_iter()
+        .enumerate()
+        .map(|(slot, name)| (name, slot))
+        .collect()
+}
+
+/// AAPCS64's integer argument registers, by slot.
+pub(super) fn aapcs64_argument_slots() -> HashMap<String, usize> {
+    (0..8).map(|slot| (format!("x{slot}"), slot)).collect()
+}
+
 fn op_at(blocks: &[SSABlock], block_addr: u64, index: usize) -> r2ssa::OpId {
     blocks
         .iter()
@@ -237,8 +258,6 @@ fn phi_scalar_pointer_value_preserves_max_confidence() {
     let pointer_value_names = HashMap::new();
     let array_addr_exprs = HashMap::new();
     let array_addr_expr_names = HashMap::new();
-    let stack_addr_offsets = HashMap::new();
-    let stack_addr_offset_names = HashMap::new();
     let block_ops = HashMap::new();
     let value_ops = HashMap::new();
 
@@ -265,8 +284,7 @@ fn phi_scalar_pointer_value_preserves_max_confidence() {
         pointer_value_names: &pointer_value_names,
         array_addr_exprs: &array_addr_exprs,
         array_addr_expr_names: &array_addr_expr_names,
-        stack_addr_offsets: &stack_addr_offsets,
-        stack_addr_offset_names: &stack_addr_offset_names,
+        stack_roots: None,
         block_ops: &block_ops,
         value_ops: &value_ops,
     };

@@ -1074,8 +1074,8 @@ fn prepared_phi_preserves_recursive_struct_parameter_type() {
         &blocks,
         None,
         &|_| false,
-        r2ssa::MachineArchitectureFamily::AArch64,
-        &collect_pointer_arg_slot_map(r2ssa::MachineArchitectureFamily::AArch64, 64),
+        None,
+        &super::aapcs64_argument_slots(),
         64,
         &mut diagnostics,
     );
@@ -1233,13 +1233,19 @@ fn local_struct_inference_uses_memory_ssa_for_spilled_element_pointer() {
         value_ids: HashMap::from([(SSAVar::new("W1", 0, 4), r2ssa::ValueId(1))]),
     };
     let mut diagnostics = TypeAnalysisDiagnostics::default();
+    // r2ssa proves the lowered stack pointer is the entry pointer less 0x20.
+    let spill = StackSlotKey {
+        base: ExternalStackBase::StackPointer,
+        offset: -0x20,
+    };
+    let stack_roots = |var: &SSAVar| (*var == SSAVar::new("SP", 1, 8)).then_some(spill);
 
     let artifacts = infer_local_struct_artifacts_from_blocks(
         &blocks,
         Some(&memory_versions),
         &|_| false,
-        r2ssa::MachineArchitectureFamily::AArch64,
-        &collect_pointer_arg_slot_map(r2ssa::MachineArchitectureFamily::AArch64, 64),
+        Some(&stack_roots),
+        &super::aapcs64_argument_slots(),
         64,
         &mut diagnostics,
     );
@@ -1548,40 +1554,51 @@ fn stack_home_strength_reduced_index_certifies_struct_array_field_access() {
         Vec::new(),
     )];
 
-    let analysis = build_type_analysis(TypeAnalysisInput {
-        function_name: "sym.test_struct_array_index",
-        ptr_bits: 64,
-        inferred_signature: InferredSignature {
-            function_name: "sym.test_struct_array_index".to_string(),
-            signature:
-                "int32_t sym.test_struct_array_index (DemoStruct * arr, int32_t idx, int32_t v)"
-                    .to_string(),
-            ret_type: "int32_t".to_string(),
-            params: vec![
-                InferredSignatureParam {
-                    name: "arr".to_string(),
-                    param_type: "DemoStruct *".to_string(),
-                },
-                InferredSignatureParam {
-                    name: "idx".to_string(),
-                    param_type: "int32_t".to_string(),
-                },
-                InferredSignatureParam {
-                    name: "v".to_string(),
-                    param_type: "int32_t".to_string(),
-                },
-            ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
+    // r2ssa proves the index home is twelve bytes below the frame pointer.
+    let frame_roots = BTreeMap::from([(
+        SSAVar::new("idx_addr", 1, 8),
+        StackSlotKey {
+            base: ExternalStackBase::FramePointer,
+            offset: -12,
         },
-        recovered_vars: &[],
-        ssa_blocks: &ssa_blocks,
-        conventional_extension: &|_| false,
-        parsed_context,
-        local_structs: LocalStructArtifacts::default(),
-        interproc_summary_set: None,
-        diagnostics: TypeAnalysisDiagnostics::default(),
-    });
+    )]);
+    let analysis = build_type_analysis_with_prep_facts(
+        TypeAnalysisInput {
+            function_name: "sym.test_struct_array_index",
+            ptr_bits: 64,
+            inferred_signature: InferredSignature {
+                function_name: "sym.test_struct_array_index".to_string(),
+                signature:
+                    "int32_t sym.test_struct_array_index (DemoStruct * arr, int32_t idx, int32_t v)"
+                        .to_string(),
+                ret_type: "int32_t".to_string(),
+                params: vec![
+                    InferredSignatureParam {
+                        name: "arr".to_string(),
+                        param_type: "DemoStruct *".to_string(),
+                    },
+                    InferredSignatureParam {
+                        name: "idx".to_string(),
+                        param_type: "int32_t".to_string(),
+                    },
+                    InferredSignatureParam {
+                        name: "v".to_string(),
+                        param_type: "int32_t".to_string(),
+                    },
+                ],
+                callconv: "amd64".to_string(),
+                arch: "x86-64".to_string(),
+            },
+            recovered_vars: &[],
+            ssa_blocks: &ssa_blocks,
+            conventional_extension: &|_| false,
+            parsed_context,
+            local_structs: LocalStructArtifacts::default(),
+            interproc_summary_set: None,
+            diagnostics: TypeAnalysisDiagnostics::default(),
+        },
+        &frame_roots,
+    );
 
     assert!(
         analysis

@@ -3,7 +3,8 @@
 use super::*;
 
 pub(crate) struct ScalarArrayMachineProfile<'a> {
-    pub(crate) architecture: r2ssa::MachineArchitectureFamily,
+    /// Where r2ssa proved a value is a stack address.
+    pub(crate) stack_roots: Option<FrameRoots<'a>>,
     pub(crate) pointer_arg_slots: Option<&'a HashMap<String, usize>>,
     pub(crate) ptr_bits: u32,
 }
@@ -53,50 +54,9 @@ pub(crate) struct ScalarArrayInferenceCtx<'a> {
     pub(crate) pointer_value_names: &'a HashMap<String, Option<ScalarPointerValue>>,
     pub(crate) array_addr_exprs: &'a HashMap<String, ScalarArrayAddrExpr>,
     pub(crate) array_addr_expr_names: &'a HashMap<String, Option<ScalarArrayAddrExpr>>,
-    pub(crate) stack_addr_offsets: &'a HashMap<String, i64>,
-    pub(crate) stack_addr_offset_names: &'a HashMap<String, Option<i64>>,
+    pub(crate) stack_roots: Option<FrameRoots<'a>>,
     pub(crate) block_ops: &'a HashMap<u64, HashMap<String, SSAOp>>,
     pub(crate) value_ops: &'a HashMap<String, SSAOp>,
-}
-
-pub(crate) fn collect_pointer_arg_slot_map(
-    architecture: r2ssa::MachineArchitectureFamily,
-    ptr_bits: u32,
-) -> HashMap<String, usize> {
-    let (arg_regs, _, _) = recover_vars_arch_profile(architecture);
-    let is_arm64 = matches!(architecture, r2ssa::MachineArchitectureFamily::AArch64);
-    let is_x86_64 = matches!(architecture, r2ssa::MachineArchitectureFamily::X86_64);
-    let is_riscv64 = matches!(architecture, r2ssa::MachineArchitectureFamily::RiscV64);
-
-    let mut out = HashMap::new();
-    for (idx, (canonical, aliases)) in arg_regs.iter().enumerate() {
-        let include_alias = |alias: &str| -> bool {
-            if ptr_bits <= 32 {
-                return true;
-            }
-            let alias = alias.to_ascii_lowercase();
-            if is_arm64 {
-                return alias.starts_with('x');
-            }
-            if is_x86_64 {
-                return alias.starts_with('r');
-            }
-            if is_riscv64 {
-                return alias.starts_with('x') || alias.starts_with('a');
-            }
-            alias == (*canonical).to_ascii_lowercase()
-        };
-
-        if include_alias(canonical) {
-            out.insert((*canonical).to_string(), idx);
-        }
-        for alias in *aliases {
-            if include_alias(alias) {
-                out.insert((*alias).to_string(), idx);
-            }
-        }
-    }
-    out
 }
 
 pub(crate) fn scalar_array_access_certificates_from_ssa(
@@ -107,20 +67,11 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
     local_element_strides: &HashMap<usize, u64>,
     machine: ScalarArrayMachineProfile<'_>,
 ) -> ScalarArrayAccessCertificates {
-    let architecture = machine.architecture;
-    let detached_pointer_arg_slots;
-    let pointer_arg_slot_map = match machine.pointer_arg_slots {
-        Some(slots) => slots,
-        None => {
-            detached_pointer_arg_slots =
-                collect_pointer_arg_slot_map(architecture, machine.ptr_bits);
-            &detached_pointer_arg_slots
-        }
-    };
-    let (_, stack_bases, frame_bases) = recover_vars_arch_profile(architecture);
+    let no_slots = HashMap::new();
+    let pointer_arg_slot_map = machine.pointer_arg_slots.unwrap_or(&no_slots);
+    let stack_roots = machine.stack_roots;
+    let stack_root = |var: &SSAVar| stack_roots.and_then(|roots| roots(var));
     let ptr_bits = machine.ptr_bits;
-    let mut stack_addr_offsets: HashMap<String, i64> = HashMap::new();
-    let mut stack_addr_offset_names: HashMap<String, Option<i64>> = HashMap::new();
     let mut pointer_values: HashMap<String, ScalarPointerValue> = HashMap::new();
     let mut pointer_value_names: HashMap<String, Option<ScalarPointerValue>> = HashMap::new();
     let mut array_addr_exprs: HashMap<String, ScalarArrayAddrExpr> = HashMap::new();
@@ -151,8 +102,6 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
         })
         .collect();
 
-    let is_stack_base = |name: &str| stack_bases.contains(&name) || frame_bases.contains(&name);
-
     for _ in 0..6 {
         let mut changed = false;
         for block in ssa_blocks {
@@ -176,8 +125,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                             pointer_value_names: &pointer_value_names,
                             array_addr_exprs: &array_addr_exprs,
                             array_addr_expr_names: &array_addr_expr_names,
-                            stack_addr_offsets: &stack_addr_offsets,
-                            stack_addr_offset_names: &stack_addr_offset_names,
+                            stack_roots,
                             block_ops: &block_ops,
                             value_ops: &value_ops,
                         };
@@ -208,20 +156,6 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 &mut array_addr_expr_names,
                             );
                         }
-                        if let Some(offset) = stack_addr_offset_for_var(
-                            block.addr,
-                            src,
-                            &stack_addr_offsets,
-                            &stack_addr_offset_names,
-                        ) {
-                            changed |= set_stack_addr_offset(
-                                block.addr,
-                                dst,
-                                offset,
-                                &mut stack_addr_offsets,
-                                &mut stack_addr_offset_names,
-                            );
-                        }
                     }
                     SSAOp::Phi { dst, sources } => {
                         let ctx = ScalarArrayInferenceCtx {
@@ -235,8 +169,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                             pointer_value_names: &pointer_value_names,
                             array_addr_exprs: &array_addr_exprs,
                             array_addr_expr_names: &array_addr_expr_names,
-                            stack_addr_offsets: &stack_addr_offsets,
-                            stack_addr_offset_names: &stack_addr_offset_names,
+                            stack_roots,
                             block_ops: &block_ops,
                             value_ops: &value_ops,
                         };
@@ -269,28 +202,6 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                         }
                     }
                     SSAOp::IntAdd { dst, a, b } => {
-                        if let Some(off) = exact_ssa_const_offset(b, ptr_bits)
-                            && is_stack_base(a.name().to_ascii_lowercase().as_str())
-                        {
-                            changed |= set_stack_addr_offset(
-                                block.addr,
-                                dst,
-                                off,
-                                &mut stack_addr_offsets,
-                                &mut stack_addr_offset_names,
-                            );
-                        }
-                        if let Some(off) = exact_ssa_const_offset(a, ptr_bits)
-                            && is_stack_base(b.name().to_ascii_lowercase().as_str())
-                        {
-                            changed |= set_stack_addr_offset(
-                                block.addr,
-                                dst,
-                                off,
-                                &mut stack_addr_offsets,
-                                &mut stack_addr_offset_names,
-                            );
-                        }
                         let expr = {
                             let ctx = ScalarArrayInferenceCtx {
                                 parsed_context,
@@ -303,8 +214,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 pointer_value_names: &pointer_value_names,
                                 array_addr_exprs: &array_addr_exprs,
                                 array_addr_expr_names: &array_addr_expr_names,
-                                stack_addr_offsets: &stack_addr_offsets,
-                                stack_addr_offset_names: &stack_addr_offset_names,
+                                stack_roots,
                                 block_ops: &block_ops,
                                 value_ops: &value_ops,
                             };
@@ -331,8 +241,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 pointer_value_names: &pointer_value_names,
                                 array_addr_exprs: &array_addr_exprs,
                                 array_addr_expr_names: &array_addr_expr_names,
-                                stack_addr_offsets: &stack_addr_offsets,
-                                stack_addr_offset_names: &stack_addr_offset_names,
+                                stack_roots,
                                 block_ops: &block_ops,
                                 value_ops: &value_ops,
                             };
@@ -350,17 +259,6 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                         }
                     }
                     SSAOp::IntSub { dst, a, b } => {
-                        if let Some(delta) = exact_ssa_const_offset(b, ptr_bits)
-                            && is_stack_base(a.name().to_ascii_lowercase().as_str())
-                        {
-                            changed |= set_stack_addr_offset(
-                                block.addr,
-                                dst,
-                                delta.saturating_neg(),
-                                &mut stack_addr_offsets,
-                                &mut stack_addr_offset_names,
-                            );
-                        }
                         let pointer_expr = {
                             let ctx = ScalarArrayInferenceCtx {
                                 parsed_context,
@@ -373,8 +271,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 pointer_value_names: &pointer_value_names,
                                 array_addr_exprs: &array_addr_exprs,
                                 array_addr_expr_names: &array_addr_expr_names,
-                                stack_addr_offsets: &stack_addr_offsets,
-                                stack_addr_offset_names: &stack_addr_offset_names,
+                                stack_roots,
                                 block_ops: &block_ops,
                                 value_ops: &value_ops,
                             };
@@ -414,8 +311,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                                 pointer_value_names: &pointer_value_names,
                                 array_addr_exprs: &array_addr_exprs,
                                 array_addr_expr_names: &array_addr_expr_names,
-                                stack_addr_offsets: &stack_addr_offsets,
-                                stack_addr_offset_names: &stack_addr_offset_names,
+                                stack_roots,
                                 block_ops: &block_ops,
                                 value_ops: &value_ops,
                             };
@@ -436,16 +332,11 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                         space: r2il::SpaceId::Ram,
                         addr,
                     } => {
-                        if let Some(offset) = stack_addr_offset_for_var(
-                            block.addr,
-                            addr,
-                            &stack_addr_offsets,
-                            &stack_addr_offset_names,
-                        ) {
+                        if let Some(root) = stack_root(addr) {
                             let pointer = scalar_pointer_value_for_stack_slot(
                                 parsed_context,
                                 type_db,
-                                offset,
+                                root,
                                 ptr_bits,
                             );
                             if let Some(mut pointer) = pointer {
@@ -488,8 +379,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                         pointer_value_names: &pointer_value_names,
                         array_addr_exprs: &array_addr_exprs,
                         array_addr_expr_names: &array_addr_expr_names,
-                        stack_addr_offsets: &stack_addr_offsets,
-                        stack_addr_offset_names: &stack_addr_offset_names,
+                        stack_roots,
                         block_ops: &block_ops,
                         value_ops: &value_ops,
                     };
@@ -541,8 +431,7 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                         pointer_value_names: &pointer_value_names,
                         array_addr_exprs: &array_addr_exprs,
                         array_addr_expr_names: &array_addr_expr_names,
-                        stack_addr_offsets: &stack_addr_offsets,
-                        stack_addr_offset_names: &stack_addr_offset_names,
+                        stack_roots,
                         block_ops: &block_ops,
                         value_ops: &value_ops,
                     };
@@ -833,13 +722,13 @@ pub(crate) fn scalar_pointer_value_for_var(
 pub(crate) fn scalar_pointer_value_for_stack_slot(
     parsed_context: &ParsedExternalContext,
     type_db: &ExternalTypeDb,
-    offset: i64,
+    root: StackSlotKey,
     ptr_bits: u32,
 ) -> Option<ScalarPointerValue> {
     parsed_context
         .stack_slots
         .iter()
-        .filter(|(key, _)| key.offset == offset)
+        .filter(|(key, _)| **key == root)
         .filter_map(|(key, spec)| {
             let element_stride = spec
                 .ty
@@ -941,24 +830,6 @@ pub(crate) fn set_scalar_array_addr_expr(
     }
 }
 
-pub(crate) fn set_stack_addr_offset(
-    block_addr: u64,
-    dst: &SSAVar,
-    offset: i64,
-    stack_addr_offsets: &mut HashMap<String, i64>,
-    stack_addr_offset_names: &mut HashMap<String, Option<i64>>,
-) -> bool {
-    let key = ssa_var_block_key(block_addr, dst);
-    match stack_addr_offsets.get(&key).copied() {
-        Some(prev) if prev == offset => false,
-        _ => {
-            stack_addr_offsets.insert(key, offset);
-            merge_named_stack_addr_offset(dst, offset, stack_addr_offset_names);
-            true
-        }
-    }
-}
-
 pub(crate) fn merge_named_scalar_pointer_value(
     dst: &SSAVar,
     pointer: ScalarPointerValue,
@@ -973,14 +844,6 @@ pub(crate) fn merge_named_scalar_array_addr_expr(
     array_addr_expr_names: &mut HashMap<String, Option<ScalarArrayAddrExpr>>,
 ) {
     merge_named_fact(dst, expr, array_addr_expr_names);
-}
-
-pub(crate) fn merge_named_stack_addr_offset(
-    dst: &SSAVar,
-    offset: i64,
-    stack_addr_offset_names: &mut HashMap<String, Option<i64>>,
-) {
-    merge_named_fact(dst, offset, stack_addr_offset_names);
 }
 
 pub(crate) fn merge_named_fact<T: Clone + PartialEq>(
@@ -998,22 +861,6 @@ pub(crate) fn merge_named_fact<T: Clone + PartialEq>(
             named_facts.insert(key, None);
         }
     }
-}
-
-pub(crate) fn stack_addr_offset_for_var(
-    block_addr: u64,
-    var: &SSAVar,
-    stack_addr_offsets: &HashMap<String, i64>,
-    stack_addr_offset_names: &HashMap<String, Option<i64>>,
-) -> Option<i64> {
-    stack_addr_offsets
-        .get(&ssa_var_block_key(block_addr, var))
-        .copied()
-        .or_else(|| {
-            stack_addr_offset_names
-                .get(&var.display_name())
-                .and_then(|value| *value)
-        })
 }
 
 pub(crate) fn scalar_array_addr_expr_for_var(
@@ -1274,7 +1121,7 @@ pub(crate) fn scalar_index_matches_stride(
     let key = ssa_var_block_key(block_addr, var);
     if ctx.pointer_values.contains_key(&key)
         || ctx.array_addr_exprs.contains_key(&key)
-        || ctx.stack_addr_offsets.contains_key(&key)
+        || ctx.stack_roots.and_then(|roots| roots(var)).is_some()
         || ctx
             .pointer_value_names
             .get(&var.display_name())
@@ -1284,11 +1131,6 @@ pub(crate) fn scalar_index_matches_stride(
             .array_addr_expr_names
             .get(&var.display_name())
             .and_then(Clone::clone)
-            .is_some()
-        || ctx
-            .stack_addr_offset_names
-            .get(&var.display_name())
-            .and_then(|value| *value)
             .is_some()
     {
         return false;
@@ -1353,7 +1195,7 @@ pub(crate) fn scalar_index_affine_factor(
     let key = ssa_var_block_key(block_addr, var);
     if ctx.pointer_values.contains_key(&key)
         || ctx.array_addr_exprs.contains_key(&key)
-        || ctx.stack_addr_offsets.contains_key(&key)
+        || ctx.stack_roots.and_then(|roots| roots(var)).is_some()
         || ctx
             .pointer_value_names
             .get(&var.display_name())
@@ -1363,11 +1205,6 @@ pub(crate) fn scalar_index_affine_factor(
             .array_addr_expr_names
             .get(&var.display_name())
             .and_then(Clone::clone)
-            .is_some()
-        || ctx
-            .stack_addr_offset_names
-            .get(&var.display_name())
-            .and_then(|value| *value)
             .is_some()
     {
         return None;
@@ -1428,14 +1265,9 @@ pub(crate) fn scalar_index_affine_factor(
             addr,
             ..
         } => {
-            let offset = stack_addr_offset_for_var(
-                block_addr,
-                addr,
-                ctx.stack_addr_offsets,
-                ctx.stack_addr_offset_names,
-            )?;
+            let root = ctx.stack_roots.and_then(|roots| roots(addr))?;
             Some(AffineIndexFactor {
-                root: Some(format!("stack:{offset}")),
+                root: Some(format!("stack:{:?}{:+}", root.base, root.offset)),
                 scale: 1,
             })
         }

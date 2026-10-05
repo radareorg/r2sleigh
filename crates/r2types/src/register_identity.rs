@@ -21,11 +21,25 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Default)]
 pub struct RegisterIdentity {
     storage_by_name: BTreeMap<String, CanonicalStorageId>,
+    /// The convention's argument registers, in order, as the machine spells them.
+    argument_registers: Vec<String>,
 }
 
 impl RegisterIdentity {
     pub fn from_prepared(prepared: &r2ssa::SsaArtifact) -> Self {
-        Self::from_register_storages(prepared.machine_context().register_storages_by_name())
+        let context = prepared.machine_context();
+        Self::from_register_storages(context.register_storages_by_name())
+            .with_argument_registers(context.argument_register_names())
+    }
+
+    #[must_use]
+    pub fn with_argument_registers(mut self, argument_registers: Vec<String>) -> Self {
+        self.argument_registers = argument_registers;
+        self
+    }
+
+    pub fn argument_registers(&self) -> &[String] {
+        &self.argument_registers
     }
 
     pub fn from_register_storages(storages: &BTreeMap<String, CanonicalStorageId>) -> Self {
@@ -34,7 +48,10 @@ impl RegisterIdentity {
             .filter(|(_, storage)| storage.space == CanonicalStorageSpace::Register)
             .map(|(name, storage)| (name.trim().to_ascii_lowercase(), *storage))
             .collect();
-        Self { storage_by_name }
+        Self {
+            storage_by_name,
+            argument_registers: Vec::new(),
+        }
     }
 
     pub fn storage_of(&self, name: &str) -> Option<CanonicalStorageId> {

@@ -128,8 +128,11 @@ pub(crate) fn apply_type_hint_assumptions_to_context(
     registers: &crate::RegisterIdentity,
 ) -> r2ssa::AssumptionUsageReport {
     let mut usage = r2ssa::AssumptionUsageReport::default();
-    let inferred_register_params =
-        inferred_signature_abi_register_params(inferred_signature, ptr_bits);
+    let inferred_register_params = inferred_signature_abi_register_params(
+        inferred_signature,
+        registers.argument_registers(),
+        ptr_bits,
+    );
     if inferred_register_params.len() > parsed_context.register_params.len() {
         parsed_context
             .register_params
@@ -340,43 +343,20 @@ pub(crate) fn applied_type_assumption_parameter_slots(
         .collect()
 }
 
+/// The signature's parameters in the convention's argument registers, in order.
 pub(crate) fn inferred_signature_abi_register_params(
     signature: &InferredSignature,
+    argument_registers: &[String],
     ptr_bits: u32,
 ) -> Vec<ExternalRegisterParamSpec> {
-    if ptr_bits != 64 {
-        return Vec::new();
-    }
-    let arch = signature.arch.trim().to_ascii_lowercase();
-    let callconv = signature.callconv.trim().to_ascii_lowercase();
-    let is_sysv64 = matches!(arch.as_str(), "x86-64" | "x86_64" | "x64" | "amd64")
-        && matches!(callconv.as_str(), "amd64" | "sysv" | "sysv64" | "x86-64");
-    // AArch64 has one standard convention for these registers, and radare2
-    // leaves the calling-convention field empty rather than naming it, so an
-    // unnamed convention on that architecture is AAPCS64 rather than unknown.
-    let is_aapcs64 = matches!(arch.as_str(), "aarch64" | "arm64")
-        && matches!(
-            callconv.as_str(),
-            "" | "aapcs" | "aapcs64" | "arm64" | "aarch64"
-        );
-    const SYSV64_ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
-    const AAPCS64_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
-    let arg_regs: &[&str] = if is_sysv64 {
-        &SYSV64_ARG_REGS
-    } else if is_aapcs64 {
-        &AAPCS64_ARG_REGS
-    } else {
-        return Vec::new();
-    };
     signature
         .params
         .iter()
-        .take(arg_regs.len())
-        .enumerate()
-        .map(|(idx, param)| ExternalRegisterParamSpec {
+        .zip(argument_registers)
+        .map(|(param, reg)| ExternalRegisterParamSpec {
             name: param.name.clone(),
             ty: parse_c_type_like(&param.param_type, ptr_bits),
-            reg: arg_regs[idx].to_string(),
+            reg: reg.clone(),
         })
         .collect()
 }

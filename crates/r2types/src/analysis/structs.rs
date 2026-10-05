@@ -677,14 +677,20 @@ pub(crate) fn infer_local_struct_artifacts_from_prepared_ssa(
     let named_blocks = prepared.function().named_blocks();
     let blocks = named_blocks.as_slice();
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
-    let architecture = prepared.machine_context().architecture_family();
     let pointer_arg_slots = collect_prepared_pointer_arg_slot_map(prepared);
+    let stack_roots = |var: &SSAVar| {
+        prepared
+            .graph()
+            .value_id_for_var(var)
+            .and_then(|value| prepared.decompile_prep_facts().stack_address_root_of(value))
+            .copied()
+    };
     let written = prepared.function().written();
     let mut artifacts = infer_local_struct_artifacts_from_blocks(
         blocks,
         Some(&memory_versions),
         &|op| written.is_conventional_extension(op),
-        architecture,
+        Some(&stack_roots),
         &pointer_arg_slots,
         ptr_bits,
         diagnostics,
@@ -753,7 +759,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     ssa_blocks: &[SSABlock],
     memory_versions: Option<&LocalMemoryVersionFacts>,
     conventional_extension: &dyn Fn(r2ssa::OpId) -> bool,
-    architecture: r2ssa::MachineArchitectureFamily,
+    stack_roots: Option<FrameRoots<'_>>,
     pointer_arg_slot_map: &HashMap<String, usize>,
     ptr_bits: u32,
     diagnostics: &mut TypeAnalysisDiagnostics,
@@ -763,10 +769,9 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
         crate::signedness::NamedSignedness::of(ssa_blocks, true, conventional_extension);
     let pointer_pointee_types =
         local_pointer_pointee_types(ssa_blocks, ptr_bits, &scalar_signedness);
-    let (_, stack_bases, frame_bases) = recover_vars_arch_profile(architecture);
+    let stack_root = |var: &SSAVar| stack_roots.and_then(|roots| roots(var));
     let mut addr_exprs: HashMap<SSAVar, LocalAddrExpr> = HashMap::new();
-    let mut stack_addr_offsets: HashMap<SSAVar, i64> = HashMap::new();
-    let mut stack_slot_values: HashMap<(u64, i64), LocalAddrExpr> = HashMap::new();
+    let mut stack_slot_values: HashMap<(u64, StackSlotKey), LocalAddrExpr> = HashMap::new();
     let mut memory_version_values = HashMap::<MemoryVersion, LocalAddrExpr>::new();
     let mut slot_field_evidence: LocalFieldEvidenceMap = HashMap::new();
     let mut slot_stride_evidence = HashMap::<usize, BTreeSet<u64>>::new();
@@ -804,8 +809,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
         }
     }
 
-    let is_stack_base = |name: &str| stack_bases.contains(&name) || frame_bases.contains(&name);
-
     loop {
         let mut changed = false;
         for block in ssa_blocks {
@@ -824,8 +827,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                     }
                     map.get(var).cloned()
                 };
-                let stack_slot_of =
-                    |var: &SSAVar, stack_map: &HashMap<SSAVar, i64>| stack_map.get(var).copied();
                 let set_expr =
                     |dst: &SSAVar,
                      expr: LocalAddrExpr,
@@ -838,18 +839,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             }
                         }
                     };
-                let set_stack_slot =
-                    |dst: &SSAVar, offset: i64, map: &mut HashMap<SSAVar, i64>| match map
-                        .get(dst)
-                        .copied()
-                    {
-                        Some(prev) if prev == offset => false,
-                        _ => {
-                            map.insert(dst.clone(), offset);
-                            true
-                        }
-                    };
-
                 match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
@@ -860,13 +849,9 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             expr.confidence = expr.confidence.saturating_sub(2);
                             changed |= set_expr(dst, expr, &mut addr_exprs);
                         }
-                        if let Some(offset) = stack_slot_of(src, &stack_addr_offsets) {
-                            changed |= set_stack_slot(dst, offset, &mut stack_addr_offsets);
-                        }
                     }
                     SSAOp::Phi { dst, sources } => {
                         let mut selected = None;
-                        let mut selected_slot = None;
                         for src in sources {
                             let Some(expr) = addr_of(src, &addr_exprs) else {
                                 selected = None;
@@ -888,15 +873,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                                 }
                                 _ => None,
                             };
-                            let Some(slot) = stack_slot_of(src, &stack_addr_offsets) else {
-                                selected_slot = None;
-                                break;
-                            };
-                            selected_slot = match selected_slot {
-                                None => Some(slot),
-                                Some(prev) if prev == slot => Some(prev),
-                                _ => None,
-                            };
                             if selected.is_none() {
                                 break;
                             }
@@ -905,23 +881,8 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             expr.confidence = expr.confidence.saturating_sub(3);
                             changed |= set_expr(dst, expr, &mut addr_exprs);
                         }
-                        if let Some(slot) = selected_slot {
-                            changed |= set_stack_slot(dst, slot, &mut stack_addr_offsets);
-                        }
                     }
                     SSAOp::IntAdd { dst, a, b } => {
-                        if let Some(off) = exact_ssa_const_offset(b, ptr_bits) {
-                            let a_lower = a.name().to_ascii_lowercase();
-                            if is_stack_base(a_lower.as_str()) {
-                                changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
-                            }
-                        }
-                        if let Some(off) = exact_ssa_const_offset(a, ptr_bits) {
-                            let b_lower = b.name().to_ascii_lowercase();
-                            if is_stack_base(b_lower.as_str()) {
-                                changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
-                            }
-                        }
                         if let Some(base) = addr_of(a, &addr_exprs)
                             && let Some(delta) = exact_ssa_const_offset(b, ptr_bits)
                         {
@@ -1017,16 +978,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         }
                     }
                     SSAOp::IntSub { dst, a, b } => {
-                        if let Some(delta) = exact_ssa_const_offset(b, ptr_bits) {
-                            let a_lower = a.name().to_ascii_lowercase();
-                            if is_stack_base(a_lower.as_str()) {
-                                changed |= set_stack_slot(
-                                    dst,
-                                    delta.saturating_neg(),
-                                    &mut stack_addr_offsets,
-                                );
-                            }
-                        }
                         if let Some(base) = addr_of(a, &addr_exprs)
                             && let Some(delta) = exact_ssa_const_offset(b, ptr_bits)
                         {
@@ -1082,7 +1033,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         addr,
                         val,
                     } => {
-                        if let Some(offset) = stack_slot_of(addr, &stack_addr_offsets)
+                        if let Some(root) = stack_root(addr)
                             && let Some(mut expr) = addr_of(val, &addr_exprs)
                         {
                             expr.confidence = expr.confidence.saturating_sub(2);
@@ -1100,7 +1051,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                                     }
                                 }
                             } else if memory_versions.is_none() {
-                                let key = (block.addr, offset);
+                                let key = (block.addr, root);
                                 match stack_slot_values.get(&key) {
                                     Some(previous) if previous.confidence >= expr.confidence => {}
                                     _ => {
@@ -1127,11 +1078,9 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                                 )
                             });
                         let fallback_expr = (memory_versions.is_none())
-                            .then(|| stack_slot_of(addr, &stack_addr_offsets))
+                            .then(|| stack_root(addr))
                             .flatten()
-                            .and_then(|offset| {
-                                stack_slot_values.get(&(block.addr, offset)).cloned()
-                            });
+                            .and_then(|root| stack_slot_values.get(&(block.addr, root)).cloned());
                         if let Some(mut expr) = exact_expr.or(fallback_expr) {
                             expr.confidence = expr.confidence.saturating_sub(3);
                             changed |= set_expr(dst, expr, &mut addr_exprs);

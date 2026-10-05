@@ -49,7 +49,6 @@ use crate::facts::{
 use crate::function_facts::{FunctionFacts, InterprocSummaryView, SourceOwnedFunctionFacts};
 use crate::inferred_signature_from_signature_spec;
 use crate::model::Signedness;
-use crate::prepare::recover_vars_arch_profile;
 use crate::prepare::ssa_var_block_key;
 use crate::signedness::ScalarSignednessEvidence;
 
@@ -492,7 +491,6 @@ struct DerivedTypeAnalysisSemanticInputs<'a> {
 }
 
 struct PreparedMachineVarProfile {
-    architecture: r2ssa::MachineArchitectureFamily,
     pointer_arg_slots: HashMap<String, usize>,
 }
 
@@ -905,8 +903,11 @@ fn build_type_analysis_inner(
         input.parsed_context.merged_signature.clone(),
         inferred_signature_spec,
     );
-    let inferred_register_params =
-        inferred_signature_abi_register_params(&input.inferred_signature, input.ptr_bits);
+    let inferred_register_params = inferred_signature_abi_register_params(
+        &input.inferred_signature,
+        registers.argument_registers(),
+        input.ptr_bits,
+    );
     let mut canonicalize_register_params = input.parsed_context.register_params.clone();
     if inferred_register_params.len() > canonicalize_register_params.len() {
         canonicalize_register_params
@@ -1054,9 +1055,7 @@ fn build_type_analysis_inner(
         merged_signature.as_ref(),
         &local_structs.slot_element_strides,
         ScalarArrayMachineProfile {
-            architecture: machine_profile
-                .map(|profile| profile.architecture)
-                .unwrap_or(r2ssa::MachineArchitectureFamily::Unknown),
+            stack_roots: prep_facts,
             pointer_arg_slots: machine_profile.map(|profile| &profile.pointer_arg_slots),
             ptr_bits: input.ptr_bits,
         },
@@ -1251,6 +1250,7 @@ fn x86_64_register_identity() -> crate::RegisterIdentity {
         ("rcx", 0x08, 8),
         ("ecx", 0x08, 4),
     ])
+    .with_argument_registers(tests::system_v_argument_registers())
 }
 
 #[cfg(test)]
@@ -1308,10 +1308,8 @@ fn build_type_analysis_with_prep_facts(
 
 #[cfg(test)]
 fn detached_x86_64_test_machine_profile() -> PreparedMachineVarProfile {
-    let architecture = r2ssa::MachineArchitectureFamily::X86_64;
     PreparedMachineVarProfile {
-        architecture,
-        pointer_arg_slots: collect_pointer_arg_slot_map(architecture, 64),
+        pointer_arg_slots: tests::system_v_argument_slots(),
     }
 }
 
@@ -1359,7 +1357,6 @@ pub fn build_source_owned_type_analysis(
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
     let mut diagnostics = TypeAnalysisDiagnostics::default();
     let machine_profile = PreparedMachineVarProfile {
-        architecture: source.machine_context().architecture_family(),
         pointer_arg_slots: collect_prepared_pointer_arg_slot_map(source.as_ref()),
     };
     let local_structs =
