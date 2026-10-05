@@ -3296,19 +3296,17 @@ fn decompile_call_boundary_config(
         ),
         None => (Vec::new(), Vec::new()),
     };
-    let slots = machine_context.convention_slots();
+    let reads = machine_context
+        .call_effect()
+        .map(crate::SourceCallEffect::reads);
     let config = CallBoundaryConfig {
         clobbered,
         preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         result_by_target: callees.results,
-        argument_regs: slots
-            .map(|slots| slots.call_reads().to_vec())
-            .unwrap_or_default(),
-        return_regs: slots
-            .map(|slots| slots.return_reads().to_vec())
-            .unwrap_or_default(),
+        argument_regs: reads.map(|reads| reads.call().to_vec()).unwrap_or_default(),
+        return_regs: reads.map(|reads| reads.ret().to_vec()).unwrap_or_default(),
     };
     let inert = config.clobbered.is_empty()
         && config.stack_pointer_restored_by_callee.is_none()

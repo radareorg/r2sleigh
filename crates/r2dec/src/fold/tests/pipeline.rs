@@ -354,7 +354,7 @@ mod tests {
             })
             .collect();
         // A call leaves the return address and the stack pointer where it found them.
-        let call_effect = r2ssa::SourceCallEffect::new([], [return_address, stack_pointer])
+        let call_effect = r2ssa::SourceCallEffect::new([], [return_address, stack_pointer], r2ssa::SourceBoundaryReads::new([], []).expect("no reads"))
             .expect("a call effect");
         r2ssa::SsaArtifact::for_decompile_with(
             blocks,

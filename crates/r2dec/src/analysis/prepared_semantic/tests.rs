@@ -194,8 +194,12 @@ fn call_effect(clobbered: &[u64], preserved: &[u64]) -> Option<r2ssa::SourceCall
             .collect::<Vec<_>>()
     };
     Some(
-        r2ssa::SourceCallEffect::new(storages(clobbered), storages(preserved))
-            .expect("a call effect"),
+        r2ssa::SourceCallEffect::new(
+            storages(clobbered),
+            storages(preserved),
+            r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+        )
+        .expect("a call effect"),
     )
 }
 

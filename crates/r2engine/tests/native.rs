@@ -90,7 +90,13 @@ impl Machine {
             let convention = calling_convention(family, bits, platform).expect("a convention");
             Under {
                 convention,
-                effect: call_effect(&embedded.arch, bits, platform, &compiler),
+                effect: call_effect(
+                    &embedded.arch,
+                    bits,
+                    platform,
+                    &compiler,
+                    convention.variadic_count_register,
+                ),
                 compiler,
             }
         };

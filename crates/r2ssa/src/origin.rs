@@ -520,6 +520,7 @@ mod tests {
         let effect = crate::SourceCallEffect::new(
             [CanonicalStorageId::from_varnode(&register(0))],
             [CanonicalStorageId::from_varnode(&register(24))],
+            crate::SourceBoundaryReads::new([], []).expect("no reads"),
         )
         .expect("a consistent effect");
         let mut origins = BlockOrigins::default();

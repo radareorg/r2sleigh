@@ -37,7 +37,12 @@ mod tests {
         };
         let clobbered = place(&["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"]);
         let preserved = place(&["rbx", "rbp", "rsp", "r12", "r13", "r14", "r15"]);
-        r2ssa::SourceCallEffect::new(clobbered, preserved).expect("a call effect")
+        let reads = r2ssa::SourceBoundaryReads::new(
+            place(&["rdi", "rsi", "rdx", "rcx", "r8", "r9", "rax"]),
+            place(&["rax", "rdx"]),
+        )
+        .expect("register reads");
+        r2ssa::SourceCallEffect::new(clobbered, preserved, reads).expect("a call effect")
     }
 
     /// Decompile-prepared SSA under System V.

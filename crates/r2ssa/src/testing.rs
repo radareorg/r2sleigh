@@ -7,12 +7,22 @@ use crate::{
     SourceFunctionInterface, SsaArtifact,
 };
 
-/// A call effect naming these registers clobbered and these preserved.
+/// A call effect naming these registers clobbered and these preserved, whose call reads nothing.
 pub(crate) fn call_effect(
     clobbered: impl IntoIterator<Item = CanonicalStorageId>,
     preserved: impl IntoIterator<Item = CanonicalStorageId>,
 ) -> Option<SourceCallEffect> {
-    Some(SourceCallEffect::new(clobbered, preserved).expect("a call effect"))
+    call_effect_reading(clobbered, preserved, [])
+}
+
+/// A call effect whose call reads these registers.
+pub(crate) fn call_effect_reading(
+    clobbered: impl IntoIterator<Item = CanonicalStorageId>,
+    preserved: impl IntoIterator<Item = CanonicalStorageId>,
+    reads: impl IntoIterator<Item = CanonicalStorageId>,
+) -> Option<SourceCallEffect> {
+    let reads = crate::SourceBoundaryReads::new(reads, []).expect("register reads");
+    Some(SourceCallEffect::new(clobbered, preserved, reads).expect("a call effect"))
 }
 
 /// Decompile-prepared SSA with these interfaces, under this call effect.

@@ -180,7 +180,12 @@ fn source_owned_from_blocks_with_interface(
     } else {
         vec![storage(0x30)]
     };
-    let call_effect = r2ssa::SourceCallEffect::new([], preserved).expect("a call effect");
+    let call_effect = r2ssa::SourceCallEffect::new(
+        [],
+        preserved,
+        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+    )
+    .expect("a call effect");
     let source = Arc::new(
         SsaArtifact::for_decompile_with(
             blocks,

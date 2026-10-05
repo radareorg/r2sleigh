@@ -1594,8 +1594,13 @@ impl Following {
 fn kept_across_a_call(machine: &r2sleigh_lift::EmbeddedMachine, bits: u32) -> Vec<Varnode> {
     let compiler = r2sleigh_lift::profile::LanguageProfile::parse(machine.compiler_spec)
         .expect("the compiler specification parses");
-    let effect =
-        r2engine::native::call_effect(&machine.arch, bits, r2abi::Platform::Unknown, &compiler);
+    let effect = r2engine::native::call_effect(
+        &machine.arch,
+        bits,
+        r2abi::Platform::Unknown,
+        &compiler,
+        None,
+    );
     effect
         .iter()
         .flat_map(|effect| effect.preserved().iter().chain(effect.system_reserved()))

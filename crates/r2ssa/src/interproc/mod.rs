@@ -2337,9 +2337,8 @@ fn collect_local_summary_facts_with_obligation_authority(
     out
 }
 
-/// Keep this classification aligned with the operations for which obligation
-/// collection emits `VolatileOrUnknownEffect`. None of these operations carry
-/// exact preservation authority for call carriers or observable memory.
+/// The operations obligation collection marks `VolatileOrUnknownEffect`; only a
+/// user operation keeps the call carriers, writing nothing but its named output.
 fn has_volatile_or_unknown_effect<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,

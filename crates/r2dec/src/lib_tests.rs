@@ -518,9 +518,12 @@ fn prepared_under_test_convention(
             size: 8,
         })
     };
-    let call_effect =
-        r2ssa::SourceCallEffect::new(storages([0x00, 0x10, 0x18]), storages([0x20, 0x28, 0x30]))
-            .expect("a call effect");
+    let call_effect = r2ssa::SourceCallEffect::new(
+        storages([0x00, 0x10, 0x18]),
+        storages([0x20, 0x28, 0x30]),
+        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+    )
+    .expect("a call effect");
     r2ssa::SsaArtifact::for_decompile_with(
         blocks,
         r2ssa::DecompileInputs {

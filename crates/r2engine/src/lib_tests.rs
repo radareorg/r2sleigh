@@ -393,8 +393,12 @@ fn x86_64_result_call_effect() -> r2ssa::SourceCallEffect {
         offset,
         size: 8,
     };
-    r2ssa::SourceCallEffect::new([storage(0)], [storage(0x28), storage(0x30)])
-        .expect("a call effect")
+    r2ssa::SourceCallEffect::new(
+        [storage(0)],
+        [storage(0x28), storage(0x30)],
+        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+    )
+    .expect("a call effect")
 }
 
 fn x86_64_result_arch() -> r2il::ArchSpec {

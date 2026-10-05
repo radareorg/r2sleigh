@@ -19,9 +19,9 @@ use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{EntryClass, LanguageProfile, SpecStorage};
 use r2source::{
-    CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect, SourceConventionSlots,
-    SourceDataObject, SourceEndianness, SourceMachineRoles, SourceRoleRegisterNames,
-    SourceStackAllocationContract, SourceStackGrowth,
+    CanonicalStorageId, CanonicalStorageSpace, SourceBoundaryReads, SourceCallEffect,
+    SourceConventionSlots, SourceDataObject, SourceEndianness, SourceMachineRoles,
+    SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
 use r2ssa::{ArgumentReach, CalleePreservedCarriers, TrustedSsaArtifact};
@@ -1940,14 +1940,6 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
     let float_result = place(registers_of(&prototype.outputs, EntryClass::Float))?
         .first()
         .copied();
-    // What a call reads without an operand naming it: the general argument
-    // registers, the hidden return pointer, and the psABI's variadic count.
-    let mut call_reads = argument_slots.clone();
-    call_reads.extend(place(registers_of(&prototype.inputs, EntryClass::Other))?);
-    if let Some(name) = target.convention.variadic_count_register {
-        call_reads.push(storage(target.arch, name)?);
-    }
-    let return_reads = place(registers_of(&prototype.outputs, EntryClass::General))?;
     // Where an argument past the registers goes is the compiler specification's
     // own statement: its stack parameter entry carries the first offset and the
     // step between entries.
@@ -1958,7 +1950,6 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
     Ok(
         SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
             .and_then(|slots| slots.with_float_slots(float_slots, float_result))
-            .and_then(|slots| slots.with_boundary_reads(call_reads, return_reads))
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
             .with_stack_arguments(stack_arguments)
             .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack),
@@ -2000,6 +1991,7 @@ pub fn call_effect(
     bits: u32,
     platform: r2abi::Platform,
     profile: &LanguageProfile,
+    variadic_count: Option<&str>,
 ) -> Option<SourceCallEffect> {
     let prototype = profile.default_prototype()?;
     let place = |name: &str| {
@@ -2061,7 +2053,13 @@ pub fn call_effect(
         .copied()
         .collect::<Vec<_>>();
     clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));
-    SourceCallEffect::new(clobbered, preserved)
+    // A call may read every input register and the psABI's variadic count;
+    // a return hands back every output register.
+    let mut call_reads = registers(&mut prototype.inputs.iter().map(|entry| &entry.storage));
+    call_reads.extend(variadic_count.and_then(place));
+    let return_reads = registers(&mut prototype.outputs.iter().map(|entry| &entry.storage));
+    SourceBoundaryReads::new(call_reads, return_reads)
+        .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
         .and_then(|effect| effect.with_system_reserved(system_reserved))
         .inspect_err(|error| {
             r2il::refusal_evidence!("call-effect", "{}: {error:?}", prototype.name);

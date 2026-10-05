@@ -329,7 +329,13 @@ impl<S: Source + 'static> OpenProgram<S> {
         };
         let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
             .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
-        let call_effect = crate::native::call_effect(&machine.arch, bits, psabi, &compiler);
+        let call_effect = crate::native::call_effect(
+            &machine.arch,
+            bits,
+            psabi,
+            &compiler,
+            convention.variadic_count_register,
+        );
         // The specification names the register; the architecture says where it
         // lives, and the lift spells writes to it in those coordinates.
         let link = compiler.return_address.as_ref().and_then(|name| {

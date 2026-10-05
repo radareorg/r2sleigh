@@ -2350,6 +2350,11 @@ fn valid_call_target_storage(storage: CanonicalStorageId) -> bool {
 mod tests {
     use super::*;
 
+    /// An effect whose call and return read nothing, for tests of the effect alone.
+    fn no_reads() -> SourceBoundaryReads {
+        SourceBoundaryReads::new([], []).expect("no reads")
+    }
+
     fn register_storage(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {
             space: CanonicalStorageSpace::Register,
@@ -3233,6 +3238,7 @@ mod tests {
                 register_storage(0xa0, 16),
                 register_storage(0xa4, 4),
             ],
+            no_reads(),
         )
         .expect("a call effect");
         assert!(effect.preserves(register_storage(0x10, 16)));
@@ -3260,10 +3266,13 @@ mod tests {
     /// contradiction like one named clobbered and preserved.
     #[test]
     fn a_reserved_register_is_neither_clobbered_nor_preserved() {
-        let effect =
-            SourceCallEffect::new([register_storage(0x00, 8)], [register_storage(0x18, 8)])
-                .and_then(|effect| effect.with_system_reserved([register_storage(0x110, 8)]))
-                .expect("a call effect");
+        let effect = SourceCallEffect::new(
+            [register_storage(0x00, 8)],
+            [register_storage(0x18, 8)],
+            no_reads(),
+        )
+        .and_then(|effect| effect.with_system_reserved([register_storage(0x110, 8)]))
+        .expect("a call effect");
         assert_eq!(
             effect.effect_on(register_storage(0x110, 8)),
             SourceCallRegisterEffect::SystemReserved
@@ -3289,7 +3298,7 @@ mod tests {
             SourceCallRegisterEffect::Clobbered
         );
         assert_eq!(
-            SourceCallEffect::new([register_storage(0x110, 8)], [])
+            SourceCallEffect::new([register_storage(0x110, 8)], [], no_reads())
                 .and_then(|effect| effect.with_system_reserved([register_storage(0x114, 4)])),
             Err(SourceMachineRolesError::ContradictoryCallEffect)
         );
@@ -3299,12 +3308,20 @@ mod tests {
     #[test]
     fn a_call_effect_naming_one_register_both_ways_refuses() {
         assert_eq!(
-            SourceCallEffect::new([register_storage(0x10, 8)], [register_storage(0x14, 4)]),
+            SourceCallEffect::new(
+                [register_storage(0x10, 8)],
+                [register_storage(0x14, 4)],
+                no_reads()
+            ),
             Err(SourceMachineRolesError::ContradictoryCallEffect)
         );
         assert_eq!(
-            SourceCallEffect::new([register_storage(0x10, 8)], [register_storage(0x18, 8)])
-                .map(|effect| (effect.clobbered().len(), effect.preserved().len())),
+            SourceCallEffect::new(
+                [register_storage(0x10, 8)],
+                [register_storage(0x18, 8)],
+                no_reads()
+            )
+            .map(|effect| (effect.clobbered().len(), effect.preserved().len())),
             Ok((1, 1))
         );
     }
@@ -3386,6 +3403,43 @@ pub struct SourceCallEffect {
     clobbered: Box<[CanonicalStorageId]>,
     preserved: Box<[CanonicalStorageId]>,
     system_reserved: Box<[CanonicalStorageId]>,
+    reads: SourceBoundaryReads,
+}
+
+/// The registers a call and a return read without an operand naming them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceBoundaryReads {
+    call: Box<[CanonicalStorageId]>,
+    ret: Box<[CanonicalStorageId]>,
+}
+
+impl SourceBoundaryReads {
+    /// Refuses a storage that is not a register.
+    pub fn new(
+        call: impl IntoIterator<Item = CanonicalStorageId>,
+        ret: impl IntoIterator<Item = CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let call = sorted_storages(call);
+        let ret = sorted_storages(ret);
+        if call
+            .iter()
+            .chain(ret.iter())
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        Ok(Self { call, ret })
+    }
+
+    /// What a call may read: the convention's argument registers.
+    pub const fn call(&self) -> &[CanonicalStorageId] {
+        &self.call
+    }
+
+    /// What a return hands back: the convention's result registers.
+    pub const fn ret(&self) -> &[CanonicalStorageId] {
+        &self.ret
+    }
 }
 
 impl SourceCallEffect {
@@ -3393,6 +3447,7 @@ impl SourceCallEffect {
     pub fn new(
         clobbered: impl IntoIterator<Item = CanonicalStorageId>,
         preserved: impl IntoIterator<Item = CanonicalStorageId>,
+        reads: SourceBoundaryReads,
     ) -> Result<Self, SourceMachineRolesError> {
         let clobbered = sorted_storages(clobbered);
         let preserved = sorted_storages(preserved);
@@ -3410,6 +3465,7 @@ impl SourceCallEffect {
             clobbered,
             preserved,
             system_reserved: Box::default(),
+            reads,
         })
     }
 
@@ -3453,6 +3509,10 @@ impl SourceCallEffect {
     /// The registers the platform reserves to the system, sorted.
     pub const fn system_reserved(&self) -> &[CanonicalStorageId] {
         &self.system_reserved
+    }
+
+    pub const fn reads(&self) -> &SourceBoundaryReads {
+        &self.reads
     }
 
     /// What a call does to a storage.
@@ -3545,10 +3605,6 @@ pub struct SourceConventionSlots {
     float_argument_slots: Box<[CanonicalStorageId]>,
     /// Where a floating-point result is left.
     float_result_slot: Option<CanonicalStorageId>,
-    /// The registers a call reads without naming them in an operand.
-    call_reads: Box<[CanonicalStorageId]>,
-    /// The registers a return hands back without naming them.
-    return_reads: Box<[CanonicalStorageId]>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
@@ -3632,34 +3688,6 @@ impl SourceConventionSlots {
         Ok(self)
     }
 
-    /// Record what a call and a return read implicitly, refusing what is no register.
-    pub fn with_boundary_reads(
-        mut self,
-        call: impl IntoIterator<Item = CanonicalStorageId>,
-        ret: impl IntoIterator<Item = CanonicalStorageId>,
-    ) -> Result<Self, SourceMachineRolesError> {
-        let call = call.into_iter().collect::<Box<[_]>>();
-        let ret = ret.into_iter().collect::<Box<[_]>>();
-        if call
-            .iter()
-            .chain(ret.iter())
-            .any(|storage| !valid_register_storage(*storage))
-        {
-            return Err(SourceMachineRolesError::InvalidRegisterStorage);
-        }
-        self.call_reads = call;
-        self.return_reads = ret;
-        Ok(self)
-    }
-
-    pub const fn call_reads(&self) -> &[CanonicalStorageId] {
-        &self.call_reads
-    }
-
-    pub const fn return_reads(&self) -> &[CanonicalStorageId] {
-        &self.return_reads
-    }
-
     pub const fn float_argument_slots(&self) -> &[CanonicalStorageId] {
         &self.float_argument_slots
     }
@@ -3711,8 +3739,6 @@ impl SourceConventionSlots {
             result_slot,
             float_argument_slots: Box::default(),
             float_result_slot: None,
-            call_reads: Box::default(),
-            return_reads: Box::default(),
             stack_arguments: None,
             variadic_tail_on_stack: false,
         })
