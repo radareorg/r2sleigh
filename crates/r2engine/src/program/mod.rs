@@ -64,8 +64,6 @@ pub struct OpenProgram<S: Source + 'static> {
     /// The control a caller set for the next request, which that request
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
-    /// The reference index, and the state of the program it was read at.
-    references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
 }
 
 impl<S: Source + 'static> OpenProgram<S> {
@@ -83,7 +81,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             modes: std::cell::RefCell::default(),
             assembly: Err("the program's machine is not loaded".to_owned()),
             next: None,
-            references: None,
             db: Db::new(ProgramInputs {
                 defined: definitions(container),
                 extents: r2types::ProgramExtents::new(
@@ -411,16 +408,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Which state of this program every answer is about.
     pub fn revision(&self) -> Revision {
-        Revision {
-            program: self.source().identity(),
-            bytes: self.source().byte_revision(),
-            // When the table last differed, which most patches leave alone:
-            // anything that read only a name stays good across them.
-            names: self.db.changed_at::<Names>(&()).unwrap_or(0),
-            // The entries a write can move: the import stubs, and the modes.
-            entries: self.db.changed_at::<Imports>(&()).unwrap_or(0)
-                + self.db.changed_at::<requests::Modes>(&()).unwrap_or(0),
-        }
+        view::revision(&self.db)
     }
 
     /// The decoder the code at this address is written in: whichever is
@@ -437,10 +425,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// Sleigh specification gives the wrong answer on exactly the binaries
     /// that have literal pools.
     pub fn endian(&self) -> r2il::Endianness {
-        match self.source().container().arch.endian {
-            Endian::Little => r2il::Endianness::Little,
-            Endian::Big => r2il::Endianness::Big,
-        }
+        view::endian(self.source())
     }
 }
 

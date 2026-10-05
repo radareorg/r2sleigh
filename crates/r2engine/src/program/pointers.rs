@@ -49,6 +49,16 @@ impl<S: Source + 'static> Parameters for OpenProgram<S> {
         callee: Callee,
         held: &dyn Fn(&CanonicalStorageId) -> bool,
     ) -> Option<Support> {
+        self.view().pointer_use(callee, held)
+    }
+}
+
+impl<S: Source + 'static> Parameters for View<'_, S> {
+    fn pointer_use(
+        &self,
+        callee: Callee,
+        held: &dyn Fn(&CanonicalStorageId) -> bool,
+    ) -> Option<Support> {
         let (Callee::At(address) | Callee::ThroughSlot(address)) = callee;
         let target = self.target(address).ok()?;
         // A number in no argument register reaches no parameter, so the callee need not be read.

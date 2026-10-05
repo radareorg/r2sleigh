@@ -556,60 +556,10 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.start_request();
         // A callee's body is read in the instruction set discovery settled, so that is settled first.
         self.ensure_current()?;
-        let revision = self.revision();
-        if let Some((at, held)) = &self.references
-            && *at == revision
-        {
-            return Ok(Answer::complete(Arc::clone(held), revision));
-        }
-        let index = Arc::new(self.indexed(revision)?);
-        self.references = Some((revision, Arc::clone(&index)));
-        Ok(Answer::complete(index, revision))
-    }
-
-    /// Read every believed body's references, at one revision.
-    fn indexed(&mut self, revision: crate::query::Revision) -> Result<References, String> {
-        let survey = self.surveyed()?;
-        let walked = &survey.walked;
-        let mut index = Indexing::default();
-        let mut coverage = Coverage::default();
-        index.read_words(&self.source().container().loader_writes);
-        // A program that states no function is never assembled, and has nothing to index.
-        if walked.is_empty() {
-            return Ok(index.finish(coverage));
-        }
-        let program = &*self;
-        let walker = super::returns::Walking::new(program.view(), true)?;
-        for (&entry, walked) in walked {
-            // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
-            let lifted = walked.clone().and_then(|thumb| {
-                let target = walker.target(thumb);
-                let body = crate::body::lift_body(entry, target.disasm, program, &BTreeMap::new());
-                body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
-            });
-            let (thumb, body) = match lifted {
-                Ok(lifted) => lifted,
-                Err(refusal) => {
-                    coverage.unread.insert(entry, Unread::Refused(refusal));
-                    continue;
-                }
-            };
-            if !body.unresolved.is_empty() {
-                coverage.unresolved.insert(entry, body.unresolved);
-            }
-            let machine = walker.machine(thumb).ok_or("no machine")?;
-            let decoder = (walker.target(thumb), machine);
-            match claimed_by(program, decoder, body.blocks, revision) {
-                Ok(lines) => {
-                    coverage.read.push(entry);
-                    index.read(entry, lines);
-                }
-                Err(unread) => {
-                    coverage.unread.insert(entry, unread);
-                }
-            }
-        }
-        Ok(index.finish(coverage))
+        let index = self.db.get::<ReferenceIndex>(&());
+        let index = index.map_err(|cycle| format!("{cycle:?}"))?;
+        let index = index.as_ref().clone()?;
+        Ok(Answer::complete(index.0, self.revision()))
     }
 
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
@@ -643,9 +593,69 @@ impl<S: Source + 'static> OpenProgram<S> {
     }
 }
 
+/// Every reference the program makes, from every function discovery believes, with the coverage it was read over.
+pub(super) struct ReferenceIndex;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for ReferenceIndex {
+    type Key = ();
+    type Value = Result<super::analysis::Shared<References>, String>;
+    const NAME: &'static str = "reference-index";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        indexed(&View::new(db, true)).map(|index| super::analysis::Shared(Arc::new(index)))
+    }
+}
+
+/// Read every believed body's references.
+fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String> {
+    let survey = view.db.get::<SurveyQuery>(&());
+    let survey = survey.map_err(|cycle| format!("{cycle:?}"))?;
+    let survey = survey.as_ref().clone()?.0;
+    let walked = &survey.walked;
+    let mut index = Indexing::default();
+    let mut coverage = Coverage::default();
+    index.read_words(&view.source().container().loader_writes);
+    // A program that states no function is never assembled, and has nothing to index.
+    if walked.is_empty() {
+        return Ok(index.finish(coverage));
+    }
+    let revision = super::view::revision(view.db);
+    let walker = super::returns::Walking::new(view.clone(), true)?;
+    for (&entry, walked) in walked {
+        // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
+        let lifted = walked.clone().and_then(|thumb| {
+            let target = walker.target(thumb);
+            let body = crate::body::lift_body(entry, target.disasm, view, &BTreeMap::new());
+            body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
+        });
+        let (thumb, body) = match lifted {
+            Ok(lifted) => lifted,
+            Err(refusal) => {
+                coverage.unread.insert(entry, Unread::Refused(refusal));
+                continue;
+            }
+        };
+        if !body.unresolved.is_empty() {
+            coverage.unresolved.insert(entry, body.unresolved);
+        }
+        let machine = walker.machine(thumb).ok_or("no machine")?;
+        let decoder = (walker.target(thumb), machine);
+        match claimed_by(view, decoder, body.blocks, revision) {
+            Ok(lines) => {
+                coverage.read.push(entry);
+                index.read(entry, lines);
+            }
+            Err(unread) => {
+                coverage.unread.insert(entry, unread);
+            }
+        }
+    }
+    Ok(index.finish(coverage))
+}
+
 /// One body listed as the reference index reads it, or why it is unread.
 fn claimed_by<S: Source + 'static>(
-    program: &OpenProgram<S>,
+    view: &View<'_, S>,
     (target, machine): (
         &crate::native::NativeTarget<'_>,
         &r2sleigh_lift::EmbeddedMachine,
@@ -660,10 +670,15 @@ fn claimed_by<S: Source + 'static>(
     let body = WalkedBody::new(&lifted, target.arch);
     let answered = Answered {
         decoders: &Walked(machine),
+        memory: Memory {
+            program: view,
+            endian: super::view::endian(view.source()),
+        },
+        call_effect: target.call_effect,
+        proved: None,
         body: Some(&body),
         holdings: false,
-        call_effect: target.call_effect,
-        ..program.answered(None)
+        parameters: Some(view),
     };
     let lines = listed_by_block(&answered, &lifted, revision).value;
     // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.

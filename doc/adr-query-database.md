@@ -77,6 +77,9 @@ engine. Commands, the visual mode and the agent surface all ask it.
   read the call-graph returns), plus returns, solved by component together
   with P6; pointers and callee reads read the analysis, so they follow Q2.
   Left: summaries with P6.
+- Q4a: the reference index is the `ReferenceIndex` query over the View,
+  which also lists, decodes and asks pointer parameters; the reference
+  cache is deleted, and `revision(db)` and `endian` have one owner.
 - Q4: references and renderings as queries. Exit: the reference cache,
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.
