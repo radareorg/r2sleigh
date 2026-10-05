@@ -171,12 +171,31 @@ pub enum NativeRefusal {
     Capture(r2source::SnapshotValidationError),
     Lift(String),
     Prepare(String),
+    /// The request's control stopped preparation: a fact about the request, never held as the program's.
+    Stopped(r2ssa::SsaPrepareError),
     /// The analysis panicked: a defect, kept to this function and reported
     /// with where it was raised rather than taking the session with it.
     Panicked {
         location: Option<crate::isolation::PanicLocation>,
         message: String,
     },
+}
+
+impl NativeRefusal {
+    /// Why preparation refused, a stop of the request's own kept apart.
+    fn of_preparation(error: r2ssa::SsaPrepareError) -> Self {
+        match error {
+            r2ssa::SsaPrepareError::Cancelled | r2ssa::SsaPrepareError::DeadlineExceeded => {
+                Self::Stopped(error)
+            }
+            error => Self::Prepare(format!("{error:?}")),
+        }
+    }
+
+    /// Whether this refusal is the request's stop rather than the program's answer.
+    pub const fn stopped(&self) -> bool {
+        matches!(self, Self::Stopped(_))
+    }
 }
 
 impl From<crate::isolation::Panicked> for NativeRefusal {
@@ -197,6 +216,7 @@ impl std::fmt::Display for NativeRefusal {
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),
+            Self::Stopped(stop) => write!(f, "{stop}"),
             Self::Panicked { location, message } => {
                 let panicked = crate::isolation::Panicked {
                     location: location.clone(),
@@ -421,6 +441,8 @@ pub enum Unreadable {
     NotWalked,
     /// The body was walked and could not be prepared.
     NotPrepared,
+    /// The request's control stopped its preparation.
+    Stopped,
     /// It was prepared and proved nothing about its boundary that a caller
     /// could use.
     NothingProved,
@@ -441,6 +463,7 @@ impl std::fmt::Display for Unread {
         let reason = match &self.reason {
             Unreadable::NotWalked => "its body could not be walked",
             Unreadable::NotPrepared => "its body could not be prepared",
+            Unreadable::Stopped => "the request stopped before its body was prepared",
             Unreadable::NothingProved => "it proved nothing about its boundary",
             Unreadable::Panicked(panicked) => {
                 return write!(f, "{:#x}: its analysis {panicked}", self.address);
@@ -705,7 +728,10 @@ fn prepare_callee(
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     native
         .prepare_restated(&walked, &imports, Vec::new(), declared, &[])
-        .map_err(|_| Unreadable::NotPrepared)
+        .map_err(|refusal| match refusal.stopped() {
+            true => Unreadable::Stopped,
+            false => Unreadable::NotPrepared,
+        })
 }
 
 /// What a callee's own body proves about its parameters, prepared as every caller prepares it.
@@ -1572,7 +1598,7 @@ impl Native<'_> {
         let evidence = callees.evidence(library);
         let artifact =
             TrustedSsaArtifact::prepare_with_callee_interfaces(lifted, &self.control, &evidence)
-                .map_err(|error| NativeRefusal::Prepare(format!("{error:?}")))?;
+                .map_err(NativeRefusal::of_preparation)?;
         Ok(Arc::new(artifact))
     }
 }

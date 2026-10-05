@@ -54,8 +54,16 @@ pub trait Query<I: Inputs>: 'static {
     /// Named in a [`Cycle`].
     const NAME: &'static str;
 
+    /// How many answers are held at once, the oldest dropped first; `None` holds every one.
+    const CAPACITY: Option<usize> = None;
+
     /// The answer, reading the program only through `db`.
     fn compute(db: &Db<I>, key: &Self::Key) -> Self::Value;
+
+    /// Whether this answer is the request's stop rather than the program's: never held, and neither is what read it.
+    fn stopped(_value: &Self::Value) -> bool {
+        false
+    }
 }
 
 /// A query asked, through some chain, for itself.
@@ -108,6 +116,8 @@ type Green<V> = (Rc<V>, Rc<[Dep]>);
 struct Frame {
     deps: Vec<Dep>,
     taken: BTreeSet<*const Dep>,
+    /// Whether it read a stopped answer, which makes its own answer the request's too.
+    stopped: bool,
 }
 
 #[derive(Clone)]
@@ -141,12 +151,16 @@ struct Entry<V> {
     deps: Rc<[Dep]>,
     verified_at: u64,
     changed_at: u64,
+    /// When it was computed, so a table at capacity drops its oldest.
+    stamp: u64,
 }
 
 /// The answers to one query, by key.
 struct Table<Q: Query<I>, I: Inputs> {
     entries: RefCell<BTreeMap<Q::Key, Entry<Q::Value>>>,
     running: RefCell<BTreeSet<Q::Key>>,
+    /// The next entry's stamp.
+    clock: std::cell::Cell<u64>,
     query: PhantomData<fn(&I) -> Q>,
 }
 
@@ -219,20 +233,18 @@ impl<I: Inputs + 'static> Db<I> {
             .downcast_ref::<Table<Q, I>>()
             .expect("a table is registered under its own query's type");
         let held = typed.entries.borrow().contains_key(key);
-        if held {
-            typed.check(self, key)?;
-        } else {
-            typed.execute(self, key)?;
+        let (value, changed_at) = match held {
+            true => typed.check(self, key)?,
+            false => typed.execute(self, key)?,
+        };
+        // A stopped answer is not held, so nothing can depend on it; the stop has tainted the asker.
+        if changed_at.is_some() {
+            self.record(Dep::Query {
+                table: TypeId::of::<Q>(),
+                key: Rc::new(key.clone()),
+            });
         }
-        self.record(Dep::Query {
-            table: TypeId::of::<Q>(),
-            key: Rc::new(key.clone()),
-        });
-        let entries = typed.entries.borrow();
-        let entry = entries
-            .get(key)
-            .expect("an answer was just checked or computed");
-        Ok(Rc::clone(&entry.value))
+        Ok(value)
     }
 
     /// `Q`'s answer at `key` where held and good; never computes, and records the answer's own dependencies, so no cycle closes.
@@ -257,8 +269,8 @@ impl<I: Inputs + 'static> Db<I> {
     /// Hold answers a computation found besides its own, depending on what it has read; each must equal a direct computation.
     pub fn deposit<Q: Query<I>>(&self, answers: impl IntoIterator<Item = (Q::Key, Q::Value)>) {
         let deps: Rc<[Dep]> = match self.frames.borrow().last() {
-            Some(frame) => coalesced(frame.deps.clone()).into(),
-            None => return,
+            Some(frame) if !frame.stopped => coalesced(frame.deps.clone()).into(),
+            _ => return,
         };
         let table = self.table::<Q>();
         let typed = table
@@ -284,9 +296,11 @@ impl<I: Inputs + 'static> Db<I> {
                     deps: Rc::clone(&deps),
                     verified_at: now,
                     changed_at,
+                    stamp: typed.tick(),
                 },
             );
         }
+        Table::<Q, I>::bound(&mut entries);
     }
 
     fn table<Q: Query<I>>(&self) -> Rc<dyn AnyTable<I>> {
@@ -295,6 +309,7 @@ impl<I: Inputs + 'static> Db<I> {
             Rc::new(Table::<Q, I> {
                 entries: RefCell::new(BTreeMap::new()),
                 running: RefCell::new(BTreeSet::new()),
+                clock: std::cell::Cell::new(0),
                 query: PhantomData,
             })
         }))
@@ -315,11 +330,13 @@ struct Running<'a, I: Inputs + 'static, K: Ord> {
 }
 
 impl<I: Inputs + 'static, K: Ord> Running<'_, I, K> {
-    fn finish(mut self) -> Vec<Dep> {
+    /// What the query read, and whether it read a stopped answer.
+    fn finish(mut self) -> (Vec<Dep>, bool) {
         if let Some(key) = self.key.take() {
             self.running.borrow_mut().remove(&key);
         }
-        coalesced(self.db.frames.borrow_mut().pop().unwrap_or_default().deps)
+        let frame = self.db.frames.borrow_mut().pop().unwrap_or_default();
+        (coalesced(frame.deps), frame.stopped)
     }
 }
 
@@ -358,31 +375,6 @@ fn coalesced(deps: Vec<Dep>) -> Vec<Dep> {
 }
 
 impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
-    /// Recheck the held answer at `key` against the current revision,
-    /// recomputing it where something it read has moved; its `changed_at`.
-    fn check(&self, db: &Db<I>, key: &Q::Key) -> Result<u64, Cycle> {
-        let now = db.inputs.byte_revision();
-        let (verified_at, changed_at, deps) = {
-            let entries = self.entries.borrow();
-            let entry = entries.get(key).expect("checked only where held");
-            (entry.verified_at, entry.changed_at, Rc::clone(&entry.deps))
-        };
-        if verified_at == now {
-            db.stats.borrow_mut().reused += 1;
-            return Ok(changed_at);
-        }
-        for dep in deps.iter() {
-            if dep.moved_since(db, verified_at)? {
-                return self.execute(db, key);
-            }
-        }
-        db.stats.borrow_mut().reused += 1;
-        if let Some(entry) = self.entries.borrow_mut().get_mut(key) {
-            entry.verified_at = now;
-        }
-        Ok(changed_at)
-    }
-
     /// The held answer and its dependencies where none has moved, checked without computing this query.
     fn green(&self, db: &Db<I>, key: &Q::Key) -> Result<Option<Green<Q::Value>>, Cycle> {
         let now = db.inputs.byte_revision();
@@ -413,8 +405,58 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         Ok(Some((value, deps)))
     }
 
-    /// Run the query at `key` and hold its answer; its `changed_at`.
-    fn execute(&self, db: &Db<I>, key: &Q::Key) -> Result<u64, Cycle> {
+    fn tick(&self) -> u64 {
+        let stamp = self.clock.get();
+        self.clock.set(stamp + 1);
+        stamp
+    }
+
+    /// Drop the oldest answers past the query's capacity; a dropped answer is recomputed when asked.
+    fn bound(entries: &mut BTreeMap<Q::Key, Entry<Q::Value>>) {
+        let Some(capacity) = Q::CAPACITY else {
+            return;
+        };
+        while entries.len() > capacity {
+            let oldest = entries.iter().min_by_key(|(_, entry)| entry.stamp);
+            let Some(oldest) = oldest.map(|(key, _)| key.clone()) else {
+                return;
+            };
+            entries.remove(&oldest);
+        }
+    }
+
+    /// Recheck the held answer at `key`, recomputing where something it read has moved; its value and `changed_at`, none where it stopped.
+    fn check(&self, db: &Db<I>, key: &Q::Key) -> Result<(Rc<Q::Value>, Option<u64>), Cycle> {
+        let now = db.inputs.byte_revision();
+        let (value, verified_at, changed_at, deps) = {
+            let entries = self.entries.borrow();
+            let entry = entries.get(key).expect("checked only where held");
+            let value = Rc::clone(&entry.value);
+            (
+                value,
+                entry.verified_at,
+                entry.changed_at,
+                Rc::clone(&entry.deps),
+            )
+        };
+        if verified_at == now {
+            db.stats.borrow_mut().reused += 1;
+            return Ok((value, Some(changed_at)));
+        }
+        for dep in deps.iter() {
+            if dep.moved_since(db, verified_at)? {
+                return self.execute(db, key);
+            }
+        }
+        db.stats.borrow_mut().reused += 1;
+        if let Some(entry) = self.entries.borrow_mut().get_mut(key) {
+            entry.verified_at = now;
+        }
+        Ok((value, Some(changed_at)))
+    }
+
+    /// Run the query at `key` and hold its answer unless it stopped; its value and `changed_at`.
+    fn execute(&self, db: &Db<I>, key: &Q::Key) -> Result<(Rc<Q::Value>, Option<u64>), Cycle> {
         if !self.running.borrow_mut().insert(key.clone()) {
             return Err(Cycle {
                 query: Q::NAME,
@@ -428,14 +470,20 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             key: Some(key.clone()),
         };
         let value = Q::compute(db, key);
-        let deps = frame.finish();
-        let now = db.inputs.byte_revision();
-        let mut stats = db.stats.borrow_mut();
-        stats.computed += 1;
+        let (deps, tainted) = frame.finish();
+        db.stats.borrow_mut().computed += 1;
         let mut entries = self.entries.borrow_mut();
+        if tainted || Q::stopped(&value) {
+            entries.remove(key);
+            if let Some(asker) = db.frames.borrow_mut().last_mut() {
+                asker.stopped = true;
+            }
+            return Ok((Rc::new(value), None));
+        }
+        let now = db.inputs.byte_revision();
         let (value, changed_at) = match entries.remove(key) {
             Some(old) if *old.value == value => {
-                stats.backdated += 1;
+                db.stats.borrow_mut().backdated += 1;
                 (old.value, old.changed_at)
             }
             _ => (Rc::new(value), now),
@@ -443,13 +491,15 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         entries.insert(
             key.clone(),
             Entry {
-                value,
+                value: Rc::clone(&value),
                 deps: deps.into(),
                 verified_at: now,
                 changed_at,
+                stamp: self.tick(),
             },
         );
-        Ok(changed_at)
+        Self::bound(&mut entries);
+        Ok((value, Some(changed_at)))
     }
 }
 
@@ -461,7 +511,7 @@ impl<Q: Query<I>, I: Inputs + 'static> AnyTable<I> for Table<Q, I> {
         if !self.entries.borrow().contains_key(key) {
             return Ok(None);
         }
-        self.check(db, key).map(Some)
+        self.check(db, key).map(|(_, changed_at)| changed_at)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -581,6 +631,53 @@ mod tests {
                 *fresh.get::<Prefix>(&at).unwrap()
             );
         }
+    }
+
+    /// A byte, where 0xff stands for a request that stopped.
+    struct Halting;
+    impl Query<Memory> for Halting {
+        type Key = u64;
+        type Value = u8;
+        const NAME: &'static str = "halting";
+        fn compute(db: &Db<Memory>, &at: &u64) -> u8 {
+            read(db, at..at + 1)[0]
+        }
+        fn stopped(value: &u8) -> bool {
+            *value == 0xff
+        }
+    }
+
+    /// Twice a halting byte, holding at most one answer.
+    struct Doubled;
+    impl Query<Memory> for Doubled {
+        type Key = u64;
+        type Value = u16;
+        const NAME: &'static str = "doubled";
+        const CAPACITY: Option<usize> = Some(1);
+        fn compute(db: &Db<Memory>, at: &u64) -> u16 {
+            u16::from(*db.get::<Halting>(at).expect("acyclic")) * 2
+        }
+    }
+
+    #[test]
+    fn a_stopped_answer_is_held_by_neither_it_nor_what_read_it() {
+        let mut bytes = vec![1; 16];
+        bytes[3] = 0xff;
+        let db = Db::new(Memory::new(bytes));
+        assert_eq!(*db.get::<Doubled>(&3).unwrap(), 0x1fe);
+        let computed = db.stats().computed;
+        assert_eq!(*db.get::<Doubled>(&3).unwrap(), 0x1fe);
+        assert_eq!(db.stats().computed, computed + 2, "both are computed again");
+        // At capacity one, a second key drops the first.
+        assert_eq!(*db.get::<Doubled>(&4).unwrap(), 2);
+        assert_eq!(*db.get::<Doubled>(&5).unwrap(), 2);
+        let computed = db.stats().computed;
+        assert_eq!(*db.get::<Doubled>(&4).unwrap(), 2);
+        assert_eq!(
+            db.stats().computed,
+            computed + 1,
+            "the dropped answer is computed again"
+        );
     }
 
     /// A query whose dependencies depend on the bytes: the byte at `at` names

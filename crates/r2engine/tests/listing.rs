@@ -794,7 +794,10 @@ fn a_function_whose_analysis_is_refused_is_still_listed_and_says_why() {
     let listed = |lines: &[Line]| lines.iter().map(|line| line.address).collect::<Vec<_>>();
     let refused = listing.refused.expect("it says the analysis was refused");
     assert!(
-        matches!(refused.reason, r2engine::native::NativeRefusal::Prepare(_)),
+        matches!(
+            refused.reason,
+            r2engine::native::NativeRefusal::Stopped(r2ssa::SsaPrepareError::Cancelled)
+        ),
         "{:?}",
         refused.reason
     );
