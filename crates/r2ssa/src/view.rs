@@ -274,12 +274,6 @@ impl<I: DenseId + std::hash::Hash> ValueViews<I> {
         self.representative(id).value()
     }
 
-    /// Every value with a representative other than itself, and that
-    /// representative, in id order.
-    pub fn representatives(&self) -> impl Iterator<Item = (I, Representative<I>)> + '_ {
-        self.representatives.iter().map(|(id, rep)| (id, *rep))
-    }
-
     /// The constant bits `id`'s representative is, where it is a literal or
     /// a constant value.
     pub fn representative_constant(&self, id: I) -> Option<(u64, u32)> {

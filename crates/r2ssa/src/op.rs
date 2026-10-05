@@ -1417,11 +1417,6 @@ impl<V> SSAOp<V> {
                 | SSAOp::CallUse { .. }
         )
     }
-
-    /// Returns true if this is a phi node.
-    pub fn is_phi(&self) -> bool {
-        matches!(self, SSAOp::Phi { .. })
-    }
 }
 
 impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {

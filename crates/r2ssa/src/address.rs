@@ -197,21 +197,14 @@ struct SpillSlotKey {
     width: u32,
 }
 
-fn memory_space_order(space: SpaceId) -> (u8, u32) {
-    match space {
-        SpaceId::Ram => (0, 0),
-        SpaceId::Register => (1, 0),
-        SpaceId::Unique => (2, 0),
-        SpaceId::Const => (3, 0),
-        SpaceId::Custom(id) => (4, id),
-    }
-}
-
 impl Ord for SpillSlotKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.root
             .cmp(&other.root)
-            .then_with(|| memory_space_order(self.space).cmp(&memory_space_order(other.space)))
+            .then_with(|| {
+                crate::semantic::memory_space_order(self.space)
+                    .cmp(&crate::semantic::memory_space_order(other.space))
+            })
             .then_with(|| self.width.cmp(&other.width))
     }
 }

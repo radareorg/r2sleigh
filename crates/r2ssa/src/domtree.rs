@@ -227,21 +227,6 @@ impl DomTree {
         a != b && self.dominates(a, b)
     }
 
-    /// Get all blocks dominated by a given block.
-    pub fn dominated_by(&self, block: u64) -> Vec<u64> {
-        let mut result = vec![block];
-        let mut stack = vec![block];
-
-        while let Some(current) = stack.pop() {
-            for &child in self.children(current) {
-                result.push(child);
-                stack.push(child);
-            }
-        }
-
-        result
-    }
-
     /// Iterate over the dominator tree in preorder.
     pub fn preorder(&self) -> Vec<u64> {
         let mut result = Vec::new();

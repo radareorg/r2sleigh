@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Work one controlled run has done, counted rather than timed.
 ///
@@ -134,29 +134,12 @@ impl SsaExecutionControl {
         self
     }
 
-    /// The meter this run counts into.
-    pub fn meter(&self) -> Option<&Arc<SsaWorkMeter>> {
-        self.meter.as_ref()
-    }
-
     pub fn with_cancellation(cancellation: SsaCancellationToken) -> Self {
         Self::new(cancellation, None)
     }
 
     pub fn with_deadline(deadline: Instant) -> Self {
         Self::new(SsaCancellationToken::default(), Some(deadline))
-    }
-
-    pub fn with_timeout(timeout: Duration) -> Self {
-        Self::with_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        )
-    }
-
-    pub fn cancellation(&self) -> SsaCancellationToken {
-        self.cancellation.clone()
     }
 
     pub fn deadline(&self) -> Option<Instant> {

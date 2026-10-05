@@ -122,11 +122,6 @@ impl ValueTable {
     pub fn is_empty(&self) -> bool {
         self.vars.is_empty()
     }
-
-    /// Every variable, in id order.
-    pub fn vars(&self) -> &[SSAVar] {
-        &self.vars
-    }
 }
 
 impl ValueTable {

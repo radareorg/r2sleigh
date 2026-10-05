@@ -313,13 +313,6 @@ impl SemanticSourceSite {
             Self::GenuineNativeSpan(_) => None,
         }
     }
-
-    pub const fn native_span(self) -> Option<crate::GenuineNativeInstructionSpan> {
-        match self {
-            Self::GraphInstruction(_) => None,
-            Self::GenuineNativeSpan(span) => Some(span),
-        }
-    }
 }
 
 impl std::fmt::Display for SemanticInstructionState {

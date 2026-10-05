@@ -348,11 +348,6 @@ impl StridedInterval {
         }
     }
 
-    /// Everything at or below a bound.
-    pub fn at_most(&self, bound: u64) -> Self {
-        self.meet(&Self::interval(self.width_bits, 0, bound))
-    }
-
     fn pointwise(&self, other: &Self, op: impl Fn(u64, u64) -> Option<u64>) -> Self {
         let (Some(left), Some(right)) = (self.body, other.body) else {
             return Self::bottom(self.width_bits);

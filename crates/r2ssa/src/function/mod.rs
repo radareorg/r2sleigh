@@ -17,7 +17,7 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use r2il::{ArchSpec, R2ILBlock, R2ILOp};
-use r2sleigh_lift::{GenuineLiftedFunction, GenuineLiftedFunctionAuthority, TrustedLiftedFunction};
+use r2sleigh_lift::{GenuineLiftedFunction, TrustedLiftedFunction};
 use r2source::{OwnedFunctionSnapshot, SourceCallPreservedCarriers};
 use serde::{Deserialize, Serialize};
 
@@ -491,9 +491,6 @@ fn genuine_native_instruction_spans(
 #[derive(Debug, Clone)]
 enum SsaArtifactProvenance {
     Manual,
-    /// The kind is the whole fact: a genuine lift alone certifies nothing,
-    /// so the authority it was built from has no reader here.
-    GenuineLiftOnly,
     TrustedSource(OwnedFunctionSnapshot),
 }
 
@@ -502,7 +499,6 @@ enum SsaArtifactProvenance {
 #[derive(Debug, Clone)]
 pub struct TrustedSsaArtifact {
     artifact: Arc<SsaArtifact>,
-    lift_authority: GenuineLiftedFunctionAuthority,
     source_block_count: usize,
     arch: ArchSpec,
 }
@@ -698,7 +694,6 @@ impl SsaArtifact {
     pub fn provenance_kind(&self) -> SsaArtifactProvenanceKind {
         match &self.provenance {
             SsaArtifactProvenance::Manual => SsaArtifactProvenanceKind::Manual,
-            SsaArtifactProvenance::GenuineLiftOnly => SsaArtifactProvenanceKind::GenuineLiftOnly,
             SsaArtifactProvenance::TrustedSource(_) => SsaArtifactProvenanceKind::TrustedSource,
         }
     }
@@ -903,101 +898,11 @@ impl SsaArtifact {
         Self::seal_finished(function, machine_context, Finish::manual(), control)
     }
 
-    /// Build analysis-only decompiler SSA directly from an immutable genuine lift.
-    ///
-    /// A genuine lift proves instruction origin, but detached source interfaces
-    /// do not prove that ABI facts came from the same immutable source snapshot.
-    /// This path therefore cannot grant certification authority.
-    pub fn for_decompile_from_genuine_lift_with_interfaces_and_control<
-        C: SsaWorkControl + ?Sized,
-    >(
-        lifted: &GenuineLiftedFunction,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-        control: &C,
-    ) -> Result<Self, SsaPrepareError> {
-        let Some(function_interface) = function_interface else {
-            return Err(malformed_ssa_input());
-        };
-        if function_interface.revision_identity() != lifted.authority().layout().revision_identity()
-        {
-            return Err(malformed_ssa_input());
-        }
-        let blocks = lifted
-            .blocks()
-            .iter()
-            .map(|block| block.block().clone())
-            .collect::<Vec<_>>();
-        let native_spans = genuine_native_instruction_spans(lifted);
-        let arch = lifted.arch_spec();
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces(
-            blocks.as_slice(),
-            Some(arch),
-            Some(function_interface),
-            SourceMachineRoles::default(),
-            None,
-            None,
-            call_site_interfaces,
-        );
-        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-            blocks.as_slice(),
-            Some(arch),
-            InterfaceQuestions::new(&machine_context),
-            &machine_context,
-            &CalleeBoundaries::default(),
-            None,
-            control,
-        )?;
-        if function.entry != lifted.authority().layout().entry_addr() {
-            return Err(malformed_ssa_input());
-        }
-        control.poll()?;
-        Self::seal_finished(
-            function,
-            machine_context,
-            Finish {
-                provenance: SsaArtifactProvenance::GenuineLiftOnly,
-                spellings: ArtifactSpellings::default(),
-                native_spans: Some(native_spans),
-            },
-            control,
-        )
-    }
-
-    /// Build analysis-only decompiler SSA from one complete genuine lift.
-    pub fn for_decompile_from_genuine_lift_with_interfaces(
-        lifted: &GenuineLiftedFunction,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-    ) -> Result<Self, SsaPrepareError> {
-        Self::for_decompile_from_genuine_lift_with_interfaces_and_control(
-            lifted,
-            function_interface,
-            call_site_interfaces,
-            &UncheckedSsaWorkControl,
-        )
-    }
-
     pub fn for_patterns(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
         Some(Self::new_with_context(
             SSAFunction::from_blocks_for_patterns(blocks, arch)?,
             SourceMachineContext::from_blocks(blocks, arch),
         ))
-    }
-
-    /// Build a complete pattern/type-inference SSA artifact under cooperative control.
-    pub fn for_patterns_with_control<C: SsaWorkControl + ?Sized>(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-        control: &C,
-    ) -> Result<Self, SsaPrepareError> {
-        let function = SSAFunction::from_blocks_for_patterns_with_control(blocks, arch, control)?;
-        control.poll()?;
-        Self::new_with_context_and_control(
-            function,
-            SourceMachineContext::from_blocks(blocks, arch),
-            control,
-        )
     }
 
     pub fn for_symbolic(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
@@ -1343,7 +1248,7 @@ impl SsaArtifact {
     pub fn source_signature(&self) -> Option<&r2source::SourceSignaturePresentation> {
         match &self.provenance {
             SsaArtifactProvenance::TrustedSource(source) => source.presentation().signature(),
-            SsaArtifactProvenance::Manual | SsaArtifactProvenance::GenuineLiftOnly => None,
+            SsaArtifactProvenance::Manual => None,
         }
     }
 
@@ -1500,26 +1405,6 @@ impl SsaArtifact {
             .filter(|certificate| self.graph().block_addr_of(certificate.at) == Some(block_addr));
         let certificate = found.next()?;
         found.next().is_none().then_some(certificate)
-    }
-
-    pub fn memory_certificates_for_inst(
-        &self,
-        inst: crate::graph::InstId,
-    ) -> Vec<&MemoryAccessCertificate> {
-        let certs = &self.facts.certificates;
-        let read = certs
-            .memory_accesses_by_inst
-            .get(&(inst, false))
-            .into_iter()
-            .flatten();
-        let write = certs
-            .memory_accesses_by_inst
-            .get(&(inst, true))
-            .into_iter()
-            .flatten();
-        read.chain(write)
-            .filter_map(|id| certs.memory_accesses.get(id))
-            .collect()
     }
 
     pub fn memory_certificate_for_inst(
@@ -2197,7 +2082,6 @@ impl TrustedSsaArtifact {
     ) -> Result<Self, SsaPrepareError> {
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
-        let lift_authority = genuine.authority().clone();
         let arch = genuine.arch_spec().clone();
         let blocks = genuine
             .blocks()
@@ -2457,7 +2341,6 @@ impl TrustedSsaArtifact {
         )?;
         Ok(Self {
             artifact: Arc::new(artifact),
-            lift_authority,
             source_block_count: blocks.len(),
             arch,
         })
@@ -2485,10 +2368,6 @@ impl TrustedSsaArtifact {
         Arc::ptr_eq(&self.artifact, artifact)
     }
 
-    pub const fn lift_authority(&self) -> &GenuineLiftedFunctionAuthority {
-        &self.lift_authority
-    }
-
     /// How many blocks the trusted lift produced.
     ///
     /// The p-code itself used to be retained here as evidence of the lift
@@ -2510,7 +2389,7 @@ impl TrustedSsaArtifact {
     pub fn source(&self) -> &OwnedFunctionSnapshot {
         match &self.artifact.provenance {
             SsaArtifactProvenance::TrustedSource(source) => source,
-            SsaArtifactProvenance::Manual | SsaArtifactProvenance::GenuineLiftOnly => {
+            SsaArtifactProvenance::Manual => {
                 unreachable!("TrustedSsaArtifact always retains source provenance")
             }
         }
@@ -2785,17 +2664,6 @@ fn block_at_mut<'a, V>(
 }
 
 impl SSAFunction {
-    /// Which machine instruction the operation at this site executes for.
-    ///
-    /// The site is in the operations' own index space: a block address and an
-    /// index into that block's operations. An operation a pass added answers
-    /// for the operation it was derived from; `None` for one derived from
-    /// nothing and for anything the lifter stamped no address on.
-    pub fn instruction_at(&self, block_addr: u64, op_idx: usize) -> Option<u64> {
-        let id = self.get_block(block_addr)?.op_id(op_idx)?;
-        self.blocks.arena().instruction(id)
-    }
-
     /// Which machine instruction this operation executes for; see
     /// [`OpArena::instruction`].
     pub fn instruction_of(&self, id: OpId) -> Option<u64> {
@@ -3054,11 +2922,6 @@ impl<'a> RewrittenFunction<'a> {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
-    /// The block control enters by; see [`SSAFunction::root`].
-    pub fn entry_block(&self) -> Option<&SSABlock> {
-        self.get_block(self.root())
-    }
-
     pub fn predecessors(&self, addr: u64) -> Vec<u64> {
         self.source.predecessors(addr)
     }
@@ -3119,11 +2982,6 @@ impl<'a> RewrittenFunction<'a> {
     /// Every operation the source and this rewrite ever held, by id.
     pub fn arena(&self) -> &OpArena {
         &self.arena
-    }
-
-    /// Which machine instruction this operation executes for.
-    pub fn instruction_of(&self, id: OpId) -> Option<u64> {
-        self.arena.instruction(id)
     }
 
     /// A second copy of these operations over the same function, for a test
@@ -3555,11 +3413,6 @@ impl SSAFunction {
         self.cfg.entry
     }
 
-    /// Get the entry block: the [`Self::root`].
-    pub fn entry_block(&self) -> Option<&SSABlock<VarId>> {
-        self.get_block(self.root())
-    }
-
     /// Get a block by address.
     pub fn get_block(&self, addr: u64) -> Option<&SSABlock<VarId>> {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
@@ -3597,22 +3450,12 @@ impl SSAFunction {
         )
     }
 
-    /// Every operation, named, block by block in order; see [`Self::named`].
-    pub fn named_ops(&self) -> Vec<SSAOp> {
-        self.all_ops().map(|op| self.named(op)).collect()
-    }
-
     /// Every block, named; see [`Self::named_block`].
     pub fn named_blocks(&self) -> Vec<SSABlock> {
         self.blocks()
             .iter()
             .map(|block| block.map_operands(&mut |id| self.var(*id).clone()))
             .collect()
-    }
-
-    /// A merge with its operands spelled as variables; see [`Self::named`].
-    pub fn named_phi(&self, phi: &PhiNode<VarId>) -> PhiNode {
-        phi.map(&mut |id| self.var(*id).clone())
     }
 
     /// Get block addresses in reverse postorder.
@@ -3728,51 +3571,6 @@ impl SSAFunction {
         self.blocks.iter().flat_map(|b| b.ops().iter())
     }
 
-    /// Iterate over all phi nodes in the function.
-    pub fn all_phis(&self) -> impl Iterator<Item = &PhiNode<VarId>> {
-        self.blocks.iter().flat_map(|b| b.phis().iter())
-    }
-
-    /// Get all variables defined in this function.
-    pub fn defined_vars(&self) -> Vec<SSAVar> {
-        let mut vars = Vec::new();
-
-        // Collect from phi nodes
-        for phi in self.all_phis() {
-            vars.push(self.var(phi.dst).clone());
-        }
-
-        // Collect from operations
-        for op in self.all_ops() {
-            if let Some(dst) = op.dst() {
-                vars.push(self.var(*dst).clone());
-            }
-        }
-
-        vars
-    }
-
-    /// Get all variables used in this function.
-    pub fn used_vars(&self) -> Vec<SSAVar> {
-        let mut vars = Vec::new();
-
-        // Collect from phi nodes
-        for phi in self.all_phis() {
-            for (_, var) in &phi.sources {
-                vars.push(self.var(*var).clone());
-            }
-        }
-
-        // Collect from operations
-        for op in self.all_ops() {
-            for src in op.sources() {
-                vars.push(self.var(*src).clone());
-            }
-        }
-
-        vars
-    }
-
     /// Iterate over all source uses in all blocks.
     pub fn for_each_source<F: FnMut(u64, SourceRef<'_>)>(&self, mut f: F) {
         for block in self.blocks() {
@@ -3786,30 +3584,6 @@ impl SSAFunction {
                 );
             });
         }
-    }
-
-    /// Iterate over all definitions in all blocks.
-    pub fn for_each_def<F: FnMut(u64, DefRef<'_>)>(&self, mut f: F) {
-        for block in self.blocks() {
-            block.for_each_def(|def| {
-                f(
-                    block.addr,
-                    DefRef {
-                        var: self.var(*def.var),
-                        site: def.site,
-                    },
-                );
-            });
-        }
-    }
-
-    /// Seal-check the complete SSA definition/use, phi, storage, and width contract.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the public validator returns the exact typed SSA failure; validation is an artifact-boundary operation"
-    )]
-    pub fn validate_integrity(&self) -> Result<(), SsaIntegrityError> {
-        validate_ssa_function(self)
     }
 
     /// The storage an entry-lane projection stands for.
@@ -4126,17 +3900,6 @@ impl RegisterFamilyInfo {
         }
     }
 
-    /// The slot a named register occupies, or `None` when the architecture
-    /// does not name it.
-    pub fn slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
-        let member = self.member_for_name(name)?;
-        Some(RegisterFamilySlot {
-            family_id: member.family_id,
-            offset: member.offset,
-            width: member.width,
-        })
-    }
-
     /// The widest register containing the named one: the canonical identity of
     /// the family, which every alias of it shares.
     pub fn widest_slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
@@ -4212,24 +3975,6 @@ impl RegisterFamilyInfo {
     }
 }
 
-/// Location of a variable definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DefLocation {
-    /// Defined by a phi node at the given index.
-    Phi(usize),
-    /// Defined by an operation at the given index.
-    Op(usize),
-}
-
-/// Location of a variable use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UseLocation {
-    /// Used in a phi node.
-    Phi { phi_idx: usize, src_idx: usize },
-    /// Used in an operation.
-    Op { op_idx: usize, src_idx: usize },
-}
-
 impl<V> SSABlock<V> {
     /// Visit all phi source variables in deterministic index order.
     pub fn for_each_phi_source<F: FnMut(SourceRef<'_, V>)>(&self, mut f: F) {
@@ -4284,18 +4029,6 @@ impl<V> SSABlock<V> {
                 });
             }
         }
-    }
-
-    /// Get all operations including phi nodes (as SSAOp::Phi).
-    pub fn all_ops(&self) -> impl Iterator<Item = SSAOp<V>> + '_
-    where
-        V: Clone,
-    {
-        let phi_ops = self.phis().iter().map(|phi| SSAOp::Phi {
-            dst: phi.dst.clone(),
-            sources: phi.sources.iter().map(|(_, v)| v.clone()).collect(),
-        });
-        phi_ops.chain(self.ops().iter().cloned())
     }
 
     /// Check if this block has any phi nodes.

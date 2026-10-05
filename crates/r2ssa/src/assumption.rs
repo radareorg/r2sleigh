@@ -143,32 +143,6 @@ impl AssumptionSet {
             self.push(assumption);
         }
     }
-
-    pub fn type_hints_for_parameter(&self, index: usize) -> impl Iterator<Item = &str> {
-        self.items.iter().filter_map(move |assumption| {
-            match (&assumption.subject, &assumption.value) {
-                (
-                    AssumptionSubject::Parameter { index: subject },
-                    AssumptionValue::TypeHint { ty },
-                ) if *subject == index => Some(ty.as_str()),
-                _ => None,
-            }
-        })
-    }
-
-    pub fn branch_truth_for_predicate(&self, predicate: PredicateId) -> Option<bool> {
-        self.items.iter().find_map(
-            |assumption| match (&assumption.subject, &assumption.value) {
-                (
-                    AssumptionSubject::Predicate {
-                        predicate: subject, ..
-                    },
-                    AssumptionValue::Branch { truth },
-                ) if *subject == predicate => Some(*truth),
-                _ => None,
-            },
-        )
-    }
 }
 
 fn assumption_binding_eq(left: &AnalysisAssumption, right: &AnalysisAssumption) -> bool {

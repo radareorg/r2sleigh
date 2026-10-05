@@ -66,14 +66,6 @@ impl SemanticId {
     pub const fn predicate(predicate: PredicateId) -> Self {
         Self::Predicate(predicate)
     }
-
-    pub const fn control_domain(domain: ControlDomainId) -> Self {
-        Self::ControlDomain(domain)
-    }
-
-    pub const fn effect(at: InstId) -> Self {
-        Self::Effect(at)
-    }
 }
 
 impl std::fmt::Display for SemanticId {
@@ -433,13 +425,6 @@ impl RelativeMemoryAddress {
         match self {
             Self::Exact(offset) => Some(*offset),
             Self::Affine { .. } | Self::Unknown => None,
-        }
-    }
-
-    pub fn constant_offset(&self) -> Option<i64> {
-        match self {
-            Self::Exact(offset) | Self::Affine { offset, .. } => Some(*offset),
-            Self::Unknown => None,
         }
     }
 }

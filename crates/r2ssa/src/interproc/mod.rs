@@ -386,11 +386,6 @@ pub struct FunctionSemanticSummary {
 }
 
 impl FunctionSemanticSummary {
-    /// Whether this report uses the current non-authoritative wire schema.
-    pub const fn has_current_schema(&self) -> bool {
-        self.schema_version == INTERPROC_SUMMARY_SCHEMA_VERSION
-    }
-
     pub fn unknown(id: InterprocFunctionId, name: Option<String>) -> Self {
         Self {
             schema_version: INTERPROC_SUMMARY_SCHEMA_VERSION,
@@ -767,12 +762,6 @@ fn validate_function_summary_map(
 pub struct PreparedInterprocSummarySet {
     root: InterprocFunctionId,
     owners: BTreeMap<InterprocFunctionId, Arc<SsaArtifact>>,
-    /// Every function this evidence was derived from a body for, whether or
-    /// not that body's allocation is still retained. Retention is a memory
-    /// decision; which functions contributed evidence is a fact about the
-    /// evidence, and a consumer asking "was there a body for this callee"
-    /// is asking the second question.
-    bodies: BTreeSet<InterprocFunctionId>,
     report: InterprocSummarySet,
 }
 
@@ -792,16 +781,6 @@ impl PreparedInterprocSummarySet {
     /// Borrow one exact immutable SSA owner by its function identity.
     pub fn owner(&self, id: InterprocFunctionId) -> Option<&Arc<SsaArtifact>> {
         self.owners.get(&id)
-    }
-
-    /// Whether this evidence was derived from a body for `id`.
-    pub fn has_body(&self, id: InterprocFunctionId) -> bool {
-        self.bodies.contains(&id)
-    }
-
-    /// Every function a body contributed evidence for.
-    pub fn bodies(&self) -> &BTreeSet<InterprocFunctionId> {
-        &self.bodies
     }
 
     /// Borrow the report projection produced from the retained root.
@@ -1653,15 +1632,12 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     require_trusted_root_for_helper_scope(root.provenance_kind(), callees.len() + 1)?;
 
     let mut owners = BTreeMap::new();
-    let mut bodies = BTreeSet::new();
     let mut locals = BTreeMap::new();
     let mut current = BTreeMap::new();
     owners.insert(root_id, Arc::clone(&root));
-    bodies.insert(root_id);
     current.insert(root_id, initial_summary(root_id, None, &root_local));
     locals.insert(root_id, (None, root_local));
     for callee in callees {
-        bodies.insert(callee.id);
         current.insert(callee.id, initial_summary(callee.id, None, &callee.local));
         locals.insert(callee.id, (None, callee.local.clone()));
     }
@@ -1679,7 +1655,6 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     Ok(PreparedInterprocSummarySet {
         root: root_id,
         owners,
-        bodies,
         report,
     })
 }

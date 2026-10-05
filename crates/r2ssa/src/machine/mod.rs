@@ -197,10 +197,6 @@ impl MachineRegisterValueGeometry {
         self.bit_offset
     }
 
-    pub const fn value_width_bits(self) -> u32 {
-        self.value_width_bits
-    }
-
     pub const fn carrier_width_bits(self) -> u32 {
         self.carrier_width_bits
     }
@@ -227,10 +223,6 @@ impl MachineDirectValueGeometry {
             Some(storage) => Some(storage.location()),
             None => None,
         }
-    }
-
-    pub const fn value_width_bits(self) -> u32 {
-        self.value_width_bits
     }
 }
 
@@ -2560,11 +2552,6 @@ impl MachineFunction {
             .binary_search_by_key(&access, |(id, _)| *id)
             .ok()
             .map(|index| self.store_addresses[index].1)
-    }
-
-    /// Every projected store's address leaf, in access order.
-    pub const fn store_addresses(&self) -> &[(StructuredAccessId, MachineExprId)] {
-        &self.store_addresses
     }
 
     pub fn expr(&self, id: MachineExprId) -> Option<&MachineExpr> {

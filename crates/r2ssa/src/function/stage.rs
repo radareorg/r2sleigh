@@ -54,11 +54,6 @@ impl Lifted {
         self.ir.named_block_for_change(addr)
     }
 
-    /// The function, given back unprepared.
-    pub fn into_function(self) -> SSAFunction {
-        self.ir
-    }
-
     /// Run the decompiler's optimisation over the function and validate what
     /// it leaves.
     ///

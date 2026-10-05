@@ -83,16 +83,6 @@ impl DefUseInfo {
         self.exact_live.contains(var)
     }
 
-    /// Get all input variable names.
-    pub fn input_vars(&self) -> impl Iterator<Item = &str> {
-        self.inputs.iter().map(|s| s.as_str())
-    }
-
-    /// Get all output variable names.
-    pub fn output_vars(&self) -> impl Iterator<Item = &str> {
-        self.outputs.iter().map(|s| s.as_str())
-    }
-
     fn rebuild_presentation(&mut self) {
         self.definitions.clear();
         self.uses.clear();

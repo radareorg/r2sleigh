@@ -145,17 +145,6 @@ impl SSAContext {
             self.versions.insert(name, version);
         }
     }
-
-    /// Get all variables that have been defined (version > 0).
-    pub fn defined_vars(&self) -> impl Iterator<Item = (&'static str, u32)> {
-        self.versions.iter().filter_map(|(name, &ver)| {
-            if ver > 0 {
-                Some((name.text(), ver))
-            } else {
-                None
-            }
-        })
-    }
 }
 
 impl<V> SSABlock<V> {
@@ -247,11 +236,6 @@ impl<V> SSABlock<V> {
     /// The identity of the operation at `index`.
     pub fn op_id(&self, index: usize) -> Option<OpId> {
         self.ids.get(index).copied()
-    }
-
-    /// The identity of the phi at `index`.
-    pub fn phi_id(&self, index: usize) -> Option<OpId> {
-        self.phi_ids.get(index).copied()
     }
 
     /// Where an operation sits in this block, by a scan of the block.

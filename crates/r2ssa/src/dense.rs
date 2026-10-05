@@ -76,10 +76,6 @@ impl<I: DenseId, T> IdVec<I, T> {
         self.cells.get(id.index())
     }
 
-    pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
-        self.cells.get_mut(id.index())
-    }
-
     /// Every id with its cell, in id order.
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.cells

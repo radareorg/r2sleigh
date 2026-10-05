@@ -24,14 +24,12 @@ use crate::var::SSAVarNameKind;
 /// One spelling, stored once for the life of the process.
 ///
 /// Everything a spelling decides on its own -- which kind of location it
-/// names, and the register offset it spells when it names one -- is settled
-/// here rather than re-parsed at each of the hundreds of thousands of places
+/// names -- is settled here rather than re-parsed at each of the hundreds of thousands of places
 /// that ask.
 pub struct InternedName {
     id: u32,
     text: &'static str,
     kind: SSAVarNameKind,
-    register_offset: Option<u64>,
 }
 
 impl InternedName {
@@ -50,10 +48,6 @@ impl InternedName {
         self.kind
     }
 
-    /// The register-space offset this spelling stands for, when it spells one.
-    pub const fn register_offset(&self) -> Option<u64> {
-        self.register_offset
-    }
     /// A register spelling that never enters the table, for a proof whose
     /// subject is not the name: the table's lock and hash are not what it
     /// verifies, and Kani cannot compile them.
@@ -63,7 +57,6 @@ impl InternedName {
             id: u32::MAX,
             text,
             kind: SSAVarNameKind::RegisterAlias,
-            register_offset: None,
         }
     }
 }
@@ -105,9 +98,6 @@ pub fn intern(text: &str) -> &'static InternedName {
         id,
         text,
         kind: SSAVarNameKind::classify(text),
-        register_offset: text
-            .strip_prefix("reg:")
-            .and_then(|rest| u64::from_str_radix(rest, 16).ok()),
     }));
     names.insert(text, name);
     name

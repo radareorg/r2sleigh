@@ -232,12 +232,6 @@ impl BasicBlock {
         }
     }
 
-    /// Source address of the final operation, with the block address used when
-    /// the lifter did not attach per-operation instruction metadata.
-    pub const fn terminal_instruction_addr(&self) -> Option<u64> {
-        self.terminal_instruction_addr
-    }
-
     /// Source instruction the operation at this index was lifted from.
     ///
     /// `None` where the lifter attached no metadata for it, and then no caller
@@ -371,17 +365,6 @@ impl BasicBlock {
                 vec![]
             }
         }
-    }
-
-    /// Check if this block is a branch (conditional or unconditional).
-    pub fn is_branch(&self) -> bool {
-        matches!(
-            self.terminator,
-            BlockTerminator::Branch { .. }
-                | BlockTerminator::ConditionalBranch { .. }
-                | BlockTerminator::IndirectBranch
-                | BlockTerminator::Switch { .. }
-        )
     }
 
     /// Check if this block ends with a return.
@@ -813,11 +796,6 @@ impl CFG {
         self.addr_to_node.get(&addr).copied()
     }
 
-    /// Get the entry block.
-    pub fn entry_block(&self) -> Option<&BasicBlock> {
-        self.get_block(self.entry)
-    }
-
     /// Get all block addresses in the CFG.
     pub fn block_addrs(&self) -> impl Iterator<Item = u64> + '_ {
         let mut addrs: Vec<u64> = self.addr_to_node.keys().copied().collect();
@@ -833,11 +811,6 @@ impl CFG {
     /// Get the number of blocks.
     pub fn num_blocks(&self) -> usize {
         self.graph.node_count()
-    }
-
-    /// Get the number of edges.
-    pub fn num_edges(&self) -> usize {
-        self.graph.edge_count()
     }
 
     /// Get the predecessors of a block.

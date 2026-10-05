@@ -372,7 +372,7 @@ impl MachineMemoryModel {
                 endianness: default_endianness,
             });
         }
-        spaces.sort_by_key(|space| space_sort_key(space.space));
+        spaces.sort_by_key(|space| crate::semantic::memory_space_order(space.space));
 
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
@@ -399,10 +399,6 @@ impl MachineMemoryModel {
 
     pub const fn default_address_bits(&self) -> u32 {
         self.default_address_bits
-    }
-
-    pub const fn alignment_bytes(&self) -> u32 {
-        self.alignment_bytes
     }
 
     pub const fn default_endianness(&self) -> MachineMemoryEndianness {
@@ -1227,30 +1223,6 @@ impl SourceMachineContext {
             .collect()
     }
 
-    /// The registers that are condition codes rather than storage.
-    ///
-    /// A flag is a one-byte register no wider register contains: nothing can be
-    /// written through it and nothing read out of it at another width. That is a
-    /// fact about the register file, so it holds for any architecture, unlike
-    /// the list of spellings this replaces.
-    pub fn flag_register_names(&self) -> Vec<String> {
-        self.register_storages_by_name
-            .iter()
-            .filter(|(_, storage)| {
-                storage.space == CanonicalStorageSpace::Register && storage.size == 1
-            })
-            .filter(|(_, storage)| {
-                !self.register_storages_by_name.values().any(|other| {
-                    other.space == CanonicalStorageSpace::Register
-                        && other.size > 1
-                        && other.offset <= storage.offset
-                        && storage.offset < other.offset + u64::from(other.size)
-                })
-            })
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
     /// The name the architecture gives this storage, when it names it exactly.
     pub fn register_name(&self, storage: CanonicalStorageId) -> Option<String> {
         self.register_storages_by_name
@@ -1619,16 +1591,6 @@ pub fn terminal_indirect_loaded_slot(
     BlockOrigins::upto(block, branch_op_index)
         .of(target)?
         .loaded_slot()
-}
-
-fn space_sort_key(space: SpaceId) -> (u8, u32) {
-    match space {
-        SpaceId::Ram => (0, 0),
-        SpaceId::Register => (1, 0),
-        SpaceId::Unique => (2, 0),
-        SpaceId::Const => (3, 0),
-        SpaceId::Custom(id) => (4, id),
-    }
 }
 
 #[cfg(test)]
