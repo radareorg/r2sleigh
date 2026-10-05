@@ -3944,6 +3944,7 @@ impl Decompiler {
             simplify_data_object_loads_in_stmt(stmt, self.config.ptr_size, &used_objects);
         }
         c_function.extern_objects = used_objects.into_inner().into_values().collect();
+        crate::ast::respell_nonconforming_main(&mut c_function, func.entry());
 
         if let Err(error) = single_evaluation::bind_each_call_site_once(
             &mut c_function,

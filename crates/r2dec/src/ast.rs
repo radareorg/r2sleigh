@@ -888,6 +888,59 @@ impl CExpr {
 }
 
 impl CExpr {
+    /// Every node, pre-order and through observations, for rewriting in place.
+    pub(crate) fn visit_mut(&mut self, f: &mut impl FnMut(&mut CExpr)) {
+        if let Self::Observed { expr, .. } = self {
+            expr.visit_mut(f);
+            return;
+        }
+        f(self);
+        match self {
+            Self::Unary { operand, .. }
+            | Self::Cast { expr: operand, .. }
+            | Self::Sizeof(operand)
+            | Self::AddrOf(operand)
+            | Self::Deref(operand)
+            | Self::Paren(operand)
+            | Self::Member { base: operand, .. }
+            | Self::PtrMember { base: operand, .. } => operand.visit_mut(f),
+            Self::Binary { left, right, .. }
+            | Self::Subscript {
+                base: left,
+                index: right,
+            } => {
+                left.visit_mut(f);
+                right.visit_mut(f);
+            }
+            Self::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                cond.visit_mut(f);
+                then_expr.visit_mut(f);
+                else_expr.visit_mut(f);
+            }
+            Self::Call { func, args, .. } => {
+                func.visit_mut(f);
+                args.iter_mut().for_each(|arg| arg.visit_mut(f));
+            }
+            Self::Comma(items) => items.iter_mut().for_each(|item| item.visit_mut(f)),
+            Self::IntLit(_)
+            | Self::UIntLit(_)
+            | Self::FloatLit(..)
+            | Self::StringLit(_)
+            | Self::CharLit(_)
+            | Self::Var(_)
+            | Self::External { .. }
+            | Self::DataObject { .. }
+            | Self::SizeofType(_)
+            | Self::Observed { .. } => {}
+        }
+    }
+}
+
+impl CExpr {
     /// Every type this expression spells, in pre-order.
     ///
     /// A cast and a `sizeof` write a type into the page just as a declaration
@@ -2113,6 +2166,82 @@ pub fn c_identifier(name: &str) -> String {
     identifier
 }
 
+/// Whether C allows `main` this prototype (C11 5.1.2.2.1): returning `int`,
+/// taking nothing, `(int, char **)` or `(int, char **, char **)`.
+fn main_may_have(ret: &CType, params: Option<&[CType]>) -> bool {
+    fn bare(ty: &CType) -> &CType {
+        match ty {
+            r2types::CTypeLike::Typedef { name, ty } if name != "char" => bare(ty),
+            other => other,
+        }
+    }
+    let int = |ty: &CType| {
+        matches!(
+            bare(ty),
+            r2types::CTypeLike::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed
+            }
+        )
+    };
+    let strings = |ty: &CType| match bare(ty) {
+        r2types::CTypeLike::Pointer(inner) => matches!(
+            bare(inner),
+            r2types::CTypeLike::Pointer(inner) if matches!(inner.as_ref(), r2types::CTypeLike::Typedef { name, .. } if name == "char")
+        ),
+        _ => false,
+    };
+    int(ret)
+        && match params {
+            None | Some([]) => true,
+            Some([count, vector]) => int(count) && strings(vector),
+            Some([count, vector, environment]) => {
+                int(count) && strings(vector) && strings(environment)
+            }
+            Some(_) => false,
+        }
+}
+
+/// Spell a `main` whose proven prototype C forbids as the unnamed function at
+/// its address, everywhere this unit names it; its symbol stays `main`.
+pub(crate) fn respell_nonconforming_main(func: &mut CFunction, entry: u64) {
+    let params = func
+        .params
+        .iter()
+        .map(|param| param.ty.clone())
+        .collect::<Vec<_>>();
+    let mut respelled = None;
+    if func.name == "main" && !main_may_have(&func.ret_type, Some(&params)) {
+        func.name = format!("fcn_{entry:x}");
+        func.body.insert(
+            0,
+            CStmt::comment("symbol `main`; C allows that name no other prototype"),
+        );
+        respelled = Some(func.name.clone());
+    }
+    for declaration in &mut func.externs {
+        if declaration.name == "main"
+            && let Some(address) = declaration.address
+            && !main_may_have(&declaration.ret_type, declaration.params.as_deref())
+        {
+            declaration.name = format!("fcn_{address:x}");
+            respelled = Some(declaration.name.clone());
+        }
+    }
+    if let Some(spelling) = respelled {
+        let mut rename = |expr: &mut CExpr| {
+            if let CExpr::External { name, .. } = expr
+                && name == "main"
+            {
+                name.clone_from(&spelling);
+            }
+        };
+        for stmt in &mut func.body {
+            stmt.visit_exprs_mut(&mut |root| root.visit_mut(&mut rename));
+        }
+    }
+}
+
 /// A prototype for a function this one calls.
 ///
 /// Only what the call needs to be well formed: the name, what it returns, and
@@ -3163,6 +3292,41 @@ mod tests {
     /// The names a fixture in this module declares.
     fn test_table() -> std::cell::RefCell<crate::symbol::SymbolTable> {
         std::cell::RefCell::new(crate::symbol::SymbolTable::new())
+    }
+
+    /// `main` is spelled only for a prototype C allows it; plain `char` is not
+    /// `int8_t`, and a 64-bit count is not `int`.
+    #[test]
+    fn main_keeps_its_name_only_for_a_prototype_c_allows() {
+        let int = r2types::CTypeLike::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
+        let strings = |element: CType| {
+            r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Pointer(Box::new(element))))
+        };
+        let char_ = r2types::CTypeLike::plain_char(true);
+        let int8 = r2types::CTypeLike::Int {
+            bits: 8,
+            signedness: r2types::Signedness::Signed,
+        };
+        let word = r2types::CTypeLike::Int {
+            bits: 64,
+            signedness: r2types::Signedness::Unsigned,
+        };
+        assert!(main_may_have(&int, Some(&[])));
+        assert!(main_may_have(&int, None));
+        assert!(main_may_have(
+            &int,
+            Some(&[int.clone(), strings(char_.clone())])
+        ));
+        assert!(main_may_have(
+            &int,
+            Some(&[int.clone(), strings(char_.clone()), strings(char_.clone())])
+        ));
+        assert!(!main_may_have(&int, Some(&[int.clone(), strings(int8)])));
+        assert!(!main_may_have(&word, Some(&[])));
+        assert!(!main_may_have(&int, Some(&[word, strings(char_)])));
     }
 
     /// An import is spelled the way the linker knows it; a defined symbol is

@@ -434,10 +434,12 @@ fn the_review_fixtures_are_units_that_compile() {
             {
                 failures.push(failure);
             }
-            let definition = answer["definition"].as_str().unwrap_or_default();
-            if build == "rv_O2" && matches!(definition, "sext" | "main") {
-                judged_at_o2.insert(definition.to_owned());
-                failures.extend(unassigned_reads_at_o2(definition, &answer));
+            // By symbol: a `main` C forbids its prototype is defined as `fcn_<addr>`.
+            let symbol = answer["name"].as_str().unwrap_or_default();
+            let symbol = symbol.strip_prefix("sym.").unwrap_or(symbol);
+            if build == "rv_O2" && matches!(symbol, "sext" | "main") {
+                judged_at_o2.insert(symbol.to_owned());
+                failures.extend(unassigned_reads_at_o2(symbol, &answer));
             }
             // `dispatch`, where nothing declares what its pointer returns.
             let dispatch = build == "rv_O0g_stripped" && addr == DISPATCH_AT_O0;
