@@ -2158,58 +2158,6 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
 }
 
 #[test]
-fn weak_summary_kind_projection_does_not_widen_authoritative_anonymous_signature() {
-    let mut facts = FunctionTypeFacts {
-        merged_signature: Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::Void),
-            params: vec![
-                FunctionParamSpec {
-                    name: "dst".to_string(),
-                    ty: Some(void_pointer_type()),
-                },
-                FunctionParamSpec {
-                    name: "src".to_string(),
-                    ty: Some(void_pointer_type()),
-                },
-            ],
-        }),
-        ..FunctionTypeFacts::default()
-    };
-    let projected = FunctionSignatureSpec {
-        ret_type: Some(CTypeLike::Void),
-        params: vec![
-            FunctionParamSpec {
-                name: "dst".to_string(),
-                ty: Some(void_pointer_type()),
-            },
-            FunctionParamSpec {
-                name: "src".to_string(),
-                ty: Some(void_pointer_type()),
-            },
-            FunctionParamSpec {
-                name: "len".to_string(),
-                ty: Some(typedef_type("size_t")),
-            },
-        ],
-    };
-
-    let result = facts.apply_signature_projection(
-        "fcn.0000a200",
-        FunctionSignatureProjection::weak_summary_kind(projected),
-        64,
-    );
-
-    assert!(result.rejected.is_some());
-    assert_eq!(
-        facts
-            .merged_signature
-            .as_ref()
-            .map(|signature| signature.params.len()),
-        Some(2)
-    );
-}
-
-#[test]
 fn summary_to_callee_fact_does_not_infer_import_linkage_from_summary_name() {
     let summary = r2ssa::FunctionSemanticSummary {
         schema_version: r2ssa::interproc::INTERPROC_SUMMARY_SCHEMA_VERSION,

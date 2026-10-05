@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::callee::{CalleeIdentityContext, CalleeResolutionFacts, CallsiteKey};
 use crate::context::{ExternalStackSlotRole, ExternalStackSlotSpec, StackSlotKey};
 use crate::facts::{
-    CalleeFact, CalleeLinkage, FunctionSignatureProjection, FunctionSignatureSpec,
-    FunctionTypeFacts, OutParamCertificateEvidence, OutParamCertificateSource,
-    SignatureCertificateSource, SignatureProjectionResult, VisibleBindingKind,
+    CalleeFact, CalleeLinkage, FunctionSignatureSpec, FunctionTypeFacts,
+    OutParamCertificateEvidence, OutParamCertificateSource, SignatureCertificateSource,
+    VisibleBindingKind,
 };
 use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
 
@@ -154,11 +154,6 @@ impl FunctionCallResultFacts {
         .flatten()
     }
 
-    pub fn owner_for_value(&self, value: r2ssa::ValueId) -> Option<&r2ssa::ValueOwner> {
-        self.result_for_value(value)
-            .and_then(|result| result.owner.as_ref())
-    }
-
     fn unique_owner_for_site_matching(
         &self,
         callsite: CallsiteKey,
@@ -217,10 +212,6 @@ impl FunctionControlFacts {
 
     pub fn switch_for_block(&self, block_addr: u64) -> Option<&SwitchSelectorFact> {
         self.switches.get(&block_addr)
-    }
-
-    pub fn control_domain_for_block(&self, block_addr: u64) -> Option<&r2ssa::ControlDomain> {
-        self.control_domains.for_block(block_addr)
     }
 
     pub fn loops_for_header(&self, header: u64) -> impl Iterator<Item = &LoopStructureFact> + '_ {
@@ -311,19 +302,6 @@ impl FunctionRenderFacts {
             .copied()
     }
 
-    pub fn has_certified_parameter(&self, slot: usize) -> bool {
-        let Some(id) = r2ssa::SemanticId::parameter(slot) else {
-            return false;
-        };
-        matches!(
-            self.certified_entities.get(&id),
-            Some(CertifiedEntity::Parameter {
-                slot: entity_slot,
-                ..
-            }) if usize::try_from(*entity_slot).ok() == Some(slot)
-        )
-    }
-
     /// Resolve a value carrying a direct parameter binding to one ABI slot.
     ///
     /// This deliberately does not walk expression inputs: an expression that
@@ -377,30 +355,6 @@ impl FunctionRenderFacts {
 
     pub fn return_effect_id_for_inst(&self, inst: r2ssa::InstId) -> Option<r2ssa::SemanticId> {
         self.return_effects_by_inst.get(inst).copied()
-    }
-
-    pub fn memory_effect_id_for_inst(
-        &self,
-        inst: r2ssa::InstId,
-        is_write: bool,
-        space: r2il::SpaceId,
-        address: r2ssa::ValueId,
-        value: Option<r2ssa::ValueId>,
-    ) -> Option<r2ssa::SemanticId> {
-        let mut matching = self
-            .memory_effects_by_inst
-            .get(&(inst, is_write))?
-            .iter()
-            .filter_map(|id| match self.certified_effects.get(id) {
-                Some(CertifiedEffect::Memory { fact, .. })
-                    if fact.space == space && fact.address == address && fact.value == value =>
-                {
-                    Some(*id)
-                }
-                _ => None,
-            });
-        let first = matching.next()?;
-        matching.next().is_none().then_some(first)
     }
 
     pub fn expression_is_renderable(&self, value: r2ssa::ValueId) -> bool {
@@ -558,53 +512,6 @@ impl FunctionRenderFacts {
         carriers.next().is_none().then_some(carrier)
     }
 
-    pub fn loop_carrier_update_for_value_at_latch(
-        &self,
-        value: r2ssa::ValueId,
-        latch: u64,
-    ) -> Option<&CertifiedEntity> {
-        let expr = self.certified_expr_for_value(value)?;
-        let mut carriers = expr.bindings.iter().filter_map(|binding| {
-            let r2ssa::SemanticId::LoopCarrier(_) = binding else {
-                return None;
-            };
-            match self.certified_entities.get(binding) {
-                Some(entity @ CertifiedEntity::LoopCarrier { updates, .. })
-                    if updates.iter().any(|update| {
-                        update.predecessor == latch
-                            && (update.value == value || update.identity_values.contains(&value))
-                    }) =>
-                {
-                    Some(entity)
-                }
-                _ => None,
-            }
-        });
-        let carrier = carriers.next()?;
-        carriers.next().is_none().then_some(carrier)
-    }
-
-    pub fn loop_carrier_update_for_value(&self, value: r2ssa::ValueId) -> Option<&CertifiedEntity> {
-        let expr = self.certified_expr_for_value(value)?;
-        let mut carriers = expr.bindings.iter().filter_map(|binding| {
-            let r2ssa::SemanticId::LoopCarrier(_) = binding else {
-                return None;
-            };
-            match self.certified_entities.get(binding) {
-                Some(entity @ CertifiedEntity::LoopCarrier { updates, .. })
-                    if updates.iter().any(|update| {
-                        update.value == value || update.identity_values.contains(&value)
-                    }) =>
-                {
-                    Some(entity)
-                }
-                _ => None,
-            }
-        });
-        let carrier = carriers.next()?;
-        carriers.next().is_none().then_some(carrier)
-    }
-
     pub fn loop_carriers(&self) -> impl Iterator<Item = &CertifiedEntity> {
         self.certified_entities
             .values()
@@ -642,19 +549,6 @@ impl FunctionRenderFacts {
             })
     }
 
-    pub fn member_access_for_inst_any_direction(
-        &self,
-        inst: r2ssa::InstId,
-        field_name: &str,
-        field_offset: u64,
-        access_width: Option<u32>,
-    ) -> Option<&MemberAccessRenderFact> {
-        self.member_access_for_inst(inst, false, field_name, field_offset, access_width)
-            .or_else(|| {
-                self.member_access_for_inst(inst, true, field_name, field_offset, access_width)
-            })
-    }
-
     pub fn array_access_for_inst(
         &self,
         inst: r2ssa::InstId,
@@ -677,19 +571,6 @@ impl FunctionRenderFacts {
                     && fact.field_offset == field_offset
                     && fact.element_stride == element_stride
                     && access_width.is_none_or(|width| fact.access_width == width)
-            })
-    }
-
-    pub fn array_access_for_inst_any_direction(
-        &self,
-        inst: r2ssa::InstId,
-        field_offset: u64,
-        element_stride: u64,
-        access_width: Option<u32>,
-    ) -> Option<&ArrayAccessRenderFact> {
-        self.array_access_for_inst(inst, false, field_offset, element_stride, access_width)
-            .or_else(|| {
-                self.array_access_for_inst(inst, true, field_offset, element_stride, access_width)
             })
     }
 
@@ -1396,10 +1277,6 @@ impl FunctionFacts {
         self
     }
 
-    pub fn merge_assumption_usage(&mut self, usage: &r2ssa::AssumptionUsageReport) {
-        self.assumption_usage.extend(usage);
-    }
-
     pub fn with_decompile_route(mut self, route: DecompileRouteFacts) -> Self {
         self.decompile_route = Some(route);
         self
@@ -1510,10 +1387,6 @@ impl FunctionFacts {
         self
     }
 
-    pub fn set_call_results(&mut self, call_results: FunctionCallResultFacts) {
-        self.call_results = call_results;
-    }
-
     pub fn call_results(&self) -> Option<&FunctionCallResultFacts> {
         (!self.call_results.is_empty()).then_some(&self.call_results)
     }
@@ -1521,10 +1394,6 @@ impl FunctionFacts {
     pub fn with_call_render(mut self, call_render: FunctionCallRenderFacts) -> Self {
         self.call_render = call_render;
         self
-    }
-
-    pub fn set_call_render(&mut self, call_render: FunctionCallRenderFacts) {
-        self.call_render = call_render;
     }
 
     pub fn call_render(&self) -> Option<&FunctionCallRenderFacts> {
@@ -1583,10 +1452,6 @@ impl FunctionFacts {
             .as_ref()?
             .get(userop as usize)
             .map(String::as_str)
-    }
-
-    pub fn control_facts(&self) -> &FunctionControlFacts {
-        &self.control
     }
 
     pub fn authorized_stack_slot_owner_render(
@@ -1785,10 +1650,6 @@ impl FunctionFacts {
                     .as_deref()
                     .or(route.reason.as_deref())
             })
-    }
-
-    pub fn summary_rollup(&self) -> Option<&SummaryEffectRollup> {
-        self.summary_view.rollup.as_ref()
     }
 
     #[cfg(test)]
@@ -2271,22 +2132,8 @@ impl FunctionFacts {
         &self.summary_view
     }
 
-    pub fn diagnostics(&self) -> &[String] {
-        &self.diagnostics
-    }
-
     pub fn assumption_usage(&self) -> &r2ssa::AssumptionUsageReport {
         &self.assumption_usage
-    }
-
-    pub fn apply_signature_projection(
-        &mut self,
-        function_name: &str,
-        projection: FunctionSignatureProjection,
-        ptr_bits: u32,
-    ) -> SignatureProjectionResult {
-        self.types
-            .apply_signature_projection(function_name, projection, ptr_bits)
     }
 
     pub fn apply_decompile_type_override(&mut self, override_facts: FunctionTypeFacts) -> bool {
@@ -3113,24 +2960,6 @@ impl FunctionFacts {
                 }
             }
         }
-    }
-
-    pub fn interproc_summary_set(&self) -> Option<&r2ssa::InterprocSummarySet> {
-        self.interproc_summary
-            .as_ref()
-            .map(r2ssa::PreparedInterprocSummarySet::report)
-    }
-
-    /// Borrow the advisory report used by pure projection and rendering.
-    ///
-    /// Unlike [`Self::prepared_interproc_summary`], this report does not prove
-    /// ownership of the prepared SSA source and must not authorize mutation or
-    /// certification.
-    pub fn interproc_summary_report(&self) -> Option<&r2ssa::InterprocSummarySet> {
-        self.interproc_summary
-            .as_ref()
-            .map(r2ssa::PreparedInterprocSummarySet::report)
-            .or_else(|| self.summary_view.as_set())
     }
 
     pub fn prepared_interproc_summary(&self) -> Option<&r2ssa::PreparedInterprocSummarySet> {

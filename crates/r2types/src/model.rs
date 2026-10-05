@@ -114,14 +114,6 @@ impl TypeArena {
         self.intern(Type::Array { elem, len, stride })
     }
 
-    pub fn function(&mut self, params: Vec<TypeId>, ret: TypeId, variadic: bool) -> TypeId {
-        self.intern(Type::Function {
-            params,
-            ret,
-            variadic,
-        })
-    }
-
     pub fn unknown_alias(&mut self, name: impl Into<String>) -> TypeId {
         self.intern(Type::UnknownAlias(name.into()))
     }
@@ -158,10 +150,6 @@ impl TypeArena {
         } else {
             self.struct_named(name)
         }
-    }
-
-    pub fn struct_anon(&mut self) -> TypeId {
-        self.intern(Type::Struct(StructShape::default()))
     }
 
     pub fn struct_with_field(
@@ -216,18 +204,6 @@ impl TypeArena {
     pub fn define(&mut self, id: TypeId, ty: Type) {
         if let Some(slot) = self.types.get_mut(id) {
             *slot = ty;
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (TypeId, &Type)> {
-        self.types.iter().enumerate()
-    }
-
-    pub fn bits_of(&self, id: TypeId) -> Option<u32> {
-        match self.get(id) {
-            Type::Bool => Some(1),
-            Type::Int { bits, .. } | Type::Float { bits } => Some(*bits),
-            _ => None,
         }
     }
 }

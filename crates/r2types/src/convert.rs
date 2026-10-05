@@ -246,11 +246,6 @@ impl CTypeLike {
         self.aggregate_tag().is_some()
     }
 
-    /// Whether this is a union rather than a struct, through any names.
-    pub fn is_union(&self) -> bool {
-        matches!(self.unaliased(), CTypeLike::Union(_))
-    }
-
     /// Whether this is an array, through any names.
     pub fn is_array(&self) -> bool {
         matches!(self.unaliased(), CTypeLike::Array(..))
@@ -297,17 +292,6 @@ impl CTypeLike {
         }
     }
 
-    /// Whether this is a signed integer.
-    pub fn is_signed(&self) -> bool {
-        matches!(
-            self,
-            CTypeLike::Int {
-                signedness: Signedness::Signed,
-                ..
-            }
-        )
-    }
-
     /// Whether this is an integer, boolean included.
     pub fn is_integer(&self) -> bool {
         matches!(self, CTypeLike::Int { .. } | CTypeLike::Bool)
@@ -316,11 +300,6 @@ impl CTypeLike {
     /// Whether this is a pointer to anything.
     pub fn is_pointer(&self) -> bool {
         matches!(self, CTypeLike::Pointer(_))
-    }
-
-    /// Whether this is `void *`.
-    pub fn is_void_pointer(&self) -> bool {
-        matches!(self, CTypeLike::Pointer(inner) if matches!(**inner, CTypeLike::Void))
     }
 }
 

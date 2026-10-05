@@ -3,10 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use r2ssa::SSAVarNameKind;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    CalleeFact, CalleeLinkage, FunctionType, InterprocSummaryView, SignatureCertificateSource,
-    SignatureRegistry,
-};
+use crate::{CalleeFact, CalleeLinkage, FunctionType, SignatureCertificateSource};
 
 const CALLEE_NAMESPACE_PREFIXES: [&str; 6] = ["sym.imp.", "sym.", "imp.", "reloc.", "dbg.", "fcn."];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -43,19 +40,6 @@ pub enum CalleeIdentityEvidence {
     KnownSignature,
     FunctionName,
     SymbolName,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CalleeAritySource {
-    KnownSignature,
-    SummaryHint,
-    SignatureRegistry,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CalleeArityDecision {
-    pub arity: usize,
-    pub source: CalleeAritySource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -225,17 +209,6 @@ impl CalleeResolutionFacts {
         self.by_direct_addr
             .get(&addr)
             .and_then(|key| self.by_key.get(key))
-    }
-
-    pub fn identity_for_direct_target_in_context(
-        resolution: Option<&Self>,
-        addr: u64,
-        ctx: &CalleeIdentityContext<'_>,
-    ) -> CalleeIdentity {
-        resolution
-            .and_then(|facts| facts.identity_for_direct_addr(addr))
-            .cloned()
-            .unwrap_or_else(|| CalleeIdentity::from_direct_target(addr, ctx))
     }
 
     pub fn identity_for_name(&self, name: &str) -> Option<&CalleeIdentity> {
@@ -666,19 +639,6 @@ impl CalleeIdentity {
     pub fn non_variadic_known_arity(&self) -> Option<usize> {
         self.known_signature()
             .and_then(|signature| (!signature.variadic).then_some(signature.params.len()))
-    }
-
-    pub fn non_variadic_arity_decision(
-        &self,
-        _summary_view: Option<&InterprocSummaryView>,
-        _signature_registry: &SignatureRegistry,
-        _ptr_bits: u32,
-    ) -> Option<CalleeArityDecision> {
-        self.non_variadic_known_arity()
-            .map(|arity| CalleeArityDecision {
-                arity,
-                source: CalleeAritySource::KnownSignature,
-            })
     }
 
     pub fn target_policy_decision(
@@ -1339,60 +1299,6 @@ mod tests {
         assert!(
             CalleeResolutionFacts::identity_for_name_in_context("missing", &ctx).is_none(),
             "known signatures must not resolve unrelated names just because they are signed"
-        );
-    }
-
-    fn summary_view_with_helper_arity(name: &str, arity: usize) -> InterprocSummaryView {
-        let id = r2ssa::InterprocFunctionId(0x401000);
-        let mut summary = r2ssa::FunctionSemanticSummary::unknown(id, Some(name.to_string()));
-        summary.arg_count_hint = Some(arity);
-        let mut set = r2ssa::InterprocSummarySet::default();
-        set.summaries.insert(id, summary);
-        InterprocSummaryView::new(Some(set)).expect("current interproc report schema")
-    }
-
-    fn registry_with_non_variadic_arity(name: &str, arity: usize) -> SignatureRegistry {
-        let mut registry = SignatureRegistry::default();
-        registry.insert_raw(name, "void", vec!["int".to_string(); arity], false);
-        registry
-    }
-
-    #[test]
-    fn callee_arity_decision_prefers_known_signature_over_summary_and_registry() {
-        let known_signatures = HashMap::from([("helper".to_string(), non_variadic_signature(3))]);
-        let identity = CalleeIdentity::from_name("helper").with_known_signature(&known_signatures);
-        let summary_view = summary_view_with_helper_arity("helper", 1);
-        let registry = registry_with_non_variadic_arity("helper", 2);
-
-        assert_eq!(
-            identity.non_variadic_arity_decision(Some(&summary_view), &registry, 64),
-            Some(CalleeArityDecision {
-                arity: 3,
-                source: CalleeAritySource::KnownSignature,
-            }),
-        );
-    }
-
-    #[test]
-    fn callee_arity_decision_rejects_summary_hint_without_known_signature() {
-        let identity = CalleeIdentity::from_name("helper");
-        let summary_view = summary_view_with_helper_arity("helper", 4);
-        let registry = registry_with_non_variadic_arity("helper", 2);
-
-        assert_eq!(
-            identity.non_variadic_arity_decision(Some(&summary_view), &registry, 64),
-            None,
-        );
-    }
-
-    #[test]
-    fn callee_arity_decision_rejects_registry_without_known_signature() {
-        let identity = CalleeIdentity::from_name("helper");
-        let registry = registry_with_non_variadic_arity("helper", 2);
-
-        assert_eq!(
-            identity.non_variadic_arity_decision(None, &registry, 64),
-            None,
         );
     }
 

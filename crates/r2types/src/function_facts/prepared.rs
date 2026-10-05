@@ -450,24 +450,11 @@ pub enum CertifiedEffect {
 }
 
 impl CertifiedEffect {
-    pub const fn id(&self) -> r2ssa::SemanticId {
-        match self {
-            Self::Memory { id, .. } | Self::Return { id, .. } => *id,
-        }
-    }
-
     pub const fn kind(&self) -> CertifiedEffectKind {
         match self {
             Self::Memory { fact, .. } if fact.is_write => CertifiedEffectKind::MemoryWrite,
             Self::Memory { .. } => CertifiedEffectKind::MemoryRead,
             Self::Return { .. } => CertifiedEffectKind::Return,
-        }
-    }
-
-    pub const fn control_domain(&self) -> &r2ssa::ControlDomain {
-        match self {
-            Self::Memory { fact, .. } => &fact.control_domain,
-            Self::Return { fact, .. } => &fact.control_domain,
         }
     }
 
@@ -514,7 +501,6 @@ pub struct StringLiteralRenderFact {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringLiteralRenderSource {
     TypedFunctionFacts,
-    Radare2TypedCollector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -802,16 +788,6 @@ impl InterprocSummaryView {
 
     pub fn diagnostics(&self) -> Option<&r2ssa::InterprocSummaryDiagnostics> {
         self.set.as_ref().map(|set| &set.diagnostics)
-    }
-
-    pub fn helper_summary_for_name(&self, name: &str) -> Option<&r2ssa::FunctionSemanticSummary> {
-        let normalized = name.trim().to_ascii_lowercase();
-        self.set.as_ref()?.summaries.values().find(|summary| {
-            summary
-                .name
-                .as_deref()
-                .is_some_and(|summary_name| summary_name.trim().to_ascii_lowercase() == normalized)
-        })
     }
 
     pub fn helper_view_for_name(&self, name: &str) -> Option<&SummaryHelperView> {

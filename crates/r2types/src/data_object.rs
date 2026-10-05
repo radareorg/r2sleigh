@@ -72,10 +72,6 @@ impl ProgramDataObjectTypeFacts {
         facts
     }
 
-    pub fn accepted(&self) -> &BTreeMap<u64, DataObjectTypeFact> {
-        &self.accepted
-    }
-
     pub fn refused(&self) -> &BTreeMap<u64, DataObjectTypeRefusal> {
         &self.refused
     }

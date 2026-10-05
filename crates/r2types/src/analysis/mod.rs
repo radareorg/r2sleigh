@@ -35,8 +35,6 @@ use crate::convert::{CTypeLike, parse_c_type_like, render_c_type_like};
 use crate::external::{
     ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion, normalize_external_type_name,
 };
-#[cfg(test)]
-use crate::facts::FunctionSignatureProjection;
 use crate::facts::{
     ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
     CalleeAtomicEffect, CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect,
@@ -94,10 +92,6 @@ impl TypeAnalysis {
 
     pub fn shared_source(&self) -> Arc<SsaArtifact> {
         Arc::clone(&self.source)
-    }
-
-    pub fn matches_source(&self, source: &Arc<SsaArtifact>) -> bool {
-        Arc::ptr_eq(&self.source, source)
     }
 
     pub fn function_facts(&self) -> &FunctionFacts {
@@ -468,10 +462,6 @@ impl TypeAnalysisRequest {
 
     pub fn source(&self) -> &Arc<SsaArtifact> {
         &self.source
-    }
-
-    pub fn parsed_context(&self) -> &ParsedExternalContext {
-        &self.parsed_context
     }
 }
 
