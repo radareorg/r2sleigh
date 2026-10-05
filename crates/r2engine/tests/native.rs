@@ -4103,3 +4103,38 @@ fn the_base_of_an_indexed_word_read_is_no_string_literal() {
         "the table is read at its own address: {text}"
     );
 }
+
+/// `dl` written on both arms of a branch and read back after they merge:
+/// only the byte `sete` wrote is read, so the caller's `rdx` is no input of
+/// the function. The merge is what keeps the read from folding into the
+/// write.
+const SETE_LOW_BYTE: &[u8] = &[
+    0x48, 0x85, 0xff, // 0x1000 test rdi, rdi
+    0x0f, 0x94, 0xc2, // 0x1003 sete dl
+    0x74, 0x08, // 0x1006 je 0x1010
+    0x48, 0x85, 0xf6, // 0x1008 test rsi, rsi
+    0x0f, 0x94, 0xc2, // 0x100b sete dl
+    0x90, 0x90, // 0x100e nop; nop
+    0x0f, 0xb6, 0xc2, // 0x1010 movzx eax, dl
+    0xc3, // 0x1013 ret
+];
+
+/// The convention's argument registers are construction's carriers, so
+/// `sete dl` writes the low byte of the whole `rdx`, and the bytes above it
+/// are the caller's. Reading back the byte it wrote reads none of those: a
+/// parameter is an entry register some byte of which an observation reaches,
+/// and here only `rdi` is.
+#[test]
+fn a_lane_written_and_read_back_is_no_parameter() {
+    let text = rendered(SETE_LOW_BYTE, "is_null");
+    let signature = text.lines().next().expect("a signature");
+    let parameters = signature
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(list, _)| list)
+        .expect("a parameter list");
+    assert_eq!(
+        parameters, "uint64_t RDI_0, uint64_t RSI_0",
+        "the signature names a register the function never reads: {text}"
+    );
+}

@@ -167,18 +167,18 @@ impl ByteMask {
         }
     }
 
-    /// How many least significant bytes the mask names, when it names exactly
-    /// that low run and nothing above it; `None` for no byte, a gap, or a mask
-    /// saturated past what one word can say.
-    pub const fn low_bytes(self) -> Option<u32> {
-        let Self::Bytes(mask) = self else {
-            return None;
-        };
-        let bytes = mask.trailing_ones();
-        if bytes > 0 && (bytes == 64 || mask >> bytes == 0) {
-            Some(bytes)
-        } else {
-            None
+    /// How many least significant bytes cover every byte the mask names:
+    /// through the most significant one, gaps included, since a lane starts
+    /// at byte zero. `None` for no byte, or a mask saturated past what one
+    /// word can say.
+    ///
+    /// It depends only on which bytes are read, not on how wide the value
+    /// that holds them is, so a register read through its whole root and
+    /// through a narrower lane of it gives one answer.
+    pub const fn extent_bytes(self) -> Option<u32> {
+        match self {
+            Self::Bytes(0) | Self::All => None,
+            Self::Bytes(mask) => Some(64 - mask.leading_zeros()),
         }
     }
 }
@@ -235,6 +235,43 @@ fn observed_input_bytes(
             crate::SSAOp::IntZExt { .. } if inputs.len() == 1 => {
                 let source = size_of(inputs[0]).map_or(ByteMask::All, ByteMask::whole);
                 vec![(inputs[0], observed.intersection(source))]
+            }
+            // A lane written into a value: the bytes the lane covers are the
+            // lane's, shifted down to it, and the rest are the base's. Exact
+            // where the lane sits at a whole byte and the value fits a mask.
+            crate::SSAOp::Insert(_) if inputs.len() == 3 => {
+                let lane = constant(inputs[2])
+                    .filter(|bits| bits % 8 == 0)
+                    .and_then(|bits| u32::try_from(bits / 8).ok())
+                    .zip(size_of(inputs[1]))
+                    .zip(inst.output.and_then(size_of).filter(|size| *size <= 64));
+                let covered = lane
+                    .filter(|((offset, lane_bytes), size)| {
+                        offset
+                            .checked_add(*lane_bytes)
+                            .is_some_and(|end| end <= *size)
+                    })
+                    .map(|((offset, lane_bytes), size)| {
+                        let mask = ByteMask::whole(lane_bytes).shifted_up(offset);
+                        (offset, size, mask)
+                    });
+                match covered {
+                    Some((offset, size, covered @ ByteMask::Bytes(covered_bits))) => {
+                        let observed = observed.intersection(ByteMask::whole(size));
+                        vec![
+                            (
+                                inputs[0],
+                                observed.intersection(ByteMask::Bytes(!covered_bits)),
+                            ),
+                            (
+                                inputs[1],
+                                observed.intersection(covered).shifted_down(offset),
+                            ),
+                            whole(inputs[2]),
+                        ]
+                    }
+                    _ => inputs.iter().map(|input| whole(*input)).collect(),
+                }
             }
             crate::SSAOp::IntAnd { .. } if inputs.len() == 2 => {
                 let mask_of = |value: ValueId| {
@@ -343,11 +380,10 @@ impl ProvenProgramObservations {
     }
 
     /// How many of a value's least significant bytes some observation
-    /// reaches, when the observed bytes are exactly that low run; `None` for
-    /// a value nothing observes, one observed at a higher lane only, or one
-    /// observed past the bytes a mask can name.
-    pub fn observed_low_bytes(&self, value: ValueId) -> Option<u32> {
-        self.bytes.get(value)?.low_bytes()
+    /// reaches, through the most significant one; `None` for a value
+    /// nothing observes or one observed past the bytes a mask can name.
+    pub fn observed_extent_bytes(&self, value: ValueId) -> Option<u32> {
+        self.bytes.get(value)?.extent_bytes()
     }
 
     /// The chain of values from the root that observes `value` down to it.
@@ -849,16 +885,17 @@ mod tests {
         };
         let cleared_bit = observed_on_entry(and((-2i64).cast_unsigned()), "RCX");
         assert_eq!(cleared_bit, Some(ByteMask::whole(8)));
-        assert_eq!(cleared_bit.and_then(ByteMask::low_bytes), Some(8));
+        assert_eq!(cleared_bit.and_then(ByteMask::extent_bytes), Some(8));
 
         // A constant that clears whole bytes still narrows what is read.
         assert_eq!(
-            observed_on_entry(and(0xff), "RCX").and_then(ByteMask::low_bytes),
+            observed_on_entry(and(0xff), "RCX").and_then(ByteMask::extent_bytes),
             Some(1)
         );
         let second_byte = observed_on_entry(and(0xff00), "RCX");
         assert_eq!(second_byte, Some(ByteMask::Bytes(0b10)));
-        assert_eq!(second_byte.and_then(ByteMask::low_bytes), None);
+        // The lane that holds the second byte holds the first too.
+        assert_eq!(second_byte.and_then(ByteMask::extent_bytes), Some(2));
     }
 
     #[test]
@@ -875,7 +912,7 @@ mod tests {
         };
         assert_eq!(at(0), Some(ByteMask::Bytes(0xff)));
         assert_eq!(at(72), Some(ByteMask::All));
-        assert_eq!(at(72).and_then(ByteMask::low_bytes), None);
+        assert_eq!(at(72).and_then(ByteMask::extent_bytes), None);
     }
 
     #[test]
@@ -884,7 +921,7 @@ mod tests {
         assert_eq!(ByteMask::whole(16), ByteMask::Bytes(0xffff));
         assert_eq!(ByteMask::whole(64), ByteMask::Bytes(u64::MAX));
         assert_eq!(ByteMask::whole(65), ByteMask::All);
-        assert_eq!(ByteMask::whole(64).low_bytes(), Some(64));
+        assert_eq!(ByteMask::whole(64).extent_bytes(), Some(64));
 
         assert_eq!(
             ByteMask::Bytes(0xff).shifted_up(56),
@@ -906,8 +943,9 @@ mod tests {
             ByteMask::whole(16)
         );
         assert_eq!(ByteMask::Bytes(0xf0).union(ByteMask::All), ByteMask::All);
-        assert_eq!(ByteMask::Bytes(0b101).low_bytes(), None);
-        assert_eq!(ByteMask::NONE.low_bytes(), None);
+        assert_eq!(ByteMask::Bytes(0b101).extent_bytes(), Some(3));
+        assert_eq!(ByteMask::Bytes(0b1100).extent_bytes(), Some(4));
+        assert_eq!(ByteMask::NONE.extent_bytes(), None);
     }
 
     #[test]

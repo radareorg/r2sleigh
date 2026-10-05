@@ -453,7 +453,9 @@ fn observed_entry_read_storages(
             && let Some(root) = is_entry_read(func, &value.var)
         {
             // Every register value is its root, so the width the program
-            // read is the observed low lanes of it, not the register's.
+            // read is the low lane holding every observed byte, not the
+            // register's: bytes two and three of `rdi` are `edi`'s, whether
+            // the build rooted the read at `rdi` or at `edi`.
             // A lane is a power of two bytes wide, so the observed run is
             // rounded up to the lane that holds it, as a stack parameter's
             // is: three bytes read through `& 0xffffff` take the four-byte
@@ -461,7 +463,7 @@ fn observed_entry_read_storages(
             // program did not read is the side a formal may err on; a lane
             // no register has would leave the interface unmintable.
             let storage = observations
-                .observed_low_bytes(value.id)
+                .observed_extent_bytes(value.id)
                 .map(u32::next_power_of_two)
                 .filter(|bytes| *bytes < root.size)
                 .map_or(root, |size| CanonicalStorageId { size, ..root });
