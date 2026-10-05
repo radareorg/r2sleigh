@@ -218,7 +218,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComesBack {
     const NAME: &'static str = "comes-back";
 
     fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> bool {
-        let Ok(walker) = Walking::new(View::new(db), false) else {
+        let Ok(walker) = Walking::new(View::new(db, true), false) else {
             return true;
         };
         if let Some(declared) = walker.declared(callee) {

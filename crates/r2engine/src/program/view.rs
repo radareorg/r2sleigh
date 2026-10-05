@@ -10,11 +10,19 @@ use super::{Imports, NameDb, Names, ProgramInputs, Source, naming};
 use crate::native::NativeTarget;
 use crate::query::db::Db;
 
+/// Whether each function the survey found is Thumb.
+pub(super) fn modes<S: Source + 'static>(db: &Db<ProgramInputs<S>>) -> Rc<BTreeMap<u64, bool>> {
+    db.get::<super::requests::Modes>(&())
+        .expect("the survey reads no modes")
+}
+
 /// One open program, read through its database.
 pub(crate) struct View<'a, S: Source + 'static> {
     pub(super) db: &'a Db<ProgramInputs<S>>,
     names: Rc<NameDb>,
     imports: Rc<BTreeMap<u64, naming::Stub>>,
+    /// Whether each function discovery found is Thumb; empty for discovery itself, which decides it.
+    modes: Rc<BTreeMap<u64, bool>>,
 }
 
 impl<S: Source + 'static> Clone for View<'_, S> {
@@ -23,27 +31,42 @@ impl<S: Source + 'static> Clone for View<'_, S> {
             db: self.db,
             names: Rc::clone(&self.names),
             imports: Rc::clone(&self.imports),
+            modes: Rc::clone(&self.modes),
         }
     }
 }
 
 impl<'a, S: Source + 'static> View<'a, S> {
-    /// The view a query reads through; the names and the stubs are asked once.
-    pub(super) fn new(db: &'a Db<ProgramInputs<S>>) -> Self {
+    /// The view a query reads through; the names, the stubs and, where asked, the modes are asked once.
+    pub(super) fn new(db: &'a Db<ProgramInputs<S>>, with_modes: bool) -> Self {
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let names = db
             .get::<Names>(&())
             .expect("the names ask only for the imports");
-        Self { db, names, imports }
+        let modes = match with_modes {
+            true => modes(db),
+            false => Rc::default(),
+        };
+        Self::with(db, names, imports, modes)
     }
 
     /// The view over tables the caller already holds for this revision.
-    pub(super) fn with(
+    pub(super) const fn with(
         db: &'a Db<ProgramInputs<S>>,
         names: Rc<NameDb>,
         imports: Rc<BTreeMap<u64, naming::Stub>>,
+        modes: Rc<BTreeMap<u64, bool>>,
     ) -> Self {
-        Self { db, names, imports }
+        Self {
+            db,
+            names,
+            imports,
+            modes,
+        }
+    }
+
+    pub(super) fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
+        &self.imports
     }
 
     pub(super) fn source(&self) -> &'a S {
@@ -62,7 +85,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
     pub(super) fn thumb_at(&self, vaddr: u64) -> bool {
         let inputs = self.db.inputs();
         let stated = inputs.mapped.range(..=vaddr).next_back();
-        let derived = inputs.modes.range(..=vaddr).next_back();
+        let derived = self.modes.range(..=vaddr).next_back();
         match (stated, derived) {
             (Some((at, thumb)), Some((from, _))) if at >= from => *thumb,
             (_, Some((_, thumb))) | (Some((_, thumb)), None) => *thumb,

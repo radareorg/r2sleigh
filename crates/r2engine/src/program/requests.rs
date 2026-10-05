@@ -7,10 +7,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{OpenProgram, Source, SymbolKind};
+use super::{OpenProgram, ProgramInputs, Source, SymbolKind, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
+use crate::query::db::{Db, Query};
 use crate::query::references::Indexing;
 use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
@@ -229,8 +230,8 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// The analysis, within a request already started.
     fn prepare(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
-        self.ensure_decodable()?;
-        self.ensure_assembled(entry)?;
+        self.ensure_current()?;
+        self.assembled()?;
         let target = self.target(entry)?;
         self.analysed(&target, entry)
             .map_err(|refusal| refusal.to_string())
@@ -295,8 +296,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// The operations Sleigh produced for one function, before any analysis.
     pub fn lifted(&mut self, entry: u64) -> Result<String, String> {
         self.start_request();
-        self.ensure_decodable()?;
-        self.ensure_assembled(entry)?;
+        self.ensure_current()?;
+        self.assembled()?;
         crate::native::lifted(&self.target(entry)?, self, entry)
             .map_err(|refusal| refusal.to_string())
     }
@@ -305,9 +306,9 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// shows. Nothing is walked or prepared.
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
         self.start_request();
-        self.ensure_decodable()?;
+        self.ensure_current()?;
         // A machine it cannot assemble still lists, with no callee parameters and nothing saying what a call clobbers.
-        if let Err(reason) = self.ensure_assembled(request.start) {
+        if let Err(reason) = self.assembled() {
             r2il::refusal_evidence!("call-effect", "{:#x}: {reason}", request.start);
         }
         Ok(crate::query::listing(
@@ -384,8 +385,8 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// The listing and the shape of the body it lists, within a request already started.
     fn listed_body(&mut self, entry: u64) -> Result<(FunctionListing, Shape), String> {
-        self.ensure_decodable()?;
-        self.ensure_assembled(entry)?;
+        self.ensure_current()?;
+        self.assembled()?;
         let target = self.target(entry)?;
         let reason = match self.analysed(&target, entry) {
             // A defect reading what the analysis proved is an analysis defect like any other.
@@ -562,7 +563,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn references(&mut self) -> Result<Answer<Arc<References>>, String> {
         self.start_request();
         // A callee's body is read in the instruction set discovery settled, so that is settled first.
-        self.ensure_decodable()?;
+        self.ensure_current()?;
         let revision = self.revision();
         if let Some((at, held)) = &self.references
             && *at == revision
@@ -619,108 +620,14 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(index.finish(coverage))
     }
 
-    /// Discovery over the whole program, which settles each function's
-    /// instruction set and whether it returns.
-    ///
-    /// Held per program and state of its bytes: discovery reads the
-    /// container, which is fixed while the program is open, the bytes, and
-    /// the returns table derived from them. Before this every `afl`, `ax`
-    /// and visual-mode lookup walked the whole program again -- 42 seconds a
-    /// time over libc-2.26.
+    /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
     pub(super) fn surveyed(&mut self) -> Result<Arc<Survey>, String> {
         self.ensure_current()?;
-        let at = (self.source().identity(), self.source().byte_revision());
-        if let Some((held_at, held)) = &self.survey
-            && *held_at == at
-        {
-            return Ok(Arc::clone(held));
-        }
-        let survey = Arc::new(self.survey()?);
-        self.survey = Some((at, Arc::clone(&survey)));
-        Ok(survey)
-    }
-
-    /// Walk the whole program from what it states, once.
-    fn survey(&mut self) -> Result<Survey, String> {
-        let seeds = self.stated_functions();
-        let Some(&(first, _, _)) = seeds.first() else {
-            return Ok(Survey {
-                functions: Vec::new(),
-                walked: BTreeMap::new(),
-                extents: BTreeMap::new(),
-                supervisor: BTreeMap::new(),
-                holders: crate::discovery::Holders::default(),
-            });
-        };
-        // Both instruction sets share one convention and one compiler
-        // specification, so one assembly serves either decoder.
-        self.ensure_assembled(first)?;
-        let program = &*self;
-        let walker = super::returns::Walking::new(program.view(), true)?;
-        let found = crate::discovery::functions(program, seeds, &walker);
-        let extents = found
-            .walks
-            .iter()
-            .filter_map(|(entry, walk)| Some((*entry, walk.as_ref().ok()?.extent())))
-            .collect();
-        let supervisor = found
-            .walks
-            .iter()
-            .filter_map(|(entry, walk)| {
-                let calls = walk.as_ref().ok()?.supervisor_calls();
-                (!calls.is_empty()).then(|| (*entry, calls.clone()))
-            })
-            .collect();
-        let holders =
-            crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
-                let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
-                spans.into_iter().map(move |span| (*entry, span))
-            }));
-        let walked = found
-            .walks
-            .into_iter()
-            .map(|(entry, walk)| (entry, walk.map(|walk| walk.thumb)))
-            .collect();
-        if self.db.inputs().thumb_machine.is_some() {
-            let modes = found
-                .functions
-                .iter()
-                .map(|one| (one.address, one.thumb))
-                .collect::<BTreeMap<_, _>>();
-            self.modes_revision +=
-                u64::from(self.modes_at.is_some() && modes != self.db.inputs().modes);
-            self.db.inputs_mut().modes = modes;
-            self.modes_at = Some(self.source().byte_revision());
-        }
-        Ok(Survey {
-            functions: found.functions,
-            walked,
-            extents,
-            supervisor,
-            holders,
-        })
-    }
-
-    /// Where the program states a function begins, and whether it states the
-    /// code there is Thumb: its entry points, the symbols it types as
-    /// functions, and a linkage stub per import, which the loader's own table
-    /// places.
-    fn stated_functions(&self) -> Vec<(u64, Confidence, bool)> {
-        let container = self.source().container();
-        container
-            .entries
-            .iter()
-            .map(|entry| (entry.vaddr, entry.thumb))
-            .chain(
-                container
-                    .symbols
-                    .iter()
-                    .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
-                    .map(|symbol| (symbol.vaddr, symbol.thumb)),
-            )
-            .chain(self.imports.keys().map(|vaddr| (*vaddr, false)))
-            .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
-            .collect()
+        let answer = self
+            .db
+            .get::<SurveyQuery>(&())
+            .map_err(|cycle| format!("{cycle:?}"))?;
+        answer.as_ref().clone().map(|surveyed| surveyed.0)
     }
 
     fn answered<'a>(&'a self, proved: Option<&'a Proved<'a>>) -> Answered<'a> {
@@ -772,4 +679,118 @@ fn claimed_by<S: Source + 'static>(
         return Err(Unread::NoSsa);
     }
     Ok(lines)
+}
+
+/// Every function discovery finds, compared by identity: a new survey is a new answer.
+#[derive(Clone)]
+pub(super) struct Surveyed(Arc<Survey>);
+
+impl PartialEq for Surveyed {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Discovery over the whole program from what it states; its returns are deposited for `ComesBack`.
+pub(super) struct SurveyQuery;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
+    type Key = ();
+    type Value = Result<Surveyed, String>;
+    const NAME: &'static str = "survey";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        // Discovery decides each body's instruction set itself, so it reads no modes.
+        let view = View::new(db, false);
+        let seeds = stated_functions(&view);
+        if seeds.is_empty() {
+            return Ok(Surveyed(Arc::new(Survey {
+                functions: Vec::new(),
+                walked: BTreeMap::new(),
+                extents: BTreeMap::new(),
+                supervisor: BTreeMap::new(),
+                holders: crate::discovery::Holders::default(),
+            })));
+        }
+        let walker = super::returns::Walking::new(view.clone(), true)?;
+        let found = crate::discovery::functions(&view, seeds, &walker);
+        db.deposit::<super::returns::ComesBack>(found.returns);
+        let extents = found
+            .walks
+            .iter()
+            .filter_map(|(entry, walk)| Some((*entry, walk.as_ref().ok()?.extent())))
+            .collect();
+        let supervisor = found
+            .walks
+            .iter()
+            .filter_map(|(entry, walk)| {
+                let calls = walk.as_ref().ok()?.supervisor_calls();
+                (!calls.is_empty()).then(|| (*entry, calls.clone()))
+            })
+            .collect();
+        let holders =
+            crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
+                let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
+                spans.into_iter().map(move |span| (*entry, span))
+            }));
+        let walked = found
+            .walks
+            .into_iter()
+            .map(|(entry, walk)| (entry, walk.map(|walk| walk.thumb)))
+            .collect();
+        Ok(Surveyed(Arc::new(Survey {
+            functions: found.functions,
+            walked,
+            extents,
+            supervisor,
+            holders,
+        })))
+    }
+}
+
+/// Whether each function the survey found is Thumb; empty where the machine has one instruction set.
+pub(super) struct Modes;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
+    type Key = ();
+    type Value = BTreeMap<u64, bool>;
+    const NAME: &'static str = "modes";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        if db.inputs().thumb_machine.is_none() {
+            return BTreeMap::new();
+        }
+        match db
+            .get::<SurveyQuery>(&())
+            .expect("the survey reads no modes")
+            .as_ref()
+        {
+            Ok(surveyed) => surveyed
+                .0
+                .functions
+                .iter()
+                .map(|one| (one.address, one.thumb))
+                .collect(),
+            Err(_) => BTreeMap::new(),
+        }
+    }
+}
+
+/// Where the program states a function begins, and whether it states the code there is Thumb.
+fn stated_functions<S: Source + 'static>(view: &View<'_, S>) -> Vec<(u64, Confidence, bool)> {
+    let container = view.source().container();
+    container
+        .entries
+        .iter()
+        .map(|entry| (entry.vaddr, entry.thumb))
+        .chain(
+            container
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
+                .map(|symbol| (symbol.vaddr, symbol.thumb)),
+        )
+        .chain(view.imports().keys().map(|vaddr| (*vaddr, false)))
+        .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
+        .collect()
 }

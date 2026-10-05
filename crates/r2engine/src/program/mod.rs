@@ -56,11 +56,8 @@ pub struct OpenProgram<S: Source + 'static> {
     /// the database's answers, held for the request that reads them.
     names: Rc<NameDb>,
     imports: Rc<BTreeMap<u64, naming::Stub>>,
-    /// Which revision of the bytes `modes` was discovered at.
-    modes_at: Option<u64>,
-    /// How many times discovery's entry modes have differed, until the
-    /// survey moves onto a query (Q3).
-    modes_revision: u64,
+    /// The survey's modes for the request in hand, asked on first use.
+    modes: std::cell::RefCell<Option<Rc<BTreeMap<u64, bool>>>>,
     /// Whether the machine's conventions were assembled when it loaded, and why not.
     assembly: Result<(), String>,
     /// What this session has already worked out about one function, and the type analysis sealed from it.
@@ -78,9 +75,6 @@ pub struct OpenProgram<S: Source + 'static> {
     callee_reads: crate::query::PerRevision<crate::native::CalleeRead>,
     /// The reference index, and the state of the program it was read at.
     references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
-    /// Discovery's walk of the whole program, and the program and state of
-    /// its bytes it was walked at.
-    survey: Option<((u64, u64), std::sync::Arc<requests::Survey>)>,
 }
 
 impl<S: Source + 'static> OpenProgram<S> {
@@ -95,8 +89,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             // first thing every request does.
             names: Rc::new(NameDb::new()),
             imports: Rc::new(BTreeMap::new()),
-            modes_at: None,
-            modes_revision: 0,
+            modes: std::cell::RefCell::default(),
             assembly: Err("the program's machine is not loaded".to_owned()),
             memo: Memo::default(),
             control: crate::EngineExecutionControl::default(),
@@ -104,7 +97,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             pointers: std::sync::Mutex::default(),
             callee_reads: crate::query::PerRevision::default(),
             references: None,
-            survey: None,
             db: Db::new(ProgramInputs {
                 defined: definitions(container),
                 extents: r2types::ProgramExtents::new(
@@ -140,7 +132,6 @@ impl<S: Source + 'static> OpenProgram<S> {
                         _ => None,
                     })
                     .collect(),
-                modes: BTreeMap::new(),
                 assembled: None,
                 source,
                 slots,
@@ -188,6 +179,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             // Before any query runs: no answer is ever computed without it.
             self.assembly = self.assemble();
         }
+        self.modes.replace(None);
         self.imports = self
             .db
             .get::<Imports>(&())
@@ -256,22 +248,8 @@ impl<S: Source + 'static> OpenProgram<S> {
         &self.imports
     }
 
-    /// Make current which instruction set each function is written in, which
-    /// every decode reads.
-    ///
-    /// Discovery answers it for the whole program, so a function reached only
-    /// by a call decodes the same whichever command asked first.
-    fn ensure_decodable(&mut self) -> Result<(), String> {
-        self.ensure_current()?;
-        if self.db.inputs().thumb_machine.is_some()
-            && self.modes_at != Some(self.source().byte_revision())
-        {
-            self.surveyed()?;
-        }
-        Ok(())
-    }
     /// Whether what a native request needs of the machine was assembled when it loaded.
-    fn ensure_assembled(&mut self, _addr: u64) -> Result<(), String> {
+    fn assembled(&self) -> Result<(), String> {
         self.assembly.clone()
     }
 
@@ -362,7 +340,17 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// The program as a query reads it, over the tables this request holds.
     fn view(&self) -> View<'_, S> {
-        View::with(&self.db, Rc::clone(&self.names), Rc::clone(&self.imports))
+        let modes = Rc::clone(
+            self.modes
+                .borrow_mut()
+                .get_or_insert_with(|| view::modes(&self.db)),
+        );
+        View::with(
+            &self.db,
+            Rc::clone(&self.names),
+            Rc::clone(&self.imports),
+            modes,
+        )
     }
 
     /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
@@ -452,7 +440,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             // anything that read only a name stays good across them.
             names: self.db.changed_at::<Names>(&()).unwrap_or(0),
             // The entries a write can move: the import stubs, and the modes.
-            entries: self.db.changed_at::<Imports>(&()).unwrap_or(0) + self.modes_revision,
+            entries: self.db.changed_at::<Imports>(&()).unwrap_or(0)
+                + self.db.changed_at::<requests::Modes>(&()).unwrap_or(0),
         }
     }
 
@@ -784,12 +773,6 @@ pub(crate) struct ProgramInputs<S> {
     /// Where the container states instructions lie, indexed once the same
     /// way; `None` where it states no section holds any.
     code: Option<r2types::ProgramExtents>,
-    /// Whether each function discovery found is Thumb, by its entry.
-    ///
-    /// Derived from the whole program, since a function nothing states is in
-    /// the instruction set its callers enter it in; only a program with a
-    /// second decoder pays for it.
-    modes: BTreeMap<u64, bool>,
     /// Whether the code from each ARM mapping symbol on is Thumb, as the
     /// container states it; this can switch inside one function, as a veneer
     /// does.

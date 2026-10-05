@@ -42,6 +42,12 @@ engine. Commands, the visual mode and the agent surface all ask it.
 - Q1, first half (2bf3f0a3): the name table and the import stubs are queries
   read through `Recorded`. `derived_at`, `names_revision` and
   `entries_revision` are deleted.
+- Q3, returns and survey: the container's and machine's fixed facts are
+  inputs (Q3a), the conventions assembled as the machine loads (Q3c);
+  `ComesBack` (Q3b), `SurveyQuery` and `Modes` (Q3d) read the program
+  through one `View`. `Db::held` and `Db::deposit` share answers;
+  `Mutex<Returns>`, the `survey` cache, `modes_at` and `modes_revision` are
+  deleted.
 
 ## Left
 
