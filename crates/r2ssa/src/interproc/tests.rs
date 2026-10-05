@@ -2243,7 +2243,7 @@ fn touch_reach(prepared: &SsaArtifact) -> BTreeMap<usize, ArgumentReach> {
     let abi = prepared.abi().expect("exact ABI");
     PreparedCalleeSummary {
         id: InterprocFunctionId(prepared.function().entry),
-        architecture_family: prepared.machine_context().architecture_family(),
+        architecture: prepared.machine_context().architecture().into(),
         blocks: Vec::new(),
         local: collect_source_owned_summary_facts(prepared, &abi),
         library: BTreeMap::new(),

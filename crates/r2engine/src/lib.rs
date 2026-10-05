@@ -254,31 +254,9 @@ fn empty_engine_phase_timings() -> Vec<EnginePhaseTimingJson> {
         .collect()
 }
 
-pub fn engine_normalized_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
-    let arch = arch?;
-    let family = r2ssa::MachineArchitectureFamily::from_arch_spec(Some(arch));
-    Some(
-        match family {
-            r2ssa::MachineArchitectureFamily::X86 => "x86",
-            r2ssa::MachineArchitectureFamily::X86_64 => "x86-64",
-            r2ssa::MachineArchitectureFamily::Arm => "arm",
-            r2ssa::MachineArchitectureFamily::AArch64 => "aarch64",
-            r2ssa::MachineArchitectureFamily::RiscV32 => "riscv32",
-            r2ssa::MachineArchitectureFamily::RiscV64 => "riscv64",
-            r2ssa::MachineArchitectureFamily::Mips32 => "mips",
-            r2ssa::MachineArchitectureFamily::Mips64 => "mips64",
-            r2ssa::MachineArchitectureFamily::PowerPc32 => "powerpc",
-            r2ssa::MachineArchitectureFamily::PowerPc64 => "powerpc64",
-            r2ssa::MachineArchitectureFamily::Unknown => return Some(arch.name.clone()),
-        }
-        .to_string(),
-    )
-}
-
-pub fn engine_arch_target(arch: Option<&r2il::ArchSpec>) -> (String, u32) {
-    let arch_name = engine_normalized_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-    let ptr_bits = arch.map(engine_effective_ptr_bits).unwrap_or(64);
-    (arch_name, ptr_bits)
+/// The pointer width of the lifted machine, 64 when none was given.
+pub fn engine_ptr_bits(arch: Option<&r2il::ArchSpec>) -> u32 {
+    arch.map(engine_effective_ptr_bits).unwrap_or(64)
 }
 
 pub fn engine_effective_ptr_bits(arch: &r2il::ArchSpec) -> u32 {
@@ -380,71 +358,34 @@ where
     hints
 }
 
+/// The machine a rendering is for: the lifted machine's identity and pointer width.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EngineRenderTarget {
-    pub arch_name: String,
+    pub architecture: String,
     pub ptr_bits: u32,
 }
 
-impl Default for EngineRenderTarget {
-    fn default() -> Self {
-        Self::for_arch_name("x86-64", 64)
-    }
-}
-
 impl EngineRenderTarget {
-    pub fn for_arch_name(arch_name: &str, ptr_bits: u32) -> Self {
-        let arch_name = match (arch_name.to_ascii_lowercase().as_str(), ptr_bits) {
-            ("x86_64" | "x64" | "amd64", _) => "x86-64".to_string(),
-            ("x86-64", _) => "x86-64".to_string(),
-            ("x86-32" | "i386" | "i686", _) => "x86".to_string(),
-            ("x86", _) => "x86".to_string(),
-            _ => arch_name.to_string(),
-        };
+    /// The target a request names: its architecture's identity at this width.
+    pub fn for_arch(arch: Option<&r2il::ArchSpec>, ptr_bits: u32) -> Self {
         Self {
-            arch_name,
+            architecture: arch.map(|arch| arch.name.clone()).unwrap_or_default(),
             ptr_bits,
         }
     }
 
-    pub fn for_arch(arch: Option<&r2il::ArchSpec>) -> (String, u32, Self) {
-        let (arch_name, ptr_bits) = engine_arch_target(arch);
-        let target = Self::for_arch_name(&arch_name, ptr_bits);
-        (arch_name, ptr_bits, target)
-    }
-
-    pub fn for_arch_with_ptr_bits(arch: Option<&r2il::ArchSpec>, ptr_bits: u32) -> (String, Self) {
-        let arch_name = engine_normalized_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-        let target = Self::for_arch_name(&arch_name, ptr_bits);
-        (arch_name, target)
-    }
-
     fn for_prepared(source: &SsaArtifact) -> Option<Self> {
-        let memory = source.machine_context().memory_model();
-        if !memory.is_available() || !memory.is_coherent() {
-            return None;
-        }
+        let context = source.machine_context();
+        let memory = context.memory_model();
         let ptr_bits = memory.default_address_bits();
-        if ptr_bits == 0 {
-            return None;
-        }
-        let (arch_name, expected_bits) = match source.machine_context().architecture_family() {
-            r2ssa::MachineArchitectureFamily::X86 => ("x86", 32),
-            r2ssa::MachineArchitectureFamily::X86_64 => ("x86-64", 64),
-            r2ssa::MachineArchitectureFamily::Arm => ("arm", 32),
-            r2ssa::MachineArchitectureFamily::AArch64 => ("aarch64", 64),
-            r2ssa::MachineArchitectureFamily::RiscV32 => ("riscv32", 32),
-            r2ssa::MachineArchitectureFamily::RiscV64 => ("riscv64", 64),
-            r2ssa::MachineArchitectureFamily::Mips32 => ("mips", 32),
-            r2ssa::MachineArchitectureFamily::Mips64 => ("mips64", 64),
-            r2ssa::MachineArchitectureFamily::PowerPc32 => ("powerpc", 32),
-            r2ssa::MachineArchitectureFamily::PowerPc64 => ("powerpc64", 64),
-            r2ssa::MachineArchitectureFamily::Unknown => return None,
-        };
-        if ptr_bits != expected_bits {
-            return None;
-        }
-        Some(Self::for_arch_name(arch_name, ptr_bits))
+        (memory.is_available()
+            && memory.is_coherent()
+            && ptr_bits != 0
+            && !context.architecture().is_empty())
+        .then(|| Self {
+            architecture: context.architecture().to_string(),
+            ptr_bits,
+        })
     }
 
     fn to_decompiler_config(&self) -> r2dec::DecompilerConfig {
@@ -1531,7 +1472,7 @@ impl EngineAnalyzeRequest {
         self.function_addr = function_addr;
         self.blocks = Vec::new();
         self.arch = Some(trusted.arch_spec().clone());
-        self.ptr_bits = engine_arch_target(self.arch.as_ref()).1;
+        self.ptr_bits = engine_ptr_bits(self.arch.as_ref());
         self.source_snapshot = None;
         self.semantic_metadata_enabled = true;
         self.reg_type_hints.clear();
@@ -1624,7 +1565,7 @@ fn engine_analyze_request_parts_from_input(
 ) -> EngineAnalyzeRequestParts {
     let ptr_bits = input
         .ptr_bits
-        .unwrap_or_else(|| engine_arch_target(input.arch.as_ref()).1);
+        .unwrap_or_else(|| engine_ptr_bits(input.arch.as_ref()));
     EngineAnalyzeRequestParts {
         function_name: input.function_name,
         function_addr: input.function_addr,
@@ -2070,10 +2011,8 @@ impl EngineSession {
         } else {
             None
         };
-        let (_, requested_render_target) = EngineRenderTarget::for_arch_with_ptr_bits(
-            analysis_request.arch.as_ref(),
-            analysis_request.ptr_bits,
-        );
+        let requested_render_target =
+            EngineRenderTarget::for_arch(analysis_request.arch.as_ref(), analysis_request.ptr_bits);
         let analyze_response = match self.analyze_checked(analysis_request) {
             Ok(response) => response,
             Err(refusal) => {

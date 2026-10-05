@@ -1050,7 +1050,7 @@ fn require_trusted_root_for_helper_scope(
 #[derive(Debug, Clone)]
 pub struct PreparedCalleeSummary {
     id: InterprocFunctionId,
-    architecture_family: crate::MachineArchitectureFamily,
+    architecture: Box<str>,
     blocks: Vec<(u64, u32)>,
     local: LocalSummaryFacts,
     /// Names of the bodiless callees this body reaches: a PLT stub's slot.
@@ -1088,7 +1088,7 @@ impl PreparedCalleeSummary {
             .collect();
         Ok(Self {
             id,
-            architecture_family: prepared.machine_context().architecture_family(),
+            architecture: prepared.machine_context().architecture().into(),
             blocks: prepared
                 .function()
                 .named_blocks()
@@ -1323,7 +1323,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         }
     }
 
-    let root_family = root.machine_context().architecture_family();
+    let root_architecture = root.machine_context().architecture();
     if root.machine_context().function_interface().is_none() {
         return Err(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext);
     }
@@ -1334,7 +1334,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     // set is consistent by construction, each body current by the analysis
     // epochs when the root was read, so no revision is compared here.
     for callee in callees {
-        if callee.architecture_family != root_family {
+        if *callee.architecture != *root_architecture {
             return Err(PreparedInterprocSummaryError::ArchitectureMismatch);
         }
     }
@@ -1461,9 +1461,9 @@ pub fn solve_prepared_interproc_summary_set(
     // source-owned cannot contribute at all, but a scope that is the wrong
     // architecture or whose functions overlap is wrong about every body in
     // it, so those answers come first.
-    let root_family = root.machine_context().architecture_family();
+    let root_architecture = root.machine_context().architecture();
     for function in functions {
-        if function.prepared.machine_context().architecture_family() != root_family {
+        if function.prepared.machine_context().architecture() != root_architecture {
             return Err(PreparedInterprocSummaryError::ArchitectureMismatch);
         }
     }

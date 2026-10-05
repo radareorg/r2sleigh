@@ -238,26 +238,9 @@ fn source_parameter_has_certified_memory_use(prepared: &r2ssa::SsaArtifact, inde
         })
 }
 
-pub(crate) fn architecture_family_name(
-    architecture: r2ssa::MachineArchitectureFamily,
-) -> Option<&'static str> {
-    match architecture {
-        r2ssa::MachineArchitectureFamily::X86 => Some("x86"),
-        r2ssa::MachineArchitectureFamily::X86_64 => Some("x86-64"),
-        r2ssa::MachineArchitectureFamily::Arm => Some("arm"),
-        r2ssa::MachineArchitectureFamily::AArch64 => Some("aarch64"),
-        r2ssa::MachineArchitectureFamily::RiscV32 => Some("riscv32"),
-        r2ssa::MachineArchitectureFamily::RiscV64 => Some("riscv64"),
-        r2ssa::MachineArchitectureFamily::Mips32 => Some("mips"),
-        r2ssa::MachineArchitectureFamily::Mips64 => Some("mips64"),
-        r2ssa::MachineArchitectureFamily::PowerPc32 => Some("powerpc"),
-        r2ssa::MachineArchitectureFamily::PowerPc64 => Some("powerpc64"),
-        r2ssa::MachineArchitectureFamily::Unknown => None,
-    }
-}
-
-pub(crate) fn prepared_arch_display_name(prepared: &r2ssa::SsaArtifact) -> Option<&'static str> {
-    architecture_family_name(prepared.machine_context().architecture_family())
+/// The lifted machine's identity, where the lift was made under one.
+pub(crate) fn prepared_arch_display_name(prepared: &r2ssa::SsaArtifact) -> Option<&str> {
+    Some(prepared.machine_context().architecture()).filter(|name| !name.is_empty())
 }
 
 fn prepared_register_name(prepared: &r2ssa::SsaArtifact, index: usize) -> Option<String> {

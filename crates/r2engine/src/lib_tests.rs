@@ -428,58 +428,24 @@ fn x86_64_exact_rdi_arch() -> r2il::ArchSpec {
     arch
 }
 
+/// A render target is the lifted machine's identity and width, whatever the name.
 #[test]
-fn engine_render_target_canonicalizes_arch_without_renderer_config_type() {
+fn a_render_target_is_the_machines_identity_and_width() {
     let mut arch = r2il::ArchSpec::new("amd64");
     arch.addr_size = 8;
-    let (arch_name, ptr_bits, target) = EngineRenderTarget::for_arch(Some(&arch));
+    let requested = EngineRenderTarget::for_arch(Some(&arch), 64);
+    assert_eq!(requested.architecture, "amd64");
+    assert_eq!(requested.to_decompiler_config().ptr_size, 64);
 
-    assert_eq!(arch_name, "x86-64");
-    assert_eq!(ptr_bits, 64);
-    assert_eq!(
-        target,
-        EngineRenderTarget {
-            arch_name: "x86-64".to_string(),
-            ptr_bits: 64,
-        }
-    );
-
-    let x86 = EngineRenderTarget::for_arch_name("i386", 32);
-    assert_eq!(x86.arch_name, "x86");
-    assert_eq!(x86.ptr_bits, 32);
-
-    let (unknown_arch_name, unknown_target) = EngineRenderTarget::for_arch_with_ptr_bits(None, 32);
-    assert_eq!(unknown_arch_name, "unknown");
-    assert_eq!(
-        unknown_target,
-        EngineRenderTarget {
-            arch_name: "unknown".to_string(),
-            ptr_bits: 32,
-        }
-    );
-
-    let riscv = EngineRenderTarget::for_arch_name("riscv32", 32).to_decompiler_config();
-    assert_eq!(riscv.ptr_size, 32);
-
-    let mut arm64 = r2il::ArchSpec::new("arm64");
-    arm64.addr_size = 8;
-    assert_eq!(
-        engine_normalized_arch_name(Some(&arm64)).as_deref(),
-        Some("aarch64")
-    );
-    let mut rv64 = r2il::ArchSpec::new("riscv:LE:64:default");
-    rv64.addr_size = 8;
-    assert_eq!(
-        engine_normalized_arch_name(Some(&rv64)).as_deref(),
-        Some("riscv64")
-    );
-
-    let mut contradictory = r2il::ArchSpec::new("x86-64");
-    contradictory.addr_size = 4;
     let prepared =
-        r2ssa::SsaArtifact::for_decompile(&const_return_blocks(0x401000, 0), Some(&contradictory))
-            .expect("mismatched family/width remains analyzable");
-    assert!(EngineRenderTarget::for_prepared(&prepared).is_none());
+        r2ssa::SsaArtifact::for_decompile(&const_return_blocks(0x401000, 0), Some(&arch))
+            .expect("prepared");
+    assert_eq!(EngineRenderTarget::for_prepared(&prepared), Some(requested));
+    assert!(
+        EngineRenderTarget::for_arch(None, 32)
+            .architecture
+            .is_empty()
+    );
 }
 
 #[test]
@@ -989,7 +955,10 @@ fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
         source_owned_facts,
         trusted_ssa: None,
         input_quality: None,
-        render_target: EngineRenderTarget::default(),
+        render_target: EngineRenderTarget {
+            architecture: "x86-64".to_string(),
+            ptr_bits: 64,
+        },
         metrics: EngineMetrics::default(),
     }
 }

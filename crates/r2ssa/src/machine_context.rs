@@ -28,101 +28,8 @@ pub use r2source::{
     StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 26;
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
 
-/// Canonical architecture family captured from the exact lifting profile.
-///
-/// This is semantic source identity, unlike calling-convention or register
-/// presentation strings. Unknown families remain explicit so architecture-
-/// specific consumers can fail closed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub enum MachineArchitectureFamily {
-    #[default]
-    Unknown,
-    X86,
-    X86_64,
-    Arm,
-    AArch64,
-    RiscV32,
-    RiscV64,
-    Mips32,
-    Mips64,
-    PowerPc32,
-    PowerPc64,
-}
-
-impl MachineArchitectureFamily {
-    /// Project an architecture description into the same typed family used by
-    /// immutable machine-context authority.
-    pub fn from_arch_spec(arch: Option<&ArchSpec>) -> Self {
-        let Some(arch) = arch else {
-            return Self::Unknown;
-        };
-        let name = arch.name.trim().to_ascii_lowercase();
-        let address_size = effective_arch_address_size(arch);
-        if matches!(name.as_str(), "x86-64" | "x86_64" | "x64" | "amd64")
-            || ((name == "x86" || name.starts_with("x86:")) && address_size == 8)
-        {
-            Self::X86_64
-        } else if matches!(name.as_str(), "x86-32" | "i386" | "i686")
-            || ((name == "x86" || name.starts_with("x86:")) && address_size == 4)
-        {
-            Self::X86
-        } else if name == "aarch64"
-            || name == "arm64"
-            || name.starts_with("aarch64:")
-            || name.starts_with("arm64:")
-        {
-            Self::AArch64
-        } else if (name == "arm" || name.starts_with("arm:")) && address_size == 4
-            || name.starts_with("armv")
-        {
-            Self::Arm
-        } else if name == "riscv32"
-            || name == "rv32"
-            || name.starts_with("rv32")
-            || ((name == "riscv" || name.starts_with("riscv:")) && address_size == 4)
-        {
-            Self::RiscV32
-        } else if name == "riscv64"
-            || name == "rv64"
-            || name.starts_with("rv64")
-            || ((name == "riscv" || name.starts_with("riscv:")) && address_size == 8)
-        {
-            Self::RiscV64
-        } else if (name == "mips" || name.starts_with("mips:") || name.starts_with("mips32"))
-            && address_size == 4
-        {
-            Self::Mips32
-        } else if name.starts_with("mips64")
-            || ((name == "mips" || name.starts_with("mips:")) && address_size == 8)
-        {
-            Self::Mips64
-        } else if (name == "ppc" || name.starts_with("ppc:") || name.starts_with("powerpc"))
-            && address_size == 4
-        {
-            Self::PowerPc32
-        } else if name.starts_with("ppc64")
-            || ((name == "ppc" || name.starts_with("ppc:") || name.starts_with("powerpc"))
-                && address_size == 8)
-        {
-            Self::PowerPc64
-        } else {
-            Self::Unknown
-        }
-    }
-
-    /// Resolve a generic source convention only when this exact machine family
-    /// supplies the missing architectural qualifier.
-    pub const fn refine_abi_class(self, abi_class: SourceAbiClass) -> SourceAbiClass {
-        match (self, abi_class) {
-            (Self::X86_64, SourceAbiClass::Microsoft) => SourceAbiClass::MicrosoftX64,
-            (Self::X86_64, SourceAbiClass::SystemV) => SourceAbiClass::SystemVAMD64,
-            (Self::AArch64, SourceAbiClass::Aapcs) => SourceAbiClass::Aapcs64,
-            (_, abi_class) => abi_class,
-        }
-    }
-}
 /// One canonical register carrier in the immutable ABI snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MachineAbiRegisterSlot {
@@ -543,7 +450,8 @@ pub enum MachineRegisterGeometryState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceMachineContext {
     schema_version: u32,
-    architecture_family: MachineArchitectureFamily,
+    /// The lifted machine's identity: the architecture name the lift was made under.
+    architecture: Box<str>,
     memory_model: MachineMemoryModel,
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
@@ -768,7 +676,7 @@ impl SourceMachineContext {
                 size: reg.size,
             })
         });
-        let architecture_family = MachineArchitectureFamily::from_arch_spec(arch);
+        let architecture = arch.map_or_else(Box::default, |arch| arch.name.as_str().into());
         let mut register_declarations_by_name = BTreeMap::<String, Vec<CanonicalStorageId>>::new();
         for register in arch.into_iter().flat_map(|arch| &arch.registers) {
             let storage = CanonicalStorageId {
@@ -1034,7 +942,7 @@ impl SourceMachineContext {
         }
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
-            architecture_family,
+            architecture,
             memory_model,
             function_interface,
             machine_roles,
@@ -1073,8 +981,9 @@ impl SourceMachineContext {
         self.schema_version
     }
 
-    pub const fn architecture_family(&self) -> MachineArchitectureFamily {
-        self.architecture_family
+    /// The lifted machine's identity; empty when no architecture was given.
+    pub fn architecture(&self) -> &str {
+        &self.architecture
     }
 
     pub const fn memory_model(&self) -> &MachineMemoryModel {
@@ -1098,29 +1007,6 @@ impl SourceMachineContext {
     /// Exact source-owned convention slots, including their typed ABI class.
     pub const fn convention_slots(&self) -> Option<&SourceConventionSlots> {
         self.convention_slots.as_ref()
-    }
-
-    /// Decisive function ABI after combining the source convention with the
-    /// exact lifted architecture family. Conflicting source contracts refuse
-    /// to choose one ABI.
-    pub fn effective_abi_class(&self) -> SourceAbiClass {
-        let function_class = self
-            .function_interface
-            .as_ref()
-            .map(SourceFunctionInterface::abi_class)
-            .unwrap_or(SourceAbiClass::Unknown);
-        let slot_class = self
-            .convention_slots
-            .as_ref()
-            .map(SourceConventionSlots::abi_class)
-            .unwrap_or(SourceAbiClass::Unknown);
-        let function_class = self.architecture_family.refine_abi_class(function_class);
-        let slot_class = self.architecture_family.refine_abi_class(slot_class);
-        match (function_class, slot_class) {
-            (SourceAbiClass::Unknown, other) | (other, SourceAbiClass::Unknown) => other,
-            (left, right) if left == right => left,
-            _ => SourceAbiClass::Unknown,
-        }
     }
 
     /// Borrow the machine carriers the source resolved from its register
@@ -1885,62 +1771,6 @@ mod tests {
         let arch = ArchSpec::new("AARCH64:LE:64:v8A");
         let context = SourceMachineContext::from_blocks(&[], Some(&arch));
         assert!(context.argument_register_names().is_empty());
-    }
-
-    #[test]
-    fn architecture_family_is_typed_and_schema_bound() {
-        let x86 = ArchSpec::new("x86:LE:64:default");
-        let arm = ArchSpec::new("AARCH64:LE:64:v8A");
-        let x86_context = SourceMachineContext::from_blocks(&[], Some(&x86));
-        let arm_context = SourceMachineContext::from_blocks(&[], Some(&arm));
-
-        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 26);
-        assert_eq!(x86_context.schema_version(), 26);
-        assert_eq!(
-            x86_context.architecture_family(),
-            MachineArchitectureFamily::X86_64
-        );
-        assert_eq!(
-            arm_context.architecture_family(),
-            MachineArchitectureFamily::AArch64
-        );
-    }
-
-    #[test]
-    fn effective_abi_class_resolves_exact_radare2_conventions_with_architecture() {
-        let mut arch = ArchSpec::new("x86-64");
-        arch.addr_size = 8;
-        arch.alignment = 1;
-        arch.add_space(AddressSpace::ram(8));
-
-        let context = |spelling| {
-            SourceMachineContext::from_blocks_with_interfaces(
-                &[],
-                Some(&arch),
-                None,
-                SourceMachineRoles::default(),
-                Some(SourceConventionSlots::new(spelling, [], None).expect("convention slots")),
-                None,
-                Vec::new(),
-            )
-        };
-        let microsoft = context("ms");
-        let system_v = context("amd64");
-        let microsoft_synonym = context("windows-x64");
-
-        assert_eq!(
-            microsoft.convention_slots().unwrap().calling_convention(),
-            "ms"
-        );
-        assert_eq!(
-            microsoft.effective_abi_class(),
-            SourceAbiClass::MicrosoftX64
-        );
-        assert_eq!(system_v.effective_abi_class(), SourceAbiClass::SystemVAMD64);
-        assert_eq!(
-            microsoft_synonym.effective_abi_class(),
-            SourceAbiClass::MicrosoftX64
-        );
     }
 
     #[test]
