@@ -2657,7 +2657,7 @@ mod tests {
     fn a_conversion_is_observation_transparent() {
         let ctx = FoldingContext::new(64);
         let target = CType::Int { bits: 32, signedness: r2types::Signedness::Signed };
-        let source = r2rewrite::CValue::Typed(CType::Int {
+        let source = crate::typed::CValue::Typed(CType::Int {
             bits: 64,
             signedness: r2types::Signedness::Unsigned,
         });
@@ -2683,10 +2683,10 @@ mod tests {
         let literal = CExpr::UIntLit(255);
         // A constant is spelled in the type that reads it rather than cast
         // to it, so the conversion of a constant is a respelling.
-        let plain = ctx.convert(literal.clone(), &r2rewrite::CValue::Constant, &target);
+        let plain = ctx.convert(literal.clone(), &crate::typed::CValue::Constant, &target);
         let mut owner = crate::ast::RenderObservationOwner::new();
         let (use_id, observed) = owner.observe_expr(literal).expect("literal observation");
-        let marked = ctx.convert(observed, &r2rewrite::CValue::Constant, &target);
+        let marked = ctx.convert(observed, &crate::typed::CValue::Constant, &target);
         let mut function =
             CFunction::new("literal", CType::Void).with_body(vec![CStmt::Expr(marked)]);
         let reachable =

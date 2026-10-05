@@ -2,7 +2,7 @@ use super::calls::CertifiedCallArgs;
 use super::memory_renderer::CertifiedMemoryAccessExpr;
 use super::projection::project_machine_write;
 use super::*;
-use r2rewrite::CValue;
+use crate::typed::CValue;
 
 /// The instruction a canonical rewrite names by its site, where it names one.
 fn canonical_site_inst(
@@ -912,7 +912,7 @@ impl<'a> FoldingContext<'a> {
                 let rendered = child(0, input)?;
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
@@ -963,7 +963,7 @@ impl<'a> FoldingContext<'a> {
             Kind::Cast { input, .. } => {
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
@@ -974,7 +974,7 @@ impl<'a> FoldingContext<'a> {
                 // collapse into one cast that converts nothing.
                 if typed
                     .term_produced(input)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                     == Some(produced)
                 {
                     self.materialize_term(names, value, input, depth + 1)?
@@ -983,14 +983,14 @@ impl<'a> FoldingContext<'a> {
                     let from = typed
                         .term_required(term, 0)
                         .cloned()
-                        .map(r2rewrite::CValue::Typed);
+                        .map(crate::typed::CValue::Typed);
                     self.convert_from(rendered, from.as_ref(), produced)
                 }
             }
             Kind::Extract { input, lsb_bits } => {
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
@@ -1012,14 +1012,14 @@ impl<'a> FoldingContext<'a> {
                 // identity: a 32-bit object read at 32 bits is the object.
                 let from = typed.term_required(term, 0).cloned();
                 if lsb_bits == 0 {
-                    let from = from.map(r2rewrite::CValue::Typed);
+                    let from = from.map(crate::typed::CValue::Typed);
                     self.convert_from(rendered, from.as_ref(), produced)
                 } else {
                     let shifted =
                         CExpr::binary(BinaryOp::Shr, rendered, CExpr::IntLit(i64::from(lsb_bits)));
                     let from = from
-                        .map(|ty| r2rewrite::promoted(&ty))
-                        .map(r2rewrite::CValue::Typed);
+                        .map(|ty| crate::typed::promoted(&ty))
+                        .map(crate::typed::CValue::Typed);
                     self.convert_from(shifted, from.as_ref(), produced)
                 }
             }
@@ -1029,7 +1029,7 @@ impl<'a> FoldingContext<'a> {
                 if r2rewrite::canon::literal_bits(arena, high) == Some(0) {
                     let Some(produced) = typed
                         .term_produced(term)
-                        .and_then(r2rewrite::CValue::as_type)
+                        .and_then(crate::typed::CValue::as_type)
                         .cloned()
                     else {
                         return Err(invalid());
@@ -1037,12 +1037,12 @@ impl<'a> FoldingContext<'a> {
                     let low_required = typed
                         .term_required(term, 1)
                         .cloned()
-                        .map(r2rewrite::CValue::Typed);
+                        .map(crate::typed::CValue::Typed);
                     return Ok(self.convert_from(child(1, low)?, low_required.as_ref(), &produced));
                 }
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                     .cloned()
                 else {
                     return Err(invalid());
@@ -1050,11 +1050,11 @@ impl<'a> FoldingContext<'a> {
                 let high_required = typed
                     .term_required(term, 0)
                     .cloned()
-                    .map(r2rewrite::CValue::Typed);
+                    .map(crate::typed::CValue::Typed);
                 let low_required = typed
                     .term_required(term, 1)
                     .cloned()
-                    .map(r2rewrite::CValue::Typed);
+                    .map(crate::typed::CValue::Typed);
                 let high = self.convert_from(child(0, high)?, high_required.as_ref(), &produced);
                 let low = self.convert_from(child(1, low)?, low_required.as_ref(), &produced);
                 CExpr::binary(

@@ -1411,10 +1411,10 @@ pub(crate) struct BindingPlan {
     /// Derived from the projection and the dispositions, so it is one answer
     /// for one plan; built on first use because it is a function of fields
     /// the constructor settles first.
-    typed: std::cell::OnceCell<r2rewrite::TypedBoundaries>,
+    typed: std::cell::OnceCell<crate::typed::TypedBoundaries>,
 }
 
-impl r2rewrite::RenderTypes for BindingPlan {
+impl crate::typed::RenderTypes for BindingPlan {
     fn declaration_type(&self, value: ValueId) -> Option<r2types::CTypeLike> {
         match self.disposition(value)? {
             ValueDisposition::Bound { binding } => {
@@ -1450,9 +1450,9 @@ impl r2rewrite::RenderTypes for BindingPlan {
 impl BindingPlan {
     /// What every rendered expression has and what every operator requires
     /// of its operands, from the projection and this plan's declarations.
-    pub(crate) fn typed_boundaries(&self) -> &r2rewrite::TypedBoundaries {
+    pub(crate) fn typed_boundaries(&self) -> &crate::typed::TypedBoundaries {
         self.typed.get_or_init(|| {
-            r2rewrite::typed_boundaries(
+            crate::typed::typed_boundaries(
                 &self.machine_projection,
                 self.partition.canonical.arena(),
                 self,

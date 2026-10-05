@@ -33,7 +33,7 @@ use r2ssa::{
 };
 use r2types::{CTypeLike, Signedness};
 
-use crate::{TermArena, TermId, TermKind};
+use r2rewrite::{TermArena, TermId, TermKind};
 
 /// What the renderer's plan says about a value, as far as typing needs it.
 ///
@@ -227,8 +227,8 @@ pub fn typed_boundaries(
             });
         builder.value_type(value, &ty);
     }
-    for index in 0..terms.len() {
-        builder.term_produced(TermId::from_index(index));
+    for id in terms.ids() {
+        builder.term_produced(id);
     }
     builder.out
 }

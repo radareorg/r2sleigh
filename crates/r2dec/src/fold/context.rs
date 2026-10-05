@@ -140,7 +140,7 @@ pub(crate) struct FoldingContext<'a> {
     /// and the finaliser reads it when it applies the write projection and
     /// the conversion to the declared object, which happen after the
     /// statement has been built. One transaction sets and takes it.
-    pub(crate) pending_assignment_type: Cell<Option<r2rewrite::CValue>>,
+    pub(crate) pending_assignment_type: Cell<Option<crate::typed::CValue>>,
     /// Legacy cache retained only as a negative test fixture: production
     /// inlining is authorized exclusively by the sealed binding plan.
     ///

@@ -9,7 +9,7 @@
 //! written down, and at most twice: the address-width step a pointer takes on
 //! its way to or from an integer of another width, and the target.
 
-use r2rewrite::CValue;
+use crate::typed::CValue;
 use r2types::Signedness;
 
 use crate::ast::{CExpr, CType};

@@ -2975,7 +2975,7 @@ impl<'a> FoldingContext<'a> {
             Some(CValue::Typed(CType::Bool))
         } else {
             self.produced_at(frame)
-                .or_else(|| stated.map(|ty| CValue::Typed(r2rewrite::promoted(&ty))))
+                .or_else(|| stated.map(|ty| CValue::Typed(crate::typed::promoted(&ty))))
         };
         self.assign_typed(lhs, rhs, produced)
     }

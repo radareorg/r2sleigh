@@ -1,7 +1,7 @@
 use r2ssa::SSAVar;
 
 use super::*;
-use r2rewrite::CValue;
+use crate::typed::CValue;
 
 /// Opaque proof that one rendered lvalue came from the exact source-owned
 /// structured memory-access fact for the current operation.

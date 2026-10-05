@@ -15,7 +15,6 @@ pub mod eval;
 pub mod import;
 pub mod rules;
 pub mod term;
-pub mod typed;
 
 pub use driver::{
     BudgetFailure, CanonicalAccess, CanonicalRoots, CanonicalValue, Multiplicity, Rewrite,
@@ -34,7 +33,6 @@ pub use term::{
     LeafOrigin, LeafRead, MAX_TERM_WIDTH_BITS, ObjectPlacement, OccurrenceId, PointerWalk, Term,
     TermArena, TermId, TermKind,
 };
-pub use typed::{CValue, RenderTypes, TypedBoundaries, c_type_of, promoted, typed_boundaries};
 
 /// One line spelling of a term for a dump.
 pub fn spell_term(arena: &TermArena, root: TermId) -> String {

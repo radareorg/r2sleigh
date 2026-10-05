@@ -20,7 +20,7 @@ use crate::analysis;
 pub(crate) use crate::analysis::lower::OpLoweringRefusal;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 use crate::binding_plan::{BindingPlan, BindingPlanSourceMismatch};
-use r2rewrite::CValue;
+use crate::typed::CValue;
 
 use super::SSABlock;
 use super::context::{EffectOccurrenceKind, FoldingContext};

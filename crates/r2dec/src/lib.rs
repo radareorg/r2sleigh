@@ -49,6 +49,7 @@ pub(crate) mod stage_timing;
 pub mod structure;
 mod structured_region;
 pub mod symbol;
+pub mod typed;
 pub(crate) mod unrendered;
 mod variable;
 

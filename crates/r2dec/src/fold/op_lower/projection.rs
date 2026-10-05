@@ -4,7 +4,7 @@
 //! exact [`r2ssa::MachineUseSlice`] selected upstream into a C expression.
 
 use crate::ast::{BinaryOp, CExpr, CType};
-use r2rewrite::CValue;
+use crate::typed::CValue;
 use r2ssa::{MachineCastKind, MachineUseSlice, MachineWriteProjection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

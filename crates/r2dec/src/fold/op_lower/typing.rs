@@ -6,7 +6,7 @@
 //! value read or by the operation lowered and the operand's position, and
 //! neither is ever read off the rendered text.
 
-use r2rewrite::{CValue, TypedBoundaries};
+use crate::typed::{CValue, TypedBoundaries};
 use r2ssa::{MachineExprId, ValueId};
 
 use super::{FoldingContext, LowerFrame};

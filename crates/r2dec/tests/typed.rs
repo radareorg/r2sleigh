@@ -1,12 +1,14 @@
 //! The C type at every boundary, stated from the arena and the plan.
 
+#[path = "../../r2rewrite/tests/fixture/mod.rs"]
 mod fixture;
 
 use std::collections::BTreeMap;
 
 use fixture::{RAX, RDI, artifact, konst, projection, reg, tmp, value_named};
+use r2dec::typed::{CValue, RenderTypes, c_type_of, promoted, typed_boundaries};
 use r2il::R2ILOp;
-use r2rewrite::{CValue, RenderTypes, TermId, c_type_of, canonicalize, promoted, typed_boundaries};
+use r2rewrite::{TermId, canonicalize};
 use r2ssa::{MachineExprId, MachineExprKind, MachineSignedness, MachineType, ValueId};
 use r2types::CTypeLike;
 

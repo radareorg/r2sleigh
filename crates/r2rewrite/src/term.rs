@@ -664,6 +664,11 @@ impl TermArena {
         id
     }
 
+    /// Every term in the arena, in id order.
+    pub fn ids(&self) -> impl Iterator<Item = TermId> + use<> {
+        (0..self.len()).map(TermId::from_index)
+    }
+
     pub fn term(&self, id: TermId) -> Term {
         self.nodes[id.index()]
     }

@@ -741,7 +741,7 @@ fn radare_typed_global_renders_as_its_type_and_direct_value() {
     let mut function = CFunction::new("read_counter", CType::i32()).with_body(vec![CStmt::Return(
         Some(CExpr::deref(crate::fold::op_lower::convert::convert(
             address,
-            &r2rewrite::CValue::Typed(address_type),
+            &crate::typed::CValue::Typed(address_type),
             &CType::ptr(CType::u32()),
             64,
         ))),
@@ -795,7 +795,7 @@ fn unplaceable_global_type_keeps_the_honest_byte_declaration() {
     let mut function = CFunction::new("read_counter", CType::u32()).with_body(vec![CStmt::Return(
         Some(crate::fold::op_lower::convert::convert(
             address,
-            &r2rewrite::CValue::Typed(address_type),
+            &crate::typed::CValue::Typed(address_type),
             &CType::u32(),
             64,
         )),
