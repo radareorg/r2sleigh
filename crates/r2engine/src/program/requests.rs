@@ -689,8 +689,9 @@ impl<S: Source + 'static> OpenProgram<S> {
                 .iter()
                 .map(|one| (one.address, one.thumb))
                 .collect::<BTreeMap<_, _>>();
-            self.modes_revision += u64::from(self.modes_at.is_some() && modes != self.modes);
-            self.modes = modes;
+            self.modes_revision +=
+                u64::from(self.modes_at.is_some() && modes != self.db.inputs().modes);
+            self.db.inputs_mut().modes = modes;
             self.modes_at = Some(self.source().byte_revision());
         }
         Ok(Survey {
@@ -732,6 +733,8 @@ impl<S: Source + 'static> OpenProgram<S> {
                 endian: self.endian(),
             },
             call_effect: self
+                .db
+                .inputs()
                 .assembled
                 .as_ref()
                 .and_then(|held| held.call_effect.as_ref()),

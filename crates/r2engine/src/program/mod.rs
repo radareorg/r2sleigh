@@ -56,40 +56,11 @@ pub struct OpenProgram<S: Source + 'static> {
     /// the database's answers, held for the request that reads them.
     names: Rc<NameDb>,
     imports: Rc<BTreeMap<u64, naming::Stub>>,
-    /// Whether a function begins at each address the binary defines, indexed
-    /// once.
-    ///
-    /// The engine asks this per call target and per branch target of every
-    /// body it walks, and answering it by scanning the symbol table made the
-    /// walk cost one pass over every symbol per edge. Read from the container
-    /// alone, so no write moves it.
-    defined: BTreeMap<u64, bool>,
-    /// Where the loaded sections lie, indexed once from the container, which no write moves.
-    extents: r2types::ProgramExtents,
-    /// Where static data can live, by `Section::holds_static_data`, indexed
-    /// once the same way: a string is looked for per address a line or a
-    /// body names, and scanning every section for each was one pass per
-    /// question.
-    static_data: r2types::ProgramExtents,
-    /// Where the container states instructions lie, indexed once the same
-    /// way; `None` where it states no section holds any.
-    code: Option<r2types::ProgramExtents>,
-    /// Whether each function discovery found is Thumb, by its entry.
-    ///
-    /// Derived from the whole program, since a function nothing states is in
-    /// the instruction set its callers enter it in; only a program with a
-    /// second decoder pays for it.
-    modes: BTreeMap<u64, bool>,
-    /// Whether the code from each ARM mapping symbol on is Thumb, as the
-    /// container states it; this can switch inside one function, as a veneer
-    /// does.
-    mapped: BTreeMap<u64, bool>,
     /// Which revision of the bytes `modes` was discovered at.
     modes_at: Option<u64>,
     /// How many times discovery's entry modes have differed, until the
     /// survey moves onto a query (Q3).
     modes_revision: u64,
-    assembled: Option<Assembled>,
     /// What this session has already worked out about one function, and the type analysis sealed from it.
     memo: Memo<Prepared, crate::SealedFunctionAnalysis>,
     /// The control for the request in hand: its cancellation, its deadline and
@@ -124,44 +95,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             // first thing every request does.
             names: Rc::new(NameDb::new()),
             imports: Rc::new(BTreeMap::new()),
-            defined: definitions(container),
-            extents: r2types::ProgramExtents::new(
-                container
-                    .sections
-                    .iter()
-                    .filter(|section| section.loaded)
-                    .map(Section::range),
-            ),
-            static_data: r2types::ProgramExtents::new(
-                container
-                    .sections
-                    .iter()
-                    .filter(|section| section.holds_static_data())
-                    .map(Section::range),
-            ),
-            code: {
-                let code = container
-                    .sections
-                    .iter()
-                    .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
-                    .map(Section::range)
-                    .collect::<Vec<_>>();
-                (!code.is_empty()).then(|| r2types::ProgramExtents::new(code))
-            },
-            modes: BTreeMap::new(),
-            mapped: container
-                .symbols
-                .iter()
-                .filter(|symbol| symbol.defined)
-                .filter_map(|symbol| match symbol.kind {
-                    SymbolKind::Mapping(Mapping::Arm) => Some((symbol.vaddr, false)),
-                    SymbolKind::Mapping(Mapping::Thumb) => Some((symbol.vaddr, true)),
-                    _ => None,
-                })
-                .collect(),
             modes_at: None,
             modes_revision: 0,
-            assembled: None,
             memo: Memo::default(),
             control: crate::EngineExecutionControl::default(),
             next: None,
@@ -171,6 +106,42 @@ impl<S: Source + 'static> OpenProgram<S> {
             references: None,
             survey: None,
             db: Db::new(ProgramInputs {
+                defined: definitions(container),
+                extents: r2types::ProgramExtents::new(
+                    container
+                        .sections
+                        .iter()
+                        .filter(|section| section.loaded)
+                        .map(Section::range),
+                ),
+                static_data: r2types::ProgramExtents::new(
+                    container
+                        .sections
+                        .iter()
+                        .filter(|section| section.holds_static_data())
+                        .map(Section::range),
+                ),
+                code: {
+                    let code = container
+                        .sections
+                        .iter()
+                        .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
+                        .map(Section::range)
+                        .collect::<Vec<_>>();
+                    (!code.is_empty()).then(|| r2types::ProgramExtents::new(code))
+                },
+                mapped: container
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.defined)
+                    .filter_map(|symbol| match symbol.kind {
+                        SymbolKind::Mapping(Mapping::Arm) => Some((symbol.vaddr, false)),
+                        SymbolKind::Mapping(Mapping::Thumb) => Some((symbol.vaddr, true)),
+                        _ => None,
+                    })
+                    .collect(),
+                modes: BTreeMap::new(),
+                assembled: None,
                 source,
                 slots,
                 machine: None,
@@ -309,6 +280,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             .ok_or("no Sleigh specification for this architecture")?;
         let key = (machine.arch.name.clone(), machine.compiler_spec);
         if self
+            .db
+            .inputs()
             .assembled
             .as_ref()
             .is_some_and(|held| held.machine == key)
@@ -372,7 +345,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         // `__fgets_chk` is two interfaces under one name. The program's own
         // declarations are read by address, beside these, not merged in.
         let prototypes = r2abi::Prototypes::embedded_for(platform(container));
-        self.assembled = Some(Assembled {
+        self.db.inputs_mut().assembled = Some(Assembled {
             machine: key,
             convention,
             call_effect,
@@ -397,6 +370,8 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     fn target_of<'a>(&'a self, machine: &'a EmbeddedMachine) -> Result<NativeTarget<'a>, String> {
         let assembled = self
+            .db
+            .inputs()
             .assembled
             .as_ref()
             .ok_or("the program was not assembled for this address")?;
@@ -508,8 +483,8 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Whether the code at this address is Thumb, as `machine_at` decides it.
     fn thumb_at(&self, vaddr: u64) -> bool {
-        let stated = self.mapped.range(..=vaddr).next_back();
-        let derived = self.modes.range(..=vaddr).next_back();
+        let stated = self.db.inputs().mapped.range(..=vaddr).next_back();
+        let derived = self.db.inputs().modes.range(..=vaddr).next_back();
         match (stated, derived) {
             (Some((at, thumb)), Some((from, _))) if at >= from => *thumb,
             (_, Some((_, thumb))) | (Some((_, thumb)), None) => *thumb,
@@ -568,7 +543,12 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         // A stub is a function of the program's as much as a body is: control
         // that reaches one has left the function it came from.
         self.imports.contains_key(&vaddr)
-            || self.defined.get(&vaddr).is_some_and(|function| *function)
+            || self
+                .db
+                .inputs()
+                .defined
+                .get(&vaddr)
+                .is_some_and(|function| *function)
     }
 
     fn returns(&self, callee: u64) -> bool {
@@ -580,11 +560,19 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
-        self.assembled.as_ref().and_then(|held| held.link.clone())
+        self.db
+            .inputs()
+            .assembled
+            .as_ref()
+            .and_then(|held| held.link.clone())
     }
 
     fn mode_register(&self) -> Option<r2il::Varnode> {
-        self.assembled.as_ref().and_then(|held| held.mode.clone())
+        self.db
+            .inputs()
+            .assembled
+            .as_ref()
+            .and_then(|held| held.mode.clone())
     }
 }
 
@@ -608,7 +596,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.static_data.holds(vaddr)
+        self.db.inputs().static_data.holds(vaddr)
     }
 
     fn loader_writes(&self) -> &[LoaderWrite] {
@@ -620,7 +608,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     }
 
     fn holds_code(&self, vaddr: u64) -> bool {
-        match &self.code {
+        match &self.db.inputs().code {
             Some(code) => code.holds(vaddr),
             None => crate::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
         }
@@ -645,7 +633,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     }
 
     fn extents(&self) -> &r2types::ProgramExtents {
-        &self.extents
+        &self.db.inputs().extents
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {
@@ -871,6 +859,36 @@ fn definitions(container: &Container) -> BTreeMap<u64, bool> {
 /// decoders and the slots the container states the loader fills.
 pub(crate) struct ProgramInputs<S> {
     pub(crate) source: S,
+    /// Whether a function begins at each address the binary defines, indexed
+    /// once.
+    ///
+    /// The engine asks this per call target and per branch target of every
+    /// body it walks, and answering it by scanning the symbol table made the
+    /// walk cost one pass over every symbol per edge. Read from the container
+    /// alone, so no write moves it.
+    defined: BTreeMap<u64, bool>,
+    /// Where the loaded sections lie, indexed once from the container, which no write moves.
+    extents: r2types::ProgramExtents,
+    /// Where static data can live, by `Section::holds_static_data`, indexed
+    /// once the same way: a string is looked for per address a line or a
+    /// body names, and scanning every section for each was one pass per
+    /// question.
+    static_data: r2types::ProgramExtents,
+    /// Where the container states instructions lie, indexed once the same
+    /// way; `None` where it states no section holds any.
+    code: Option<r2types::ProgramExtents>,
+    /// Whether each function discovery found is Thumb, by its entry.
+    ///
+    /// Derived from the whole program, since a function nothing states is in
+    /// the instruction set its callers enter it in; only a program with a
+    /// second decoder pays for it.
+    modes: BTreeMap<u64, bool>,
+    /// Whether the code from each ARM mapping symbol on is Thumb, as the
+    /// container states it; this can switch inside one function, as a veneer
+    /// does.
+    mapped: BTreeMap<u64, bool>,
+    /// What a native request needs of the machine, assembled once it is loaded.
+    assembled: Option<Assembled>,
     /// Which import each slot the loader fills stands for. A stub's tail
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
