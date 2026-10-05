@@ -49,11 +49,11 @@ preservation proof once depended on how a clobber list was spelled (M1b).
   their three transfers are deleted. The census stayed byte-identical,
   although observation became as precise as demand (or, xor, sign
   extension).
+- B1: `bytes::closure` is the one backward closure; `Demand` runs it from the
+  return values and every effect's inputs, observation from its obligations.
 
 ## Left
 
-- B1: one closure index for demand and observation. Exit: `Demand` and
-  `ProvenProgramObservations` are two root sets over one computation.
 - B2: r2dec's dead values from the index. Exit: `unread_defined_values` is
   deleted; a value read only by an unobserved value is never bound.
 - B3: slots as lanes of a root at every boundary. Exit: no boundary match by

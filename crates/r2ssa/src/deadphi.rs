@@ -23,7 +23,7 @@
 //! for the rules that reason about candidates and the function is left alone for
 //! the rules that simulate it.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 
 use crate::graph::{InstId, SsaGraph, UseSite, ValueId};
 use crate::liveout::FunctionLiveOut;
@@ -64,86 +64,7 @@ pub struct ProvenProgramObservations {
     roots: crate::dense::IdMap<ValueId, String>,
 }
 
-struct Closure {
-    values: crate::dense::IdSet<ValueId>,
-    bytes: crate::dense::IdMap<ValueId, ByteMask>,
-    parents: crate::dense::IdMap<ValueId, ValueId>,
-}
-
 pub(crate) use crate::bytes::ByteMask;
-
-/// What an observation of `observed` bytes of a value asks of each input, by
-/// the one byte relation (`crate::bytes`); the closure trims each mask to its
-/// input's width.
-fn observed_input_bytes(
-    graph: &SsaGraph,
-    inst: &crate::graph::GraphInst,
-    observed: ByteMask,
-) -> impl Iterator<Item = (ValueId, ByteMask)> {
-    let rule = match &inst.payload {
-        crate::graph::InstPayload::Phi { .. } => None,
-        crate::graph::InstPayload::Op(op) => Some(crate::bytes::rule(op, |value| {
-            let var = graph.var(*value);
-            (var.size, var.constant_bits())
-        })),
-    };
-    inst.inputs.iter().enumerate().map(move |(index, input)| {
-        let read = match rule {
-            None => observed,
-            Some(rule) => rule.backward(index, observed).unwrap_or(ByteMask::All),
-        };
-        (*input, read)
-    })
-}
-
-/// Every value some root depends on, with the bytes of it that dependence
-/// reaches.
-///
-/// A mask only grows, by union, and is trimmed to its value's width, so a
-/// value is queued again only when it gains a byte or saturates -- at most 65
-/// times -- and the walk stays linear in the graph's edges.
-fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
-    let width = |value: ValueId| {
-        graph
-            .value(value)
-            .map_or(ByteMask::All, |value| ByteMask::whole(value.var.size))
-    };
-    let mut bytes: crate::dense::IdMap<ValueId, ByteMask> = crate::dense::IdMap::default();
-    let mut parents = crate::dense::IdMap::default();
-    let mut pending = VecDeque::new();
-    for value in roots {
-        let mask = width(value);
-        if !mask.is_empty() && bytes.insert(value, mask).is_none() {
-            pending.push_back(value);
-        }
-    }
-    while let Some(value) = pending.pop_front() {
-        let observed = bytes.get(value).copied().unwrap_or(ByteMask::NONE);
-        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
-            continue;
-        };
-        for (input, mask) in observed_input_bytes(graph, inst, observed) {
-            let mask = mask.intersection(width(input));
-            if mask.is_empty() {
-                continue;
-            }
-            let entry = bytes.get_or_insert_with(input, || ByteMask::NONE);
-            let before = *entry;
-            *entry = before.union(mask);
-            if before.is_empty() {
-                parents.insert(input, value);
-            }
-            if *entry != before {
-                pending.push_back(input);
-            }
-        }
-    }
-    Closure {
-        values: bytes.keys().collect(),
-        bytes,
-        parents,
-    }
-}
 
 impl ProvenProgramObservations {
     /// Close exact live outputs and non-refusal obligations over SSA def-use.
@@ -167,7 +88,7 @@ impl ProvenProgramObservations {
                 roots.get_or_insert_with(input, || format!("{:?}", obligation.id));
             }
         }
-        let closure = dependency_closure(graph, roots.keys());
+        let closure = crate::bytes::closure(graph, roots.keys());
         Some(Self {
             values: closure.values,
             bytes: closure.bytes,
@@ -252,7 +173,7 @@ impl DeadPhis {
         }
         // Whatever an observation depends on is observed, transitively. The walk
         // is over the graph's own instruction inputs, so it visits each edge once.
-        let observed = dependency_closure(graph, roots).values;
+        let observed = crate::bytes::closure(graph, roots).values;
 
         let unobserved_values = graph
             .values

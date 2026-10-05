@@ -1,38 +1,5 @@
-//! Which bytes of each value the function's meaning reads.
-//!
-//! A machine writes registers by lanes: `setg al` puts one byte in RAX and
-//! leaves the other seven holding whatever the caller left there. When nothing
-//! downstream reads those seven -- `movzbl %al` keeps one byte, a 32-bit OR
-//! keeps four -- the entry value they came from is not an input of anything the
-//! function computes, and a reading of the C that names it reads a value no
-//! statement assigned for bytes nobody uses.
-//!
-//! The fact is a byte mask per value, computed backwards over the graph:
-//!
-//! - **Roots.** A value leaving through a return register is demanded whole --
-//!   being read by the caller is a use (`FunctionLiveOut`), and so is a
-//!   carrier a call boundary reads (`CallUse`, read at its widest). Those are
-//!   all the roots only where every exit is one of them: a tail jump or a
-//!   transfer the walk could not follow hands every register to code this
-//!   graph does not see, and a return whose value was not found names no
-//!   root, so such a function releases nothing ([`exits_are_named`]). Every operation
-//!   this module does not model exactly demands its inputs whole, whether or
-//!   not its own result is read: a division or a load can trap, a store or a
-//!   call has effects, and none of that may depend on bytes this pass calls
-//!   free.
-//! - **Exact transfer**, for operations that are pure and cannot trap: copies,
-//!   zero and sign extension (a sign extension past its source also reads the
-//!   source's top byte), lane extraction and concatenation, the three bitwise
-//!   operations, a byte-aligned INSERT, and merges.
-//!
-//! The masks only grow, each at most to its value's width, so the worklist
-//! ends after O((V + E) * W) steps for width W in bytes.
-//!
-//! The one rewrite it licenses: an INSERT whose demanded bytes all lie in the
-//! inserted lane does not read its base, and the base is replaced by zero --
-//! no demanded bit changes, and the value the base held loses a reader it
-//! never needed. This is the demanded-bits simplification compilers apply,
-//! done with the proof rather than a pattern.
+//! Which bytes of each value the function's meaning reads (doc/adr-byte-relation.md),
+//! and the one rewrite it licenses: an INSERT read only in its lane does not read its base.
 
 use crate::SSAFunction;
 use crate::bytes::ByteMask;
@@ -63,116 +30,73 @@ fn inserted_lane(value: &SSAVar, position: &SSAVar) -> Option<(u32, u64)> {
     Some((first, whole(value.size).checked_shl(first).unwrap_or(0)))
 }
 
-/// How an operation's inputs are demanded.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// Pure, and the bytes of each input it reads follow from the bytes of
-    /// its output that are read (`transfer`).
-    Exact,
-    /// Pure and cannot trap: it reads its inputs whole, but only where its
-    /// own result is read. A flag computed and never tested reads nothing.
-    Pure,
-    /// Touches memory, transfers control, calls, can trap, or is a user
-    /// operation: it reads its inputs whole whatever becomes of its result.
-    Effect,
-}
-
-fn kind(graph: &SsaGraph, inst: &GraphInst) -> Kind {
+/// Whether an operation reads its inputs whatever becomes of its result
+/// (memory, control, a call, a trap, a user operation), unlike a pure one.
+fn has_effect(inst: &GraphInst) -> bool {
     let op = match &inst.payload {
-        InstPayload::Phi { .. } => return Kind::Exact,
+        InstPayload::Phi { .. } => return false,
         InstPayload::Op(op) => op,
     };
-    match op {
+    !matches!(
+        op,
         SSAOp::Copy { .. }
-        | SSAOp::IntZExt { .. }
-        | SSAOp::IntSExt { .. }
-        | SSAOp::Subpiece { .. }
-        | SSAOp::Piece { .. }
-        | SSAOp::IntAnd { .. }
-        | SSAOp::IntOr { .. }
-        | SSAOp::IntXor { .. } => Kind::Exact,
-        SSAOp::Insert(insert) => {
-            match inserted_lane(graph.var(insert.value), graph.var(insert.position)) {
-                Some(_) => Kind::Exact,
-                None => Kind::Pure,
-            }
-        }
-        SSAOp::IntAdd { .. }
-        | SSAOp::IntSub { .. }
-        | SSAOp::IntMult { .. }
-        | SSAOp::IntNegate { .. }
-        | SSAOp::IntCarry { .. }
-        | SSAOp::IntSCarry { .. }
-        | SSAOp::IntSBorrow { .. }
-        | SSAOp::IntNot { .. }
-        | SSAOp::IntLeft { .. }
-        | SSAOp::IntRight { .. }
-        | SSAOp::IntSRight { .. }
-        | SSAOp::IntEqual { .. }
-        | SSAOp::IntNotEqual { .. }
-        | SSAOp::IntLess { .. }
-        | SSAOp::IntSLess { .. }
-        | SSAOp::IntLessEqual { .. }
-        | SSAOp::IntSLessEqual { .. }
-        | SSAOp::BoolNot { .. }
-        | SSAOp::BoolAnd { .. }
-        | SSAOp::BoolOr { .. }
-        | SSAOp::BoolXor { .. }
-        | SSAOp::PopCount { .. }
-        | SSAOp::Lzcount { .. }
-        | SSAOp::FloatAdd { .. }
-        | SSAOp::FloatSub { .. }
-        | SSAOp::FloatMult { .. }
-        | SSAOp::FloatDiv { .. }
-        | SSAOp::FloatNeg { .. }
-        | SSAOp::FloatAbs { .. }
-        | SSAOp::FloatSqrt { .. }
-        | SSAOp::FloatCeil { .. }
-        | SSAOp::FloatFloor { .. }
-        | SSAOp::FloatRound { .. }
-        | SSAOp::FloatNaN { .. }
-        | SSAOp::FloatEqual { .. }
-        | SSAOp::FloatNotEqual { .. }
-        | SSAOp::FloatLess { .. }
-        | SSAOp::FloatLessEqual { .. }
-        | SSAOp::Int2Float { .. }
-        | SSAOp::Float2Int { .. }
-        | SSAOp::FloatFloat { .. }
-        | SSAOp::Trunc { .. }
-        | SSAOp::PtrAdd { .. }
-        | SSAOp::PtrSub { .. }
-        | SSAOp::Cast { .. }
-        | SSAOp::Extract { .. }
-        | SSAOp::Select(_)
-        | SSAOp::Nop => Kind::Pure,
-        _ => Kind::Effect,
-    }
-}
-
-/// The bytes of input `index` an exact operation reads when `demanded` of its
-/// output is read, by the one byte relation (`crate::bytes`).
-fn read_by(graph: &SsaGraph, inst: &GraphInst, index: usize, demanded: u64) -> ByteMask {
-    let out = ByteMask::Bytes(demanded);
-    match &inst.payload {
-        InstPayload::Phi { .. } => out,
-        InstPayload::Op(op) => {
-            let facts = |value: &ValueId| {
-                let var = graph.var(*value);
-                (var.size, var.constant_bits())
-            };
-            crate::bytes::rule(op, facts)
-                .backward(index, out)
-                .unwrap_or(ByteMask::All)
-        }
-    }
-}
-
-/// A mask as the word this pass keeps, trimmed to a value `size` bytes wide.
-fn word(mask: ByteMask, size: u32) -> u64 {
-    match mask.intersection(ByteMask::whole(size)) {
-        ByteMask::Bytes(bytes) => bytes,
-        ByteMask::All => u64::MAX,
-    }
+            | SSAOp::IntZExt { .. }
+            | SSAOp::IntSExt { .. }
+            | SSAOp::Subpiece { .. }
+            | SSAOp::Piece { .. }
+            | SSAOp::IntAnd { .. }
+            | SSAOp::IntOr { .. }
+            | SSAOp::IntXor { .. }
+            | SSAOp::Insert(_)
+            | SSAOp::IntAdd { .. }
+            | SSAOp::IntSub { .. }
+            | SSAOp::IntMult { .. }
+            | SSAOp::IntNegate { .. }
+            | SSAOp::IntCarry { .. }
+            | SSAOp::IntSCarry { .. }
+            | SSAOp::IntSBorrow { .. }
+            | SSAOp::IntNot { .. }
+            | SSAOp::IntLeft { .. }
+            | SSAOp::IntRight { .. }
+            | SSAOp::IntSRight { .. }
+            | SSAOp::IntEqual { .. }
+            | SSAOp::IntNotEqual { .. }
+            | SSAOp::IntLess { .. }
+            | SSAOp::IntSLess { .. }
+            | SSAOp::IntLessEqual { .. }
+            | SSAOp::IntSLessEqual { .. }
+            | SSAOp::BoolNot { .. }
+            | SSAOp::BoolAnd { .. }
+            | SSAOp::BoolOr { .. }
+            | SSAOp::BoolXor { .. }
+            | SSAOp::PopCount { .. }
+            | SSAOp::Lzcount { .. }
+            | SSAOp::FloatAdd { .. }
+            | SSAOp::FloatSub { .. }
+            | SSAOp::FloatMult { .. }
+            | SSAOp::FloatDiv { .. }
+            | SSAOp::FloatNeg { .. }
+            | SSAOp::FloatAbs { .. }
+            | SSAOp::FloatSqrt { .. }
+            | SSAOp::FloatCeil { .. }
+            | SSAOp::FloatFloor { .. }
+            | SSAOp::FloatRound { .. }
+            | SSAOp::FloatNaN { .. }
+            | SSAOp::FloatEqual { .. }
+            | SSAOp::FloatNotEqual { .. }
+            | SSAOp::FloatLess { .. }
+            | SSAOp::FloatLessEqual { .. }
+            | SSAOp::Int2Float { .. }
+            | SSAOp::Float2Int { .. }
+            | SSAOp::FloatFloat { .. }
+            | SSAOp::Trunc { .. }
+            | SSAOp::PtrAdd { .. }
+            | SSAOp::PtrSub { .. }
+            | SSAOp::Cast { .. }
+            | SSAOp::Extract { .. }
+            | SSAOp::Select(_)
+            | SSAOp::Nop
+    )
 }
 
 /// Whether every way control leaves the function reads registers this
@@ -202,68 +126,32 @@ pub(crate) fn exits_are_named(function: &SSAFunction, live_out: &FunctionLiveOut
     })
 }
 
-/// The bytes of each value something reads.
+/// The bytes of each value something reads: the one byte closure
+/// (`crate::bytes::closure`) from the return values and every input of an
+/// operation with an effect.
 pub(crate) struct Demand {
-    bytes: Vec<u64>,
+    bytes: crate::dense::IdMap<ValueId, ByteMask>,
 }
 
 impl Demand {
     pub(crate) fn of(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
-        let size = |value: ValueId| graph.value(value).map_or(64, |value| value.var.size);
-        let mut demand = Self {
-            bytes: vec![0u64; graph.values.len()],
-        };
-        let mut pending = Vec::new();
-        for value in live_out.iter() {
-            demand.raise(value, whole(size(value)), &mut pending);
-        }
-        for inst in graph
+        let effects = graph
             .insts
             .iter()
-            .filter(|inst| kind(graph, inst) == Kind::Effect)
-        {
-            for input in &inst.inputs {
-                demand.raise(*input, whole(size(*input)), &mut pending);
-            }
-        }
-        while let Some(value) = pending.pop() {
-            let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
-                continue;
-            };
-            let exact = match kind(graph, inst) {
-                Kind::Exact => true,
-                Kind::Pure => false,
-                Kind::Effect => continue,
-            };
-            let demanded = demand.bytes(value);
-            for (index, input) in inst.inputs.iter().enumerate() {
-                let mask = match exact {
-                    true => word(read_by(graph, inst, index, demanded), size(*input)),
-                    false => whole(size(*input)),
-                };
-                demand.raise(*input, mask, &mut pending);
-            }
-        }
-        demand
-    }
-
-    /// Add `mask` to what `value` has demanded, queueing it where that grew.
-    fn raise(&mut self, value: ValueId, mask: u64, pending: &mut Vec<ValueId>) {
-        let Some(held) = self.bytes.get_mut(value.0 as usize) else {
-            return;
-        };
-        if *held | mask != *held {
-            *held |= mask;
-            pending.push(value);
+            .filter(|inst| has_effect(inst))
+            .flat_map(|inst| inst.inputs.iter().copied());
+        Self {
+            bytes: crate::bytes::closure(graph, live_out.iter().chain(effects)).bytes,
         }
     }
 
     /// The bytes of `value` something reads.
     pub(crate) fn bytes(&self, value: ValueId) -> u64 {
-        self.bytes
-            .get(value.0 as usize)
-            .copied()
-            .unwrap_or(u64::MAX)
+        match self.bytes.get(value) {
+            None => 0,
+            Some(ByteMask::Bytes(bytes)) => *bytes,
+            Some(ByteMask::All) => u64::MAX,
+        }
     }
 }
 

@@ -2,6 +2,9 @@
 //! (doc/adr-byte-relation.md): one rule per operation, read backward by demand
 //! and observation and forward by written lanes.
 
+use std::collections::VecDeque;
+
+use crate::graph::{SsaGraph, ValueId};
 use crate::op::SSAOp;
 
 /// A set of a value's bytes, bit `b` for byte `b`; `All` saturates past 64.
@@ -206,6 +209,87 @@ impl Rule {
             (Self::Whole, _) => ByteMask::All,
             _ => return None,
         })
+    }
+}
+
+/// What a closure found: each value some root depends on, the bytes reached,
+/// and the value through which each was first reached.
+pub(crate) struct Closure {
+    pub(crate) values: crate::dense::IdSet<ValueId>,
+    pub(crate) bytes: crate::dense::IdMap<ValueId, ByteMask>,
+    pub(crate) parents: crate::dense::IdMap<ValueId, ValueId>,
+}
+
+/// What an observation of `observed` bytes of a value asks of each input, by
+/// the one byte relation (`crate::bytes`); the closure trims each mask to its
+/// input's width.
+fn observed_input_bytes(
+    graph: &SsaGraph,
+    inst: &crate::graph::GraphInst,
+    observed: ByteMask,
+) -> impl Iterator<Item = (ValueId, ByteMask)> {
+    let rule = match &inst.payload {
+        crate::graph::InstPayload::Phi { .. } => None,
+        crate::graph::InstPayload::Op(op) => Some(crate::bytes::rule(op, |value| {
+            let var = graph.var(*value);
+            (var.size, var.constant_bits())
+        })),
+    };
+    inst.inputs.iter().enumerate().map(move |(index, input)| {
+        let read = match rule {
+            None => observed,
+            Some(rule) => rule.backward(index, observed).unwrap_or(ByteMask::All),
+        };
+        (*input, read)
+    })
+}
+
+/// Every value some root depends on, with the bytes of it that dependence
+/// reaches: one closure, which demand and observation run from their roots.
+///
+/// A mask only grows, by union, and is trimmed to its value's width, so a
+/// value is queued again only when it gains a byte or saturates -- at most 65
+/// times -- and the walk stays linear in the graph's edges.
+pub(crate) fn closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
+    let width = |value: ValueId| {
+        graph
+            .value(value)
+            .map_or(ByteMask::All, |value| ByteMask::whole(value.var.size))
+    };
+    let mut bytes: crate::dense::IdMap<ValueId, ByteMask> = crate::dense::IdMap::default();
+    let mut parents = crate::dense::IdMap::default();
+    let mut pending = VecDeque::new();
+    for value in roots {
+        let mask = width(value);
+        if !mask.is_empty() && bytes.insert(value, mask).is_none() {
+            pending.push_back(value);
+        }
+    }
+    while let Some(value) = pending.pop_front() {
+        let observed = bytes.get(value).copied().unwrap_or(ByteMask::NONE);
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            continue;
+        };
+        for (input, mask) in observed_input_bytes(graph, inst, observed) {
+            let mask = mask.intersection(width(input));
+            if mask.is_empty() {
+                continue;
+            }
+            let entry = bytes.get_or_insert_with(input, || ByteMask::NONE);
+            let before = *entry;
+            *entry = before.union(mask);
+            if before.is_empty() {
+                parents.insert(input, value);
+            }
+            if *entry != before {
+                pending.push_back(input);
+            }
+        }
+    }
+    Closure {
+        values: bytes.keys().collect(),
+        bytes,
+        parents,
     }
 }
 
