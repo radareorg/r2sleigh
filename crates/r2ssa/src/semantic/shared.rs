@@ -1636,7 +1636,6 @@ pub(crate) fn callee_write_spans(
             let target = target
                 .and_then(|target| graph.value_of(*target))
                 .and_then(|target| resolve_graph_literal_value(graph, Some(facts), target));
-            let id = crate::interproc::InterprocFunctionId(target.unwrap_or(0));
             let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
@@ -1656,16 +1655,8 @@ pub(crate) fn callee_write_spans(
             // available here because the callee's body was read before this
             // one was prepared.
             let reach = target.and_then(|target| machine_context.callee_argument_reach(target));
-            // Only an import is described by its name; a local symbol's name is a hint.
-            let imported = machine_context
-                .raw_call_site_at(*instruction)
-                .is_some_and(|identity| {
-                    machine_context.callee_linkage(identity)
-                        == r2source::AdvisoryCalleeLinkage::Imported
-                });
-            let seed = (imported && !name.is_empty())
-                .then(|| crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name))
-                .flatten();
+            // The engine names a library model only for a stated import.
+            let seed = target.and_then(|target| machine_context.callee_library(target));
             // A callee nothing describes -- no body was read, no import is
             // modelled, or the call is indirect -- may reach anything through a
             // frame address it is handed, so the object that address is in has

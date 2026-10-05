@@ -581,6 +581,8 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The library models of the imports this body calls, by entry.
+    callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The register saves the container's call-frame information states.
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The function each captured code pointer table entry names, by the
@@ -1057,6 +1059,7 @@ impl SourceMachineContext {
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            callee_library: BTreeMap::new(),
             frame_saves: Vec::new(),
             code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
@@ -1361,6 +1364,28 @@ impl SourceMachineContext {
         self.callee_names = callee_names;
     }
 
+    pub(crate) fn set_callee_library(
+        &mut self,
+        library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
+    ) {
+        self.callee_library = library;
+    }
+
+    /// The library model of the import at `target`, where the engine named one.
+    pub(crate) fn callee_library(
+        &self,
+        target: u64,
+    ) -> Option<&crate::interproc::FunctionSemanticSummary> {
+        self.callee_library.get(&target)
+    }
+
+    /// Every import this body calls that has a library model, by entry.
+    pub(crate) const fn callee_libraries(
+        &self,
+    ) -> &BTreeMap<u64, crate::interproc::FunctionSemanticSummary> {
+        &self.callee_library
+    }
+
     pub(crate) fn set_callee_argument_reach(
         &mut self,
         callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
@@ -1406,19 +1431,6 @@ impl SourceMachineContext {
     /// The name the source gave the site's callee, where it gave one.
     pub fn callee_name(&self, identity: SourceCallSiteIdentity) -> Option<&str> {
         self.callee_names.get(&identity).map(String::as_str)
-    }
-
-    /// The imports this body calls directly, by entry: the container binds an
-    /// import by its name, so that name says what the callee is.
-    pub(crate) fn imported_callees(&self) -> BTreeMap<u64, String> {
-        self.callee_names
-            .iter()
-            .filter(|(identity, _)| {
-                self.callee_linkage(**identity) == r2source::AdvisoryCalleeLinkage::Imported
-            })
-            .filter(|(identity, _)| identity.target().space == CanonicalStorageSpace::Ram)
-            .map(|(identity, name)| (identity.target().offset, name.clone()))
-            .collect()
     }
 
     /// Who the site calls, as the source's symbol or relocation said; unknown where it said nothing.
@@ -1640,35 +1652,6 @@ mod tests {
         AddressSpace, RegisterDef, RegisterProjectionDisposition, RegisterProjectionRefusal,
         Varnode,
     };
-
-    /// Only a call the source states imports is described by its callee's name.
-    #[test]
-    fn only_an_imported_callee_is_named_for_its_library_model() {
-        let site = |instruction: u64, target: u64| {
-            SourceCallSiteIdentity::new(
-                instruction,
-                CanonicalStorageId {
-                    space: CanonicalStorageSpace::Ram,
-                    offset: target,
-                    size: 8,
-                },
-            )
-        };
-        let (import, local) = (site(0x1000, 0x2000), site(0x1010, 0x3000));
-        let mut context = SourceMachineContext::from_blocks(&[], None);
-        context.set_callee_names(BTreeMap::from([
-            (import, "free".to_owned()),
-            (local, "free".to_owned()),
-        ]));
-        context.set_callee_linkages(BTreeMap::from([
-            (import, r2source::AdvisoryCalleeLinkage::Imported),
-            (local, r2source::AdvisoryCalleeLinkage::Internal),
-        ]));
-        assert_eq!(
-            context.imported_callees(),
-            BTreeMap::from([(0x2000, "free".to_owned())])
-        );
-    }
 
     fn register_storage(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {

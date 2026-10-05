@@ -1012,6 +1012,19 @@ struct Callees {
 }
 
 impl Callees {
+    /// These facts and the body's own library models, as preparation takes them.
+    fn evidence(
+        &self,
+        library: BTreeMap<u64, r2ssa::interproc::FunctionSemanticSummary>,
+    ) -> r2ssa::CalleeEvidence {
+        r2ssa::CalleeEvidence {
+            interfaces: self.interfaces.clone(),
+            preserved: self.preserved.clone(),
+            reach: self.reach.clone(),
+            library,
+        }
+    }
+
     fn record(&mut self, address: u64, facts: &CalleeFacts) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
@@ -1514,11 +1527,13 @@ impl Native<'_> {
             let slots = interface.stack_slots().to_vec();
             restate(&interface, slots, identity.to_vec())
         });
+        let calls = call_sites(&walked.body, self.program);
+        let library = library_evidence(self.program, &calls);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
             blocks,
-            calls: call_sites(&walked.body, self.program),
+            calls,
             string_literals: {
                 let mut literals = self.literals(&walked.body);
                 literals.extend(extra_literals);
@@ -1552,14 +1567,10 @@ impl Native<'_> {
             r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)?;
         let lifted = Disassembler::lift_owned_function(snapshot)
             .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
-        let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
-            lifted,
-            &self.control,
-            &callees.interfaces,
-            &callees.preserved,
-            &callees.reach,
-        )
-        .map_err(|error| NativeRefusal::Prepare(format!("{error:?}")))?;
+        let evidence = callees.evidence(library);
+        let artifact =
+            TrustedSsaArtifact::prepare_with_callee_interfaces(lifted, &self.control, &evidence)
+                .map_err(|error| NativeRefusal::Prepare(format!("{error:?}")))?;
         Ok(Arc::new(artifact))
     }
 }
@@ -1621,6 +1632,25 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
         }
     }
     sites
+}
+
+/// The library model of each import a body calls, by the name the container
+/// binds it with; a local function is described by its body, not its name.
+fn library_evidence(
+    program: &dyn Program,
+    calls: &[NativeCall],
+) -> BTreeMap<u64, r2ssa::interproc::FunctionSemanticSummary> {
+    calls
+        .iter()
+        .filter(|call| call.linkage == r2source::AdvisoryCalleeLinkage::Imported)
+        .filter_map(|call| {
+            let name = program.import_at(call.target)?;
+            Some((
+                call.target,
+                crate::library::import_summary(call.target, &name)?,
+            ))
+        })
+        .collect()
 }
 
 /// How one operation reaches another function, where it reaches one at all.

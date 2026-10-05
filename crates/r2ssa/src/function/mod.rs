@@ -2060,13 +2060,7 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::prepare_with_callee_interfaces(
-            lifted,
-            control,
-            &BTreeMap::new(),
-            &CalleePreservedCarriers::new(),
-            &BTreeMap::new(),
-        )
+        Self::prepare_with_callee_interfaces(lifted, control, &CalleeEvidence::default())
     }
 
     /// Prepare, describing each call whose callee body came in this capture.
@@ -2076,10 +2070,14 @@ impl TrustedSsaArtifact {
     pub fn prepare_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
         lifted: TrustedLiftedFunction,
         control: &C,
-        callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
-        callee_preserved_carriers: &CalleePreservedCarriers,
-        callee_argument_reach: &BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+        evidence: &CalleeEvidence,
     ) -> Result<Self, SsaPrepareError> {
+        let CalleeEvidence {
+            interfaces: callee_interfaces,
+            preserved: callee_preserved_carriers,
+            reach: callee_argument_reach,
+            library,
+        } = evidence;
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
         let arch = genuine.arch_spec().clone();
@@ -2267,6 +2265,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_callee_library(library.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_frame_saves(source.image().frame_saves());
         // What each entry of a captured code pointer table names, recorded
@@ -3164,6 +3163,19 @@ pub struct DefRef<'a, V = SSAVar> {
 /// reaches the value the compiler meant rather than a clobber that never
 /// happened.
 pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
+
+/// What the engine knows of the functions a body calls, by entry address.
+#[derive(Debug, Clone, Default)]
+pub struct CalleeEvidence {
+    /// The interface each callee's own body proved.
+    pub interfaces: BTreeMap<u64, SourceFunctionInterface>,
+    /// The registers each callee's body proves it leaves alone.
+    pub preserved: CalleePreservedCarriers,
+    /// How far each callee reaches through each pointer it is handed.
+    pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The model of each imported library routine called, from r2abi.
+    pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
+}
 
 /// What the callees this function calls said about their own boundaries.
 ///

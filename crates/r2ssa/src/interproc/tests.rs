@@ -1050,106 +1050,25 @@ fn prepared_summary_uses_exact_abi_carrier_not_callconv_label() {
     );
 }
 
-#[test]
-fn seed_summary_models_the_fortified_snprintf_by_its_length_argument() {
-    let seed =
-        FunctionSemanticSummary::seed_for_name(InterprocFunctionId(9), "sym.imp.__snprintf_chk")
-            .expect("snprintf_chk seed");
-    assert_eq!(seed.transfer_effects.len(), 1);
-    assert_eq!(
-        seed.transfer_effects[0].len,
-        SummaryTransferLength::Arg(1),
-        "the fortified layout bounds the write by maxlen"
+/// A modelled allocator, as the engine hands one in for an import of malloc.
+fn malloc_summary(id: InterprocFunctionId) -> FunctionSemanticSummary {
+    let mut summary = FunctionSemanticSummary::unknown(id, Some("malloc".to_owned()));
+    summary.arg_count_hint = Some(1);
+    summary.arg_effects.insert(
+        0,
+        SummaryArgEffect {
+            read: true,
+            write: false,
+            escape: false,
+            free: false,
+        },
     );
-    assert_eq!(
-        seed.transfer_effects[0].dst.region,
-        SummaryMemoryRegion::Arg { index: 0 }
-    );
-    let plain = FunctionSemanticSummary::seed_for_name(InterprocFunctionId(10), "sym.imp.snprintf")
-        .expect("snprintf seed");
-    assert_eq!(plain.transfer_effects[0].len, SummaryTransferLength::Arg(1));
-}
-
-#[test]
-fn seed_summary_models_malloc_and_memcpy() {
-    let malloc = FunctionSemanticSummary::seed_for_name(InterprocFunctionId(1), "sym.imp.malloc")
-        .expect("malloc seed");
-    assert_eq!(malloc.return_relation, SummaryReturnRelation::HeapAlloc);
-    assert_eq!(
-        malloc.allocation_effects,
-        vec![SummaryAllocationEffect {
-            size_arg: Some(0),
-            zeroed: false,
-        }]
-    );
-    let memcpy = FunctionSemanticSummary::seed_for_name(InterprocFunctionId(2), "sym.imp.memcpy")
-        .expect("memcpy seed");
-    assert_eq!(memcpy.return_relation, SummaryReturnRelation::Arg(0));
-    assert!(memcpy.arg_effects.get(&0).expect("dst").write);
-    assert!(memcpy.arg_effects.get(&1).expect("src").read);
-    assert_eq!(
-        memcpy.transfer_effects,
-        vec![SummaryTransferEffect {
-            dst: arg_location(0, None, None),
-            src: arg_location(1, None, None),
-            len: SummaryTransferLength::Arg(2),
-        }]
-    );
-}
-
-#[test]
-fn seed_summary_requires_external_marker() {
-    for name in [
-        "malloc",
-        "memcpy",
-        "sym.malloc",
-        "dbg.memcpy",
-        "sym._copyin",
-    ] {
-        assert!(
-            FunctionSemanticSummary::seed_for_name(InterprocFunctionId(0xdead), name).is_none(),
-            "test seed must not accept local/name-only semantic owner for {name}"
-        );
-    }
-}
-
-#[test]
-fn seed_summary_models_kernel_helpers_as_canonical_effects() {
-    let copyin = FunctionSemanticSummary::seed_for_name(InterprocFunctionId(3), "sym.imp.copyin")
-        .expect("copyin seed");
-    assert_eq!(
-        copyin.transfer_effects,
-        vec![SummaryTransferEffect {
-            dst: arg_location(1, None, None),
-            src: arg_location(0, None, None),
-            len: SummaryTransferLength::Arg(2),
-        }]
-    );
-    assert!(copyin.arg_effects.get(&0).expect("src").read);
-    assert!(copyin.arg_effects.get(&1).expect("dst").write);
-
-    let retain =
-        FunctionSemanticSummary::seed_for_name(InterprocFunctionId(4), "sym.imp.os_ref_retain")
-            .expect("retain seed");
-    assert_eq!(retain.return_relation, SummaryReturnRelation::Arg(0));
-    assert_eq!(
-        retain.lifetime_effects,
-        vec![SummaryLifetimeEffect {
-            arg: 0,
-            op: SummaryLifetimeOp::Retain,
-        }]
-    );
-
-    let lock =
-        FunctionSemanticSummary::seed_for_name(InterprocFunctionId(5), "sym.imp.lck_mtx_lock")
-            .expect("lock seed");
-    assert_eq!(
-        lock.sync_effects,
-        vec![SummarySyncEffect {
-            arg: 0,
-            op: SummarySyncOp::Lock,
-        }]
-    );
+    summary.allocation_effects.push(SummaryAllocationEffect {
+        size_arg: Some(0),
+        zeroed: false,
+    });
+    summary.return_relation = SummaryReturnRelation::HeapAlloc;
+    summary
 }
 
 #[test]
@@ -1196,8 +1115,7 @@ fn report_only_summary_does_not_promote_unbound_call_returns() {
     let mut seeds = BTreeMap::new();
     seeds.insert(
         InterprocFunctionId(0x2000),
-        FunctionSemanticSummary::seed_for_name(InterprocFunctionId(0x2000), "sym.imp.malloc")
-            .expect("malloc"),
+        malloc_summary(InterprocFunctionId(0x2000)),
     );
 
     let set = solve_interproc_summary_set(
@@ -1261,8 +1179,7 @@ fn report_only_ip_return_requires_exact_call_result_carrier() {
     let mut seeds = BTreeMap::new();
     seeds.insert(
         InterprocFunctionId(0x2000),
-        FunctionSemanticSummary::seed_for_name(InterprocFunctionId(0x2000), "sym.imp.malloc")
-            .expect("malloc"),
+        malloc_summary(InterprocFunctionId(0x2000)),
     );
 
     let set = solve_interproc_summary_set(
@@ -1303,8 +1220,7 @@ fn opaque_single_call_wrapper_does_not_promote_unbound_return() {
     let mut seeds = BTreeMap::new();
     seeds.insert(
         InterprocFunctionId(0x2000),
-        FunctionSemanticSummary::seed_for_name(InterprocFunctionId(0x2000), "sym.imp.malloc")
-            .expect("malloc"),
+        malloc_summary(InterprocFunctionId(0x2000)),
     );
 
     let set = solve_interproc_summary_set(
@@ -2369,7 +2285,7 @@ fn touch_reach(prepared: &SsaArtifact) -> BTreeMap<usize, ArgumentReach> {
         architecture_family: prepared.machine_context().architecture_family(),
         blocks: Vec::new(),
         local: collect_source_owned_summary_facts(prepared, &abi),
-        callee_names: BTreeMap::new(),
+        library: BTreeMap::new(),
     }
     .argument_touch_reach()
 }

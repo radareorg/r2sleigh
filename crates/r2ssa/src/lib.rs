@@ -94,12 +94,12 @@ pub use control::{
 };
 pub use defuse::{DefUseInfo, def_use};
 pub use function::{
-    CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
-    GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo,
-    RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
-    SSAFunction, Sealed, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
-    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedSsaArtifact,
-    def_use_graph,
+    CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts,
+    DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared,
+    RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction,
+    SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite, SsaArtifact,
+    SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot,
+    TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

@@ -34,6 +34,7 @@ use r2types::{
 use serde::{Deserialize, Serialize};
 
 mod json;
+mod library;
 use json::*;
 pub use json::{
     RenderProofJson, RenderRefusalJson, RenderedFunctionJson, RenderedLineJson, RenderedLinkJson,

@@ -409,276 +409,6 @@ impl FunctionSemanticSummary {
             touches_unknown_memory: false,
         }
     }
-
-    /// The seed for a bodiless callee named bare or marked. The names table
-    /// spells an import bare; having no body is the externality the seed
-    /// table asks the name to carry.
-    pub(crate) fn seed_for_callee_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
-        if name.contains("imp.") || name.contains("reloc.") {
-            Self::seed_for_name(id, name)
-        } else {
-            Self::seed_for_name(id, &format!("sym.imp.{name}"))
-        }
-    }
-
-    fn seed_for_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
-        let normalized = normalize_seed_name(name)?;
-        // The normalized spelling selects the model; it does not rename the
-        // callee. `_Exit` is not `exit`, and a rendering that says so names a
-        // function the program does not call.
-        let called = import_basename(name).to_owned();
-        let mut arg_effects = BTreeMap::new();
-        let mut effect = |idx: usize, read: bool, write: bool, escape: bool, free: bool| {
-            arg_effects.insert(
-                idx,
-                SummaryArgEffect {
-                    read,
-                    write,
-                    escape,
-                    free,
-                },
-            );
-        };
-        let mut memory_effects = Vec::new();
-        let mut transfer_effects = Vec::new();
-        let mut allocation_effects = Vec::new();
-        let mut lifetime_effects = Vec::new();
-        let mut sync_effects = Vec::new();
-        let atomic_effects = Vec::new();
-
-        let return_relation = match normalized {
-            "malloc" => {
-                effect(0, true, false, false, false);
-                allocation_effects.push(SummaryAllocationEffect {
-                    size_arg: Some(0),
-                    zeroed: false,
-                });
-                SummaryReturnRelation::HeapAlloc
-            }
-            "calloc" => {
-                effect(0, true, false, false, false);
-                effect(1, true, false, false, false);
-                allocation_effects.push(SummaryAllocationEffect {
-                    size_arg: Some(1),
-                    zeroed: true,
-                });
-                SummaryReturnRelation::HeapAlloc
-            }
-            "free" => {
-                effect(0, false, false, true, true);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Free,
-                    location: arg_location(0, None, None),
-                });
-                lifetime_effects.push(SummaryLifetimeEffect {
-                    arg: 0,
-                    op: SummaryLifetimeOp::Free,
-                });
-                SummaryReturnRelation::Void
-            }
-            "memcpy" | "memmove" => {
-                effect(0, false, true, true, false);
-                effect(1, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(1, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: arg_location(1, None, None),
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            "copyin" | "copyout" => {
-                effect(0, true, false, false, false);
-                effect(1, false, true, true, false);
-                effect(2, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(1, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(1, None, None),
-                    src: arg_location(0, None, None),
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "memset" => {
-                effect(0, false, true, true, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::Unknown,
-                        range: None,
-                    },
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            // The `n`-bounded writers: at most `n` bytes land in the destination.
-            "snprintf" | "vsnprintf" => {
-                effect(0, false, true, true, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::Unknown,
-                        range: None,
-                    },
-                    len: SummaryTransferLength::Arg(1),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            // `__snprintf_chk(s, maxlen, flag, slen, format, ...)` on glibc and
-            // Apple alike: the write is bounded by `maxlen`; `slen` is the
-            // object size the check compares it against.
-            "snprintf_chk" => {
-                effect(0, false, true, true, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::Unknown,
-                        range: None,
-                    },
-                    len: SummaryTransferLength::Arg(1),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "strncpy" => {
-                effect(0, false, true, true, false);
-                effect(1, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(1, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: arg_location(1, None, None),
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            "strlen" => {
-                effect(0, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "strcmp" | "memcmp" => {
-                effect(0, true, false, false, false);
-                effect(1, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(1, None, None),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "puts" | "printf" => {
-                effect(0, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "retain" => {
-                effect(0, true, false, true, false);
-                lifetime_effects.push(SummaryLifetimeEffect {
-                    arg: 0,
-                    op: SummaryLifetimeOp::Retain,
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            "release" => {
-                effect(0, false, false, true, false);
-                lifetime_effects.push(SummaryLifetimeEffect {
-                    arg: 0,
-                    op: SummaryLifetimeOp::Release,
-                });
-                SummaryReturnRelation::Void
-            }
-            "lock" => {
-                effect(0, false, false, true, false);
-                sync_effects.push(SummarySyncEffect {
-                    arg: 0,
-                    op: SummarySyncOp::Lock,
-                });
-                SummaryReturnRelation::Void
-            }
-            "unlock" => {
-                effect(0, false, false, true, false);
-                sync_effects.push(SummarySyncEffect {
-                    arg: 0,
-                    op: SummarySyncOp::Unlock,
-                });
-                SummaryReturnRelation::Void
-            }
-            "exit" => SummaryReturnRelation::Void,
-            _ => return None,
-        };
-
-        Some(Self {
-            schema_version: INTERPROC_SUMMARY_SCHEMA_VERSION,
-            id,
-            name: Some(called),
-            linkage: FunctionSemanticLinkage::Unknown,
-            arg_count_hint: Some(match normalized {
-                "malloc" | "free" | "strlen" | "puts" | "printf" | "exit" | "retain"
-                | "release" | "lock" | "unlock" => 1,
-                "calloc" => 2,
-                "strcmp" | "memcmp" => 2,
-                "memcpy" | "memmove" | "copyin" | "copyout" | "memset" | "strncpy" | "snprintf"
-                | "vsnprintf" => 3,
-                "snprintf_chk" => 5,
-                _ => 0,
-            }),
-            direct_callees: BTreeSet::new(),
-            callsite_count: 0,
-            has_unknown_calls: false,
-            arg_effects,
-            memory_effects,
-            transfer_effects,
-            allocation_effects,
-            lifetime_effects,
-            sync_effects,
-            atomic_effects,
-            return_relation,
-            reads_global_memory: false,
-            writes_global_memory: false,
-            touches_unknown_memory: false,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1325,7 +1055,8 @@ pub struct PreparedCalleeSummary {
     blocks: Vec<(u64, u32)>,
     local: LocalSummaryFacts,
     /// Names of the bodiless callees this body reaches: a PLT stub's slot.
-    callee_names: BTreeMap<u64, String>,
+    /// The library model of each import this body calls directly.
+    library: BTreeMap<u64, FunctionSemanticSummary>,
 }
 
 impl PreparedCalleeSummary {
@@ -1349,11 +1080,12 @@ impl PreparedCalleeSummary {
             .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
         let local = collect_source_owned_summary_facts(prepared, &abi);
         require_converged_call_carriers(&local)?;
-        let callee_names = prepared
+        let library = prepared
             .machine_context()
-            .imported_callees()
-            .into_iter()
-            .filter(|(addr, _)| local.direct_callees.contains(addr))
+            .callee_libraries()
+            .iter()
+            .filter(|(addr, _)| local.direct_callees.contains(*addr))
+            .map(|(addr, summary)| (*addr, summary.clone()))
             .collect();
         Ok(Self {
             id,
@@ -1365,7 +1097,7 @@ impl PreparedCalleeSummary {
                 .map(|block| (block.addr, block.size))
                 .collect(),
             local,
-            callee_names,
+            library,
         })
     }
 
@@ -1641,14 +1373,14 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         locals.insert(callee.id, (None, callee.local.clone()));
     }
 
-    // Only an import is described by its name; a local symbol's name is a hint.
-    let mut names = root.machine_context().imported_callees();
+    // The engine models only stated imports; a local symbol's name is a hint.
+    let mut library = root.machine_context().callee_libraries().clone();
     for callee in callees {
-        for (addr, name) in &callee.callee_names {
-            names.entry(*addr).or_insert_with(|| name.clone());
+        for (addr, summary) in &callee.library {
+            library.entry(*addr).or_insert_with(|| summary.clone());
         }
     }
-    seed_named_callees(&names, &locals, &mut current);
+    seed_library_callees(&library, &locals, &mut current);
     let report =
         solve_interproc_summary_set_from_locals(locals, current, Some(root_id), callees.len() + 1);
     require_converged_summary_report(&report)?;
@@ -1659,11 +1391,10 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     })
 }
 
-/// A callee with no body but a known name is what its model says: an import
-/// the seed table describes enters the set as a fixed summary, so a call to
-/// `snprintf` is a bounded write rather than an unknown call.
-fn seed_named_callees(
-    names: &BTreeMap<u64, String>,
+/// A callee with no body that is a modelled import is what its model says, so
+/// a call to `snprintf` is a bounded write rather than an unknown call.
+fn seed_library_callees(
+    library: &BTreeMap<u64, FunctionSemanticSummary>,
     locals: &BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
     current: &mut BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
 ) {
@@ -1676,19 +1407,9 @@ fn seed_named_callees(
         if current.contains_key(&id) {
             continue;
         }
-        let seed = names
-            .get(&callee)
-            .and_then(|name| FunctionSemanticSummary::seed_for_callee_name(id, name));
-        r2il::refusal_evidence!(
-            "summary-seed",
-            "callee {callee:#x} name={:?} seeded={}",
-            names.get(&callee),
-            seed.is_some()
-        );
-        let Some(seed) = seed else {
-            continue;
-        };
-        current.insert(id, seed);
+        if let Some(summary) = library.get(&callee) {
+            current.insert(id, summary.clone());
+        }
     }
 }
 
@@ -3480,82 +3201,6 @@ fn global_address_for_value_id(prepared: &SsaArtifact, value_id: ValueId) -> Opt
     let object = prepared.objects().object(object)?;
     match object.kind {
         ObjectKind::Global { address, .. } => Some(address),
-        _ => None,
-    }
-}
-
-/// The name the program links against, with radare2's namespace removed.
-fn import_basename(name: &str) -> &str {
-    let mut bare = name.trim();
-    for prefix in ["sym.imp.", "sym.", "imp.", "reloc.", "dbg."] {
-        while let Some(rest) = bare.strip_prefix(prefix) {
-            bare = rest;
-        }
-    }
-    bare.split_once('@').map_or(bare, |(base, _)| base)
-}
-
-fn normalize_seed_name(name: &str) -> Option<&'static str> {
-    let normalized_owned = name.trim().to_ascii_lowercase();
-    let mut normalized = normalized_owned.as_str();
-    let has_external_marker = ["sym.imp.", "imp.", "reloc."]
-        .iter()
-        .any(|prefix| normalized.strip_prefix(prefix).is_some())
-        || normalized.ends_with("@plt")
-        || normalized.ends_with(".plt");
-    if !has_external_marker {
-        return None;
-    }
-    for prefix in ["sym.imp.", "sym.", "imp.", "reloc.", "dbg."] {
-        while let Some(rest) = normalized.strip_prefix(prefix) {
-            normalized = rest;
-        }
-    }
-    while let Some(rest) = normalized.strip_suffix("@plt") {
-        normalized = rest;
-    }
-    while let Some(rest) = normalized.strip_suffix(".plt") {
-        normalized = rest;
-    }
-    if let Some((base, _)) = normalized.split_once('@') {
-        normalized = base;
-    }
-    if let Some(rest) = normalized.strip_prefix("__isoc99_") {
-        normalized = rest;
-    }
-    if let Some(rest) = normalized.strip_prefix("__gi_") {
-        normalized = rest;
-    }
-    while let Some(rest) = normalized.strip_prefix('_') {
-        normalized = rest;
-    }
-    match normalized {
-        // Names arrive with their leading underscores already stripped, so
-        // the fortified variants match by their bare spelling. Those that keep
-        // the plain layout share a model; the ones that insert the object size
-        // before the length get their own.
-        "strlen" | "strlen_chk" => Some("strlen"),
-        "strcmp" => Some("strcmp"),
-        "memcmp" => Some("memcmp"),
-        "memcpy" => Some("memcpy"),
-        "memmove" => Some("memmove"),
-        "copyin" => Some("copyin"),
-        "copyout" => Some("copyout"),
-        "memset" => Some("memset"),
-        "snprintf" => Some("snprintf"),
-        "vsnprintf" => Some("vsnprintf"),
-        "snprintf_chk" | "vsnprintf_chk" => Some("snprintf_chk"),
-        "strncpy" => Some("strncpy"),
-        "malloc" | "__libc_malloc" | "__gi___libc_malloc" => Some("malloc"),
-        "calloc" | "__libc_calloc" => Some("calloc"),
-        "free" => Some("free"),
-        "os_ref_retain" | "osobject_retain" => Some("retain"),
-        "os_ref_release" | "osobject_release" => Some("release"),
-        "lck_mtx_lock" | "lck_rw_lock_shared" | "lck_rw_lock_exclusive" => Some("lock"),
-        "lck_mtx_unlock" | "lck_rw_unlock_shared" | "lck_rw_unlock_exclusive" => Some("unlock"),
-        "puts" => Some("puts"),
-        "printf" | "__printf_chk" => Some("printf"),
-        "exit" | "_exit" => Some("exit"),
         _ => None,
     }
 }
