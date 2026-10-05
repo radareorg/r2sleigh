@@ -7,6 +7,9 @@
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
 #[cfg(feature = "sleigh-config")]
+mod export;
+
+#[cfg(feature = "sleigh-config")]
 use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use r2il::{serialize, validate_archspec};
@@ -16,9 +19,7 @@ use r2sleigh_lift::{
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "sleigh-config")]
-use r2sleigh_export::{
-    ExportFormat, InstructionAction, InstructionExportInput, export_instruction,
-};
+use export::{ExportFormat, InstructionAction, InstructionExportInput, export_instruction};
 #[cfg(feature = "sleigh-config")]
 use r2sleigh_lift::{Disassembler, build_arch_spec};
 
@@ -1060,7 +1061,7 @@ mod tests {
                     parsed
                         .get("schema_version")
                         .and_then(serde_json::Value::as_u64),
-                    Some(r2sleigh_export::SSA_JSON_SCHEMA_VERSION.into()),
+                    Some(export::SSA_JSON_SCHEMA_VERSION.into()),
                     "ssa json must carry the current document schema"
                 );
                 assert!(

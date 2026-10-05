@@ -61,7 +61,7 @@ Crates
 | `r2types` | Type inference, layouts, signatures |
 | `r2rewrite` | Term rewriting with proved rules |
 | `r2dec` | Structuring, binding and C rendering |
-| `r2sleigh-cli`, `r2sleigh-export` | The Sleigh toolchain and the instruction exporter |
+| `r2sleigh-cli` | The Sleigh toolchain and the instruction exporter |
 
 Extending
 ---------

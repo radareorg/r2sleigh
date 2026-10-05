@@ -674,11 +674,11 @@ fn r2dec_retired_renderer_repairs_stay_deleted() {
 
 /// The instruction-level `dec` export has no function, so no facts, so no C:
 /// it may not depend on the renderer at all. What it prints instead is held by
-/// `dec_c_like_residualizes_without_function_facts` in r2sleigh-export.
+/// `dec_c_like_residualizes_without_function_facts` in r2sleigh-cli.
 #[test]
-fn r2sleigh_export_does_not_depend_on_the_renderer() {
-    let manifest = file("crates/r2sleigh-export/Cargo.toml");
-    let export = production("crates/r2sleigh-export/src");
+fn the_instruction_export_does_not_depend_on_the_renderer() {
+    let manifest = file("crates/r2sleigh-cli/Cargo.toml");
+    let export = production("crates/r2sleigh-cli/src");
     for forbidden in [
         "r2dec",
         "CodeGenerator",
@@ -691,11 +691,11 @@ fn r2sleigh_export_does_not_depend_on_the_renderer() {
     ] {
         assert!(
             !manifest.view().text().contains(forbidden),
-            "the r2sleigh-export manifest names {forbidden}"
+            "the r2sleigh-cli manifest names {forbidden}"
         );
         assert!(
             !export.view().contains(forbidden),
-            "r2sleigh-export source uses {forbidden}"
+            "r2sleigh-cli source uses {forbidden}"
         );
     }
 }

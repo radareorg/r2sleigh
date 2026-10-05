@@ -1001,7 +1001,6 @@ version = "0.1.0"
 dependencies = [
  "r2il",
  "r2ssa",
- "r2types",
  "serde",
  "z3",
 ]
@@ -1038,18 +1037,6 @@ dependencies = [
  "hex",
  "r2il",
  "r2image",
- "r2sleigh-export",
- "r2sleigh-lift",
- "serde_json",
- "sleigh-config",
-]
-
-[[package]]
-name = "r2sleigh-export"
-version = "0.1.0"
-dependencies = [
- "hex",
- "r2il",
  "r2sleigh-lift",
  "r2ssa",
  "serde",

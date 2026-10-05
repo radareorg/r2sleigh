@@ -135,7 +135,7 @@ Sleigh CLI and instruction exporter
 
 `r2sleigh` (`crates/r2sleigh-cli`) has `compile`, `info`, `test-arch`,
 `version`, `image`, `disasm` and `run`. `run` lifts one instruction and hands
-it to `r2sleigh-export`:
+it to `r2sleigh-cli` (`export.rs`):
 
 ```bash
 cargo run -p r2sleigh-cli --bin r2sleigh --features x86 -- \

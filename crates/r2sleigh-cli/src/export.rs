@@ -1,4 +1,4 @@
-//! Unified instruction export pipeline for r2sleigh.
+//! The instruction export pipeline: one instruction lifted, as r2il, SSA or def-use.
 
 use r2il::{ArchSpec, R2ILBlock, R2ILOp, SpaceId, Varnode, validate_block_full};
 use r2sleigh_lift::{Disassembler, format_op};
@@ -12,7 +12,7 @@ use thiserror::Error;
 ///
 /// This is one exact schema, not a compatibility selector. Consumers must
 /// reject any value other than this constant.
-pub const SSA_JSON_SCHEMA_VERSION: u32 = 4;
+pub(crate) const SSA_JSON_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstructionAction {
@@ -85,8 +85,6 @@ pub enum ExportError {
     ValidationFailed(String),
     #[error("serialization failed: {0}")]
     SerializeError(String),
-    #[error("render failed: {0}")]
-    RenderError(String),
 }
 
 pub fn export_instruction(
@@ -137,11 +135,11 @@ fn supported_formats(action: InstructionAction) -> &'static [ExportFormat] {
         InstructionAction::Ssa => &[Json, Text],
         InstructionAction::Defuse => &[Json, Text],
         InstructionAction::Dec => {
-            #[cfg(feature = "dec")]
+            #[cfg(feature = "decompile")]
             {
                 &[CLike, Json, Text]
             }
-            #[cfg(not(feature = "dec"))]
+            #[cfg(not(feature = "decompile"))]
             {
                 &[]
             }
@@ -272,11 +270,11 @@ fn export_dec_action(
     input: &InstructionExportInput<'_>,
     format: ExportFormat,
 ) -> Result<String, ExportError> {
-    #[cfg(feature = "dec")]
+    #[cfg(feature = "decompile")]
     {
         export_dec(input, format)
     }
-    #[cfg(not(feature = "dec"))]
+    #[cfg(not(feature = "decompile"))]
     {
         let _ = input;
         Err(ExportError::UnsupportedCombination {
@@ -287,7 +285,7 @@ fn export_dec_action(
     }
 }
 
-#[cfg(feature = "dec")]
+#[cfg(feature = "decompile")]
 fn export_dec(
     input: &InstructionExportInput<'_>,
     format: ExportFormat,
@@ -301,7 +299,7 @@ fn export_dec(
             kind: "residual",
             op_index,
             comment: format!(
-                "r2sleigh-export residual: instruction-level dec requires r2engine FunctionFacts render proof; executable C suppressed: {op:?}"
+                "r2sleigh export residual: instruction-level dec requires r2engine FunctionFacts render proof; executable C suppressed: {op:?}"
             ),
         })
         .collect::<Vec<_>>();
@@ -405,7 +403,7 @@ struct DefUseInfoJson {
     live: Vec<String>,
 }
 
-#[cfg(feature = "dec")]
+#[cfg(feature = "decompile")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DecResidualJson {
     kind: &'static str,
@@ -421,7 +419,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     const X86_BYTES_MINIMAL: &str = "4889c000000000000000000000000000";
-    #[cfg(feature = "dec")]
+    #[cfg(feature = "decompile")]
     const X86_BYTES_DEC: &str = "48ffc000000000000000000000000000";
 
     fn x86_disasm_and_spec() -> (Disassembler, ArchSpec) {
@@ -493,7 +491,7 @@ mod tests {
         lines.join("\n")
     }
 
-    #[cfg(feature = "dec")]
+    #[cfg(feature = "decompile")]
     fn normalize_c_like_output(output: &str) -> String {
         let text = output.replace("\r\n", "\n");
         let mut lines = Vec::new();
@@ -636,13 +634,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "dec")]
+    #[cfg(feature = "decompile")]
     fn dec_c_like_residualizes_without_function_facts() {
         let input = lift_input(X86_BYTES_DEC, 0x1000);
         let out = export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike)
             .expect("dec residual");
         assert!(
-            out.contains("r2sleigh-export residual")
+            out.contains("r2sleigh export residual")
                 && out.contains("FunctionFacts render proof")
                 && out.contains("executable C suppressed"),
             "expected explicit residual, got: {out}"
@@ -690,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "dec"))]
+    #[cfg(not(feature = "decompile"))]
     fn dec_action_is_typed_but_unsupported_without_dec_feature() {
         let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
         let err = export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike)
@@ -710,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "dec"))]
+    #[cfg(not(feature = "decompile"))]
     fn dec_feature_gate_rejects_at_support_and_execution_layers() {
         let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
 
@@ -830,7 +828,7 @@ mod tests {
             );
         }
 
-        #[cfg(feature = "dec")]
+        #[cfg(feature = "decompile")]
         {
             for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
                 let normalized = assert_export_deterministic(
@@ -883,7 +881,7 @@ mod tests {
             "{\"inputs\":[\"RAX_0\"],\"live\":[],\"outputs\":[\"RAX_1\"]}"
         );
 
-        #[cfg(feature = "dec")]
+        #[cfg(feature = "decompile")]
         {
             let dec_json = assert_export_deterministic(
                 X86_BYTES_MINIMAL,
