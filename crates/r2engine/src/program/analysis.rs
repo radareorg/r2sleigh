@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::{ProgramInputs, Source, View};
 use crate::SealedFunctionAnalysis;
 use crate::native::{CalleeRead, NativeRefusal, Prepared, Unreadable};
-use crate::query::db::{Db, Query};
+use crate::query::db::{Db, Hold, Query};
 
 /// A shared answer compared by identity: a recomputed analysis is a new one, never backdated.
 pub(super) struct Shared<T>(pub(super) Arc<T>);
@@ -60,8 +60,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
         )
     }
 
-    fn stopped(value: &Analysis) -> bool {
-        value.0.as_ref().is_err_and(NativeRefusal::stopped)
+    fn hold(value: &Analysis) -> Hold {
+        match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
     }
 }
 
@@ -88,8 +91,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
         Shared(Arc::new(read))
     }
 
-    fn stopped(value: &Shared<CalleeRead>) -> bool {
-        matches!(value.0.facts, Err(Unreadable::Stopped))
+    fn hold(value: &Shared<CalleeRead>) -> Hold {
+        match value.0.facts {
+            Err(Unreadable::Stopped) => Hold::Stopped,
+            _ => Hold::Held,
+        }
     }
 }
 
@@ -147,7 +153,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
         }
     }
 
-    fn stopped(value: &Sealing) -> bool {
-        !matches!(value, Sealing::Sealed(_))
+    fn hold(value: &Sealing) -> Hold {
+        match value {
+            Sealing::Sealed(_) => Hold::Held,
+            _ => Hold::Stopped,
+        }
     }
 }

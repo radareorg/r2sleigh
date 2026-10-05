@@ -60,10 +60,21 @@ pub trait Query<I: Inputs>: 'static {
     /// The answer, reading the program only through `db`.
     fn compute(db: &Db<I>, key: &Self::Key) -> Self::Value;
 
-    /// Whether this answer is not the program's alone (the request's stop, a cycle's cut): never held, nor what read it.
-    fn stopped(_value: &Self::Value) -> bool {
-        false
+    /// Whether this answer is held; see [`Hold`].
+    fn hold(_value: &Self::Value) -> Hold {
+        Hold::Held
     }
+}
+
+/// What the database does with a computed answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// The program's answer at its key: held until something it read moves.
+    Held,
+    /// Depends on where a cycle was entered: not held, and its asker reads what it read instead.
+    Transient,
+    /// The request's stop, not the program's: neither it nor what read it is held.
+    Stopped,
 }
 
 /// A query asked, through some chain, for itself.
@@ -259,7 +270,7 @@ impl<I: Inputs + 'static> Db<I> {
             true => typed.check(self, key)?,
             false => typed.execute(self, key)?,
         };
-        // A stopped answer is not held, so nothing can depend on it; the stop has tainted the asker.
+        // An answer not held has no entry to depend on: it tainted the asker or handed it its reads.
         if changed_at.is_some() {
             self.record(Dep::Query {
                 table: TypeId::of::<Q>(),
@@ -507,10 +518,15 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         self.count(|stats| stats.computed += 1);
         db.stats.borrow_mut().computed += 1;
         let mut entries = self.entries.borrow_mut();
-        if tainted || Q::stopped(&value) {
+        let hold = match tainted {
+            true => Hold::Stopped,
+            false => Q::hold(&value),
+        };
+        if hold != Hold::Held {
             entries.remove(key);
             if let Some(asker) = db.frames.borrow_mut().last_mut() {
-                asker.stopped = true;
+                asker.stopped |= hold == Hold::Stopped;
+                asker.deps.extend(deps);
             }
             return Ok((Rc::new(value), None));
         }
@@ -676,8 +692,12 @@ mod tests {
         fn compute(db: &Db<Memory>, &at: &u64) -> u8 {
             read(db, at..at + 1)[0]
         }
-        fn stopped(value: &u8) -> bool {
-            *value == 0xff
+        fn hold(value: &u8) -> Hold {
+            match value {
+                0xff => Hold::Stopped,
+                0xfe => Hold::Transient,
+                _ => Hold::Held,
+            }
         }
     }
 
@@ -712,6 +732,40 @@ mod tests {
             computed + 1,
             "the dropped answer is computed again"
         );
+    }
+
+    /// Twice a doubled byte, holding every answer though what it reads may be dropped.
+    struct Quadrupled;
+    impl Query<Memory> for Quadrupled {
+        type Key = u64;
+        type Value = u16;
+        const NAME: &'static str = "quadrupled";
+        fn compute(db: &Db<Memory>, at: &u64) -> u16 {
+            *db.get::<Doubled>(at).expect("acyclic") * 2
+        }
+    }
+
+    #[test]
+    fn a_transient_answer_hands_its_reads_to_a_held_asker() {
+        let mut bytes = vec![1; 16];
+        bytes[6] = 0xfe;
+        let mut db = Db::new(Memory::new(bytes));
+        assert_eq!(*db.get::<Doubled>(&6).unwrap(), 0x1fc);
+        let computed = db.stats().computed;
+        assert_eq!(*db.get::<Doubled>(&6).unwrap(), 0x1fc);
+        assert_eq!(db.stats().computed, computed, "the asker is held");
+        db.inputs_mut().write(6, 2);
+        assert_eq!(*db.get::<Doubled>(&6).unwrap(), 4, "it read the byte");
+    }
+
+    #[test]
+    fn a_dropped_dependency_counts_as_moved() {
+        let mut db = Db::new(Memory::new(vec![1; 16]));
+        assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 4);
+        // Doubled holds one answer, so this drops the one Quadrupled read.
+        assert_eq!(*db.get::<Doubled>(&8).unwrap(), 2);
+        db.inputs_mut().write(7, 5);
+        assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 20);
     }
 
     /// A query whose dependencies depend on the bytes: the byte at `at` names

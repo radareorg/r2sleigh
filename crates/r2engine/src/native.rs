@@ -744,17 +744,19 @@ pub(crate) fn callee_summary(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     address: u64,
-) -> Option<r2ssa::PreparedCalleeSummary> {
+) -> Result<r2ssa::PreparedCalleeSummary, Unreadable> {
     let native = Native {
         target,
         program,
-        machine: machine(target).ok()?,
+        machine: machine(target).map_err(|_| Unreadable::NotPrepared)?,
         control: program.control().ssa_execution_control(),
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let artifact = prepared_callee(&native, target, address, ptr_bits).ok()?;
+    let artifact = prepared_callee(&native, target, address, ptr_bits)?;
     let shared = artifact.shared_artifact();
-    r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared).ok()
+    let summary =
+        r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared);
+    summary.map_err(|_| Unreadable::NothingProved)
 }
 
 /// What one callee's body proves, read with this decoder; the query `CalleeReads` holds it.

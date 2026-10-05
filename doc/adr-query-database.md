@@ -48,9 +48,13 @@ engine. Commands, the visual mode and the agent surface all ask it.
   through one `View`. `Db::held` and `Db::deposit` share answers;
   `Mutex<Returns>`, the `survey` cache, `modes_at` and `modes_revision` are
   deleted. `PointerParameters` (Q3e) answers a callee's pointer
-  parameters; a call cycle is the database's `Cycle`, and an answer it cut
-  is a stop, so neither it nor what read it is held. `Mutex<Pointers>` is
-  deleted.
+  parameters; a call cycle is the database's `Cycle`. `Mutex<Pointers>` is
+  deleted. A query says how each answer is held (`Hold`): held; transient,
+  which depends on where a cycle was entered, is not held and hands its
+  reads to its asker; or the request's stop, which taints its asker. A
+  cut is transient; a callee prepared under a stop is a stop. Body-to-body
+  forwarding needs callee interfaces a callee prepared alone does not
+  have yet, so no cycle is reached today; the Db tests cover each hold.
 
 ## Left
 

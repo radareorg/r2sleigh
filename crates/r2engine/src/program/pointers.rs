@@ -11,14 +11,23 @@ use std::sync::Arc;
 use r2ssa::CanonicalStorageId;
 
 use super::{OpenProgram, ProgramInputs, Source, View};
-use crate::query::db::{Db, Query};
+use crate::query::db::{Db, Hold, Query};
 use crate::query::{Callee, Parameters, Support};
 
-/// A callee's pointer parameters, and whether a call cycle cut the answer short.
+/// A callee's pointer parameters, and whether a call cycle or the request's stop cut the answer short.
 #[derive(Clone, PartialEq)]
 pub(super) struct Pointed {
     found: Arc<[(CanonicalStorageId, Support)]>,
-    cut: bool,
+    cut: Cut,
+}
+
+/// What cut an answer short, the stop outranking the cycle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Cut {
+    #[default]
+    Whole,
+    Cycle,
+    Stopped,
 }
 
 /// What the declaration or the body says of each parameter, with its strongest support.
@@ -38,8 +47,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for PointerParameters {
     }
 
     /// An answer a cycle cut short depends on where the walk entered the cycle, so it is not held.
-    fn stopped(value: &Pointed) -> bool {
-        value.cut
+    fn hold(value: &Pointed) -> Hold {
+        match value.cut {
+            Cut::Whole => Hold::Held,
+            Cut::Cycle => Hold::Transient,
+            Cut::Stopped => Hold::Stopped,
+        }
     }
 }
 
@@ -75,25 +88,25 @@ impl<S: Source + 'static> Parameters for View<'_, S> {
     }
 }
 
-/// What the declaration or the body says, and whether a call cycle cut it short.
+/// What the declaration or the body says, and what cut it short.
 fn derived<S: Source + 'static>(
     view: &View<'_, S>,
     callee: Callee,
-) -> (BTreeMap<CanonicalStorageId, Support>, bool) {
+) -> (BTreeMap<CanonicalStorageId, Support>, Cut) {
     let (Callee::At(address) | Callee::ThroughSlot(address)) = callee;
     let Ok(target) = view.target(address) else {
-        return (BTreeMap::new(), false);
+        return (BTreeMap::new(), Cut::Whole);
     };
     if let Some(name) = crate::native::Program::import_at(view, address) {
         let declared = crate::native::declared_pointers(&target, &name);
         let declared = declared
             .into_iter()
             .map(|storage| (storage, Support::Declared));
-        return (declared.collect(), false);
+        return (declared.collect(), Cut::Whole);
     }
     // A slot the loader fills with no import is a word of data, not a body to read.
     let Callee::At(address) = callee else {
-        return (BTreeMap::new(), false);
+        return (BTreeMap::new(), Cut::Whole);
     };
     body_pointers(view, &target, address)
 }
@@ -103,7 +116,7 @@ fn body_pointers<S: Source + 'static>(
     view: &View<'_, S>,
     target: &crate::native::NativeTarget<'_>,
     address: u64,
-) -> (BTreeMap<CanonicalStorageId, Support>, bool) {
+) -> (BTreeMap<CanonicalStorageId, Support>, Cut) {
     // A callee some root has read already carries its summary; otherwise it
     // is prepared for this alone, which costs less than reading it whole.
     let key = (address, target.cpu == "thumb");
@@ -112,9 +125,13 @@ fn body_pointers<S: Source + 'static>(
         let facts = read.0.facts.as_ref().ok();
         facts.map(|facts| facts.summary().clone())
     });
-    let Some(summary) = held.or_else(|| crate::native::callee_summary(target, view, address))
-    else {
-        return (BTreeMap::new(), false);
+    let summary = match held {
+        Some(summary) => summary,
+        None => match crate::native::callee_summary(target, view, address) {
+            Ok(summary) => summary,
+            Err(crate::native::Unreadable::Stopped) => return (BTreeMap::new(), Cut::Stopped),
+            Err(_) => return (BTreeMap::new(), Cut::Whole),
+        },
     };
     let slots = crate::native::argument_slots(target);
     let mut found = summary
@@ -123,7 +140,7 @@ fn body_pointers<S: Source + 'static>(
         .filter_map(|index| slots.get(*index))
         .map(|storage| (*storage, Support::Dereferenced))
         .collect::<BTreeMap<_, _>>();
-    let mut cut = false;
+    let mut cut = Cut::Whole;
     for (onward, there, here) in summary.forwarded_arguments() {
         let (Some(own), Some(theirs)) = (slots.get(here), slots.get(there)) else {
             continue;
@@ -133,10 +150,10 @@ fn body_pointers<S: Source + 'static>(
         }
         // A cycle back into a callee being read is cut, not followed.
         let Ok(pointed) = view.db.get::<PointerParameters>(&Callee::At(onward)) else {
-            cut = true;
+            cut = cut.max(Cut::Cycle);
             continue;
         };
-        cut |= pointed.cut;
+        cut = cut.max(pointed.cut);
         if let Some((_, support)) = pointed.found.iter().find(|(storage, _)| storage == theirs) {
             found.insert(*own, *support);
         }
