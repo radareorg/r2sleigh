@@ -493,34 +493,6 @@ impl NormalizationOrigins {
         edges
     }
 
-    pub(crate) fn materialized_phi_edges(&self, definition: InstId) -> BTreeSet<UseSite> {
-        self.blocks
-            .iter()
-            .flat_map(|block| block.rows.iter())
-            .flat_map(|origin| match origin {
-                // The edge's own copy.
-                NormalizedOpOrigin::PhiEdgeCopy(edge) if edge.definition.inst == definition => {
-                    vec![edge.incoming]
-                }
-                // One relocated initializer stands for a whole sorted set of
-                // header inputs, so those edges are written too.
-                NormalizedOpOrigin::RelocatedInitializer(origin)
-                    if origin.definition.inst == definition =>
-                {
-                    origin.replaced_sites.to_vec()
-                }
-                _ => Vec::new(),
-            })
-            .chain(
-                // Edge operations a relocated initializer superseded.
-                self.replaced_phi_edges
-                    .iter()
-                    .filter(|edge| edge.definition.inst == definition)
-                    .map(|edge| edge.incoming),
-            )
-            .collect()
-    }
-
     pub(crate) fn removed_phis(&self) -> &[RemovedPhiOrigin] {
         &self.removed_phis
     }
