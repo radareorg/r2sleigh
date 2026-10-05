@@ -3335,6 +3335,9 @@ pub struct SourceMachineRoles {
     /// The flag that decides which way a repeated string instruction walks,
     /// placed against the lifted architecture.
     direction_flag_storage: Option<CanonicalStorageId>,
+    /// Whether a call pushes its return address, as `<returnaddress>` says.
+    #[serde(default)]
+    call_pushes_return_address: Option<bool>,
 }
 
 /// Whether a call leaves the frame carriers where they were, as the convention's call effect says.
@@ -3764,6 +3767,7 @@ impl SourceMachineRoles {
             role_register_names: SourceRoleRegisterNames::none(),
             stack_allocation_contract: None,
             direction_flag_storage: None,
+            call_pushes_return_address: None,
         })
     }
 
@@ -3805,6 +3809,16 @@ impl SourceMachineRoles {
     /// The direction flag, placed against the lifted architecture.
     pub const fn direction_flag_storage(&self) -> Option<CanonicalStorageId> {
         self.direction_flag_storage
+    }
+
+    pub const fn call_pushes_return_address(&self) -> Option<bool> {
+        self.call_pushes_return_address
+    }
+
+    #[must_use]
+    pub const fn with_call_pushes_return_address(mut self, pushes: bool) -> Self {
+        self.call_pushes_return_address = Some(pushes);
+        self
     }
 
     /// Bind the direction flag's storage, dropping one that is not a

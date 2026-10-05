@@ -1890,6 +1890,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
             )
         })
         .map_err(|_| NativeRefusal::Machine("the carriers are not register storages"))?
+        .with_call_pushes_return_address(target.compiler.return_address_slot.is_some())
         // The names, not only the storages: the trusted lift restates every
         // carrier in its own architecture's numbering, and it looks the
         // carriers up by name to do it.

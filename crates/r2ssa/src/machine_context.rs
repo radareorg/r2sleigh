@@ -1180,20 +1180,15 @@ impl SourceMachineContext {
             .or_else(|| self.machine_roles.stack_pointer_storage())
     }
 
-    /// Whether a call transfer moves the stack pointer by itself: it does
-    /// where the call pushes its return address, and not where a register
-    /// carries it. The interface's return mechanism states it where one was
-    /// recovered; the architecture answers otherwise, and an unknown one keeps
-    /// the cautious answer.
+    /// Whether a call pushes its return address, moving the stack pointer;
+    /// unstated, the cautious answer is yes.
     pub fn call_moves_stack_pointer(&self) -> bool {
         match self.return_mechanism() {
             Some(r2source::SourceReturnMechanism::Stacked { .. }) => true,
-            None => matches!(
-                self.architecture_family(),
-                MachineArchitectureFamily::X86
-                    | MachineArchitectureFamily::X86_64
-                    | MachineArchitectureFamily::Unknown
-            ),
+            None => self
+                .machine_roles
+                .call_pushes_return_address()
+                .unwrap_or(true),
         }
     }
 
