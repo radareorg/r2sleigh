@@ -220,7 +220,42 @@ pub(crate) struct NormalizationOrigins {
     /// Synthetic edge operations superseded by one relocated initializer.
     /// Sorted by original incoming `UseSite`.
     replaced_phi_edges: Vec<PhiEdgeOrigin>,
+    /// Where each original instruction sits, worked out once.
+    original_sites: OriginalSites,
 }
+
+/// Where each original instruction's row is, built the first time it is
+/// asked and cleared by any edit of the rows, so it is never stale.
+///
+/// The fold asks for an instruction's site once per operation it lowers;
+/// found by scanning the block's rows, that was quadratic in the block, and
+/// a large -O0 block made it a tenth of a render. It is a cache of the rows,
+/// not part of what the origins say, so it takes no part in equality.
+#[derive(Debug, Clone, Default)]
+struct OriginalSites(std::cell::OnceCell<BTreeMap<(BlockId, InstId), usize>>);
+
+/// Each original instruction's first row in each block, as a scan of the
+/// block would find it.
+fn original_sites(blocks: &[NormalizationBlockOrigins]) -> BTreeMap<(BlockId, InstId), usize> {
+    let mut sites = BTreeMap::new();
+    for (index, origins) in blocks.iter().enumerate() {
+        let block = BlockId(u32::try_from(index).expect("fewer than 2^32 blocks"));
+        for (op_idx, origin) in origins.rows.iter().enumerate() {
+            if let NormalizedOpOrigin::Original(original) = origin {
+                sites.entry((block, *original)).or_insert(op_idx);
+            }
+        }
+    }
+    sites
+}
+
+impl PartialEq for OriginalSites {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for OriginalSites {}
 
 impl NormalizationOrigins {
     fn from_source(
@@ -259,6 +294,7 @@ impl NormalizationOrigins {
             blocks,
             removed_phis: Vec::new(),
             replaced_phi_edges: Vec::new(),
+            original_sites: OriginalSites::default(),
         }
     }
 
@@ -269,9 +305,11 @@ impl NormalizationOrigins {
     /// Where an original instruction of the source stands in the normalized
     /// block at `block`: a scan of that block's rows.
     pub(crate) fn original_site(&self, block: BlockId, inst: InstId) -> Option<NormalizedOpSite> {
-        let op_idx = self.blocks.get(block.0 as usize)?.rows.iter().position(
-            |origin| matches!(origin, NormalizedOpOrigin::Original(original) if *original == inst),
-        )?;
+        let sites = self
+            .original_sites
+            .0
+            .get_or_init(|| original_sites(&self.blocks));
+        let op_idx = *sites.get(&(block, inst))?;
         Some(NormalizedOpSite { block, op_idx })
     }
 
@@ -443,6 +481,7 @@ impl NormalizationOrigins {
     }
 
     fn rows_mut(&mut self, block: BlockId) -> Option<&mut Vec<NormalizedOpOrigin>> {
+        self.original_sites.0.take();
         Some(&mut self.blocks.get_mut(block.0 as usize)?.rows)
     }
 
