@@ -185,6 +185,22 @@ impl CTypeLike {
         }
     }
 
+    /// Plain `char`, spelled as itself over the byte it is.
+    pub fn plain_char(signed: bool) -> Self {
+        let signedness = if signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        };
+        Self::named(
+            "char",
+            CTypeLike::Int {
+                bits: 8,
+                signedness,
+            },
+        )
+    }
+
     /// A name over the type it stands for.
     pub fn named(name: impl Into<String>, ty: CTypeLike) -> Self {
         CTypeLike::Typedef {

@@ -48,6 +48,9 @@ impl Conversion<'_> {
             Type::Scalar(scalar) => match (scalar.kind, self.model.bits(scalar.width)) {
                 (_, None) => CTypeLike::Unknown,
                 (ScalarKind::Bool, Some(_)) => CTypeLike::Bool,
+                (_, Some(bits)) if super::is_plain_char(scalar, bits) => {
+                    CTypeLike::plain_char(scalar.kind == ScalarKind::Signed)
+                }
                 (ScalarKind::Float, Some(bits)) => CTypeLike::Float(bits),
                 (ScalarKind::Signed, Some(bits)) => CTypeLike::Int {
                     bits,

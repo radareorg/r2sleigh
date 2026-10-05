@@ -414,6 +414,7 @@ pub(crate) fn exact_logical_return_projection(
                     source_type.kind(),
                     SourceTypeKind::SignedInteger
                         | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Char { .. }
                         | SourceTypeKind::Float
                 ) =>
         {

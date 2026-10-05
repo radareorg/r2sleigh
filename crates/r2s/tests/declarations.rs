@@ -67,7 +67,7 @@ fn a_declared_array_and_a_declared_struct_are_one_object_each() {
         "uint32_t v[4];",
         "struct node c;",
         "double d[3];",
-        "int8_t buf[16];",
+        "char buf[16];",
         "sum_array(v, 4)",
         "avg(d, 3)",
         "list_len(&a)",

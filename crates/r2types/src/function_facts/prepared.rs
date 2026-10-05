@@ -888,7 +888,9 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
             if projection.size_bits() < storage_bits
                 && matches!(
                     source_type.kind(),
-                    r2ssa::SourceTypeKind::SignedInteger | r2ssa::SourceTypeKind::UnsignedInteger
+                    r2ssa::SourceTypeKind::SignedInteger
+                        | r2ssa::SourceTypeKind::UnsignedInteger
+                        | r2ssa::SourceTypeKind::Char { .. }
                 ) =>
         {
             u32::try_from(projection.size_bits() / 8).ok()?
@@ -1021,6 +1023,7 @@ pub(crate) fn member_is_scalar_leaf(
             ty.kind(),
             r2ssa::SourceTypeKind::SignedInteger
                 | r2ssa::SourceTypeKind::UnsignedInteger
+                | r2ssa::SourceTypeKind::Char { .. }
                 | r2ssa::SourceTypeKind::Float
                 | r2ssa::SourceTypeKind::Pointer { .. }
         )

@@ -1601,6 +1601,7 @@ pub fn source_type_like(
             bits,
             signedness: Signedness::Unsigned,
         },
+        r2ssa::SourceTypeKind::Char { signed } => CTypeLike::plain_char(signed),
         r2ssa::SourceTypeKind::Pointer { target_type_id } => {
             let target = source_type_like(graph, target_type_id, visiting)?;
             // `CTypeLike::Function` already spells a pointer to function,

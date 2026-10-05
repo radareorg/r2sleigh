@@ -1198,6 +1198,7 @@ fn source_member_type_spelling(
     let element = match source_type.kind() {
         r2ssa::SourceTypeKind::SignedInteger => format!("int{bits}_t"),
         r2ssa::SourceTypeKind::UnsignedInteger => format!("uint{bits}_t"),
+        r2ssa::SourceTypeKind::Char { .. } => "char".to_string(),
         r2ssa::SourceTypeKind::Pointer { .. } => "void *".to_string(),
         r2ssa::SourceTypeKind::Float if bits == 32 => "float".to_string(),
         r2ssa::SourceTypeKind::Float if bits == 64 => "double".to_string(),

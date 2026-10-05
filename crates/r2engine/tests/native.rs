@@ -534,7 +534,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     // strlen takes one argument, the convention says it arrives in rdi, and
     // the declaration says what it is.
     assert!(
-        response.output.text().contains("strlen(const int8_t*)"),
+        response.output.text().contains("strlen(const char*)"),
         "{}",
         response.output
     );
@@ -542,7 +542,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
         response
             .output
             .text()
-            .contains("strlen((const int8_t*)RDI_0)"),
+            .contains("strlen((const char*)RDI_0)"),
         "{}",
         response.output
     );

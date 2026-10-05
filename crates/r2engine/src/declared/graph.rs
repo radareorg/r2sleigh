@@ -122,6 +122,8 @@ impl<'a> Interned<'a> {
             SourceTypeKind::SignedInteger => 0,
             SourceTypeKind::UnsignedInteger => 1,
             SourceTypeKind::Float => 2,
+            SourceTypeKind::Char { signed: true } => 4,
+            SourceTypeKind::Char { signed: false } => 5,
             _ => 3,
         };
         if let Some(found) = self.leaves.get(&(shape, size)) {
@@ -135,6 +137,12 @@ impl<'a> Interned<'a> {
     fn scalar(&mut self, scalar: &Scalar) -> Option<u32> {
         let bits = u64::from(self.model.bits(scalar.width)?);
         let (kind, stated) = match scalar.kind {
+            _ if super::is_plain_char(scalar, bits) => (
+                SourceTypeKind::Char {
+                    signed: scalar.kind == ScalarKind::Signed,
+                },
+                true,
+            ),
             ScalarKind::Signed => (SourceTypeKind::SignedInteger, integer_width(bits)),
             ScalarKind::Unsigned | ScalarKind::Bool => {
                 (SourceTypeKind::UnsignedInteger, integer_width(bits))
@@ -318,7 +326,9 @@ impl Interned<'_> {
         let source = &self.parts.types[ty as usize];
         let integer = matches!(
             source.kind(),
-            SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+            SourceTypeKind::SignedInteger
+                | SourceTypeKind::UnsignedInteger
+                | SourceTypeKind::Char { .. }
         );
         match (member.bit_size, source.kind()) {
             (Some(bits), _) => integer.then(|| {

@@ -64,7 +64,7 @@ fn afi_and_the_header_declare_a_parameter_alike() {
         .map(|argument| r2types::c_object_declaration(&argument.ty, "_"))
         .collect::<Vec<_>>();
     // The declaration's `const` lives on the signature, not on the type graph the parameter entity carries.
-    assert_eq!(declared, ["const int8_t* _"], "{header}");
+    assert_eq!(declared, ["const char* _"], "{header}");
     let (_, parameters) = header.split_once('(').expect("a parameter list");
     let (ty, _) = parameters
         .trim_end_matches(')')

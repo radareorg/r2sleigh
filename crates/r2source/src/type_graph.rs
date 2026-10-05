@@ -23,6 +23,11 @@ pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 2;
 pub enum SourceTypeKind {
     SignedInteger,
     UnsignedInteger,
+    /// Plain `char`: one byte, a type distinct from both signed and unsigned
+    /// char, whose signedness the ABI states.
+    Char {
+        signed: bool,
+    },
     Pointer {
         target_type_id: u32,
     },
@@ -581,6 +586,7 @@ impl SourceTypeGraph {
                         source_type.kind,
                         SourceTypeKind::SignedInteger
                             | SourceTypeKind::UnsignedInteger
+                            | SourceTypeKind::Char { .. }
                             | SourceTypeKind::Float
                     )
             }
@@ -614,6 +620,7 @@ impl SourceTypeGraph {
                 .unwrap_or_default(),
             SourceTypeKind::SignedInteger
             | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Char { .. }
             | SourceTypeKind::Float
             | SourceTypeKind::Void
             | SourceTypeKind::Opaque { .. } => Vec::new(),
@@ -875,6 +882,7 @@ fn value_containment_is_well_founded(parts: &SourceTypeGraphParts) -> bool {
             } => vec![element_type_id as usize],
             SourceTypeKind::SignedInteger
             | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Char { .. }
             | SourceTypeKind::Float
             | SourceTypeKind::Pointer { .. }
             | SourceTypeKind::Void
@@ -938,7 +946,9 @@ fn validate_type(
         SourceTypeKind::Opaque { tag_id } => {
             size == 0 && align == 0 && (tag_id as usize) < parts.opaque_tags.len()
         }
-        SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger => {
+        SourceTypeKind::SignedInteger
+        | SourceTypeKind::UnsignedInteger
+        | SourceTypeKind::Char { .. } => {
             sized_consistently(size, align) && matches!(size, 8 | 16 | 32 | 64 | 128)
         }
         // binary16 through binary128, and the x87 extended format in the
@@ -1052,9 +1062,12 @@ fn member_extent(
         return Err(SourceTypeGraphError::InvalidMember);
     }
     let valid = match (member.bit_field, member_type.kind) {
-        (true, SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger) => {
-            member.size_bits > 0 && member.size_bits <= member_type.size_bits
-        }
+        (
+            true,
+            SourceTypeKind::SignedInteger
+            | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Char { .. },
+        ) => member.size_bits > 0 && member.size_bits <= member_type.size_bits,
         (true, _) => false,
         (false, SourceTypeKind::Array { count: None, .. }) => {
             flexible_allowed && member.size_bits == 0 && member.offset_bits.is_multiple_of(8)

@@ -22,6 +22,12 @@ use r2source::{CanonicalStorageId, SourceFunctionReturn, SourceLogicalValue};
 
 use crate::native::{NativeTarget, storage};
 
+/// Whether a declared scalar is plain `char`, a type distinct from signed and
+/// unsigned char; its kind says whether this ABI makes it signed.
+fn is_plain_char(scalar: &r2abi::Scalar, bits: impl Into<u64>) -> bool {
+    bits.into() == 8 && scalar.name.as_deref() == Some("char")
+}
+
 /// One declaration and the graph its types are nodes of.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Declared<'a> {

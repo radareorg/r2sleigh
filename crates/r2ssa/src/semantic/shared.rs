@@ -911,6 +911,7 @@ pub(crate) fn projected_logical_register_storage(
                     source_type.kind(),
                     SourceTypeKind::SignedInteger
                         | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Char { .. }
                         | SourceTypeKind::Float
                 ) =>
         {

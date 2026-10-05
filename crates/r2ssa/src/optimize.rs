@@ -645,7 +645,9 @@ pub(crate) fn coherent_return_carrier(
             if carrier.size_bits() < storage_bits
                 && matches!(
                     source_type.kind(),
-                    SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+                    SourceTypeKind::SignedInteger
+                        | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Char { .. }
                 ) =>
         {
             Some(storage)

@@ -53,7 +53,7 @@ fn an_import_stub_renders_as_the_import_it_jumps_to() {
     assert!(run.ok, "{}", run.out);
     assert!(
         run.out
-            .contains("extern int32_t __printf_chk(int32_t, const int8_t*, ...);"),
+            .contains("extern int32_t __printf_chk(int32_t, const char*, ...);"),
         "{}",
         run.out
     );
