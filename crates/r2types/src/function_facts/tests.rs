@@ -1208,7 +1208,7 @@ fn function_facts_owns_canonical_call_results() {
         offset: -8,
     };
     let call_results = FunctionCallResultFacts {
-        by_value: BTreeMap::from([
+        by_value: r2ssa::dense::IdMap::from_iter([
             (
                 value,
                 CallResultFact {
@@ -1304,7 +1304,7 @@ fn call_result_definition_is_not_replaced_by_a_later_stack_owner() {
         offset: -8,
     };
     let call_results = FunctionCallResultFacts {
-        by_value: BTreeMap::from([
+        by_value: r2ssa::dense::IdMap::from_iter([
             (
                 defined,
                 CallResultFact {
@@ -1615,7 +1615,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
         source: MemberAccessSource::ExternalLayout,
     };
     let existing_render = FunctionRenderFacts {
-        string_literals_by_value: BTreeMap::from([(
+        string_literals_by_value: r2ssa::dense::IdMap::from_iter([(
             string_value,
             StringLiteralRenderFact {
                 value: string_value,
@@ -2885,9 +2885,9 @@ fn function_facts_owns_canonical_render_facts() {
                 },
             ),
         ]),
-        return_effects_by_inst: BTreeMap::from([(return_at, return_id)]),
+        return_effects_by_inst: r2ssa::dense::IdMap::from_iter([(return_at, return_id)]),
         memory_effects_by_inst: BTreeMap::from([((r2ssa::InstId(7), true), vec![memory_id])]),
-        string_literals_by_value: BTreeMap::from([(
+        string_literals_by_value: r2ssa::dense::IdMap::from_iter([(
             value,
             StringLiteralRenderFact {
                 value,

@@ -289,6 +289,13 @@ pub struct GuardedPhiArmRenderFact {
 /// A certified addressable resource. Resources have identity and layout but do
 /// not execute, so they must never be counted as observable effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub enum CertifiedEntity {
     Parameter {
         id: r2ssa::SemanticId,
@@ -359,6 +366,13 @@ impl CertifiedEntity {
     /// not authorize globally substituting any member's expression with the
     /// binding. Stack-slot entities return `None` because object identity alone
     /// is not a certificate of `ValueId` membership.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn coalescing_values(&self) -> Option<BTreeSet<r2ssa::ValueId>> {
         match self {
             Self::Parameter {
@@ -1028,10 +1042,17 @@ pub(crate) fn aggregate_layout_for_type(
         .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn parameter_entry_value_has_live_use(
     prepared: &r2ssa::SsaArtifact,
     root: r2ssa::ValueId,
-    implicit_call_arguments: &BTreeSet<r2ssa::ValueId>,
+    implicit_call_arguments: &r2ssa::dense::IdSet<r2ssa::ValueId>,
 ) -> bool {
     let graph = prepared.graph();
     let mut pending = vec![root];
@@ -1040,7 +1061,7 @@ pub(crate) fn parameter_entry_value_has_live_use(
         if !visited.insert(value) {
             continue;
         }
-        if implicit_call_arguments.contains(&value) {
+        if implicit_call_arguments.contains(value) {
             return true;
         }
         for use_site in graph.use_sites(value) {
@@ -1283,7 +1304,7 @@ pub(crate) fn prepared_callsite_argument_facts(
 }
 
 pub(crate) fn prepared_call_result_facts(prepared: &r2ssa::SsaArtifact) -> FunctionCallResultFacts {
-    let mut by_value = BTreeMap::new();
+    let mut by_value = r2ssa::dense::IdMap::default();
     let mut by_callsite = BTreeMap::<CallsiteKey, Vec<r2ssa::ValueId>>::new();
     for cert in prepared.certificates().call_results.values() {
         let Some(callsite_cert) = prepared.certificates().callsites.get(&cert.call_site) else {
@@ -1414,11 +1435,18 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
 /// resolved has no single base yet.
 pub(crate) struct AddressBases<'a> {
     prepared: &'a r2ssa::SsaArtifact,
-    resolved: BTreeMap<r2ssa::ValueId, Option<(r2ssa::ValueId, i64)>>,
+    resolved: r2ssa::dense::IdMap<r2ssa::ValueId, Option<(r2ssa::ValueId, i64)>>,
 }
 
 /// The values waiting on others while one address is resolved, and the merges
 /// being resolved, which a cycle must not re-enter.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 struct AddressWalk {
     pending: Vec<(r2ssa::ValueId, bool)>,
     visiting: BTreeSet<r2ssa::ValueId>,
@@ -1438,7 +1466,7 @@ impl<'a> AddressBases<'a> {
     pub(crate) fn new(prepared: &'a r2ssa::SsaArtifact) -> Self {
         Self {
             prepared,
-            resolved: BTreeMap::new(),
+            resolved: r2ssa::dense::IdMap::default(),
         }
     }
 
@@ -1465,14 +1493,14 @@ impl<'a> AddressBases<'a> {
             visiting: BTreeSet::new(),
         };
         while let Some((current, expanded)) = walk.pending.pop() {
-            if self.resolved.contains_key(&current) {
+            if self.resolved.contains(current) {
                 continue;
             }
             if let Some(result) = self.resolve(current, expanded, &mut walk) {
                 self.resolved.insert(current, result);
             }
         }
-        self.resolved.get(&value).copied().flatten()
+        self.resolved.get(value).copied().flatten()
     }
 
     /// `current`'s base, where every input it needs is resolved; otherwise it
@@ -1488,7 +1516,7 @@ impl<'a> AddressBases<'a> {
             AddressStep::Merge(inputs) => return self.merged(current, &inputs, expanded, walk),
             AddressStep::Displaced(input, delta) => (input, delta),
         };
-        if !expanded && !self.resolved.contains_key(&input) {
+        if !expanded && !self.resolved.contains(input) {
             // A cycle back into a merge being resolved has no base yet.
             if walk.visiting.contains(&input) {
                 return Some(None);
@@ -1499,7 +1527,7 @@ impl<'a> AddressBases<'a> {
         }
         Some(
             self.resolved
-                .get(&input)
+                .get(input)
                 .copied()
                 .flatten()
                 .and_then(|(base, offset)| Some((base, offset.checked_add(delta)?))),
@@ -1520,7 +1548,7 @@ impl<'a> AddressBases<'a> {
             walk.pending.extend(
                 inputs
                     .iter()
-                    .filter(|input| !self.resolved.contains_key(input) && !visiting.contains(input))
+                    .filter(|input| !self.resolved.contains(**input) && !visiting.contains(input))
                     .map(|input| (*input, false)),
             );
             return None;
@@ -1529,7 +1557,7 @@ impl<'a> AddressBases<'a> {
         // Every input known, at one base and one displacement.
         let mut bases = inputs
             .iter()
-            .map(|input| self.resolved.get(input).copied().flatten());
+            .map(|input| self.resolved.get(*input).copied().flatten());
         let common = bases.next().flatten();
         Some(common.filter(|common| bases.all(|base| base == Some(*common))))
     }
@@ -2003,9 +2031,9 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                 .values()
                 .filter_map(|switch| switch.selector),
         )
-        .collect::<BTreeSet<_>>();
+        .collect::<r2ssa::dense::IdSet<_>>();
     let mut observable_values = observable_roots;
-    let mut pending = observable_values.iter().copied().collect::<Vec<_>>();
+    let mut pending = observable_values.iter().collect::<Vec<_>>();
     while let Some(value) = pending.pop() {
         let Some(inst) = prepared
             .graph()
@@ -2027,7 +2055,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
     // function's own result vanished whenever the return went uncertified.
     let unobserved = prepared.unobserved_merges();
     let mut carrier_edge_roots = Vec::new();
-    let mut carrier_identity_values = BTreeSet::new();
+    let mut carrier_identity_values = r2ssa::dense::IdSet::default();
     for carrier in prepared
         .structured()
         .loops
@@ -2075,7 +2103,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
         if certificates.stack_slots.contains_key(&fact.object) {
             continue;
         }
-        fact.materialize_result = inline_multiplicity.get(&value).copied().unwrap_or(0) > 1;
+        fact.materialize_result = inline_multiplicity.get(value).copied().unwrap_or(0) > 1;
     }
     let mut certified_effects = certified_memory_effects;
     certified_effects.extend(certified_return_effects);
@@ -2085,7 +2113,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
         certified_effects,
         return_effects_by_inst,
         memory_effects_by_inst,
-        string_literals_by_value: BTreeMap::new(),
+        string_literals_by_value: r2ssa::dense::IdMap::default(),
         member_accesses_by_inst: BTreeMap::new(),
         array_accesses_by_inst: BTreeMap::new(),
     }
@@ -2155,15 +2183,15 @@ pub(crate) fn prepared_render_consumer_occurrences(
 pub(crate) fn expression_inline_multiplicity(
     graph: &r2ssa::SsaGraph,
     roots: &[r2ssa::ValueId],
-    carrier_identities: &BTreeSet<r2ssa::ValueId>,
-) -> BTreeMap<r2ssa::ValueId, u8> {
-    let mut multiplicity = BTreeMap::<r2ssa::ValueId, u8>::new();
+    carrier_identities: &r2ssa::dense::IdSet<r2ssa::ValueId>,
+) -> r2ssa::dense::IdMap<r2ssa::ValueId, u8> {
+    let mut multiplicity = r2ssa::dense::IdMap::<r2ssa::ValueId, u8>::default();
     let mut worklist = Vec::new();
     for root in roots {
-        if carrier_identities.contains(root) {
+        if carrier_identities.contains(*root) {
             continue;
         }
-        let slot = multiplicity.entry(*root).or_insert(0);
+        let slot = multiplicity.get_or_insert_with(*root, || 0);
         let raised = slot.saturating_add(1).min(2);
         if raised != *slot {
             *slot = raised;
@@ -2171,17 +2199,17 @@ pub(crate) fn expression_inline_multiplicity(
         }
     }
     while let Some(value) = worklist.pop() {
-        let Some(share) = multiplicity.get(&value).copied() else {
+        let Some(share) = multiplicity.get(value).copied() else {
             continue;
         };
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
         for input in &inst.inputs {
-            if carrier_identities.contains(input) {
+            if carrier_identities.contains(*input) {
                 continue;
             }
-            let slot = multiplicity.entry(*input).or_insert(0);
+            let slot = multiplicity.get_or_insert_with(*input, || 0);
             let raised = slot.saturating_add(share).min(2);
             if raised != *slot {
                 *slot = raised;

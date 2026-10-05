@@ -2,6 +2,13 @@
 
 use super::*;
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn canonicalize_param_home_stack_slots(
     merged_signature: Option<&FunctionSignatureSpec>,
     register_params: &[crate::context::ExternalRegisterParamSpec],
@@ -102,6 +109,13 @@ pub(crate) fn canonicalize_param_home_stack_slots(
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn collect_trivial_value_sources(ssa_blocks: &[SSABlock]) -> HashMap<SSAVar, SSAVar> {
     let mut trivial_value_sources = HashMap::new();
     for block in ssa_blocks {
@@ -122,6 +136,13 @@ pub(crate) fn collect_trivial_value_sources(ssa_blocks: &[SSABlock]) -> HashMap<
     trivial_value_sources
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn resolve_trivial_value_root(
     trivial_value_sources: &HashMap<SSAVar, SSAVar>,
     value: &SSAVar,

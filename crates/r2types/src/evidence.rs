@@ -44,7 +44,7 @@ impl SolverNode for EvidenceNode {
 /// What the solver concluded, spelled the way the evidence spelled it.
 #[derive(Debug, Clone, Default)]
 pub struct EvidenceTypes {
-    value_types: HashMap<r2ssa::ValueId, CTypeLike>,
+    value_types: r2ssa::dense::IdMap<r2ssa::ValueId, CTypeLike>,
     slot_types: BTreeMap<StackSlotKey, CTypeLike>,
 }
 
@@ -54,7 +54,7 @@ impl EvidenceTypes {
     }
 
     pub fn value_type(&self, value: r2ssa::ValueId) -> Option<&CTypeLike> {
-        self.value_types.get(&value)
+        self.value_types.get(value)
     }
 
     pub fn stack_slot_types(&self) -> impl Iterator<Item = (&StackSlotKey, &CTypeLike)> {
@@ -489,6 +489,13 @@ impl<'a> EvidenceBuilder<'a> {
     }
 
     /// The two operands of an address that is one value plus another.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+        )
+    )]
     fn address_sum_operands(
         &self,
         address: r2ssa::ValueId,

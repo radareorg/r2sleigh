@@ -1,3 +1,8 @@
+// A fact about a function's values, instructions or blocks is an index over
+// their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
+// at the item that keeps one.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+
 pub(crate) mod analysis;
 pub(crate) mod callee;
 pub(crate) mod constraint;

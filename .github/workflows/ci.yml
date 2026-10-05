@@ -83,10 +83,11 @@ jobs:
   # ── The repository's own lints (tools/dylints/r2sleigh_lints) ──────
   #
   # A crate that has cleared a rule denies it at its root, so a new
-  # violation fails here: r2ssa denies entity_keyed_map (doc/adr-one-ir.md).
+  # violation fails here: r2ssa and r2types deny entity_keyed_map
+  # (doc/adr-one-ir.md).
   # The other rules still warn while their debt is paid down.
   dylint:
-    name: Dylint (r2ssa)
+    name: Dylint (r2ssa, r2types)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -104,8 +105,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-dylint,dylint-link
-      - name: r2ssa
-        run: cargo dylint --path tools/dylints/r2sleigh_lints -p r2ssa -- --all-features --lib
+      - name: r2ssa and r2types
+        run: cargo dylint --path tools/dylints/r2sleigh_lints -p r2ssa -p r2types -- --all-features --lib
 
   # ── One build of the shell every gate grades ───────────────────────
   #

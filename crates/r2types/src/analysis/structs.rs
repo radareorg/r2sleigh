@@ -24,6 +24,13 @@ pub(crate) struct LocalAffineValue {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) struct LocalMemoryVersionFacts {
     pub(crate) stores_by_op: HashMap<r2ssa::OpId, Vec<MemoryVersion>>,
     pub(crate) loads_by_op: HashMap<r2ssa::OpId, Vec<MemoryVersion>>,
@@ -110,6 +117,13 @@ impl LocalMemoryVersionFacts {
 }
 
 #[derive(Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) struct LocalTypeEquivalence {
     pub(crate) ids: HashMap<SSAVar, usize>,
     pub(crate) vars: Vec<SSAVar>,
@@ -222,6 +236,13 @@ pub(crate) fn collect_prepared_pointer_arg_slot_map(
     out
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn local_struct_type_slots(
     blocks: &[SSABlock],
     pointer_arg_slot_map: &HashMap<String, usize>,
@@ -300,6 +321,13 @@ pub(crate) fn local_struct_type_slots(
 /// memory address operand lets dereference types flow through transparent
 /// aliases, phis, and constant pointer arithmetic without rescanning the
 /// function once per candidate field.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn local_pointer_pointee_types(
     blocks: &[SSABlock],
     ptr_bits: u32,
@@ -457,6 +485,13 @@ pub(crate) fn multiply_local_affine_value(
     })
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn local_affine_value(
     var: &SSAVar,
     definitions: &HashMap<SSAVar, SSAOp>,
@@ -707,6 +742,13 @@ pub(crate) fn prepared_parameter_indexed_accesses(
     candidates
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn infer_local_struct_artifacts_from_blocks(
     ssa_blocks: &[SSABlock],
     memory_versions: Option<&LocalMemoryVersionFacts>,

@@ -22,7 +22,7 @@ use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParamSlotResolver {
-    slots_by_value: BTreeMap<r2ssa::ValueId, usize>,
+    slots_by_value: r2ssa::dense::IdMap<r2ssa::ValueId, usize>,
 }
 
 impl ParamSlotResolver {
@@ -32,7 +32,7 @@ impl ParamSlotResolver {
     }
 
     fn slot_for_value(&self, value: r2ssa::ValueId) -> Option<usize> {
-        self.slots_by_value.get(&value).copied()
+        self.slots_by_value.get(value).copied()
     }
 }
 
@@ -53,7 +53,7 @@ impl FunctionCallsiteFacts {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionCallResultFacts {
-    pub by_value: BTreeMap<r2ssa::ValueId, CallResultFact>,
+    pub by_value: r2ssa::dense::IdMap<r2ssa::ValueId, CallResultFact>,
     pub by_callsite: BTreeMap<CallsiteKey, Vec<r2ssa::ValueId>>,
 }
 
@@ -63,7 +63,7 @@ impl FunctionCallResultFacts {
     }
 
     pub fn result_for_value(&self, value: r2ssa::ValueId) -> Option<&CallResultFact> {
-        self.by_value.get(&value)
+        self.by_value.get(value)
     }
 
     pub fn results_for_site(&self, callsite: CallsiteKey) -> impl Iterator<Item = &CallResultFact> {
@@ -71,7 +71,7 @@ impl FunctionCallResultFacts {
             .get(&callsite)
             .into_iter()
             .flatten()
-            .filter_map(|value| self.by_value.get(value))
+            .filter_map(|value| self.by_value.get(*value))
     }
 
     /// The value the call boundary itself defines.
@@ -249,11 +249,11 @@ pub struct FunctionRenderFacts {
     /// Canonical certified observable-effect graph keyed by stable semantic identity.
     pub certified_effects: BTreeMap<r2ssa::SemanticId, CertifiedEffect>,
     /// Stable return-effect identity for each returning instruction.
-    pub return_effects_by_inst: BTreeMap<r2ssa::InstId, r2ssa::SemanticId>,
+    pub return_effects_by_inst: r2ssa::dense::IdMap<r2ssa::InstId, r2ssa::SemanticId>,
     /// Stable memory-effect identities for each instruction, by direction.
     pub memory_effects_by_inst: BTreeMap<MemoryEffectKey, Vec<r2ssa::SemanticId>>,
     /// Value annotations that supplement, rather than duplicate, certified expressions.
-    pub string_literals_by_value: BTreeMap<r2ssa::ValueId, StringLiteralRenderFact>,
+    pub string_literals_by_value: r2ssa::dense::IdMap<r2ssa::ValueId, StringLiteralRenderFact>,
     /// Type-owner render projections tied back to canonical memory-effect identities.
     pub member_accesses_by_inst: BTreeMap<MemoryEffectKey, Vec<MemberAccessRenderFact>>,
     pub array_accesses_by_inst: BTreeMap<MemoryEffectKey, Vec<ArrayAccessRenderFact>>,
@@ -376,7 +376,7 @@ impl FunctionRenderFacts {
     }
 
     pub fn return_effect_id_for_inst(&self, inst: r2ssa::InstId) -> Option<r2ssa::SemanticId> {
-        self.return_effects_by_inst.get(&inst).copied()
+        self.return_effects_by_inst.get(inst).copied()
     }
 
     pub fn memory_effect_id_for_inst(
@@ -412,7 +412,7 @@ impl FunctionRenderFacts {
         &self,
         value: r2ssa::ValueId,
     ) -> Option<&StringLiteralRenderFact> {
-        self.string_literals_by_value.get(&value)
+        self.string_literals_by_value.get(value)
     }
 
     /// The memory fact for one exact structured access at an op site.
@@ -2355,7 +2355,7 @@ impl FunctionFacts {
                         r2ssa::SourceCallArgumentValue::PreservedEntry => None,
                     }),
             )
-            .collect::<BTreeSet<_>>();
+            .collect::<r2ssa::dense::IdSet<_>>();
         // The resolver names each formal's one value -- the carrier's entry
         // value or the lane projection minted for it -- and its width is the
         // formal's (doc/adr-register-identity.md).
@@ -2363,7 +2363,7 @@ impl FunctionFacts {
         let mut resolved = param_slots
             .slots_by_value
             .iter()
-            .map(|(value, slot)| (*value, *slot))
+            .map(|(value, slot)| (value, *slot))
             .collect::<Vec<_>>();
         resolved.sort_unstable();
         for (value_id, slot) in resolved {
@@ -2396,7 +2396,7 @@ impl FunctionFacts {
         let mut parameter_slot_by_value = entry_value_by_slot
             .iter()
             .map(|(slot, (value, _))| (*value, *slot))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<r2ssa::dense::IdMap<_, _>>();
         // Only a reload that is the stored bits is the parameter; a value
         // computed from it -- the sign word a `cqo` makes of it -- is not.
         for reload in prepared
@@ -2407,7 +2407,7 @@ impl FunctionFacts {
         {
             let mut slots = [reload.canonical_source, reload.source]
                 .into_iter()
-                .filter_map(|value| parameter_slot_by_value.get(&value).copied())
+                .filter_map(|value| parameter_slot_by_value.get(value).copied())
                 .collect::<BTreeSet<_>>();
             let Some(slot) = slots.pop_first() else {
                 continue;
@@ -2433,7 +2433,7 @@ impl FunctionFacts {
         while changed {
             changed = false;
             for value in &prepared.graph().values {
-                if parameter_slot_by_value.contains_key(&value.id) {
+                if parameter_slot_by_value.contains(value.id) {
                     continue;
                 }
                 let Some(inst) = prepared
@@ -2451,7 +2451,7 @@ impl FunctionFacts {
                     continue;
                 }
                 let source = *src;
-                let Some(slot) = parameter_slot_by_value.get(&source).copied() else {
+                let Some(slot) = parameter_slot_by_value.get(source).copied() else {
                     continue;
                 };
                 let Some(expr) = self
@@ -2584,10 +2584,17 @@ impl FunctionFacts {
     /// an exact parameter or return binding already authorized by the function
     /// signature, or from an exact typed memory-access certificate. Conflicting
     /// projections leave the carrier untyped.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     fn populate_certified_loop_carrier_types(&mut self) {
         let signature = self.types.render_authorized_signature().cloned();
-        let mut memory_value_types = BTreeMap::<r2ssa::ValueId, CTypeLike>::new();
-        let mut conflicting_memory_values = BTreeSet::new();
+        let mut memory_value_types = r2ssa::dense::IdMap::<r2ssa::ValueId, CTypeLike>::default();
+        let mut conflicting_memory_values = r2ssa::dense::IdSet::default();
         for memory in self.render.memory_accesses() {
             let Some(value) = memory.value.filter(|_| !memory.is_write) else {
                 continue;
@@ -2595,7 +2602,7 @@ impl FunctionFacts {
             let Some(ty) = self.render.memory_value_type(memory.access).cloned() else {
                 continue;
             };
-            match memory_value_types.get(&value) {
+            match memory_value_types.get(value) {
                 None => {
                     memory_value_types.insert(value, ty);
                 }
@@ -2606,13 +2613,13 @@ impl FunctionFacts {
             }
         }
         for value in conflicting_memory_values {
-            memory_value_types.remove(&value);
+            memory_value_types.remove(value);
         }
         let return_values = self
             .render
             .return_effects()
             .map(|fact| fact.value)
-            .collect::<BTreeSet<_>>();
+            .collect::<r2ssa::dense::IdSet<_>>();
         let carriers = self
             .render
             .loop_carriers()
@@ -2638,7 +2645,7 @@ impl FunctionFacts {
                 {
                     candidates.push(ty);
                 }
-                if let Some(ty) = memory_value_types.get(value).cloned()
+                if let Some(ty) = memory_value_types.get(*value).cloned()
                     && !candidates.contains(&ty)
                 {
                     candidates.push(ty);
@@ -2646,7 +2653,7 @@ impl FunctionFacts {
             }
             if carrier_values
                 .iter()
-                .any(|value| return_values.contains(value))
+                .any(|value| return_values.contains(*value))
                 && let Some(ty) = signature
                     .as_ref()
                     .and_then(|signature| signature.ret_type.clone())
