@@ -429,3 +429,73 @@ fn a_rendering_the_request_stopped_is_not_held() {
         "the stopped analysis was served"
     );
 }
+
+/// One question the property test asks of a program and of a fresh open of its bytes.
+#[derive(Debug, Clone)]
+enum Step {
+    Write(u64, u8),
+    Render(u64),
+    List(u64),
+    Index,
+    Discover,
+}
+
+fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+    use proptest::prelude::*;
+    let entry = proptest::sample::select(vec![ONE, CALLER, TWO, PASSES, common::FORKED]);
+    prop_oneof![
+        3 => (common::BASE..TEXT, any::<u8>()).prop_map(|(at, byte)| Step::Write(at, byte)),
+        2 => entry.clone().prop_map(Step::Render),
+        1 => entry.prop_map(Step::List),
+        1 => Just(Step::Index),
+        1 => Just(Step::Discover),
+    ]
+}
+
+/// What one question answers, spelled so two programs' answers compare.
+fn asked(program: &mut OpenProgram<Literal>, step: &Step) -> String {
+    match *step {
+        Step::Write(..) => String::new(),
+        Step::Render(entry) => format!(
+            "{:?}",
+            program
+                .rendered(entry, r2engine::RenderTier::C)
+                .map(|rendering| (rendering.response.output.into_text(), rendering.unread))
+        ),
+        Step::List(entry) => format!(
+            "{:?}",
+            program
+                .function_listing(entry)
+                .map(|listing| (listing.lines.value, listing.refused.is_some()))
+        ),
+        Step::Index => format!("{:?}", program.references().map(|index| index.value)),
+        Step::Discover => format!("{:?}", program.functions()),
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+    /// The exit the query ADR sets for Q: any interleaving of writes and
+    /// questions over the real program inputs answers as a fresh open does.
+    #[test]
+    fn a_session_answers_as_a_fresh_open_of_its_bytes(
+        steps in proptest::collection::vec(step(), 1..16),
+    ) {
+        let mut program = opened();
+        let mut written = Vec::new();
+        for step in &steps {
+            if let Step::Write(at, byte) = *step {
+                program.source_mut().write(at, &[byte]);
+                written.push((at, byte));
+                continue;
+            }
+            let mut fresh = Literal::new();
+            for (at, byte) in &written {
+                fresh.write(*at, &[*byte]);
+            }
+            let mut fresh = OpenProgram::of(fresh);
+            proptest::prop_assert_eq!(asked(&mut program, step), asked(&mut fresh, step));
+        }
+    }
+}

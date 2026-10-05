@@ -113,7 +113,11 @@ engine. Commands, the visual mode and the agent surface all ask it.
   `ensure_current` and `Revision` are deleted, and the D11 Dylint is fatal in
   r2engine.
 - Exit for the whole of Q: the random-write property test holds over the real
-  program inputs, and no cache exists outside the database.
+  program inputs, and no cache exists outside the database. Met:
+  `a_session_answers_as_a_fresh_open_of_its_bytes` (tests/reuse.rs) writes
+  random bytes into the fixture's code between renderings, listings, the
+  reference index and discovery, each equal to a fresh open's; making the
+  database skip its dependency check fails it. Q4e makes the cache rule fatal.
 
 ## Consequences
 
