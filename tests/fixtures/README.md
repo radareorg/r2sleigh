@@ -19,6 +19,7 @@ answer.
 | `rv_O2` | `tests/gold/review.c` | the same source, x86-64 PIE, GCC 13.3.0 `-O2`, no debug information; `sext` reads the entry value of `rax` it only partly overwrites, and `main` reads `avg`'s float result after a call nothing claims it from |
 | `shapes_zig_riscv64_O0` | `tests/corpus/shapes.c` | RISC-V 64 (RV64GC, LP64D), `zig cc` 0.17.0 `-target riscv64-linux-gnu -O0 -g0 -fno-pie -no-pie -fno-sanitize=all`: the call-heavy corpus on the one architecture the census otherwise never sees |
 | `float_calls_zig_x86_64_O2g`, `float_calls_zig_aarch64_O2g` | `src/float_calls.c` | `zig cc` 0.17.0 `-O2 -g`: a declared `double` parameter, written as a constant before one call and passed through from the caller's own formal to another; on AArch64 the cspec's float slot is `q0`, wider than the `double` |
+| `float_returns_zig_x86_64_O2g`, `float_returns_zig_aarch64_O2g` | `src/float_returns.c` | `zig cc` 0.17.0 `-O2 -g`: declared `double` results, one a vectorised sum whose result register is written by lane inserts and merged as its root, one a literal `0.0` |
 
 `src/` holds sources the equivalence gate must not build as programs of their
 own: a multi-unit program, and fixtures that exist for their debug information

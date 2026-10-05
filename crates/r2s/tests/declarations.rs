@@ -167,3 +167,19 @@ fn a_declared_double_argument_reaches_its_call() {
         assert!(!forward.contains("r2sleigh refused"), "{name}:\n{forward}");
     }
 }
+
+/// A declared `double` result is certified when its slot is the low lane of the root the body merges or writes (B3).
+#[test]
+fn a_declared_double_result_is_returned() {
+    for name in [
+        "float_returns_zig_x86_64_O2g",
+        "float_returns_zig_aarch64_O2g",
+    ] {
+        let out = run(name, "pdd @ sym.loop_sum");
+        assert!(!out.contains("r2sleigh refused"), "{name}:\n{out}");
+        assert!(
+            out.contains("double loop_sum(const double* v, int32_t n)"),
+            "{name}:\n{out}"
+        );
+    }
+}

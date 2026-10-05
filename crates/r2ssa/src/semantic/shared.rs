@@ -1169,6 +1169,13 @@ pub(crate) fn reaching_abi_value_before(
                     continue;
                 }
             }
+            // Any other write of the root the wanted storage is the low lane of: the root's value answers it (B3).
+            if machine_context.is_some_and(|context| context.is_low_lane_of(storage, dst_storage)) {
+                return graph
+                    .inst(producer)
+                    .and_then(|inst| inst.output)
+                    .map(|value| ReachingAbiPath::Reaches(ReachingAbiState::Value(value)));
+            }
             // A later overlapping slice means an older exact-width definition
             // is not the value at this boundary. Generic boundary recovery has
             // no implicit register-merge semantics, so it must fail closed.
@@ -1194,10 +1201,17 @@ pub(crate) fn reaching_abi_value_before(
     if scanned_from.is_some() {
         return Some(ReachingAbiPath::Cycle);
     }
+    // The merge of the storage, or of the root it is the low lane of (B3).
+    let merges = |phi: &&crate::PhiNode<crate::VarId>| {
+        phi.canonical_storage.is_some_and(|merged| {
+            merged == storage
+                || machine_context.is_some_and(|context| context.is_low_lane_of(storage, merged))
+        })
+    };
     let phi_insts = block
         .phis()
         .iter()
-        .filter(|phi| phi.canonical_storage == Some(storage))
+        .filter(merges)
         .filter_map(|phi| graph.value_of(phi.dst))
         .filter_map(|value| graph.def_inst(value))
         .collect::<Vec<_>>();
