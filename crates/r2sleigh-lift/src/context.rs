@@ -17,9 +17,6 @@ pub struct LiftContext {
 
     /// Counter for unique space IDs
     next_custom_space: u32,
-
-    /// Counter for unique temporary offsets
-    next_unique_offset: u64,
 }
 
 impl LiftContext {
@@ -29,7 +26,6 @@ impl LiftContext {
             arch: ArchSpec::new(name),
             space_map: HashMap::new(),
             next_custom_space: 0,
-            next_unique_offset: 0x10000000,
         };
 
         // Add standard spaces
@@ -72,7 +68,6 @@ impl LiftContext {
             arch,
             space_map,
             next_custom_space,
-            next_unique_offset: 0x10000000,
         }
     }
 
@@ -98,11 +93,6 @@ impl LiftContext {
     /// Set the address size.
     pub fn set_addr_size(&mut self, size: u32) {
         self.arch.addr_size = size;
-    }
-
-    /// Set the alignment.
-    pub fn set_alignment(&mut self, align: u32) {
-        self.arch.alignment = align;
     }
 
     /// Add an address space from Sleigh.
@@ -189,13 +179,6 @@ impl LiftContext {
     pub fn add_sub_register(&mut self, name: &str, offset: u64, size: u32, parent: &str) {
         let reg = RegisterDef::sub(name, offset, size, parent);
         self.arch.add_register(reg);
-    }
-
-    /// Allocate a unique temporary offset.
-    pub fn alloc_unique(&mut self, size: u32) -> u64 {
-        let offset = self.next_unique_offset;
-        self.next_unique_offset += size as u64;
-        offset
     }
 
     /// Finish building and return the architecture specification.

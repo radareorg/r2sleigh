@@ -146,22 +146,6 @@ pub fn translate_ptradd<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     })
 }
 
-/// Translate a PTRSUB operation.
-pub fn translate_ptrsub<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
-    let dst = require_output(source, "PTRSUB")?;
-    let base = require_input(source, 0, "PTRSUB")?;
-    let index = require_input(source, 1, "PTRSUB")?;
-    let element_size = source
-        .input_raw_offset(2)
-        .ok_or(TranslateError::MissingInput("PTRSUB", 2))? as u32;
-    Ok(R2ILOp::PtrSub {
-        dst,
-        base,
-        index,
-        element_size,
-    })
-}
-
 /// Rewrite every direct-address memory operand into an explicit access.
 ///
 /// Sleigh spells a memory operand with a constant address as a varnode in the

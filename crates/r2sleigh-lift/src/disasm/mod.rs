@@ -710,10 +710,6 @@ impl GenuineFunctionLayout {
         self.entry_addr
     }
 
-    pub fn blocks(&self) -> &[GenuineFunctionBlockRange] {
-        &self.blocks
-    }
-
     pub fn external_exits(&self) -> &[u64] {
         &self.external_exits
     }
@@ -1981,11 +1977,6 @@ impl Disassembler {
     /// ```
     pub fn from_sla(sla_bytes: &[u8], pspec: &str, arch_name: &str) -> Result<Self> {
         Self::from_sla_parts(sla_bytes, pspec, arch_name, None)
-    }
-
-    /// Get the architecture name.
-    pub fn arch_name(&self) -> &str {
-        &self.arch_name
     }
 
     /// The register this processor uses as its program counter.
