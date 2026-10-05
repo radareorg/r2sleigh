@@ -1451,14 +1451,44 @@ struct Held {
     may: HeldSet,
 }
 
+/// One event as the transfer performs it, its values already numbered.
+///
+/// What an event does to the state never depends on the state it meets
+/// except through these bits, so the closures, the bit numbers and a
+/// write's whole result are worked out once, when the variable's check is
+/// built, rather than at every visit of the block.
+#[derive(Debug, Clone)]
+enum Step {
+    /// A read of the value at `bit`.
+    Read { bit: usize, read: RenderedRead },
+    /// A write: the variable holds exactly `held` after it. `value` is the
+    /// value written, kept for `is_trivial`.
+    Write { value: Option<ValueId>, held: Held },
+    /// An elided definition: the bits of the defined value and what it
+    /// re-expresses become held where `source` is, or everywhere for a
+    /// reload of the variable's own storage.
+    Rename {
+        source: Option<usize>,
+        bits: Vec<usize>,
+    },
+}
+
+/// A merge into the variable, by bit: its output and, per predecessor, the
+/// bits that edge supplies.
+#[derive(Debug, Clone)]
+struct MergeBits {
+    output: usize,
+    incoming: Vec<(u64, usize)>,
+}
+
 /// The check for one variable: its values, its events by block -- one
 /// sequence per rendered copy of the block, in the order the text performs
 /// them -- the merges into it, and what it holds on entry.
 struct VariableFlow<'a> {
-    bits: BTreeMap<ValueId, usize>,
     values: Vec<ValueId>,
-    events: BTreeMap<u64, Vec<Vec<HeldEvent>>>,
-    merges: BTreeMap<u64, Vec<&'a ReachingMerge>>,
+    events: BTreeMap<u64, Vec<Vec<Step>>>,
+    merges: BTreeMap<u64, Vec<MergeBits>>,
+    marker: std::marker::PhantomData<&'a ReachingMerge>,
     entry: Held,
 }
 
@@ -1496,9 +1526,16 @@ impl<'a> VariableFlow<'a> {
             .enumerate()
             .map(|(bit, value)| (*value, bit))
             .collect::<BTreeMap<_, _>>();
-        let mut by_block = BTreeMap::<u64, Vec<&ReachingMerge>>::new();
+        let mut by_block = BTreeMap::<u64, Vec<MergeBits>>::new();
         for merge in merges {
-            by_block.entry(merge.block).or_default().push(merge);
+            by_block.entry(merge.block).or_default().push(MergeBits {
+                output: bits[&merge.output],
+                incoming: merge
+                    .incoming
+                    .iter()
+                    .map(|(pred, value)| (*pred, bits[value]))
+                    .collect(),
+            });
         }
         let mut entry = Held {
             must: HeldSet::empty(values.len()),
@@ -1508,11 +1545,17 @@ impl<'a> VariableFlow<'a> {
             entry.must.insert(bits[value]);
             entry.may.insert(bits[value]);
         }
+        let events = compile_steps(
+            facts,
+            ordered_events(events, facts.exclusive),
+            &bits,
+            values.len(),
+        );
         Self {
-            bits,
             values,
-            events: ordered_events(events, facts.exclusive),
+            events,
             merges: by_block,
+            marker: std::marker::PhantomData,
             entry,
         }
     }
@@ -1523,12 +1566,12 @@ impl<'a> VariableFlow<'a> {
     fn is_trivial(&self) -> bool {
         self.values.len() <= 1
             && self.merges.is_empty()
-            && self
-                .events
-                .values()
-                .flatten()
-                .flatten()
-                .all(|event| matches!(event, HeldEvent::Read(_) | HeldEvent::Write(Some(_))))
+            && self.events.values().flatten().flatten().all(|event| {
+                matches!(
+                    event,
+                    Step::Read { .. } | Step::Write { value: Some(_), .. }
+                )
+            })
     }
 
     /// What the variable holds after the edge from `pred` into `block`: each
@@ -1537,21 +1580,25 @@ impl<'a> VariableFlow<'a> {
     fn across_edge(&self, pred: u64, block: u64, out: &Held) -> Held {
         let mut held = out.clone();
         for merge in self.merges.get(&block).into_iter().flatten() {
-            let from_pred = merge
+            let mut from_pred = merge
                 .incoming
                 .iter()
                 .filter(|(from, _)| *from == pred)
-                .map(|(_, value)| self.bits[value])
-                .collect::<Vec<_>>();
-            if from_pred.is_empty() {
+                .map(|(_, bit)| *bit)
+                .peekable();
+            if from_pred.peek().is_none() {
                 continue;
             }
-            let output = self.bits[&merge.output];
-            if from_pred.iter().all(|bit| out.must.has(*bit)) {
-                held.must.insert(output);
+            let (mut all_must, mut any_may) = (true, false);
+            for bit in from_pred {
+                all_must &= out.must.has(bit);
+                any_may |= out.may.has(bit);
             }
-            if from_pred.iter().any(|bit| out.may.has(*bit)) {
-                held.may.insert(output);
+            if all_must {
+                held.must.insert(merge.output);
+            }
+            if any_may {
+                held.may.insert(merge.output);
             }
         }
         held
@@ -1560,19 +1607,13 @@ impl<'a> VariableFlow<'a> {
     /// Run `block` over what it is entered with, handing each read that does
     /// not see its value to `stale`. A block the text renders more than once
     /// runs each copy from its entry, and leaves what every copy leaves.
-    fn through(
-        &self,
-        facts: &ReachingFacts<'_>,
-        block: u64,
-        held: Held,
-        stale: &mut dyn FnMut(&RenderedRead, &Held),
-    ) -> Held {
+    fn through(&self, block: u64, held: Held, stale: &mut dyn FnMut(&RenderedRead, &Held)) -> Held {
         let Some(copies) = self.events.get(&block) else {
             return held;
         };
         let mut left = None::<Held>;
         for copy in copies {
-            let out = self.through_copy(facts, copy, held.clone(), stale);
+            let out = self.through_copy(copy, held.clone(), stale);
             match left.as_mut() {
                 None => left = Some(out),
                 Some(left) => {
@@ -1586,60 +1627,91 @@ impl<'a> VariableFlow<'a> {
 
     fn through_copy(
         &self,
-        facts: &ReachingFacts<'_>,
-        events: &[HeldEvent],
+        events: &[Step],
         mut held: Held,
         stale: &mut dyn FnMut(&RenderedRead, &Held),
     ) -> Held {
         for event in events {
             match event {
-                HeldEvent::Read(read) if !held.must.has(self.bits[&read.value]) => {
-                    stale(read, &held);
-                }
-                HeldEvent::Read(_) => {}
-                HeldEvent::Write(value) => held = self.written(facts, *value),
-                HeldEvent::Elided(elided) => self.rename(facts, elided, &mut held),
+                Step::Read { bit, read } if !held.must.has(*bit) => stale(read, &held),
+                Step::Read { .. } => {}
+                Step::Write { held: written, .. } => held.clone_from(written),
+                Step::Rename { source, bits } => rename(&mut held, *source, bits),
             }
         }
         held
     }
+}
 
-    /// What the variable holds after a write of `value`: that value and
-    /// whatever its definition re-expresses, and nothing else.
-    fn written(&self, facts: &ReachingFacts<'_>, value: Option<ValueId>) -> Held {
-        let mut must = HeldSet::empty(self.values.len());
-        value
-            .iter()
-            .flat_map(|value| closure(facts, *value))
-            .filter_map(|written| self.bits.get(&written))
-            .for_each(|bit| must.insert(*bit));
-        Held {
-            may: must.clone(),
-            must,
+/// An elided definition names what the variable already holds: the defined
+/// value and what it re-expresses are held where `source` is, and a reload
+/// of the variable's own storage (`None`) is whatever the variable holds.
+/// What else it held, it holds.
+fn rename(held: &mut Held, source: Option<usize>, bits: &[usize]) {
+    let (must, may) = match source {
+        None => (true, true),
+        Some(bit) => (held.must.has(bit), held.may.has(bit)),
+    };
+    for bit in bits {
+        if must {
+            held.must.insert(*bit);
+        }
+        if may {
+            held.may.insert(*bit);
         }
     }
+}
 
-    /// An elided definition names what the variable already holds: its value
-    /// is held where its source is, and a reload of the variable's own
-    /// storage is whatever the variable holds. What else it held, it holds.
-    fn rename(&self, facts: &ReachingFacts<'_>, elided: &ElidedDefinition, held: &mut Held) {
-        let (must, may) = match elided.source {
-            ElidedSource::Content => (true, true),
-            ElidedSource::Value(source) => {
-                let bit = self.bits[&source];
-                (held.must.has(bit), held.may.has(bit))
+/// Each event of a variable's blocks as the transfer performs it, its
+/// values numbered by `bits` and a write's result built whole.
+fn compile_steps(
+    facts: &ReachingFacts<'_>,
+    events: BTreeMap<u64, Vec<Vec<HeldEvent>>>,
+    bits: &BTreeMap<ValueId, usize>,
+    width: usize,
+) -> BTreeMap<u64, Vec<Vec<Step>>> {
+    let closure_bits = |value: ValueId| {
+        closure(facts, value)
+            .into_iter()
+            .filter_map(|value| bits.get(&value).copied())
+            .collect::<Vec<_>>()
+    };
+    let step = |event: HeldEvent| match event {
+        HeldEvent::Read(read) => Step::Read {
+            bit: bits[&read.value],
+            read,
+        },
+        HeldEvent::Write(value) => {
+            let mut must = HeldSet::empty(width);
+            for bit in value.into_iter().flat_map(closure_bits) {
+                must.insert(bit);
             }
-        };
-        for value in closure(facts, elided.value) {
-            let bit = self.bits[&value];
-            if must {
-                held.must.insert(bit);
-            }
-            if may {
-                held.may.insert(bit);
+            Step::Write {
+                value,
+                held: Held {
+                    may: must.clone(),
+                    must,
+                },
             }
         }
-    }
+        HeldEvent::Elided(elided) => Step::Rename {
+            source: match elided.source {
+                ElidedSource::Content => None,
+                ElidedSource::Value(source) => Some(bits[&source]),
+            },
+            bits: closure_bits(elided.value),
+        },
+    };
+    events
+        .into_iter()
+        .map(|(block, copies)| {
+            let copies = copies
+                .into_iter()
+                .map(|copy| copy.into_iter().map(step).collect())
+                .collect();
+            (block, copies)
+        })
+        .collect()
 }
 
 /// One variable's reads, writes and elided definitions.
@@ -1781,15 +1853,53 @@ fn block_copies<K: Copy>(
     copies.into_values().collect()
 }
 
-/// A value and every value its definition re-expresses, in turn.
+/// A value and every value its definition re-expresses, in turn, up to the
+/// first one already in the chain.
+///
+/// Re-expression is a function, so the sequence either ends or runs into a
+/// cycle. Brent's cycle finding stops at the first repeat in time linear in
+/// the chain: a chain through a long run of copies reached two thousand
+/// values in one -O0 function, and checking each step against the chain so
+/// far made every closure quadratic in its length.
 fn closure(facts: &ReachingFacts<'_>, value: ValueId) -> Vec<ValueId> {
-    let mut chain = vec![value];
-    while let Some(next) = chain.last().and_then(|last| (facts.re_expresses)(*last)) {
-        if chain.contains(&next) {
-            break;
+    chain_until_repeat(value, |value| (facts.re_expresses)(value))
+}
+
+/// `start`, `next(start)`, `next(next(start))`, ... up to the first element
+/// already in the sequence or the first step `next` refuses.
+fn chain_until_repeat<T: Copy + PartialEq>(start: T, next: impl Fn(T) -> Option<T>) -> Vec<T> {
+    let mut chain = vec![start];
+    // Brent: the hare walks the chain; the tortoise jumps to the hare at
+    // each power of two. A cycle of length `lambda` shows as the hare
+    // meeting the tortoise `lambda` steps after the tortoise last jumped.
+    let (mut power, mut lambda, mut tortoise) = (1usize, 1usize, start);
+    let lambda = loop {
+        let Some(hare) = next(*chain.last().expect("the chain starts with the value")) else {
+            return chain;
+        };
+        if hare == tortoise {
+            break lambda;
         }
-        chain.push(next);
-    }
+        chain.push(hare);
+        if power == lambda {
+            tortoise = hare;
+            power *= 2;
+            lambda = 0;
+        }
+        lambda += 1;
+    };
+    // The first repeat is at `mu`, where the value `lambda` steps ahead
+    // first equals it; everything before `mu + lambda` is distinct. The
+    // hare that met the tortoise is the element at `chain.len()`, equal to
+    // the one `lambda` before it, so the search ends by then.
+    let mu = (0..chain.len())
+        .find(|at| {
+            chain
+                .get(at + lambda)
+                .is_none_or(|ahead| *ahead == chain[*at])
+        })
+        .unwrap_or(chain.len());
+    chain.truncate((mu + lambda).min(chain.len()));
     chain
 }
 
@@ -1853,7 +1963,7 @@ pub(crate) fn stale_reads<C: ReachingControlFlow + ?Sized>(
             width += len.div_ceil(64) * 64;
         }
     }
-    SharedFlow::new(lanes, width).stale_reads(cfg, facts, &order)
+    SharedFlow::new(lanes, width).stale_reads(cfg, &order)
 }
 
 /// One variable's place in the shared check: its bits are `base..` in the
@@ -1976,7 +2086,6 @@ impl<'a> SharedFlow<'a> {
     /// each stale read to `stale` with the lane it belongs to.
     fn through(
         &self,
-        facts: &ReachingFacts<'_>,
         block: u64,
         mut held: Held,
         stale: &mut dyn FnMut(usize, &RenderedRead, &Held),
@@ -1985,7 +2094,7 @@ impl<'a> SharedFlow<'a> {
             let lane = &self.lanes[*index];
             let local = lane
                 .flow
-                .through(facts, block, lane.local(&held), &mut |read, local| {
+                .through(block, lane.local(&held), &mut |read, local| {
                     stale(*index, read, local);
                 });
             lane.store(&mut held, &local);
@@ -2003,7 +2112,6 @@ impl<'a> SharedFlow<'a> {
     fn settle<C: ReachingControlFlow + ?Sized>(
         &self,
         cfg: &C,
-        facts: &ReachingFacts<'_>,
         order: &[u64],
     ) -> BTreeMap<u64, Held> {
         let successors = successors_by_rank(cfg, order);
@@ -2016,7 +2124,7 @@ impl<'a> SharedFlow<'a> {
             queued[at] = false;
             let block = order[at];
             let entered = self.entering(cfg, block, &out);
-            let left = self.through(facts, block, entered, &mut |_, _, _| {});
+            let left = self.through(block, entered, &mut |_, _, _| {});
             if out.get(&block) == Some(&left) {
                 continue;
             }
@@ -2037,17 +2145,16 @@ impl<'a> SharedFlow<'a> {
     fn stale_reads<C: ReachingControlFlow + ?Sized>(
         &self,
         cfg: &C,
-        facts: &ReachingFacts<'_>,
         order: &[u64],
     ) -> Vec<StaleRead> {
         if self.lanes.is_empty() {
             return Vec::new();
         }
-        let out = self.settle(cfg, facts, order);
+        let out = self.settle(cfg, order);
         let mut found = Vec::new();
         for (rank, block) in order.iter().enumerate() {
             let entered = self.entering(cfg, *block, &out);
-            self.through(facts, *block, entered, &mut |lane, read, held| {
+            self.through(*block, entered, &mut |lane, read, held| {
                 let values = &self.lanes[lane].flow.values;
                 found.push((
                     lane,
@@ -2132,6 +2239,28 @@ pub(crate) fn reaching_repair(
 #[cfg(test)]
 mod reaching_tests {
     use super::*;
+
+    proptest::proptest! {
+        /// Brent's chain is the one a walk that checks every step against
+        /// the chain so far would build, over any function on a small set:
+        /// chains that end, that run into a cycle at their start, and that
+        /// run into one further on.
+        #[test]
+        fn a_chain_stops_at_its_first_repeat(
+            table in proptest::collection::vec(proptest::option::of(0usize..40), 40),
+            start in 0usize..40,
+        ) {
+            let next = |at: usize| table[at];
+            let mut naive = vec![start];
+            while let Some(step) = naive.last().and_then(|last| next(*last)) {
+                if naive.contains(&step) {
+                    break;
+                }
+                naive.push(step);
+            }
+            proptest::prop_assert_eq!(chain_until_repeat(start, next), naive);
+        }
+    }
 
     /// A control flow graph spelled as edges between block addresses.
     struct Edges {
