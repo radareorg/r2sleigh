@@ -52,12 +52,10 @@ matches an architecture name or a register name.
 - M1b (797e11f2): call effects from the prototype; callees are asked about the whole call universe.
 - M1c (5a205ad2): convention name, red zone and variadic tail from r2abi's cited ABI rows by platform.
 - M1d: float slots are the prototype's float entries (lanes such as `XMM0_Qa`), matched against the program root that holds them (B3, doc/adr-byte-relation.md); r2abi `Conventions` and its sdb files are deleted.
+- M0 rest: `.pspec` tracked values, `.dwarf` numbers (M5) and `.ldefs` selection: a machine names one language id, and its sla, pspec, compiler specs and DWARF file are read from that `<language>` entry. AppleSilicon names no Windows compiler, so an arm64 PE runs under the default cspec.
 
 ## Left
 
-- M0 remainder: `.ldefs` selection, `.sla` lanes, `.pspec` tracked values and
-  `.dwarf` numbers in the profile (the Windows pairing is a static table in
-  the embedded machine today). Exit: read where M2–M5 need them.
 - M2: r2ssa reads roles and slots only. Exit: `abi.rs` alias tables,
   `MachineArchitectureFamily::from_arch_spec`, `call_argument_register_defs`/
   `return_read_register_defs` by name, `call_moves_stack_pointer` by family

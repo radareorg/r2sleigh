@@ -1643,74 +1643,115 @@ struct EmbeddedSpecification {
     cpu: &'static str,
 }
 
-/// The embedded data one lower-cased architecture name selects, if any is compiled in for it.
-fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
+/// One processor's embedded files, by the names its language definitions use.
+#[derive(Clone, Copy)]
+struct Bundle {
+    files: &'static [(&'static str, &'static str)],
+    slas: &'static [(&'static str, &'static [u8])],
+}
+
+/// Which language a machine name selects: its `.ldefs` id, and a decoding context where Ghidra ships one.
+struct Selection {
+    bundle: Bundle,
+    language: &'static str,
+    /// A processor specification the language does not list: Thumb's TMode-set context.
+    pspec: Option<&'static str>,
+    name: &'static str,
+    cpu: &'static str,
+}
+
+fn selection(arch_name: &str) -> Option<Selection> {
+    #[cfg(feature = "x86")]
+    let x86 = Bundle {
+        files: sleigh_config::processor_x86::FILES,
+        slas: sleigh_config::processor_x86::SLAS,
+    };
+    #[cfg(feature = "arm")]
+    let (aarch64, arm) = (
+        Bundle {
+            files: sleigh_config::processor_aarch64::FILES,
+            slas: sleigh_config::processor_aarch64::SLAS,
+        },
+        Bundle {
+            files: sleigh_config::processor_arm::FILES,
+            slas: sleigh_config::processor_arm::SLAS,
+        },
+    );
+    #[cfg(feature = "riscv")]
+    let riscv = Bundle {
+        files: sleigh_config::processor_riscv::FILES,
+        slas: sleigh_config::processor_riscv::SLAS,
+    };
+    #[cfg(any(feature = "x86", feature = "arm", feature = "riscv"))]
+    let select = |bundle, language, pspec, name, cpu| {
+        Some(Selection {
+            bundle,
+            language,
+            pspec,
+            name,
+            cpu,
+        })
+    };
     match arch_name {
         #[cfg(feature = "x86")]
-        "x86-64" | "x86_64" | "x64" | "amd64" => Some(EmbeddedSpecification {
-            sla: sleigh_config::processor_x86::SLA_X86_64,
-            pspec: sleigh_config::processor_x86::PSPEC_X86_64,
-            cspec: sleigh_config::processor_x86::CSPEC_X86_64_GCC,
-            windows_cspec: Some(sleigh_config::processor_x86::CSPEC_X86_64_WIN),
-            dwarf: sleigh_config::processor_x86::DWARF_X86_64,
-            name: "x86-64",
-            cpu: "x86",
-        }),
+        "x86-64" | "x86_64" | "x64" | "amd64" => {
+            select(x86, "x86:LE:64:default", None, "x86-64", "x86")
+        }
         #[cfg(feature = "x86")]
-        "x86" | "x86-32" | "i386" | "i686" => Some(EmbeddedSpecification {
-            sla: sleigh_config::processor_x86::SLA_X86,
-            pspec: sleigh_config::processor_x86::PSPEC_X86,
-            cspec: sleigh_config::processor_x86::CSPEC_X86GCC,
-            windows_cspec: Some(sleigh_config::processor_x86::CSPEC_X86WIN),
-            dwarf: sleigh_config::processor_x86::DWARF_X86,
-            name: "x86",
-            cpu: "x86",
-        }),
+        "x86" | "x86-32" | "i386" | "i686" => select(x86, "x86:LE:32:default", None, "x86", "x86"),
         #[cfg(feature = "arm")]
-        "aarch64" | "arm64" | "arm64e" => Some(EmbeddedSpecification {
-            sla: sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
-            pspec: sleigh_config::processor_aarch64::PSPEC_AARCH64,
-            cspec: sleigh_config::processor_aarch64::CSPEC_AARCH64,
-            windows_cspec: Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN),
-            dwarf: sleigh_config::processor_aarch64::DWARF_AARCH64,
-            name: "aarch64",
-            cpu: "arm",
-        }),
+        "aarch64" | "arm64" | "arm64e" => select(
+            aarch64,
+            "AARCH64:LE:64:AppleSilicon",
+            None,
+            "aarch64",
+            "arm",
+        ),
         #[cfg(feature = "arm")]
-        "arm" | "arm32" => Some(EmbeddedSpecification {
-            sla: sleigh_config::processor_arm::SLA_ARM8_LE,
-            pspec: sleigh_config::processor_arm::PSPEC_ARMT,
-            cspec: sleigh_config::processor_arm::CSPEC_ARM,
-            windows_cspec: Some(sleigh_config::processor_arm::CSPEC_ARM_WIN),
-            dwarf: sleigh_config::processor_arm::DWARF_ARMNEON,
-            name: "ARM",
-            cpu: "arm",
-        }),
-        // The same instruction set with TMode set, which is how Ghidra itself
-        // ships a Thumb decoder: one language, two processor contexts.
+        "arm" | "arm32" => select(arm, "ARM:LE:32:v8", None, "ARM", "arm"),
         #[cfg(feature = "arm")]
-        "arm-thumb" | "thumb" => Some(EmbeddedSpecification {
-            sla: sleigh_config::processor_arm::SLA_ARM8_LE,
-            pspec: sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
-            cspec: sleigh_config::processor_arm::CSPEC_ARM,
-            windows_cspec: Some(sleigh_config::processor_arm::CSPEC_ARM_WIN),
-            dwarf: sleigh_config::processor_arm::DWARF_ARMNEON,
-            name: "ARM",
-            cpu: "thumb",
-        }),
-        // RV64GC under the LP64D ABI, the usual Linux target.
+        "arm-thumb" | "thumb" => {
+            select(arm, "ARM:LE:32:v8", Some("ARMtTHUMB.pspec"), "ARM", "thumb")
+        }
         #[cfg(feature = "riscv")]
-        "riscv64" | "riscv" | "rv64" => Some(EmbeddedSpecification {
-            sla: sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-            pspec: sleigh_config::processor_riscv::PSPEC_RV64GC,
-            cspec: sleigh_config::processor_riscv::CSPEC_RISCV64_FP,
-            windows_cspec: None,
-            dwarf: sleigh_config::processor_riscv::DWARF_RISCV64,
-            name: "riscv64",
-            cpu: "riscv",
-        }),
+        "riscv64" | "riscv" | "rv64" => {
+            select(riscv, "RISCV:LE:64:RV64GC", None, "riscv64", "riscv")
+        }
         _ => None,
     }
+}
+
+/// The embedded data one lower-cased architecture name selects, read through its language definition.
+fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
+    let chosen = selection(arch_name)?;
+    let Bundle { files, slas } = chosen.bundle;
+    let file = |name: &str| {
+        files
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, text)| *text)
+    };
+    let definition = files
+        .iter()
+        .filter(|(file, _)| file.ends_with(".ldefs"))
+        .flat_map(|(_, text)| crate::profile::LanguageDefinition::parse_all(text))
+        .find(|language| language.id == chosen.language)?;
+    let usual = definition
+        .compiler("gcc")
+        .or_else(|| definition.compiler("default"))?;
+    Some(EmbeddedSpecification {
+        sla: slas.iter().find(|(sla, _)| *sla == definition.sla)?.1,
+        pspec: file(chosen.pspec.unwrap_or(&definition.pspec))?,
+        cspec: file(usual)?,
+        windows_cspec: definition.compiler("windows").and_then(file),
+        dwarf: definition
+            .dwarf
+            .as_deref()
+            .and_then(file)
+            .unwrap_or_default(),
+        name: chosen.name,
+        cpu: chosen.cpu,
+    })
 }
 
 impl Disassembler {

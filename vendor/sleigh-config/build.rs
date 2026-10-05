@@ -32,6 +32,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 r#"/// Configurations for the processor `{processor_name}`"#
             )?;
             writeln!(&mut config_vars_file, r#"pub mod {mod_name} {{"#)?;
+            // Every file by its name, so a language definition's references resolve.
+            let mut module_files = Vec::new();
+            let mut module_slas = Vec::new();
 
             for lang_entry in std::fs::read_dir(processor_dir.path().join("data/languages"))?
                 .filter_map(Result::ok)
@@ -54,6 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         )?;
 
                         sla_data.push(format!("{mod_name}::{var_name}"));
+                        module_slas.push((format!("{file_stem}.sla"), var_name));
                     }
                     Some(ext) if ext == "pspec" => {
                         // File extension is pspec
@@ -68,6 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         )?;
 
                         pspec_data.push(format!("{mod_name}::{var_name}"));
+                        module_files.push((lang_entry.file_name().display().to_string(), var_name));
                     }
                     Some(ext) if ext == "cspec" => {
                         // File extension is cspec. It names the stack pointer
@@ -83,6 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         )?;
 
                         cspec_data.push(format!("{mod_name}::{var_name}"));
+                        module_files.push((lang_entry.file_name().display().to_string(), var_name));
                     }
 
                     // A DWARF register numbering or the language definitions.
@@ -96,12 +102,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                             r##"pub const {var_name}: &'static str = include_str!(r#"{path}"#);"##,
                             path = output_path.display()
                         )?;
+                        module_files.push((lang_entry.file_name().display().to_string(), var_name));
                     }
 
                     // No match, nothing to do
                     _ => (),
                 } // End match
             } // End language directory for loop
+            module_files.sort();
+            module_slas.sort();
+            writeln!(&mut config_vars_file, "pub const FILES: &[(&str, &str)] = &[")?;
+            for (name, var) in &module_files {
+                writeln!(&mut config_vars_file, r##"(r#"{name}"#, {var}),"##)?;
+            }
+            writeln!(&mut config_vars_file, "];")?;
+            writeln!(&mut config_vars_file, "pub const SLAS: &[(&str, &[u8])] = &[")?;
+            for (name, var) in &module_slas {
+                writeln!(&mut config_vars_file, r##"(r#"{name}"#, {var}),"##)?;
+            }
+            writeln!(&mut config_vars_file, "];")?;
             writeln!(&mut config_vars_file, r#"}}"#)?;
         } // End feature check
     } // End processor directory for loop

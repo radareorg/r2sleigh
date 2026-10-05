@@ -181,6 +181,64 @@ impl LanguageProfile {
 /// callee's own coordinates, where the transfer has already spent
 /// `stackshift` bytes on the return address, so that much is taken off to
 /// name the slot from the stack pointer entering the call.
+/// One `<language>` of a `.ldefs` file: the files that make it up, by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageDefinition {
+    pub id: String,
+    pub sla: String,
+    pub pspec: String,
+    /// Each compiler's id and specification file, in the order stated.
+    pub compilers: Vec<(String, String)>,
+    pub dwarf: Option<String>,
+}
+
+impl LanguageDefinition {
+    /// Every language a `.ldefs` file defines; an unreadable file defines none.
+    pub fn parse_all(text: &str) -> Vec<Self> {
+        let Ok(document) = roxmltree::Document::parse(text) else {
+            return Vec::new();
+        };
+        let languages = document
+            .descendants()
+            .filter(|node| node.has_tag_name("language"));
+        languages.filter_map(language).collect()
+    }
+
+    /// The specification a compiler id names.
+    pub fn compiler(&self, id: &str) -> Option<&str> {
+        self.compilers
+            .iter()
+            .find(|(compiler, _)| compiler == id)
+            .map(|(_, spec)| spec.as_str())
+    }
+}
+
+fn language(node: roxmltree::Node<'_, '_>) -> Option<LanguageDefinition> {
+    let compilers = node
+        .children()
+        .filter(|child| child.has_tag_name("compiler"))
+        .filter_map(|child| {
+            Some((
+                child.attribute("id")?.into(),
+                child.attribute("spec")?.into(),
+            ))
+        })
+        .collect();
+    let dwarf = node
+        .children()
+        .filter(|child| child.has_tag_name("external_name"))
+        .find(|child| child.attribute("tool") == Some("DWARF.register.mapping.file"))
+        .and_then(|child| child.attribute("name"))
+        .map(str::to_string);
+    Some(LanguageDefinition {
+        id: node.attribute("id")?.into(),
+        sla: node.attribute("slafile")?.into(),
+        pspec: node.attribute("processorspec")?.into(),
+        compilers,
+        dwarf,
+    })
+}
+
 /// A language's DWARF register numbering, as its `.dwarf` file states it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DwarfRegisters {
@@ -345,6 +403,26 @@ mod tests {
 
     fn parse(text: &str) -> LanguageProfile {
         LanguageProfile::parse(text).expect("parses")
+    }
+
+    #[test]
+    fn a_language_definition_names_its_files() {
+        let languages = LanguageDefinition::parse_all(
+            r#"<language_definitions>
+              <language processor="x86" id="x86:LE:64:default" slafile="x86-64.sla" processorspec="x86-64.pspec">
+                <compiler name="Visual Studio" spec="x86-64-win.cspec" id="windows"/>
+                <compiler name="gcc" spec="x86-64-gcc.cspec" id="gcc"/>
+                <external_name tool="DWARF.register.mapping.file" name="x86-64.dwarf"/>
+              </language>
+            </language_definitions>"#,
+        );
+        let [x86_64] = languages.as_slice() else {
+            panic!("one language: {languages:?}");
+        };
+        assert_eq!(x86_64.sla, "x86-64.sla");
+        assert_eq!(x86_64.compiler("gcc"), Some("x86-64-gcc.cspec"));
+        assert_eq!(x86_64.compiler("windows"), Some("x86-64-win.cspec"));
+        assert_eq!(x86_64.dwarf.as_deref(), Some("x86-64.dwarf"));
     }
 
     #[test]
