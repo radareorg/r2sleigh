@@ -54,8 +54,14 @@ preservation proof once depended on how a clobber list was spelled (M1b).
 
 ## Left
 
-- B2: r2dec's dead values from the index. Exit: `unread_defined_values` is
-  deleted; a value read only by an unobserved value is never bound.
+- B2 moves into R (doc/adr-renderer-printer.md, R2). Measured over the
+  census, r2dec's `unread_defined_values` holds 934 values that r2ssa calls
+  observed. The roots are not the cause; the obligation inventory disagrees
+  with r2dec about liveness. It marks `CALLDEF`s read only by non-argument
+  `CallUse`s as structural but used; stack-pointer adds that nothing reads as
+  `LiveObligation`; never-read values as `UnsupportedUnknown`. The inventory
+  has to own that liveness, with one checker, before r2dec can read it. Exit
+  (in R2): `unread_defined_values` is deleted.
 - B3: slots as lanes of a root at every boundary. Exit: no boundary match by
   storage equality; M1d's float lanes render (`two_units_O0g` `helper`,
   `rv_O0g` `main` and `avg`).

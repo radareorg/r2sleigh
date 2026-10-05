@@ -76,7 +76,7 @@ The program
 | Item | ADR | Done | Left |
 |------|-----|------|------|
 | **G0** Gates real | [testing](doc/testing.md) | — | the census, release A/B timing and equivalence diff are scripts in the repo and CI jobs, with a time budget on the large functions; the two clang-21 failures fixed |
-| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | — | B0 one transfer; B1 one closure; B2 r2dec's dead values from it; B3 slots as lanes of a root; B4 liveness over locations |
+| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure | B3 slots as lanes of a root; B4 liveness over locations (B2, r2dec's dead values, moved into R2: the inventory must own liveness first) |
 | **L** Layering | — | — | L1 the body walk and decoding move to r2engine (r2ssa stops depending on r2sleigh-lift); L2 `CTypeLike`/`Signedness` move to r2source (r2rewrite stops depending on r2types); L3 interproc summaries move to r2engine; L4 r2sleigh-export merges into r2sleigh-cli; L5 r2ssa's IR and facts layers as modules with a Dylint boundary |
 | **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
 | **K** One fixpoint driver | [fixpoint](doc/adr-fixpoint.md) | r2ssa | r2types' loops (with C3), r2dec's (with R) |
@@ -138,7 +138,7 @@ Order
 1. **B**: one byte relation (blocks M1d, P4, P5 and R).
 2. **L**: layering, beside B.
 3. **M** (M1d–M6), beside **F2.1–F2.5** and **Q1–Q2**.
-4. **B2** then **R1**: r2dec reads r2ssa's observation; expressions as terms.
+4. **R1**: expressions as terms.
 5. **P4**, then **P5**, then **R** (R0, R2–R4).
 6. **Q3–Q4** with **P6**, then **I**.
 7. **C2–C4**, then **P7, P8, P9, P11**, then **A**.
