@@ -90,6 +90,7 @@ Documentation
 | [doc/testing.md](doc/testing.md) | Gates and where a test goes |
 | `doc/r2il.md`, `doc/ssa.md`, `doc/decompiler.md`, `doc/types.md` | The tiers |
 | `doc/adr-*.md` | One design decision each, linked from the roadmap |
+| `doc/drafts/` | Designs not yet adopted |
 
 Requirements
 ------------

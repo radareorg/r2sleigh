@@ -29,6 +29,13 @@ stops retrying when a check fails.
 5. **No retries.** A render that cannot place a value refuses that value with
    a residual. It does not re-run the plan without it.
 
+6. **It absorbs three ADRs as invariants.** The partition comes before
+   inlining (doc/adr-partition-first.md, decisions 1–4, 6–7; decision 5's
+   rounds are what item 1 removes); every access has one spelling from facts
+   (doc/adr-access-syntax.md); every effect survives exactly once with one
+   typed owner (doc/adr-semantic-preservation-kernel.md). When R lands, those
+   three files are folded into this one and deleted.
+
 ## Done
 
 Nothing yet.

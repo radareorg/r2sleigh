@@ -1,0 +1,57 @@
+# ADR: one byte relation
+
+Status: proposed (ROADMAP B, before M1d and P4)
+
+## Context
+
+Which bytes of which value an operation reads and writes is answered three
+times, each with its own per-operation transfer: the demand pass
+(`demand.rs::transfer`, backward, rooted at the return registers), program
+observation (`deadphi.rs::observed_input_bytes`, backward, rooted at the
+obligations and live-out values) and written lanes (`lanes.rs::transfer`,
+forward). r2dec answers a fourth time (`binding_plan/rules.rs::
+unread_defined_values`, whole values, not transitive). Boundaries compare
+storages with `==`, so a slot narrower than the register family's program
+root never matches.
+
+Each disagreement has cost a regression: a lane-sized float slot (`XMM0_Qa`)
+matches no `CALLDEF` of `XMM0` (M1d); r2dec binds a value r2ssa proved
+unobserved and then asks for an operand the plan elided; a callee's
+preservation proof once depended on how a clobber list was spelled (M1b).
+
+## Decision
+
+- **One relation.** `r2ssa::bytes` states, per operation, which input bytes
+  each output byte depends on and how (copied, extended, combined, filled).
+  Backward demand and forward classification are two readings of it; no pass
+  has a transfer of its own.
+- **One closure, named roots.** Demand and observation are the same backward
+  closure over the relation from different roots (return registers;
+  obligations and live-out values). The result is an index of the sealed
+  function (doc/adr-one-ir.md): an observed `ByteMask` per value, computed
+  once.
+- **A slot is a lane of a root.** Every boundary slot (parameter, call
+  argument, call result, return) is `(root storage, byte range)`, matched by
+  containment against the program root's definition. The lane becomes the
+  logical value's carrier; nothing compares storages by equality.
+- **Consumers read the index.** Liveness, dead-merge pruning, the demand
+  release, written widths, parameter widths (`cover(demanded)`) and r2dec's
+  dead values read it. `unread_defined_values` is deleted.
+- **Checked against the machine.** The relation is checked against
+  `r2il::eval`: exhaustively at 8 and 16 bits, under Kani at 32 and 64.
+- **Cost.** O(ops × W) once per sealed function, W the widest value in bytes;
+  O(1) lookup.
+
+## Left
+
+- B0: `r2ssa::bytes` with its eval check; `demand.rs`, `deadphi.rs` and
+  `lanes.rs` read it. Exit: their three transfers are deleted; the census is
+  byte-identical.
+- B1: one closure index for demand and observation. Exit: `Demand` and
+  `ProvenProgramObservations` are two root sets over one computation.
+- B2: r2dec's dead values from the index. Exit: `unread_defined_values` is
+  deleted; a value read only by an unobserved value is never bound.
+- B3: slots as lanes of a root at every boundary. Exit: no boundary match by
+  storage equality; M1d's float lanes render (`two_units_O0g` `helper`,
+  `rv_O0g` `main` and `avg`).
+- B4: liveness over locations reads it (F2.2). Exit: #47 and #50 closed.

@@ -21,6 +21,9 @@ structural reasons (a hidden cursor, a turn per hop, text to parse, empty
 results that look like errors, unbounded output, guesses that look proven),
 and no renderer fixes those. Success is an agent answering a real question in
 one or two calls, with confidence on every field and the ability to ask why.
+The agent surface itself (ROADMAP A) is built last, on purpose: it is a thin
+layer over the query database (Q) and provenance (C), and built before them it
+would be a second API to delete.
 
 Non-goals
 ---------
@@ -38,7 +41,7 @@ Topology
 - **The engine**: IL, analyses, fact database and decompiler in one process,
   with no serialization boundary inside it.
 - **The debugger**, if built, is a separate process: it needs privileges and
-  the debuggee can crash it ([debugger.md](debugger.md)).
+  the debuggee can crash it ([drafts/debugger.md](drafts/debugger.md), not adopted).
 - **Frontends** (`r2s`, its visual mode, an agent surface) are clients of a
   typed engine API; the engine never formats output for any of them, the
   discipline radare2's `libr/core` lost.

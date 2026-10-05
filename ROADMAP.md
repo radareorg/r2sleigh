@@ -63,6 +63,10 @@ Decisions
 | D13 | One query database ([adr-query-database](doc/adr-query-database.md)) | Q |
 | D14 | One frame model ([adr-frame-model](doc/adr-frame-model.md)) | P4 |
 | D15 | One machine profile from the trusted Sleigh bundle; no architecture-name match below the lifter ([adr-machine-profile](doc/adr-machine-profile.md)) | M |
+| D16 | One byte relation: every pass that asks which bytes an operation reads or writes reads one relation, and a boundary slot is a lane of a root ([adr-byte-relation](doc/adr-byte-relation.md)) | B |
+| D17 | No new crates: a layer boundary inside a crate is a module boundary enforced by a Dylint; the IR depends on neither the lifter nor type inference | L |
+
+Open: the three patched git forks (`libsla`, `libsla-sys`, `sleigh-config`) are upstreamed or vendored. M0's rest needs `.ldefs` and `.dwarf` from the bundle.
 
 The program
 -----------
@@ -71,19 +75,22 @@ The program
 
 | Item | ADR | Done | Left |
 |------|-----|------|------|
+| **G0** Gates real | [testing](doc/testing.md) | — | the census, release A/B timing and equivalence diff are scripts in the repo and CI jobs, with a time budget on the large functions; the two clang-21 failures fixed |
+| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | — | B0 one transfer; B1 one closure; B2 r2dec's dead values from it; B3 slots as lanes of a root; B4 liveness over locations |
+| **L** Layering | — | — | L1 the body walk and decoding move to r2engine (r2ssa stops depending on r2sleigh-lift); L2 `CTypeLike`/`Signedness` move to r2source (r2rewrite stops depending on r2types); L3 interproc summaries move to r2engine; L4 r2sleigh-export merges into r2sleigh-cli; L5 r2ssa's IR and facts layers as modules with a Dylint boundary |
 | **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
 | **K** One fixpoint driver | [fixpoint](doc/adr-fixpoint.md) | r2ssa | r2types' loops (with C3), r2dec's (with R) |
 | **F2** One IR, indexed once | [one-ir](doc/adr-one-ir.md) | F2.0; F2.1 and F2.2 in part (dense dominators, loops, liveness once); F2.3; F2.6 (entity-keyed-map Dylint fatal in r2ssa and r2types, in CI) | F2.1 `FunctionIndex` on `Sealed`; F2.2 one byte-granular liveness model (#47, #50); F2.3's name-keyed readers deleted; F2.4 builder with incremental def-use (one graph build); F2.5 projections as indexes |
-| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed by the lifter; M1a slots, M1b call effect, M1c name/red zone/variadic tail from the profile and cited ABI rows | M0 rest (`.ldefs` selection, `.sla` lanes, `.pspec` tracked values, `.dwarf` numbers); M1d float slots as lanes of the program root, then delete r2abi `Conventions`; M2–M5 delete the name tables in r2ssa, r2types, r2dec, r2image/r2engine; M6 RISC-V end to end |
+| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed by the lifter; M1a slots, M1b call effect, M1c name/red zone/variadic tail from the profile and cited ABI rows | M0 rest (`.ldefs` selection, `.sla` lanes, `.pspec` tracked values, `.dwarf` numbers; needs the forks decision); M1d float slots as lanes of a root (after B3), then delete r2abi `Conventions`; M2–M5 delete the name tables in r2ssa, r2types, r2dec, r2image/r2engine; M6 RISC-V end to end |
 | **Q** One query database | [query-database](doc/adr-query-database.md) | Q0 the database (red-green, a random-write session equals a fresh open); Q1 in part (names, import stubs) | Q2 decode/walk/lift/seal per function; Q3 discovery survey, entry modes, summaries; Q4 references and renderings; the caches and `Revision` deleted |
 | **P4** One frame model | [frame-model](doc/adr-frame-model.md) | — | one partition, one escape analysis, promotion as an SSA rewrite, canary under its premise; `afv` agrees with `pdd` |
-| **R** Renderer as a printer | [renderer-printer](doc/adr-renderer-printer.md) | — | r2dec reads only sealed facts; journal, binding-plan fixpoint and retries deleted |
+| **R** Renderer as a printer | [renderer-printer](doc/adr-renderer-printer.md) | — | R1 terms may start before P4; r2dec reads only sealed facts; journal, binding-plan fixpoint and retries deleted; absorbs partition-first's decision 5, access-syntax and the semantic-kernel principles as its invariants |
 
 ### Analysis
 
 | Item | Done | Left (exit) |
 |------|------|-------------|
-| **PE** Written-lane result widths ([written-lanes](doc/adr-written-lanes.md)) | result widths | demand pass and `lanes` one relation (an F2 index); parameter widths as `cover(demanded)`; a per-operation proof harness against `r2il::eval`/Kani in the quality gate |
+| **PE** Written-lane result widths ([written-lanes](doc/adr-written-lanes.md)) | result widths | the rest is B (one relation, `cover(demanded)`, the eval/Kani check) |
 | **P1.7** Entry lanes are the caller's | done | — |
 | **C** Provenance ([provenance](doc/adr-provenance.md)) | C0; C1 types and the format parameter | C1 r2dec reads the grade (`from_source_signature` deleted); C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
 | **P5** Values as an index | — | XMM lane noise gone; immutable loads fold |
@@ -117,18 +124,25 @@ The program
 | Pinned containers; compiled coverage cells as pinned bytes | gate results independent of the runner |
 | `PipelineTests`/`SelfTestSuite` stall on hosted runners | both gate again |
 | arm64 equivalence in CI (D6) | `tests/equiv` reports both architectures |
-| Census as a CI job | a structural PR shows its census diff |
+| macOS arm64 equivalence | Mach-O renderings run beside their originals |
+| Stage merges of PR #67 to master | finished items land on master |
+| "Where this stands" generated from CI artifacts | no hand-typed status |
+| Ratchet on file length (largest today 5.2k lines) | no file grows past the cap |
 | D11 Dylints: unbudgeted loops, caches outside Q | fatal in r2engine after Q |
 | Hygiene: `long_comments` ratchet (3833), dead code | comments one or two lines; no unreferenced items |
 
 Order
 -----
 
-1. **M** (M1d–M6), beside **F2.1–F2.5** and **Q1–Q2**.
-2. **P4**, then **P5**, then **R**.
-3. **Q3–Q4** with **P6**, then **I**.
-4. **C2–C4**, then **P7, P8, P9, P11**.
-5. **Surface**, interleaved where nothing structural blocks it.
+0. **G0**: the gates real.
+1. **B**: one byte relation (blocks M1d, P4, P5 and R).
+2. **L**: layering, beside B.
+3. **M** (M1d–M6), beside **F2.1–F2.5** and **Q1–Q2**.
+4. **B2** then **R1**: r2dec reads r2ssa's observation; expressions as terms.
+5. **P4**, then **P5**, then **R** (R0, R2–R4).
+6. **Q3–Q4** with **P6**, then **I**.
+7. **C2–C4**, then **P7, P8, P9, P11**, then **A**.
+8. **Surface**, interleaved where nothing structural blocks it.
 
 Every item runs beside what it replaces and deletes it when the gates agree;
 deletes more than it adds or says why; leaves the census byte-identical or

@@ -3,7 +3,7 @@ The debugger (design)
 
 Draft of 2026-10-04, not yet on the roadmap. **No debugger code exists.** This
 page keeps the decisions and the build order; the full derivations and the
-research notes are in git history (`f531b719:doc/debugger.md`). If adopted, it
+research notes are in git history (`f531b719:doc/debugger.md`, before the move to `doc/drafts/`). If adopted, it
 starts only after `ROADMAP.md`'s Q, P4, R and M land, because until then it
 would bind to register names and a renderer that are being replaced.
 
