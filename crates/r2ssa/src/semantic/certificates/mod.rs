@@ -1120,7 +1120,7 @@ pub(crate) fn collect_prepared_function_certificates(
             // The arguments are certified wherever they were proved, whatever became of the results.
             let complete_arguments = boundary.filter(|boundary| boundary.arguments_complete);
             let (mut argument_certificates, declared_stack_arguments) = complete_arguments
-                .map(|boundary| exact_register_call_arguments(boundary, graph))
+                .map(|boundary| exact_register_call_arguments(boundary, graph, machine_context))
                 .unwrap_or_default();
             // A stack argument the prototype declared: the boundary proved
             // which value reaches which coordinate, and the outgoing-store
@@ -1355,13 +1355,23 @@ pub(crate) fn collect_prepared_function_certificates(
     }
 }
 
-/// Whether a value is what a register slot holds: its own storage, an entry lane's projection, or a lane inserted there (B3).
-fn holds(graph: &SsaGraph, value: &crate::graph::GraphValue, storage: CanonicalStorageId) -> bool {
-    if value.canonical_storage == Some(storage)
-        || graph.formal_projection_storage(value.id) == Some(storage)
+/// Whether a value is what a register slot holds: its storage, a root whose low lane it is, an entry lane's projection, or a lane inserted there (B3).
+fn holds(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    value: &crate::graph::GraphValue,
+    storage: CanonicalStorageId,
+) -> bool {
+    if let Some(own) = value.canonical_storage
+        && own.space == CanonicalStorageSpace::Register
     {
+        return own == storage
+            || machine_context.is_some_and(|context| context.is_low_lane_of(storage, own));
+    }
+    if graph.formal_projection_storage(value.id) == Some(storage) {
         return true;
     }
+    // A temporary names no register: it holds the slot where an insert puts it there.
     graph.use_sites(value.id).iter().any(|site| {
         let Some(inst) = graph.inst(site.inst) else {
             return false;
@@ -1389,6 +1399,7 @@ fn holds(graph: &SsaGraph, value: &crate::graph::GraphValue, storage: CanonicalS
 pub(crate) fn exact_register_call_arguments(
     boundary: &SourceCallBoundaryFact,
     graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
 ) -> (Vec<CallArgumentCertificate>, Vec<BoundaryStackArgument>) {
     macro_rules! give_up {
         ($reason:literal $(, $arg:expr)* $(,)?) => {{
@@ -1431,7 +1442,7 @@ pub(crate) fn exact_register_call_arguments(
         let Some(graph_value) = graph.value(value) else {
             give_up!("slot {} value {:?} is not in the graph", index, value);
         };
-        if !holds(graph, graph_value, storage) {
+        if !holds(graph, machine_context, graph_value, storage) {
             give_up!(
                 "slot {} wants {:?} but {:?} is at {:?}",
                 index,

@@ -410,7 +410,10 @@ impl ValueLiveness {
                 steps += 1;
                 if steps > relocations.len() {
                     debug_assert!(false, "relocations form a cycle through {inst:?}");
-                    r2il::refusal_evidence!("liveness", "relocations form a cycle through {inst:?}");
+                    r2il::refusal_evidence!(
+                        "liveness",
+                        "relocations form a cycle through {inst:?}"
+                    );
                     break;
                 }
             }
