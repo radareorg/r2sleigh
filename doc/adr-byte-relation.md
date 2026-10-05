@@ -56,6 +56,11 @@ preservation proof once depended on how a clobber list was spelled (M1b).
   boundary (`root_slot_for_name`); call results, the reaching-value search
   and the return certificate match a slot against the program root whose low
   lane it is (`is_low_lane_of`). M1d's float lanes render.
+- B3, declared floats: the call-argument certificate, the entry lookup, entry
+  lane projections (minted for a call's argument lanes too), the reaching
+  walk's merges and root writes, and AArch64's float slot (narrowed to the
+  value's low lane) match by lane; a literal passes the return gate as a
+  temporary does. `float_calls_*`, `float_returns_*` and review.c's `avg`.
 
 ## Left
 
@@ -67,6 +72,12 @@ preservation proof once depended on how a clobber list was spelled (M1b).
   `LiveObligation`; never-read values as `UnsupportedUnknown`. The inventory
   has to own that liveness, with one checker, before r2dec can read it. Exit
   (in R2): `unread_defined_values` is deleted.
-- B3 rest: parameters and call arguments matched the same way, where a lane
-  slot first meets them. Exit: no boundary match by storage equality.
-- B4: liveness over locations reads it (F2.2). Exit: #47 and #50 closed.
+- B3 rest: a recovered interface's float slots (with P7, ROADMAP.md);
+  declared ones match by lane (above). Exit: no boundary match by storage
+  equality where a slot is a lane.
+- B4, measured (2026-10-05): over the census no loop header merges two
+  overlapping storages, so byte-granular liveness has no instance yet; r2dec's
+  relocated recompute costs 1.5–5 ms of a 2–3 s `pdd` on the large 0pack and
+  pumasim cases, repeated by R's retries. #50's first gate reads
+  `liveout::is_read`; its third is R2's. Exit: a failing case, or #47 and
+  #50 closed when R2 lands.
