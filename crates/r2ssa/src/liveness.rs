@@ -402,12 +402,15 @@ impl ValueLiveness {
         content: ValueContent,
         ignored_reads: &BTreeSet<UseSite>,
     ) -> Self {
+        // Each fold moves a read to a later reader, so a chain has at most one step per fold.
         let relocate = |mut inst: InstId| {
             let mut steps = 0;
             while let Some(next) = relocations.get(inst) {
                 inst = *next;
                 steps += 1;
                 if steps > relocations.len() {
+                    debug_assert!(false, "relocations form a cycle through {inst:?}");
+                    r2il::refusal_evidence!("liveness", "relocations form a cycle through {inst:?}");
                     break;
                 }
             }
