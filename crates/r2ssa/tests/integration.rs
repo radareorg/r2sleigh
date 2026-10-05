@@ -72,7 +72,7 @@ mod tests {
         let bytes = pad_hex("55"); // push rbp
 
         let block = disasm.lift(&bytes, 0x1000).expect("Failed to lift");
-        let ssa_block = to_ssa(&block, &disasm);
+        let ssa_block = to_ssa(&block, &|vn| disasm.register_spelling(vn).map(String::from));
 
         // Verify we got some operations
         assert!(!ssa_block.is_empty(), "SSA block should not be empty");
@@ -96,7 +96,7 @@ mod tests {
         let bytes = pad_hex("4889d8"); // mov rax, rbx
 
         let block = disasm.lift(&bytes, 0x1000).expect("Failed to lift");
-        let ssa_block = to_ssa(&block, &disasm);
+        let ssa_block = to_ssa(&block, &|vn| disasm.register_spelling(vn).map(String::from));
 
         // Verify we got operations
         assert!(!ssa_block.is_empty(), "SSA block should not be empty");
@@ -122,7 +122,7 @@ mod tests {
         let bytes = pad_hex("4801d8"); // add rax, rbx
 
         let block = disasm.lift(&bytes, 0x1000).expect("Failed to lift");
-        let ssa_block = to_ssa(&block, &disasm);
+        let ssa_block = to_ssa(&block, &|vn| disasm.register_spelling(vn).map(String::from));
 
         // Verify we got operations
         assert!(!ssa_block.is_empty(), "SSA block should not be empty");
@@ -152,7 +152,7 @@ mod tests {
         let bytes = pad_hex("4801d8"); // add rax, rbx
 
         let block = disasm.lift(&bytes, 0x1000).expect("Failed to lift");
-        let ssa_block = to_ssa(&block, &disasm);
+        let ssa_block = to_ssa(&block, &|vn| disasm.register_spelling(vn).map(String::from));
 
         let info = def_use(&ssa_block);
 
@@ -171,7 +171,7 @@ mod tests {
         let bytes = pad_hex("48ffc0");
 
         let block = disasm.lift(&bytes, 0x1000).expect("Failed to lift");
-        let ssa_block = to_ssa(&block, &disasm);
+        let ssa_block = to_ssa(&block, &|vn| disasm.register_spelling(vn).map(String::from));
 
         fn is_rax_family(name: &str) -> bool {
             matches!(

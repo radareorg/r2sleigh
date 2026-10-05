@@ -1,12 +1,11 @@
 //! Recursive-descent body lift, from bytes at an address.
 
-#![cfg(feature = "sleigh-config")]
-
 use r2sleigh_lift::Disassembler;
 use std::collections::BTreeMap;
 
-use r2ssa::body::{Body, UnresolvedReason, lift_body};
+use r2engine::body::{Body, UnresolvedReason, lift_body};
 use r2ssa::cfg::CFG;
+use r2ssa::{EntryAffineForm, TripCount, TripRefusal, ValueId};
 
 const BASE: u64 = 0x1000;
 
@@ -22,12 +21,9 @@ fn lifted(body: &Body) -> Vec<r2il::R2ILBlock> {
 }
 
 fn x86_64() -> Disassembler {
-    Disassembler::from_sla(
-        sleigh_config::processor_x86::SLA_X86_64,
-        sleigh_config::processor_x86::PSPEC_X86_64,
-        "x86-64",
-    )
-    .expect("x86-64 disassembler")
+    r2sleigh_lift::embedded_machine("x86-64")
+        .expect("x86-64 is embedded")
+        .disasm
 }
 
 /// One run of bytes mapped at `BASE`, in a program that declares no other
@@ -37,7 +33,7 @@ struct Fixture {
     entries: &'static [u64],
 }
 
-impl r2ssa::body::Program for Fixture {
+impl r2engine::body::Program for Fixture {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
@@ -45,15 +41,17 @@ impl r2ssa::body::Program for Fixture {
     }
 
     /// The bytes are one run of code.
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         let end = BASE + self.bytes.len() as u64;
-        (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
-            start: BASE,
-            end,
-            file_end: end,
-            execute: true,
-            write: false,
-        })
+        (BASE..end)
+            .contains(&vaddr)
+            .then_some(r2engine::body::Region {
+                start: BASE,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
@@ -191,13 +189,13 @@ const INTO_DATA: &[u8] = &[
 /// `INTO_DATA` with its code ending at 0x1002 and the rest mapped where nothing runs.
 struct DataAfterCode;
 
-impl r2ssa::body::Program for DataAfterCode {
+impl r2engine::body::Program for DataAfterCode {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        r2ssa::body::Program::read(&reader(INTO_DATA), vaddr, max)
+        r2engine::body::Program::read(&reader(INTO_DATA), vaddr, max)
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
-        let region = |start, end, execute| r2ssa::body::Region {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let region = |start, end, execute| r2engine::body::Region {
             start,
             end,
             file_end: end,
@@ -295,4 +293,108 @@ fn a_run_keeps_the_decoder_context_that_predicates_it() {
             .any(|op| matches!(op, r2il::R2ILOp::Select { .. })),
         "{ops:?}"
     );
+}
+
+/// Code mapped at `base`, in a program that declares no other function.
+struct Mapped {
+    base: u64,
+    bytes: &'static [u8],
+}
+
+impl r2engine::body::Program for Mapped {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(self.base)?).ok()?;
+        let slice = self.bytes.get(offset..).filter(|slice| !slice.is_empty())?;
+        Some(slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = self.base + self.bytes.len() as u64;
+        (self.base..end)
+            .contains(&vaddr)
+            .then_some(r2engine::body::Region {
+                start: self.base,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+}
+
+/// The function the bytes at `entry` begin, walked and prepared.
+fn walked(code: Mapped, entry: u64) -> r2ssa::SsaArtifact {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 is embedded");
+    let body = lift_body(entry, &machine.disasm, &code, &BTreeMap::new()).expect("the body lifts");
+    r2ssa::SsaArtifact::for_decompile(&lifted(&body), Some(&machine.arch)).expect("an artifact")
+}
+
+/// Each loop's trip count, once its stated trips recount the same from the graph.
+fn trips_of(artifact: &r2ssa::SsaArtifact) -> Vec<Result<r2ssa::TripCount, r2ssa::TripRefusal>> {
+    let loops = artifact.structured().loops.values();
+    let checked = loops.inspect(|fact| assert!(fact.validate_trips(artifact)));
+    checked.map(|fact| Ok(fact.trips.clone()?.count)).collect()
+}
+
+/// `fnv1a32` from `hashes_gcc_x64_O2`, `0x401330` to `0x401366`.
+const FNV1A32: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x85, 0xf6, 0x74, 0x27, 0x48, 0x01, 0xfe, 0xb8, 0xc5, 0x9d, 0x1c,
+    0x81, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xb6, 0x17, 0x48, 0x83, 0xc7, 0x01, 0x31,
+    0xd0, 0x69, 0xc0, 0x93, 0x01, 0x00, 0x01, 0x48, 0x39, 0xfe, 0x75, 0xec, 0xc3, 0x0f, 0x1f, 0x00,
+    0xb8, 0xc5, 0x9d, 0x1c, 0x81, 0xc3,
+];
+
+#[test]
+fn a_pointer_walked_to_its_end_runs_its_length_once_the_guard_excludes_zero() {
+    let code = || Mapped {
+        base: 0x401330,
+        bytes: FNV1A32,
+    };
+    let artifact = walked(code(), 0x401330);
+    let length = artifact
+        .graph()
+        .values
+        .iter()
+        .find(|value| value.var.to_string() == "RSI_0")
+        .expect("rsi at entry")
+        .id;
+    let form = EntryAffineForm {
+        width_bits: 64,
+        terms: BTreeMap::from([(length, 1)]),
+        constant: 0,
+    };
+    let [
+        Ok(TripCount::Symbolic {
+            form: counted,
+            guard,
+        }),
+    ] = &trips_of(&artifact)[..]
+    else {
+        panic!("one symbolic count");
+    };
+    assert_eq!(*counted, form);
+    // The guard is `test rsi, rsi; je` taken not equal, on the edge into the preheader.
+    let (block, assumption) = (guard.block, &guard.assumption);
+    assert_eq!(
+        (block, assumption.predecessor, assumption.truth),
+        (0x401339, 0x401330, false)
+    );
+    // The test is `cmp rsi, rdi` after `add rdi, 1`: the pointer's update against the end.
+    let loop_fact = artifact
+        .structured()
+        .loops
+        .values()
+        .next()
+        .expect("the loop");
+    let test = loop_fact.trips.as_ref().expect("a count").test;
+    let name = |value: ValueId| artifact.graph().value(value).map(|v| v.var.to_string());
+    let tested = (name(test.induction), name(test.bound), test.reads_update);
+    assert_eq!(tested, (Some("RDI_1".into()), Some("RSI_1".into()), true));
+    // Entered past `test rsi, rsi; je`, nothing says the length is not zero, which is 2^64 trips.
+    let unguarded = walked(code(), 0x401339);
+    assert_eq!(trips_of(&unguarded), [Err(TripRefusal::ZeroNotExcluded)]);
 }

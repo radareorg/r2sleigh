@@ -303,7 +303,7 @@ const IT_BLOCK: [u8; 8] = [0x00, 0x28, 0x08, 0xbf, 0x01, 0x20, 0x70, 0x47];
 /// The bytes of one function and nothing else, as the body walk reads them.
 struct Walked(&'static [u8]);
 
-impl r2ssa::body::Program for Walked {
+impl r2engine::body::Program for Walked {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(ARM)?).ok()?;
         let rest = self.0.get(offset..).filter(|rest| !rest.is_empty())?;
@@ -311,15 +311,17 @@ impl r2ssa::body::Program for Walked {
     }
 
     /// The function's bytes are one run of code.
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         let end = ARM + self.0.len() as u64;
-        (ARM..end).contains(&vaddr).then_some(r2ssa::body::Region {
-            start: ARM,
-            end,
-            file_end: end,
-            execute: true,
-            write: false,
-        })
+        (ARM..end)
+            .contains(&vaddr)
+            .then_some(r2engine::body::Region {
+                start: ARM,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
     }
 
     fn is_entry(&self, _vaddr: u64) -> bool {
@@ -362,7 +364,7 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
     );
 
     // The walk's lift of the guarded instruction is the continuing decode's.
-    let body = r2ssa::body::lift_body(
+    let body = r2engine::body::lift_body(
         ARM,
         &thumb.disasm,
         &Walked(&IT_BLOCK),

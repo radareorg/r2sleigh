@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
-use r2sleigh_lift::Disassembler;
 use serde::Serialize;
 
 use crate::arena::{OpArena, OpId, OpOrigin, Pass, local_id};
@@ -484,11 +483,11 @@ impl<V> std::ops::Deref for BlockMut<'_, V> {
 ///
 /// # Arguments
 /// * `block` - The r2il block to convert
-/// * `disasm` - Disassembler for resolving varnode names
+/// * `spell` - the register's name, where the lifter names it
 ///
 /// # Returns
 /// An SSA block with versioned variables
-pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
+pub fn to_ssa(block: &R2ILBlock, spell: Spelling<'_>) -> SSABlock {
     let mut ctx = SSAContext::new();
     let mut ssa_block = SSABlock::new(block.addr, block.size);
 
@@ -496,7 +495,7 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
         let instruction = block
             .op_metadata(op_index)
             .and_then(|metadata| metadata.instruction_addr);
-        let ssa_op = convert_op(op, instruction, disasm, &mut ctx);
+        let ssa_op = convert_op(op, instruction, spell, &mut ctx);
         ctx.commit_deferred_versions();
         ssa_block.push(ssa_op);
     }
@@ -504,14 +503,17 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
     ssa_block
 }
 
+/// A register's name, where the lift names it (`Disassembler::register_spelling`).
+pub type Spelling<'a> = &'a dyn Fn(&Varnode) -> Option<String>;
+
 /// Convert a varnode to an SSA variable name.
 ///
 /// For registers:
 /// - If a name is found, use the name directly (e.g., "rax", "cf")
 /// - If no name is found, use "reg:offset" fallback (e.g., "reg:10")
-fn varnode_to_name(vn: &Varnode, disasm: &Disassembler) -> &'static InternedName {
+fn varnode_to_name(vn: &Varnode, spell: Spelling<'_>) -> &'static InternedName {
     match vn.space {
-        SpaceId::Register => match disasm.register_spelling(vn) {
+        SpaceId::Register => match spell(vn) {
             Some(name) => intern_ascii_lowercase(&name),
             None => intern_fmt(format_args!("reg:{:x}", vn.offset)),
         },
@@ -526,8 +528,8 @@ fn varnode_to_name(vn: &Varnode, disasm: &Disassembler) -> &'static InternedName
 }
 
 /// Convert a varnode to an SSA variable for reading (uses current version).
-fn read_var(vn: &Varnode, disasm: &Disassembler, ctx: &SSAContext) -> SSAVar {
-    let name = varnode_to_name(vn, disasm);
+fn read_var(vn: &Varnode, spell: Spelling<'_>, ctx: &SSAContext) -> SSAVar {
+    let name = varnode_to_name(vn, spell);
     let version = ctx.current_version(name);
     SSAVar::from_interned(name, version, vn.size)
 }
@@ -536,8 +538,8 @@ fn read_var(vn: &Varnode, disasm: &Disassembler, ctx: &SSAContext) -> SSAVar {
 ///
 /// The new version remains invisible to reads until the current operation is
 /// fully converted.
-fn write_var(vn: &Varnode, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAVar {
-    let name = varnode_to_name(vn, disasm);
+fn write_var(vn: &Varnode, spell: Spelling<'_>, ctx: &mut SSAContext) -> SSAVar {
+    let name = varnode_to_name(vn, spell);
     let version = ctx.defer_version(name);
     SSAVar::from_interned(name, version, vn.size)
 }
@@ -546,38 +548,38 @@ fn write_var(vn: &Varnode, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAVa
 fn convert_op(
     op: &R2ILOp,
     instruction: Option<u64>,
-    disasm: &Disassembler,
+    spell: Spelling<'_>,
     ctx: &mut SSAContext,
 ) -> SSAOp {
     use R2ILOp::*;
 
     match op {
         Copy { dst, src } => SSAOp::Copy {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Load { dst, space, addr } => SSAOp::Load {
-            dst: write_var(dst, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
             space: *space,
-            addr: read_var(addr, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
         },
 
         Store { space, addr, val } => SSAOp::Store {
             space: *space,
-            addr: read_var(addr, disasm, ctx),
-            val: read_var(val, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
+            val: read_var(val, spell, ctx),
         },
         BlockTransfer(transfer) => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
             space: transfer.space,
             kind: transfer.kind,
-            destination: read_var(&transfer.destination, disasm, ctx),
-            source: read_var(&transfer.source, disasm, ctx),
-            count: read_var(&transfer.count, disasm, ctx),
-            direction: read_var(&transfer.direction, disasm, ctx),
+            destination: read_var(&transfer.destination, spell, ctx),
+            source: read_var(&transfer.source, spell, ctx),
+            count: read_var(&transfer.count, spell, ctx),
+            direction: read_var(&transfer.direction, spell, ctx),
             element_size: transfer.element_size,
             // Written after every read, as the fields are evaluated in order.
-            answer: transfer.answer.as_ref().map(|v| write_var(v, disasm, ctx)),
+            answer: transfer.answer.as_ref().map(|v| write_var(v, spell, ctx)),
         })),
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
@@ -588,9 +590,9 @@ fn convert_op(
             addr,
             ordering,
         } => SSAOp::LoadLinked {
-            dst: write_var(dst, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
             space: *space,
-            addr: read_var(addr, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
             ordering: *ordering,
         },
         StoreConditional {
@@ -600,10 +602,10 @@ fn convert_op(
             val,
             ordering,
         } => SSAOp::StoreConditional {
-            result: result.as_ref().map(|v| write_var(v, disasm, ctx)),
+            result: result.as_ref().map(|v| write_var(v, spell, ctx)),
             space: *space,
-            addr: read_var(addr, disasm, ctx),
-            val: read_var(val, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
+            val: read_var(val, spell, ctx),
             ordering: *ordering,
         },
         AtomicCAS {
@@ -614,11 +616,11 @@ fn convert_op(
             replacement,
             ordering,
         } => SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
-            dst: write_var(dst, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
             space: *space,
-            addr: read_var(addr, disasm, ctx),
-            expected: read_var(expected, disasm, ctx),
-            replacement: read_var(replacement, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
+            expected: read_var(expected, spell, ctx),
+            replacement: read_var(replacement, spell, ctx),
             ordering: *ordering,
         })),
         LoadGuarded {
@@ -628,10 +630,10 @@ fn convert_op(
             guard,
             ordering,
         } => SSAOp::LoadGuarded {
-            dst: write_var(dst, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
             space: *space,
-            addr: read_var(addr, disasm, ctx),
-            guard: read_var(guard, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
+            guard: read_var(guard, spell, ctx),
             ordering: *ordering,
         },
         StoreGuarded {
@@ -642,339 +644,339 @@ fn convert_op(
             ordering,
         } => SSAOp::StoreGuarded {
             space: *space,
-            addr: read_var(addr, disasm, ctx),
-            val: read_var(val, disasm, ctx),
-            guard: read_var(guard, disasm, ctx),
+            addr: read_var(addr, spell, ctx),
+            val: read_var(val, spell, ctx),
+            guard: read_var(guard, spell, ctx),
             ordering: *ordering,
         },
 
         IntAdd { dst, a, b } => SSAOp::IntAdd {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSub { dst, a, b } => SSAOp::IntSub {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntMult { dst, a, b } => SSAOp::IntMult {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntDiv { dst, a, b } => SSAOp::IntDiv {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSDiv { dst, a, b } => SSAOp::IntSDiv {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntRem { dst, a, b } => SSAOp::IntRem {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSRem { dst, a, b } => SSAOp::IntSRem {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntNegate { dst, src } => SSAOp::IntNegate {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         IntCarry { dst, a, b } => SSAOp::IntCarry {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSCarry { dst, a, b } => SSAOp::IntSCarry {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSBorrow { dst, a, b } => SSAOp::IntSBorrow {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntAnd { dst, a, b } => SSAOp::IntAnd {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntOr { dst, a, b } => SSAOp::IntOr {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntXor { dst, a, b } => SSAOp::IntXor {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntNot { dst, src } => SSAOp::IntNot {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         IntLeft { dst, a, b } => SSAOp::IntLeft {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntRight { dst, a, b } => SSAOp::IntRight {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSRight { dst, a, b } => SSAOp::IntSRight {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntEqual { dst, a, b } => SSAOp::IntEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntNotEqual { dst, a, b } => SSAOp::IntNotEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntLess { dst, a, b } => SSAOp::IntLess {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSLess { dst, a, b } => SSAOp::IntSLess {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntLessEqual { dst, a, b } => SSAOp::IntLessEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntSLessEqual { dst, a, b } => SSAOp::IntSLessEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         IntZExt { dst, src } => SSAOp::IntZExt {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         IntSExt { dst, src } => SSAOp::IntSExt {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         BoolNot { dst, src } => SSAOp::BoolNot {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         BoolAnd { dst, a, b } => SSAOp::BoolAnd {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         BoolOr { dst, a, b } => SSAOp::BoolOr {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         BoolXor { dst, a, b } => SSAOp::BoolXor {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         Piece { dst, hi, lo } => SSAOp::Piece {
-            dst: write_var(dst, disasm, ctx),
-            hi: read_var(hi, disasm, ctx),
-            lo: read_var(lo, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            hi: read_var(hi, spell, ctx),
+            lo: read_var(lo, spell, ctx),
         },
 
         Subpiece { dst, src, offset } => SSAOp::Subpiece {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
             offset: *offset,
         },
 
         PopCount { dst, src } => SSAOp::PopCount {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Lzcount { dst, src } => SSAOp::Lzcount {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Branch { target } => SSAOp::Branch {
-            target: read_var(target, disasm, ctx),
+            target: read_var(target, spell, ctx),
             instruction,
         },
 
         CBranch { target, cond } => SSAOp::CBranch {
-            target: read_var(target, disasm, ctx),
-            cond: read_var(cond, disasm, ctx),
+            target: read_var(target, spell, ctx),
+            cond: read_var(cond, spell, ctx),
         },
 
         BranchInd { target } => SSAOp::BranchInd {
-            target: read_var(target, disasm, ctx),
+            target: read_var(target, spell, ctx),
             instruction,
         },
 
         Call { target } => SSAOp::Call {
-            target: read_var(target, disasm, ctx),
+            target: read_var(target, spell, ctx),
             instruction,
         },
 
         CallInd { target } => SSAOp::CallInd {
-            target: read_var(target, disasm, ctx),
+            target: read_var(target, spell, ctx),
             instruction,
         },
 
         Return { target } => SSAOp::Return {
-            target: read_var(target, disasm, ctx),
+            target: read_var(target, spell, ctx),
         },
 
         FloatAdd { dst, a, b } => SSAOp::FloatAdd {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatSub { dst, a, b } => SSAOp::FloatSub {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatMult { dst, a, b } => SSAOp::FloatMult {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatDiv { dst, a, b } => SSAOp::FloatDiv {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatNeg { dst, src } => SSAOp::FloatNeg {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatAbs { dst, src } => SSAOp::FloatAbs {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatSqrt { dst, src } => SSAOp::FloatSqrt {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatCeil { dst, src } => SSAOp::FloatCeil {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatFloor { dst, src } => SSAOp::FloatFloor {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatRound { dst, src } => SSAOp::FloatRound {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatNaN { dst, src } => SSAOp::FloatNaN {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatEqual { dst, a, b } => SSAOp::FloatEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatNotEqual { dst, a, b } => SSAOp::FloatNotEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatLess { dst, a, b } => SSAOp::FloatLess {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         FloatLessEqual { dst, a, b } => SSAOp::FloatLessEqual {
-            dst: write_var(dst, disasm, ctx),
-            a: read_var(a, disasm, ctx),
-            b: read_var(b, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            a: read_var(a, spell, ctx),
+            b: read_var(b, spell, ctx),
         },
 
         Int2Float { dst, src } => SSAOp::Int2Float {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Float2Int { dst, src } => SSAOp::Float2Int {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         FloatFloat { dst, src } => SSAOp::FloatFloat {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Trunc { dst, src } => SSAOp::Trunc {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         CallOther {
@@ -982,9 +984,9 @@ fn convert_op(
             userop,
             inputs,
         } => SSAOp::CallOther {
-            output: output.as_ref().map(|o| write_var(o, disasm, ctx)),
+            output: output.as_ref().map(|o| write_var(o, spell, ctx)),
             userop: *userop,
-            inputs: inputs.iter().map(|i| read_var(i, disasm, ctx)).collect(),
+            inputs: inputs.iter().map(|i| read_var(i, spell, ctx)).collect(),
         },
 
         Nop => SSAOp::Nop,
@@ -992,7 +994,7 @@ fn convert_op(
         Unimplemented => SSAOp::Unimplemented,
 
         CpuId { dst } => SSAOp::CpuId {
-            dst: write_var(dst, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
         },
 
         Breakpoint => SSAOp::Breakpoint,
@@ -1000,16 +1002,16 @@ fn convert_op(
         Multiequal { dst, inputs } => {
             // Multiequal is already a phi-like construct, convert to Phi
             SSAOp::Phi {
-                dst: write_var(dst, disasm, ctx),
-                sources: inputs.iter().map(|i| read_var(i, disasm, ctx)).collect(),
+                dst: write_var(dst, spell, ctx),
+                sources: inputs.iter().map(|i| read_var(i, spell, ctx)).collect(),
             }
         }
 
         Indirect { dst, src, .. } => {
             // Indirect is used for aliasing analysis; treat as copy for now
             SSAOp::Copy {
-                dst: write_var(dst, disasm, ctx),
-                src: read_var(src, disasm, ctx),
+                dst: write_var(dst, spell, ctx),
+                src: read_var(src, spell, ctx),
             }
         }
 
@@ -1019,9 +1021,9 @@ fn convert_op(
             index,
             element_size,
         } => SSAOp::PtrAdd {
-            dst: write_var(dst, disasm, ctx),
-            base: read_var(base, disasm, ctx),
-            index: read_var(index, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            base: read_var(base, spell, ctx),
+            index: read_var(index, spell, ctx),
             element_size: *element_size,
         },
 
@@ -1031,9 +1033,9 @@ fn convert_op(
             index,
             element_size,
         } => SSAOp::PtrSub {
-            dst: write_var(dst, disasm, ctx),
-            base: read_var(base, disasm, ctx),
-            index: read_var(index, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            base: read_var(base, spell, ctx),
+            index: read_var(index, spell, ctx),
             element_size: *element_size,
         },
 
@@ -1042,25 +1044,25 @@ fn convert_op(
             segment,
             offset,
         } => SSAOp::SegmentOp {
-            dst: write_var(dst, disasm, ctx),
-            segment: read_var(segment, disasm, ctx),
-            offset: read_var(offset, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            segment: read_var(segment, spell, ctx),
+            offset: read_var(offset, spell, ctx),
         },
 
         New { dst, src } => SSAOp::New {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Cast { dst, src } => SSAOp::Cast {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
         },
 
         Extract { dst, src, position } => SSAOp::Extract {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
-            position: read_var(position, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
+            position: read_var(position, spell, ctx),
         },
 
         Insert {
@@ -1069,10 +1071,10 @@ fn convert_op(
             value,
             position,
         } => SSAOp::Insert(Box::new(crate::op::InsertOp {
-            dst: write_var(dst, disasm, ctx),
-            src: read_var(src, disasm, ctx),
-            value: read_var(value, disasm, ctx),
-            position: read_var(position, disasm, ctx),
+            dst: write_var(dst, spell, ctx),
+            src: read_var(src, spell, ctx),
+            value: read_var(value, spell, ctx),
+            position: read_var(position, spell, ctx),
         })),
 
         Select {
@@ -1081,11 +1083,11 @@ fn convert_op(
             if_true,
             if_false,
         } => {
-            let cond = read_var(cond, disasm, ctx);
-            let if_true = read_var(if_true, disasm, ctx);
-            let if_false = read_var(if_false, disasm, ctx);
+            let cond = read_var(cond, spell, ctx);
+            let if_true = read_var(if_true, spell, ctx);
+            let if_false = read_var(if_false, spell, ctx);
             SSAOp::Select(Box::new(crate::op::SelectOp {
-                dst: write_var(dst, disasm, ctx),
+                dst: write_var(dst, spell, ctx),
                 cond,
                 if_true,
                 if_false,

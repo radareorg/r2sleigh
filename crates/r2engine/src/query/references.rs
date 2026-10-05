@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use r2ssa::body::{Unresolved, UnresolvedReason};
+use crate::body::{Unresolved, UnresolvedReason};
 
 use super::{Line, Support};
 use crate::native::NativeRefusal;

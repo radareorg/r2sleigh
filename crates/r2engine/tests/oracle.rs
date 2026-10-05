@@ -759,7 +759,7 @@ struct Lift<'a> {
 
 impl<'a> Lift<'a> {
     fn of(
-        body: &r2ssa::body::Body,
+        body: &r2engine::body::Body,
         machine: &r2sleigh_lift::EmbeddedMachine,
         endian: Endianness,
         source: &'a Literal,
@@ -939,7 +939,7 @@ fn read_as_boolean(op: &R2ILOp) -> Vec<&Varnode> {
 }
 
 /// The instructions of a body, from the address each operation's metadata records.
-fn instructions(body: &r2ssa::body::Body) -> BTreeMap<u64, Instruction> {
+fn instructions(body: &r2engine::body::Body) -> BTreeMap<u64, Instruction> {
     let mut found = BTreeMap::new();
     for block in &body.blocks {
         let lifted = &block.lifted;

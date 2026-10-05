@@ -204,7 +204,9 @@ fn export_ssa(
     input: &InstructionExportInput<'_>,
     format: ExportFormat,
 ) -> Result<String, ExportError> {
-    let ssa_block = r2ssa::block::to_ssa(input.block, input.disasm);
+    let ssa_block = r2ssa::block::to_ssa(input.block, &|vn| {
+        input.disasm.register_spelling(vn).map(String::from)
+    });
     let ops_info: Vec<SSAOpInfo> = ssa_block.ops().iter().map(ssa_op_to_info).collect();
 
     match format {
@@ -241,7 +243,9 @@ fn export_defuse(
     input: &InstructionExportInput<'_>,
     format: ExportFormat,
 ) -> Result<String, ExportError> {
-    let ssa_block = r2ssa::block::to_ssa(input.block, input.disasm);
+    let ssa_block = r2ssa::block::to_ssa(input.block, &|vn| {
+        input.disasm.register_spelling(vn).map(String::from)
+    });
     let info = r2ssa::def_use(&ssa_block);
     let json_info = DefUseInfoJson {
         inputs: sorted_set(&info.inputs),
@@ -290,7 +294,9 @@ fn export_dec(
     input: &InstructionExportInput<'_>,
     format: ExportFormat,
 ) -> Result<String, ExportError> {
-    let ssa_block = r2ssa::block::to_ssa(input.block, input.disasm);
+    let ssa_block = r2ssa::block::to_ssa(input.block, &|vn| {
+        input.disasm.register_spelling(vn).map(String::from)
+    });
     let residuals = ssa_block
         .ops()
         .iter()

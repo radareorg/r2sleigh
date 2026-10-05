@@ -132,7 +132,7 @@ impl Anchored {
     /// An indirect transfer the walk stopped at says so, and no case is invented for it; a dispatch or a tail call there is already said.
     fn unresolved(&mut self, prepared: &Prepared) {
         for stop in &prepared.body().unresolved {
-            if stop.reason != r2ssa::body::UnresolvedReason::IndirectBranch {
+            if stop.reason != crate::body::UnresolvedReason::IndirectBranch {
                 continue;
             }
             let claims = self.0.get(&stop.addr).map_or(&[][..], Vec::as_slice);

@@ -533,17 +533,17 @@ impl<S: Source + 'static> Decoders for OpenProgram<S> {
     }
 }
 
-impl<S: Source + 'static> r2ssa::body::Program for OpenProgram<S> {
+impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         self.source().read(vaddr, max)
     }
 
     /// The segment the container states holds this address. Read from the
     /// container alone, so no write moves it and nothing need record asking.
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
         let segment = self.source().container().segment_at(vaddr)?;
         let (start, end) = segment.range();
-        Some(r2ssa::body::Region {
+        Some(crate::body::Region {
             start,
             end,
             file_end: segment.file_end(),
@@ -610,7 +610,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn holds_code(&self, vaddr: u64) -> bool {
         match &self.code {
             Some(code) => code.holds(vaddr),
-            None => r2ssa::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
+            None => crate::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
         }
     }
 
@@ -655,7 +655,7 @@ struct Recording<'a, S: Source + 'static> {
     consulted: std::cell::RefCell<Consulted>,
 }
 
-impl<S: Source + 'static> r2ssa::body::Program for Recording<'_, S> {
+impl<S: Source + 'static> crate::body::Program for Recording<'_, S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let read = self.program.source().read(vaddr, max)?;
         // Only what is mapped: no write can land in the unmapped rest.
@@ -666,12 +666,12 @@ impl<S: Source + 'static> r2ssa::body::Program for Recording<'_, S> {
         Some(read)
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
-        r2ssa::body::Program::region(self.program, vaddr)
+    fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
+        crate::body::Program::region(self.program, vaddr)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
-        r2ssa::body::Program::is_entry(self.program, vaddr)
+        crate::body::Program::is_entry(self.program, vaddr)
     }
 
     fn returns(&self, callee: u64) -> bool {
@@ -687,11 +687,11 @@ impl<S: Source + 'static> r2ssa::body::Program for Recording<'_, S> {
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
-        r2ssa::body::Program::return_address_register(self.program)
+        crate::body::Program::return_address_register(self.program)
     }
 
     fn mode_register(&self) -> Option<r2il::Varnode> {
-        r2ssa::body::Program::mode_register(self.program)
+        crate::body::Program::mode_register(self.program)
     }
 }
 

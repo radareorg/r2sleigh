@@ -228,11 +228,11 @@ impl Lookahead<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::Program;
     use crate::query::Support;
     use crate::query::records::{AnnotationKind, Decoders, Memory, WalkedBody};
     use r2il::Endianness;
     use r2sleigh_lift::{EmbeddedMachine, embedded_machine};
-    use r2ssa::body::Program;
 
     /// A flat run of bytes mapped at one address and nothing else.
     struct Mapped {
@@ -260,11 +260,11 @@ mod tests {
         }
 
         /// The one run of bytes is code.
-        fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
             let end = self.base + self.bytes.len() as u64;
             (self.base..end)
                 .contains(&vaddr)
-                .then_some(r2ssa::body::Region {
+                .then_some(crate::body::Region {
                     start: self.base,
                     end,
                     file_end: end,
@@ -395,7 +395,7 @@ mod tests {
         bytes.resize(32, 0);
         let program = Mapped::new(BASE, bytes);
         let thumb = Everywhere(embedded_machine("arm-thumb").expect("Thumb is compiled in"));
-        let body = r2ssa::body::lift_body(BASE, &thumb.0.disasm, &program, &Default::default())
+        let body = crate::body::lift_body(BASE, &thumb.0.disasm, &program, &Default::default())
             .expect("the body walks");
         let mut walked = std::collections::BTreeMap::<u64, Vec<r2il::R2ILOp>>::new();
         for lifted in body.blocks.iter().map(|block| &block.lifted) {
@@ -653,7 +653,7 @@ mod tests {
         let mut image = code.to_vec();
         image.resize(0x1100, 0);
         let program = Mapped::new(BASE, image);
-        let walked = r2ssa::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
+        let walked = crate::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
         let blocks = walked.expect("it walks").blocks.into_iter();
         let blocks = blocks.map(|block| block.lifted).collect::<Vec<_>>();
         let body = WalkedBody::new(&blocks, &machine.0.arch);

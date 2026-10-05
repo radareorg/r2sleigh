@@ -10,9 +10,9 @@ mod common;
 use std::sync::Arc;
 
 use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, SLOT, STEPPED, STUB, TEXT, TWO};
+use r2engine::body::{Unresolved, UnresolvedReason};
 use r2engine::program::OpenProgram;
 use r2engine::query::{AnnotationKind, Listing, Reference, Role, Stop, Support, Unread};
-use r2ssa::body::{Unresolved, UnresolvedReason};
 
 /// Every fact as `(from, to, role, support)`.
 fn listed(facts: &[Reference]) -> Vec<(u64, u64, Role, Support)> {

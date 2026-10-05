@@ -139,15 +139,17 @@ impl Machine {
 }
 
 /// `len` bytes of code mapped at `BASE`, as one region an instruction can run in.
-fn code_region(len: usize, vaddr: u64) -> Option<r2ssa::body::Region> {
+fn code_region(len: usize, vaddr: u64) -> Option<r2engine::body::Region> {
     let end = BASE + len as u64;
-    (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
-        start: BASE,
-        end,
-        file_end: end,
-        execute: true,
-        write: false,
-    })
+    (BASE..end)
+        .contains(&vaddr)
+        .then_some(r2engine::body::Region {
+            start: BASE,
+            end,
+            file_end: end,
+            execute: true,
+            write: false,
+        })
 }
 
 /// One run of bytes mapped at `BASE`, under one name.
@@ -159,14 +161,14 @@ struct Fixture {
     name: &'static str,
 }
 
-impl r2ssa::body::Program for Fixture {
+impl r2engine::body::Program for Fixture {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(self.bytes.len(), vaddr)
     }
 
@@ -281,7 +283,7 @@ fn a_call_is_rendered_from_the_callee_body() {
 /// a defect reached only by reading the callee.
 struct PanickingCallee;
 
-impl r2ssa::body::Program for PanickingCallee {
+impl r2engine::body::Program for PanickingCallee {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         assert!(vaddr < 0x100a, "a defect reading the callee at {vaddr:#x}");
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
@@ -289,7 +291,7 @@ impl r2ssa::body::Program for PanickingCallee {
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(CALLER.len(), vaddr)
     }
 
@@ -481,14 +483,14 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
 /// import stub is: no body worth reading, and a declared prototype instead.
 struct Importing;
 
-impl r2ssa::body::Program for Importing {
+impl r2engine::body::Program for Importing {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = CALLER.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(CALLER.len(), vaddr)
     }
 
@@ -888,7 +890,7 @@ impl Unbounded {
     }
 }
 
-impl r2ssa::body::Program for Unbounded {
+impl r2engine::body::Program for Unbounded {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let region = self.region(vaddr)?;
         let bytes: &[u8] = match region.execute {
@@ -905,12 +907,12 @@ impl r2ssa::body::Program for Unbounded {
         Some(rest[..rest.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         let code = code_region(UNBOUNDED_TABLE.len(), vaddr);
         let end = TABLE + 16 + self.zero_filled;
         let table = (TABLE..end)
             .contains(&vaddr)
-            .then_some(r2ssa::body::Region {
+            .then_some(r2engine::body::Region {
                 start: TABLE,
                 end,
                 file_end: TABLE + 16,
@@ -978,7 +980,7 @@ fn unresolved_at_the_dispatch(prepared: &r2engine::native::Prepared) {
             .iter()
             .map(|stop| (stop.addr, stop.reason))
             .collect::<Vec<_>>(),
-        vec![(0x1020, r2ssa::body::UnresolvedReason::IndirectBranch)]
+        vec![(0x1020, r2engine::body::UnresolvedReason::IndirectBranch)]
     );
 }
 
@@ -2655,14 +2657,14 @@ struct ImportCaller {
     stub: u64,
 }
 
-impl r2ssa::body::Program for ImportCaller {
+impl r2engine::body::Program for ImportCaller {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(self.bytes.len(), vaddr)
     }
 
@@ -4058,7 +4060,7 @@ const LOOKUP_BYTES: [u8; 32] = [
 /// `CLASSIFY` as code and `LOOKUP_BYTES` as static data at `LOOKUP`.
 struct LookupTable;
 
-impl r2ssa::body::Program for LookupTable {
+impl r2engine::body::Program for LookupTable {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let region = self.region(vaddr)?;
         let bytes: &[u8] = match region.execute {
@@ -4069,12 +4071,12 @@ impl r2ssa::body::Program for LookupTable {
         Some(rest[..rest.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         let end = LOOKUP + LOOKUP_BYTES.len() as u64;
         code_region(CLASSIFY.len(), vaddr).or_else(|| {
             (LOOKUP..end)
                 .contains(&vaddr)
-                .then_some(r2ssa::body::Region {
+                .then_some(r2engine::body::Region {
                     start: LOOKUP,
                     end,
                     file_end: end,

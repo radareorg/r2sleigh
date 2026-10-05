@@ -26,7 +26,6 @@ pub(crate) mod aggregate_access;
 pub mod arena;
 pub(crate) mod assumption;
 pub mod block;
-pub mod body;
 pub(crate) mod bytes;
 pub mod cfg;
 pub(crate) mod constant;

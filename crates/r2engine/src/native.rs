@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::body::{BodyError, WINDOW};
 use r2abi::{CallingConvention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
@@ -23,7 +24,6 @@ use r2source::{
     SourceStackAllocationContract, SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
-use r2ssa::body::{BodyError, WINDOW};
 use r2ssa::{ArgumentReach, CalleePreservedCarriers, TrustedSsaArtifact};
 
 use crate::declared::{Declared, Placement, Restatement};
@@ -36,7 +36,7 @@ use crate::{
 ///
 /// Two questions and no cursor: what byte lives at an address, and what the
 /// program calls one. Whoever opened the binary answers them.
-pub trait Program: r2ssa::body::Program {
+pub trait Program: crate::body::Program {
     /// What the program calls this address, where it names it at all.
     fn name_at(&self, vaddr: u64) -> Option<String>;
 
@@ -219,7 +219,7 @@ pub fn lifted(
     program: &dyn Program,
     entry: u64,
 ) -> Result<String, NativeRefusal> {
-    let body = r2ssa::body::lift_body(entry, target.disasm, program, &BTreeMap::new())
+    let body = crate::body::lift_body(entry, target.disasm, program, &BTreeMap::new())
         .map_err(NativeRefusal::Body)?;
     let names = register_spellings(target.arch);
     let mut out = format!("Entry: {entry:#x}\nBlocks: {}\n", body.blocks.len());
@@ -366,7 +366,7 @@ impl Prepared {
     }
 
     /// The walked body's blocks, dispatches followed, and where the walk could not follow.
-    pub fn body(&self) -> &r2ssa::body::Body {
+    pub fn body(&self) -> &crate::body::Body {
         &self.root.body
     }
 
@@ -494,7 +494,7 @@ pub(crate) fn hands_a_function(
 pub(crate) fn handed(
     target: &NativeTarget<'_>,
     program: &dyn Program,
-    body: r2ssa::body::Body,
+    body: crate::body::Body,
 ) -> Vec<u64> {
     let entry = body.entry;
     let native = match machine(target) {
@@ -1094,7 +1094,7 @@ impl TableBytes {
 /// One function walked out of the program.
 struct Walked {
     name: String,
-    body: r2ssa::body::Body,
+    body: crate::body::Body,
     /// Each function this one reaches, and what it is called.
     callees: Vec<Callee>,
 }
@@ -1149,13 +1149,13 @@ impl Native<'_> {
         entry: u64,
         dispatched: &BTreeMap<u64, Vec<u64>>,
     ) -> Result<Walked, NativeRefusal> {
-        let body = r2ssa::body::lift_body(entry, self.target.disasm, self.program, dispatched)
+        let body = crate::body::lift_body(entry, self.target.disasm, self.program, dispatched)
             .map_err(NativeRefusal::Body)?;
         Ok(self.walked(body))
     }
 
     /// One walked body, with what the program calls it and each function it calls.
-    fn walked(&self, body: r2ssa::body::Body) -> Walked {
+    fn walked(&self, body: crate::body::Body) -> Walked {
         // Everything the body reaches, as the preparation reaches it: a
         // callee reached by a tail jump, or by a jump through an import's
         // slot, is declared by the same prototype as one reached by a call.
@@ -1497,7 +1497,7 @@ impl Native<'_> {
                         cases: table.cases.clone(),
                     }),
                 unresolved: walked.body.unresolved.iter().any(|stop| {
-                    stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch
+                    stop.reason == crate::body::UnresolvedReason::IndirectBranch
                         && (block.lifted.addr..block.lifted.addr + u64::from(block.lifted.size))
                             .contains(&stop.addr)
                 }),
@@ -1573,7 +1573,7 @@ impl Native<'_> {
 /// declaration is placed at. One callee reached two ways is still one
 /// callee: declaring it twice makes the type analysis reject the whole
 /// capture as holding a duplicate address.
-fn reached(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<u64> {
+fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
     body.calls
         .iter()
         .chain(body.tail_calls.iter())
@@ -1594,7 +1594,7 @@ fn reached(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<u64> {
 /// The walk collects call targets without saying which instruction made each
 /// one, so the instruction is found by looking for the call operation in the
 /// block that carries it.
-fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall> {
+fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
         for index in 0..block.lifted.ops.len() {
@@ -1634,7 +1634,7 @@ fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall
 fn transfer(
     block: &r2il::R2ILBlock,
     index: usize,
-    body: &r2ssa::body::Body,
+    body: &crate::body::Body,
 ) -> Option<(u64, r2source::AdvisoryCallTransfer)> {
     match block.ops.get(index)? {
         r2il::R2ILOp::Call { target } => {
@@ -1657,7 +1657,7 @@ impl Native<'_> {
     /// A constant the code computes with is not a pointer, and nothing here
     /// claims it is: the address has to hold a run of printable bytes ending
     /// in a terminator for it to be read as text at all.
-    fn literals(&self, body: &r2ssa::body::Body) -> Vec<(u64, String)> {
+    fn literals(&self, body: &crate::body::Body) -> Vec<(u64, String)> {
         referenced(body)
             .into_iter()
             .filter_map(|address| Some((address, text_at(self.program, address)?)))
@@ -1666,7 +1666,7 @@ impl Native<'_> {
 
     /// The named program data this body points at, each with the type the
     /// binary's debug information declares at its address.
-    fn data_symbols(&self, body: &r2ssa::body::Body) -> Vec<SourceDataObject> {
+    fn data_symbols(&self, body: &crate::body::Body) -> Vec<SourceDataObject> {
         let declarations = self.target.declarations;
         referenced(body)
             .into_iter()
@@ -1807,7 +1807,7 @@ pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> 
 /// Where a branch or a call sends control is executed, not read, so its
 /// target is no constant of the body's: no string or object is looked for
 /// there.
-fn referenced(body: &r2ssa::body::Body) -> BTreeSet<u64> {
+fn referenced(body: &crate::body::Body) -> BTreeSet<u64> {
     let mut addresses = BTreeSet::new();
     for block in &body.blocks {
         for op in &block.lifted.ops {

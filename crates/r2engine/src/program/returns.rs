@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::body::{Body, BodyError, Trace};
 use r2sleigh_lift::EmbeddedMachine;
-use r2ssa::body::{Body, BodyError, Trace};
 
 use super::{OpenProgram, Source};
 use crate::discovery::{Transfers, Walker};
@@ -25,7 +25,7 @@ pub(super) struct BodyWalk {
 
 impl BodyWalk {
     /// The blocks the walk traced, and their bytes.
-    pub(super) fn extent(&self) -> r2ssa::body::TraceExtent {
+    pub(super) fn extent(&self) -> crate::body::TraceExtent {
         self.trace.extent()
     }
 
@@ -51,16 +51,16 @@ pub(super) struct Walking<'p, S: Source + 'static> {
 
 /// The program as one walk reads it, told which callees are known to come back.
 struct Knowing<'a> {
-    program: &'a dyn r2ssa::body::Program,
+    program: &'a dyn crate::body::Program,
     returns: &'a dyn Fn(u64) -> bool,
 }
 
-impl r2ssa::body::Program for Knowing<'_> {
+impl crate::body::Program for Knowing<'_> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         self.program.read(vaddr, max)
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
         self.program.region(vaddr)
     }
 
@@ -121,7 +121,7 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
             returns,
         };
         let disasm = self.target(thumb).disasm;
-        r2ssa::body::lift_body(entry, disasm, &knowing, &BTreeMap::new())
+        crate::body::lift_body(entry, disasm, &knowing, &BTreeMap::new())
     }
 
     fn step(trace: &mut Trace) -> Transfers {

@@ -430,12 +430,12 @@ mod tests {
 
     struct Named;
 
-    impl r2ssa::body::Program for Named {
+    impl crate::body::Program for Named {
         fn read(&self, _vaddr: u64, _max: usize) -> Option<Vec<u8>> {
             None
         }
 
-        fn region(&self, _vaddr: u64) -> Option<r2ssa::body::Region> {
+        fn region(&self, _vaddr: u64) -> Option<crate::body::Region> {
             None
         }
 

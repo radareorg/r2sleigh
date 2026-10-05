@@ -700,42 +700,23 @@ mod tests {
         bytes: &'static [u8],
     }
 
-    impl crate::body::Program for Code {
-        fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-            let offset = usize::try_from(vaddr.checked_sub(self.base)?).ok()?;
-            let slice = self.bytes.get(offset..).filter(|slice| !slice.is_empty())?;
-            Some(slice[..slice.len().min(max)].to_vec())
-        }
-
-        /// The code is the one run it maps, and it runs.
-        fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
-            let end = self.base + self.bytes.len() as u64;
-            (self.base..end)
-                .contains(&vaddr)
-                .then_some(crate::body::Region {
-                    start: self.base,
-                    end,
-                    file_end: end,
-                    execute: true,
-                    write: false,
-                })
-        }
-
-        fn is_entry(&self, _vaddr: u64) -> bool {
-            false
-        }
-    }
-
-    /// The function the bytes begin at `entry`, lifted and prepared.
+    /// The function the bytes begin at `entry`, lifted an instruction to a
+    /// block (the walk is the engine's) and prepared.
     fn lifted(arch: &str, code: Code, entry: u64) -> SsaArtifact {
         let machine = r2sleigh_lift::embedded_machine(arch).expect("an embedded machine");
-        let body = crate::body::lift_body(entry, &machine.disasm, &code, &BTreeMap::new())
-            .expect("the body lifts");
-        let blocks = body
-            .blocks
-            .iter()
-            .map(|block| block.lifted.clone())
-            .collect::<Vec<_>>();
+        let mut blocks = Vec::new();
+        let mut at = entry;
+        while let Some(offset) = usize::try_from(at - code.base)
+            .ok()
+            .filter(|o| *o < code.bytes.len())
+        {
+            // Sleigh decodes from at least sixteen bytes; past the code is padding.
+            let mut window = code.bytes[offset..].to_vec();
+            window.resize(window.len().max(16), 0);
+            let block = machine.disasm.lift(&window, at).expect("the bytes lift");
+            at += u64::from(block.size);
+            blocks.push(block);
+        }
         SsaArtifact::for_decompile(&blocks, Some(&machine.arch)).expect("an artifact")
     }
 
@@ -887,64 +868,5 @@ mod tests {
             0xba, 0x08, 0, 0, 0, 0x85, 0xc9, 0x74, 0x05, 0x83, 0xea, 0x01, 0x75, 0xf7, 0xc3,
         ];
         assert_eq!(x86(two_exits), [Err(TripRefusal::MultipleExits)]);
-    }
-
-    /// `fnv1a32` from `hashes_gcc_x64_O2`, `0x401330` to `0x401366`.
-    const FNV1A32: &[u8] = &[
-        0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x85, 0xf6, 0x74, 0x27, 0x48, 0x01, 0xfe, 0xb8, 0xc5, 0x9d,
-        0x1c, 0x81, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xb6, 0x17, 0x48, 0x83, 0xc7,
-        0x01, 0x31, 0xd0, 0x69, 0xc0, 0x93, 0x01, 0x00, 0x01, 0x48, 0x39, 0xfe, 0x75, 0xec, 0xc3,
-        0x0f, 0x1f, 0x00, 0xb8, 0xc5, 0x9d, 0x1c, 0x81, 0xc3,
-    ];
-
-    #[test]
-    fn a_pointer_walked_to_its_end_runs_its_length_once_the_guard_excludes_zero() {
-        let code = || Code {
-            base: 0x401330,
-            bytes: FNV1A32,
-        };
-        let artifact = lifted("x86-64", code(), 0x401330);
-        let length = artifact
-            .graph()
-            .values
-            .iter()
-            .find(|value| value.var.to_string() == "RSI_0")
-            .expect("rsi at entry")
-            .id;
-        let form = EntryAffineForm {
-            width_bits: 64,
-            terms: BTreeMap::from([(length, 1)]),
-            constant: 0,
-        };
-        let [
-            Ok(TripCount::Symbolic {
-                form: counted,
-                guard,
-            }),
-        ] = &trips_of(&artifact)[..]
-        else {
-            panic!("one symbolic count");
-        };
-        assert_eq!(*counted, form);
-        // The guard is `test rsi, rsi; je` taken not equal, on the edge into the preheader.
-        let (block, assumption) = (guard.block, &guard.assumption);
-        assert_eq!(
-            (block, assumption.predecessor, assumption.truth),
-            (0x401339, 0x401330, false)
-        );
-        // The test is `cmp rsi, rdi` after `add rdi, 1`: the pointer's update against the end.
-        let loop_fact = artifact
-            .structured()
-            .loops
-            .values()
-            .next()
-            .expect("the loop");
-        let test = loop_fact.trips.as_ref().expect("a count").test;
-        let name = |value: ValueId| artifact.graph().value(value).map(|v| v.var.to_string());
-        let tested = (name(test.induction), name(test.bound), test.reads_update);
-        assert_eq!(tested, (Some("RDI_1".into()), Some("RSI_1".into()), true));
-        // Entered past `test rsi, rsi; je`, nothing says the length is not zero, which is 2^64 trips.
-        let unguarded = lifted("x86-64", code(), 0x401339);
-        assert_eq!(trips_of(&unguarded), [Err(TripRefusal::ZeroNotExcluded)]);
     }
 }

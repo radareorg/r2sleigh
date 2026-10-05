@@ -82,7 +82,7 @@ struct Shape {
     dispatches: std::collections::BTreeSet<u64>,
 }
 
-fn shape_of(blocks: &[r2ssa::body::BodyBlock], dispatches: impl Iterator<Item = u64>) -> Shape {
+fn shape_of(blocks: &[crate::body::BodyBlock], dispatches: impl Iterator<Item = u64>) -> Shape {
     let blocks = blocks
         .iter()
         .map(|block| {
@@ -164,7 +164,7 @@ pub(super) struct Survey {
     functions: Vec<Discovered>,
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
     /// Each walked body's blocks and their bytes, as the walk traced them.
-    extents: BTreeMap<u64, r2ssa::body::TraceExtent>,
+    extents: BTreeMap<u64, crate::body::TraceExtent>,
     /// Each walked body's instructions that enter the supervisor, where it has any.
     supervisor: BTreeMap<u64, std::collections::BTreeSet<u64>>,
     /// Which walked bodies hold each address.
@@ -435,12 +435,12 @@ impl<S: Source + 'static> OpenProgram<S> {
         entry: u64,
         reason: NativeRefusal,
     ) -> Result<(FunctionListing, Shape), String> {
-        let body = r2ssa::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
+        let body = crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
             .map_err(|error| NativeRefusal::Body(error).to_string())?;
         let unresolved = body
             .unresolved
             .iter()
-            .filter(|stop| stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch)
+            .filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
         // The plain walk reads no table, so it follows no dispatch.
@@ -483,7 +483,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     ///
     /// The walk follows no dispatch table, so a jump table's arms are not
     /// counted; one resolved body for every consumer is P6.
-    pub fn function_extents(&mut self) -> Result<BTreeMap<u64, r2ssa::body::TraceExtent>, String> {
+    pub fn function_extents(&mut self) -> Result<BTreeMap<u64, crate::body::TraceExtent>, String> {
         self.start_request();
         Ok(self.surveyed()?.extents.clone())
     }
@@ -591,7 +591,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
             let lifted = walked.clone().and_then(|thumb| {
                 let target = walker.target(thumb);
-                let body = r2ssa::body::lift_body(entry, target.disasm, program, &BTreeMap::new());
+                let body = crate::body::lift_body(entry, target.disasm, program, &BTreeMap::new());
                 body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
             });
             let (thumb, body) = match lifted {
@@ -750,7 +750,7 @@ fn claimed_by<S: Source + 'static>(
         &crate::native::NativeTarget<'_>,
         &r2sleigh_lift::EmbeddedMachine,
     ),
-    blocks: Vec<r2ssa::body::BodyBlock>,
+    blocks: Vec<crate::body::BodyBlock>,
     revision: crate::query::Revision,
 ) -> Result<Vec<Line>, Unread> {
     let lifted = blocks

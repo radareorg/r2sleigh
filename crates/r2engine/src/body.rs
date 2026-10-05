@@ -26,7 +26,7 @@ use r2il::R2ILBlock;
 use r2sleigh_lift::{Continuation, Disassembler};
 use r2source::AdvisorySuccessorKind;
 
-use crate::cfg::{BasicBlock, BlockTerminator};
+use r2ssa::cfg::{BasicBlock, BlockTerminator};
 
 /// Longest instruction any supported architecture encodes, and the window
 /// Sleigh wants for a decode wherever the address is mapped.
