@@ -110,14 +110,6 @@ impl EngineFunctionIdentity {
     pub fn name_candidates(&self) -> impl Iterator<Item = &str> {
         self.aliases.iter().map(String::as_str)
     }
-
-    pub fn primary_name(&self) -> &str {
-        if !self.display_name.trim().is_empty() {
-            &self.display_name
-        } else {
-            &self.canonical_name
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

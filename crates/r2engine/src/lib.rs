@@ -176,51 +176,6 @@ impl EngineSourceSnapshot {
     }
 }
 
-pub fn direct_block_c_residual_comment(block_addr: u64) -> String {
-    format!(
-        "/* r2dec residual: block C output for 0x{block_addr:x} requires engine FunctionFacts route; direct C-like block decompile suppressed */"
-    )
-}
-
-pub fn direct_block_ast_residual_json(block_addr: u64) -> String {
-    let comment = format!(
-        "r2dec residual: block AST for 0x{block_addr:x} requires engine FunctionFacts route; direct SSA op lowering suppressed"
-    );
-    let value = serde_json::json!([{ "Comment": comment }]);
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_string())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineAutoCallbackKind {
-    AnalyzeFunction,
-    DataRefs,
-    PostAnalysisTaint,
-    PostAnalysisXref,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineAutoCallbackRefusalReason {
-    Allowed,
-    ModeNotFull,
-    TooManyBlocks,
-    TooLarge,
-    TooCostly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineAutoCallbackMetrics {
-    pub basic_block_count: u32,
-    pub cost: u32,
-    pub linear_size: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineAutoCallbackPlan {
-    pub allowed: bool,
-    pub kind: EngineAutoCallbackKind,
-    pub reason: EngineAutoCallbackRefusalReason,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnginePhase {
@@ -499,7 +454,6 @@ impl EngineRenderTarget {
 pub struct EngineMetrics {
     pub planning_time: Duration,
     pub ssa_time: Duration,
-    pub semantic_time: Duration,
     pub type_time: Duration,
     pub render_time: Duration,
     /// Units of work this request counted, the deterministic measure of what
@@ -516,7 +470,6 @@ impl Default for EngineMetrics {
             work_spent: 0,
             planning_time: Duration::default(),
             ssa_time: Duration::default(),
-            semantic_time: Duration::default(),
             type_time: Duration::default(),
             render_time: Duration::default(),
             phase_timings: empty_engine_phase_timings(),
@@ -573,11 +526,6 @@ impl EngineAnalysis {
         Self { ssa_func }
     }
 
-    /// Borrow the immutable prepared SSA consumed by this analysis.
-    pub fn ssa_func(&self) -> &SsaArtifact {
-        self.ssa_func.as_ref()
-    }
-
     fn from_trusted_ssa(trusted: &r2ssa::TrustedSsaArtifact) -> Self {
         Self {
             ssa_func: trusted.shared_artifact(),
@@ -619,16 +567,6 @@ impl EngineAnalysisArtifact {
     /// Borrow the report sealed to the exact immutable SSA owner.
     pub fn function_facts(&self) -> &FunctionFacts {
         self.type_analysis.function_facts()
-    }
-
-    /// Borrow the inseparable source-owned type analysis.
-    pub fn type_analysis(&self) -> &r2types::TypeAnalysis {
-        &self.type_analysis
-    }
-
-    /// Borrow request-local certification authority when this artifact retains it.
-    pub fn trusted_ssa(&self) -> Option<&r2ssa::TrustedSsaArtifact> {
-        self.trusted_ssa.as_deref()
     }
 }
 
@@ -686,22 +624,6 @@ impl EngineExecutionControl {
 
     pub fn with_cancellation(cancellation: EngineCancellationToken) -> Self {
         Self::new(cancellation, None)
-    }
-
-    pub fn with_deadline(deadline: Instant) -> Self {
-        Self::new(EngineCancellationToken::default(), Some(deadline))
-    }
-
-    pub fn with_timeout(timeout: Duration) -> Self {
-        Self::with_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        )
-    }
-
-    pub fn cancellation(&self) -> EngineCancellationToken {
-        self.cancellation.clone()
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -1676,20 +1598,6 @@ impl EngineAnalyzeRequest {
         self.execution.replace_cancellation(cancellation);
         self
     }
-
-    pub fn with_deadline(mut self, deadline: Instant) -> Self {
-        self.execution.replace_deadline(deadline);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.execution.replace_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        );
-        self
-    }
 }
 
 fn engine_analyze_request_input_from_function(
@@ -1852,14 +1760,6 @@ impl EngineFunctionDecompileRequestInput {
         self
     }
 
-    /// Attach the signatures the program declares for callees it carries no
-    /// body for, which is what an import is.
-    /// Render the structured tree instead of the C generated from it.
-    pub fn rendering(mut self, tier: RenderTier) -> Self {
-        self.tier = tier;
-        self
-    }
-
     pub fn with_declared_signatures(
         mut self,
         signatures: impl IntoIterator<Item = r2types::SourceOwnedCalleeSignature>,
@@ -1875,15 +1775,6 @@ impl EngineFunctionDecompileRequestInput {
 
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.execution.replace_deadline(deadline);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.execution.replace_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        );
         self
     }
 }
@@ -1912,29 +1803,9 @@ impl EngineFunctionDecompileRequest {
     }
 }
 
-pub struct EngineSignatureInferenceRequest<'a> {
-    pub analysis: &'a EngineAnalysis,
-}
-
 #[derive(Debug, Clone)]
 pub struct EngineFunctionAnalysisArtifactRequest {
     pub analysis: EngineAnalyzeRequest,
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineInterprocSummaryReportRequest {
-    pub analysis: EngineAnalyzeRequest,
-    pub iterations: usize,
-    pub max_iterations: usize,
-    pub converged: bool,
-    pub scope_report: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineInterprocSummaryReportResponse {
-    pub report: EngineInterprocSummaryJson,
-    pub metrics: EngineMetrics,
-    pub diagnostics: EngineDiagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -1956,71 +1827,6 @@ impl EngineFunctionAnalysisArtifactRequest {
                     include_interproc_summary_set: true,
                 },
             ),
-        }
-    }
-
-    pub fn full_semantics_for_function_with_register_names<F>(
-        input: EngineFunctionAnalysisArtifactRequestInput,
-        register_name: F,
-    ) -> Self
-    where
-        F: FnMut(&r2il::Varnode) -> Option<String>,
-    {
-        Self {
-            analysis: EngineAnalyzeRequest::full_semantics_for_function_with_register_names(
-                EngineAnalyzeFunctionRequestInput {
-                    function: input.function,
-                    ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
-                    parsed_context: input.parsed_context,
-                    include_interproc_summary_set: true,
-                },
-                register_name,
-            ),
-        }
-    }
-}
-
-impl EngineInterprocSummaryReportRequest {
-    pub fn full_semantics_for_function(
-        input: EngineFunctionAnalysisArtifactRequestInput,
-        iterations: usize,
-        max_iterations: usize,
-        converged: bool,
-        scope_report: Option<serde_json::Value>,
-    ) -> Self {
-        Self {
-            analysis: EngineFunctionAnalysisArtifactRequest::full_semantics_for_function(input)
-                .analysis,
-            iterations,
-            max_iterations,
-            converged,
-            scope_report,
-        }
-    }
-
-    pub fn full_semantics_for_function_with_register_names<F>(
-        input: EngineFunctionAnalysisArtifactRequestInput,
-        register_name: F,
-        iterations: usize,
-        max_iterations: usize,
-        converged: bool,
-        scope_report: Option<serde_json::Value>,
-    ) -> Self
-    where
-        F: FnMut(&r2il::Varnode) -> Option<String>,
-    {
-        Self {
-            analysis:
-                EngineFunctionAnalysisArtifactRequest::full_semantics_for_function_with_register_names(
-                    input,
-                    register_name,
-                )
-                .analysis,
-            iterations,
-            max_iterations,
-            converged,
-            scope_report,
         }
     }
 }
@@ -2135,39 +1941,6 @@ impl EngineSession {
         );
         let ssa_control = request.execution.ssa_execution_control();
         self.analyze_with_ssa_control(request, started, metrics, &ssa_control)
-    }
-
-    pub fn interproc_summary_report(
-        &self,
-        request: EngineInterprocSummaryReportRequest,
-    ) -> Option<EngineInterprocSummaryReportResponse> {
-        let EngineInterprocSummaryReportRequest {
-            analysis,
-            iterations,
-            max_iterations,
-            converged,
-            scope_report,
-        } = request;
-        let analysis = analysis.canonicalize_trusted();
-        let response = self.analyze(analysis)?;
-        let summary = response
-            .artifact
-            .function_facts()
-            .summary_view()
-            .root_summary();
-        let report = interproc_summary_json(EngineInterprocSummaryJsonInput {
-            callsite_count: summary.map(|summary| summary.callsite_count).unwrap_or(0),
-            iterations,
-            max_iterations,
-            converged,
-            summary,
-            scope_report: scope_report.as_ref(),
-        });
-        Some(EngineInterprocSummaryReportResponse {
-            report,
-            metrics: response.metrics,
-            diagnostics: response.diagnostics,
-        })
     }
 
     fn analyze_with_ssa_control<C: r2ssa::SsaWorkControl + ?Sized>(

@@ -481,27 +481,6 @@ fn engine_render_target_canonicalizes_arch_without_renderer_config_type() {
 }
 
 #[test]
-fn engine_interproc_summary_json_preserves_supplied_scope_report() {
-    let existing_scope = serde_json::json!({
-        "payloads": [{ "function_addr": 0x403000u64, "function_name": "seeded" }],
-        "seeds": [{ "id": 0x403000u64, "name": "seeded" }],
-    });
-
-    let interproc = interproc_summary_json(EngineInterprocSummaryJsonInput {
-        callsite_count: 2,
-        iterations: 0,
-        max_iterations: 0,
-        converged: true,
-        summary: None,
-        scope_report: Some(&existing_scope),
-    });
-
-    assert_eq!(interproc.iterations, 1);
-    assert_eq!(interproc.max_iterations, 1);
-    assert_eq!(interproc.scope, Some(existing_scope));
-}
-
-#[test]
 fn analyze_request_builders_own_semantic_mode_selection() {
     let parts = EngineAnalyzeRequestParts {
         function_name: "sym.builder".to_string(),
