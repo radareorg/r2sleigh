@@ -1963,11 +1963,6 @@ impl CStmt {
         Self::Block(stmts)
     }
 
-    /// Create a declaration.
-    pub fn decl(ty: CType, name: crate::symbol::SymbolId, init: Option<CExpr>) -> Self {
-        Self::Decl { ty, name, init }
-    }
-
     /// Create a comment.
     pub fn comment(text: impl Into<String>) -> Self {
         Self::Comment(text.into())
@@ -2199,12 +2194,6 @@ impl CFunction {
     /// proven-empty `(void)` list.
     pub fn with_unknown_params(mut self) -> Self {
         self.params_known = false;
-        self
-    }
-
-    /// Add a parameter.
-    pub fn with_param(mut self, ty: CType, name: crate::symbol::SymbolId) -> Self {
-        self.params.push(CParam { ty, name });
         self
     }
 

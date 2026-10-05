@@ -259,35 +259,6 @@ impl SymbolTable {
         id
     }
 
-    /// Apply a rename the caller worked out, keeping every reference intact.
-    ///
-    /// A reference is an identifier, so moving a spelling moves every mention of
-    /// it at once. Nothing walks the body to keep declarations and uses in step,
-    /// because they were never separately spelled.
-    pub fn follow_renames(&mut self, renames: &HashMap<String, String>) {
-        if renames.is_empty() {
-            return;
-        }
-        for index in 0..self.symbols.len() {
-            let Some(target) = renames.get(&*self.symbols[index].name) else {
-                continue;
-            };
-            if self.by_name.contains_key(target) {
-                // Two names cannot become one, or two variables would.
-                continue;
-            }
-            if let Some(want) = crate::debug::traced_variable_name()
-                && target.eq_ignore_ascii_case(want)
-            {
-                eprintln!("NAMEFOLLOW {} -> {target}", self.symbols[index].name);
-            }
-            let previous =
-                std::mem::replace(&mut self.symbols[index].name, Rc::from(target.as_str()));
-            self.by_name.remove(&*previous);
-            self.by_name.insert(target.clone(), self.id_at(index));
-        }
-    }
-
     /// An identifier that no declaration has taken yet.
     fn unique_name(&self, requested: String) -> String {
         if !self.by_name.contains_key(&requested) {
@@ -351,11 +322,6 @@ impl SymbolTable {
         let previous = std::mem::replace(&mut self.symbols[index].name, Rc::from(name.as_str()));
         self.by_name.remove(&*previous);
         self.by_name.insert(name, id);
-    }
-
-    pub fn set_type(&mut self, id: SymbolId, ty: CType) {
-        let index = self.resolve(id);
-        self.symbols[index].ty = ty;
     }
 
     /// The identifier spelled this way, if any declaration took that spelling.

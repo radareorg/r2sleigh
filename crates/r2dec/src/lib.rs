@@ -1463,14 +1463,6 @@ impl BindingObservationDomainAudit {
     pub const fn is_complete(self) -> bool {
         self.equations_hold() && self.unaccounted == 0
     }
-
-    pub const fn passes_quality(self) -> bool {
-        self.is_complete() && self.refused == 0
-    }
-
-    pub const fn is_fully_proven(self) -> bool {
-        self.passes_quality() && self.gapped == 0
-    }
 }
 
 impl From<crate::observation_journal::LegacyObservationDomainCoverage>
@@ -1497,16 +1489,8 @@ pub struct BindingObservationAudit {
 }
 
 impl BindingObservationAudit {
-    pub const fn equations_hold(self) -> bool {
-        self.values.equations_hold() && self.uses.equations_hold() && self.writes.equations_hold()
-    }
-
     pub const fn is_complete(self) -> bool {
         self.values.is_complete() && self.uses.is_complete() && self.writes.is_complete()
-    }
-
-    pub const fn passes_quality(self) -> bool {
-        self.values.passes_quality() && self.uses.passes_quality() && self.writes.passes_quality()
     }
 }
 
@@ -2408,12 +2392,6 @@ pub enum PlacementAudit {
     NotRun,
 }
 
-impl PlacementAudit {
-    pub const fn is_applied(self) -> bool {
-        matches!(self, Self::Applied)
-    }
-}
-
 /// Which upstream authority failed when a machine projection was refused.
 ///
 /// Every one of these used to become the same payload-free
@@ -2766,10 +2744,6 @@ pub struct DecompileBindingAudit {
 impl DecompileBindingAudit {
     pub fn output(&self) -> &str {
         self.rendered.text()
-    }
-
-    pub fn into_output(self) -> String {
-        self.rendered.into_text()
     }
 
     /// The C and the tree it came from, for a consumer that walks the function.
