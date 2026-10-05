@@ -46,10 +46,18 @@ engine. Commands, the visual mode and the agent surface all ask it.
 ## Left
 
 - Order (2026-10-06): Q3's returns and survey land before Q2, since the
-  analysis reads both. Callees over a maximal walk (every callee returns but
-  those declared not to) give components independent of returns; each
-  component's returns is one query, and a callee outside it is another
-  component's answer.
+  analysis reads both.
+- Returns are not solved per component. Components over a maximal walk
+  (every callee returns but those declared not to) are independent of the
+  answers, but the closure is what a single `pdd` would pay: 35/231/1991/1148
+  bodies and 0.7/3.5/19/14% of release `pdd` on the four timed cases, against
+  3/44/396/370 bodies for the lazy fixpoint, which walks a callee only while
+  an undecided caller waits on it. `ComesBack(f)` runs that fixpoint, reads
+  answers already held (`Db::held`, recording a dependency, never computing,
+  so no cycle arises) and deposits the others it found with its own
+  dependencies; the least fixpoint is unique, so a deposited answer equals a
+  computed one. P6's summaries may still want components; they decide that
+  with their own measurement.
 - Q2: decode, walk, lift and seal per function as queries. Exit: `Memo` and
   `Moved` are deleted.
 - Q3: the discovery survey and entry modes (moved here from Q1, because they
