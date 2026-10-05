@@ -542,29 +542,3 @@ identity_rule!(
         )
     }]
 );
-
-pub static GROUP: &[&Rule] = &[
-    &ADD_ZERO,
-    &SUB_ZERO,
-    &SUB_SELF,
-    &MUL_ONE,
-    &MUL_ZERO,
-    &AND_ZERO,
-    &AND_ONES,
-    &AND_SELF,
-    &OR_ZERO,
-    &OR_SELF,
-    &OR_ONES,
-    &XOR_ZERO,
-    &XOR_SELF,
-    &NOT_NOT,
-    &NEG_NEG,
-    &SHL_ZERO,
-    &LSHR_ZERO,
-    &ASHR_ZERO,
-    &BOOLNOT_BOOLNOT,
-    &BOOLAND_SELF,
-    &BOOLOR_SELF,
-    &BOOLAND_TRUE,
-    &BOOLOR_FALSE,
-];

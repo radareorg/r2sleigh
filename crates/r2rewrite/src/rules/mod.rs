@@ -289,7 +289,3 @@ pub static RULES: &[&Rule] = &[
     &subscript::POINTER_WALK,
     &subscript::CONSTANT_STRIDE,
 ];
-
-pub fn rule(id: RuleId) -> Option<&'static Rule> {
-    RULES.iter().copied().find(|rule| rule.id == id)
-}

@@ -522,8 +522,3 @@ literal_rule!(
         )
     }]
 );
-
-pub static GROUP: &[&Rule] = &[
-    &ADD, &SUB, &MUL, &NEG, &AND, &OR, &XOR, &NOT, &SHIFT, &COMPARE, &FLAG, &BOOL, &BOOL_NOT,
-    &CAST, &EXTRACT, &CONCAT, &SELECT,
-];

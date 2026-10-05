@@ -84,10 +84,6 @@ impl Import {
         self.accesses.values()
     }
 
-    pub fn entry_never_redefined(&self) -> &BTreeSet<ValueId> {
-        &self.entry_never_redefined
-    }
-
     /// Whether every read `term` makes is of a literal or of an entry value
     /// the function never redefines, so the term can be rendered at any
     /// number of sites without observing anything twice.
