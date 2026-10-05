@@ -26,14 +26,13 @@
 //! [`MOST_WAYS`] + 1, so the passes are bounded by that height times the loop
 //! nesting, O(ops × W) each for width W in bytes.
 
-use std::collections::BTreeMap;
-
 use r2source::{CanonicalStorageId, CanonicalStorageSpace};
 
 use crate::SSAFunction;
 use crate::arena::OpId;
+use crate::dense::{IdMap, IdSet};
 use crate::op::SSAOp;
-use crate::var::SSAVar;
+use crate::value_table::VarId;
 
 /// One byte of a register, by where it lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -121,13 +120,13 @@ pub fn join(a: &[Byte], b: &[Byte]) -> Bytes {
 /// What every operation and phi of a function wrote, by id, as lifted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Written {
-    by_op: BTreeMap<OpId, Bytes>,
+    by_op: IdMap<OpId, Bytes>,
 }
 
 impl Written {
     /// What the operation or phi `id` wrote, where it was lifted.
     pub fn of(&self, id: OpId) -> Option<&Bytes> {
-        self.by_op.get(&id)
+        self.by_op.get(id)
     }
 
     /// Whether nothing was recorded: the function was never prepared.
@@ -137,13 +136,11 @@ impl Written {
 
     /// Take the record of a function before anything rewrites it.
     pub fn capture(function: &SSAFunction) -> Self {
-        let mut by_var = BTreeMap::<SSAVar, Bytes>::new();
-        let mut by_op = BTreeMap::<OpId, Bytes>::new();
+        let mut by_var = IdMap::<VarId, Bytes>::default();
+        let mut by_op = IdMap::<OpId, Bytes>::default();
         let writes = Writes::of(function);
         // Until nothing changes: a loop's phi reads a value defined below it.
-        // Named once, not once a round.
-        let named = function.named_blocks();
-        while named.iter().fold(false, |changed, block| {
+        while function.blocks().iter().fold(false, |changed, block| {
             changed | capture_block(function, &writes, block, &mut by_var, &mut by_op)
         }) {}
         Self { by_op }
@@ -154,28 +151,26 @@ impl Written {
 fn capture_block(
     function: &SSAFunction,
     writes: &Writes,
-    block: &crate::block::SSABlock,
-    by_var: &mut BTreeMap<SSAVar, Bytes>,
-    by_op: &mut BTreeMap<OpId, Bytes>,
+    block: &crate::block::SSABlock<VarId>,
+    by_var: &mut IdMap<VarId, Bytes>,
+    by_op: &mut IdMap<OpId, Bytes>,
 ) -> bool {
     let mut changed = false;
     for (id, phi) in block.sited_phis() {
+        let size = function.var(phi.dst).size as usize;
         let bytes = phi
             .sources
             .iter()
-            .map(|(_, source)| read(function, by_var, source))
-            .fold(vec![Byte::NONE; phi.dst.size as usize], |held, source| {
-                join(&held, &source)
-            });
-        changed |= settle(by_var, by_op, id, &phi.dst, bytes);
+            .map(|(_, source)| read(function, by_var, *source))
+            .fold(vec![Byte::NONE; size], |held, source| join(&held, &source));
+        changed |= settle(by_var, by_op, id, phi.dst, bytes);
     }
     for (id, op) in block.sited() {
         if let Some(dst) = op.dst() {
             let convention = by_convention(function, writes, op);
-            let bytes = transfer(op, convention, crate::op::var_facts, |var| {
-                read(function, by_var, var)
-            });
-            changed |= settle(by_var, by_op, id, dst, bytes);
+            let facts = |var: &VarId| crate::op::var_facts(function.var(*var));
+            let bytes = transfer(op, convention, facts, |var| read(function, by_var, *var));
+            changed |= settle(by_var, by_op, id, *dst, bytes);
         }
     }
     changed
@@ -199,43 +194,39 @@ fn capture_block(
 /// conventional one, and the whole is taken as written: too wide is a
 /// claim the caller can still check, too narrow drops bytes it reads. A
 /// sign extension is always the program's.
-fn by_convention(function: &SSAFunction, writes: &Writes, op: &SSAOp) -> bool {
+fn by_convention(function: &SSAFunction, writes: &Writes, op: &SSAOp<VarId>) -> bool {
     let SSAOp::IntZExt { dst, src } = op else {
         return false;
     };
     let register = function
-        .canonical_storage_for_var(dst)
+        .storage_of(*dst)
         .is_some_and(|storage| storage.space == CanonicalStorageSpace::Register);
-    let halves = src.size.checked_mul(2) == Some(dst.size);
-    let outermost = !writes.extended.contains(dst);
+    let halves = function.var(*src).size.checked_mul(2) == Some(function.var(*dst).size);
+    let outermost = !writes.extended.contains(*dst);
     register && halves && outermost
 }
 
 /// Every value an extension in the same instruction as its definition
 /// widens again, as lifted.
 struct Writes {
-    extended: std::collections::BTreeSet<SSAVar>,
+    extended: IdSet<VarId>,
 }
 
 impl Writes {
     fn of(function: &SSAFunction) -> Self {
         let arena = function.arena();
-        let mut definers = BTreeMap::new();
-        let mut extended = std::collections::BTreeSet::new();
-        for (id, op) in function
-            .named_blocks()
-            .iter()
-            .flat_map(|block| block.sited())
-        {
+        let mut definers = IdMap::<VarId, OpId>::default();
+        let mut extended = IdSet::default();
+        for (id, op) in function.blocks().iter().flat_map(|block| block.sited()) {
             if let SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } = op
-                && let Some(definer) = definers.get(src)
+                && let Some(definer) = definers.get(*src)
                 && arena.instruction(*definer).is_some()
                 && arena.instruction(*definer) == arena.instruction(id)
             {
-                extended.insert(src.clone());
+                extended.insert(*src);
             }
             if let Some(dst) = op.dst() {
-                definers.insert(dst.clone(), id);
+                definers.insert(*dst, id);
             }
         }
         Self { extended }
@@ -245,13 +236,13 @@ impl Writes {
 /// Record what `id` wrote to `dst`, joined with what it was recorded as
 /// writing before; whether that moved anything.
 fn settle(
-    by_var: &mut BTreeMap<SSAVar, Bytes>,
-    by_op: &mut BTreeMap<OpId, Bytes>,
+    by_var: &mut IdMap<VarId, Bytes>,
+    by_op: &mut IdMap<OpId, Bytes>,
     id: OpId,
-    dst: &SSAVar,
+    dst: VarId,
     bytes: Bytes,
 ) -> bool {
-    let held = by_var.entry(dst.clone()).or_default();
+    let held = by_var.get_or_insert_with(dst, Vec::new);
     let joined = match held.len() == bytes.len() {
         true => held.iter().zip(&bytes).map(|(a, b)| a.join(b)).collect(),
         false => bytes,
@@ -267,15 +258,16 @@ fn settle(
 /// The bytes of a variable an operation reads: a literal's are data, an entry
 /// value's are the register bytes it was entered with, and anything else is
 /// what its definition wrote, so far as the pass has reached it.
-fn read(function: &SSAFunction, by_var: &BTreeMap<SSAVar, Bytes>, var: &SSAVar) -> Bytes {
+fn read(function: &SSAFunction, by_var: &IdMap<VarId, Bytes>, id: VarId) -> Bytes {
+    let var = function.var(id);
     if var.constant_bits().is_some() {
         return vec![Byte::Data; var.size as usize];
     }
-    if let Some(bytes) = by_var.get(var) {
+    if let Some(bytes) = by_var.get(id) {
         return bytes.clone();
     }
     if var.version == 0 {
-        return entry_bytes(function.canonical_storage_for_var(var), var.size);
+        return entry_bytes(function.storage_of(id), var.size);
     }
     vec![Byte::NONE; var.size as usize]
 }

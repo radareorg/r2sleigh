@@ -171,10 +171,8 @@ impl ValueViews<VarId> {
         // order as the representative of their class. A lane no operation
         // names is no value of the function, and names none.
         for (lane, root) in function.entry_lanes() {
-            if let (Some(lane), Some(root)) = (table.id_of(lane), table.id_of(root)) {
-                nodes.push(lane);
-                definitions.push(Definition::Step(root, lane_step(&facts, lane, root)));
-            }
+            nodes.push(lane);
+            definitions.push(Definition::Step(root, lane_step(&facts, lane, root)));
         }
         for block in function.blocks() {
             for phi in block.phis() {

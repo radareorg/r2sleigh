@@ -2463,14 +2463,14 @@ pub(crate) fn loop_carrier_member_rows(
             .iter()
             .enumerate()
             .map(|(index, carrier)| (carrier.phi, index))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<crate::dense::IdMap<_, _>>();
         for candidate_group in candidates_by_key.values() {
             let Some((leader, leader_candidate)) = candidate_group
                 .iter()
                 .filter_map(|candidate_index| {
                     let candidate = &candidates[*candidate_index];
                     carrier_by_phi
-                        .get(&candidate.phi)
+                        .get(candidate.phi)
                         .copied()
                         .map(|carrier_index| (carrier_index, *candidate_index))
                 })
@@ -2486,14 +2486,14 @@ pub(crate) fn loop_carrier_member_rows(
             let leader_width = candidates[leader_candidate].width;
             for candidate_index in candidate_group {
                 let candidate = &candidates[*candidate_index];
-                if let Some(peer_carrier) = carrier_by_phi.get(&candidate.phi).copied() {
+                if let Some(peer_carrier) = carrier_by_phi.get(candidate.phi).copied() {
                     leader_by_carrier[peer_carrier] = leader;
                 }
                 if candidate.width == leader_width {
                     continue;
                 }
                 insert_loop_carrier_peer_roles(&mut rows[leader], candidate);
-                if let Some(peer_carrier) = carrier_by_phi.get(&candidate.phi).copied() {
+                if let Some(peer_carrier) = carrier_by_phi.get(candidate.phi).copied() {
                     insert_loop_carrier_peer_roles(
                         &mut rows[peer_carrier],
                         &candidates[leader_candidate],
@@ -2530,7 +2530,7 @@ pub(crate) fn loop_carrier_member_rows(
     // emptied again doing nothing. The guards below are the body's own, in its
     // order, so what is skipped here is exactly what it would have skipped.
     // Read the carriers' spans' members, not every instruction once per loop.
-    let mut pending = BTreeSet::new();
+    let mut pending = crate::dense::IdWorklist::default();
     for span in roots_by_span.keys() {
         for value in storage_spans.members(*span)? {
             let Some(inst) = graph.def_inst(*value).and_then(|inst| graph.inst(inst)) else {

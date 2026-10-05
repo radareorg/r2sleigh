@@ -385,13 +385,11 @@ impl SSAFunction {
             if self.values.storage(held).is_none() {
                 self.values.set_storage(held, root);
             }
-            self.formal_projections
-                .insert(projection.clone(), lane_storage);
-            if offset == 0 {
-                self.entry_lanes
-                    .insert(projection.clone(), root_var.clone());
-            }
             let projection_id = self.values.intern(&projection);
+            self.formal_projections.insert(projection_id, lane_storage);
+            if offset == 0 {
+                self.entry_lanes.insert(projection_id, held);
+            }
             for (addr, op_index, inside) in reads {
                 if let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), addr)
                     && let Some(SSAOp::Subpiece { dst, .. }) = block.ops().get(op_index)
@@ -489,8 +487,8 @@ impl SSAFunction {
                 carried = dst;
             }
             highest_disambiguator.insert(composed.name().to_string(), disambiguator);
-            self.values.intern_with_storage(&composed, root);
-            self.formal_roots.insert(composed.clone(), root);
+            let composed_id = self.values.intern_with_storage(&composed, root);
+            self.formal_roots.insert(composed_id, root);
             substitutions.insert(root_id, self.values.intern(&composed));
         }
         // One walk for every root. Each root substitutes one variable, and

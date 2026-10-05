@@ -515,22 +515,20 @@ impl SsaGraph {
             .unwrap_or(BlockId(0));
 
         let formal_projections = function
-            .formal_projection_vars()
-            .filter_map(|(var, storage)| {
-                let operand = function.values().id_of(var)?;
+            .formal_projection_ids()
+            .filter_map(|(operand, storage)| {
                 value_by_var[operand.0 as usize].map(|value| (value, *storage))
             })
             .collect();
         let formal_roots = function
-            .formal_root_vars()
-            .filter_map(|(var, storage)| {
-                let operand = function.values().id_of(var)?;
+            .formal_root_ids()
+            .filter_map(|(operand, storage)| {
                 value_by_var[operand.0 as usize].map(|value| (value, *storage))
             })
             .collect();
         let entry_lanes = function
             .entry_lanes()
-            .map(|(lane, root)| (lane.clone(), root.clone()))
+            .map(|(lane, root)| (function.var(lane).clone(), function.var(root).clone()))
             .collect();
         let value_index = value_index_of(&values);
         Self {

@@ -42,9 +42,9 @@ impl SSAFunction {
             blocks: Blocks::adopting(ordered),
             values,
             block_order,
-            formal_projections: BTreeMap::new(),
-            formal_roots: BTreeMap::new(),
-            entry_lanes: BTreeMap::new(),
+            formal_projections: crate::dense::IdMap::default(),
+            formal_roots: crate::dense::IdMap::default(),
+            entry_lanes: crate::dense::IdMap::default(),
             written: crate::lanes::Written::default(),
         }
     }
@@ -592,9 +592,9 @@ impl SSAFunction {
             block_order: renamed_block_order,
             blocks: Blocks::new(ssa_blocks, arena),
             values,
-            formal_projections: BTreeMap::new(),
-            formal_roots: BTreeMap::new(),
-            entry_lanes: BTreeMap::new(),
+            formal_projections: crate::dense::IdMap::default(),
+            formal_roots: crate::dense::IdMap::default(),
+            entry_lanes: crate::dense::IdMap::default(),
             written: crate::lanes::Written::default(),
         };
         function.zero_scratch_insert_roots(abi_carriers);

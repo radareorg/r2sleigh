@@ -2531,17 +2531,17 @@ pub struct SSAFunction {
     /// the function was entered with it, defined at entry as a `Subpiece` of
     /// the family root's entry value (doc/adr-register-identity.md §8, 6).
     /// Keyed by the projection's variable, valued by the lane's storage.
-    formal_projections: BTreeMap<SSAVar, CanonicalStorageId>,
+    formal_projections: crate::dense::IdMap<VarId, CanonicalStorageId>,
     /// Entry roots rebuilt from their declared lanes: the value a read of the
     /// whole register takes once the formals describe it, defined at entry
     /// from the projections with zero above them. Keyed by the rebuilt
     /// variable, valued by the root's storage. The rebuild restates what the
     /// caller passed; it is no write the body made.
-    formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
+    formal_roots: crate::dense::IdMap<VarId, CanonicalStorageId>,
     /// Each entry-lane formal at the low end of its root, and that root: the
     /// formal is the caller's own value of the lane, live at entry with no
     /// definition, and its bits are the root's low bits.
-    entry_lanes: BTreeMap<SSAVar, SSAVar>,
+    entry_lanes: crate::dense::IdMap<VarId, VarId>,
     /// Which bytes each operation and phi wrote as data, recorded when the
     /// function was lifted and kept through every rewrite by id
     /// (doc/adr-written-lanes.md).
@@ -3688,23 +3688,23 @@ impl SSAFunction {
     }
 
     /// The storage an entry-lane projection stands for.
-    pub fn formal_projection_storage(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
-        self.formal_projections.get(var).copied()
+    pub fn formal_projection_storage(&self, id: VarId) -> Option<CanonicalStorageId> {
+        self.formal_projections.get(id).copied()
     }
 
-    pub(crate) fn formal_projection_vars(
+    pub(crate) fn formal_projection_ids(
         &self,
-    ) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
+    ) -> impl Iterator<Item = (VarId, &CanonicalStorageId)> {
         self.formal_projections.iter()
     }
 
-    pub(crate) fn formal_root_vars(&self) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
+    pub(crate) fn formal_root_ids(&self) -> impl Iterator<Item = (VarId, &CanonicalStorageId)> {
         self.formal_roots.iter()
     }
 
     /// Each entry-lane formal at the low end of its root, with the root.
-    pub(crate) fn entry_lanes(&self) -> impl Iterator<Item = (&SSAVar, &SSAVar)> {
-        self.entry_lanes.iter()
+    pub(crate) fn entry_lanes(&self) -> impl Iterator<Item = (VarId, VarId)> + '_ {
+        self.entry_lanes.iter().map(|(lane, root)| (lane, *root))
     }
 
     /// Print the function in a human-readable format.

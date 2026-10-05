@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::function::{DefSite, SSAFunction, SourceSite};
-use crate::{CanonicalStorageId, SSAOp, SSAVar};
+use crate::{CanonicalStorageId, SSAOp, SSAVar, VarId};
 
 /// The scalar-width rule violated by one regular SSA operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,17 +402,19 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
         }
     }
 
-    let mut definitions = HashMap::<SSAVar, DefinitionLocation>::new();
+    let mut definitions = crate::dense::IdMap::<VarId, DefinitionLocation>::default();
+    let var = |id: &VarId| function.var(*id);
 
     // Complete the definition table before checking uses: a legal SSA use can
     // precede its textual definition through a loop-carried phi edge.
-    for block in function.named_blocks() {
+    for block in function.blocks() {
         let mut failure = None;
         block.for_each_def(|definition| {
             if failure.is_some() {
                 return;
             }
-            let var = definition.var;
+            let id = *definition.var;
+            let var = var(definition.var);
             if var.size == 0 {
                 failure = Some(SsaIntegrityError::ZeroWidthValue {
                     block_addr: block.addr,
@@ -433,7 +435,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 block_addr: block.addr,
                 site: definition.site,
             };
-            if let Some(first) = definitions.insert(var.clone(), location) {
+            if let Some(first) = definitions.insert(id, location) {
                 failure = Some(SsaIntegrityError::DuplicateDefinition {
                     var: var.clone(),
                     first_block_addr: first.block_addr,
@@ -449,7 +451,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
     }
 
     let domtree = function.domtree();
-    for block in function.named_blocks() {
+    for block in function.blocks() {
         // Query once per block so the full validator remains linear in CFG
         // edges even when a merge block carries several phi values.
         let expected_predecessors = topology
@@ -477,7 +479,9 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 });
             }
 
+            let dst = var(&phi.dst);
             for (source_idx, (pred_addr, source)) in phi.sources.iter().enumerate() {
+                let source = var(source);
                 if source.size == 0 {
                     return Err(SsaIntegrityError::ZeroWidthValue {
                         block_addr: block.addr,
@@ -489,11 +493,11 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                         var: source.clone(),
                     });
                 }
-                if source.size != phi.dst.size {
+                if source.size != dst.size {
                     return Err(SsaIntegrityError::PhiWidthMismatch {
                         block_addr: block.addr,
                         phi_idx,
-                        dst: phi.dst.clone(),
+                        dst: dst.clone(),
                         source_idx,
                         source: source.clone(),
                     });
@@ -501,12 +505,12 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             }
 
             if let Some(declared) = phi.canonical_storage {
-                let retained = function.canonical_storage_for_var(&phi.dst);
-                if declared.size != phi.dst.size || retained != Some(declared) {
+                let retained = function.storage_of(phi.dst);
+                if declared.size != dst.size || retained != Some(declared) {
                     return Err(SsaIntegrityError::PhiStorageMismatch {
                         block_addr: block.addr,
                         phi_idx,
-                        dst: phi.dst.clone(),
+                        dst: dst.clone(),
                         declared,
                         retained,
                     });
@@ -518,6 +522,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             let mut zero_width_source = None;
             let mut source_idx = 0usize;
             op.for_each_source(|source| {
+                let source = var(source);
                 if zero_width_source.is_none() && source.size == 0 {
                     zero_width_source = Some((source_idx, source.clone()));
                 }
@@ -530,12 +535,12 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                     var,
                 });
             }
-            if let Some(rule) = scalar_width_violation(op) {
+            if let Some(rule) = scalar_width_violation(op, |id| var(id).size) {
                 return Err(SsaIntegrityError::ScalarWidthMismatch {
                     block_addr: block.addr,
                     op_idx,
                     rule,
-                    op: op.clone(),
+                    op: op.map(&mut |id| var(id).clone()),
                 });
             }
         }
@@ -545,22 +550,24 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
             if failure.is_some() {
                 return;
             }
-            if source.var.size == 0 {
+            let id = *source.var;
+            let source_var = var(source.var);
+            if source_var.size == 0 {
                 failure = Some(SsaIntegrityError::ZeroWidthValue {
                     block_addr: block.addr,
                     site: SsaValueSite::Source(source.site),
-                    var: source.var.clone(),
+                    var: source_var.clone(),
                 });
                 return;
             }
-            if source.var.version == 0 {
+            if source_var.version == 0 {
                 return;
             }
-            let Some(definition) = definitions.get(source.var) else {
+            let Some(definition) = definitions.get(id) else {
                 failure = Some(SsaIntegrityError::MissingDefinition {
                     block_addr: block.addr,
                     site: source.site,
-                    var: source.var.clone(),
+                    var: source_var.clone(),
                 });
                 return;
             };
@@ -584,7 +591,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 failure = Some(SsaIntegrityError::UseNotDominated {
                     block_addr: block.addr,
                     site: source.site,
-                    var: source.var.clone(),
+                    var: source_var.clone(),
                     def_block_addr: definition.block_addr,
                     def_site: definition.site,
                 });
@@ -598,9 +605,9 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
     Ok(())
 }
 
-fn scalar_width_violation(op: &SSAOp) -> Option<ScalarWidthRule> {
+fn scalar_width_violation<V>(op: &SSAOp<V>, size: impl Fn(&V) -> u32) -> Option<ScalarWidthRule> {
     match op {
-        SSAOp::Copy { dst, src } if dst.size != src.size => {
+        SSAOp::Copy { dst, src } if size(dst) != size(src) => {
             Some(ScalarWidthRule::CopyPreservesWidth)
         }
         SSAOp::IntEqual { dst, .. }
@@ -609,7 +616,7 @@ fn scalar_width_violation(op: &SSAOp) -> Option<ScalarWidthRule> {
         | SSAOp::IntSLess { dst, .. }
         | SSAOp::IntLessEqual { dst, .. }
         | SSAOp::IntSLessEqual { dst, .. }
-            if dst.size != 1 =>
+            if size(dst) != 1 =>
         {
             Some(ScalarWidthRule::ComparisonProducesBoolean)
         }
@@ -619,11 +626,11 @@ fn scalar_width_violation(op: &SSAOp) -> Option<ScalarWidthRule> {
         | SSAOp::IntSLess { a, b, .. }
         | SSAOp::IntLessEqual { a, b, .. }
         | SSAOp::IntSLessEqual { a, b, .. }
-            if a.size != b.size =>
+            if size(a) != size(b) =>
         {
             Some(ScalarWidthRule::ComparisonOperandsMatch)
         }
-        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } if dst.size <= src.size => {
+        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } if size(dst) <= size(src) => {
             Some(ScalarWidthRule::ExtensionWidens)
         }
         _ => None,

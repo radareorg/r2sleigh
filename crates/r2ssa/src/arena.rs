@@ -33,6 +33,15 @@ impl OpId {
     }
 }
 
+impl crate::dense::DenseId for OpId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+    fn from_index(index: usize) -> Self {
+        Self(u32::try_from(index).expect("fewer than 2^32 operations"))
+    }
+}
+
 impl fmt::Display for OpId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

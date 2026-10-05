@@ -308,7 +308,7 @@ impl<'a> AddressCollector<'a> {
         graph: &'a SsaGraph,
         _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
-        let mut expressions = BTreeMap::new();
+        let mut expressions = crate::dense::IdMap::default();
         if let Some(prep) = prep {
             // Every formal, not only those that arrived at their ABI storage's
             // full width. A narrow parameter -- an `unsigned` in `w1` where
@@ -323,16 +323,14 @@ impl<'a> AddressCollector<'a> {
                 .iter()
                 .chain(prep.formal_parameters.iter())
             {
-                expressions
-                    .entry(value)
-                    .or_insert_with(|| AddressExpression {
-                        base: AddressBase::Parameter {
-                            index: *parameter,
-                            storage: graph.value(value).and_then(|value| value.canonical_storage),
-                        },
-                        terms: Vec::new(),
-                        offset: 0,
-                    });
+                expressions.get_or_insert_with(value, || AddressExpression {
+                    base: AddressBase::Parameter {
+                        index: *parameter,
+                        storage: graph.value(value).and_then(|value| value.canonical_storage),
+                    },
+                    terms: Vec::new(),
+                    offset: 0,
+                });
             }
         }
         let load_count = graph
@@ -352,7 +350,7 @@ impl<'a> AddressCollector<'a> {
             prep,
             graph,
             views: prep.map(|prep| &prep.views),
-            seeded: expressions.keys().copied().collect(),
+            seeded: expressions.keys().collect(),
             expressions: expressions
                 .into_iter()
                 .map(|(value, expression)| (value, Cell::Expr(expression)))

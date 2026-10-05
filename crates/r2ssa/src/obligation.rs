@@ -798,11 +798,11 @@ impl SemanticObligationInventory {
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
         propagate_live_dependencies(graph, &mut required);
-        let live_before_loop_annotation = required.keys().collect::<BTreeSet<_>>();
+        let live_before_loop_annotation = required.keys().collect::<crate::dense::IdSet<_>>();
         for fact in structured.loops.values() {
             for carrier in &fact.carriers {
                 let carrier_inst = graph.def_inst(carrier.phi);
-                if carrier_inst.is_none_or(|inst| !live_before_loop_annotation.contains(&inst)) {
+                if carrier_inst.is_none_or(|inst| !live_before_loop_annotation.contains(inst)) {
                     continue;
                 }
                 seed_value_definition(
