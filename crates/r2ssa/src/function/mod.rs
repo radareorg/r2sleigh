@@ -2780,12 +2780,12 @@ impl SSAFunction {
     /// The prep facts of this function as it stands, with no interface, and
     /// the graph they are keyed by, for a test that reads them off a
     /// function it does not seal.
-    pub(crate) fn prep_facts_for_test(&self) -> TestPrep {
+    pub(crate) fn prep_facts_for_test(&self) -> Provisional {
         let graph = SsaGraph::from_function_with_storage(self);
         let facts = self
             .collect_decompile_prep_facts_with_control(&graph, None, &UncheckedSsaWorkControl)
             .expect("an unchecked control never stops");
-        TestPrep { graph, facts }
+        Provisional { graph, facts }
     }
 
     /// One block, open for change, for a test that writes a fixture a block
@@ -3990,15 +3990,14 @@ mod forward;
 #[cfg(test)]
 mod tests;
 
-/// Prep facts and the graph whose values key them, for a test.
-#[cfg(test)]
-pub(crate) struct TestPrep {
+/// Prep facts and the graph whose values key them, for a function analysed but not sealed.
+pub(crate) struct Provisional {
     pub(crate) graph: SsaGraph,
     pub(crate) facts: DecompilePrepFacts,
 }
 
 #[cfg(test)]
-impl TestPrep {
+impl Provisional {
     /// The graph's value for a variable the test names.
     pub(crate) fn value(&self, var: &SSAVar) -> ValueId {
         self.graph
@@ -4007,8 +4006,7 @@ impl TestPrep {
     }
 }
 
-#[cfg(test)]
-impl Deref for TestPrep {
+impl Deref for Provisional {
     type Target = DecompilePrepFacts;
 
     fn deref(&self) -> &DecompilePrepFacts {

@@ -153,10 +153,10 @@ impl Prepared {
     pub(crate) fn provisional_prep_facts<C: SsaWorkControl + ?Sized>(
         &self,
         control: &C,
-    ) -> Result<DecompilePrepFacts, SsaExecutionStopReason> {
+    ) -> Result<super::Provisional, SsaExecutionStopReason> {
         let graph = SsaGraph::from_function_with_storage(&self.ir);
-        self.ir
-            .collect_decompile_prep_facts_with_control(&graph, None, control)
+        let facts = (self.ir).collect_decompile_prep_facts_with_control(&graph, None, control)?;
+        Ok(super::Provisional { graph, facts })
     }
 
     /// Seal the function: the fixed sequence that rewrites the blocks for

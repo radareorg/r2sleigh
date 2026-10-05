@@ -952,7 +952,7 @@ pub fn recover_interface(
 /// `prep` is the prep facts of `func`, which is prepared and never sealed.
 pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
-    prep: &crate::DecompilePrepFacts,
+    prep: &crate::function::Provisional,
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
     loader_role: Option<r2source::SourceLoaderRole>,
@@ -966,7 +966,7 @@ pub(crate) fn recover_interface_with_context(
 /// the register; parameters are still read off the body.
 fn recover_interface_inner(
     func: &SSAFunction,
-    prep: Option<&crate::DecompilePrepFacts>,
+    provisional: Option<&crate::function::Provisional>,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
     loader_role: Option<r2source::SourceLoaderRole>,
@@ -982,18 +982,26 @@ fn recover_interface_inner(
     // establishes the observation domain; the ordinary preparation pass then
     // seals the recovered interface into the final artifact. A cheaper raw-use
     // scan cannot distinguish program inputs from preserved machine state.
-    let graph = SsaGraph::from_function(func);
+    // The graph the prep facts were read off, or one built here when none came with them.
+    let built;
+    let (graph, prep) = match provisional {
+        Some(provisional) => (&provisional.graph, Some(&provisional.facts)),
+        None => {
+            built = SsaGraph::from_function(func);
+            (&built, None)
+        }
+    };
     let facts = if let Some(machine_context) = machine_context {
         crate::semantic::PreparedFunctionFacts::collect_with_context(
             func,
             prep,
-            &graph,
+            graph,
             &crate::AssumptionSet::default(),
             machine_context,
             "recover",
         )
     } else {
-        crate::semantic::PreparedFunctionFacts::collect(func, &graph)
+        crate::semantic::PreparedFunctionFacts::collect(func, graph)
     };
     if !facts.obligations.is_complete() {
         r2il::refusal_evidence!(
@@ -1031,7 +1039,7 @@ fn recover_interface_inner(
         // the arm that writes it says what the function returns. An import
         // thunk has no such arm and still refuses.
         TailResult::Unproven
-            if direct_return_result(func, &graph, &facts, slots.result_slot()).is_some() =>
+            if direct_return_result(func, graph, &facts, slots.result_slot()).is_some() =>
         {
             let slot = slots.result_slot();
             r2il::refusal_evidence!(
@@ -1088,8 +1096,8 @@ fn recover_interface_inner(
         && let Some(candidate) = slots.result_slot()
     {
         let candidate_live_out =
-            crate::liveout::FunctionLiveOut::compute(func, &graph, &[candidate]);
-        result = returned_result(func, &graph, &facts, &candidate_live_out, slots);
+            crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
+        result = returned_result(func, graph, &facts, &candidate_live_out, slots);
         if !candidate_live_out.is_empty()
             && (candidate_live_out.unresolved_blocks().next().is_none()
                 || result.register().is_some())
@@ -1103,9 +1111,9 @@ fn recover_interface_inner(
     // proven nothing about which of them a caller reads.
     // An unproven convention carrier may be what the caller reads, so no other carrier is the one result.
     if no_tail_boundary && loader_role.is_none() && result == RecoveredFunctionResult::Void {
-        let mut proven = body_proven_result(func, &graph, &facts, machine_context, slots);
+        let mut proven = body_proven_result(func, graph, &facts, machine_context, slots);
         if let Some((candidate, candidate_live_out)) = proven.take() {
-            result = recovered_result(func, &graph, &facts, &candidate_live_out, candidate);
+            result = recovered_result(func, graph, &facts, &candidate_live_out, candidate);
             live_out = candidate_live_out;
         }
     }
@@ -1122,7 +1130,7 @@ fn recover_interface_inner(
             .count()
     );
     let Some(observations) =
-        crate::deadphi::ProvenProgramObservations::find(&graph, &live_out, &facts)
+        crate::deadphi::ProvenProgramObservations::find(graph, &live_out, &facts)
     else {
         r2il::refusal_evidence!(
             "interface-recovery",
@@ -1133,7 +1141,7 @@ fn recover_interface_inner(
         );
         return None;
     };
-    let mut reads = observed_entry_read_storages(func, &graph, &observations);
+    let mut reads = observed_entry_read_storages(func, graph, &observations);
     // A carrier passed straight to a call is read by that call, so it belongs
     // in the same evidence as an explicit entry read. The prefix rule below is
     // unchanged and still stops at the first candidate slot nothing observes.
@@ -1142,7 +1150,7 @@ fn recover_interface_inner(
     // either case a preserved carrier is a real entry read by the call. Final
     // preparation materializes its source-declared boundary value so every
     // consumer can use the same identity.
-    for storage in passed_through_entry_storages(&facts.boundaries, &graph) {
+    for storage in passed_through_entry_storages(&facts.boundaries, graph) {
         if !reads.contains(&storage) {
             reads.push(storage);
         }
@@ -1180,7 +1188,7 @@ fn recover_interface_inner(
     );
     let return_mechanism = recovered_return_mechanism(&facts);
     let result_is_return_address = result.register().is_some()
-        && result_is_the_return_address(&graph, &facts, &live_out, return_mechanism);
+        && result_is_the_return_address(graph, &facts, &live_out, return_mechanism);
     // The convention fills every register slot before the argument area, so
     // a stack slot is a parameter only once each register slot is proven.
     let stack_parameters = if parameters.len() == slots.argument_slots().len() {
