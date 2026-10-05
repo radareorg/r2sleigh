@@ -748,18 +748,6 @@ impl Image {
         &self.container.symbols
     }
 
-    /// Every frame the call-frame information states.
-    pub fn unwind_frames(&self) -> &unwind::UnwindFrames {
-        &self.container.unwind
-    }
-
-    /// What the binary's own debug information declares: its functions by
-    /// the address each body begins, its objects by address, and the types
-    /// both name. Empty where it carries none.
-    pub fn declarations(&self) -> &r2abi::Declarations {
-        &self.container.declarations
-    }
-
     /// Every relocation record the loader applies, each once, in the order it applies them.
     pub fn relocations(&self) -> &[Relocation] {
         &self.container.relocations
@@ -944,12 +932,6 @@ impl Image {
     /// Which open program this is.
     pub const fn identity(&self) -> u64 {
         self.identity
-    }
-
-    /// Whether the address is inside a segment marked executable.
-    pub fn is_executable(&self, vaddr: u64) -> bool {
-        self.segment_at(vaddr)
-            .is_some_and(|segment| segment.permissions.execute)
     }
 }
 
