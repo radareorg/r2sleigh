@@ -52,8 +52,16 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
         let Ok(target) = target else {
             return Analysis(Err(NativeRefusal::Machine("the machine is not assembled")));
         };
-        let analysed =
-            crate::isolation::isolated(|| crate::native::analysed(&target, &view, entry));
+        let walk = db
+            .get::<Walked>(&(entry, thumb))
+            .expect("a walk asks for no analysis");
+        let walk = match &walk.0 {
+            Ok(walk) => walk,
+            Err(refusal) => return Analysis(Err(refusal.clone())),
+        };
+        let analysed = crate::isolation::isolated(|| {
+            crate::native::analysed_from(&target, &view, entry, walk)
+        });
         Analysis(
             analysed
                 .unwrap_or_else(|panicked| Err(panicked.into()))
@@ -62,6 +70,50 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
     }
 
     fn hold(value: &Analysis) -> Hold {
+        match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
+/// One function's walk through the dispatch tables it reads, by its entry and whether it is Thumb.
+pub(super) struct Walked;
+
+/// A walk, or why there is none; compared by identity, as an analysis is.
+#[derive(Clone)]
+pub(super) struct Walking(pub(super) Result<Arc<crate::native::Walk>, NativeRefusal>);
+
+impl PartialEq for Walking {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((&self.0, &other.0), (Ok(one), Ok(other)) if Arc::ptr_eq(one, other))
+    }
+}
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
+    type Key = (u64, bool);
+    type Value = Walking;
+    const NAME: &'static str = "walked";
+    /// A walk holds its lifted blocks; the values dropped past this keep what they read.
+    const CAPACITY: Option<usize> = Some(64);
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Walking {
+        let view = View::new(db, true);
+        let Some(Ok(target)) = view
+            .machine_in(thumb)
+            .map(|machine| view.target_of(machine))
+        else {
+            return Walking(Err(NativeRefusal::Machine("the machine is not assembled")));
+        };
+        let walked = crate::isolation::isolated(|| crate::native::walk(&target, &view, entry));
+        Walking(
+            walked
+                .unwrap_or_else(|panicked| Err(panicked.into()))
+                .map(Arc::new),
+        )
+    }
+
+    fn hold(value: &Walking) -> Hold {
         match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
             true => Hold::Stopped,
             false => Hold::Held,

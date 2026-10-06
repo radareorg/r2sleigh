@@ -94,7 +94,7 @@ The program
 | **P1.7** Entry lanes are the caller's | done | — |
 | **C** Provenance ([provenance](doc/adr-provenance.md)) | C0; C1 types and the format parameter | C1 r2dec reads the grade (`from_source_signature` deleted); C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
 | **P5** Values as an index | — | XMM lane noise gone; immutable loads fold |
-| **P6** One resolved body per function, as a query | — | `read_callees` deleted; switch arms in the walked body; summaries solved per call-graph component in the engine, with r2ssa's composition as the transfer (was L3c) |
+| **P6** One resolved body per function, as a query | [resolved-bodies](doc/adr-resolved-bodies.md); P6a the walk through dispatch tables is the `Walked` query | `read_callees` deleted; switch arms in the walked body; summaries solved per call-graph component in the engine, with r2ssa's composition as the transfer (was L3c) |
 | **I** Unread container facts (CFI, LSDA, IBT, RELRO, init arrays) | — | stripped discovery finds every FDE start |
 | **P7** Call contracts | Darwin arm64 variadic tail (M1c); declared `double` arguments reach their calls (B3) | no dropped or invented argument; printf's stack tail on x86-64; a recovered interface's float parameters and float result (a body's float work feeds only the float result, so recovery never observes it; the variadic save area's spills read as parameters in both classes, and the convention's `al` read at entry states the tail) |
 | **P8** Data objects and strings | — | `iz` lists proven strings |

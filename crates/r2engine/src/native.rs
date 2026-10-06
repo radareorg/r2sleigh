@@ -329,7 +329,7 @@ pub fn prepared(
     program: &dyn Program,
     entry: u64,
 ) -> Result<std::sync::Arc<TrustedSsaArtifact>, NativeRefusal> {
-    analyse(target, program, entry).map(|prepared| prepared.artifact)
+    analysed(target, program, entry).map(|prepared| prepared.artifact)
 }
 
 /// Walk and prepare one function, without rendering anything from it.
@@ -338,7 +338,73 @@ pub fn analysed(
     program: &dyn Program,
     entry: u64,
 ) -> Result<Prepared, NativeRefusal> {
-    analyse(target, program, entry)
+    analyse(target, program, entry, &walk(target, program, entry)?)
+}
+
+/// Prepare one function from its walk; the query `Analysed` reads the walk from `Walked`.
+pub(crate) fn analysed_from(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+    walk: &Walk,
+) -> Result<Prepared, NativeRefusal> {
+    analyse(target, program, entry, walk)
+}
+
+/// One function's walk, through the dispatch tables it reads (doc/adr-resolved-bodies.md, P6a).
+#[derive(Clone)]
+pub struct Walk {
+    root: Walked,
+    tables: Vec<NativePointerTable>,
+}
+
+/// Walk one function, and where a dispatch stops the walk, read its tables and walk again through them.
+///
+/// A table is the body's own, so it is read off a preparation against the imports' declarations alone.
+pub fn walk(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<Walk, NativeRefusal> {
+    let native = Native {
+        target,
+        program,
+        machine: machine(target)?,
+        control: program.control().ssa_execution_control(),
+    };
+    let root = native.walk(entry)?;
+    let indirect = |stop: &crate::body::Unresolved| {
+        stop.reason == crate::body::UnresolvedReason::IndirectBranch
+    };
+    let dispatches = root.body.unresolved.iter().any(indirect);
+    if !dispatches {
+        return Ok(Walk {
+            root,
+            tables: Vec::new(),
+        });
+    }
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    let mut imports = Callees::default();
+    declare_imports(
+        &native,
+        target,
+        &reached(&root.body, program),
+        ptr_bits,
+        &mut imports,
+    );
+    let declared = native.declaration(entry);
+    let first = match declared.interface.is_some() {
+        false => native.prepare(&root, &imports)?,
+        true => native.prepare_restated(&root, &imports, Vec::new(), declared, &[])?,
+    };
+    let tables = native.pointer_tables(&first);
+    if tables.is_empty() {
+        return Ok(Walk { root, tables });
+    }
+    let dispatched = tables.iter();
+    let dispatched = dispatched.map(|table| (table.instruction, table.targets.clone()));
+    let root = native.walk_dispatched(entry, &dispatched.collect())?;
+    Ok(Walk { root, tables })
 }
 
 /// One function's analysis, before anything is rendered from it.
@@ -579,7 +645,7 @@ fn render(
     tier: crate::RenderTier,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
     let control = program.control();
-    let prepared = analyse(target, program, entry)?;
+    let prepared = analysed(target, program, entry)?;
     Ok(match sealed(target, entry, &prepared, &control) {
         Ok(sealed) => EngineSession::new().render_sealed(&sealed, tier, &control),
         Err(refused) => *refused,
@@ -871,6 +937,7 @@ fn analyse(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
+    walk: &Walk,
 ) -> Result<Prepared, NativeRefusal> {
     let native = Native {
         target,
@@ -878,7 +945,7 @@ fn analyse(
         machine: machine(target)?,
         control: program.control().ssa_execution_control(),
     };
-    let root = native.walk(entry)?;
+    let (root, tables) = (walk.root.clone(), walk.tables.clone());
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
 
     let Read {
@@ -895,35 +962,10 @@ fn analyse(
     // register it arrived in, whatever the source said.
     let declared_prototype = Declared::body(target, entry).map(|declared| declared.prototype);
     let declared_root = native.declaration(entry);
-    let first = match declared_root.interface.is_some() {
-        false => native.prepare(&root, &callees)?,
-        true => native.prepare_restated(&root, &callees, Vec::new(), declared_root.clone(), &[])?,
-    };
-    // A dispatch through a table is where the first walk stopped: it could see
-    // the branch and not where it goes. The analysis it has just been through
-    // says where the table is and how far it runs, so the table is read and
-    // the body walked again through it. The blocks this adds are the switch
-    // arms, which nothing has seen until now.
-    let tables = native.pointer_tables(&first);
-    let (root, first) = match tables.is_empty() {
-        true => (root, first),
-        false => {
-            let root = native.walk_dispatched(
-                entry,
-                &tables
-                    .iter()
-                    .map(|table| (table.instruction, table.targets.clone()))
-                    .collect(),
-            )?;
-            // The first walk stopped at the dispatch, so its interface and slots are read again off the whole body.
-            let first = native.prepare_restated(
-                &root,
-                &callees,
-                Vec::new(),
-                declared_root.clone(),
-                &tables,
-            )?;
-            (root, first)
+    let first = match (declared_root.interface.is_some(), tables.is_empty()) {
+        (false, true) => native.prepare(&root, &callees)?,
+        _ => {
+            native.prepare_restated(&root, &callees, Vec::new(), declared_root.clone(), &tables)?
         }
     };
     // A second capture states what the first proved. Preparation recovers the
@@ -1165,6 +1207,7 @@ impl TableBytes {
 }
 
 /// One function walked out of the program.
+#[derive(Clone)]
 struct Walked {
     name: String,
     body: crate::body::Body,
@@ -1173,6 +1216,7 @@ struct Walked {
 }
 
 /// One function a body calls.
+#[derive(Clone)]
 struct Callee {
     address: u64,
     /// What the program calls it.
@@ -1183,6 +1227,7 @@ struct Callee {
 
 /// One program, one machine, and the walk over it.
 /// One dispatch's table, read, and where the dispatch that reads it stands.
+#[derive(Clone)]
 struct NativePointerTable {
     instruction: u64,
     /// What the container states about whether the bytes read are the run's.
