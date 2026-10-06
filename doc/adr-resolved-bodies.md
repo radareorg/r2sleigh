@@ -1,6 +1,6 @@
 # ADR: One resolved body per function (P6)
 
-Status: accepted, in progress.
+Status: accepted, done (P6a, P6c1, P6c2).
 
 ## Context
 
@@ -75,4 +75,6 @@ Tarjan, O(V + E) over result demands only, each component deposited once.
 - P6b: `Component` and the closure measured on 0pack and pumasim.
 - P6c1: a callee runs the root's resolution, on its `Walked`, against its imports.
 - P6c2: `result_owners`, `Demand` and `Resolved`; an unproven callee states how many arguments it reads.
-- P6d: `read_callees`, `prepare_callee` and `callee_summary` deleted; one call per root reads `Resolved`.
+- P6d, declined: `read_callees` is the one loop a root reads its callees through. The database
+  answers it with `Resolved`; a plain `Program` (tests/native.rs, the model integration test)
+  with each callee resolved alone, through the same `resolved_alone`.
