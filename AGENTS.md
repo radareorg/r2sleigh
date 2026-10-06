@@ -132,8 +132,8 @@ A comment is one or two lines: what the code cannot say for itself, such as
 the invariant, the reason, or the ADR section. Design, derivations, history,
 worked examples and measurements go in the architecture docs (`doc/adr-*.md`)
 and the comment links there. `scripts/structure-report.sh` counts runs of more
-than two `//` lines (`long_comments`), and the count only falls: when you touch
-a long comment, shorten it.
+than two `//` lines (`long_comments`), and the count only falls at an item's
+exit (see Validation Bar): when you touch a long comment, shorten it.
 
 ## radare2
 
@@ -197,8 +197,22 @@ the engine renders. More in [doc/testing.md](doc/testing.md).
 
 ## Validation Bar
 
-Touching `r2ssa`, `r2source`, `r2rewrite`, `r2types`, `r2engine`, `r2dec` or
-`r2s`:
+Work runs one roadmap item per branch, with two tiers of checks.
+
+Inside an item, per edit: `cargo fmt`, clippy and the tests of the crates
+touched. The old path is deleted when the new owner lands, without running
+both (ROADMAP D1); the census may move. `scripts/structure-report.sh` and its
+`long_comments` count are suspended until the item's exit.
+
+At an item's exit, before it merges, the full bar below runs once: the
+workspace suite, equivalence on x86-64 and aarch64, the census (each moved
+line read and judged), certification, release `pdd` timing on the large
+0pack and pumasim functions, and `scripts/structure-report.sh`, whose counts
+are then blessed for the item. Equivalence, certification, tests, proofs and
+Dylints are never suspended.
+
+The exit bar, for any item touching `r2ssa`, `r2source`, `r2rewrite`,
+`r2types`, `r2engine`, `r2dec` or `r2s`:
 
 ```bash
 cargo fmt --all -- --check
@@ -221,8 +235,10 @@ Quality gates (`scripts/quality-gate.sh [--dry-run|--strict-dylint]`,
 [doc/rewrite_quality_gates.md](doc/rewrite_quality_gates.md)): dependency
 hygiene, fmt, Clippy, the `tools/dylints/r2sleigh_lints` Dylints, Kani
 harnesses for algebraic and policy invariants, targeted mutation testing.
-Never delete or weaken a proof, lint, fuzz target, mutation target or gate to
-make progress; replace a wrong one with a stronger one and state why.
+Never delete or weaken a proof, lint, fuzz target, mutation target or
+correctness gate to make progress; replace a wrong one with a stronger one and
+state why. The structure ratchets are the one suspension, and only inside an
+item.
 
 ## Build And Run
 

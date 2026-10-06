@@ -39,9 +39,16 @@ outside the components that order them; a `Cycle` the database still
 meets (a call no walk states) degrades that callee to unknown and is
 `Hold::Transient`.
 
+### Demand
+
+A callee is resolved only where its caller's preparation has a call it
+cannot prove (an argument or a return); other callees keep their walk.
+Measured 2026-10-06: walking pumasim `main`'s reachable graph alone is 1949
+walks and 2.6 s, so resolving the whole closure is not the default.
+
 ### Budget
 
-Resolving a root resolves its reachable call graph. A request carries a
+Resolving a root resolves what its unproven calls demand. A request carries a
 work budget in preparations; a summary the budget stops is the request's
 stop (`Hold::Stopped`): never held, the call rendered as a callee not read
 for the budget, and the summaries finished before the stop are held, so

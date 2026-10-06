@@ -48,7 +48,7 @@ Decisions
 
 | | Decision | State |
 |-|----------|-------|
-| D1 | Restructure, not rewrite: replaced parts run beside the old path until the gates agree, then the old path is deleted in the same change | standing |
+| D1 | Restructure, not rewrite: one roadmap item per branch replaces its owner outright and deletes the old path in the same branch; the gates run once at the item's exit, and the census diff is read there (was: run beside until the gates agree, 2026-10-06) | standing |
 | D2 | Stable identity before more facts | done (F1) |
 | D3 | Stages are types | done (F1) |
 | D4 | Provenance on every fact, as `Fact<T>` | C0–C1 done |
@@ -94,7 +94,7 @@ The program
 | **P1.7** Entry lanes are the caller's | done | — |
 | **C** Provenance ([provenance](doc/adr-provenance.md)) | C0; C1 types and the format parameter | C1 r2dec reads the grade (`from_source_signature` deleted); C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
 | **P5** Values as an index | — | XMM lane noise gone; immutable loads fold |
-| **P6** One resolved body per function, as a query | [resolved-bodies](doc/adr-resolved-bodies.md); P6a the walk through dispatch tables is the `Walked` query | `read_callees` deleted; switch arms in the walked body; summaries solved per call-graph component in the engine, with r2ssa's composition as the transfer (was L3c) |
+| **P6** One resolved body per function, as a query | [resolved-bodies](doc/adr-resolved-bodies.md); P6a the walk through dispatch tables is the `Walked` query | demand-driven: a callee resolved only where its caller's preparation has an unproven call, under a request budget; `read_callees` deleted; switch arms in the walked body; summaries per call-graph component, with r2ssa's composition as the transfer (was L3c) |
 | **I** Unread container facts (CFI, LSDA, IBT, RELRO, init arrays) | — | stripped discovery finds every FDE start |
 | **P7** Call contracts | Darwin arm64 variadic tail (M1c); declared `double` arguments reach their calls (B3) | no dropped or invented argument; printf's stack tail on x86-64; a recovered interface's float parameters and float result (a body's float work feeds only the float result, so recovery never observes it; the variadic save area's spills read as parameters in both classes, and the convention's `al` read at entry states the tail) |
 | **P8** Data objects and strings | — | `iz` lists proven strings |
@@ -129,25 +129,30 @@ The program
 | "Where this stands" generated from CI artifacts | no hand-typed status |
 | Ratchet on file length (largest today 5.2k lines) | no file grows past the cap |
 | D11 Dylints: unbudgeted loops | fatal in r2engine (caches outside Q: fatal since Q4e) |
-| Hygiene: `long_comments` ratchet (3833), dead code | comments one or two lines; no unreferenced items |
+| Hygiene: `long_comments` ratchet (3833), dead code | comments one or two lines; no unreferenced items; the structure ratchets are suspended inside an item and blessed at its exit (AGENTS.md, Validation Bar) |
 
 Order
 -----
 
-0. **G0**: the gates real.
-1. **B**: one byte relation (blocks P4, P5 and R).
-2. **L**: layering, beside B.
-3. **M** (M2–M6), beside **F2.1–F2.5** and **Q1–Q2**.
-4. **R1**: expressions as terms.
-5. **P4**, then **P5**, then **R** (R0, R2–R4).
-6. **Q3–Q4** with **P6**, then **I**.
-7. **C2–C4**, then **P7, P8, P9, P11**, then **A**.
-8. **Surface**, interleaved where nothing structural blocks it.
+Done out of order: Q (step 6) landed before G0, B, P4 and R. From 2026-10-06
+the order is the dependency path, and nothing jumps it.
 
-Every item runs beside what it replaces and deletes it when the gates agree;
-deletes more than it adds or says why; leaves the census byte-identical or
-names each moved line; adds no renderer policy while R is open; and violates
-nothing in D11.
+0. **G0** next: equivalence on both architectures, the census and release
+   timing as CI jobs, so an item's exit is one CI run, not a hand-run queue.
+1. **B**: one byte relation (blocks P4, P5 and R).
+2. **R1**, then **P4**, then **P5**, then **R** (R0, R2–R4): the critical path.
+3. **P6** demand-driven: a callee is resolved only where its caller's
+   preparation has a call it cannot prove; walking `main`'s reachable graph
+   alone costs 1949 walks and 2.6 s on pumasim. Then **I**.
+4. **C2–C4**, then **P7, P8, P9, P11**.
+5. Beside the path, as small items when a step waits on CI: **L5**, **M6**
+   rest, **F2.1–F2.5**, **Q2** rest, **K** rest.
+6. **Surface** on its own branch: S2, A and V3 now; V4, V5 and the rest after R.
+
+Every item replaces what it owns and deletes the old path in its own branch
+(D1); at its exit it deletes more than it adds or says why, names each moved
+census line, adds no renderer policy while R is open, and violates nothing in
+D11.
 
 Upstream radare2 (differential target, [radare2-function-walk](doc/adr-radare2-function-walk.md)):
 `ret` given one definition, one read-ahead cache per walk, predecessor in the
