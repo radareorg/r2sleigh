@@ -1828,7 +1828,7 @@ impl BindingPlan {
         let super::rules::EscapedFrameObjects {
             escaped: escaped_frame_objects,
             reached_by_callee: callee_reached_frame_objects,
-        } = super::rules::frame_objects_with_escaped_address(source_owned, &machine_projection);
+        } = super::rules::frame_objects_with_escaped_address(source_owned);
         let return_address_objects = stack_objects
             .keys()
             .copied()

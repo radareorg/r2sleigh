@@ -2186,7 +2186,6 @@ pub(crate) fn evidenced_stack_roots(
         }
         !inside
     });
-    let mut escaping = BTreeSet::new();
     for (value, root) in &facts.stack_address_roots {
         let escapes = graph.use_sites(value).iter().any(|site| {
             graph
@@ -2210,14 +2209,9 @@ pub(crate) fn evidenced_stack_roots(
             if !inside {
                 roots.insert(*root);
             }
-            escaping.insert(*root);
         }
     }
-    EvidencedStackRoots {
-        roots,
-        spans,
-        escaping,
-    }
+    EvidencedStackRoots { roots, spans }
 }
 
 /// The operand of an indexed address that supplies the index.

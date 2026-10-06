@@ -172,12 +172,7 @@ fn escaped_objects(
             pending.push(value);
         }
     }
-    // What the partition already knows escaped stays escaped.
-    let mut escaped = model
-        .escaping_addresses
-        .union(&model.callee_reached)
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let mut escaped = BTreeSet::new();
     let mut whole = false;
     let placed = |value: ValueId| {
         let key = MemoryObjectKey {

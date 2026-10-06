@@ -736,95 +736,25 @@ pub(super) struct EscapedFrameObjects {
 
 pub(super) fn frame_objects_with_escaped_address(
     source_owned: &SourceOwnedFunctionFacts,
-    projection: &r2ssa::MachineProjection,
 ) -> EscapedFrameObjects {
+    // r2ssa's one escape analysis owns the fact (doc/adr-frame-model.md); a callee reaches what escaped.
     let source = source_owned.source();
-    let graph = source.graph();
-    let geometry = &source.certificates().stack_geometry.insts;
-    let boundary_readers = super::readers::BoundaryReads::compute(source);
-    let mut escaped = BTreeSet::new();
-    let mut reached_by_callee = BTreeSet::new();
-    for value in &graph.values {
-        let Some(object) = r2rewrite::exact_stack_object_address(source, value.id) else {
-            continue;
-        };
-        let escapes = boundary_readers.any(value.id)
-            || graph.use_sites(value.id).iter().any(|site| {
-                !geometry.contains(site.inst)
-                    && !matches!(
-                        projection.use_disposition(*site),
-                        Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
-                    )
-            });
-        if !escapes {
-            continue;
-        }
-        escaped.insert(object);
-        // A callee handed the address reaches the object it is in, and r2ssa's
-        // frame objects already end where what the callee reaches ends: its
-        // stated reach, or the nearest save slot when nothing bounds it. So
-        // the object itself is what a callee reaches here, and nothing beside it.
-        if is_call_argument(source_owned, value.id) {
-            reached_by_callee.insert(object);
-        }
-    }
-    // A place inside an object handed to a callee -- `&buf[2]`, `&s.field` --
-    // escapes that object as surely as its base does.
     let objects = source.objects();
-    for value in &graph.values {
-        if objects.interior_offset(value.id).is_none() && !objects.address_is_indexed(value.id) {
-            continue;
-        }
-        let Some(object) = objects
-            .object_for_value(value.id, r2il::SpaceId::Ram)
-            .filter(|object| {
-                objects.object(*object).is_some_and(|fact| {
-                    matches!(
-                        fact.kind,
-                        r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. }
-                    )
-                }) && source.declarable_stack_object(*object)
-            })
-        else {
-            continue;
-        };
-        if is_call_argument(source_owned, value.id) {
-            escaped.insert(object);
-            reached_by_callee.insert(object);
-        }
-    }
-    // What r2ssa states a call reaches, which is the owner of the fact; the
-    // walk above only adds what a callsite's arguments show directly.
-    for object in objects
-        .callee_reached
-        .iter()
-        .filter(|object| source.declarable_stack_object(**object))
-    {
-        escaped.insert(*object);
-        reached_by_callee.insert(*object);
-    }
+    let frame = objects.objects.iter().filter(|(_, fact)| {
+        matches!(
+            fact.kind,
+            r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. }
+        )
+    });
+    let escaped: BTreeSet<_> = frame
+        .map(|(object, _)| *object)
+        .filter(|object| objects.frame_reach.escaped(*object))
+        .filter(|object| source.declarable_stack_object(*object))
+        .collect();
     EscapedFrameObjects {
+        reached_by_callee: escaped.clone(),
         escaped,
-        reached_by_callee,
     }
-}
-
-/// Whether this value, or a value with its bits, is an argument of a call.
-fn is_call_argument(source_owned: &SourceOwnedFunctionFacts, value: ValueId) -> bool {
-    let source = source_owned.source();
-    let graph = source.graph();
-    let identity = source.decompile_prep_facts();
-    let Some(callsites) = source_owned.report().callsites() else {
-        return false;
-    };
-    callsites.by_callsite.values().any(|facts| {
-        facts.argument_values.iter().any(|argument| {
-            argument.value == value
-                || (graph.value(argument.value).is_some()
-                    && graph.value(value).is_some()
-                    && identity.same_bits(argument.value, value))
-        })
-    })
 }
 
 /// The type one object is declared with.
