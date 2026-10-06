@@ -111,6 +111,22 @@ fn derived<S: Source + 'static>(
     body_pointers(view, &target, address)
 }
 
+/// A callee's summary off its walk, resolved alone; no type analysis is derived for it.
+fn body_summary<S: Source + 'static>(
+    view: &View<'_, S>,
+    target: &crate::native::NativeTarget<'_>,
+    address: u64,
+    key: (u64, bool),
+) -> Result<r2ssa::PreparedCalleeSummary, crate::native::Unreadable> {
+    let walked = view.db.get::<super::analysis::Walked>(&key);
+    let walked = walked.expect("a walk asks for no pointer parameters");
+    match &walked.0 {
+        Ok(walked) => crate::native::callee_summary(target, view, address, walked),
+        Err(refusal) if refusal.stopped() => Err(crate::native::Unreadable::Stopped),
+        Err(_) => Err(crate::native::Unreadable::NotWalked),
+    }
+}
+
 /// What a callee's prepared body does with its parameters: loads or stores through one, or hands it on to a callee that does.
 fn body_pointers<S: Source + 'static>(
     view: &View<'_, S>,
@@ -127,7 +143,7 @@ fn body_pointers<S: Source + 'static>(
     });
     let summary = match held {
         Some(summary) => summary,
-        None => match crate::native::callee_summary(target, view, address) {
+        None => match body_summary(view, target, address, key) {
             Ok(summary) => summary,
             Err(crate::native::Unreadable::Stopped) => return (BTreeMap::new(), Cut::Stopped),
             Err(_) => return (BTreeMap::new(), Cut::Whole),

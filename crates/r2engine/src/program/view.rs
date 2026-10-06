@@ -212,9 +212,9 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
     fn read_callee(
         &self,
         address: u64,
-        thumb: bool,
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
+        let thumb = self.thumb_at(address);
         let read = self
             .db
             .get::<super::analysis::CalleeReads>(&(address, thumb));

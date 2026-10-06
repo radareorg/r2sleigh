@@ -112,12 +112,7 @@ pub trait Program: crate::body::Program {
     /// against a body of its own callees or of whichever root calls it, so
     /// what it proves is a fact about the callee and the state of the program,
     /// and a program that holds one per state need derive it only once.
-    fn read_callee(
-        &self,
-        _address: u64,
-        _thumb: bool,
-        read: &mut dyn FnMut() -> CalleeRead,
-    ) -> Arc<CalleeRead> {
+    fn read_callee(&self, _address: u64, read: &mut dyn FnMut() -> CalleeRead) -> Arc<CalleeRead> {
         Arc::new(read())
     }
 }
@@ -787,22 +782,26 @@ fn prepare_callee(
         (Some(switched), Some(own)) => (switched, own),
         _ => (native, target),
     };
-    let walked = native.walk(address).map_err(|_| Unreadable::NotWalked)?;
-    // Against what the binary declares about it, exactly as the root is
-    // prepared: a callee prepared without its declaration proves only what
-    // its instructions show, which for a result register is nothing, and
-    // then the call site renders it as returning nothing.
-    let declared = native.declaration(address);
-    // An import's prototype is a declaration, not a body, so what the callee returns through one is known.
-    let targets = reached(&walked.body, native.program);
+    let walked = walk(target, native.program, address).map_err(|_| Unreadable::NotWalked)?;
+    resolved_alone(native, target, address, ptr_bits, &walked)
+}
+
+/// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
+fn resolved_alone(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+    ptr_bits: u32,
+    walked: &Walk,
+) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
     let mut imports = Callees::default();
+    let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
-    native
-        .prepare_restated(&walked, &imports, Vec::new(), declared, &[])
-        .map_err(|refusal| match refusal.stopped() {
-            true => Unreadable::Stopped,
-            false => Unreadable::NotPrepared,
-        })
+    let resolved = native.resolve(address, &walked.root, &walked.tables, &imports);
+    resolved.map_err(|refusal| match refusal.stopped() {
+        true => Unreadable::Stopped,
+        false => Unreadable::NotPrepared,
+    })
 }
 
 /// What a callee's own body proves about its parameters, prepared as every caller prepares it.
@@ -810,6 +809,7 @@ pub(crate) fn callee_summary(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     address: u64,
+    walked: &Walk,
 ) -> Result<r2ssa::PreparedCalleeSummary, Unreadable> {
     let native = Native {
         target,
@@ -818,7 +818,9 @@ pub(crate) fn callee_summary(
         control: program.control().ssa_execution_control(),
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let artifact = prepared_callee(&native, target, address, ptr_bits)?;
+    let resolved =
+        crate::isolation::isolated(|| resolved_alone(&native, target, address, ptr_bits, walked));
+    let artifact = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
     let shared = artifact.shared_artifact();
     let summary =
         r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared);
@@ -830,6 +832,7 @@ pub(crate) fn callee_read(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     address: u64,
+    walked: &Walk,
 ) -> CalleeRead {
     let native = match machine(target) {
         Ok(machine) => Native {
@@ -846,7 +849,12 @@ pub(crate) fn callee_read(
         }
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    read_callee(&native, target, address, ptr_bits)
+    let resolved =
+        crate::isolation::isolated(|| resolved_alone(&native, target, address, ptr_bits, walked));
+    read_of(
+        resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
+        ptr_bits,
+    )
 }
 
 /// What one callee's body proves, read under the same isolation boundary as its preparation.
@@ -856,7 +864,12 @@ fn read_callee(
     address: u64,
     ptr_bits: u32,
 ) -> CalleeRead {
-    let artifact = match prepared_callee(native, target, address, ptr_bits) {
+    read_of(prepared_callee(native, target, address, ptr_bits), ptr_bits)
+}
+
+/// What a resolved callee proves, derived under isolation.
+fn read_of(artifact: Result<Arc<TrustedSsaArtifact>, Unreadable>, ptr_bits: u32) -> CalleeRead {
+    let artifact = match artifact {
         Ok(artifact) => artifact,
         Err(reason) => {
             return CalleeRead {
@@ -905,8 +918,7 @@ fn read_callees(
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        let thumb = target.cpu == "thumb";
-        let read = native.program.read_callee(*address, thumb, &mut || {
+        let read = native.program.read_callee(*address, &mut || {
             read_callee(native, target, *address, ptr_bits)
         });
         // Taking the interface keeps the call rendered as a call.
@@ -955,53 +967,7 @@ fn analyse(
         unread,
     } = read_callees(&native, target, &root, entry, ptr_bits);
 
-    // What the binary's own debug information says this function takes is a
-    // declaration, exactly as an import's is, so it is placed in the
-    // convention's slots the same way and the body is prepared against it.
-    // Without this the engine reads every parameter as the width of the
-    // register it arrived in, whatever the source said.
-    let declared_prototype = Declared::body(target, entry).map(|declared| declared.prototype);
-    let declared_root = native.declaration(entry);
-    let first = match (declared_root.interface.is_some(), tables.is_empty()) {
-        (false, true) => native.prepare(&root, &callees)?,
-        _ => {
-            native.prepare_restated(&root, &callees, Vec::new(), declared_root.clone(), &tables)?
-        }
-    };
-    // A second capture states what the first proved. Preparation recovers the
-    // interface off the instructions and proves which frame slots home which
-    // parameter; declaring those turns the spill into the parameter again,
-    // which is the whole difference between reading a frame and reading a
-    // program. Text the body points at is harvested the same way, because
-    // aarch64 forms an address from a page and an offset and the constant the
-    // literal lives at appears only once those are folded.
-    // The debug information may measure the frame from the frame pointer, and
-    // objects are identified by where they sit relative to the pointer the
-    // function was entered with. The distance between the two is what the
-    // prologue moved, which the first pass proved for every object it placed,
-    // so the declaration is restated into those coordinates rather than
-    // dropped for being in the other ones.
-    let declared_root = crate::declared::rebased(declared_root, &first, declared_prototype);
-    let declared_slots = declared_root
-        .interface
-        .as_ref()
-        .map(|interface| interface.stack_slots().to_vec())
-        .unwrap_or_default();
-    let restated = native.restated(&first, &declared_slots);
-    let folded = native.folded_literals(&first, &root);
-    let artifact = match restated.is_none() && folded.is_empty() {
-        true => first,
-        false => {
-            // A body that proved no frame slot restates nothing, and the
-            // declaration it was prepared against is still the declaration.
-            let restatement = Restatement {
-                interface: restated.or(declared_root.interface),
-                signature: declared_root.signature,
-                slot_names: declared_root.slot_names,
-            };
-            native.prepare_restated(&root, &callees, folded, restatement, &tables)?
-        }
-    };
+    let artifact = native.resolve(entry, &root, &tables, &callees)?;
     let tables = tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1247,6 +1213,62 @@ struct Native<'a> {
 }
 
 impl Native<'_> {
+    /// One body prepared, restated and prepared again against `callees`: one function's whole preparation, whoever asks.
+    fn resolve(
+        &self,
+        entry: u64,
+        root: &Walked,
+        tables: &[NativePointerTable],
+        callees: &Callees,
+    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        // What the binary's own debug information says this function takes is a
+        // declaration, exactly as an import's is, so it is placed in the
+        // convention's slots the same way and the body is prepared against it.
+        // Without this the engine reads every parameter as the width of the
+        // register it arrived in, whatever the source said.
+        let declared_prototype =
+            Declared::body(self.target, entry).map(|declared| declared.prototype);
+        let declared_root = self.declaration(entry);
+        let first = match (declared_root.interface.is_some(), tables.is_empty()) {
+            (false, true) => self.prepare(root, callees)?,
+            _ => self.prepare_restated(root, callees, Vec::new(), declared_root.clone(), tables)?,
+        };
+        // A second capture states what the first proved. Preparation recovers the
+        // interface off the instructions and proves which frame slots home which
+        // parameter; declaring those turns the spill into the parameter again,
+        // which is the whole difference between reading a frame and reading a
+        // program. Text the body points at is harvested the same way, because
+        // aarch64 forms an address from a page and an offset and the constant the
+        // literal lives at appears only once those are folded.
+        // The debug information may measure the frame from the frame pointer, and
+        // objects are identified by where they sit relative to the pointer the
+        // function was entered with. The distance between the two is what the
+        // prologue moved, which the first pass proved for every object it placed,
+        // so the declaration is restated into those coordinates rather than
+        // dropped for being in the other ones.
+        let declared_root = crate::declared::rebased(declared_root, &first, declared_prototype);
+        let declared_slots = declared_root
+            .interface
+            .as_ref()
+            .map(|interface| interface.stack_slots().to_vec())
+            .unwrap_or_default();
+        let restated = self.restated(&first, &declared_slots);
+        let folded = self.folded_literals(&first, root);
+        Ok(match restated.is_none() && folded.is_empty() {
+            true => first,
+            false => {
+                // A body that proved no frame slot restates nothing, and the
+                // declaration it was prepared against is still the declaration.
+                let restatement = Restatement {
+                    interface: restated.or(declared_root.interface),
+                    signature: declared_root.signature,
+                    slot_names: declared_root.slot_names,
+                };
+                self.prepare_restated(root, callees, folded, restatement, tables)?
+            }
+        })
+    }
+
     /// The same request over another machine of this program.
     fn in_target<'b>(&'b self, target: &'b NativeTarget<'b>) -> Option<Native<'b>> {
         Some(Native {

@@ -121,7 +121,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     }
 }
 
-/// What one callee's body proves, read with the root's decoder, by its entry and whether that decoder is Thumb.
+/// What one callee's body proves, resolved alone, by its entry and whether it is Thumb.
 pub(super) struct CalleeReads;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
@@ -134,8 +134,21 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
         let target = view
             .machine_in(thumb)
             .map(|machine| view.target_of(machine));
-        let read = match target {
-            Some(Ok(target)) => crate::native::callee_read(&target, &view, address),
+        let walked = db
+            .get::<Walked>(&(address, thumb))
+            .expect("a walk asks for no callee");
+        let read = match (target, &walked.0) {
+            (_, Err(refusal)) if refusal.stopped() => CalleeRead {
+                interface: None,
+                facts: Err(Unreadable::Stopped),
+            },
+            (_, Err(_)) => CalleeRead {
+                interface: None,
+                facts: Err(Unreadable::NotWalked),
+            },
+            (Some(Ok(target)), Ok(walked)) => {
+                crate::native::callee_read(&target, &view, address, walked)
+            }
             _ => CalleeRead {
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
