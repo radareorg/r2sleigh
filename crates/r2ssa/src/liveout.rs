@@ -139,11 +139,10 @@ impl FunctionLiveOut {
         // Each block is walked at most twice: once on a path nothing has written yet, once on one written.
         let mut seen = BTreeSet::new();
         let mut pending = std::collections::VecDeque::from([(from, false)]);
-        while let Some((addr, written)) = pending.pop_front() {
+        while let Some((addr, mut written)) = pending.pop_front() {
             if !seen.insert((addr, written)) {
                 continue;
             }
-            let mut written = written;
             let Some(block) = func.get_block(addr) else {
                 continue;
             };
@@ -227,9 +226,7 @@ impl FunctionLiveOut {
                 continue;
             }
             // A path back to the entry that wrote none of it hands back what the caller left there.
-            if addr == func.entry && !written {
-                reaches_entry = true;
-            }
+            reaches_entry |= addr == func.entry && !written;
             for predecessor in func.predecessors(addr) {
                 pending.push_back((predecessor, written));
             }

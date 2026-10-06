@@ -155,23 +155,30 @@ impl Search {
             let node = frame.node;
             let Some(&callee) = frame.callees.get(frame.next) else {
                 frames.pop();
-                if let Some(caller) = frames.last() {
-                    let low = self.low[&node].min(self.low[&caller.node]);
-                    self.low.insert(caller.node, low);
-                }
-                self.close(node);
+                self.finish(node, frames.last().map(|caller| caller.node));
                 continue;
             };
             frame.next += 1;
             match self.index.get(&callee) {
                 None => frames.push(self.open(callee, &callees)),
-                Some(&index) if self.on_stack.contains(&callee) => {
-                    let low = self.low[&node].min(index);
-                    self.low.insert(node, low);
-                }
+                Some(&index) if self.on_stack.contains(&callee) => self.lower(node, index),
                 Some(_) => {}
             }
         }
+    }
+
+    /// `node` has visited every callee: its caller's low link takes its own, and it may close a component.
+    fn finish(&mut self, node: Node, caller: Option<Node>) {
+        if let Some(caller) = caller {
+            self.lower(caller, self.low[&node]);
+        }
+        self.close(node);
+    }
+
+    /// Lower `node`'s low link to `to` where that is lower.
+    fn lower(&mut self, node: Node, to: usize) {
+        let low = self.low[&node].min(to);
+        self.low.insert(node, low);
     }
 
     fn open(&mut self, node: Node, callees: &impl Fn(Node) -> Vec<Node>) -> Frame {
