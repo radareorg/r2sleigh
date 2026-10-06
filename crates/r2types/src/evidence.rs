@@ -1446,7 +1446,7 @@ mod tests {
             ret_type: Some(CTypeLike::Void),
             params: vec![crate::FunctionParamSpec {
                 name: "length".to_string(),
-                ty: Some(signed.clone()),
+                ty: Some(signed),
             }],
         };
         let mut facts = crate::FunctionFacts::new(crate::FunctionTypeFacts {

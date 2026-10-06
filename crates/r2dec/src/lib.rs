@@ -240,6 +240,42 @@ pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String 
 /// number in the line rather than an absence from it. An unaccounted count is
 /// never zero because nothing went wrong; it is zero only when every obligation
 /// was reached by a rule that named its fate.
+/// The proof line's columns that appear only when they are not zero, in reading order.
+fn proof_columns(closure: &crate::ledger::LedgerClosure, split: usize) -> String {
+    let mut line = String::new();
+    if closure.compiler_inserted > 0 {
+        let premise = r2source::Premise::UbFreeSource.spelled();
+        let _ = write!(
+            &mut line,
+            ", {} compiler-inserted (assuming {premise})",
+            closure.compiler_inserted
+        );
+    }
+    if closure.assumed > 0 {
+        let _ = write!(
+            &mut line,
+            ", {} assumed (frame extent unproven)",
+            closure.assumed
+        );
+    }
+    // A function with a residual is rendered, not proven: the count is how many obligations residuals stand in for.
+    if closure.gapped > 0 {
+        let _ = write!(&mut line, ", {} residual", closure.gapped);
+    }
+    // Rendered, through a variable split out of a shared one so every read sees its value.
+    if split > 0 {
+        let _ = write!(&mut line, " ({split} through a split variable)");
+    }
+    // Spelled whenever not zero: saying nothing here let a gutted body report as clean.
+    if closure.unattributed > 0 {
+        let _ = write!(&mut line, ", {} unaccounted", closure.unattributed);
+    }
+    if closure.conflicts > 0 {
+        let _ = write!(&mut line, ", {} conflicting", closure.conflicts);
+    }
+    line
+}
+
 fn note_unproven_constructs(
     func: &mut CFunction,
     ledger: Option<&crate::ledger::ObligationLedger>,
@@ -267,41 +303,8 @@ fn note_unproven_constructs(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
                 closure.total, closure.rendered, closure.elided, closure.refused
             );
-            // A function with a residual is rendered, not proven. The count
-            // says how many obligations a residual stands in for, so the proof
-            // line never reads as clean when part of the body went unproven.
-            if closure.compiler_inserted > 0 {
-                let _ = write!(
-                    &mut line,
-                    ", {} compiler-inserted (assuming {})",
-                    closure.compiler_inserted,
-                    r2source::Premise::UbFreeSource.spelled()
-                );
-            }
-            if closure.assumed > 0 {
-                let _ = write!(
-                    &mut line,
-                    ", {} assumed (frame extent unproven)",
-                    closure.assumed
-                );
-            }
-            if closure.gapped > 0 {
-                let _ = write!(&mut line, ", {} residual", closure.gapped);
-            }
-            // Rendered, and through a variable split out of a shared one so
-            // that every read sees the value it stands for.
             let split = ledger.map_or(0, crate::ledger::ObligationLedger::split_rendered);
-            if split > 0 {
-                let _ = write!(&mut line, " ({split} through a split variable)");
-            }
-            // The column that used to have no name. Saying nothing here is what let a
-            // gutted body report as clean, so it is spelled out whenever it is not zero.
-            if closure.unattributed > 0 {
-                let _ = write!(&mut line, ", {} unaccounted", closure.unattributed);
-            }
-            if closure.conflicts > 0 {
-                let _ = write!(&mut line, ", {} conflicting", closure.conflicts);
-            }
+            line.push_str(&proof_columns(&closure, split));
             let _ = write!(
                 &mut line,
                 "; {} statements rendered",

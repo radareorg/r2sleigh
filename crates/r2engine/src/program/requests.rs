@@ -292,7 +292,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     }
 
     /// The frame locals the C rendering declares, at their entry-stack offsets; none where it refused.
-    fn declared_frame_locals(&mut self, entry: u64) -> Option<Vec<super::info::Local>> {
+    fn declared_frame_locals(&self, entry: u64) -> Option<Vec<super::info::Local>> {
         let key = (entry, self.view().thumb_at(entry), RenderTier::C);
         let render = self.db.get::<super::analysis::Rendered>(&key).ok()?;
         let drawn = render.0.as_ref().ok()?;
