@@ -53,6 +53,16 @@ stops retrying when a check fails.
   peephole are deleted. Import admits a zero high part of any width as a
   literal, so a byte lane inserted into a zeroed register imports and
   widens where the machine renderer spelled masks (29 census functions).
+- R1c (decided 2026-10-06): `inst_combine` stays r2ssa's SSA
+  canonicalisation, since every fact is derived after it and r2rewrite sits
+  above r2ssa; it is proved there instead. Every identity it applies and
+  every fold through a definition is checked against `r2il::eval`,
+  exhaustively at 8 and 16 bits (eval gained `Insert`, an r2il operation it
+  did not model). Its termination is a measure, not a budget: each step makes
+  the operation a copy, makes one more operand a constant, or moves a slice
+  to a strictly shallower definition (longest-path depth, computed once in
+  O(definitions)); a step that lowers nothing is a defect and panics, where
+  the budget kept a partial result. Census byte-identical; no time added.
 
 ## Left
 

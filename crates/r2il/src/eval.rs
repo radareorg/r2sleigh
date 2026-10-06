@@ -387,6 +387,8 @@ pub enum Operation {
     },
     /// The second operand where the first is non-zero, the third where it is zero.
     Select,
+    /// The first operand with the second written over its bits from the third, a bit position, up.
+    Insert,
 }
 
 impl Operation {
@@ -446,6 +448,7 @@ impl Operation {
                 dst,
             ),
             R2ILOp::Select { dst, .. } => (O::Select, dst),
+            R2ILOp::Insert { dst, .. } => (O::Insert, dst),
             _ => return None,
         };
         Some((operation, dst, op.inputs()))
@@ -476,6 +479,7 @@ impl Operation {
             (O::Piece, [high, low]) => high.checked_add(*low) == Some(width),
             (O::PtrAdd { .. } | O::PtrSub { .. }, [base, _]) => *base == width,
             (O::Select, [_, a, b]) => *a == width && *b == width,
+            (O::Insert, [root, value, _]) => *root == width && *value <= width,
             (
                 O::Add
                 | O::Sub
@@ -503,6 +507,9 @@ pub fn apply(operation: Operation, operands: &[Word], width: u32) -> Result<u128
     let value = match *operands {
         [a] => unary(operation, a, width)?,
         [a, b] => binary(operation, a, b)?,
+        [root, value, position] if operation == Operation::Insert => {
+            insert(root, value, position.bits, width)?
+        }
         [cond, if_true, if_false] => match cond.bits {
             0 => if_false.bits,
             _ => if_true.bits,
@@ -510,6 +517,20 @@ pub fn apply(operation: Operation, operands: &[Word], width: u32) -> Result<u128
         _ => return Err(Stop::Unmodelled),
     };
     Ok(value & mask(width))
+}
+
+/// `root` with `value` written over its bits from `position` up; a value that runs past the width is unmodelled.
+fn insert(root: Word, value: Word, position: u128, width: u32) -> Result<u128, Stop> {
+    let position = u32::try_from(position).map_err(|_| Stop::Unmodelled)?;
+    let bits = value.bytes.saturating_mul(8);
+    if position
+        .checked_add(bits)
+        .is_none_or(|end| end > width.saturating_mul(8))
+    {
+        return Err(Stop::Unmodelled);
+    }
+    let field = mask(value.bytes) << position;
+    Ok((root.bits & !field) | (value.bits << position))
 }
 
 fn unary(operation: Operation, src: Word, width: u32) -> Result<u128, Stop> {
@@ -768,6 +789,30 @@ fn block<M: Mapped>(transfer: &BlockTransfer, state: &mut State<M>) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_insert_writes_the_value_over_its_bits_and_keeps_the_rest() {
+        let word = |bits, bytes| Word::new(bits, bytes).expect("a width");
+        let inserted = apply(
+            Operation::Insert,
+            &[word(0x1234, 2), word(0xab, 1), word(8, 1)],
+            2,
+        );
+        assert_eq!(inserted, Ok(0xab34));
+        let low = apply(
+            Operation::Insert,
+            &[word(0x1234, 2), word(0xab, 1), word(0, 1)],
+            2,
+        );
+        assert_eq!(low, Ok(0x12ab));
+        let past = apply(
+            Operation::Insert,
+            &[word(0x1234, 2), word(0xab, 1), word(9, 1)],
+            2,
+        );
+        assert_eq!(past, Err(Stop::Unmodelled));
+    }
+
     use super::*;
 
     fn nothing_mapped(_: u64) -> Option<u8> {
