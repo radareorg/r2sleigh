@@ -355,7 +355,10 @@ jobs:
         if: always()
         with:
           name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
-          path: ${{ runner.temp }}/equiv/records.json
+          # The stripped binaries graded, so a moved record can be read locally.
+          path: |
+            ${{ runner.temp }}/equiv/records.json
+            ${{ runner.temp }}/equiv/build/**/shown/*
           retention-days: 7
           if-no-files-found: error
 
@@ -438,7 +441,10 @@ jobs:
         if: always()
         with:
           name: equiv-aarch64-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
-          path: ${{ runner.temp }}/equiv/records.json
+          # The stripped binaries graded, so a moved record can be read locally.
+          path: |
+            ${{ runner.temp }}/equiv/records.json
+            ${{ runner.temp }}/equiv/build/**/shown/*
           retention-days: 7
           if-no-files-found: error
 
