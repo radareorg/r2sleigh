@@ -124,6 +124,16 @@ declarations.
   deleted.
 - P4.4: exit measured at P4's exit: the 38 x86-64 canary residual traps
   (all on `FS_OFFSET_0`) leave the equivalence baseline.
+- P4 extent, left (2026-10-07): the canary elision let equivalence run
+  functions whose residual trap had hidden layout defects. Fixed: the
+  escape closure (P4.1e/g) and the `% d` layout proof (P4.1h). Standing:
+  gcc -O1 `shape_struct_array` walks a pointer over a frame array
+  (`p += 8`, eight steps), which no layout proof reads, so the C splits
+  the array (UB in the rendering); a layout proof over an induction
+  pointer closes it. gcc -O0 `unaligned_words` dereferences an address
+  of unproven alignment as `*(uint32_t*)`: a renderer defect (R), not P4.
+  gcc -O1/O2 `shape_byte_indexed_buffer` moved from residual-trap to an
+  honest refusal.
 - P4.5: the restatement removed. Exit: the proved half of `restated_slots`
   is deleted.
 - Exit for the whole of P4: one owner of frame objects, and `afv` agrees with
