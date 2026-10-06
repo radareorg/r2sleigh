@@ -112,7 +112,7 @@ impl FrameReach {
 
 /// Nothing proves where the object an escaped address points into ends: `rows[4]` is four
 /// objects to the partition and one to the callee that indexes it. So an escaped address reaches
-/// every object of this frame above it, up to a slot the compiler owns, which no C object spans.
+/// every object of this frame around it, out to a slot the compiler owns, which no C object spans.
 /// `O(objects)` per escaped object.
 fn close_upward(
     escaped: &mut BTreeSet<ObjectId>,
@@ -125,12 +125,19 @@ fn close_upward(
         .filter(|start| *start < 0)
         .collect::<BTreeSet<_>>();
     let mut reached = BTreeSet::new();
+    let stops =
+        |objects: &BTreeSet<ObjectId>| objects.iter().any(|object| barriers.contains(object));
     for start in starts {
-        for (_, objects) in frame.starts.range(start..0) {
-            if objects.iter().any(|object| barriers.contains(object)) {
-                break;
+        // An interior address indexes down as well as up: `&rows[1]` reaches `rows[0]`.
+        let up = frame.starts.range(start..0);
+        let down = frame.starts.range(..start).rev();
+        for run in [up.collect::<Vec<_>>(), down.collect::<Vec<_>>()] {
+            for (_, objects) in run {
+                if stops(objects) {
+                    break;
+                }
+                reached.extend(objects.iter().copied());
             }
-            reached.extend(objects.iter().copied());
         }
     }
     escaped.extend(reached);
