@@ -2533,7 +2533,7 @@ pub struct SSAFunction {
     /// operations, and every layer that counts those has to agree.
     promoted_slot_sites: BTreeSet<(u64, usize)>,
     /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
-    compiler_inserted: BTreeSet<crate::arena::OpId>,
+    compiler_inserted: crate::dense::IdSet<crate::arena::OpId>,
     /// The failure blocks a decided stack-protector check removed, whose instructions stay owed.
     compiler_inserted_blocks: BTreeSet<u64>,
     /// The architectural stack pointer, as the machine roles name it.
@@ -3390,16 +3390,16 @@ impl SSAFunction {
     }
 
     /// The operations a decided stack-protector check inserted (`crate::stack_protector`).
-    pub fn compiler_inserted(&self) -> &BTreeSet<crate::arena::OpId> {
+    pub fn compiler_inserted(&self) -> &crate::dense::IdSet<crate::arena::OpId> {
         &self.compiler_inserted
     }
 
     pub(crate) fn record_compiler_inserted(
         &mut self,
-        ops: BTreeSet<crate::arena::OpId>,
+        ops: crate::dense::IdSet<crate::arena::OpId>,
         blocks: BTreeSet<u64>,
     ) {
-        self.compiler_inserted.extend(ops);
+        self.compiler_inserted.extend(ops.iter());
         self.compiler_inserted_blocks.extend(blocks);
     }
 

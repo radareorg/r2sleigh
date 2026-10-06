@@ -32,7 +32,7 @@ impl SSAFunction {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
             promoted_slot_sites: BTreeSet::new(),
-            compiler_inserted: BTreeSet::new(),
+            compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,
@@ -576,7 +576,7 @@ impl SSAFunction {
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
             promoted_slot_sites: promoted.keys().copied().collect(),
-            compiler_inserted: BTreeSet::new(),
+            compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,

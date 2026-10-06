@@ -1474,13 +1474,12 @@ fn unobserved_compiler_inserted(
     let mut inserted = function
         .compiler_inserted()
         .iter()
-        .filter_map(|op| graph.inst_for_op(*op))
-        .collect::<BTreeSet<_>>();
+        .filter_map(|op| graph.inst_for_op(op))
+        .collect::<crate::dense::IdSet<_>>();
     loop {
         let observed = observed_values(graph, returns, &inserted);
         let released = inserted
             .iter()
-            .copied()
             .filter(|inst| {
                 graph
                     .inst(*inst)
@@ -1489,10 +1488,10 @@ fn unobserved_compiler_inserted(
             })
             .collect::<Vec<_>>();
         if released.is_empty() {
-            return inserted.into_iter().collect();
+            return inserted;
         }
         for inst in released {
-            inserted.remove(&inst);
+            inserted.remove(inst);
         }
     }
 }
@@ -1502,7 +1501,7 @@ fn unobserved_compiler_inserted(
 fn observed_values(
     graph: &crate::graph::SsaGraph,
     returns: &[ReturnValueCertificate],
-    silent: &BTreeSet<InstId>,
+    silent: &crate::dense::IdSet<InstId>,
 ) -> Vec<bool> {
     let mut observed = vec![false; graph.values.len()];
     let mut pending = returns
@@ -1522,7 +1521,7 @@ fn observed_values(
             }
             _ => false,
         };
-        if effect && !silent.contains(&inst.id) {
+        if effect && !silent.contains(inst.id) {
             pending.extend(inst.inputs.iter().copied());
         }
     }
@@ -1534,7 +1533,7 @@ fn observed_values(
             continue;
         }
         if let Some(definition) = graph.def_inst(value).and_then(|inst| graph.inst(inst))
-            && !silent.contains(&definition.id)
+            && !silent.contains(definition.id)
         {
             pending.extend(definition.inputs.iter().copied());
         }

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use crate::arena::OpId;
 use crate::cfg::BlockTerminator;
-use crate::dense::IdMap;
+use crate::dense::{IdMap, IdSet};
 use crate::function::{EditPlan, SSAFunction, ShapeEdit};
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
@@ -30,10 +30,10 @@ struct Check {
     pass: u64,
     pass_is_target: bool,
     fail: u64,
-    inserted: BTreeSet<OpId>,
+    inserted: IdSet<OpId>,
     /// The guard read every other read of the check equals under the premise, and those rereads.
     first: VarId,
-    rereads: BTreeSet<(OpId, VarId)>,
+    rereads: IdMap<OpId, VarId>,
 }
 
 /// Decide every stack-protector check the function holds; the operations each one inserted are
@@ -60,7 +60,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         return;
     }
     let mut decided = EditPlan::new();
-    let mut inserted = BTreeSet::new();
+    let mut inserted = IdSet::default();
     for check in &checks {
         let op = if check.pass_is_target {
             SSAOp::Branch {
@@ -83,11 +83,11 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
             block: check.fail,
             pred: check.block,
         });
-        inserted.extend(check.inserted.iter().copied());
+        inserted.extend(check.inserted.iter());
         // Under the premise every reread holds what the first read did, so `reload - guard` folds to zero.
-        for (op, dst) in &check.rereads {
+        for (op, dst) in check.rereads.iter() {
             decided.replace(
-                *op,
+                op,
                 SSAOp::Copy {
                     dst: *dst,
                     src: check.first,
@@ -124,7 +124,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
 struct Definitions {
     defs: IdMap<VarId, (OpId, Op)>,
     /// Where each operation sits: its block and its index there.
-    positions: std::collections::BTreeMap<OpId, (u64, usize)>,
+    positions: IdMap<OpId, (u64, usize)>,
     /// A bound on any definition chain: every step moves to an operand defined earlier.
     values: usize,
 }
@@ -133,7 +133,7 @@ impl Definitions {
     fn of(func: &SSAFunction) -> Self {
         let values = func.values().len();
         let mut defs = IdMap::new(values);
-        let mut positions = std::collections::BTreeMap::new();
+        let mut positions = IdMap::new(func.id_limit());
         for addr in func.block_addrs() {
             let Some(block) = func.get_block(*addr) else {
                 continue;
@@ -154,7 +154,7 @@ impl Definitions {
 
     /// Whether operation `a` runs before `b` on every path to `b`.
     fn precedes(&self, func: &SSAFunction, a: OpId, b: OpId) -> bool {
-        match (self.positions.get(&a), self.positions.get(&b)) {
+        match (self.positions.get(a), self.positions.get(b)) {
             (Some((block_a, at)), Some((block_b, bt))) if block_a == block_b => at < bt,
             (Some((block_a, _)), Some((block_b, _))) => func.dominates(*block_a, *block_b),
             _ => false,
@@ -214,12 +214,12 @@ impl Definitions {
 
 /// Every store whose address is a root plus a constant, by root; written once, by the walk below.
 struct SlotStores {
-    by_root: std::collections::BTreeMap<VarId, Vec<(i64, i64, OpId, VarId)>>,
+    by_root: IdMap<VarId, Vec<(i64, i64, OpId, VarId)>>,
 }
 
 impl SlotStores {
     fn of(func: &SSAFunction, defs: &Definitions) -> Self {
-        let mut by_root = std::collections::BTreeMap::<VarId, Vec<_>>::new();
+        let mut by_root = IdMap::<VarId, Vec<_>>::new(func.values().len());
         for block in func
             .block_addrs()
             .iter()
@@ -230,8 +230,7 @@ impl SlotStores {
                     let (root, offset) = defs.affine(func, *addr);
                     let width = i64::from(func.var(*val).size);
                     by_root
-                        .entry(root)
-                        .or_default()
+                        .get_or_insert_with(root, Vec::new)
                         .push((offset, width, id, *val));
                 }
             }
@@ -244,7 +243,7 @@ impl SlotStores {
         let end = offset + i64::from(width);
         let mut writers = self
             .by_root
-            .get(&root)?
+            .get(root)?
             .iter()
             .filter(|(start, size, ..)| *start < end && offset < start + size);
         let (start, size, id, val) = writers.next()?;
@@ -258,8 +257,8 @@ impl SlotStores {
 struct GuardRead {
     guard: Affine,
     first: (OpId, VarId),
-    ops: BTreeSet<OpId>,
-    rereads: BTreeSet<(OpId, VarId)>,
+    ops: Vec<OpId>,
+    rereads: Vec<(OpId, VarId)>,
 }
 
 fn guard_read(
@@ -275,8 +274,8 @@ fn guard_read(
         return Some(GuardRead {
             guard: address,
             first: (load, loaded),
-            ops: BTreeSet::from([load]),
-            rereads: BTreeSet::new(),
+            ops: vec![load],
+            rereads: Vec::new(),
         });
     }
     // A reload of a frame slot whose only writer, run before it, stored a direct read of the guard.
@@ -289,8 +288,8 @@ fn guard_read(
     Some(GuardRead {
         guard: stored_address,
         first: (guard_load, first),
-        ops: BTreeSet::from([load, store, guard_load]),
-        rereads: BTreeSet::from([(load, loaded)]),
+        ops: vec![load, store, guard_load],
+        rereads: vec![(load, loaded)],
     })
 }
 
@@ -351,9 +350,10 @@ fn check(
     } else {
         return None;
     };
-    let mut rereads = &left.rereads | &right.rereads;
+    let mut rereads = IdMap::default();
+    rereads.extend(left.rereads.iter().chain(&right.rereads).copied());
     if second != first {
-        rereads.insert(second);
+        rereads.insert(second.0, second.1);
     }
     // Every other read of the guard in the checking block is the check's: a compare may read it once per flag.
     rereads.extend(block.sited().filter_map(|(id, op)| match op {
@@ -366,12 +366,17 @@ fn check(
     }));
     if !rereads
         .iter()
-        .all(|(op, _)| defs.precedes(func, first.0, *op))
+        .all(|(op, _)| defs.precedes(func, first.0, op))
     {
         return None;
     }
-    let mut inserted = &left.ops | &right.ops;
-    inserted.extend(rereads.iter().map(|(op, _)| *op));
+    let mut inserted = left
+        .ops
+        .iter()
+        .chain(&right.ops)
+        .copied()
+        .collect::<IdSet<_>>();
+    inserted.extend(rereads.iter().map(|(op, _)| op));
     Some(Check {
         block: addr,
         branch,

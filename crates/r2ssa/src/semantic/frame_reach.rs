@@ -148,8 +148,8 @@ fn compiler_slots(
     let canary = function
         .compiler_inserted()
         .iter()
-        .filter_map(|op| graph.inst_for_op(*op))
-        .collect::<BTreeSet<_>>();
+        .filter_map(|op| graph.inst_for_op(op))
+        .collect::<crate::dense::IdSet<_>>();
     let preserved =
         |storage: CanonicalStorageId| effect.is_some_and(|effect| effect.preserves(storage));
     let entry = |value: ValueId| {
@@ -198,7 +198,7 @@ fn compiler_slots(
         .filter_map(|inst| match &inst.payload {
             crate::graph::InstPayload::Op(SSAOp::Store { space, .. }) => {
                 let (address, value) = (*inst.inputs.first()?, *inst.inputs.get(1)?);
-                (saved(value) || canary.contains(&inst.id)).then_some(MemoryObjectKey {
+                (saved(value) || canary.contains(inst.id)).then_some(MemoryObjectKey {
                     value: address,
                     space: *space,
                 })
