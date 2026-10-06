@@ -43,10 +43,7 @@ stops retrying when a check fails.
   operands carrying no render observation, which the audited path never
   has; disabling each left the census byte-identical. Their identities are
   r2rewrite rules (23 identity rules, proved). `structure/rewrite.rs`'s
-  `negate_condition` turns `!(a < b)` into `a >= b`, false for a NaN; no
-  float comparison reaches it today (lowering binds each to a `uint8_t`
-  temporary with its `isnan` guards, fixture `float_compares_zig_*`), so it
-  waits for R1's negation as a rule over typed terms.
+  `negate_condition`'s float hazard is R1e.
 - R1b: zeroes above a value are its zero extension as a proved rule
   (`cast.concat_zero_high`, decreasing a new `Joins` measure component);
   import's `Insert`-over-zero shortcut and the printer's `Concat`-of-zero
@@ -69,6 +66,12 @@ stops retrying when a check fails.
   found `_Bool` treated as an 8-bit integer: `(uint8_t)(_Bool)x` collapsed
   to `(uint8_t)x`, 2 where C gives 1. `_Bool` now takes no part in the
   modular collapses. The pointer collapses rest on C11 6.3.2.3 as cited.
+- R1e: ordered float comparisons are their own operators (`FLt`, `FLe`,
+  `FGt`, `FGe`, printed as `<` and the rest), from the float lowering and
+  the rewriter's float compare terms. `negate_condition` wraps them in `!`
+  where it flips an integer relation: a NaN makes `a < b` and `a >= b` both
+  false. Float compares reach conditions inline through
+  `materialize_term`; the census had no negated one yet.
 
 ## Left
 

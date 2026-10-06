@@ -180,6 +180,12 @@ pub enum BinaryOp {
     Le,
     Gt,
     Ge,
+    /// Ordered float comparisons: false when either operand is a NaN, so their negation is no
+    /// opposite comparison (`!(a < b)` is not `a >= b`). They print as `<`, `<=`, `>`, `>=`.
+    FLt,
+    FLe,
+    FGt,
+    FGe,
 
     // Logical
     And,
@@ -714,7 +720,15 @@ impl CExpr {
                 ..
             } => 9,
             Self::Binary {
-                op: BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge,
+                op:
+                    BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::FLt
+                    | BinaryOp::FLe
+                    | BinaryOp::FGt
+                    | BinaryOp::FGe,
                 ..
             } => 10,
             Self::Binary {
@@ -1517,10 +1531,10 @@ impl BinaryOp {
             Self::Shr => ">>",
             Self::Eq => "==",
             Self::Ne => "!=",
-            Self::Lt => "<",
-            Self::Le => "<=",
-            Self::Gt => ">",
-            Self::Ge => ">=",
+            Self::Lt | Self::FLt => "<",
+            Self::Le | Self::FLe => "<=",
+            Self::Gt | Self::FGt => ">",
+            Self::Ge | Self::FGe => ">=",
             Self::And => "&&",
             Self::Or => "||",
             Self::Assign => "=",

@@ -2012,3 +2012,23 @@ impl ControlFlowStructurer<'_, '_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relation(op: BinaryOp) -> CExpr {
+        CExpr::binary(op, CExpr::IntLit(1), CExpr::IntLit(2))
+    }
+
+    #[test]
+    fn an_ordered_float_comparison_negates_to_its_negation_and_an_integer_one_flips() {
+        // A NaN makes `a < b` and `a >= b` both false, so only the integer relation has an opposite.
+        for op in [BinaryOp::FLt, BinaryOp::FLe, BinaryOp::FGt, BinaryOp::FGe] {
+            let negated = ControlFlowStructurer::negate_condition(relation(op));
+            assert_eq!(negated, CExpr::unary(UnaryOp::Not, relation(op)), "{op:?}");
+        }
+        let flipped = ControlFlowStructurer::negate_condition(relation(BinaryOp::Lt));
+        assert_eq!(flipped, relation(BinaryOp::Ge));
+    }
+}

@@ -20,7 +20,16 @@ fn traced_variable_name() -> Option<&'static str> {
 const fn comparison_op(op: BinaryOp) -> bool {
     matches!(
         op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::FLt
+            | BinaryOp::FLe
+            | BinaryOp::FGt
+            | BinaryOp::FGe
     )
 }
 
@@ -2138,9 +2147,9 @@ impl<'a> FoldingContext<'a> {
                 self.float_binary_stmt(frame, dst, a, b, BinaryOp::Mul)
             }
             SSAOp::FloatDiv { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::Div),
-            SSAOp::FloatLess { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::Lt),
+            SSAOp::FloatLess { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::FLt),
             SSAOp::FloatLessEqual { dst, a, b } => {
-                self.float_binary_stmt(frame, dst, a, b, BinaryOp::Le)
+                self.float_binary_stmt(frame, dst, a, b, BinaryOp::FLe)
             }
             SSAOp::FloatEqual { dst, a, b } => {
                 self.float_binary_stmt(frame, dst, a, b, BinaryOp::Eq)

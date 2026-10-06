@@ -776,9 +776,11 @@ impl<'a> FoldingContext<'a> {
                     .ok_or_else(invalid)?;
                 float_unary(*op, width, child(0, *input)?).ok_or_else(invalid)?
             }
-            Kind::FloatCompare { op, left, right } => {
-                CExpr::binary(comparison_op(*op), child(0, *left)?, child(1, *right)?)
-            }
+            Kind::FloatCompare { op, left, right } => CExpr::binary(
+                float_comparison_op(*op),
+                child(0, *left)?,
+                child(1, *right)?,
+            ),
             Kind::Negate { input, .. } => CExpr::unary(UnaryOp::Neg, child(0, *input)?),
             Kind::Select {
                 condition,
@@ -904,7 +906,7 @@ impl<'a> FoldingContext<'a> {
                 float_unary(op, width, child(0, input)?).ok_or_else(invalid)?
             }
             Kind::FloatCompare { op, left, right } => {
-                CExpr::binary(comparison_op(op), child(0, left)?, child(1, right)?)
+                CExpr::binary(float_comparison_op(op), child(0, left)?, child(1, right)?)
             }
             // The conversion the machine states, spelled as the C cast to the
             // type it produces; the operand arrives at the type it reads.
@@ -2079,12 +2081,13 @@ fn float_binary_op(op: r2ssa::MachineFloatOp) -> BinaryOp {
     }
 }
 
-fn comparison_op(op: r2ssa::MachineComparisonOp) -> BinaryOp {
+/// A float comparison's operator: ordered, so negation never flips it.
+fn float_comparison_op(op: r2ssa::MachineComparisonOp) -> BinaryOp {
     match op {
         r2ssa::MachineComparisonOp::Equal => BinaryOp::Eq,
         r2ssa::MachineComparisonOp::NotEqual => BinaryOp::Ne,
-        r2ssa::MachineComparisonOp::LessThan => BinaryOp::Lt,
-        r2ssa::MachineComparisonOp::LessThanOrEqual => BinaryOp::Le,
+        r2ssa::MachineComparisonOp::LessThan => BinaryOp::FLt,
+        r2ssa::MachineComparisonOp::LessThanOrEqual => BinaryOp::FLe,
     }
 }
 
