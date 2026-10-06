@@ -2330,7 +2330,16 @@ mod sccp_tests {
                     };
                     let dst = SSAVar::new("dst", 1, out_bytes);
                     let op = build(dst, spell(left), spell(right));
-                    let Some(replacement) = simplify(&op) else {
+                    // `eval_const_op` decides absorbing elements on its own, for constant substitution.
+                    let absorbed = through_ids(&op, &[], |op, _, values| {
+                        let value = eval_const_op(op, values, |id| const_value(values, id))?;
+                        let dst = *op.dst()?;
+                        Some(SSAOp::Copy {
+                            dst,
+                            src: values.constant(value, width(values, dst)),
+                        })
+                    });
+                    let Some(replacement) = absorbed.or_else(|| simplify(&op)) else {
                         continue;
                     };
                     let values: u128 = if boolean_inputs {
