@@ -89,6 +89,12 @@ pub(crate) fn cached_register_name_map(arch: &ArchSpec) -> Arc<RegisterNameMap> 
     map
 }
 
+/// A frame object's name where nothing declares one: where it sits from the entry stack pointer, as C spells it.
+pub fn frame_object_name(entry_offset: i64) -> String {
+    let side = if entry_offset < 0 { 'm' } else { 'p' };
+    format!("stack_{side}{}", entry_offset.unsigned_abs())
+}
+
 /// A promoted frame slot's spelling, in the coordinate every frame object is
 /// named by: where it sits relative to the frame the function was entered with.
 pub fn frame_slot_name(entry_offset: i64) -> String {

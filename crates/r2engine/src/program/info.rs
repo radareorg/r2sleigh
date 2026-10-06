@@ -56,6 +56,8 @@ pub struct Argument {
 /// One stack object in the function's own frame, frame management excluded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Local {
+    /// What the rendering calls it (`SourceOwnedFunctionFacts::stack_object_name`).
+    pub name: String,
     pub base: StackBase,
     pub offset: i64,
     /// The declared type, or else storage of the width its accesses agree on.
@@ -97,7 +99,7 @@ impl FunctionInfo {
             return_unproven: sealed
                 .return_type()
                 .is_some_and(r2types::ReturnTypeFact::is_unproven),
-            locals: locals(artifact, &entities),
+            locals: locals(artifact, sealed, &entities),
             noreturn,
         }
     }
@@ -265,10 +267,14 @@ fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> 
 }
 
 /// Every declarable stack object, and every frame slot promotion took out of memory.
-fn locals(artifact: &r2ssa::SsaArtifact, entities: &[&CertifiedEntity]) -> Vec<Local> {
+fn locals(
+    artifact: &r2ssa::SsaArtifact,
+    sealed: &SourceOwnedFunctionFacts,
+    entities: &[&CertifiedEntity],
+) -> Vec<Local> {
     let objects = entities
         .iter()
-        .filter_map(|entity| object(artifact, entity));
+        .filter_map(|entity| object(artifact, sealed, entity));
     let promoted = artifact
         .graph()
         .values
@@ -279,6 +285,7 @@ fn locals(artifact: &r2ssa::SsaArtifact, entities: &[&CertifiedEntity]) -> Vec<L
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|(offset, bytes)| Local {
+            name: r2ssa::frame_object_name(offset),
             base: StackBase::StackPointer,
             offset,
             ty: CTypeLike::machine_bits(bytes * 8),
@@ -289,7 +296,11 @@ fn locals(artifact: &r2ssa::SsaArtifact, entities: &[&CertifiedEntity]) -> Vec<L
 }
 
 /// A stack object the rendering can declare, typed as declared or by its width.
-fn object(artifact: &r2ssa::SsaArtifact, entity: &CertifiedEntity) -> Option<Local> {
+fn object(
+    artifact: &r2ssa::SsaArtifact,
+    sealed: &SourceOwnedFunctionFacts,
+    entity: &CertifiedEntity,
+) -> Option<Local> {
     let CertifiedEntity::StackSlot {
         object,
         base,
@@ -307,6 +318,7 @@ fn object(artifact: &r2ssa::SsaArtifact, entity: &CertifiedEntity) -> Option<Loc
     }
     let storage = CTypeLike::machine_bits(size.unwrap_or_default() * 8);
     Some(Local {
+        name: sealed.stack_object_name(*object, *offset),
         base: *base,
         offset: *offset,
         ty: ty.clone().unwrap_or(storage),

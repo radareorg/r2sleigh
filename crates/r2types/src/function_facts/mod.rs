@@ -895,6 +895,25 @@ impl SourceOwnedFunctionFacts {
         Arc::ptr_eq(&self.source, source)
     }
 
+    /// The source's name for the slot a frame object occupies, asked at the coordinate the source declared it.
+    pub fn stack_object_declared_name(&self, object: r2ssa::ObjectId) -> Option<&str> {
+        let slot = self
+            .source()
+            .certificates()
+            .stack_slots
+            .get(&object)?
+            .source_slot?;
+        self.report()
+            .display_names()
+            .stack_slot(slot.base(), slot.offset())
+    }
+
+    /// What a frame object is called: its declared name, else where it sits from its base.
+    pub fn stack_object_name(&self, object: r2ssa::ObjectId, offset: i64) -> String {
+        let declared = self.stack_object_declared_name(object);
+        declared.map_or_else(|| r2ssa::frame_object_name(offset), str::to_owned)
+    }
+
     pub fn report(&self) -> &FunctionFacts {
         &self.report
     }

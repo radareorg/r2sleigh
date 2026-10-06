@@ -50,6 +50,7 @@ pub(crate) mod machine_context;
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
+pub use naming::frame_object_name;
 pub mod natural_loops;
 pub(crate) mod obligation;
 pub(crate) mod op;

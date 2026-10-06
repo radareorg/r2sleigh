@@ -161,22 +161,11 @@ fn source_parameter_presentation<'a>(
     )
 }
 
-/// The name the source gave the slot this object occupies, asked for at the
-/// coordinate the source declared it.
 fn source_stack_slot_presentation(
     source_owned: &SourceOwnedFunctionFacts,
     object: r2ssa::ObjectId,
 ) -> Option<&str> {
-    let slot = source_owned
-        .source()
-        .certificates()
-        .stack_slots
-        .get(&object)?
-        .source_slot?;
-    source_owned
-        .report()
-        .display_names()
-        .stack_slot(slot.base(), slot.offset())
+    source_owned.stack_object_declared_name(object)
 }
 
 fn preferred_parameter_presentation<'a>(

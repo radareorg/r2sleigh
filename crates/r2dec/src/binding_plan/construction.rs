@@ -1587,11 +1587,7 @@ impl BindingPlan {
                         ),
                         *id,
                         declaration_type,
-                        Some(if certificate.entry_offset < 0 {
-                            format!("stack_m{}", certificate.entry_offset.unsigned_abs())
-                        } else {
-                            format!("stack_p{}", certificate.entry_offset.unsigned_abs())
-                        }),
+                        Some(r2ssa::frame_object_name(certificate.entry_offset)),
                         source_owned.source().caller_stack_object(*object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
@@ -1621,11 +1617,7 @@ impl BindingPlan {
                         ),
                         *id,
                         declaration_type,
-                        Some(if *offset < 0 {
-                            format!("stack_m{}", offset.unsigned_abs())
-                        } else {
-                            format!("stack_p{}", offset.unsigned_abs())
-                        }),
+                        Some(r2ssa::frame_object_name(*offset)),
                         source_owned.source().caller_stack_object(*object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
@@ -1694,11 +1686,7 @@ impl BindingPlan {
                                 .memory_model()
                                 .default_address_bits(),
                         );
-                        let name_hint = Some(if *offset < 0 {
-                            format!("stack_m{}", offset.unsigned_abs())
-                        } else {
-                            format!("stack_p{}", offset.unsigned_abs())
-                        });
+                        let name_hint = Some(r2ssa::frame_object_name(*offset));
                         let binding = bind_stack_object(
                             &mut bindings,
                             shared_reload_binding(
