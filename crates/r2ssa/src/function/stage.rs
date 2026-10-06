@@ -83,6 +83,8 @@ impl Lifted {
         config: &crate::optimize::OptimizationConfig,
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
+        // As `prepare`: what each operation wrote, before an optimisation folds it away.
+        self.ir.capture_written();
         crate::optimize::optimize_function_with_control(&mut self.ir, config, control)?;
         self.validate().map_err(super::integrity_refusal)
     }

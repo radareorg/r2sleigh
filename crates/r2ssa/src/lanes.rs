@@ -82,6 +82,10 @@ impl Byte {
     /// The byte on either of two paths.
     fn join(&self, other: &Self) -> Self {
         match (self, other) {
+            // A byte no path has reached yet is the join's identity, not a way of filling it.
+            (Self::Filled(none), reached) | (reached, Self::Filled(none)) if none.is_empty() => {
+                reached.clone()
+            }
             (Self::Data, _) | (_, Self::Data) => Self::Data,
             (Self::Widened { sign: a }, Self::Widened { sign: b }) if a == b => self.clone(),
             (Self::Widened { .. }, _) | (_, Self::Widened { .. }) => Self::Data,
@@ -499,6 +503,14 @@ mod tests {
         // A stated extension joined with data on another path is data.
         assert_eq!(widened(true).join(&Byte::Data), Byte::Data);
         assert_eq!(widened(true).join(&widened(false)), Byte::Data);
+    }
+
+    #[test]
+    fn a_byte_no_path_has_reached_joins_as_the_identity() {
+        let widened = Byte::Widened { sign: true };
+        assert_eq!(Byte::NONE.join(&widened), widened);
+        assert_eq!(widened.join(&Byte::NONE), widened);
+        assert_eq!(Byte::NONE.join(&Byte::Data), Byte::Data);
     }
 
     #[test]

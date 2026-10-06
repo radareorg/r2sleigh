@@ -125,6 +125,16 @@ pub struct Visual<'a> {
     pub session: &'a mut Session,
 }
 
+impl Visual<'_> {
+    /// A line's roles where `scr.color` paints, and none where it does not.
+    fn painted(&self, roles: r2s_tui::theme::Roles) -> r2s_tui::theme::Roles {
+        match self.session.color {
+            true => roles,
+            false => r2s_tui::theme::Roles::default(),
+        }
+    }
+}
+
 impl Host for Visual<'_> {
     fn title(&self) -> String {
         let image = self.session.image();
@@ -158,6 +168,7 @@ impl Host for Visual<'_> {
             .iter()
             .map(|line| {
                 let (text, roles) = crate::listing::instruction_painted(self.session, line);
+                let roles = self.painted(roles);
                 ListedLine {
                     address: line.address,
                     size: (line.bytes.len() as u64).max(1),
@@ -228,7 +239,7 @@ impl Host for Visual<'_> {
             .enumerate()
             .map(|(row, (text, addresses))| DecompiledLine {
                 text: text.to_owned(),
-                roles: roles.get(row).cloned().unwrap_or_default(),
+                roles: self.painted(roles.get(row).cloned().unwrap_or_default()),
                 addresses,
             })
             .collect())
@@ -392,6 +403,22 @@ mod tests {
         assert_eq!(containing_entry(&mut session, 0x121b), Ok(0x120a));
         assert_eq!(containing_entry(&mut session, 0x1246), Ok(0x120a));
         assert_eq!(containing_entry(&mut session, 0x1), Ok(0x1));
+    }
+
+    #[test]
+    fn scr_color_off_paints_no_role_in_the_visual_mode() {
+        let mut session = fixture();
+        for color in [true, false] {
+            session.color = color;
+            let mut host = Visual {
+                session: &mut session,
+            };
+            let listed = host.disassemble(0x120a, 4);
+            let decompiled = host.decompile(0x120a).expect("it decompiles");
+            let painted = listed.iter().any(|line| !line.roles.is_empty())
+                || decompiled.iter().any(|line| !line.roles.is_empty());
+            assert_eq!(painted, color, "scr.color={color}");
+        }
     }
 
     #[test]
