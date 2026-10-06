@@ -98,6 +98,16 @@ declarations.
 
 ## Left
 
+- Extent, amended (2026-10-07, user decision "assume and label"): where
+  nothing declares an object and no layout proves it, but code outside its
+  own accesses may reach past them (an escaped address, or an index no
+  value range bounds), the C declares the accessed extent and every access
+  to the object counts in the proof's `assumed` column
+  (`SsaArtifact::extent_assumption`). FrameReach closes an escaped address
+  upward to the next compiler-owned slot (a save, the canary), so every
+  store such an access could read stays (P4.1e). A layout proof (the
+  `% d` rewrite) moves an object out of `assumed`. Measured: 46 rendered
+  functions with an escaped frame object, 2 with an unbounded index.
 - P4.0, amended (D1, 2026-10-06): no second model beside the owners.
   `ObjectModelBuilder`, which the certificates, memory SSA, `FrameReach`,
   the binding plan and `afv` already read, grows into the frame model, and

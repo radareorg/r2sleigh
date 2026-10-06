@@ -1317,6 +1317,25 @@ impl SsaArtifact {
     ///
     /// A frame-management slot is not a program object, and neither is one
     /// whose extent nothing states.
+    /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
+    pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
+        let slot = self.certificates().stack_slots.get(&object)?;
+        if slot.source_slot.is_some() || !self.declarable_stack_object(object) {
+            return None;
+        }
+        match slot.array_layout {
+            crate::StackArrayLayoutDisposition::Proven(_) => None,
+            crate::StackArrayLayoutDisposition::Refused(
+                crate::StackArrayLayoutRefusal::MissingConstantOffset,
+            ) => Some(crate::ExtentAssumption::UnboundedIndex),
+            _ => self
+                .objects()
+                .frame_reach
+                .escaped(object)
+                .then_some(crate::ExtentAssumption::EscapedAddress),
+        }
+    }
+
     pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
         !self.frame_managed_stack_object(object)
             && !self.call_return_address_object(object)

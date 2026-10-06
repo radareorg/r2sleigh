@@ -278,6 +278,13 @@ fn note_unproven_constructs(
                     r2source::Premise::UbFreeSource.spelled()
                 );
             }
+            if closure.assumed > 0 {
+                let _ = write!(
+                    &mut line,
+                    ", {} assumed (frame extent unproven)",
+                    closure.assumed
+                );
+            }
             if closure.gapped > 0 {
                 let _ = write!(&mut line, ", {} residual", closure.gapped);
             }

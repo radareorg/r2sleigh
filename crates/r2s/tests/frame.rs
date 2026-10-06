@@ -33,3 +33,11 @@ fn every_row_of_an_array_whose_first_address_escapes_is_stored() {
         assert!(out.contains(&format!("{row} = ")), "{row}:\n{out}");
     }
 }
+
+/// Nothing proves `rows` ends where the partition says, so the proof counts every access to it as
+/// rendered under an assumed extent rather than as proven.
+#[test]
+fn accesses_to_an_object_of_unproven_extent_are_counted_as_assumed() {
+    let out = pdd("shapes_gcc_x64_O0", "sym.shape_pointer_to_pointer");
+    assert!(out.contains("assumed (frame extent unproven)"), "{out}");
+}

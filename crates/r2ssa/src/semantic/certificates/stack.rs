@@ -3,6 +3,16 @@
 use super::super::*;
 use crate::view::ViewRelation;
 
+/// Why a frame object's extent is assumed rather than proven: nothing declares it, no layout proves
+/// it, and code outside its own accesses may reach past them (doc/adr-frame-model.md, extent rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtentAssumption {
+    /// Its address escapes, or an escaped address below it may reach it, and no callee reach bounds it.
+    EscapedAddress,
+    /// It is read or written through an index no value range bounds.
+    UnboundedIndex,
+}
+
 /// Upstream decision for declaring one indexed stack object as an array.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StackArrayLayoutDisposition {

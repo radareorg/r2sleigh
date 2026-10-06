@@ -242,6 +242,8 @@ pub enum Outcome {
     Elided(ElisionReason),
     /// Could not be discharged. The obligation's own kind says what it was.
     Refused,
+    /// Rendered as an access to a frame object whose extent is assumed (`r2ssa::ExtentAssumption`).
+    Assumed,
     /// Covered by a marked gap in the output at this operation site.
     ///
     /// A gap is not a discharge and not a refusal. The renderer could not
@@ -283,6 +285,8 @@ pub struct LedgerClosure {
     pub elided: usize,
     /// Elided as compiler-inserted, under the premise the rendering states.
     pub compiler_inserted: usize,
+    /// Rendered as accesses to frame objects whose extent is assumed.
+    pub assumed: usize,
     pub refused: usize,
     pub gapped: usize,
     pub unattributed: usize,
@@ -301,7 +305,11 @@ impl LedgerClosure {
     /// renderer could not fully prove, which is a weaker statement than this
     /// one and must never be reported as the same thing.
     pub fn is_fully_proven(&self) -> bool {
-        self.is_closed() && self.gapped == 0 && self.refused == 0 && self.conflicts == 0
+        self.is_closed()
+            && self.gapped == 0
+            && self.refused == 0
+            && self.assumed == 0
+            && self.conflicts == 0
     }
 
     /// How many obligations the five columns name between them.
@@ -309,6 +317,7 @@ impl LedgerClosure {
         self.rendered
             + self.elided
             + self.compiler_inserted
+            + self.assumed
             + self.refused
             + self.gapped
             + self.unattributed
@@ -585,6 +594,7 @@ impl ObligationLedger {
         for (id, outcome) in &self.outcomes {
             match outcome {
                 Outcome::Rendered => closure.rendered += 1,
+                Outcome::Assumed => closure.assumed += 1,
                 Outcome::Elided(ElisionReason::CompilerInserted) => {
                     closure.compiler_inserted += 1;
                 }

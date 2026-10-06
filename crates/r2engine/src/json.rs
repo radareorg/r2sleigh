@@ -61,7 +61,7 @@ pub struct RenderRefusalJson {
 /// reaching-values check split out of a shared one, so that every read sees
 /// the value it stands for; they are not also counted as `rendered`.
 /// `compiler_inserted` counts a stack-protector check elided under
-/// `Premise::UbFreeSource`; `assumed` is the column assumed arities answer into, zero so far.
+/// `Premise::UbFreeSource`; `assumed` counts accesses to frame objects whose extent is assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct RenderProofJson {
     pub total: usize,
@@ -142,10 +142,10 @@ impl RenderProofJson {
             split,
             elided: closure.elided,
             compiler_inserted: closure.compiler_inserted,
+            assumed: closure.assumed,
             refused: closure.refused,
             residual: closure.gapped,
             unaccounted: closure.unattributed,
-            ..Self::default()
         }
     }
 }
