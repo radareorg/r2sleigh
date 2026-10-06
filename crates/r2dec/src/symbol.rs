@@ -66,6 +66,8 @@ pub enum SymbolRole {
     StackLocal(i64),
     /// A value the function computes and more than one place reads.
     Carrier,
+    /// A carrier held in the frame slot at this entry offset, which promotion took out of memory.
+    FrameValue(i64),
     /// A cursor the rendering introduced, which no program object answers for.
     ///
     /// One machine operation whose meaning is a loop needs a loop to spell it,

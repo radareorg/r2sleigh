@@ -261,6 +261,20 @@ impl BindingNameResolution {
         let argument_area_placed = convention_slots
             .is_some_and(|slots| slots.stack_arguments().is_some())
             && (machine.return_mechanism().is_some() || !machine.call_moves_stack_pointer());
+        // The frame slot each binding holds where promotion took it out of memory, in one pass over the values.
+        let mut frame_values = BTreeMap::new();
+        for value in &source.graph().values {
+            let Some(ValueDisposition::Bound { binding }) = plan.disposition(value.id) else {
+                continue;
+            };
+            let slot = value
+                .canonical_storage
+                .as_ref()
+                .and_then(r2ssa::promoted_slot_offset);
+            if let Some(offset) = slot {
+                frame_values.entry(*binding).or_insert(offset);
+            }
+        }
         for (binding_id, binding) in plan.bindings() {
             let mut stack_object = None;
             let role = plan.binding_role(binding_id);
@@ -322,7 +336,11 @@ impl BindingNameResolution {
                 // An incoming machine value renders as an ordinary object; the
                 // role only says the declaration comes from entry rather than
                 // from a statement.
-                Some(BindingRole::EntryValue | BindingRole::Local) => SymbolRole::Carrier,
+                Some(BindingRole::EntryValue | BindingRole::Local) => frame_values
+                    .get(&binding_id)
+                    .map_or(SymbolRole::Carrier, |offset| {
+                        SymbolRole::FrameValue(*offset)
+                    }),
                 None => {
                     return Err(BindingNameResolutionError::ConflictingCertifiedRoles(
                         binding_id,
@@ -342,7 +360,9 @@ impl BindingNameResolution {
                 // A binding is never a render cursor: the cursor exists only
                 // where a lowering needs something to step, and no binding
                 // answers for it.
-                SymbolRole::Carrier | SymbolRole::RenderCursor => binding.presentation_name_hint(),
+                SymbolRole::Carrier | SymbolRole::FrameValue(_) | SymbolRole::RenderCursor => {
+                    binding.presentation_name_hint()
+                }
             }
             .map(c_identifier_for_presentation)
             .unwrap_or_else(|| format!("binding_{}", binding_id.index()));

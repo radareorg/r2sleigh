@@ -78,7 +78,9 @@ pub(crate) fn variables(func: &CFunction) -> Vec<RenderedVariable> {
     let entry = |id: SymbolId, ty: &CType, kind: VariableKind| {
         let location = match symbols.get(id).role {
             SymbolRole::Parameter(slot) => VariableLocation::Argument { slot },
-            SymbolRole::StackLocal(offset) => VariableLocation::Frame { offset },
+            SymbolRole::StackLocal(offset) | SymbolRole::FrameValue(offset) => {
+                VariableLocation::Frame { offset }
+            }
             SymbolRole::Carrier | SymbolRole::RenderCursor => VariableLocation::Carrier,
         };
         RenderedVariable {
