@@ -94,7 +94,7 @@ The program
 | **P1.7** Entry lanes are the caller's | done | — |
 | **C** Provenance ([provenance](doc/adr-provenance.md)) | C0; C1 types and the format parameter | C1 r2dec reads the grade (`from_source_signature` deleted); C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
 | **P5** Values as an index | — | XMM lane noise gone; immutable loads fold |
-| **P6** One resolved body per function, as a query | [resolved-bodies](doc/adr-resolved-bodies.md); P6a the walk through dispatch tables is the `Walked` query | demand-driven: a callee resolved only where its caller's preparation has an unproven call, under a request budget; `read_callees` deleted; switch arms in the walked body; summaries per call-graph component, with r2ssa's composition as the transfer (was L3c) |
+| **P6** One resolved body per function, as a query | [resolved-bodies](doc/adr-resolved-bodies.md); P6a the walk through dispatch tables is the `Walked` query; P6c1 a callee resolved as a root is; P6c2 return-only demand (`Resolved`, `Demand`, `result_owners`) | `read_callees` deleted; parameters stay what each body proves alone (transitive parameter resolution measured at 21 s for pumasim `main`, declined) |
 | **I** Unread container facts (CFI, LSDA, IBT, RELRO, init arrays) | — | stripped discovery finds every FDE start |
 | **P7** Call contracts | Darwin arm64 variadic tail (M1c); declared `double` arguments reach their calls (B3) | no dropped or invented argument; printf's stack tail on x86-64; a recovered interface's float parameters and float result (a body's float work feeds only the float result, so recovery never observes it; the variadic save area's spills read as parameters in both classes, and the convention's `al` read at entry states the tail) |
 | **P8** Data objects and strings | — | `iz` lists proven strings |
@@ -141,9 +141,9 @@ the order is the dependency path, and nothing jumps it.
    timing as CI jobs, so an item's exit is one CI run, not a hand-run queue.
 1. **B**: one byte relation (blocks P4, P5 and R).
 2. **R1**, then **P4**, then **P5**, then **R** (R0, R2–R4): the critical path.
-3. **P6** demand-driven: a callee is resolved only where its caller's
-   preparation has a call it cannot prove; walking `main`'s reachable graph
-   alone costs 1949 walks and 2.6 s on pumasim. Then **I**.
+3. **P6** return-only demand: a function whose result a callee's unstated
+   result owns is resolved again with that callee resolved; transitive
+   resolution measured at 21 s for pumasim `main` and declined. Then **I**.
 4. **C2–C4**, then **P7, P8, P9, P11**.
 5. Beside the path, as small items when a step waits on CI: **L5**, **M6**
    rest, **F2.1–F2.5**, **Q2** rest, **K** rest.

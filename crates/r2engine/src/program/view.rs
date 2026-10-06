@@ -215,9 +215,7 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
         let thumb = self.thumb_at(address);
-        let read = self
-            .db
-            .get::<super::analysis::CalleeReads>(&(address, thumb));
+        let read = self.db.get::<super::resolved::Resolved>(&(address, thumb));
         let read = read.expect("a callee's read asks for no other root");
         std::sync::Arc::clone(&read.0)
     }

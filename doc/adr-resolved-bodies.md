@@ -15,58 +15,64 @@ on who asked.
 
 ## Decision
 
-One function has one resolved body, whoever asks, built by four queries:
+One function has one resolution, whoever asks: walk through its dispatch
+tables (`Walked`), prepare, restate, prepare again (`Native::resolve`). A
+root resolves against its callees' answers; a callee resolves against its
+imports, and against the callees that own its result (below).
 
-1. `Walked(f)`: the walk, and where an indirect branch is unresolved, the
-   dispatch pass: prepare against the imports' declarations alone, read
-   the tables, walk again through them. Its value is the body, the tables
-   and the direct callees. A table is intraprocedural, so the evidence a
-   table read needs is the body and its imports, never another body.
-2. `Component(f)`: the strongly connected component of the call graph
-   `Walked` states, by Tarjan's algorithm from `f`; every component the
-   search closes is deposited, so the closure is searched once.
-3. `Summaries(component)`: each member resolved against the summaries of
-   the components below it, then the members' summaries composed to a
-   fixpoint with r2ssa's interprocedural transfer (`resolve_summary`,
-   whose lattice and round bound already terminate). No member is
-   prepared again inside the fixpoint.
-4. `Resolved(f)`: `f` prepared, restated and prepared again against its
-   callees' summaries: those of lower components, and for members of its
-   own component the composed ones.
+### Demand: results only
 
-The call graph is the resolved walks' own, so no query reads a callee
-outside the components that order them; a `Cycle` the database still
-meets (a call no walk states) degrades that callee to unknown and is
-`Hold::Transient`.
+Measured 2026-10-06: one callee resolved against its imports costs about
+10.5 ms; pumasim `main` reaches 1949 functions (2.5 s to walk them, 21 s to
+resolve them), 0pack `main` 1287 (13 s). Demand for parameters prunes
+nothing: an argument a body hands on is invisible until the callee's
+interface exists, and an unread slot sits beside almost every call. So
+demand is for results only:
 
-### Demand
+- r2ssa's interface recovery states `result_owners`: where the result is
+  unproven, the direct callees whose unstated result owns it (a tail target
+  no prototype describes, or a call whose result reaches an exit).
+- `Resolved(f)` is `f` resolved alone where it has no owner; otherwise it is
+  `f` resolved again with each owner outside `f`'s demand cycle resolved,
+  and only where some owner then states its result.
+- `Demand(f)` is the cycle of result demands `f` is in, by Tarjan over the
+  owners; members of one cycle read each other resolved alone.
+- A callee whose interface still has an unproven result mints no call
+  contract; a call to it reads the registers the caller wrote, and at least
+  as many as the callee's own body proves it reads (`CalleeStatement`).
 
-A callee is resolved only where its caller's preparation has a call it
-cannot prove (an argument or a return); other callees keep their walk.
-Measured 2026-10-06: walking pumasim `main`'s reachable graph alone is 1949
-walks and 2.6 s, so resolving the whole closure is not the default.
+The limit: parameters stay what each body proves alone. A thunk whose
+target forwards an argument to a body nothing describes reports only the
+arguments it reads itself, so a caller can pass fewer than the source does
+(`QString::operator=(const char*)` renders with its `this` alone). Marking
+such parameter lists a floor and reading more at the call site was measured
+and rejected: the extra arguments were registers written for other reasons
+(`murmur3_32`'s rotate count), which AGENTS forbids as invented arguments.
+
+The first preparation recovers the interface; a restated one is handed it,
+so the owners are taken from the first.
+
+Known refusals this brings to the 300-function samples (pumasim refusals
+27 -> 27, 0pack 36 -> 37): one observation-journal `ConflictingValue` on a
+merge carrier in 0pack, which R deletes the journal for.
 
 ### Budget
 
-Resolving a root resolves what its unproven calls demand. A request carries a
-work budget in preparations; a summary the budget stops is the request's
-stop (`Hold::Stopped`): never held, the call rendered as a callee not read
-for the budget, and the summaries finished before the stop are held, so
-the next request goes further. Every held answer is still a function of
-the program alone.
+Resolution follows result demands only, so a request resolves what its
+unproven results need; the 300-function samples cost 8% more (pumasim 9.1
+to 9.9 s). A stopped owner stops the answer (`Hold::Stopped`); every held
+answer is a function of the program alone.
 
 ## Complexity
 
-Walks: one per function in the closure, held. Components: Tarjan, O(V + E)
-over the closure, once. Preparations: three per function at most (dispatch
-pass, first, restated), each once per state of what it read. Composition:
-r2ssa's bound per component, over summaries, never bodies.
+Walks: one per function asked, held. Resolutions: one per callee asked,
+plus one per function whose result an owner then proves. Demand cycles:
+Tarjan, O(V + E) over result demands only, each component deposited once.
 
 ## Steps
 
 - P6a: `Walked` is a query and the root analysis reads it.
 - P6b: `Component` and the closure measured on 0pack and pumasim.
-- P6c: `Summaries` and `Resolved` with the budget; `read_callees`,
-  `CalleeReads`, `prepare_callee` and `callee_summary` deleted.
-- P6d: composition inside a component; pointer forwarding through bodies
-  reachable.
+- P6c1: a callee runs the root's resolution, on its `Walked`, against its imports.
+- P6c2: `result_owners`, `Demand` and `Resolved`; an unproven callee states how many arguments it reads.
+- P6d: `read_callees`, `prepare_callee` and `callee_summary` deleted; one call per root reads `Resolved`.

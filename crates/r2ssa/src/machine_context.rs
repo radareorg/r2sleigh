@@ -473,6 +473,10 @@ pub struct SourceMachineContext {
     call_universe: Box<[CanonicalStorageId]>,
     /// What each direct callee's own body proves it leaves alone, by entry.
     callee_preserved: crate::function::CalleePreservedCarriers,
+    /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
+    result_owners: BTreeSet<u64>,
+    /// How many arguments each callee whose result is unproven reads at least.
+    callee_statements: BTreeMap<u64, CalleeStatement>,
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
     register_projections: Box<[RegisterProjection]>,
@@ -960,6 +964,8 @@ impl SourceMachineContext {
                 .map(|(effect, arch)| call_universe(effect, arch))
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
+            result_owners: BTreeSet::new(),
+            callee_statements: BTreeMap::new(),
             call_effect,
             register_geometry_state,
             register_projections,
@@ -1137,6 +1143,24 @@ impl SourceMachineContext {
         preserved: crate::function::CalleePreservedCarriers,
     ) {
         self.callee_preserved = preserved;
+    }
+
+    /// The direct callees whose stated result could prove this function's, where recovery left it unproven.
+    pub const fn result_owners(&self) -> &BTreeSet<u64> {
+        &self.result_owners
+    }
+
+    pub(crate) fn set_result_owners(&mut self, owners: BTreeSet<u64>) {
+        self.result_owners = owners;
+    }
+
+    /// What the callee at `target` states, where its unproven result mints no call contract.
+    pub(crate) fn callee_statement(&self, target: u64) -> Option<&CalleeStatement> {
+        self.callee_statements.get(&target)
+    }
+
+    pub(crate) fn set_callee_statements(&mut self, statements: &BTreeMap<u64, CalleeStatement>) {
+        self.callee_statements.clone_from(statements);
     }
 
     /// What the convention says a call does to the registers.
@@ -2996,5 +3020,38 @@ mod tests {
                 .map(MachineMemorySpace::address_bits),
             Some(64)
         );
+    }
+}
+
+/// What a callee's body states when its unproven result mints no call contract (doc/adr-resolved-bodies.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct CalleeStatement {
+    /// The register parameters its body itself proves it reads.
+    pub(crate) at_least: usize,
+}
+
+impl CalleeStatement {
+    /// Each callee interface whose result is unproven, which mints no call contract, as a statement.
+    pub(crate) fn of(
+        interfaces: &BTreeMap<u64, crate::SourceFunctionInterface>,
+    ) -> BTreeMap<u64, Self> {
+        let unproven = interfaces.iter().filter(|(_, interface)| {
+            interface.return_kind() == crate::SourceFunctionReturn::Unproven
+        });
+        let registers = |interface: &crate::SourceFunctionInterface| {
+            let parameters = interface.parameters().iter();
+            parameters
+                .filter(|parameter| parameter.register_storage().is_some())
+                .count()
+        };
+        let statements = unproven.map(|(address, interface)| {
+            (
+                *address,
+                Self {
+                    at_least: registers(interface),
+                },
+            )
+        });
+        statements.collect()
     }
 }

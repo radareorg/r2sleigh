@@ -124,6 +124,8 @@ pub struct CalleeRead {
     /// preparation cannot be certified still proved.
     pub interface: Option<r2ssa::SourceFunctionInterface>,
     pub facts: Result<CalleeFacts, Unreadable>,
+    /// Where its result is unproven, the direct callees whose unstated result owns it.
+    pub result_owners: std::collections::BTreeSet<u64>,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -761,7 +763,7 @@ fn prepared_callee(
     target: &NativeTarget<'_>,
     address: u64,
     ptr_bits: u32,
-) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
+) -> Result<Resolution, Unreadable> {
     crate::isolation::isolated(|| prepare_callee(native, target, address, ptr_bits))
         .unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))
 }
@@ -771,7 +773,7 @@ fn prepare_callee(
     target: &NativeTarget<'_>,
     address: u64,
     ptr_bits: u32,
-) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
+) -> Result<Resolution, Unreadable> {
     // A callee in the other instruction set is walked and captured in it.
     let own = native
         .program
@@ -783,8 +785,11 @@ fn prepare_callee(
         _ => (native, target),
     };
     let walked = walk(target, native.program, address).map_err(|_| Unreadable::NotWalked)?;
-    resolved_alone(native, target, address, ptr_bits, &walked)
+    resolved_alone(native, target, address, ptr_bits, &walked, &[])
 }
+
+/// A resolved body, and where its result is unproven, the callees whose result owns it.
+type Resolution = (Arc<TrustedSsaArtifact>, std::collections::BTreeSet<u64>);
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
 fn resolved_alone(
@@ -793,10 +798,17 @@ fn resolved_alone(
     address: u64,
     ptr_bits: u32,
     walked: &Walk,
-) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
+    owners: &[(u64, Arc<CalleeRead>)],
+) -> Result<Resolution, Unreadable> {
     let mut imports = Callees::default();
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
+    // Each resolved owner of its result; r2ssa reads a floor interface for its result alone.
+    for (owner, read) in owners {
+        if let Ok(facts) = &read.facts {
+            imports.record(*owner, facts);
+        }
+    }
     let resolved = native.resolve(address, &walked.root, &walked.tables, &imports);
     resolved.map_err(|refusal| match refusal.stopped() {
         true => Unreadable::Stopped,
@@ -818,9 +830,10 @@ pub(crate) fn callee_summary(
         control: program.control().ssa_execution_control(),
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let resolved =
-        crate::isolation::isolated(|| resolved_alone(&native, target, address, ptr_bits, walked));
-    let artifact = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
+    let resolved = crate::isolation::isolated(|| {
+        resolved_alone(&native, target, address, ptr_bits, walked, &[])
+    });
+    let (artifact, _) = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
     let shared = artifact.shared_artifact();
     let summary =
         r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared);
@@ -833,6 +846,7 @@ pub(crate) fn callee_read(
     program: &dyn Program,
     address: u64,
     walked: &Walk,
+    owners: &[(u64, Arc<CalleeRead>)],
 ) -> CalleeRead {
     let native = match machine(target) {
         Ok(machine) => Native {
@@ -845,12 +859,14 @@ pub(crate) fn callee_read(
             return CalleeRead {
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
+                result_owners: Default::default(),
             };
         }
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let resolved =
-        crate::isolation::isolated(|| resolved_alone(&native, target, address, ptr_bits, walked));
+    let resolved = crate::isolation::isolated(|| {
+        resolved_alone(&native, target, address, ptr_bits, walked, owners)
+    });
     read_of(
         resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
         ptr_bits,
@@ -868,13 +884,14 @@ fn read_callee(
 }
 
 /// What a resolved callee proves, derived under isolation.
-fn read_of(artifact: Result<Arc<TrustedSsaArtifact>, Unreadable>, ptr_bits: u32) -> CalleeRead {
-    let artifact = match artifact {
-        Ok(artifact) => artifact,
+fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRead {
+    let (artifact, result_owners) = match resolved {
+        Ok(resolved) => resolved,
         Err(reason) => {
             return CalleeRead {
                 interface: None,
                 facts: Err(reason),
+                result_owners: Default::default(),
             };
         }
     };
@@ -891,7 +908,11 @@ fn read_of(artifact: Result<Arc<TrustedSsaArtifact>, Unreadable>, ptr_bits: u32)
         Ok(None) => Err(Unreadable::NothingProved),
         Err(panicked) => Err(Unreadable::Panicked(panicked)),
     };
-    CalleeRead { interface, facts }
+    CalleeRead {
+        interface,
+        facts,
+        result_owners,
+    }
 }
 
 fn read_callees(
@@ -967,7 +988,7 @@ fn analyse(
         unread,
     } = read_callees(&native, target, &root, entry, ptr_bits);
 
-    let artifact = native.resolve(entry, &root, &tables, &callees)?;
+    let (artifact, _) = native.resolve(entry, &root, &tables, &callees)?;
     let tables = tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1220,7 +1241,7 @@ impl Native<'_> {
         root: &Walked,
         tables: &[NativePointerTable],
         callees: &Callees,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+    ) -> Result<Resolution, NativeRefusal> {
         // What the binary's own debug information says this function takes is a
         // declaration, exactly as an import's is, so it is placed in the
         // convention's slots the same way and the body is prepared against it.
@@ -1254,7 +1275,13 @@ impl Native<'_> {
             .unwrap_or_default();
         let restated = self.restated(&first, &declared_slots);
         let folded = self.folded_literals(&first, root);
-        Ok(match restated.is_none() && folded.is_empty() {
+        // Only the first preparation recovers the interface; the restated one is handed it.
+        let owners = first
+            .shared_artifact()
+            .machine_context()
+            .result_owners()
+            .clone();
+        let artifact = match restated.is_none() && folded.is_empty() {
             true => first,
             false => {
                 // A body that proved no frame slot restates nothing, and the
@@ -1266,7 +1293,8 @@ impl Native<'_> {
                 };
                 self.prepare_restated(root, callees, folded, restatement, tables)?
             }
-        })
+        };
+        Ok((artifact, owners))
     }
 
     /// The same request over another machine of this program.

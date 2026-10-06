@@ -11,6 +11,7 @@ pub mod info;
 pub mod naming;
 mod pointers;
 mod requests;
+mod resolved;
 mod returns;
 pub mod source;
 mod view;
@@ -378,6 +379,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             analysed: self.db.query_stats::<analysis::Analysed>(),
             sealed: self.db.query_stats::<analysis::Sealed>(),
             callee_reads: self.db.query_stats::<analysis::CalleeReads>(),
+            resolved: self.db.query_stats::<resolved::Resolved>(),
             rendered: self.db.query_stats::<analysis::Rendered>(),
         }
     }

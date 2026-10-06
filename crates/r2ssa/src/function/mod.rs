@@ -2078,6 +2078,7 @@ impl TrustedSsaArtifact {
             reach: callee_argument_reach,
             library,
         } = evidence;
+        let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
         let arch = genuine.arch_spec().clone();
@@ -2155,6 +2156,7 @@ impl TrustedSsaArtifact {
         // nothing construction reads differs between the two contexts.
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
+        let mut result_owners = BTreeSet::new();
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None => 'recovered: {
@@ -2188,6 +2190,7 @@ impl TrustedSsaArtifact {
                 // the final pass reads; without them every format was unproven.
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
+                provisional_machine_context.set_callee_statements(&callee_statements);
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
@@ -2231,6 +2234,7 @@ impl TrustedSsaArtifact {
                 let Some(recovered) = recovered else {
                     break 'recovered None;
                 };
+                result_owners.clone_from(recovered.result_owners());
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
@@ -2267,6 +2271,8 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
+        machine_context.set_result_owners(result_owners);
+        machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven

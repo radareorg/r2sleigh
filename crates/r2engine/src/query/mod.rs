@@ -28,6 +28,8 @@ pub struct AnalysisStats {
     pub analysed: db::QueryStats,
     pub sealed: db::QueryStats,
     pub callee_reads: db::QueryStats,
+    /// Callees resolved against the owners of their result, which every caller asks.
+    pub resolved: db::QueryStats,
     pub rendered: db::QueryStats,
 }
 pub use proved::Proved;

@@ -150,9 +150,16 @@ pub struct RecoveredInterface {
     /// Whether that result is the return address the caller pushed.
     result_is_return_address: bool,
     return_mechanism: Option<RecoveredReturnMechanism>,
+    /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
+    result_owners: BTreeSet<u64>,
 }
 
 impl RecoveredInterface {
+    /// The direct callees whose stated result could prove this one's.
+    pub const fn result_owners(&self) -> &BTreeSet<u64> {
+        &self.result_owners
+    }
+
     /// Parameter slots in convention order, contiguous from index zero, each
     /// with the entry read that proved it.
     pub const fn parameters(&self) -> &[RecoveredParameter] {
@@ -591,7 +598,7 @@ enum ReturnedByCall {
     /// The callee returns nothing, so the register holds no value.
     Void,
     /// The callee's result is stated nowhere, so what the register holds is unproven.
-    Unstated,
+    Unstated(crate::semantic::CallSiteId),
 }
 
 /// Whether a call left this register undefined, unstated, or returned it.
@@ -652,7 +659,7 @@ fn returned_by_call(
     // A declared void callee proves no value; a boundary naming no result kind proves nothing either way.
     match (boundary.results_complete, boundary.result_kind) {
         (true, Some(crate::SourceCallResult::Void)) => ReturnedByCall::Void,
-        (true, None) => ReturnedByCall::Unstated,
+        (true, None) => ReturnedByCall::Unstated(*id),
         _ => ReturnedByCall::Produced,
     }
 }
@@ -818,7 +825,7 @@ fn recovered_result(
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
             ReturnedByCall::Void => continue,
-            ReturnedByCall::Unstated => return RecoveredFunctionResult::Unproven,
+            ReturnedByCall::Unstated(_) => return RecoveredFunctionResult::Unproven,
             ReturnedByCall::Produced => {}
         }
         let Some(storage) = graph.value(value).and_then(|value| value.canonical_storage) else {
@@ -1230,13 +1237,51 @@ fn recover_interface_inner(
     } else {
         Vec::new()
     };
+    let result_owners = match (result, slots.result_slot()) {
+        (RecoveredFunctionResult::Unproven, Some(slot)) => result_owners(func, graph, &facts, slot),
+        _ => BTreeSet::new(),
+    };
     Some(RecoveredInterface {
         parameters: parameters.into_boxed_slice(),
         stack_parameters: stack_parameters.into_boxed_slice(),
         result,
         result_is_return_address,
         return_mechanism,
+        result_owners,
     })
+}
+
+/// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.
+fn result_owners(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    slot: CanonicalStorageId,
+) -> BTreeSet<u64> {
+    let unstated = |call: &crate::semantic::CallSiteFact| {
+        let boundary = facts.boundaries.calls.get(&call.id);
+        !boundary
+            .is_some_and(|boundary| boundary.results_complete && boundary.result_kind.is_some())
+    };
+    let tails = facts.call_sites.by_id.values();
+    let tails = tails.filter(|call| call.transfer == crate::CallSiteTransfer::TailCall);
+    let mut owners: BTreeSet<u64> = tails
+        .filter(|call| unstated(call))
+        .filter_map(|call| call.direct_target)
+        .collect();
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
+    for value in live_out.iter() {
+        if let ReturnedByCall::Unstated(id) = returned_by_call(graph, facts, value)
+            && let Some(target) = facts
+                .call_sites
+                .by_id
+                .get(&id)
+                .and_then(|call| call.direct_target)
+        {
+            owners.insert(target);
+        }
+    }
+    owners
 }
 
 /// What the function's tail transfers say about its result.

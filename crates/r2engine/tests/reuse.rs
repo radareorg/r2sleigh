@@ -344,7 +344,7 @@ fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
     program.prepared(PASSES).expect("it prepares");
     let stats = program.analysis_stats();
     assert_eq!(
-        (stats.callee_reads.computed, stats.callee_reads.reused),
+        (stats.callee_reads.computed, stats.resolved.reused),
         (1, 1),
         "the second caller prepared the shared callee again"
     );
@@ -498,6 +498,31 @@ proptest::proptest! {
             proptest::prop_assert_eq!(asked(&mut program, step), asked(&mut fresh, step));
         }
     }
+}
+
+#[test]
+fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
+    // `bump` returns its argument plus one; `thunk` sets an unrelated register and tail-jumps to
+    // it; `root` calls the thunk. Alone, the thunk proves no result: its target owns it. Resolved
+    // against `bump`, it returns `bump`'s result and passes its own first argument through.
+    let mut code = [0xcc_u8; 0x40];
+    code[0x00..0x04].copy_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // lea eax, [rdi + 1]; ret
+    code[0x10..0x1a].copy_from_slice(&[0xba, 0xff, 0xff, 0xff, 0xff, 0xe9, 0xe6, 0xff, 0xff, 0xff]); // mov edx, -1; jmp bump
+    code[0x20..0x2b].copy_from_slice(&[0xbf, 0x05, 0, 0, 0, 0xe8, 0xe6, 0xff, 0xff, 0xff, 0xc3]); // mov edi, 5; call thunk; ret
+    let base = common::BASE;
+    let functions = [
+        ("bump", base, 4),
+        ("thunk", base + 0x10, 10),
+        ("root", base + 0x20, 11),
+    ];
+    let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
+    let rendering = program
+        .rendered(base + 0x20, r2engine::RenderTier::C)
+        .expect("it renders");
+    let text = rendering.response.output.into_text();
+    assert!(text.contains("uint64_t thunk(uint64_t);"), "{text}");
+    assert!(text.contains("= thunk(5);"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
 #[test]

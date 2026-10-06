@@ -130,31 +130,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
     const NAME: &'static str = "callee-reads";
 
     fn compute(db: &Db<ProgramInputs<S>>, &(address, thumb): &(u64, bool)) -> Shared<CalleeRead> {
-        let view = View::new(db, true);
-        let target = view
-            .machine_in(thumb)
-            .map(|machine| view.target_of(machine));
-        let walked = db
-            .get::<Walked>(&(address, thumb))
-            .expect("a walk asks for no callee");
-        let read = match (target, &walked.0) {
-            (_, Err(refusal)) if refusal.stopped() => CalleeRead {
-                interface: None,
-                facts: Err(Unreadable::Stopped),
-            },
-            (_, Err(_)) => CalleeRead {
-                interface: None,
-                facts: Err(Unreadable::NotWalked),
-            },
-            (Some(Ok(target)), Ok(walked)) => {
-                crate::native::callee_read(&target, &view, address, walked)
-            }
-            _ => CalleeRead {
-                interface: None,
-                facts: Err(Unreadable::NotPrepared),
-            },
-        };
-        Shared(Arc::new(read))
+        Shared(Arc::new(callee_read(db, (address, thumb), &[])))
     }
 
     fn hold(value: &Shared<CalleeRead>) -> Hold {
@@ -162,6 +138,34 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
             Err(Unreadable::Stopped) => Hold::Stopped,
             _ => Hold::Held,
         }
+    }
+}
+
+/// One callee resolved on its walk against its imports and the given resolved owners of its result.
+pub(super) fn callee_read<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    (address, thumb): (u64, bool),
+    owners: &[(u64, Arc<CalleeRead>)],
+) -> CalleeRead {
+    let unread = |reason| CalleeRead {
+        interface: None,
+        facts: Err(reason),
+        result_owners: Default::default(),
+    };
+    let view = View::new(db, true);
+    let target = view
+        .machine_in(thumb)
+        .map(|machine| view.target_of(machine));
+    let walked = db
+        .get::<Walked>(&(address, thumb))
+        .expect("a walk asks for no callee");
+    match (target, &walked.0) {
+        (_, Err(refusal)) if refusal.stopped() => unread(Unreadable::Stopped),
+        (_, Err(_)) => unread(Unreadable::NotWalked),
+        (Some(Ok(target)), Ok(walked)) => {
+            crate::native::callee_read(&target, &view, address, walked, owners)
+        }
+        _ => unread(Unreadable::NotPrepared),
     }
 }
 

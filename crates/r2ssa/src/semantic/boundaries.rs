@@ -793,6 +793,8 @@ pub(crate) fn convention_call_boundary(
     live_out: &crate::liveout::FunctionLiveOut,
     block_addr: u64,
     op_index: usize,
+    at_least: usize,
+    entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
     let mut arguments = Vec::new();
@@ -800,7 +802,9 @@ pub(crate) fn convention_call_boundary(
         let Ok(index) = u32::try_from(position) else {
             break;
         };
-        let Some(value) = reaching_variadic_tail_argument_in_block(
+        // A call whose signature nothing knows takes its arity from the registers this body provably
+        // wrote before it, and at least the `at_least` its callee's own body reads, whoever wrote them.
+        let reaching = reaching_abi_value_in_block_with_policy(
             function,
             prep,
             graph,
@@ -808,22 +812,38 @@ pub(crate) fn convention_call_boundary(
             block_addr,
             op_index,
             *slot,
-        ) else {
-            break;
+            // Below the floor the callee reads the slot whatever merges into it.
+            position < at_least,
+        );
+        let value = match reaching {
+            // What an earlier call left is nothing this body passed, unless the callee proves it reads it.
+            Some(ReachingAbiState::Value(value))
+                if value_is_call_clobber(graph, value) && position >= at_least =>
+            {
+                break;
+            }
+            Some(ReachingAbiState::Value(value)) if graph.written_by_body(value) => {
+                SourceCallArgumentValue::Value(value)
+            }
+            // What this body arrived with: the call may read it, and only its callee says whether.
+            Some(ReachingAbiState::Value(value)) if position < at_least => {
+                SourceCallArgumentValue::Value(value)
+            }
+            // The arrival is named where the body has a value for it, which a rendering can account.
+            Some(ReachingAbiState::PreservedEntry) if position < at_least => {
+                match entry_values.get(slot).copied().flatten() {
+                    Some(value) => SourceCallArgumentValue::Value(value),
+                    None => SourceCallArgumentValue::PreservedEntry,
+                }
+            }
+            Some(_) | None => break,
         };
-        // A call whose signature nothing knows takes its arity from the
-        // registers this body provably wrote before it. One the caller merely
-        // arrived holding is not evidence the call reads it, and a register
-        // the formals rebuilt still holds only what the caller passed.
-        if !graph.written_by_body(value) {
-            break;
-        }
         arguments.push(SourceCallArgumentFact {
             slot: CallBoundarySlot::Register {
                 index,
                 storage: *slot,
             },
-            value: SourceCallArgumentValue::Value(value),
+            value,
         });
     }
     // The convention fills every register slot before the argument area, and a
@@ -1152,6 +1172,9 @@ pub(crate) fn collect_source_boundary_facts(
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
         {
+            let stated = call_site
+                .direct_target
+                .and_then(|target| machine_context.callee_statement(target));
             let convention = convention_call_boundary(
                 function,
                 prep,
@@ -1160,12 +1183,16 @@ pub(crate) fn collect_source_boundary_facts(
                 live_out,
                 block_addr,
                 op_index,
+                stated.map_or(0, |statement| statement.at_least),
+                &entry_values,
             );
             // One record of what the fallback was asked and what it answered.
             r2il::refusal_evidence!(
                 "call-boundary-fallback",
-                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} interface={} built={} arguments={} results={}",
+                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} target={:?} at_least={:?} interface={} built={} arguments={} results={}",
                 call_site.raw_identity,
+                call_site.direct_target,
+                stated.map(|statement| statement.at_least),
                 call_site
                     .raw_identity
                     .is_some_and(|identity| machine_context
@@ -1641,46 +1668,6 @@ pub(crate) fn reaching_source_return_register_in_block(
         r2il::refusal_evidence!("return-register-unreachable", "carrier={storage:?}");
     }
     found
-}
-
-/// Resolve one variadic tail carrier, which must be the same on every path.
-///
-/// A named parameter may be answered by a merge of two definitions: the
-/// prototype says the argument exists, so which of them reaches the call is a
-/// question about the value and not about whether there is one. A tail slot
-/// has no prototype behind it, and a merge whose inputs differ says only that
-/// the register holds something -- which every register does. Admitting one
-/// claimed an argument the machine had not set for this call, and the
-/// placement audit then refused two `/bin/ls` functions for reading a value no
-/// path had assigned.
-pub(crate) fn reaching_variadic_tail_argument_in_block(
-    function: &SSAFunction,
-    prep: Option<&crate::DecompilePrepFacts>,
-    graph: &SsaGraph,
-    machine_context: &SourceMachineContext,
-    block_addr: u64,
-    boundary_op_index: usize,
-    storage: CanonicalStorageId,
-) -> Option<ValueId> {
-    reaching_abi_value_in_block_with_policy(
-        function,
-        prep,
-        graph,
-        machine_context,
-        block_addr,
-        boundary_op_index,
-        storage,
-        false,
-    )
-    .and_then(|state| match state {
-        ReachingAbiState::PreservedEntry => None,
-        // A register an earlier call clobbered holds whatever that callee
-        // left there. Nothing this function wrote reaches the slot, so no
-        // argument was passed in it; counting it claimed an argument the
-        // caller never set and read a value no statement had assigned.
-        ReachingAbiState::Value(value) if value_is_call_clobber(graph, value) => None,
-        ReachingAbiState::Value(value) => Some(value),
-    })
 }
 
 /// Whether a value is the fresh definition a call leaves in a register it may
