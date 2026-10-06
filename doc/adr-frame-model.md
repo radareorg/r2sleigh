@@ -63,6 +63,18 @@ declarations.
   walk deleted; containment one `FrameIndex` (O(log n)). Census: one
   rendering fixed (stores to locals read through a pointer array were
   dropped), 14 `_start` reorderings. `promote.rs`'s escape set is P4.3's.
+- P4.2: r2types' own frame-slot map, roles and authorizations deleted
+  (3163 lines, unread in production); a frame object has one name
+  (`SourceOwnedFunctionFacts::stack_object_name`: the debug information's,
+  else `r2ssa::frame_object_name`).
+- P4.4, `afv` half (amended 2026-10-06): `afv` lists the frame locals the
+  C rendering declares (`VariableLocation::Frame`), read from the cached
+  rendering, and the frame model only where the rendering refused. A
+  promoted slot's value is reported at its offset (`SymbolRole::FrameValue`);
+  a call's own return-address push is no local. `frame_agree`: 385 of 385
+  offsets agree over rendered functions (90 refused). Coverage: three
+  `_start`s gap 13 to 14, because the read of the caller's `[sp]` now stays
+  before the pushes through the realigned stack pointer, in program order.
 
 ## Left
 
@@ -80,9 +92,8 @@ declarations.
 - P4.3: promotion as an SSA rewrite. Exit: `promote.rs`, `PromotedSlot`,
   `promoted_slot_sites` and the `(block, index)`-keyed promoted maps are
   deleted.
-- P4.4: the canary role and its elision under `UbFreeSource`, and
-  `afv`/`afi` from the model. Exit: the 37 canary residual traps (all on
-  `FS_OFFSET_0`) are gone, and `afv` has no names of its own.
+- P4.4: the canary role and its elision under `UbFreeSource`. Exit: the
+  37 canary residual traps (all on `FS_OFFSET_0`) are gone.
 - P4.5: the restatement removed. Exit: the proved half of `restated_slots`
   is deleted.
 - Exit for the whole of P4: one owner of frame objects, and `afv` agrees with
