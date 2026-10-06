@@ -75,6 +75,18 @@ preservation proof once depended on how a clobber list was spelled (M1b).
 - B3 rest: a recovered interface's float slots (with P7, ROADMAP.md);
   declared ones match by lane (above). Exit: no boundary match by storage
   equality where a slot is a lane.
+  Surveyed 2026-10-06: recovery reads no float slot, so its equalities
+  (recover_interface.rs, entry `canonical_storage == Some(slot)` and the
+  result's location and size test) are latent. Seven compare a value's
+  root with a declared float lane by equality: optimize.rs (return phi kept
+  only when its root equals the carrier), interproc/mod.rs (call-argument
+  carriers; the return storage and a callee's result storage), and
+  semantic/shared.rs (entry, phi and written storage against the wanted
+  one; a root `CallDefine` against a lane). None moves a census function
+  or a probe of declared and undeclared floats on x86-64, so no failing
+  case exists yet; P7's float recovery is what reaches them, and it
+  replaces each with `is_low_lane_of`, which needs the machine context the
+  shared.rs walks do not take today.
 - B4, measured (2026-10-05): over the census no loop header merges two
   overlapping storages, so byte-granular liveness has no instance yet; r2dec's
   relocated recompute costs 1.5–5 ms of a 2–3 s `pdd` on the large 0pack and
