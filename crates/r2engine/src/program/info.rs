@@ -275,7 +275,12 @@ fn locals(
 ) -> Vec<Local> {
     let objects = entities
         .iter()
-        .filter_map(|entity| object(artifact, sealed, entity));
+        .filter_map(|entity| object(artifact, sealed, entity))
+        .collect::<Vec<_>>();
+    let held = objects
+        .iter()
+        .map(|local| local.offset)
+        .collect::<BTreeSet<_>>();
     let promoted = artifact
         .graph()
         .values
@@ -283,6 +288,7 @@ fn locals(
         .filter_map(|value| value.canonical_storage)
         .filter_map(|storage| Some((r2ssa::promoted_slot_offset(&storage)?, storage.size)))
         .filter(|(offset, _)| !r2ssa::SsaArtifact::caller_frame_offset(*offset))
+        .filter(|(offset, _)| !held.contains(offset))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|(offset, bytes)| Local {
@@ -291,7 +297,7 @@ fn locals(
             offset,
             ty: CTypeLike::machine_bits(bytes * 8).to_string(),
         });
-    let mut locals = objects.chain(promoted).collect::<Vec<_>>();
+    let mut locals = objects.into_iter().chain(promoted).collect::<Vec<_>>();
     locals.sort_by_key(|local| local.offset);
     locals
 }

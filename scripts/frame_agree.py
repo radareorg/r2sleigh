@@ -46,9 +46,13 @@ def afv_locals(text):
 def pdd_locals(text):
     found = collections.defaultdict(list)
     try:
-        variables = json.loads(text).get("variables") or []
-    except (json.JSONDecodeError, AttributeError):
+        rendering = json.loads(text)
+    except json.JSONDecodeError:
         return None
+    # A refused function declares nothing; afv then lists the frame model, and nothing compares.
+    if not isinstance(rendering, dict) or rendering.get("refused"):
+        return None
+    variables = rendering.get("variables") or []
     for variable in variables:
         location = variable.get("location", "")
         if variable.get("kind") == "local" and location.startswith("stack:"):
@@ -114,7 +118,7 @@ def main():
             lines.extend(f"{binary.name} {address} {off:#x} {kind} afv={a} pdd={p}"
                          for off, kind, a, p in details)
     offsets = sum(totals.values())
-    print(f"frame agreement: {totals['agree']} of {offsets} offsets agree; {unrendered} functions not rendered")
+    print(f"frame agreement: {totals['agree']} of {offsets} offsets agree; {unrendered} functions refused")
     for kind, count in totals.most_common():
         if kind != "agree":
             print(f"  {kind:10} {count}")
