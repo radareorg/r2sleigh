@@ -86,7 +86,7 @@ impl FrameReach {
                 ..Self::default()
             };
         };
-        let frame = frame_objects(model);
+        let frame = FrameIndex::of(model);
         let (escaped, whole) = escaped_objects(facts, graph, model, &frame);
         let by_call = call_reaches(function, graph, facts, &frame, machine_context);
         r2il::refusal_evidence!(
@@ -108,38 +108,43 @@ impl FrameReach {
     }
 }
 
-/// Every frame object with where it starts in the entry frame, when placed.
-fn frame_objects(model: &ObjectModel) -> BTreeMap<ObjectId, Option<i64>> {
-    model
-        .objects
-        .iter()
-        .filter(|(_, fact)| {
+/// The frame objects by where each starts in the entry frame, built once; the unplaced ones apart.
+struct FrameIndex {
+    starts: BTreeMap<i64, BTreeSet<ObjectId>>,
+    unplaced: BTreeSet<ObjectId>,
+}
+
+impl FrameIndex {
+    fn of(model: &ObjectModel) -> Self {
+        let mut index = Self {
+            starts: BTreeMap::new(),
+            unplaced: BTreeSet::new(),
+        };
+        let frame = model.objects.iter().filter(|(_, fact)| {
             matches!(
                 fact.kind,
                 ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
             )
-        })
-        .map(|(id, _)| {
-            let start = model
-                .entry_stack_roots
-                .get(id)
-                .filter(|root| root.base == StackAddressBase::StackPointer)
-                .map(|root| root.offset);
-            (*id, start)
-        })
-        .collect()
-}
+        });
+        for (id, _) in frame {
+            let start = model.entry_stack_roots.get(id);
+            match start.filter(|root| root.base == StackAddressBase::StackPointer) {
+                Some(root) => index.starts.entry(root.offset).or_default().insert(*id),
+                None => index.unplaced.insert(*id),
+            };
+        }
+        index
+    }
 
-/// The frame object an entry-relative position lies in: the one starting
-/// nearest at or below it, since objects start at their roots and do not
-/// overlap.
-fn containing(frame: &BTreeMap<ObjectId, Option<i64>>, offset: i64) -> Option<ObjectId> {
-    frame
-        .iter()
-        .filter_map(|(id, start)| Some((*id, (*start)?)))
-        .filter(|(_, start)| *start <= offset)
-        .max_by_key(|(id, start)| (*start, std::cmp::Reverse(*id)))
-        .map(|(id, _)| id)
+    fn len(&self) -> usize {
+        self.starts.values().map(BTreeSet::len).sum::<usize>() + self.unplaced.len()
+    }
+
+    /// The object an entry-relative position lies in: the one starting nearest at or below it, in O(log n).
+    fn containing(&self, offset: i64) -> Option<ObjectId> {
+        let (_, ids) = self.starts.range(..=offset).next_back()?;
+        ids.first().copied()
+    }
 }
 
 /// Where a frame address points, entry-relative, when the prep facts place it.
@@ -157,7 +162,7 @@ fn escaped_objects(
     facts: &DecompilePrepFacts,
     graph: &SsaGraph,
     model: &ObjectModel,
-    frame: &BTreeMap<ObjectId, Option<i64>>,
+    frame: &FrameIndex,
 ) -> (BTreeSet<ObjectId>, bool) {
     let frame_address = |value: ValueId| {
         graph.value(value).is_some_and(|value| {
@@ -225,11 +230,11 @@ enum Carry {
 fn escaping_object(
     facts: &DecompilePrepFacts,
     graph: &SsaGraph,
-    frame: &BTreeMap<ObjectId, Option<i64>>,
+    frame: &FrameIndex,
     value: ValueId,
 ) -> Option<ObjectId> {
     let offset = entry_offset(facts, graph.value(value)?.id)?;
-    containing(frame, offset)
+    frame.containing(offset)
 }
 
 /// What one use of a frame address does with it; `placed` is whether the model puts the address in an object.
@@ -285,7 +290,7 @@ fn call_reaches(
     function: &SSAFunction,
     graph: &SsaGraph,
     facts: &DecompilePrepFacts,
-    frame: &BTreeMap<ObjectId, Option<i64>>,
+    frame: &FrameIndex,
     machine_context: Option<&SourceMachineContext>,
 ) -> crate::dense::IdMap<InstId, CallFrameReach> {
     let mut out = crate::dense::IdMap::default();
@@ -350,32 +355,16 @@ fn call_reaches(
 
 /// The frame objects any byte of these entry-relative ranges lies in; an
 /// object nothing places may be any of them.
-fn objects_in(
-    frame: &BTreeMap<ObjectId, Option<i64>>,
-    ranges: &[(i64, i64)],
-) -> BTreeSet<ObjectId> {
-    let mut found = BTreeSet::new();
-    for (id, start) in frame {
-        match start {
-            None => {
-                found.insert(*id);
-            }
-            Some(start) => {
-                if ranges
-                    .iter()
-                    .any(|(low, high)| low <= start && start < high)
-                {
-                    found.insert(*id);
-                }
-            }
-        }
-    }
-    for (low, high) in ranges {
-        if low < high
-            && let Some(object) = containing(frame, *low)
-        {
-            found.insert(object);
-        }
+fn objects_in(frame: &FrameIndex, ranges: &[(i64, i64)]) -> BTreeSet<ObjectId> {
+    let mut found = frame.unplaced.clone();
+    for (low, high) in ranges.iter().filter(|(low, high)| low < high) {
+        found.extend(frame.containing(*low));
+        found.extend(
+            frame
+                .starts
+                .range(*low..*high)
+                .flat_map(|(_, ids)| ids.iter().copied()),
+        );
     }
     found
 }

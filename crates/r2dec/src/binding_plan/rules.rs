@@ -726,12 +726,9 @@ pub(super) fn unread_defined_values(facts: PlanFacts<'_>) -> BTreeSet<ValueId> {
 /// object is defined by a statement this function does not contain. Reading it
 /// afterwards is ordinary C and needs no assignment here. A read that is the
 /// address of a memory access, or the frame geometry itself, is not an escape.
-/// Frame objects a callee may touch: those whose address leaves this body
-/// (`escaped`), and among them those a call is proven to reach through an
-/// argument, with everything the reach covers (`reached_by_callee`).
+/// Frame objects a callee may touch: those whose address leaves this body.
 pub(super) struct EscapedFrameObjects {
     pub escaped: BTreeSet<r2ssa::ObjectId>,
-    pub reached_by_callee: BTreeSet<r2ssa::ObjectId>,
 }
 
 pub(super) fn frame_objects_with_escaped_address(
@@ -751,10 +748,7 @@ pub(super) fn frame_objects_with_escaped_address(
         .filter(|object| objects.frame_reach.escaped(*object))
         .filter(|object| source.declarable_stack_object(*object))
         .collect();
-    EscapedFrameObjects {
-        reached_by_callee: escaped.clone(),
-        escaped,
-    }
+    EscapedFrameObjects { escaped }
 }
 
 /// The type one object is declared with.
