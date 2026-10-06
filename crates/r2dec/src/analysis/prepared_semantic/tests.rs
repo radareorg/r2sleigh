@@ -490,7 +490,6 @@ fn prepared_view_prefers_typed_callee_resolution_over_raw_name_maps() {
         [(sole_callsite_key(&prepared), 0x401000)],
         &resolution_ctx,
     );
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
     let function_facts = FunctionFacts::default().with_callee_resolution(callee_resolution.clone());
 
@@ -498,7 +497,6 @@ fn prepared_view_prefers_typed_callee_resolution_over_raw_name_maps() {
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: &function_facts,
             certified_rendering_required: false,
@@ -546,7 +544,6 @@ fn prepared_view_uses_typed_direct_addr_identity_through_callsite_facts() {
         .by_key
         .insert(key, CalleeIdentity::from_name("sym.imp.printf"));
     let callee_facts = BTreeMap::new();
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
     let callsite_facts = test_callsite_facts(&prepared);
     let function_facts = FunctionFacts::default()
@@ -557,7 +554,6 @@ fn prepared_view_uses_typed_direct_addr_identity_through_callsite_facts() {
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: &function_facts,
             certified_rendering_required: false,
@@ -604,7 +600,6 @@ fn prepared_view_requires_callsite_facts_for_direct_addr_identity() {
     callee_resolution
         .by_key
         .insert(key, CalleeIdentity::from_name("sym.imp.printf"));
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
     let function_facts = FunctionFacts::default().with_callee_resolution(callee_resolution.clone());
 
@@ -612,7 +607,6 @@ fn prepared_view_requires_callsite_facts_for_direct_addr_identity() {
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: &function_facts,
             certified_rendering_required: false,
@@ -636,14 +630,12 @@ fn prepared_view_requires_callsite_facts_for_direct_addr_identity() {
 fn prepared_view_refuses_raw_callee_identity_without_typed_resolution() {
     let symbols = test_table();
     let prepared = test_prepared_call_artifact();
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
 
     let view = PreparedSemanticView::build(
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: leak_function_facts(FunctionFacts::default()),
             certified_rendering_required: false,
@@ -672,14 +664,12 @@ fn prepared_view_refuses_recursive_name_identity_without_typed_resolution() {
         1,
         "fixture should expose a structural recursive call"
     );
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
 
     let view = PreparedSemanticView::build(
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: leak_function_facts(FunctionFacts::default()),
             certified_rendering_required: false,
@@ -734,7 +724,6 @@ fn prepared_call_arity_comes_from_the_call_site_not_the_callee_signature() {
         r2ssa::FunctionSemanticSummary::unknown(summary_id, Some("sym.local_two_arg".into()));
     summary.arg_count_hint = Some(2);
     summaries.summaries.insert(summary_id, summary);
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
     let callsite_facts = test_callsite_facts(&prepared);
     let function_facts = FunctionFacts::default()
@@ -745,7 +734,6 @@ fn prepared_call_arity_comes_from_the_call_site_not_the_callee_signature() {
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: &function_facts,
             certified_rendering_required: false,
@@ -778,14 +766,12 @@ fn prepared_call_args_require_function_facts_callsite_contract() {
         r2ssa::FunctionSemanticSummary::unknown(summary_id, Some("sym.local_two_arg".into()));
     summary.arg_count_hint = Some(1);
     summaries.summaries.insert(summary_id, summary);
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
 
     let view = PreparedSemanticView::build(
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: leak_function_facts(FunctionFacts::default()),
             certified_rendering_required: false,
@@ -813,7 +799,6 @@ fn prepared_call_args_require_function_facts_location_contract() {
         .expect("fixture callsite facts");
     call_facts.register_argument_locations.clear();
     call_facts.stack_argument_locations.clear();
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
     let function_facts = FunctionFacts::default().with_callsites(callsite_facts.clone());
 
@@ -821,7 +806,6 @@ fn prepared_call_args_require_function_facts_location_contract() {
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: &function_facts,
             certified_rendering_required: false,
@@ -843,7 +827,6 @@ fn prepared_call_args_use_function_facts_callsite_contract() {
     let symbols = test_table();
     let prepared = test_prepared_two_arg_call_artifact();
     let callsite_facts = test_callsite_facts(&prepared);
-    let stack_slots = BTreeMap::new();
     let visible_bindings = Vec::new();
     let function_facts = FunctionFacts::default().with_callsites(callsite_facts);
 
@@ -851,7 +834,6 @@ fn prepared_call_args_use_function_facts_callsite_contract() {
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: &function_facts,
             certified_rendering_required: false,
@@ -871,24 +853,12 @@ fn prepared_call_args_use_function_facts_callsite_contract() {
 fn prepared_call_result_owner_requires_function_facts_contract() {
     let symbols = test_table();
     let prepared = test_prepared_stack_owned_call_result_artifact();
-    let stack_slots = BTreeMap::from([(
-        StackSlotKey {
-            base: r2types::ExternalStackBase::StackPointer,
-            offset: -8,
-        },
-        ExternalStackSlotSpec {
-            name: "call_result".to_string(),
-            role: ExternalStackSlotRole::Local,
-            ..ExternalStackSlotSpec::default()
-        },
-    )]);
     let visible_bindings = Vec::new();
 
     let view = PreparedSemanticView::build(
         &symbols,
         PreparedSemanticViewInputs {
             prepared: &prepared,
-            stack_slots: &stack_slots,
             visible_bindings: &visible_bindings,
             function_facts: leak_function_facts(FunctionFacts::default()),
             certified_rendering_required: false,

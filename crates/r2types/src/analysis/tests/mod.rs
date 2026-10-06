@@ -56,16 +56,12 @@ fn unplaceable_recovered_type_produces_no_candidate() {
     }];
     let context_maps = SignatureContextMaps::default();
     let slot_type_overrides = HashMap::new();
-    let stack_slots = BTreeMap::new();
-    let existing_types = HashMap::new();
     let stack_access_widths = BTreeMap::new();
     let stack_access_signedness = BTreeMap::new();
     let context = VarTypeCandidateContext {
         current_context_maps: &context_maps,
         merged_signature: None,
         slot_type_overrides: &slot_type_overrides,
-        stack_slots: &stack_slots,
-        existing_types: &existing_types,
         stack_access_widths: &stack_access_widths,
         stack_access_signedness: &stack_access_signedness,
         ptr_bits: 64,
@@ -169,38 +165,6 @@ fn local_pointee_type_evidence_requires_exact_ram_space() {
         Some(&BTreeSet::from(["int32_t".to_string()]))
     );
     assert!(!types.contains_key(&custom_addr));
-}
-
-fn test_signature_spec(param_name: &str, param_bits: u32) -> FunctionSignatureSpec {
-    FunctionSignatureSpec {
-        ret_type: Some(CTypeLike::Int {
-            bits: 32,
-            signedness: Signedness::Signed,
-        }),
-        params: vec![FunctionParamSpec {
-            name: param_name.to_string(),
-            ty: Some(CTypeLike::Int {
-                bits: param_bits,
-                signedness: Signedness::Signed,
-            }),
-        }],
-    }
-}
-
-fn three_prepared_frame_slot_roots() -> std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>
-{
-    [(1, -8), (2, -12), (3, -16)]
-        .into_iter()
-        .map(|(version, offset)| {
-            (
-                SSAVar::new("tmp:slot", version, 8),
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::FramePointer,
-                    offset,
-                },
-            )
-        })
-        .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>()
 }
 
 /// Storage that an access states only the width of is a type C spells at

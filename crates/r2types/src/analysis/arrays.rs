@@ -70,7 +70,6 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
     let no_slots = HashMap::new();
     let pointer_arg_slot_map = machine.pointer_arg_slots.unwrap_or(&no_slots);
     let stack_roots = machine.stack_roots;
-    let stack_root = |var: &SSAVar| stack_roots.and_then(|roots| roots(var));
     let ptr_bits = machine.ptr_bits;
     let mut pointer_values: HashMap<String, ScalarPointerValue> = HashMap::new();
     let mut pointer_value_names: HashMap<String, Option<ScalarPointerValue>> = HashMap::new();
@@ -327,30 +326,6 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
                             );
                         }
                     }
-                    SSAOp::Load {
-                        dst,
-                        space: r2il::SpaceId::Ram,
-                        addr,
-                    } => {
-                        if let Some(root) = stack_root(addr) {
-                            let pointer = scalar_pointer_value_for_stack_slot(
-                                parsed_context,
-                                type_db,
-                                root,
-                                ptr_bits,
-                            );
-                            if let Some(mut pointer) = pointer {
-                                pointer.confidence = pointer.confidence.saturating_sub(1);
-                                changed |= set_scalar_pointer_value(
-                                    block.addr,
-                                    dst,
-                                    pointer,
-                                    &mut pointer_values,
-                                    &mut pointer_value_names,
-                                );
-                            }
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -564,13 +539,7 @@ pub(crate) fn aggregate_pointee_type_names_for_scalar_pointer(
             )
             .flat_map(aggregate_pointee_type_names_from_type)
             .collect(),
-        ArrayIndexBase::StackSlot { slot } => parsed_context
-            .stack_slots
-            .get(slot)
-            .and_then(|spec| spec.ty.as_ref())
-            .into_iter()
-            .flat_map(aggregate_pointee_type_names_from_type)
-            .collect(),
+        // Frame objects carry no declared type yet (doc/adr-frame-model.md P4.2).
     };
     names.into_iter().fold(Vec::new(), |mut out, name| {
         push_unique_type_name(&mut out, &name);
@@ -717,37 +686,6 @@ pub(crate) fn scalar_pointer_value_for_var(
                 .get(&var.display_name())
                 .and_then(Clone::clone)
         })
-}
-
-pub(crate) fn scalar_pointer_value_for_stack_slot(
-    parsed_context: &ParsedExternalContext,
-    type_db: &ExternalTypeDb,
-    root: StackSlotKey,
-    ptr_bits: u32,
-) -> Option<ScalarPointerValue> {
-    parsed_context
-        .stack_slots
-        .iter()
-        .filter(|(key, _)| **key == root)
-        .filter_map(|(key, spec)| {
-            let element_stride = spec
-                .ty
-                .as_ref()
-                .and_then(|ty| pointer_element_stride(ty, type_db, ptr_bits))?;
-            Some(ScalarPointerValue {
-                slot: legacy_array_slot_for_stack_slot(key),
-                base: ArrayIndexBase::StackSlot { slot: *key },
-                element_stride,
-                confidence: 94,
-            })
-        })
-        .next()
-}
-
-pub(crate) fn legacy_array_slot_for_stack_slot(key: &StackSlotKey) -> usize {
-    // Retain the legacy numeric slot while the exact owner is carried by
-    // ArrayIndexBase::StackSlot.
-    1_000_000usize.saturating_add(key.offset.unsigned_abs() as usize)
 }
 
 pub(crate) fn pointer_element_stride(

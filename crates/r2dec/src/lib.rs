@@ -3452,8 +3452,6 @@ impl Decompiler {
             analysis::PreparedSemanticViewInputs {
                 prepared,
                 #[cfg(test)]
-                stack_slots: &self.context.type_facts().stack_slots,
-                #[cfg(test)]
                 visible_bindings: &self.context.type_facts().visible_bindings,
                 function_facts: &self.context.function_facts,
                 #[cfg(test)]
@@ -3494,8 +3492,6 @@ impl Decompiler {
             #[cfg(test)]
             binary_symbols: &self.context.symbols,
             function_facts: &self.context.function_facts,
-            #[cfg(test)]
-            stack_slots: &self.context.type_facts().stack_slots,
             #[cfg(test)]
             visible_bindings: &self.context.type_facts().visible_bindings,
             function_return_type: fold_function_return_type,

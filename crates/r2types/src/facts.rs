@@ -2,9 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::{
-    ExternalRegisterParamSpec, ExternalStackSlotRole, ExternalStackSlotSpec, StackSlotKey,
-};
+use crate::context::{ExternalRegisterParamSpec, StackSlotKey};
 use crate::convert::CTypeLike;
 use crate::external::ExternalTypeDb;
 use crate::model::Signedness;
@@ -37,7 +35,6 @@ pub struct FieldAccessCertificate {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArrayIndexBase {
     Param { index: usize },
-    StackSlot { slot: StackSlotKey },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -502,7 +499,6 @@ pub struct FunctionTypeFacts {
     pub noreturn: bool,
     pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
-    pub stack_slots: BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     pub visible_bindings: Vec<VisibleBinding>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub external_type_db: ExternalTypeDb,
@@ -525,7 +521,6 @@ pub struct FunctionTypeFactInputs {
     pub noreturn: bool,
     pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
-    pub stack_slots: BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     pub visible_bindings: Vec<VisibleBinding>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub external_type_db: ExternalTypeDb,
@@ -554,7 +549,6 @@ impl FunctionTypeFacts {
             && !self.noreturn
             && self.known_function_signatures.is_empty()
             && self.register_params.is_empty()
-            && self.stack_slots.is_empty()
             && self.visible_bindings.is_empty()
             && self.callee_facts.is_empty()
             && self.external_type_db.structs.is_empty()
@@ -581,7 +575,6 @@ impl FunctionTypeFacts {
             noreturn: self.noreturn,
             known_function_signatures: self.known_function_signatures,
             register_params: self.register_params,
-            stack_slots: self.stack_slots,
             visible_bindings: self.visible_bindings,
             callee_facts: self.callee_facts,
             external_type_db: self.external_type_db,
@@ -1016,7 +1009,6 @@ impl FunctionTypeFactsBuilder {
             noreturn,
             known_function_signatures,
             mut register_params,
-            mut stack_slots,
             mut visible_bindings,
             callee_facts,
             external_type_db,
@@ -1033,7 +1025,6 @@ impl FunctionTypeFactsBuilder {
             &mut merged_signature,
             &mut signature_certificate,
             &mut register_params,
-            &mut stack_slots,
             &mut visible_bindings,
         );
 
@@ -1047,7 +1038,6 @@ impl FunctionTypeFactsBuilder {
             noreturn,
             known_function_signatures,
             register_params,
-            stack_slots,
             visible_bindings,
             callee_facts,
             external_type_db,
@@ -1083,7 +1073,6 @@ fn canonicalize_generic_param_names(
     merged_signature: &mut Option<FunctionSignatureSpec>,
     signature_certificate: &mut Option<SignatureCertificate>,
     register_params: &mut [ExternalRegisterParamSpec],
-    stack_slots: &mut BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     visible_bindings: &mut [VisibleBinding],
 ) {
     if let Some(signature) = merged_signature.as_mut() {
@@ -1094,19 +1083,6 @@ fn canonicalize_generic_param_names(
     }
     for (index, param) in register_params.iter_mut().enumerate() {
         param.name = canonical_generic_param_name(index, &param.name);
-    }
-    for slot in stack_slots.values_mut() {
-        let Some(index) = slot.param_index else {
-            continue;
-        };
-        if let Some(name) = slot.param_name.as_mut() {
-            *name = canonical_generic_param_name(index, name);
-        }
-        if matches!(slot.role, ExternalStackSlotRole::StackArg)
-            && crate::context::is_generic_arg_name(&slot.name)
-        {
-            slot.name = format!("arg{index}");
-        }
     }
     for binding in visible_bindings {
         let Some(index) = binding.param_index else {
@@ -1144,7 +1120,6 @@ fn dedup_preserving_order(items: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExternalStackBase, ExternalStackSlotRole};
 
     fn test_int(bits: u32) -> CTypeLike {
         CTypeLike::Int {
@@ -1554,47 +1529,6 @@ mod tests {
         assert_eq!(facts.register_params[0].name, "arg0");
         assert_eq!(facts.register_params[1].name, "arg1");
         assert_eq!(facts.visible_bindings[0].name, "arg0");
-    }
-
-    #[test]
-    fn builder_preserves_structural_stack_slot_root() {
-        let spec = ExternalStackSlotSpec {
-            name: "count".to_string(),
-            ty: Some(CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed,
-            }),
-            role: ExternalStackSlotRole::Local,
-            param_index: None,
-            param_name: None,
-            source_reg: None,
-        };
-        let facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
-            stack_slots: BTreeMap::from([(
-                StackSlotKey {
-                    base: ExternalStackBase::FramePointer,
-                    offset: -0x10,
-                },
-                spec,
-            )]),
-            ..FunctionTypeFactInputs::default()
-        })
-        .build();
-
-        assert_eq!(
-            facts
-                .stack_slots
-                .get(&StackSlotKey {
-                    base: ExternalStackBase::FramePointer,
-                    offset: -0x10,
-                })
-                .map(|slot| slot.name.as_str()),
-            Some("count")
-        );
-        assert!(!facts.stack_slots.contains_key(&StackSlotKey {
-            base: ExternalStackBase::StackPointer,
-            offset: -0x10,
-        }));
     }
 
     #[test]

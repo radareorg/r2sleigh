@@ -153,7 +153,6 @@ impl<'a> FoldingContext<'a> {
                     &self.symbols,
                     analysis::PreparedSemanticViewInputs {
                         prepared,
-                        stack_slots: self.inputs.stack_slots,
                         visible_bindings: self.inputs.visible_bindings,
                         function_facts: self.inputs.function_facts,
                         #[cfg(test)]

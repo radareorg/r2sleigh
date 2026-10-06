@@ -229,83 +229,11 @@ pub(crate) fn apply_type_hint_assumptions_to_context(
                 }
             }
             r2ssa::AssumptionSubject::StackSlot { base, offset } => {
-                let key = StackSlotKey {
-                    base: *base,
-                    offset: *offset,
-                };
-                let corroborated = semantic_projection.is_some_and(|projection| {
-                    parsed_context
-                        .stack_slots
-                        .get(&key)
-                        .and_then(|slot| slot.param_index)
-                        .is_some_and(|slot| {
-                            projection.corroborates_stack_slot_type_hint(slot, &hint)
-                        })
-                });
-                if type_hint_requires_semantic_corroboration(assumption) && !corroborated {
-                    usage.mark_ignored(assumption);
-                    continue;
-                }
-                let Some(slot) = parsed_context.stack_slots.get_mut(&key) else {
-                    usage.mark_ignored(assumption);
-                    continue;
-                };
-                let mut applied = match slot.ty.as_ref() {
-                    None => {
-                        slot.ty = Some(hint.clone());
-                        true
-                    }
-                    Some(existing)
-                        if type_hint_can_replace_weak_existing(
-                            assumption,
-                            existing,
-                            Some(&slot.name),
-                            ptr_bits,
-                        ) =>
-                    {
-                        slot.ty = Some(hint.clone());
-                        true
-                    }
-                    Some(existing) if !type_hint_conflicts(existing, &hint, ptr_bits) => true,
-                    Some(existing) => {
-                        usage.mark_conflict(
-                            assumption,
-                            format!(
-                                "stack slot {}@{} already has incompatible type {}",
-                                match key.base {
-                                    ExternalStackBase::FramePointer => "bp",
-                                    ExternalStackBase::StackPointer => "sp",
-                                    ExternalStackBase::Realigned => "aligned sp",
-                                },
-                                key.offset,
-                                render_signature_type(existing, ptr_bits)
-                            ),
-                        );
-                        continue;
-                    }
-                };
-
-                if let Some(index) = slot.param_index {
-                    match apply_type_hint_to_signature_param(
-                        &mut parsed_context.merged_signature,
-                        inferred_signature,
-                        index,
-                        assumption,
-                        &hint,
-                        ptr_bits,
-                    ) {
-                        Ok(result) => applied |= result,
-                        Err(reason) => {
-                            usage.mark_conflict(assumption, reason);
-                            continue;
-                        }
-                    }
-                }
-                if applied {
-                    usage.mark_applied(assumption);
-                } else {
-                    usage.mark_ignored(assumption);
-                }
+                r2il::refusal_evidence!(
+                    "stack-slot-type-hint",
+                    "{base:?}{offset:+}: stack-slot type hints apply to frame objects (doc/adr-frame-model.md P4.2) and are not wired"
+                );
+                usage.mark_ignored(assumption);
             }
             _ => {}
         }
@@ -329,14 +257,8 @@ pub(crate) fn applied_type_assumption_parameter_slots(
                         || param.name.eq_ignore_ascii_case(name)
                 })
             }
-            r2ssa::AssumptionSubject::StackSlot { base, offset } => parsed_context
-                .stack_slots
-                .get(&StackSlotKey {
-                    base: *base,
-                    offset: *offset,
-                })
-                .and_then(|slot| slot.param_index),
-            r2ssa::AssumptionSubject::Predicate { .. }
+            r2ssa::AssumptionSubject::StackSlot { .. }
+            | r2ssa::AssumptionSubject::Predicate { .. }
             | r2ssa::AssumptionSubject::Target { .. }
             | r2ssa::AssumptionSubject::MemoryWindow { .. } => None,
         })

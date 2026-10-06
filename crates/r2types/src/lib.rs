@@ -48,8 +48,8 @@ pub(crate) use signature_infer::{
 pub use solver::{SolvedTypes, solve_constraints};
 
 pub use context::{
-    ExternalStackBase, ExternalStackSlotRole, ExternalStackSlotSpec, ParsedExternalContext,
-    ProgramExtents, StackSlotKey, is_generic_arg_name, sanitize_c_identifier,
+    ExternalStackBase, ParsedExternalContext, ProgramExtents, StackSlotKey, is_generic_arg_name,
+    sanitize_c_identifier,
 };
 pub use convert::{
     CTypeLike, bit_vector_tag, c_object_declaration, parse_c_type_like, spellable_c_type_like,

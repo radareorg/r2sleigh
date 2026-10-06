@@ -10,9 +10,9 @@ use crate::analysis;
 use crate::ast::CExpr;
 use crate::ast::CType;
 use r2ssa::{BlockId, InstId, SemanticObligationId, SsaArtifact, UseSite, ValueId};
-use r2types::{CalleeFact, CalleeResolutionFacts, FunctionFacts};
 #[cfg(test)]
-use r2types::{ExternalStackSlotSpec, StackSlotKey, VisibleBinding};
+use r2types::VisibleBinding;
+use r2types::{CalleeFact, CalleeResolutionFacts, FunctionFacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum EffectOccurrenceKind {
@@ -37,8 +37,6 @@ pub(crate) struct FoldInputs<'a> {
     /// rendering declares.
     pub(crate) binary_symbols: &'a HashMap<u64, String>,
     pub(crate) function_facts: &'a FunctionFacts,
-    #[cfg(test)]
-    pub(crate) stack_slots: &'a BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     #[cfg(test)]
     pub(crate) visible_bindings: &'a [VisibleBinding],
     pub(crate) function_return_type: Option<&'a CType>,
@@ -1984,9 +1982,6 @@ impl<'a> FoldingContext<'a> {
         #[cfg(test)]
         static EMPTY_U64_STRING: OnceLock<HashMap<u64, String>> = OnceLock::new();
         #[cfg(test)]
-        static EMPTY_STACK_SLOTS: OnceLock<BTreeMap<StackSlotKey, ExternalStackSlotSpec>> =
-            OnceLock::new();
-        #[cfg(test)]
         static EMPTY_VISIBLE_BINDINGS: OnceLock<Vec<VisibleBinding>> = OnceLock::new();
         static ARCH64: OnceLock<FoldArchConfig> = OnceLock::new();
         static ARCH32: OnceLock<FoldArchConfig> = OnceLock::new();
@@ -2007,8 +2002,6 @@ impl<'a> FoldingContext<'a> {
             #[cfg(test)]
             binary_symbols: EMPTY_U64_STRING.get_or_init(HashMap::new),
             function_facts: empty_function_facts(),
-            #[cfg(test)]
-            stack_slots: EMPTY_STACK_SLOTS.get_or_init(BTreeMap::new),
             #[cfg(test)]
             visible_bindings: EMPTY_VISIBLE_BINDINGS.get_or_init(Vec::new),
             function_return_type: None,

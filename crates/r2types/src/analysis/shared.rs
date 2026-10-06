@@ -7,8 +7,6 @@ pub(crate) enum TypeFactSource {
     LocalInferred,
     CalleeSignature,
     SignatureRegistry,
-    ExistingState,
-    ExternalTypeDb,
     DataflowRanked,
 }
 
@@ -21,9 +19,6 @@ pub(crate) enum TypeEvidence {
     ExternalSignatureCurrent,
     CanonicalMainSignature,
     SsaFieldOffsetPattern,
-    ExistingStackType,
-    ExternalStackAnnotation,
-    ExternalStackName,
     ExternalParamName,
 }
 
@@ -232,10 +227,6 @@ impl SemanticTypeProjection {
         self.pointer_param_indices.contains(&index)
             || self.out_param_indices.contains(&index)
             || self.slot_field_profiles.contains_key(&index)
-    }
-
-    pub(crate) fn corroborates_stack_slot_type_hint(&self, slot: usize, hint: &CTypeLike) -> bool {
-        matches!(hint, CTypeLike::Pointer(_)) && self.slot_field_profiles.contains_key(&slot)
     }
 
     pub(crate) fn refusal_warnings(&self) -> Vec<String> {

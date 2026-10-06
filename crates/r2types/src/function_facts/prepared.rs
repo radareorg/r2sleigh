@@ -40,28 +40,6 @@ pub struct StackSlotOwnerRenderAuthorization {
     pub name: String,
 }
 
-pub(crate) fn stack_slot_offset(slot: &StackSlotKey) -> i64 {
-    slot.offset
-}
-
-pub(crate) fn stack_slot_matches_offset(slot: &StackSlotKey, offset: i64) -> bool {
-    stack_slot_offset(slot) == offset
-}
-
-pub(crate) fn visible_stack_binding_kind_is_renderable(kind: &VisibleBindingKind) -> bool {
-    matches!(
-        kind,
-        VisibleBindingKind::Param | VisibleBindingKind::Local | VisibleBindingKind::StackObject
-    )
-}
-
-pub(crate) fn external_stack_slot_role_is_renderable(role: ExternalStackSlotRole) -> bool {
-    matches!(
-        role,
-        ExternalStackSlotRole::Local | ExternalStackSlotRole::StackArg
-    )
-}
-
 pub(crate) fn recovered_stack_owner_name_is_renderable(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     !lower.is_empty()
@@ -74,58 +52,6 @@ pub(crate) fn recovered_stack_owner_name_is_renderable(name: &str) -> bool {
         && !lower.starts_with("local_")
         && !lower.starts_with("arg_")
         && !lower.starts_with("var_")
-}
-
-pub(crate) fn remember_stack_param_owner_name(
-    candidate: &mut Option<String>,
-    name: &str,
-) -> Option<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Some(());
-    }
-    if let Some(existing) = candidate.as_ref() {
-        return existing.eq_ignore_ascii_case(name).then_some(());
-    }
-    *candidate = Some(name.to_string());
-    Some(())
-}
-
-pub(crate) fn stack_owner_type_is_renderable(ty: &CTypeLike) -> bool {
-    !matches!(ty, CTypeLike::Unknown | CTypeLike::Void)
-}
-
-pub(crate) fn signature_param_name_type_is_renderable(
-    signature: Option<&FunctionSignatureSpec>,
-    name: &str,
-) -> bool {
-    signature
-        .into_iter()
-        .flat_map(|signature| signature.params.iter())
-        .any(|param| {
-            param.name.eq_ignore_ascii_case(name)
-                && param
-                    .ty
-                    .as_ref()
-                    .is_some_and(stack_owner_type_is_renderable)
-        })
-}
-
-pub(crate) fn indexed_param_home_name<'a>(
-    signature: Option<&'a FunctionSignatureSpec>,
-    slot: &ExternalStackSlotSpec,
-) -> Option<&'a str> {
-    if !matches!(slot.role, ExternalStackSlotRole::ParamHome) {
-        return None;
-    }
-    let param = signature?.params.get(slot.param_index?)?;
-    let name = param.name.trim();
-    (!name.is_empty()
-        && param
-            .ty
-            .as_ref()
-            .is_some_and(stack_owner_type_is_renderable))
-    .then_some(name)
 }
 
 pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {

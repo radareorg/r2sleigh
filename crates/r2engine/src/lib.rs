@@ -1288,7 +1288,6 @@ fn trusted_parsed_context(
     );
     r2types::ParsedExternalContext {
         known_function_signatures: trusted_callee_signatures(trusted, ptr_bits),
-        stack_slots: trusted_stack_slot_names(trusted, ptr_bits),
         callconv: signature
             .as_ref()
             .and_then(|(_, callconv, _)| callconv.clone()),
@@ -1300,51 +1299,6 @@ fn trusted_parsed_context(
         assumptions: trusted.artifact().facts().assumptions.clone(),
         ..r2types::ParsedExternalContext::default()
     }
-}
-
-fn trusted_stack_slot_names(
-    trusted: &r2ssa::TrustedSsaArtifact,
-    ptr_bits: u32,
-) -> std::collections::BTreeMap<r2types::StackSlotKey, r2types::ExternalStackSlotSpec> {
-    let snapshot = trusted.source();
-    let Some(interface) = snapshot.function_interface() else {
-        return Default::default();
-    };
-    let mut slots = std::collections::BTreeMap::new();
-    for slot_name in snapshot.presentation().stack_slot_names() {
-        let Some(slot) = interface
-            .stack_slots()
-            .iter()
-            .find(|slot| slot.base() == slot_name.base() && slot.offset() == slot_name.offset())
-        else {
-            continue;
-        };
-        // A home is the parameter it spills and is named through the parameter
-        // list, so only a slot that stands for itself is named here.
-        let role = match slot.role() {
-            r2ssa::SourceStackSlotRole::Local => r2types::ExternalStackSlotRole::Local,
-            r2ssa::SourceStackSlotRole::UnclassifiedResource => {
-                r2types::ExternalStackSlotRole::Unknown
-            }
-            r2ssa::SourceStackSlotRole::ParameterHome { .. }
-            | r2ssa::SourceStackSlotRole::Parameter { .. } => continue,
-        };
-        slots.insert(
-            r2types::StackSlotKey {
-                base: slot_name.base(),
-                offset: slot_name.offset(),
-            },
-            r2types::ExternalStackSlotSpec {
-                name: slot_name.name().to_string(),
-                ty: slot_name
-                    .type_spelling()
-                    .and_then(|spelling| source_spelled_type(spelling, ptr_bits)),
-                role,
-                ..r2types::ExternalStackSlotSpec::default()
-            },
-        );
-    }
-    slots
 }
 
 impl EngineAnalyzeRequest {

@@ -155,72 +155,6 @@ fn imported_size_t_type_hint_matches_preserved_source_typedef() {
 }
 
 #[test]
-fn structural_slots_do_not_apply_to_unrooted_variables() {
-    let mut parsed_context = ParsedExternalContext::default();
-    let spec = ExternalStackVarSpec {
-        name: "len".to_string(),
-        ty: Some(CTypeLike::Int {
-            bits: 64,
-            signedness: Signedness::Unsigned,
-        }),
-        role: ExternalStackSlotRole::Local,
-        param_index: None,
-        param_name: None,
-        source_reg: None,
-    };
-    parsed_context.stack_slots.insert(
-        StackSlotKey {
-            base: ExternalStackBase::FramePointer,
-            offset: -8,
-        },
-        spec,
-    );
-
-    let vars = [RecoveredVariable {
-        name: "var_8h".to_string(),
-        kind: "x".to_string(),
-        delta: -8,
-        var_type: "void *".to_string(),
-        isarg: false,
-        reg: None,
-    }];
-    let analysis = build_type_analysis(TypeAnalysisInput {
-        function_name: "sym.f",
-        ptr_bits: 64,
-        inferred_signature: InferredSignature {
-            function_name: "sym.f".to_string(),
-            signature: "void sym.f ()".to_string(),
-            ret_type: "void".to_string(),
-            params: Vec::new(),
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
-        },
-        recovered_vars: &vars,
-        ssa_blocks: &[],
-        conventional_extension: &|_| false,
-        parsed_context,
-        local_structs: LocalStructArtifacts::default(),
-        interproc_summary_set: None,
-        diagnostics: TypeAnalysisDiagnostics::default(),
-    });
-
-    assert_eq!(analysis.plan.var_type_candidates.len(), 1);
-    assert_eq!(
-        analysis.plan.var_type_candidates[0].var_type,
-        parse_test_type("void *", 64)
-    );
-    assert_eq!(
-        analysis.plan.var_type_candidates[0].source,
-        TypeFactSource::LocalInferred
-    );
-    assert!(
-        analysis.plan.var_rename_candidates.is_empty(),
-        "unrooted recovered vars must not inherit names from structural slots: {:?}",
-        analysis.plan.var_rename_candidates
-    );
-}
-
-#[test]
 fn external_stack_identity_refuses_without_a_structural_root() {
     let vars = [RecoveredVariable {
         name: "var_10h".to_string(),
@@ -250,7 +184,6 @@ fn external_stack_identity_refuses_without_a_structural_root() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert!(analysis.type_facts.stack_slots.is_empty());
     assert!(analysis.plan.var_rename_candidates.is_empty());
     assert_eq!(
         analysis.plan.var_type_candidates[0].source,

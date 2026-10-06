@@ -4,7 +4,6 @@ mod bindings;
 mod globals;
 mod shared;
 mod signature;
-mod stack;
 mod structs;
 
 pub(crate) use arrays::*;
@@ -13,7 +12,6 @@ pub(crate) use bindings::*;
 pub(crate) use globals::*;
 pub(crate) use shared::*;
 pub(crate) use signature::*;
-pub(crate) use stack::*;
 pub(crate) use structs::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -27,9 +25,9 @@ use r2ssa::{
 };
 
 use crate::context::{
-    ExternalRegisterParamSpec, ExternalStackBase, ExternalStackSlotRole, ExternalStackVarSpec,
-    ParsedExternalContext, StackSlotKey, apply_main_signature_override,
-    canonical_main_signature_spec, is_generic_arg_name, sanitize_c_identifier,
+    ExternalRegisterParamSpec, ExternalStackBase, ParsedExternalContext, StackSlotKey,
+    apply_main_signature_override, canonical_main_signature_spec, is_generic_arg_name,
+    sanitize_c_identifier,
 };
 use crate::convert::{CTypeLike, parse_c_type_like, render_c_type_like};
 use crate::external::{
@@ -903,25 +901,6 @@ fn build_type_analysis_inner(
         input.parsed_context.merged_signature.clone(),
         inferred_signature_spec,
     );
-    let inferred_register_params = inferred_signature_abi_register_params(
-        &input.inferred_signature,
-        registers.argument_registers(),
-        input.ptr_bits,
-    );
-    let mut canonicalize_register_params = input.parsed_context.register_params.clone();
-    if inferred_register_params.len() > canonicalize_register_params.len() {
-        canonicalize_register_params
-            .extend_from_slice(&inferred_register_params[canonicalize_register_params.len()..]);
-    }
-    canonicalize_param_home_stack_slots(
-        merged_signature.as_ref(),
-        &canonicalize_register_params,
-        &mut input.parsed_context.stack_slots,
-        input.ssa_blocks,
-        prep_facts,
-        registers,
-    );
-    hide_unproven_stack_pointer_frame_slots(&mut input.parsed_context.stack_slots);
     apply_main_signature_override(input.function_name, &mut merged_signature);
     let role_hint_has_authoritative_empty_params = false;
     let before_interproc_signature = merged_signature.clone();
@@ -1097,8 +1076,6 @@ fn build_type_analysis_inner(
         input.ptr_bits,
         &type_db,
     );
-    let existing_types =
-        parse_existing_var_types_from_specs(&input.parsed_context.stack_slots, input.ptr_bits);
     let stack_access_widths = canonical_stack_access_widths(input.ssa_blocks, prep_facts);
     let stack_access_signedness = canonical_stack_access_signedness(
         input.ssa_blocks,
@@ -1112,8 +1089,6 @@ fn build_type_analysis_inner(
         current_context_maps: &current_context_maps,
         merged_signature: merged_signature.as_ref(),
         slot_type_overrides: &local_structs.slot_type_overrides,
-        stack_slots: &input.parsed_context.stack_slots,
-        existing_types: &existing_types,
         stack_access_widths: &stack_access_widths,
         stack_access_signedness: &stack_access_signedness,
         ptr_bits: input.ptr_bits,
@@ -1121,20 +1096,11 @@ fn build_type_analysis_inner(
     };
     let var_type_candidates =
         build_var_type_candidates(input.recovered_vars, &var_type_ctx, &mut diagnostics);
-    apply_canonical_stack_width_types(
-        &mut input.parsed_context.stack_slots,
-        input.recovered_vars,
-        &var_type_candidates,
-    );
-    let var_rename_candidates = build_var_rename_candidates(
-        input.recovered_vars,
-        &current_context_maps.param_names,
-        &input.parsed_context.stack_slots,
-    );
+    let var_rename_candidates =
+        build_var_rename_candidates(input.recovered_vars, &current_context_maps.param_names);
     let visible_bindings = build_visible_bindings(
         merged_signature.as_ref(),
         &input.parsed_context.register_params,
-        &input.parsed_context.stack_slots,
         input.recovered_vars,
         &var_type_candidates,
         &var_rename_candidates,
@@ -1146,7 +1112,6 @@ fn build_type_analysis_inner(
         noreturn: input.parsed_context.noreturn,
         known_function_signatures: input.parsed_context.known_function_signatures.clone(),
         register_params: input.parsed_context.register_params.clone(),
-        stack_slots: input.parsed_context.stack_slots.clone(),
         visible_bindings,
         callee_facts: merged_context_and_summary_callee_facts(
             &input.parsed_context.callee_facts,
@@ -1251,31 +1216,6 @@ fn x86_64_register_identity() -> crate::RegisterIdentity {
         ("ecx", 0x08, 4),
     ])
     .with_argument_registers(tests::system_v_argument_registers())
-}
-
-#[cfg(test)]
-fn aarch64_register_identity() -> crate::RegisterIdentity {
-    let mut registers = Vec::new();
-    for index in 0..31u64 {
-        let offset = 0x1000 + index * 8;
-        registers.push((format!("x{index}"), offset, 8u32));
-        registers.push((format!("w{index}"), offset, 4u32));
-    }
-    registers.push(("sp".to_string(), 0x1100, 8));
-    let storages = registers
-        .iter()
-        .map(|(name, offset, size)| {
-            (
-                name.clone(),
-                r2ssa::CanonicalStorageId {
-                    space: r2ssa::CanonicalStorageSpace::Register,
-                    offset: *offset,
-                    size: *size,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    crate::RegisterIdentity::from_register_storages(&storages)
 }
 
 #[cfg(test)]
@@ -2005,32 +1945,6 @@ fn canonical_stack_access_signedness(
     signedness
 }
 
-fn hide_unproven_stack_pointer_frame_slots(
-    stack_slots: &mut BTreeMap<StackSlotKey, ExternalStackVarSpec>,
-) {
-    let has_frame_pointer_slots = stack_slots
-        .keys()
-        .any(|slot_key| matches!(slot_key.base, ExternalStackBase::FramePointer));
-    if !has_frame_pointer_slots {
-        return;
-    }
-
-    for (slot_key, slot) in stack_slots {
-        if !matches!(slot_key.base, ExternalStackBase::StackPointer)
-            || slot_key.offset != 0
-            || !matches!(slot.role, ExternalStackSlotRole::Unknown)
-            || slot.param_index.is_some()
-            || slot.param_name.is_some()
-            || slot.source_reg.is_some()
-            || !is_low_quality_stack_name(&slot.name)
-        {
-            continue;
-        }
-        slot.role = ExternalStackSlotRole::SavedFp;
-        slot.name = "saved_fp".to_string();
-    }
-}
-
 fn is_canonical_main_signature_spec(signature: &FunctionSignatureSpec) -> bool {
     signature == &canonical_main_signature_spec()
 }
@@ -2212,23 +2126,6 @@ fn should_replace_struct_decl(
     candidate.source == StructDeclSource::LocalInferred
         && is_generated_local_struct_name(&candidate.name)
         && existing.name.eq_ignore_ascii_case(&candidate.name)
-}
-
-fn parse_existing_var_types_from_specs(
-    stack_vars: &BTreeMap<StackSlotKey, ExternalStackVarSpec>,
-    ptr_bits: u32,
-) -> HashMap<String, String> {
-    stack_vars
-        .values()
-        .filter(|var| slot_role_allows_external_local_identity(var.role))
-        .filter_map(|var| {
-            let ty = var
-                .ty
-                .as_ref()
-                .map(|ty| render_signature_type(ty, ptr_bits))?;
-            Some((var.name.clone(), normalize_external_type_name(&ty)))
-        })
-        .collect()
 }
 
 #[cfg(test)]
