@@ -47,13 +47,21 @@ declarations.
 
 ## Done
 
-Nothing yet.
+- P4.0, measured (2026-10-06): `scripts/frame_agree.py` compares `afv` with
+  `pddj`'s declared locals at each entry-stack offset over the census. 99 of
+  1218 offsets agree: afv-only 946 (promoted slots and saved registers the
+  rendering declares nothing for), afv-twice 49 (one promoted offset at two
+  widths), pdd-twice 43 (a slot and a temporary bound to it), pdd-only 31,
+  type 29, name 21 (`afv` spells `stack_m{N}` where the rendering uses the
+  debug information's name). This is the number every P4 step moves.
 
 ## Left
 
-- P4.0: the frame model as an index beside the current owners. Exit: a test
-  compares the two partitions over the census, and every disagreement is
-  judged.
+- P4.0, amended (D1, 2026-10-06): no second model beside the owners.
+  `ObjectModelBuilder`, which the certificates, memory SSA, `FrameReach`,
+  the binding plan and `afv` already read, grows into the frame model, and
+  each other owner is deleted into it. The exit measure is
+  `scripts/frame_agree.py`.
 - P4.1: certificates and memory SSA read it. Exit: `ObjectModelBuilder`'s
   frame half, `FrameReach`'s containment, `private_stack_objects` and three
   escape analyses (`escaping_roots`, `FrameReach`'s taint, `promote.rs`'s
