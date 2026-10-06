@@ -1319,11 +1319,28 @@ impl SsaArtifact {
     /// whose extent nothing states.
     pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
         !self.frame_managed_stack_object(object)
+            && !self.call_return_address_object(object)
             && self
                 .certificates()
                 .stack_slots
                 .get(&object)
                 .is_some_and(|slot| slot.size.is_some_and(|size| size > 0))
+    }
+
+    /// Whether every access to this object is a call pushing its return address: the callee's frame, not a local.
+    pub fn call_return_address_object(&self, object: crate::ObjectId) -> bool {
+        let stores = &self.certificates().call_return_address_stores;
+        let mut accesses = self
+            .structured()
+            .memory_accesses
+            .values()
+            .filter(|access| access.object == object);
+        let mut any = false;
+        let pushed = accesses.all(|access| {
+            any = true;
+            access.is_write && stores.contains(access.id.inst)
+        });
+        any && pushed
     }
 
     /// The entry-relative offset of a stack object addressed from the entry stack pointer.
