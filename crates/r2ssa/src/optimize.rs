@@ -2134,88 +2134,79 @@ mod sccp_tests {
     /// every byte x and z and every 257th half-word y (R1c).
     #[test]
     fn every_fold_through_a_definition_is_what_the_machine_computes() {
-        let var = |name: &str, size| SSAVar::new(name, 1, size);
-        let (x, z, y) = (var("x", 1), var("z", 1), var("y", 2));
-        let constant = SSAVar::constant;
-        let byte = |name: &str| var(name, 1);
-        let mut cases: Vec<(Vec<SSAOp>, SSAOp)> = Vec::new();
+        let checked: usize = fold_cases()
+            .iter()
+            .map(|(defs, op)| check_fold(defs, op))
+            .sum();
+        assert!(checked > 0);
+    }
+
+    /// A free input of the fold cases, or a value one of them defines.
+    fn fold_var(name: &str, size: u32) -> SSAVar {
+        SSAVar::new(name, 1, size)
+    }
+
+    /// Each fold through a definition: its definitions over the free inputs x, z (bytes) and y (a half-word), and the operation.
+    fn fold_cases() -> Vec<(Vec<SSAOp>, SSAOp)> {
+        let (x, z, y) = (fold_var("x", 1), fold_var("z", 1), fold_var("y", 2));
+        let (constant, byte) = (SSAVar::constant, |name: &str| fold_var(name, 1));
+        let slice = |src: SSAVar, offset| SSAOp::Subpiece {
+            dst: byte("d"),
+            src,
+            offset,
+        };
         let less = SSAOp::IntLess {
             dst: byte("b"),
             a: x.clone(),
             b: z.clone(),
         };
-        for mask in [0u64, 1, 0xfe, 0xff] {
-            let op = SSAOp::IntAnd {
-                dst: byte("d"),
-                a: byte("b"),
-                b: constant(mask, 1),
-            };
-            cases.push((vec![less.clone()], op));
-            let op = SSAOp::IntAnd {
-                dst: byte("d"),
-                a: constant(mask, 1),
-                b: byte("b"),
-            };
-            cases.push((vec![less.clone()], op));
-        }
-        for position in [0u64, 8] {
+        let masks = [0u64, 1, 0xfe, 0xff].into_iter().flat_map(|mask| {
+            let (b, m) = (byte("b"), constant(mask, 1));
+            [
+                SSAOp::IntAnd {
+                    dst: byte("d"),
+                    a: b.clone(),
+                    b: m.clone(),
+                },
+                SSAOp::IntAnd {
+                    dst: byte("d"),
+                    a: m,
+                    b,
+                },
+            ]
+        });
+        let mut cases: Vec<_> = masks.map(|op| (vec![less.clone()], op)).collect();
+        for (position, offset) in [(0u64, 0), (0, 1), (8, 0), (8, 1)] {
             let insert = SSAOp::Insert(Box::new(crate::op::InsertOp {
-                dst: var("r", 2),
+                dst: fold_var("r", 2),
                 src: y.clone(),
                 value: x.clone(),
                 position: constant(position, 4),
             }));
-            for offset in [0, 1] {
-                let op = SSAOp::Subpiece {
-                    dst: byte("d"),
-                    src: var("r", 2),
-                    offset,
-                };
-                cases.push((vec![insert.clone()], op));
-            }
+            cases.push((vec![insert], slice(fold_var("r", 2), offset)));
         }
-        for extend in [
-            SSAOp::IntZExt {
-                dst: var("w", 2),
-                src: x.clone(),
-            },
-            SSAOp::IntSExt {
-                dst: var("w", 2),
-                src: x.clone(),
-            },
-        ] {
-            let op = SSAOp::Subpiece {
-                dst: byte("d"),
-                src: var("w", 2),
-                offset: 0,
-            };
-            cases.push((vec![extend], op));
-        }
+        let widened = fold_var("w", 2);
+        let zext = SSAOp::IntZExt {
+            dst: widened.clone(),
+            src: x.clone(),
+        };
+        let sext = SSAOp::IntSExt {
+            dst: widened.clone(),
+            src: x.clone(),
+        };
+        cases.push((vec![zext], slice(widened.clone(), 0)));
+        cases.push((vec![sext], slice(widened, 0)));
         let narrowed = SSAOp::Subpiece {
             dst: byte("m"),
             src: y,
             offset: 1,
         };
-        cases.push((
-            vec![narrowed],
-            SSAOp::Subpiece {
-                dst: byte("d"),
-                src: byte("m"),
-                offset: 0,
-            },
-        ));
+        cases.push((vec![narrowed], slice(byte("m"), 0)));
         let literal = SSAOp::Copy {
-            dst: var("c", 2),
+            dst: fold_var("c", 2),
             src: constant(0xabcd, 2),
         };
-        cases.push((
-            vec![literal],
-            SSAOp::Subpiece {
-                dst: byte("d"),
-                src: var("c", 2),
-                offset: 1,
-            },
-        ));
+        cases.push((vec![literal], slice(fold_var("c", 2), 1)));
         for decided in [0u64, 1] {
             let condition = SSAOp::Copy {
                 dst: byte("k"),
@@ -2229,47 +2220,44 @@ mod sccp_tests {
             }));
             cases.push((vec![condition], select));
         }
+        cases
+    }
+
+    /// The fold of `op` over `definitions` against the machine, for every byte x and every 257th half-word y; the inputs compared.
+    fn check_fold(definitions: &[SSAOp], op: &SSAOp) -> usize {
+        let Some(replacement) = fold(op, definitions) else {
+            panic!("the fold this case names does not fire: {op:?} over {definitions:?}");
+        };
         let halves = (0u128..=0xffff)
             .step_by(257)
             .chain([0xffff, 0x8000, 0x7fff]);
-        let mut checked = 0usize;
-        for (definitions, op) in &cases {
-            let Some(replacement) = fold(op, definitions) else {
-                panic!("the fold this case names does not fire: {op:?} over {definitions:?}");
+        let inputs =
+            (0u128..256).flat_map(|x| halves.clone().map(move |y| (x, (x * 37 + 11) & 0xff, y)));
+        let mut checked = 0;
+        for (xv, zv, yv) in inputs {
+            let free = |v: &SSAVar| match v.name() {
+                "x" => xv,
+                "z" => zv,
+                "y" => yv,
+                _ => panic!("no input {v:?}"),
             };
-            for (xv, zv, yv) in (0u128..256).flat_map(|xv| {
-                halves
-                    .clone()
-                    .map(move |yv| (xv, (xv * 37 + 11) & 0xff, yv))
-            }) {
-                let inputs = |v: &SSAVar| match v.name() {
-                    "x" => xv,
-                    "z" => zv,
-                    "y" => yv,
-                    _ => panic!("no input {v:?}"),
-                };
-                let defined = |v: &SSAVar| {
-                    let definition = definitions.iter().find(|d| d.dst() == Some(v));
-                    match definition {
-                        Some(definition) => {
-                            machine(definition, &inputs).expect("the definition computes")
-                        }
-                        None => inputs(v),
-                    }
-                };
-                let (Some(original), Some(folded)) =
-                    (machine(op, &defined), machine(&replacement, &defined))
-                else {
-                    continue;
-                };
-                assert_eq!(
-                    folded, original,
-                    "{op:?} over {definitions:?} at x={xv:#x} z={zv:#x} y={yv:#x}: folded to {replacement:?}"
-                );
-                checked += 1;
-            }
+            let defined = |v: &SSAVar| match definitions.iter().find(|d| d.dst() == Some(v)) {
+                Some(definition) => machine(definition, &free).expect("the definition computes"),
+                None => free(v),
+            };
+            let (Some(original), Some(folded)) =
+                (machine(op, &defined), machine(&replacement, &defined))
+            else {
+                continue;
+            };
+            let at = format!("x={xv:#x} z={zv:#x} y={yv:#x}");
+            assert_eq!(
+                folded, original,
+                "{op:?} over {definitions:?} at {at}: folded to {replacement:?}"
+            );
+            checked += 1;
         }
-        assert!(checked > 0);
+        checked
     }
 
     /// An operand of a checked operation: the free variable, or a literal.
@@ -2297,110 +2285,127 @@ mod sccp_tests {
     /// (0, 1, all ones or the same variable beside it), exhaustively at 8 and 16 bits (R1c).
     #[test]
     fn every_identity_inst_combine_applies_is_what_the_machine_computes() {
-        use r2il::eval::{Word, apply};
         let mut checked = 0usize;
         for bytes in [1u32, 2] {
-            let bits = bytes * 8;
-            let mask = (1u64 << bits) - 1;
-            let x = SSAVar::new("x", 1, bytes);
-            let shapes = [0, 1, mask].into_iter().flat_map(|literal| {
-                [
-                    (Operand::Free, Operand::Literal(literal)),
-                    (Operand::Literal(literal), Operand::Free),
-                ]
-            });
-            let shapes = shapes.chain([(Operand::Free, Operand::Free)]);
             for (build, operation, boolean) in binaries() {
-                let boolean_inputs = matches!(
-                    operation,
-                    r2il::eval::Operation::BoolAnd | r2il::eval::Operation::BoolOr
-                );
-                let (in_bytes, out_bytes) = match boolean_inputs {
-                    true => (1, 1),
-                    false => (bytes, if boolean { 1 } else { bytes }),
-                };
-                if boolean_inputs && bytes != 1 {
-                    continue;
-                }
-                let x = SSAVar::new("x", 1, in_bytes);
-                for (left, right) in shapes.clone() {
-                    let spell = |operand: Operand| match operand {
-                        Operand::Free => x.clone(),
-                        Operand::Literal(literal) => SSAVar::constant(literal & mask, in_bytes),
-                    };
-                    let dst = SSAVar::new("dst", 1, out_bytes);
-                    let op = build(dst, spell(left), spell(right));
-                    // `eval_const_op` decides absorbing elements on its own, for constant substitution.
-                    let absorbed = through_ids(&op, &[], |op, _, values| {
-                        let value = eval_const_op(op, values, |id| const_value(values, id))?;
-                        let dst = *op.dst()?;
-                        Some(SSAOp::Copy {
-                            dst,
-                            src: values.constant(value, width(values, dst)),
-                        })
-                    });
-                    let Some(replacement) = absorbed.or_else(|| simplify(&op)) else {
-                        continue;
-                    };
-                    let values: u128 = if boolean_inputs {
-                        2
-                    } else {
-                        1 << (in_bytes * 8)
-                    };
-                    for value in 0..values {
-                        let operand = |operand: Operand| match operand {
-                            Operand::Free => value,
-                            Operand::Literal(literal) => u128::from(literal & mask),
-                        };
-                        let words = [operand(left), operand(right)]
-                            .map(|v| Word::new(v, in_bytes).expect("a width"));
-                        let Ok(machine) = apply(operation, &words, out_bytes) else {
-                            continue;
-                        };
-                        assert_eq!(
-                            replaced_value(&replacement, &x, value),
-                            machine,
-                            "{op:?} at x = {value:#x}: inst_combine answered {replacement:?}"
-                        );
-                        checked += 1;
-                    }
-                }
+                checked += check_binary_identities(bytes, build, operation, boolean);
             }
-            // A decided selection is its arm; an extension to its own width is its operand.
-            let z = SSAVar::new("z", 1, bytes);
-            let unary = [
-                SSAOp::IntZExt {
-                    dst: SSAVar::new("dst", 1, bytes),
-                    src: x.clone(),
-                },
-                SSAOp::IntSExt {
-                    dst: SSAVar::new("dst", 1, bytes),
-                    src: x.clone(),
-                },
-            ];
-            let selects = [0u64, 1].map(|decided| {
-                SSAOp::Select(Box::new(crate::op::SelectOp {
-                    dst: SSAVar::new("dst", 1, bytes),
-                    cond: SSAVar::constant(decided, 1),
-                    if_true: x.clone(),
-                    if_false: z.clone(),
-                }))
-            });
-            for op in unary.iter().chain(&selects) {
-                let replacement = simplify(op).expect("the identity fires");
-                for value in 0..(1u128 << bits) {
-                    let env = |v: &SSAVar| if v == &x { value } else { 0x5a };
-                    let machine = machine(op, &env).expect("it computes");
-                    let folded = machine_value(&replacement, &env);
-                    assert_eq!(
-                        folded, machine,
-                        "{op:?} at x = {value:#x}: answered {replacement:?}"
-                    );
-                    checked += 1;
-                }
-            }
+            checked += check_unary_identities(bytes);
         }
         assert!(checked > 0);
+    }
+
+    /// What `simplify_op` or `eval_const_op` answers for `op`, which decides absorbing elements on its own.
+    fn identity_answer(op: &SSAOp) -> Option<SSAOp> {
+        let absorbed = through_ids(op, &[], |op, _, values| {
+            let value = eval_const_op(op, values, |id| const_value(values, id))?;
+            let dst = *op.dst()?;
+            Some(SSAOp::Copy {
+                dst,
+                src: values.constant(value, width(values, dst)),
+            })
+        });
+        absorbed.or_else(|| simplify(op))
+    }
+
+    /// One binary operation over each operand shape at `bytes`, against `r2il::eval`; the inputs compared.
+    fn check_binary_identities(
+        bytes: u32,
+        build: fn(SSAVar, SSAVar, SSAVar) -> SSAOp,
+        operation: r2il::eval::Operation,
+        boolean: bool,
+    ) -> usize {
+        use r2il::eval::{Word, apply};
+        let boolean_inputs = matches!(
+            operation,
+            r2il::eval::Operation::BoolAnd | r2il::eval::Operation::BoolOr
+        );
+        if boolean_inputs && bytes != 1 {
+            return 0;
+        }
+        let mask = (1u64 << (bytes * 8)) - 1;
+        let out_bytes = if boolean { 1 } else { bytes };
+        let x = SSAVar::new("x", 1, bytes);
+        let shapes = [0, 1, mask].into_iter().flat_map(|literal| {
+            [
+                (Operand::Free, Operand::Literal(literal)),
+                (Operand::Literal(literal), Operand::Free),
+            ]
+        });
+        let values: u128 = if boolean_inputs { 2 } else { 1 << (bytes * 8) };
+        let mut checked = 0;
+        for (left, right) in shapes.chain([(Operand::Free, Operand::Free)]) {
+            let spell = |operand: Operand| match operand {
+                Operand::Free => x.clone(),
+                Operand::Literal(literal) => SSAVar::constant(literal & mask, bytes),
+            };
+            let op = build(SSAVar::new("dst", 1, out_bytes), spell(left), spell(right));
+            let Some(replacement) = identity_answer(&op) else {
+                continue;
+            };
+            let computed = (0..values).filter_map(|value| {
+                let operand = |operand: Operand| match operand {
+                    Operand::Free => value,
+                    Operand::Literal(literal) => u128::from(literal & mask),
+                };
+                let words =
+                    [operand(left), operand(right)].map(|v| Word::new(v, bytes).expect("a width"));
+                apply(operation, &words, out_bytes)
+                    .ok()
+                    .map(|machine| (value, machine))
+            });
+            for (value, machine) in computed {
+                let answered = replaced_value(&replacement, &x, value);
+                assert_eq!(
+                    answered, machine,
+                    "{op:?} at x = {value:#x}: inst_combine answered {replacement:?}"
+                );
+                checked += 1;
+            }
+        }
+        checked
+    }
+
+    /// A decided selection is its arm; an extension to its own width is its operand.
+    fn check_unary_identities(bytes: u32) -> usize {
+        let (x, z, dst) = (
+            SSAVar::new("x", 1, bytes),
+            SSAVar::new("z", 1, bytes),
+            SSAVar::new("dst", 1, bytes),
+        );
+        let mut ops = vec![
+            SSAOp::IntZExt {
+                dst: dst.clone(),
+                src: x.clone(),
+            },
+            SSAOp::IntSExt {
+                dst: dst.clone(),
+                src: x.clone(),
+            },
+        ];
+        ops.extend([0u64, 1].map(|decided| {
+            SSAOp::Select(Box::new(crate::op::SelectOp {
+                dst: dst.clone(),
+                cond: SSAVar::constant(decided, 1),
+                if_true: x.clone(),
+                if_false: z.clone(),
+            }))
+        }));
+        let mut checked = 0;
+        for op in &ops {
+            let replacement = simplify(op).expect("the identity fires");
+            for value in 0..(1u128 << (bytes * 8)) {
+                let env = |v: &SSAVar| [0x5a, value][usize::from(v == &x)];
+                let machine = machine(op, &env).expect("it computes");
+                let answered = machine_value(&replacement, &env);
+                assert_eq!(
+                    answered, machine,
+                    "{op:?} at x = {value:#x}: answered {replacement:?}"
+                );
+                checked += 1;
+            }
+        }
+        checked
     }
 
     /// What a replacement copy computes, its operand read from `env`.

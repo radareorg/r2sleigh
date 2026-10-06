@@ -780,13 +780,14 @@ impl Importer<'_> {
                         .arena
                         .intern(joined_ty, TermKind::Concat { high: term, low });
                 }
+                let zero_high = match zero_above {
+                    true => Some(MachineBitVector::new(width - end, 0)?),
+                    false => None,
+                };
                 if end < width {
-                    let high = match zero_above {
-                        true => {
-                            let zero = MachineBitVector::new(width - end, 0)?;
-                            self.arena.intern(unsigned(width - end), TermKind::Literal(zero))
-                        }
-                        false => self.arena.intern(
+                    let high = match zero_high {
+                        Some(zero) => self.arena.intern(unsigned(width - end), TermKind::Literal(zero)),
+                        None => self.arena.intern(
                             unsigned(width - end),
                             TermKind::Extract {
                                 input: r,

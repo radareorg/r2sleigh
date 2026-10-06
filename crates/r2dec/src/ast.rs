@@ -3918,15 +3918,16 @@ mod cast_collapse {
             i(64),
             CType::Bool,
         ];
-        let mut chains: Vec<Vec<CType>> = Vec::new();
-        for a in &types {
-            for b in &types {
-                chains.push(vec![a.clone(), b.clone()]);
-                for c in &types {
-                    chains.push(vec![a.clone(), b.clone(), c.clone()]);
-                }
-            }
-        }
+        let pairs = types
+            .iter()
+            .flat_map(|a| types.iter().map(move |b| vec![a.clone(), b.clone()]));
+        let pairs: Vec<Vec<CType>> = pairs.collect();
+        let triples = pairs.iter().flat_map(|pair| {
+            types
+                .iter()
+                .map(move |c| [pair.as_slice(), std::slice::from_ref(c)].concat())
+        });
+        let chains: Vec<Vec<CType>> = pairs.iter().cloned().chain(triples).collect();
         for chain in &chains {
             let collapsed = spine(&built(&conv(chain)));
             if &collapsed == chain {

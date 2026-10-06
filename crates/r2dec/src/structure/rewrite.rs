@@ -2064,26 +2064,22 @@ mod tests {
             BinaryOp::Gt,
             BinaryOp::Ge,
         ];
-        for a in -8..8 {
-            for b in -8..8 {
-                let rel = |op| CExpr::binary(op, CExpr::IntLit(a), CExpr::IntLit(b));
-                for op in relations {
-                    let negated = ControlFlowStructurer::negate_condition(rel(op));
-                    assert_eq!(
-                        holds(&negated),
-                        !holds(&rel(op)),
-                        "!({a} {op:?} {b}) as {negated:?}"
-                    );
-                    for other in relations {
-                        let either = CExpr::binary(BinaryOp::Or, rel(op), rel(other));
-                        let negated = ControlFlowStructurer::negate_condition(either.clone());
-                        assert_eq!(
-                            holds(&negated),
-                            !holds(&either),
-                            "!({either:?}) as {negated:?}"
-                        );
-                    }
-                }
+        let pairs = (-8..8).flat_map(|a| (-8..8).map(move |b| (a, b)));
+        for ((a, b), op) in pairs.flat_map(|pair| relations.map(|op| (pair, op))) {
+            let rel = |op| CExpr::binary(op, CExpr::IntLit(a), CExpr::IntLit(b));
+            let negated = ControlFlowStructurer::negate_condition(rel(op));
+            assert_eq!(
+                holds(&negated),
+                !holds(&rel(op)),
+                "!({a} {op:?} {b}) as {negated:?}"
+            );
+            for either in relations.map(|other| CExpr::binary(BinaryOp::Or, rel(op), rel(other))) {
+                let negated = ControlFlowStructurer::negate_condition(either.clone());
+                assert_eq!(
+                    holds(&negated),
+                    !holds(&either),
+                    "!({either:?}) as {negated:?}"
+                );
             }
         }
     }

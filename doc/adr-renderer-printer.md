@@ -77,8 +77,9 @@ stops retrying when a check fails.
 
 - R0: the render plan beside the current path. Exit: it agrees over the
   census.
-- R1: expressions as r2rewrite terms, with the folds and `inst_combine` as
-  proved rules. Exit: the Rust-side simplifiers are deleted.
+- R1: done (above). Exit as amended 2026-10-06: no simplifier is unproved;
+  each is deleted, an r2rewrite rule, or proved against the evaluator or
+  C's rules where it lives.
 - R2: obligations carried by the tree, with the linear checker. Exit: the
   observation journal is deleted.
 - R3: bindings from the frame model, with certified reloads reading their
