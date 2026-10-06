@@ -25,11 +25,10 @@ pub enum CastRole {
     PointerWidthStep,
 }
 
-/// The width of an integer cast target, or `None` for anything else.
+/// The width of an integer cast target, or `None` for anything else; `_Bool` converts by `!= 0`, not modulo (C11 6.3.1.2).
 fn integer_cast_width(ty: &CType) -> Option<u32> {
     match ty {
         CType::Int { bits, .. } => Some(*bits),
-        CType::Bool => Some(8),
         _ => None,
     }
 }
@@ -3835,6 +3834,8 @@ mod cast_collapse {
     fn convert(bits: u128, width: u32, signed: bool, to: &CType) -> (u128, u32, bool) {
         let (to_bits, to_signed) = match to {
             CType::Int { bits, signedness } => (*bits, *signedness == r2types::Signedness::Signed),
+            // C11 6.3.1.2: a conversion to _Bool is whether the value compares unequal to 0.
+            CType::Bool => return (u128::from(bits != 0), 8, false),
             _ => unreachable!("only integer conversions are evaluated"),
         };
         let mask = |w: u32| {
@@ -3885,6 +3886,41 @@ mod cast_collapse {
                 a, b,
                 "chains disagree on input {input:#x} of {source:?}: {before:?} gave {a:#x}, {after:?} gave {b:#x}"
             );
+        }
+    }
+
+    /// Every collapse `cast_with_role` makes over integer and `_Bool` conversions, against C's
+    /// conversion rules: each chain of two and three conversions, every 8- and 16-bit source (R1d).
+    #[test]
+    fn every_collapse_is_the_conversion_chain_it_replaces() {
+        let types = [
+            u(8),
+            i(8),
+            u(16),
+            i(16),
+            u(32),
+            i(32),
+            u(64),
+            i(64),
+            CType::Bool,
+        ];
+        let mut chains: Vec<Vec<CType>> = Vec::new();
+        for a in &types {
+            for b in &types {
+                chains.push(vec![a.clone(), b.clone()]);
+                for c in &types {
+                    chains.push(vec![a.clone(), b.clone(), c.clone()]);
+                }
+            }
+        }
+        for chain in &chains {
+            let collapsed = spine(&built(&conv(chain)));
+            if &collapsed == chain {
+                continue;
+            }
+            for source in [u(8), i(8), u(16), i(16)] {
+                agrees(chain, &collapsed, &source);
+            }
         }
     }
 

@@ -63,6 +63,12 @@ stops retrying when a check fails.
   to a strictly shallower definition (longest-path depth, computed once in
   O(definitions)); a step that lowers nothing is a defect and panics, where
   the budget kept a partial result. Census byte-identical; no time added.
+- R1d: `CExpr::cast_with_role`'s integer collapses are proved against C's
+  conversion rules over every chain of two and three conversions among the
+  eight integer types and `_Bool`, for every 8- and 16-bit source. The proof
+  found `_Bool` treated as an 8-bit integer: `(uint8_t)(_Bool)x` collapsed
+  to `(uint8_t)x`, 2 where C gives 1. `_Bool` now takes no part in the
+  modular collapses. The pointer collapses rest on C11 6.3.2.3 as cited.
 
 ## Left
 
