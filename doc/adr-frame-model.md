@@ -54,6 +54,15 @@ declarations.
   widths), pdd-twice 43 (a slot and a temporary bound to it), pdd-only 31,
   type 29, name 21 (`afv` spells `stack_m{N}` where the rendering uses the
   debug information's name). This is the number every P4 step moves.
+- P4.1: one extent rule's forbidden halves deleted (the gap extent and the
+  widest-access guess); one escape analysis, `FrameReach`'s O(V + E) taint,
+  with every sink stated once, read by the obligations (`private` is the
+  frame objects not escaped), the certificates, memory SSA and r2dec's
+  binding plan; `private_stack_objects`' per-object walk,
+  `escaping_roots`/`escaping_addresses`, `callee_reached` and r2dec's own
+  walk deleted; containment one `FrameIndex` (O(log n)). Census: one
+  rendering fixed (stores to locals read through a pointer array were
+  dropped), 14 `_start` reorderings. `promote.rs`'s escape set is P4.3's.
 
 ## Left
 
