@@ -127,3 +127,22 @@ fn main_s_stack_protector_check_is_compiler_inserted() {
         run.out
     );
 }
+
+#[test]
+fn pddj_names_the_premise_main_s_rendering_assumed() {
+    let run = bounded("pddj @ sym.main");
+    assert!(run.ok, "{}", run.out);
+    let line = run.out.lines().next().unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_str(line).expect("pddj is one line of JSON");
+    assert_eq!(
+        json["premises"],
+        serde_json::json!(["ub-free"]),
+        "{}",
+        run.out
+    );
+    assert!(
+        json["proof"]["compiler_inserted"].as_u64() > Some(0),
+        "{}",
+        run.out
+    );
+}

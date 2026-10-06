@@ -3906,6 +3906,48 @@ fn a_canary_written_twice_is_not_decided() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
+/// Two reads of a thread-local variable at `fs:[0x30]` compared the same way are a program's
+/// own check: a call between may change the variable, and only `fs:[0x28]` is the platform's guard.
+#[test]
+fn a_thread_local_read_twice_is_no_stack_guard() {
+    let mut bytes = CANARY_CHECKED.to_vec();
+    bytes[0x09] = 0x30; // 1004 mov rax, fs:[0x30]
+    bytes[0x1e] = 0x30; // 1019 sub rdx, fs:[0x30]
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "thread_local_checked",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+/// The canary is still in RAX at `ret`, so the function returns the guard: that read is the
+/// program's and keeps its residual, while the check and the slot are still the compiler's.
+#[test]
+fn a_canary_the_function_returns_keeps_its_read() {
+    let mut bytes = CANARY_CHECKED.to_vec();
+    bytes[0x12..0x14].copy_from_slice(&[0x90, 0x90]); // 1012 no `xor eax, eax`
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_returned",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("fcn_1030"), "{output}");
+    assert!(output.contains("compiler-inserted"), "{output}");
+}
+
 /// The failure path calls a function that returns, so nothing proves the check is a protector.
 #[test]
 fn a_check_whose_failure_returns_is_not_decided() {

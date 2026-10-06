@@ -270,6 +270,14 @@ fn note_unproven_constructs(
             // A function with a residual is rendered, not proven. The count
             // says how many obligations a residual stands in for, so the proof
             // line never reads as clean when part of the body went unproven.
+            if closure.compiler_inserted > 0 {
+                let _ = write!(
+                    &mut line,
+                    ", {} compiler-inserted (assuming {})",
+                    closure.compiler_inserted,
+                    r2source::Premise::UbFreeSource.spelled()
+                );
+            }
             if closure.gapped > 0 {
                 let _ = write!(&mut line, ", {} residual", closure.gapped);
             }
@@ -278,14 +286,6 @@ fn note_unproven_constructs(
             let split = ledger.map_or(0, crate::ledger::ObligationLedger::split_rendered);
             if split > 0 {
                 let _ = write!(&mut line, " ({split} through a split variable)");
-            }
-            if closure.compiler_inserted > 0 {
-                let _ = write!(
-                    &mut line,
-                    ", {} compiler-inserted (assuming {})",
-                    closure.compiler_inserted,
-                    r2source::Premise::UbFreeSource.spelled()
-                );
             }
             // The column that used to have no name. Saying nothing here is what let a
             // gutted body report as clean, so it is spelled out whenever it is not zero.

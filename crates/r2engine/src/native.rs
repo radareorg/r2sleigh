@@ -2220,6 +2220,19 @@ pub fn call_effect(
     SourceBoundaryReads::new(call_reads, return_reads)
         .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
         .and_then(|effect| effect.with_system_reserved(system_reserved))
+        .and_then(
+            |effect| match r2abi::stack_guard(&arch.name, bits, platform) {
+                Some(guard) => match place(guard.register) {
+                    Some(base) => effect.with_stack_guard(r2source::SourceStackGuard {
+                        base,
+                        offset: guard.offset,
+                        width: guard.width,
+                    }),
+                    None => Ok(effect),
+                },
+                None => Ok(effect),
+            },
+        )
         .inspect_err(|error| {
             r2il::refusal_evidence!("call-effect", "{}: {error:?}", prototype.name);
         })

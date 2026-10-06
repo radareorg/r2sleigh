@@ -36,6 +36,9 @@ pub struct RenderedFunctionJson {
     /// A translation unit that compiles on its own.
     pub code: String,
     pub proof: RenderProofJson,
+    /// The premises the rendering assumed (`Premise::spelled`); empty where it assumed none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub premises: Vec<&'static str>,
     pub variables: Vec<RenderedVariableJson>,
     /// One-based lines of `code`, each with the instructions it accounts for.
     pub lines: Vec<RenderedLineJson>,
@@ -159,6 +162,11 @@ impl RenderedFunctionJson {
         definition: String,
     ) -> Self {
         let proof = RenderProofJson::of(response.obligation_ledger.as_ref());
+        // A compiler-inserted elision holds only of a UB-free source.
+        let premises = (proof.compiler_inserted > 0)
+            .then_some(r2source::Premise::UbFreeSource.spelled())
+            .into_iter()
+            .collect::<Vec<_>>();
         let rendered = match &response.output {
             EngineRendering::Function(rendered) => rendered,
             // A listing is what the engine answers with when nothing was
@@ -178,6 +186,7 @@ impl RenderedFunctionJson {
                     }),
                     code: text.clone(),
                     proof,
+                    premises,
                     variables: Vec::new(),
                     lines: Vec::new(),
                     links: Vec::new(),
@@ -200,6 +209,7 @@ impl RenderedFunctionJson {
             refused: refused.map(|reason| RenderRefusalJson { reason }),
             code: emission.unit().to_owned(),
             proof,
+            premises,
             variables: emission.variables().iter().map(variable_json).collect(),
             lines: emission
                 .lines()

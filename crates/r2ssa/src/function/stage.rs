@@ -359,7 +359,9 @@ impl Sealed {
         // function came from; a span the obligations cannot bind means the
         // lift and the function disagree.
         if let Some(spans) = finish.native_spans
-            && !facts.obligations.bind_genuine_native_spans(spans)
+            && !facts
+                .obligations
+                .bind_genuine_native_spans(spans, self.ir.compiler_inserted_blocks())
         {
             return Err(super::malformed_ssa_input());
         }

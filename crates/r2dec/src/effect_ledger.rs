@@ -443,6 +443,9 @@ fn upstream_zero_occurrence_outcome(
 ) -> Option<Outcome> {
     // The instruction does nothing, so there is nothing to render for it and
     // nothing left unaccounted when the rendering omits it.
+    if id.kind == SemanticObligationKind::CompilerInserted {
+        return Some(Outcome::Elided(ElisionReason::CompilerInserted));
+    }
     if id.kind == SemanticObligationKind::NoNativeSemantics {
         return Some(Outcome::Elided(ElisionReason::NoNativeSemantics));
     }

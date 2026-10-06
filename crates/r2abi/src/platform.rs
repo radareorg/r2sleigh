@@ -114,6 +114,44 @@ const AARCH64_DARWIN: [PlatformRegister; 1] = [PlatformRegister {
                register x18. Don't use this register.\"",
 }];
 
+/// Where a platform keeps the value a stack protector compares its canary with: memory at a
+/// constant offset from a register the platform reserves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackGuard {
+    /// The reserved register, spelled as radare2 spells it.
+    pub register: &'static str,
+    pub offset: u64,
+    pub width: u32,
+    pub citation: &'static str,
+}
+
+const X86_64_LINUX_GUARD: StackGuard = StackGuard {
+    register: "fs_base",
+    offset: 0x28,
+    width: 8,
+    citation: "glibc sysdeps/x86_64/nptl/tls.h, tcbhead_t: stack_guard at %fs:0x28; GCC \
+               gcc/config/i386/gnu-user64.h: TARGET_THREAD_SSP_OFFSET 0x28 (musl agrees)",
+};
+
+const I386_LINUX_GUARD: StackGuard = StackGuard {
+    register: "gs_base",
+    offset: 0x14,
+    width: 4,
+    citation: "glibc sysdeps/i386/nptl/tls.h, tcbhead_t: stack_guard at %gs:0x14; GCC \
+               gcc/config/i386/gnu-user.h: TARGET_THREAD_SSP_OFFSET 0x14",
+};
+
+/// Where the platform keeps the stack guard, if it addresses it from a reserved register.
+///
+/// AArch64 Linux keeps it in the global `__stack_chk_guard`, which no register addresses.
+pub fn stack_guard(arch: &str, bits: u32, platform: Platform) -> Option<&'static StackGuard> {
+    match (crate::family(arch), bits, platform) {
+        (Some("x86"), 64, Platform::Linux) => Some(&X86_64_LINUX_GUARD),
+        (Some("x86"), 32, Platform::Linux) => Some(&I386_LINUX_GUARD),
+        _ => None,
+    }
+}
+
 /// What a platform's ABI says of its default calling convention that no
 /// compiler specification in the Sleigh bundle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3362,7 +3362,17 @@ pub struct SourceCallEffect {
     clobbered: Box<[CanonicalStorageId]>,
     preserved: Box<[CanonicalStorageId]>,
     system_reserved: Box<[CanonicalStorageId]>,
+    /// Where the platform keeps the stack guard, addressed from one of `system_reserved`.
+    stack_guard: Option<SourceStackGuard>,
     reads: SourceBoundaryReads,
+}
+
+/// Memory at a constant offset from a reserved register's value, where a stack protector's guard is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceStackGuard {
+    pub base: CanonicalStorageId,
+    pub offset: u64,
+    pub width: u32,
 }
 
 /// The registers a call and a return read without an operand naming them.
@@ -3424,6 +3434,7 @@ impl SourceCallEffect {
             clobbered,
             preserved,
             system_reserved: Box::default(),
+            stack_guard: None,
             reads,
         })
     }
@@ -3453,6 +3464,25 @@ impl SourceCallEffect {
             system_reserved,
             ..self
         })
+    }
+
+    /// The same effect, with where the platform keeps the stack guard; its base must be reserved.
+    pub fn with_stack_guard(
+        self,
+        guard: SourceStackGuard,
+    ) -> Result<Self, SourceMachineRolesError> {
+        if !self.reserves(guard.base) {
+            return Err(SourceMachineRolesError::ContradictoryCallEffect);
+        }
+        Ok(Self {
+            stack_guard: Some(guard),
+            ..self
+        })
+    }
+
+    /// Where the platform keeps the stack guard, where it states one.
+    pub const fn stack_guard(&self) -> Option<&SourceStackGuard> {
+        self.stack_guard.as_ref()
     }
 
     /// The registers the convention names as destroyed, sorted.

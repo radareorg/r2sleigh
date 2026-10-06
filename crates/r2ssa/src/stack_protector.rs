@@ -1,6 +1,7 @@
 //! The stack-protector check, decided under `Premise::UbFreeSource` (doc/adr-frame-model.md, P4.4).
 //!
-//! The guard is memory addressed from the entry value of a register the platform reserves. A
+//! The guard is the memory the platform states it at (`r2abi::stack_guard`), addressed from the
+//! entry value of a register the platform reserves. A
 //! check compares two reads of it, each direct or through a frame slot written once from one, and
 //! a mismatch leaves for a block that only calls a function that does not return. A UB-free source
 //! writes neither the guard nor outside its own objects, so both reads agree and the check passes.
@@ -41,7 +42,11 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     if !machine.accepts(r2source::Premise::UbFreeSource) {
         return;
     }
-    let Some(effect) = machine.call_effect() else {
+    // Only the slot the platform states: a thread-local variable read twice is no guard.
+    let Some(guard) = machine
+        .call_effect()
+        .and_then(r2source::SourceCallEffect::stack_guard)
+    else {
         return;
     };
     let defs = Definitions::of(func);
@@ -49,7 +54,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     let checks = func
         .block_addrs()
         .iter()
-        .filter_map(|addr| check(func, &defs, &slots, effect, *addr))
+        .filter_map(|addr| check(func, &defs, &slots, guard, *addr))
         .collect::<Vec<_>>();
     if checks.is_empty() {
         return;
@@ -99,6 +104,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         .iter()
         .map(|check| check.block)
         .collect::<BTreeSet<_>>();
+    let mut removed = BTreeSet::new();
     for fail in failed {
         if func
             .predecessors(fail)
@@ -106,11 +112,12 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
             .all(|pred| deciding.contains(pred))
         {
             decided.reshape(ShapeEdit::RemoveBlock(fail));
+            removed.insert(fail);
         }
     }
     decided.reorder();
     func.apply_edits(decided);
-    func.record_compiler_inserted(inserted);
+    func.record_compiler_inserted(inserted, removed);
 }
 
 /// Each variable's defining operation, and the walks over it this check needs.
@@ -259,12 +266,12 @@ fn guard_read(
     func: &SSAFunction,
     defs: &Definitions,
     slots: &SlotStores,
-    effect: &r2source::SourceCallEffect,
+    guard: &r2source::SourceStackGuard,
     var: VarId,
 ) -> Option<GuardRead> {
     let (load, address, width) = defs.load(func, var)?;
     let loaded = defs.op(defs.copied(var))?.1.dst().copied()?;
-    if reserved_entry_value(func, effect, address.0) {
+    if is_guard(func, guard, address, width) {
         return Some(GuardRead {
             guard: address,
             first: (load, loaded),
@@ -274,29 +281,30 @@ fn guard_read(
     }
     // A reload of a frame slot whose only writer, run before it, stored a direct read of the guard.
     let (store, stored) = slots.sole_writer(address, width)?;
-    let (guard_load, guard, _) = defs.load(func, stored)?;
-    if !reserved_entry_value(func, effect, guard.0) || !defs.precedes(func, store, load) {
+    let (guard_load, stored_address, stored_width) = defs.load(func, stored)?;
+    if !is_guard(func, guard, stored_address, stored_width) || !defs.precedes(func, store, load) {
         return None;
     }
     let first = defs.op(defs.copied(stored))?.1.dst().copied()?;
     Some(GuardRead {
-        guard,
+        guard: stored_address,
         first: (guard_load, first),
         ops: BTreeSet::from([load, store, guard_load]),
         rereads: BTreeSet::from([(load, loaded)]),
     })
 }
 
-/// Whether a value is the entry value of a register the platform reserves to the system.
-fn reserved_entry_value(
+/// Whether a read of `width` bytes at `address` is a read of the platform's stack guard.
+fn is_guard(
     func: &SSAFunction,
-    effect: &r2source::SourceCallEffect,
-    var: VarId,
+    guard: &r2source::SourceStackGuard,
+    (root, offset): Affine,
+    width: u32,
 ) -> bool {
-    func.var(var).version == 0
-        && func
-            .storage_of(var)
-            .is_some_and(|storage| effect.reserves(storage))
+    func.var(root).version == 0
+        && func.storage_of(root) == Some(guard.base)
+        && u64::try_from(offset).ok() == Some(guard.offset)
+        && width == guard.width
 }
 
 /// The check that ends one block, when it compares two reads of one guard.
@@ -304,7 +312,7 @@ fn check(
     func: &SSAFunction,
     defs: &Definitions,
     slots: &SlotStores,
-    effect: &r2source::SourceCallEffect,
+    guard: &r2source::SourceStackGuard,
     addr: u64,
 ) -> Option<Check> {
     let BlockTerminator::ConditionalBranch {
@@ -320,8 +328,8 @@ fn check(
         _ => None,
     })?;
     let (left, right, equal_when_true) = equality(func, defs, cond)?;
-    let left = guard_read(func, defs, slots, effect, left)?;
-    let right = guard_read(func, defs, slots, effect, right)?;
+    let left = guard_read(func, defs, slots, guard, left)?;
+    let right = guard_read(func, defs, slots, guard, right)?;
     if left.guard != right.guard {
         return None;
     }
