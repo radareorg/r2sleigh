@@ -80,14 +80,17 @@ declarations.
   -O0 keeps the canary in a slot, but promotion often takes it out of
   memory, leaving two reads of the guard compared. Under
   `Premise::UbFreeSource`, which r2engine grants (`accepted_premises`), a
-  check comparing two reads of memory at a reserved register's entry
-  value plus a constant, directly or through a slot written once before
+  check comparing two reads of the platform's guard slot (r2abi states
+  it: x86-64 Linux `fs_base+0x28`, i386 Linux `gs_base+0x14`; a
+  thread-local read twice is not one), directly or through a slot written once before
   the reload, whose mismatch edge reaches only a call that does not return,
   passes: the failing edge and block go, every reread becomes a copy of the
   first read (so a live `reload - guard` folds to zero), and the reads and
   the slot store are certified `compiler_inserted` unless something outside
   them is observed reading one (a returned carrier holding the canary keeps
-  its residual). The proof line counts them and names the premise. Census:
+  its residual). The removed failure block's instructions stay in the
+  inventory as `CompilerInserted` obligations, so `total` does not shrink
+  by deletion. The proof line and `pddj`'s `premises` name the premise. Census:
   14 functions lose the canary residual and `__stack_chk_fail`; one array
   shrinks to its own 16 bytes. The x86-64 baseline holds 38 canary traps;
   aarch64's guard is a global (`__stack_chk_guard`), which this rule does
