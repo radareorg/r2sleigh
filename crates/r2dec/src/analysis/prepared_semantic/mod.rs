@@ -829,15 +829,7 @@ fn populate_owner_exprs(
                                 b,
                                 compare_width,
                             ))
-                            .map(|(lhs, rhs)| {
-                                prepared_simplify_binary_expr(
-                                    symbols,
-                                    view,
-                                    BinaryOp::Sub,
-                                    lhs,
-                                    rhs,
-                                )
-                            })
+                            .map(|(lhs, rhs)| CExpr::binary(BinaryOp::Sub, lhs, rhs))
                         });
                         if let Some(expr) = derived
                             && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
@@ -872,15 +864,7 @@ fn populate_owner_exprs(
                                 b,
                                 compare_width,
                             ))
-                            .map(|(lhs, rhs)| {
-                                prepared_simplify_binary_expr(
-                                    symbols,
-                                    view,
-                                    BinaryOp::Shl,
-                                    lhs,
-                                    rhs,
-                                )
-                            })
+                            .map(|(lhs, rhs)| CExpr::binary(BinaryOp::Shl, lhs, rhs))
                         });
                         if let Some(expr) = derived
                             && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
@@ -915,15 +899,7 @@ fn populate_owner_exprs(
                                 b,
                                 compare_width,
                             ))
-                            .map(|(lhs, rhs)| {
-                                prepared_simplify_binary_expr(
-                                    symbols,
-                                    view,
-                                    BinaryOp::Mul,
-                                    lhs,
-                                    rhs,
-                                )
-                            })
+                            .map(|(lhs, rhs)| CExpr::binary(BinaryOp::Mul, lhs, rhs))
                         });
                         if let Some(expr) = derived
                             && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
@@ -958,15 +934,7 @@ fn populate_owner_exprs(
                                 b,
                                 compare_width,
                             ))
-                            .map(|(lhs, rhs)| {
-                                prepared_simplify_binary_expr(
-                                    symbols,
-                                    view,
-                                    BinaryOp::Add,
-                                    lhs,
-                                    rhs,
-                                )
-                            })
+                            .map(|(lhs, rhs)| CExpr::binary(BinaryOp::Add, lhs, rhs))
                         });
                         if let Some(expr) = derived
                             && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
@@ -1017,9 +985,7 @@ fn populate_owner_exprs(
                             b,
                             compare_width,
                         ))
-                        .map(|(lhs, rhs)| {
-                            prepared_simplify_binary_expr(symbols, view, op, lhs, rhs)
-                        })
+                        .map(|(lhs, rhs)| CExpr::binary(op, lhs, rhs))
                         .or_else(|| {
                             prepared_binary_owner_expr(
                                 symbols,
@@ -2440,262 +2406,7 @@ fn prepared_binary_owner_expr(
 ) -> Option<CExpr> {
     let lhs = scalar_owner_expr_for_value(symbols, prepared, view, a, compare_width)?;
     let rhs = scalar_owner_expr_for_value(symbols, prepared, view, b, compare_width)?;
-    Some(prepared_simplify_binary_expr(symbols, view, op, lhs, rhs))
-}
-
-fn prepared_simplify_binary_expr(
-    symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    view: &PreparedSemanticView,
-    op: BinaryOp,
-    mut lhs: CExpr,
-    mut rhs: CExpr,
-) -> CExpr {
-    if prepared_binary_op_is_commutative(op)
-        && prepared_expr_order_key(symbols, view, &rhs)
-            < prepared_expr_order_key(symbols, view, &lhs)
-    {
-        std::mem::swap(&mut lhs, &mut rhs);
-    }
-
-    match op {
-        BinaryOp::Add => {
-            if prepared_expr_is_zero(&lhs) {
-                rhs
-            } else if prepared_expr_is_zero(&rhs) {
-                lhs
-            } else if let Some(expr) = prepared_simplify_linear_addition(symbols, view, &lhs, &rhs)
-            {
-                expr
-            } else {
-                CExpr::binary(op, lhs, rhs)
-            }
-        }
-        BinaryOp::Sub => {
-            if prepared_expr_is_zero(&rhs) {
-                lhs
-            } else {
-                CExpr::binary(op, lhs, rhs)
-            }
-        }
-        BinaryOp::Mul => {
-            if prepared_expr_is_one(&lhs) {
-                rhs
-            } else if prepared_expr_is_one(&rhs) {
-                lhs
-            } else {
-                CExpr::binary(op, lhs, rhs)
-            }
-        }
-        BinaryOp::Div => {
-            if prepared_expr_is_one(&rhs) {
-                lhs
-            } else {
-                CExpr::binary(op, lhs, rhs)
-            }
-        }
-        BinaryOp::BitOr | BinaryOp::BitXor => {
-            if matches!(op, BinaryOp::BitXor) && lhs == rhs {
-                CExpr::IntLit(0)
-            } else if prepared_expr_is_zero(&lhs) {
-                rhs
-            } else if prepared_expr_is_zero(&rhs) {
-                lhs
-            } else {
-                CExpr::binary(op, lhs, rhs)
-            }
-        }
-        _ => CExpr::binary(op, lhs, rhs),
-    }
-}
-
-fn prepared_simplify_linear_addition(
-    symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    view: &PreparedSemanticView,
-    left: &CExpr,
-    right: &CExpr,
-) -> Option<CExpr> {
-    let mut terms = Vec::new();
-    let mut constant = 0i64;
-    prepared_collect_linear_add_terms(view, left, 1, &mut terms, &mut constant)?;
-    prepared_collect_linear_add_terms(view, right, 1, &mut terms, &mut constant)?;
-    terms.retain(|(_, coeff)| *coeff != 0);
-    terms.sort_by_key(|(term, _)| prepared_expr_order_key(symbols, view, term));
-
-    let mut pieces: Vec<CExpr> = terms
-        .into_iter()
-        .map(|(term, coeff)| prepared_linear_coeff_expr(term, coeff))
-        .collect::<Option<Vec<_>>>()?;
-    if constant != 0 {
-        pieces.push(CExpr::IntLit(constant));
-    }
-
-    let mut iter = pieces.into_iter();
-    let first = iter.next().unwrap_or(CExpr::IntLit(0));
-    Some(iter.fold(first, |acc, expr| CExpr::binary(BinaryOp::Add, acc, expr)))
-}
-
-fn prepared_collect_linear_add_terms(
-    view: &PreparedSemanticView,
-    expr: &CExpr,
-    scale: i64,
-    terms: &mut Vec<(CExpr, i64)>,
-    constant: &mut i64,
-) -> Option<()> {
-    match expr {
-        CExpr::Binary {
-            op: BinaryOp::Add,
-            left,
-            right,
-        } => {
-            prepared_collect_linear_add_terms(view, left, scale, terms, constant)?;
-            prepared_collect_linear_add_terms(view, right, scale, terms, constant)
-        }
-        CExpr::Binary {
-            op: BinaryOp::Mul,
-            left,
-            right,
-        } => {
-            if let Some(coeff) = prepared_literal_i64(right)
-                && let Some(term) = prepared_linear_atom_expr(view, left)
-            {
-                return prepared_push_linear_term(terms, term, scale.checked_mul(coeff)?);
-            }
-            if let Some(coeff) = prepared_literal_i64(left)
-                && let Some(term) = prepared_linear_atom_expr(view, right)
-            {
-                return prepared_push_linear_term(terms, term, scale.checked_mul(coeff)?);
-            }
-            None
-        }
-        CExpr::IntLit(value) => {
-            *constant = constant.checked_add(scale.checked_mul(*value)?)?;
-            Some(())
-        }
-        CExpr::UIntLit(value) => {
-            let value = i64::try_from(*value).ok()?;
-            *constant = constant.checked_add(scale.checked_mul(value)?)?;
-            Some(())
-        }
-        CExpr::Paren(inner) => {
-            prepared_collect_linear_add_terms(view, inner, scale, terms, constant)
-        }
-        _ => {
-            let term = prepared_linear_atom_expr(view, expr)?;
-            prepared_push_linear_term(terms, term, scale)
-        }
-    }
-}
-
-fn prepared_parameter_rank(
-    view: &PreparedSemanticView,
-    symbol: crate::symbol::SymbolId,
-) -> Option<usize> {
-    view.binding_names
-        .as_ref()?
-        .parameters()
-        .filter_map(Result::ok)
-        .find_map(|parameter| {
-            (parameter.symbol == symbol)
-                .then(|| usize::try_from(parameter.slot).ok())
-                .flatten()
-        })
-}
-
-fn prepared_linear_atom_expr(view: &PreparedSemanticView, expr: &CExpr) -> Option<CExpr> {
-    match expr {
-        CExpr::Var(name) if prepared_parameter_rank(view, *name).is_some() => Some(expr.clone()),
-        CExpr::Paren(inner) => prepared_linear_atom_expr(view, inner),
-        CExpr::Cast {
-            ty, expr: inner, ..
-        } if ty.is_integer() && prepared_linear_atom_expr(view, inner).is_some() => {
-            Some(expr.clone())
-        }
-        _ => None,
-    }
-}
-
-fn prepared_push_linear_term(terms: &mut Vec<(CExpr, i64)>, term: CExpr, coeff: i64) -> Option<()> {
-    if coeff == 0 {
-        return Some(());
-    }
-    if let Some((_, existing)) = terms.iter_mut().find(|(existing, _)| *existing == term) {
-        *existing = existing.checked_add(coeff)?;
-    } else {
-        terms.push((term, coeff));
-    }
-    Some(())
-}
-
-fn prepared_linear_coeff_expr(term: CExpr, coeff: i64) -> Option<CExpr> {
-    match coeff {
-        0 => Some(CExpr::IntLit(0)),
-        1 => Some(term),
-        _ => Some(CExpr::binary(BinaryOp::Mul, term, CExpr::IntLit(coeff))),
-    }
-}
-
-fn prepared_literal_i64(expr: &CExpr) -> Option<i64> {
-    match expr {
-        CExpr::IntLit(value) => Some(*value),
-        CExpr::UIntLit(value) => i64::try_from(*value).ok(),
-        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => prepared_literal_i64(inner),
-        _ => None,
-    }
-}
-
-fn prepared_binary_op_is_commutative(op: BinaryOp) -> bool {
-    matches!(
-        op,
-        BinaryOp::Add | BinaryOp::Mul | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
-    )
-}
-
-fn prepared_expr_order_key(
-    symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    view: &PreparedSemanticView,
-    expr: &CExpr,
-) -> (u8, usize, std::rc::Rc<str>) {
-    match expr {
-        CExpr::Var(name) => prepared_parameter_rank(view, *name)
-            .map(|rank| (0, rank, crate::symbol::spelling(symbols, *name)))
-            .unwrap_or_else(|| (1, usize::MAX, crate::symbol::spelling(symbols, *name))),
-        CExpr::IntLit(value) => (
-            2,
-            usize::MAX,
-            std::rc::Rc::from(format!("{value:020}").as_str()),
-        ),
-        CExpr::UIntLit(value) => (
-            2,
-            usize::MAX,
-            std::rc::Rc::from(format!("{value:020}").as_str()),
-        ),
-        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
-            prepared_expr_order_key(symbols, view, inner)
-        }
-        _ => (
-            1,
-            usize::MAX,
-            std::rc::Rc::from(format!("{expr:?}").as_str()),
-        ),
-    }
-}
-
-fn prepared_expr_is_zero(expr: &CExpr) -> bool {
-    match expr {
-        CExpr::IntLit(value) => *value == 0,
-        CExpr::UIntLit(value) => *value == 0,
-        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => prepared_expr_is_zero(inner),
-        _ => false,
-    }
-}
-
-fn prepared_expr_is_one(expr: &CExpr) -> bool {
-    match expr {
-        CExpr::IntLit(value) => *value == 1,
-        CExpr::UIntLit(value) => *value == 1,
-        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => prepared_expr_is_one(inner),
-        _ => false,
-    }
+    Some(CExpr::binary(op, lhs, rhs))
 }
 
 fn prepared_signed_dividend_expr(

@@ -776,14 +776,6 @@ mod tests {
     fn make_x86_64_ctx<'a>() -> FoldingContext<'a> {
         let arch = Box::leak(Box::new(FoldArchConfig {
             ptr_size: 8,
-            arg_regs: vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ],
         }));
         let empty_u64 = Box::leak(Box::new(HashMap::new()));
         let empty_stack_slots = Box::leak(Box::new(BTreeMap::new()));
@@ -2401,29 +2393,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_linear_addition_refuses_pointer_terms() {
-        let ctx = FoldingContext::new(64);
-
-        let expr = ctx.identity_simplify_binary(
-            BinaryOp::Add,
-            ctx.name_ref("buf"),
-            CExpr::binary(BinaryOp::Add, ctx.name_ref("i"), ctx.name_ref("i")),
-            Some(8),
-        );
-
-        assert_eq!(
-            expr,
-            CExpr::binary(
-                BinaryOp::Add,
-                ctx.name_ref("buf"),
-                CExpr::binary(BinaryOp::Add, ctx.name_ref("i"), ctx.name_ref("i"))
-            ),
-            "pointer arithmetic must not be reordered or collapsed by scalar linear normalization"
-        );
-    }
-
-    #[test]
+        #[test]
     fn source_call_void_detection_prefers_callsite_identity_over_rendered_name() {
         let mut ctx = make_x86_64_ctx();
         let source_call = (0x2000, 1);
@@ -2585,31 +2555,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_identity_sub_zero() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::Sub,
-            ctx.name_ref("x"),
-            CExpr::IntLit(0),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
-    fn test_identity_add_zero() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::Add,
-            ctx.name_ref("x"),
-            CExpr::IntLit(0),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
+            #[test]
     fn assignment_without_exact_elision_keeps_write_and_rhs_occurrence() {
         let ctx = FoldingContext::new(64);
         let lhs = ctx.name_ref("x");
@@ -2698,116 +2644,7 @@ mod tests {
         assert_eq!(function.body, vec![CStmt::Expr(plain)]);
     }
 
-    #[test]
-    fn test_identity_or_zero() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::BitOr,
-            ctx.name_ref("x"),
-            CExpr::IntLit(0),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
-    fn test_identity_xor_zero() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::BitXor,
-            ctx.name_ref("x"),
-            CExpr::IntLit(0),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
-    fn test_identity_xor_self() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::BitXor,
-            ctx.name_ref("x"),
-            ctx.name_ref("x"),
-            Some(4),
-        );
-        assert_eq!(simplified, CExpr::IntLit(0));
-    }
-
-    #[test]
-    fn test_identity_mul_one() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::Mul,
-            ctx.name_ref("x"),
-            CExpr::IntLit(1),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
-    fn test_identity_div_one() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::Div,
-            ctx.name_ref("x"),
-            CExpr::IntLit(1),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
-    fn test_identity_and_all_ones_with_explicit_width() {
-        let ctx = FoldingContext::new(64);
-        let simplified = ctx.identity_simplify_binary(
-            BinaryOp::BitAnd,
-            ctx.name_ref("x"),
-            CExpr::UIntLit(0xffff_ffff),
-            Some(4),
-        );
-        assert_eq!(simplified, ctx.name_ref("x"));
-    }
-
-    #[test]
-    fn test_identity_negative_cases_preserved() {
-        let ctx = FoldingContext::new(64);
-        let sub = ctx.identity_simplify_binary(
-            BinaryOp::Sub,
-            ctx.name_ref("x"),
-            CExpr::IntLit(1),
-            Some(4),
-        );
-        assert_eq!(
-            sub,
-            CExpr::binary(BinaryOp::Sub, ctx.name_ref("x"), CExpr::IntLit(1))
-        );
-
-        let add = ctx.identity_simplify_binary(
-            BinaryOp::Add,
-            ctx.name_ref("x"),
-            CExpr::IntLit(2),
-            Some(4),
-        );
-        assert_eq!(
-            add,
-            CExpr::binary(BinaryOp::Add, ctx.name_ref("x"), CExpr::IntLit(2))
-        );
-
-        let or = ctx.identity_simplify_binary(
-            BinaryOp::BitOr,
-            ctx.name_ref("x"),
-            CExpr::IntLit(1),
-            Some(4),
-        );
-        assert_eq!(
-            or,
-            CExpr::binary(BinaryOp::BitOr, ctx.name_ref("x"), CExpr::IntLit(1))
-        );
-    }
-
-    #[test]
+                                #[test]
     fn raw_x86_check_secret_like_cfg_keeps_distinct_branch_return_values_before_render() {
         let blocks = vec![
             R2ILBlock {

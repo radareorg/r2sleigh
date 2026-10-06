@@ -2476,19 +2476,6 @@ pub(crate) fn has_render_observations(function: &CFunction) -> bool {
     validate_render_observations(function, 0).is_err()
 }
 
-/// Whether one expression subtree contains any render observation marker.
-pub(crate) fn expr_has_render_observations(expr: &CExpr) -> bool {
-    let mut found = false;
-    let never = visit_expr_observations(expr, &mut |_| {
-        found = true;
-        Ok::<_, std::convert::Infallible>(())
-    });
-    match never {
-        Ok(()) => found,
-        Err(never) => match never {},
-    }
-}
-
 /// Whether one statement subtree contains any render observation marker.
 #[cfg(test)]
 pub(crate) fn stmt_has_render_observations(stmt: &CStmt) -> bool {

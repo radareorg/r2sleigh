@@ -3446,7 +3446,6 @@ impl Decompiler {
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
-            arg_regs: prepared.machine_context().argument_register_names(),
         };
         let prepared_semantic_view = match analysis::PreparedSemanticView::build_with_bindings(
             symbols,

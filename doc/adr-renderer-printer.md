@@ -38,7 +38,15 @@ stops retrying when a check fails.
 
 ## Done
 
-Nothing yet.
+- R1a: the CExpr identity and linear folds in fold/op_lower and
+  analysis/prepared_semantic are deleted (867 lines). Each ran only on
+  operands carrying no render observation, which the audited path never
+  has; disabling each left the census byte-identical. Their identities are
+  r2rewrite rules (23 identity rules, proved). `structure/rewrite.rs`'s
+  `negate_condition` turns `!(a < b)` into `a >= b`, false for a NaN; no
+  float comparison reaches it today (lowering binds each to a `uint8_t`
+  temporary with its `isnan` guards, fixture `float_compares_zig_*`), so it
+  waits for R1's negation as a rule over typed terms.
 
 ## Left
 

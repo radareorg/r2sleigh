@@ -425,26 +425,6 @@ pub(crate) fn parse_const_value(name: &str) -> Option<u64> {
     analysis::utils::parse_const_value(name)
 }
 
-fn push_linear_term(terms: &mut Vec<(CExpr, i64)>, term: CExpr, coeff: i64) -> Option<()> {
-    if coeff == 0 {
-        return Some(());
-    }
-    if let Some((_, existing)) = terms.iter_mut().find(|(existing, _)| *existing == term) {
-        *existing = existing.checked_add(coeff)?;
-    } else {
-        terms.push((term, coeff));
-    }
-    Some(())
-}
-
-fn linear_coeff_expr(term: CExpr, coeff: i64) -> Option<CExpr> {
-    match coeff {
-        0 => Some(CExpr::IntLit(0)),
-        1 => Some(term),
-        _ => Some(CExpr::binary(BinaryOp::Mul, term, CExpr::IntLit(coeff))),
-    }
-}
-
 /// The signed C type of a value `size` bytes wide: the signed integer where C
 /// has one, and otherwise what [`uint_type_from_size`] says.
 fn type_from_size(size: u32) -> CType {
