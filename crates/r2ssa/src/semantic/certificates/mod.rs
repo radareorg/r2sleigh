@@ -404,38 +404,6 @@ pub struct PreparedFunctionCertificates {
     pub failures: Vec<PreparedProofFailure>,
 }
 
-pub(crate) fn frame_gap_extent(
-    objects: &ObjectModel,
-    base: StackAddressBase,
-    offset: i64,
-) -> Option<u32> {
-    if offset >= 0 {
-        return None;
-    }
-    let next = objects
-        .objects
-        .values()
-        .filter_map(|fact| match fact.kind {
-            ObjectKind::StackSlot {
-                base: other_base,
-                offset: other,
-                ..
-            }
-            | ObjectKind::FrameObject {
-                base: other_base,
-                offset: other,
-                ..
-            } if other_base == base && other > offset => Some(other),
-            _ => None,
-        })
-        .min()
-        .unwrap_or(0)
-        .min(0);
-    u32::try_from(next - offset)
-        .ok()
-        .filter(|extent| *extent > 0)
-}
-
 /// Remove the certified byte stride from one offset without manufacturing a
 /// value. More involved affine expressions remain valid array geometry but do
 /// not get a direct element spelling here; the general rewrite rules may still
@@ -970,16 +938,6 @@ pub(crate) fn collect_prepared_function_certificates(
                     None
                 } else {
                     accessed_object_storage(graph, values, objects, structured, *object)
-                        // No access sizes it and nothing declares it, but its address left the body: a buffer a callee fills.
-                        // The frame lays it out between its neighbours, and that gap is its extent, as bytes.
-                        // An address that never leaves and is never accessed is a stack position, not an object, and the gap says nothing about it.
-                        .or_else(|| {
-                            objects
-                                .address_escapes(*object)
-                                .then(|| frame_gap_extent(objects, base, offset))
-                                .flatten()
-                                .map(|extent| (extent, true))
-                        })
                 };
                 r2il::refusal_evidence!(
                     "stack-slot-storage",

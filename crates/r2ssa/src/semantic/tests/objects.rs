@@ -726,10 +726,11 @@ fn a_stack_position_nothing_accesses_or_passes_on_has_no_extent() {
         (None, false),
         "a position with no access and no escaping address is not an object to declare"
     );
+    // Handing its address on proves no width: the gap to the next object is a layout, not an extent (ADR frame-model).
     assert_eq!(
         passed_through(&artifact(true)),
-        (Some(8), true),
-        "the same position is a buffer once its address is handed on, and the frame's gap is its extent"
+        (None, false),
+        "an escaping position nothing sizes has no extent"
     );
 }
 
