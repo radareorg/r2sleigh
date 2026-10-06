@@ -747,31 +747,16 @@ impl Importer<'_> {
                     width_bits: bits,
                     signedness: MachineSignedness::Unsigned,
                 };
-                // Written over nothing but zeroes, the lane is the whole value
-                // zero-extended, and that is one node rather than three.
-                if lsb_bits == 0
-                    && crate::canon::literal_bits(self.arena, r) == Some(0)
-                    && lane_bits < width
-                {
-                    return Some((
-                        self.arena.intern(
-                            ty,
-                            TermKind::Cast {
-                                kind: r2ssa::MachineCastKind::ZeroExtend,
-                                input: l,
-                            },
-                        ),
-                        trace,
-                        substituted,
-                    ));
-                }
                 // A part C has no scalar for cannot be spelled, and joining it
                 // would render a cast to an aggregate. The machine renderer's
                 // mask arithmetic still spells those.
                 let spellable = |bits: u32| matches!(bits, 8 | 16 | 32 | 64);
+                // Zeroes above the lane are a literal the rules turn into a widening (`cast.concat_zero_high`).
+                let root_bits = crate::canon::literal_bits(self.arena, r);
+                let zero_above = end < width && root_bits.is_some_and(|bits| bits.checked_shr(end).unwrap_or(0) == 0);
                 if !spellable(lane_bits)
                     || (lsb_bits > 0 && !spellable(lsb_bits))
-                    || (end < width && !spellable(width - end))
+                    || (end < width && !zero_above && !spellable(width - end))
                 {
                     return None;
                 }
@@ -796,13 +781,19 @@ impl Importer<'_> {
                         .intern(joined_ty, TermKind::Concat { high: term, low });
                 }
                 if end < width {
-                    let high = self.arena.intern(
-                        unsigned(width - end),
-                        TermKind::Extract {
-                            input: r,
-                            lsb_bits: end,
-                        },
-                    );
+                    let high = match zero_above {
+                        true => {
+                            let zero = MachineBitVector::new(width - end, 0)?;
+                            self.arena.intern(unsigned(width - end), TermKind::Literal(zero))
+                        }
+                        false => self.arena.intern(
+                            unsigned(width - end),
+                            TermKind::Extract {
+                                input: r,
+                                lsb_bits: end,
+                            },
+                        ),
+                    };
                     joined = width;
                     term = self.arena.intern(ty, TermKind::Concat { high, low: term });
                 }

@@ -47,6 +47,12 @@ stops retrying when a check fails.
   float comparison reaches it today (lowering binds each to a `uint8_t`
   temporary with its `isnan` guards, fixture `float_compares_zig_*`), so it
   waits for R1's negation as a rule over typed terms.
+- R1b: zeroes above a value are its zero extension as a proved rule
+  (`cast.concat_zero_high`, decreasing a new `Joins` measure component);
+  import's `Insert`-over-zero shortcut and the printer's `Concat`-of-zero
+  peephole are deleted. Import admits a zero high part of any width as a
+  literal, so a byte lane inserted into a zeroed register imports and
+  widens where the machine renderer spelled masks (29 census functions).
 
 ## Left
 

@@ -1025,21 +1025,6 @@ impl<'a> FoldingContext<'a> {
             }
             Kind::Concat { high, low } => {
                 let low_width = arena.term(low).width_bits();
-                // Zeroes above a value spell a widening of it, not a shift-or.
-                if r2rewrite::canon::literal_bits(arena, high) == Some(0) {
-                    let Some(produced) = typed
-                        .term_produced(term)
-                        .and_then(crate::typed::CValue::as_type)
-                        .cloned()
-                    else {
-                        return Err(invalid());
-                    };
-                    let low_required = typed
-                        .term_required(term, 1)
-                        .cloned()
-                        .map(crate::typed::CValue::Typed);
-                    return Ok(self.convert_from(child(1, low)?, low_required.as_ref(), &produced));
-                }
                 let Some(produced) = typed
                     .term_produced(term)
                     .and_then(crate::typed::CValue::as_type)
