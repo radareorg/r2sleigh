@@ -499,3 +499,25 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn a_return_one_arm_leaves_untouched_proves_no_result() {
+    // `maybe` calls `bump` only when its argument is nonzero and returns either way. On the other
+    // arm the result register still holds what the caller left, so no result is proven.
+    let mut code = [0xcc_u8; 0x50];
+    code[0x00..0x04].copy_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // lea eax, [rdi + 1]; ret
+    code[0x30..0x3a].copy_from_slice(&[0x85, 0xff, 0x74, 0x05, 0xe8, 0xc7, 0xff, 0xff, 0xff, 0xc3]); // test edi, edi; je ret; call bump; ret
+    let base = common::BASE;
+    let functions = [("bump", base, 4), ("maybe", base + 0x30, 10)];
+    let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
+    let rendering = program
+        .rendered(base + 0x30, r2engine::RenderTier::C)
+        .expect("it renders");
+    let text = rendering.response.output.into_text();
+    assert!(!text.contains("r2sleigh refused"), "{text}");
+    assert!(text.contains("return r2sleigh_residual"), "{text}");
+    assert!(
+        !text.contains("uint64_t RAX"),
+        "a value only one arm produces is no result: {text}"
+    );
+}

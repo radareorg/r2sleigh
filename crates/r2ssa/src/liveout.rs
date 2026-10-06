@@ -117,7 +117,7 @@ impl FunctionLiveOut {
     /// join is answered by its merge rather than by whatever lies beyond it, and
     /// a block already visited is not walked twice.
     ///
-    /// Answers whether any definition was found, and whether a path was clobbered.
+    /// Answers whether a definition was found on every path, none reaching the entry unwritten, and whether a path was clobbered.
     #[cfg_attr(
         dylint_lib = "r2sleigh_lints",
         allow(
@@ -135,12 +135,15 @@ impl FunctionLiveOut {
     ) -> (bool, bool) {
         let mut found = false;
         let mut clobbered_any = false;
+        let mut reaches_entry = false;
+        // Each block is walked at most twice: once on a path nothing has written yet, once on one written.
         let mut seen = BTreeSet::new();
-        let mut pending = std::collections::VecDeque::from([from]);
-        while let Some(addr) = pending.pop_front() {
-            if !seen.insert(addr) {
+        let mut pending = std::collections::VecDeque::from([(from, false)]);
+        while let Some((addr, written)) = pending.pop_front() {
+            if !seen.insert((addr, written)) {
                 continue;
             }
+            let mut written = written;
             let Some(block) = func.get_block(addr) else {
                 continue;
             };
@@ -179,6 +182,7 @@ impl FunctionLiveOut {
                 if !contributes_to(storage, return_storage) {
                     continue;
                 }
+                written = true;
                 if let Some(value) = graph.value_of(*dst) {
                     self.values.insert(value);
                     found |= here.insert(value);
@@ -205,6 +209,7 @@ impl FunctionLiveOut {
                 if overwritten {
                     continue;
                 }
+                written = true;
                 if let Some(value) = graph.value_of(phi.dst) {
                     defined_here |= covers_fully(storage, return_storage);
                     self.values.insert(value);
@@ -221,11 +226,15 @@ impl FunctionLiveOut {
             if defined_here {
                 continue;
             }
+            // A path back to the entry that wrote none of it hands back what the caller left there.
+            if addr == func.entry && !written {
+                reaches_entry = true;
+            }
             for predecessor in func.predecessors(addr) {
-                pending.push_back(predecessor);
+                pending.push_back((predecessor, written));
             }
         }
-        (found, clobbered_any)
+        (found && !reaches_entry, clobbered_any)
     }
 
     /// Whether the caller reads this value once the function returns.
