@@ -36,7 +36,7 @@ Where this stands (2026-10-05, `engine/roadmap`, PR #67)
 | Census | 665 functions, 8 refused |
 | Certification | 113 rendered, 17 refused, 0 undefined reads, 0 panics |
 | Coverage | 554/562 rendered |
-| Tests | all pass except 2 that fail only under Apple clang 21 |
+| Tests | all pass (2096, Apple clang 21) |
 
 The 2026-10-04 review rated the code 4/10: sound ideas and discipline (~7),
 weak algorithms and structure (~3) — hand-rolled iteration, recomputation,
@@ -75,7 +75,7 @@ The program
 
 | Item | ADR | Done | Left |
 |------|-----|------|------|
-| **G0** Gates real | [testing](doc/testing.md) | — | the census, release A/B timing and equivalence diff are scripts in the repo and CI jobs, with a time budget on the large functions; the two clang-21 failures fixed |
+| **G0** Gates real | [testing](doc/testing.md) | the census and release timing (budget 1.3x on the large functions) and the x86-64 equivalence ratchet are CI jobs; the aarch64 equivalence ratchet is a CI job (cross gcc 13, clang 18, qemu-user, the blessed toolchain); the clang-21 failures are fixed | — |
 | **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure; B3 call results, returns and reaching values match the program root; argument lanes, entry-lane projections and certificates match by lane, and a declared float slot narrows to its value's low lane; float merges and root writes answer the lane | B3 rest: a recovered interface's float slots (with P7); B4 measured, no instance yet (see the ADR); liveness over locations (B2, r2dec's dead values, moved into R2: the inventory must own liveness first) |
 | **L** Layering | — | L2 C typing at render boundaries (`typed`) moved from r2rewrite to r2dec, so r2rewrite no longer depends on r2types; L4 r2sleigh-export merged into r2sleigh-cli (13 crates); L1 the body walk moved to r2engine and `block::to_ssa` takes a spelling, so r2ssa reads the lifter only for the trusted-lift authority types; L3a only a stated import takes its library model by name; L3b the library models are the engine's (`r2engine::library`), handed to preparation as `CalleeEvidence` beside the callees' interfaces, preserved registers and reach |   L5 r2ssa's IR and facts layers as modules with a Dylint boundary |
 | **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
@@ -123,7 +123,7 @@ The program
 |------|------|
 | Pinned containers; compiled coverage cells as pinned bytes | gate results independent of the runner |
 | `PipelineTests`/`SelfTestSuite` stall on hosted runners | both gate again |
-| arm64 equivalence in CI (D6) | `tests/equiv` reports both architectures |
+| arm64 equivalence in CI (D6) | done with G0 |
 | macOS arm64 equivalence | Mach-O renderings run beside their originals |
 | Stage merges of PR #67 to master | finished items land on master |
 | "Where this stands" generated from CI artifacts | no hand-typed status |

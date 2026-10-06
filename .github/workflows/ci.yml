@@ -387,6 +387,89 @@ jobs:
             ${{ runner.temp }}/equiv/baseline.proposed.json
           if-no-files-found: warn
 
+  # The same ratchet for AArch64 (D6): built with Ubuntu 24.04's cross gcc 13 and
+  # clang 18 `--target=aarch64-linux-gnu`, run under qemu-user, which is the
+  # toolchain baseline-aarch64.json was blessed on. Emulation makes each
+  # configuration slower, so the sources split three ways.
+  equivalence-shard-aarch64:
+    name: Equivalence aarch64 ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        opt: [O0, O1, O2]
+        part:
+          - name: a
+            sources: tests/corpus/branchy.c tests/corpus/hashes.c
+          - name: b
+            sources: tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+          - name: shapes
+            sources: tests/corpus/shapes.c
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - name: Install the AArch64 cross toolchain and qemu-user
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+      - name: Print the compilers
+        run: |
+          aarch64-linux-gnu-gcc --version | head -n 1
+          clang --version | head -n 1
+          qemu-aarch64 --version | head -n 1
+      - name: Grade the shard
+        run: |
+          timeout -s ABRT 22m python3 tests/equiv/run_equiv.py \
+            --r2s target/ci/r2s \
+            --target aarch64 \
+            --sources ${{ matrix.part.sources }} \
+            --compilers ${{ matrix.compiler }} \
+            --opts ${{ matrix.opt }} \
+            --jobs 4 \
+            --out "$RUNNER_TEMP/equiv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equiv-aarch64-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
+          path: ${{ runner.temp }}/equiv/records.json
+          retention-days: 7
+          if-no-files-found: error
+
+  equivalence-aarch64:
+    name: Equivalence Ratchet aarch64
+    runs-on: ubuntu-24.04
+    needs: equivalence-shard-aarch64
+    if: ${{ !cancelled() }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-aarch64-shard-*
+          path: ${{ runner.temp }}/shards
+      - name: Hold every function to the baseline
+        run: |
+          python3 tests/equiv/merge_shards.py \
+            --baseline tests/equiv/baseline-aarch64.json \
+            --out "$RUNNER_TEMP/equiv" \
+            "$RUNNER_TEMP"/shards/*/records.json
+      - name: Archive the records and the proposed baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: equivalence-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/equiv/records.json
+            ${{ runner.temp }}/equiv/baseline.proposed.json
+          if-no-files-found: warn
+
   # ── Whole-binary render coverage ────────────────────────────────────
   #
   # The other gates score nine hand-picked functions and check that what they
@@ -427,7 +510,7 @@ jobs:
     name: Release Build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, coverage]
+    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, equivalence-aarch64, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6
