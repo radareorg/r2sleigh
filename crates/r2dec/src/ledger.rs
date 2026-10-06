@@ -28,6 +28,8 @@ use r2ssa::{
 pub enum ElisionReason {
     /// Frame setup and teardown the rendered function does not model.
     StackFrame,
+    /// A stack-protector check the compiler inserted, which passes under `Premise::UbFreeSource`.
+    CompilerInserted,
     /// The exact machine control target consumed by a source-certified return.
     ///
     /// This is not the program value returned by the function. The lifted
@@ -200,6 +202,7 @@ impl std::fmt::Display for ElisionReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::StackFrame => "stack-frame",
+            Self::CompilerInserted => "compiler-inserted",
             Self::ReturnControl => "return-control",
             Self::DirectControlTarget => "direct-control-target",
             Self::DirectCallTarget => "direct-call-target",
@@ -278,6 +281,8 @@ pub struct LedgerClosure {
     pub total: usize,
     pub rendered: usize,
     pub elided: usize,
+    /// Elided as compiler-inserted, under the premise the rendering states.
+    pub compiler_inserted: usize,
     pub refused: usize,
     pub gapped: usize,
     pub unattributed: usize,
@@ -301,7 +306,12 @@ impl LedgerClosure {
 
     /// How many obligations the five columns name between them.
     pub fn accounted(&self) -> usize {
-        self.rendered + self.elided + self.refused + self.gapped + self.unattributed
+        self.rendered
+            + self.elided
+            + self.compiler_inserted
+            + self.refused
+            + self.gapped
+            + self.unattributed
     }
 }
 
@@ -575,6 +585,9 @@ impl ObligationLedger {
         for (id, outcome) in &self.outcomes {
             match outcome {
                 Outcome::Rendered => closure.rendered += 1,
+                Outcome::Elided(ElisionReason::CompilerInserted) => {
+                    closure.compiler_inserted += 1;
+                }
                 Outcome::Elided(_) => closure.elided += 1,
                 Outcome::Refused => {
                     closure.refused += 1;

@@ -164,6 +164,9 @@ fn certified_instruction_elision(
     source_inst: Option<r2ssa::InstId>,
 ) -> Option<ElisionReason> {
     let graph = prepared.graph();
+    if source_inst.is_some_and(|inst| prepared.certificates().compiler_inserted.contains(inst)) {
+        return Some(ElisionReason::CompilerInserted);
+    }
     if source_inst.is_some_and(|inst| {
         prepared
             .certificates()

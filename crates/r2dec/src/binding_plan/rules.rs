@@ -2326,6 +2326,18 @@ pub(crate) fn certificate_elided_cells(
             }
         }
     }
+    for inst in certificates.compiler_inserted.iter() {
+        let definition = graph
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
+        for input_idx in 0..definition.inputs.len() {
+            let site = UseSite { inst, input_idx };
+            insert_elided_use(&mut uses, site, ElisionReason::CompilerInserted)?;
+        }
+        if definition.output.is_some() {
+            insert_elided_write(&mut writes, inst, ElisionReason::CompilerInserted)?;
+        }
+    }
     for certificate in certificates.machine_return_controls.values() {
         for site in &certificate.uses {
             insert_elided_use(&mut uses, *site, ElisionReason::ReturnControl)?;

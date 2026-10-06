@@ -1723,9 +1723,13 @@ impl Native<'_> {
         let lifted = Disassembler::lift_owned_function(snapshot)
             .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
         let evidence = callees.evidence(library);
-        let artifact =
-            TrustedSsaArtifact::prepare_with_callee_interfaces(lifted, &self.control, &evidence)
-                .map_err(NativeRefusal::of_preparation)?;
+        let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
+            lifted,
+            &self.control,
+            &evidence,
+            &accepted_premises(),
+        )
+        .map_err(NativeRefusal::of_preparation)?;
         Ok(Arc::new(artifact))
     }
 }
@@ -2287,4 +2291,10 @@ pub(crate) fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId,
             size: register.size,
         })
         .ok_or_else(|| NativeRefusal::UnknownRegister(name.to_owned()))
+}
+
+/// The premises the engine grants every derivation: a UB-free source, so a stack-protector check
+/// passes (doc/adr-frame-model.md, P4.4). A consumer that refuses it is item A's.
+pub(crate) fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
+    std::collections::BTreeSet::from([r2source::Premise::UbFreeSource])
 }

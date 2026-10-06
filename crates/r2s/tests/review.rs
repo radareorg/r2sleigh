@@ -113,17 +113,16 @@ fn thread_pointer_versions(text: &str) -> std::collections::BTreeSet<String> {
 }
 
 #[test]
-fn both_canary_reads_go_through_the_thread_pointer_the_function_entered_with() {
-    // `main` reads the stack-protector canary through %fs at entry and again
-    // before it returns, with a dozen calls in between. The platform reserves
-    // %fs to the system, so no call redefines it: before that was read, the
-    // second load named `FS_OFFSET_15`, a register the calls "defined" and
-    // nothing ever assigned.
+fn main_s_stack_protector_check_is_compiler_inserted() {
+    // `main` reads the canary through %fs at entry and again before it returns, with a dozen
+    // calls between. Under a UB-free source both reads agree, so the check and the thread
+    // pointer are gone and the proof names the premise (doc/adr-frame-model.md, P4.4).
     let run = bounded("pdd @ sym.main");
     assert!(run.ok, "{}", run.out);
-    assert_eq!(
-        thread_pointer_versions(&run.out),
-        std::collections::BTreeSet::from(["FS_OFFSET_0".to_owned()]),
+    assert!(thread_pointer_versions(&run.out).is_empty(), "{}", run.out);
+    assert!(!run.out.contains("__stack_chk_fail()"), "{}", run.out);
+    assert!(
+        run.out.contains("compiler-inserted (assuming ub-free)"),
         "{}",
         run.out
     );

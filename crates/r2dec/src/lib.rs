@@ -279,6 +279,14 @@ fn note_unproven_constructs(
             if split > 0 {
                 let _ = write!(&mut line, " ({split} through a split variable)");
             }
+            if closure.compiler_inserted > 0 {
+                let _ = write!(
+                    &mut line,
+                    ", {} compiler-inserted (assuming {})",
+                    closure.compiler_inserted,
+                    r2source::Premise::UbFreeSource.spelled()
+                );
+            }
             // The column that used to have no name. Saying nothing here is what let a
             // gutted body report as clean, so it is spelled out whenever it is not zero.
             if closure.unattributed > 0 {
@@ -1908,7 +1916,7 @@ impl EffectObligationAudit {
             },
             total: closure.total,
             rendered: closure.rendered,
-            justified_elision: closure.elided,
+            justified_elision: closure.elided + closure.compiler_inserted,
             refused: closure.refused,
             gapped: closure.gapped,
             unaccounted: closure.unattributed,

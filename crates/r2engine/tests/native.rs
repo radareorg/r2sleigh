@@ -205,6 +205,48 @@ impl Program for Fixture {
     }
 }
 
+/// A fixture whose program states that one function never returns.
+struct Halting {
+    fixture: Fixture,
+    halts: u64,
+}
+
+impl r2engine::body::Program for Halting {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.fixture.is_entry(vaddr)
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        callee != self.halts
+    }
+}
+
+impl Program for Halting {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+}
+
 #[test]
 fn a_function_is_decompiled_from_bytes_alone() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -3799,6 +3841,84 @@ fn a_call_does_not_redefine_the_register_the_platform_reserves() {
         "{}",
         without.output
     );
+}
+
+/// A stack-protector check: the canary is stored from `fs:[0x28]`, reloaded, compared with a
+/// second read of the guard, and a mismatch calls a function that never returns.
+const CANARY_CHECKED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp+8], rax
+    0x31, 0xc0, // 1012 xor eax, eax
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1014 mov rdx, [rsp+8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1019 sub rdx, fs:[0x28]
+    0x75, 0x05, // 1022 jne 0x1029
+    0x48, 0x83, 0xc4, 0x18, // 1024 add rsp, 0x18
+    0xc3, // 1028 ret
+    0xe8, 0x02, 0x00, 0x00, 0x00, // 1029 call 0x1030
+    0x90, 0x90, // 102e padding
+    0xeb, 0xfe, // 1030 jmp 0x1030
+];
+
+/// Under `Premise::UbFreeSource` the canary still holds the guard, so the check passes: the
+/// rendering reads no thread pointer, calls nothing, and says which premise it assumed.
+#[test]
+fn a_stack_protector_check_is_compiler_inserted_under_a_ub_free_source() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes: CANARY_CHECKED.to_vec(),
+            name: "canary_checked",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("return 0;"), "{output}");
+    assert!(!output.contains("fcn_1030"), "{output}");
+    assert!(
+        output.contains("compiler-inserted (assuming ub-free)"),
+        "{output}"
+    );
+}
+
+/// The slot is written again before the check, so the check can fail and stays a residual.
+#[test]
+fn a_canary_written_twice_is_not_decided() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0x48, 0x89, 0x44, 0x24, 0x08]); // 1014 mov [rsp+8], rax
+    bytes.extend(&CANARY_CHECKED[0x14..0x22]); // 1019 the reload and compare
+    bytes.extend([0x75, 0x05]); // 1027 jne 0x102e
+    bytes.extend(&CANARY_CHECKED[0x24..0x29]); // 1029 add rsp; ret
+    bytes.extend([0xe8, 0x02, 0x00, 0x00, 0x00, 0x90, 0x90, 0xeb, 0xfe]); // 102e call 0x1035
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_overwritten",
+        },
+        halts: 0x1035,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+/// The failure path calls a function that returns, so nothing proves the check is a protector.
+#[test]
+fn a_check_whose_failure_returns_is_not_decided() {
+    let bytes = CANARY_CHECKED.to_vec();
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes,
+        name: "canary_returning_failure",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with

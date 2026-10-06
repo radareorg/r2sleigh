@@ -498,6 +498,8 @@ pub struct SourceMachineContext {
     callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The register saves the container's call-frame information states.
     frame_saves: Vec<r2source::SourceFrameSave>,
+    /// The premises the engine grants its derivations (`r2engine::premises`).
+    accepted_premises: BTreeSet<r2source::Premise>,
     /// The function each captured code pointer table entry names, by the
     /// address of the entry. A slot a relocation fills holds no address the
     /// file states, so what it becomes is a fact about the program rather
@@ -976,6 +978,7 @@ impl SourceMachineContext {
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
             frame_saves: Vec::new(),
+            accepted_premises: BTreeSet::new(),
             code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
@@ -1301,6 +1304,15 @@ impl SourceMachineContext {
 
     pub(crate) fn set_frame_saves(&mut self, saves: &[r2source::SourceFrameSave]) {
         self.frame_saves = saves.to_vec();
+    }
+
+    pub(crate) fn set_accepted_premises(&mut self, premises: BTreeSet<r2source::Premise>) {
+        self.accepted_premises = premises;
+    }
+
+    /// Whether the engine grants this premise to what it derives here.
+    pub fn accepts(&self, premise: r2source::Premise) -> bool {
+        self.accepted_premises.contains(&premise)
     }
 
     /// Where the call-frame information says the function saves each register

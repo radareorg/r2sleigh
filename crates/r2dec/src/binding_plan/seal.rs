@@ -179,6 +179,7 @@ impl BindingPlan {
         let direct_call_targets = super::certified_direct_call_target_values(source);
         let call_return_addresses = super::certified_call_return_address_values(source);
         let stack_frame_values = certified_stack_frame_values(source);
+        let compiler_inserted_values = super::certified_compiler_inserted_values(source);
         let stack_geometry_values = certified_stack_geometry_values(source);
         let structural_unused = source
             .obligations()
@@ -305,6 +306,11 @@ impl BindingPlan {
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && stack_frame_values.contains(&value) => {}
+                ValueDisposition::Elided { reason, proof }
+                    if *reason == crate::ledger::ElisionReason::CompilerInserted
+                        && proof.authority == *source.authority()
+                        && proof.value == value
+                        && compiler_inserted_values.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
                     if *reason == crate::ledger::ElisionReason::DeadStackBase
                         && proof.authority == *source.authority()
@@ -704,6 +710,17 @@ impl BindingPlan {
                         "{object:?}: the frame round trip is elided and the plan says {:?}",
                         self.stack_object_disposition(object)
                     );
+                    return Err(BindingPlanBuildError::Seal(
+                        BindingPlanSourceMismatch::UnexpectedStackObjectDisposition { object },
+                    ));
+                }
+                continue;
+            }
+            if source.compiler_inserted_stack_object(object) {
+                let expected = StackObjectDisposition::Elided {
+                    reason: crate::ledger::ElisionReason::CompilerInserted,
+                };
+                if self.stack_object_disposition(object) != Some(expected) {
                     return Err(BindingPlanBuildError::Seal(
                         BindingPlanSourceMismatch::UnexpectedStackObjectDisposition { object },
                     ));

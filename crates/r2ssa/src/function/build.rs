@@ -32,6 +32,7 @@ impl SSAFunction {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
             promoted_slot_sites: BTreeSet::new(),
+            compiler_inserted: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,
             entry,
@@ -227,6 +228,8 @@ impl SSAFunction {
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
+        // Before preparation, so the comparison a decided check leaves unread folds away.
+        crate::stack_protector::decide(&mut func, machine_context);
         // Preparation reads the interface for the return projection only;
         // the prep facts, collected when the function is sealed, read it for
         // the declared stack bases.
@@ -572,6 +575,7 @@ impl SSAFunction {
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
             promoted_slot_sites: promoted.keys().copied().collect(),
+            compiler_inserted: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,
             entry,

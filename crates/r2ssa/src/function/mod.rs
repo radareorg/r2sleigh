@@ -1320,6 +1320,7 @@ impl SsaArtifact {
     pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
         !self.frame_managed_stack_object(object)
             && !self.call_return_address_object(object)
+            && !self.compiler_inserted_stack_object(object)
             && self
                 .certificates()
                 .stack_slots
@@ -1329,7 +1330,26 @@ impl SsaArtifact {
 
     /// Whether every access to this object is a call pushing its return address: the callee's frame, not a local.
     pub fn call_return_address_object(&self, object: crate::ObjectId) -> bool {
-        let stores = &self.certificates().call_return_address_stores;
+        self.object_accessed_only_by(
+            object,
+            &self.certificates().call_return_address_stores,
+            true,
+        )
+    }
+
+    /// Whether every access to this object is one a decided stack-protector check inserted: the canary.
+    pub fn compiler_inserted_stack_object(&self, object: crate::ObjectId) -> bool {
+        self.object_accessed_only_by(object, &self.certificates().compiler_inserted, false)
+    }
+
+    /// Whether the object has an access and every access is an instruction of `insts` (each a write, if asked).
+    fn object_accessed_only_by(
+        &self,
+        object: crate::ObjectId,
+        insts: &crate::dense::IdSet<crate::graph::InstId>,
+        writes_only: bool,
+    ) -> bool {
+        let stores = insts;
         let mut accesses = self
             .structured()
             .memory_accesses
@@ -1338,7 +1358,7 @@ impl SsaArtifact {
         let mut any = false;
         let pushed = accesses.all(|access| {
             any = true;
-            access.is_write && stores.contains(access.id.inst)
+            (access.is_write || !writes_only) && stores.contains(access.id.inst)
         });
         any && pushed
     }
@@ -2077,7 +2097,12 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::prepare_with_callee_interfaces(lifted, control, &CalleeEvidence::default())
+        Self::prepare_with_callee_interfaces(
+            lifted,
+            control,
+            &CalleeEvidence::default(),
+            &BTreeSet::new(),
+        )
     }
 
     /// Prepare, describing each call whose callee body came in this capture.
@@ -2088,6 +2113,7 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
         evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
     ) -> Result<Self, SsaPrepareError> {
         let CalleeEvidence {
             interfaces: callee_interfaces,
@@ -2208,6 +2234,8 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
                 provisional_machine_context.set_callee_statements(&callee_statements);
+                // The preliminary build may be the one sealed, so it decides under the same premises.
+                provisional_machine_context.set_accepted_premises(premises.clone());
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
@@ -2291,6 +2319,7 @@ impl TrustedSsaArtifact {
         machine_context.set_result_owners(result_owners);
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());
+        machine_context.set_accepted_premises(premises.clone());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.
@@ -2503,6 +2532,8 @@ pub struct SSAFunction {
     /// operations, so it is no longer one of the function's memory
     /// operations, and every layer that counts those has to agree.
     promoted_slot_sites: BTreeSet<(u64, usize)>,
+    /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
+    compiler_inserted: BTreeSet<crate::arena::OpId>,
     /// The architectural stack pointer, as the machine roles name it.
     ///
     /// The roles know it for every function, including one whose signature
@@ -2850,6 +2881,7 @@ impl Clone for SSAFunction {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
             promoted_slot_sites: self.promoted_slot_sites.clone(),
+            compiler_inserted: self.compiler_inserted.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
@@ -3352,6 +3384,15 @@ impl SSAFunction {
     /// Which lifted memory operations promotion took out of memory.
     pub fn promoted_slot_sites(&self) -> &BTreeSet<(u64, usize)> {
         &self.promoted_slot_sites
+    }
+
+    /// The operations a decided stack-protector check inserted (`crate::stack_protector`).
+    pub fn compiler_inserted(&self) -> &BTreeSet<crate::arena::OpId> {
+        &self.compiler_inserted
+    }
+
+    pub(crate) fn record_compiler_inserted(&mut self, ops: BTreeSet<crate::arena::OpId>) {
+        self.compiler_inserted.extend(ops);
     }
 
     /// Set the function name.

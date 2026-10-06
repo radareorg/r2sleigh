@@ -1032,6 +1032,7 @@ impl BindingPlan {
         let direct_call_targets = super::certified_direct_call_target_values(source);
         let call_return_addresses = super::certified_call_return_address_values(source);
         let stack_frame_values = certified_stack_frame_values(source);
+        let compiler_inserted_values = super::certified_compiler_inserted_values(source);
         let stack_geometry_values = certified_stack_geometry_values(source);
         let unobserved_values = source.unobserved_values();
         let effectful = super::rules::effectful_definition_values(source);
@@ -1111,6 +1112,14 @@ impl BindingPlan {
             } else if direct_call_targets.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: crate::ledger::ElisionReason::DirectCallTarget,
+                    proof: ValueElisionProof {
+                        authority: source.authority().clone(),
+                        value: graph_value.id,
+                    },
+                };
+            } else if compiler_inserted_values.contains(&graph_value.id) {
+                dispositions[index] = ValueDisposition::Elided {
+                    reason: crate::ledger::ElisionReason::CompilerInserted,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1482,6 +1491,15 @@ impl BindingPlan {
                         *object,
                         StackObjectDisposition::Elided {
                             reason: crate::ledger::ElisionReason::StackFrame,
+                        },
+                    );
+                    continue;
+                }
+                if source.compiler_inserted_stack_object(*object) {
+                    stack_objects.insert(
+                        *object,
+                        StackObjectDisposition::Elided {
+                            reason: crate::ledger::ElisionReason::CompilerInserted,
                         },
                     );
                     continue;

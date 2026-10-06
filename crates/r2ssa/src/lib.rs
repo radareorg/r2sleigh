@@ -65,6 +65,7 @@ pub(crate) mod rename;
 pub(crate) mod semantic;
 mod slice;
 pub mod span;
+pub(crate) mod stack_protector;
 mod strided;
 #[cfg(test)]
 pub(crate) mod testing;

@@ -75,6 +75,23 @@ declarations.
   offsets agree over rendered functions (90 refused). Coverage: three
   `_start`s gap 13 to 14, because the read of the caller's `[sp]` now stays
   before the pushes through the realigned stack pointer, in program order.
+- P4.4, canary half (amended 2026-10-06): the check is decided in r2ssa
+  before preparation (`stack_protector.rs`), not as a frame role: gcc at
+  -O0 keeps the canary in a slot, but promotion often takes it out of
+  memory, leaving two reads of the guard compared. Under
+  `Premise::UbFreeSource`, which r2engine grants (`accepted_premises`), a
+  check comparing two reads of memory at a reserved register's entry
+  value plus a constant, directly or through a slot written once before
+  the reload, whose mismatch edge reaches only a call that does not return,
+  passes: the failing edge and block go, every reread becomes a copy of the
+  first read (so a live `reload - guard` folds to zero), and the reads and
+  the slot store are certified `compiler_inserted` unless something outside
+  them is observed reading one (a returned carrier holding the canary keeps
+  its residual). The proof line counts them and names the premise. Census:
+  14 functions lose the canary residual and `__stack_chk_fail`; one array
+  shrinks to its own 16 bytes. The x86-64 baseline holds 38 canary traps;
+  aarch64's guard is a global (`__stack_chk_guard`), which this rule does
+  not read. A consumer refusing the premise is item A's.
 
 ## Left
 
@@ -92,8 +109,8 @@ declarations.
 - P4.3: promotion as an SSA rewrite. Exit: `promote.rs`, `PromotedSlot`,
   `promoted_slot_sites` and the `(block, index)`-keyed promoted maps are
   deleted.
-- P4.4: the canary role and its elision under `UbFreeSource`. Exit: the
-  37 canary residual traps (all on `FS_OFFSET_0`) are gone.
+- P4.4: exit measured at P4's exit: the 38 x86-64 canary residual traps
+  (all on `FS_OFFSET_0`) leave the equivalence baseline.
 - P4.5: the restatement removed. Exit: the proved half of `restated_slots`
   is deleted.
 - Exit for the whole of P4: one owner of frame objects, and `afv` agrees with
