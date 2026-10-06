@@ -87,7 +87,9 @@ impl FrameReach {
             };
         };
         let frame = FrameIndex::of(model);
-        let (escaped, whole) = escaped_objects(facts, graph, model, &frame);
+        let (mut escaped, whole) = escaped_objects(facts, graph, model, &frame);
+        let barriers = compiler_slots(function, graph, model, machine_context);
+        close_upward(&mut escaped, &frame, &barriers);
         let by_call = call_reaches(function, graph, facts, &frame, machine_context);
         r2il::refusal_evidence!(
             "frame-reach",
@@ -106,6 +108,105 @@ impl FrameReach {
             by_call,
         }
     }
+}
+
+/// Nothing proves where the object an escaped address points into ends: `rows[4]` is four
+/// objects to the partition and one to the callee that indexes it. So an escaped address reaches
+/// every object of this frame above it, up to a slot the compiler owns, which no C object spans.
+/// `O(objects)` per escaped object.
+fn close_upward(
+    escaped: &mut BTreeSet<ObjectId>,
+    frame: &FrameIndex,
+    barriers: &BTreeSet<ObjectId>,
+) {
+    let starts = escaped
+        .iter()
+        .filter_map(|object| frame.start_of(*object))
+        .filter(|start| *start < 0)
+        .collect::<BTreeSet<_>>();
+    let mut reached = BTreeSet::new();
+    for start in starts {
+        for (_, objects) in frame.starts.range(start..0) {
+            if objects.iter().any(|object| barriers.contains(object)) {
+                break;
+            }
+            reached.extend(objects.iter().copied());
+        }
+    }
+    escaped.extend(reached);
+}
+
+/// The frame slots the compiler owns: a save of a register the convention preserves (its entry
+/// value stored) and a decided stack protector's canary.
+fn compiler_slots(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    model: &ObjectModel,
+    machine_context: Option<&SourceMachineContext>,
+) -> BTreeSet<ObjectId> {
+    let effect = machine_context.and_then(SourceMachineContext::call_effect);
+    let canary = function
+        .compiler_inserted()
+        .iter()
+        .filter_map(|op| graph.inst_for_op(*op))
+        .collect::<BTreeSet<_>>();
+    let preserved =
+        |storage: CanonicalStorageId| effect.is_some_and(|effect| effect.preserves(storage));
+    let entry = |value: ValueId| {
+        graph
+            .value(value)
+            .filter(|value| value.var.version == 0)
+            .and_then(|value| value.canonical_storage)
+    };
+    // The low lane of an entry register the convention preserves: AArch64's `d8` of `z8`.
+    let preserved_low_lane = |root: CanonicalStorageId, size: u32| {
+        effect.is_some_and(|effect| {
+            effect.preserved().iter().any(|lane| {
+                lane.size == size
+                    && machine_context.is_some_and(|context| context.is_low_lane_of(*lane, root))
+            })
+        })
+    };
+    // A register's entry value, or the low lane of one, stored whole.
+    let saved = |value: ValueId| {
+        graph
+            .formal_projection_storage(value)
+            .is_some_and(preserved)
+            || entry(value).is_some_and(preserved)
+            || graph
+                .def_inst(value)
+                .and_then(|inst| graph.inst(inst))
+                .is_some_and(|inst| {
+                    matches!(
+                        inst.payload,
+                        crate::graph::InstPayload::Op(SSAOp::Subpiece { offset: 0, .. })
+                    ) && inst
+                        .inputs
+                        .first()
+                        .copied()
+                        .and_then(entry)
+                        .is_some_and(|root| {
+                            graph
+                                .value(value)
+                                .is_some_and(|lane| preserved_low_lane(root, lane.var.size))
+                        })
+                })
+    };
+    graph
+        .insts
+        .iter()
+        .filter_map(|inst| match &inst.payload {
+            crate::graph::InstPayload::Op(SSAOp::Store { space, .. }) => {
+                let (address, value) = (*inst.inputs.first()?, *inst.inputs.get(1)?);
+                (saved(value) || canary.contains(&inst.id)).then_some(MemoryObjectKey {
+                    value: address,
+                    space: *space,
+                })
+            }
+            _ => None,
+        })
+        .filter_map(|key| model.value_objects.get(&key).copied())
+        .collect()
 }
 
 /// The frame objects by where each starts in the entry frame, built once; the unplaced ones apart.
@@ -134,6 +235,13 @@ impl FrameIndex {
             };
         }
         index
+    }
+
+    /// The entry offset an object starts at, where the frame places it.
+    fn start_of(&self, object: ObjectId) -> Option<i64> {
+        self.starts
+            .iter()
+            .find_map(|(start, objects)| objects.contains(&object).then_some(*start))
     }
 
     fn len(&self) -> usize {
