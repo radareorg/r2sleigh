@@ -60,8 +60,8 @@ pub struct Local {
     pub name: String,
     pub base: StackBase,
     pub offset: i64,
-    /// The declared type, or else storage of the width its accesses agree on.
-    pub ty: CTypeLike,
+    /// The type it is declared at, as C spells it.
+    pub ty: String,
 }
 
 impl Argument {
@@ -266,7 +266,8 @@ fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> 
     ))
 }
 
-/// Every declarable stack object, and every frame slot promotion took out of memory.
+/// Every declarable stack object, and every frame slot promotion took out of memory: what `afv`
+/// lists where no rendering declares the frame (`OpenProgram::function_info`).
 fn locals(
     artifact: &r2ssa::SsaArtifact,
     sealed: &SourceOwnedFunctionFacts,
@@ -288,7 +289,7 @@ fn locals(
             name: r2ssa::frame_object_name(offset),
             base: StackBase::StackPointer,
             offset,
-            ty: CTypeLike::machine_bits(bytes * 8),
+            ty: CTypeLike::machine_bits(bytes * 8).to_string(),
         });
     let mut locals = objects.chain(promoted).collect::<Vec<_>>();
     locals.sort_by_key(|local| local.offset);
@@ -321,6 +322,6 @@ fn object(
         name: sealed.stack_object_name(*object, *offset),
         base: *base,
         offset: *offset,
-        ty: ty.clone().unwrap_or(storage),
+        ty: ty.clone().unwrap_or(storage).to_string(),
     })
 }

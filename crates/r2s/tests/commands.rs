@@ -831,9 +831,8 @@ mod dispatch_table {
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
-    /// The block counts and the frame are the prepared analysis's: the saved
-    /// `x29`/`x30` pair is frame management, the two spills of `x0`/`x1` and
-    /// the promoted loop counter are the body's own.
+    /// The block counts are the prepared analysis's; the frame is the locals the rendering declares
+    /// (doc/adr-frame-model.md): the table and the promoted loop counter, where the spills of `x0`/`x1` read as values.
     #[test]
     fn a_function_reports_its_shape_and_its_frame() {
         let run = r2s("afi @ sym._table_dispatch; afv @ sym._table_dispatch");
@@ -845,7 +844,7 @@ mod dispatch_table {
             "num-instrs: 38",
             "cyclomatic-complexity: 2",
             "is-lineal: true",
-            "locals: 5",
+            "locals: 2",
             "args: 2",
         ] {
             assert!(
@@ -861,10 +860,7 @@ mod dispatch_table {
             "arg uint64_t arg1 @ x0\n\
              arg uint64_t arg2 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
-             var uint64_t stack_m72 @ entry.sp-0x48\n\
-             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40\n\
-             var uint64_t stack_m32 @ entry.sp-0x20\n\
-             var uint64_t stack_m24 @ entry.sp-0x18"
+             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40"
         );
     }
 

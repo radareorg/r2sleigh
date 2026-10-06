@@ -7,7 +7,7 @@ For every function of the census binaries, `afv` lists the frame's locals at
 entry-stack offsets and `pddj` the locals the rendering declares at the same
 offsets. Each offset either side names is classified:
 
-  agree         one local on each side, same name and type
+  agree         the same locals on each side, by name and type
   name          one on each side, names differ
   type          one on each side, same name, types differ
   afv-only      `afv` lists it; the rendering declares nothing there
@@ -61,7 +61,9 @@ def classify(afv, pdd):
     details = []
     for offset in sorted(set(afv) | set(pdd)):
         a, p = afv.get(offset, []), pdd.get(offset, [])
-        if len(a) > 1:
+        if sorted(a) == sorted(p):
+            kind = "agree"
+        elif len(a) > 1:
             kind = "afv-twice"
         elif len(p) > 1:
             kind = "pdd-twice"
