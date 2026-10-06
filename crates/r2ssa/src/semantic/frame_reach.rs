@@ -14,6 +14,10 @@
 //!   the value of a store, or the inputs of an intrinsic escapes the object it
 //!   points into. A tainted value that names no object escapes the whole
 //!   frame -- there is no object to blame, so none may be called private.
+//!   An access through an address the model places in no object escapes the
+//!   object at its offset; a frame address used as code or in an unmodelled
+//!   operation escapes the whole frame; a return does not escape (the frame
+//!   ends with the call). Private objects are the frame objects not escaped.
 //! - **The argument area** of a call is the slots its complete, non-variadic
 //!   interface places on the stack, at the stack pointer the call is made with,
 //!   and below the first of them the space the convention reserves for the
@@ -175,12 +179,20 @@ fn escaped_objects(
         .copied()
         .collect::<BTreeSet<_>>();
     let mut whole = false;
+    let placed = |value: ValueId| {
+        let key = MemoryObjectKey {
+            value,
+            space: SpaceId::Ram,
+        };
+        model.value_objects.contains_key(&key)
+    };
     while let Some(value) = pending.pop() {
         for site in graph.use_sites(value) {
             let Some(inst) = graph.inst(site.inst) else {
+                whole = true;
                 continue;
             };
-            match carries(inst, site.input_idx) {
+            match carries(inst, site.input_idx, placed(value)) {
                 Carry::Escapes => match escaping_object(facts, graph, frame, value) {
                     Some(object) => {
                         escaped.insert(object);
@@ -189,6 +201,7 @@ fn escaped_objects(
                 },
                 Carry::Propagates => pending.extend(inst.output.filter(|out| tainted.insert(*out))),
                 Carry::Stops => {}
+                Carry::Everything => whole = true,
             }
         }
     }
@@ -204,6 +217,8 @@ fn escaped_objects(
 enum Carry {
     /// The value leaves the function's sight with the address it carries.
     Escapes,
+    /// Control or code goes where the address says, so no object of the frame is private.
+    Everything,
     /// The output is computed from the address and may be one.
     Propagates,
     /// The address is used as one, or reduced to something that is not one.
@@ -222,29 +237,38 @@ fn escaping_object(
     containing(frame, offset)
 }
 
-/// What one use of a frame address does with it.
-fn carries(inst: &crate::graph::GraphInst, input: usize) -> Carry {
+/// What one use of a frame address does with it; `placed` is whether the model puts the address in an object.
+///
+/// A return is no escape: under the UB-free premise the frame ends with the call (doc/adr-frame-model.md).
+fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry {
     let op = match &inst.payload {
         crate::graph::InstPayload::Phi { .. } => return Carry::Propagates,
         crate::graph::InstPayload::Op(op) => op,
     };
+    let access = || if placed { Carry::Stops } else { Carry::Escapes };
     match op {
         SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => Carry::Escapes,
+        SSAOp::Call { .. }
+        | SSAOp::CallInd { .. }
+        | SSAOp::Branch { .. }
+        | SSAOp::BranchInd { .. }
+        | SSAOp::Switch { .. } => Carry::Everything,
+        // A conditional branch reads its condition; an address there is a truth value.
+        SSAOp::CBranch { .. } | SSAOp::Return { .. } => Carry::Stops,
         // Input 0 is the address; anything else stored is the value.
         SSAOp::Store { .. }
         | SSAOp::StoreConditional { .. }
         | SSAOp::StoreGuarded { .. }
         | SSAOp::AtomicCAS(_) => {
             if input == 0 {
-                Carry::Stops
+                access()
             } else {
                 Carry::Escapes
             }
         }
-        SSAOp::Load { .. }
-        | SSAOp::LoadLinked { .. }
-        | SSAOp::LoadGuarded { .. }
-        | SSAOp::IntEqual { .. }
+        SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. } => access(),
+        SSAOp::BlockTransfer(_) => access(),
+        SSAOp::IntEqual { .. }
         | SSAOp::IntNotEqual { .. }
         | SSAOp::IntLess { .. }
         | SSAOp::IntSLess { .. }
@@ -256,7 +280,8 @@ fn carries(inst: &crate::graph::GraphInst, input: usize) -> Carry {
         | SSAOp::PopCount { .. }
         | SSAOp::Lzcount { .. } => Carry::Stops,
         _ if inst.output.is_some() => Carry::Propagates,
-        _ => Carry::Stops,
+        // An operation with no output that is none of the above does something unmodelled with the address.
+        _ => Carry::Everything,
     }
 }
 

@@ -320,7 +320,7 @@ impl PreparedFunctionFacts {
         phase!("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
         phase!("control_domains", 0);
-        let private_stack_objects = private_stack_objects(graph, &objects, &structured, &live_out);
+        let private_stack_objects = private_stack_objects(&objects);
         // Before the obligations, because whether an access is a statement at
         // all depends on it: a round trip leaves the object as it found it, so
         // neither half is an observable effect.
