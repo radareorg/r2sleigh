@@ -958,7 +958,11 @@ impl<'a> FoldingContext<'a> {
         else {
             return None;
         };
-        Some(names.plan().binding(binding)?.declaration_type().clone())
+        // An access into an array writes at the type the access is rendered at, which the caller has.
+        match names.plan().binding(binding)?.declaration_type() {
+            CType::Array(..) => None,
+            declared => Some(declared.clone()),
+        }
     }
 
 
