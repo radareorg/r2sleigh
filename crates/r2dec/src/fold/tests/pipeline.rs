@@ -1480,6 +1480,12 @@ mod tests {
             a: Varnode::register(0x28, 8),
             b: Varnode::constant(8, 8),
         });
+        // Spilled twice, so the declared home is no single-store slot promotion could take.
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x280, 8),
+            val: Varnode::register(0x10, 8),
+        });
         entry.push(R2ILOp::Store {
             space: SpaceId::Ram,
             addr: Varnode::unique(0x280, 8),

@@ -31,7 +31,7 @@ impl SSAFunction {
         Self {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
-            promoted_slot_sites: BTreeSet::new(),
+            promoted_slots: crate::dense::IdSet::default(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeSet::new(),
             stack_pointer_carrier: None,
@@ -163,39 +163,6 @@ impl SSAFunction {
         let abi_carriers = questions.construction_carriers();
 
         let cfg = lifted_cfg(blocks, declared_successors)?;
-        // Which frame slots behave like variables. Asked of the lifted text,
-        // before construction, because construction is what decides which
-        // value each read of a variable sees.
-        // A home is proven by the entry value it spills, not by which
-        // carriers the convention names: the result register among them
-        // made `call f; mov [rbp-4], eax` a parameter's home.
-        //
-        // Promotion reads the entry block as run once, on the way in, with
-        // the stack pointer where the caller left it: its prologue opens the
-        // frame every place is named from. A branch in the body back to the
-        // entry arrives with the frame open -- a block that closed it would
-        // move the stack pointer without leaving, which promotion refuses --
-        // so the prologue would open a second frame under the first, and no
-        // displacement would name one slot on both arrivals. The graph says
-        // whether that happens: it is rooted at the entry edge exactly then.
-        let promoted = if cfg.has_entry_edge() {
-            r2il::refusal_evidence!(
-                "promote-stack-slot",
-                "{:#x} is also a branch target, so its block does not run once",
-                cfg.entered_at()
-            );
-            crate::phi::PromotedStackSlots::default()
-        } else {
-            crate::promote::promote_private_stack_slots(
-                blocks,
-                stack_pointer_carrier,
-                machine_context.machine_roles().frame_pointer_storage(),
-                questions.interface,
-                machine_context.call_effect(),
-                stack_pointer_restored_by_callee.is_some(),
-            )
-            .unwrap_or_default()
-        };
         // The same phase report the semantic collector gives, for the half of
         // a decompile's bytes that are already held before the collector runs.
         // Construction is three passes over the same body and they do not cost
@@ -222,7 +189,6 @@ impl SSAFunction {
             stack_pointer_restored_by_callee,
             callees,
             &abi_carriers,
-            &promoted,
             control,
         )?;
         phase("raw", func.num_blocks());
@@ -230,6 +196,12 @@ impl SSAFunction {
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
+        let promoted = crate::slot_promotion::promote(
+            &mut func,
+            machine_context,
+            stack_pointer_restored_by_callee.is_some(),
+        );
+        func.record_promoted_slots(promoted);
         // Before preparation, so the comparison a decided check leaves unread folds away.
         crate::stack_protector::decide(&mut func, machine_context);
         // Preparation reads the interface for the return projection only;
@@ -266,7 +238,6 @@ impl SSAFunction {
             arch,
             None,
             &[],
-            &Default::default(),
             control,
         )?;
         let cfg = crate::optimize::OptimizationConfig {
@@ -306,7 +277,6 @@ impl SSAFunction {
             arch,
             None,
             &[],
-            &Default::default(),
             control,
         )
     }
@@ -334,7 +304,6 @@ impl SSAFunction {
             None,
             &CalleeBoundaries::default(),
             &[],
-            &Default::default(),
             control,
         )
     }
@@ -349,7 +318,6 @@ impl SSAFunction {
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
         callees: &CalleeBoundaries,
         abi_carriers: &[CanonicalStorageId],
-        promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let policy = decompile_call_boundary_config(
@@ -364,7 +332,6 @@ impl SSAFunction {
             arch,
             policy.as_ref(),
             abi_carriers,
-            promoted,
             control,
         )
     }
@@ -382,7 +349,6 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         call_boundaries: Option<&CallBoundaryConfig>,
         abi_carriers: &[CanonicalStorageId],
-        promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -433,7 +399,6 @@ impl SSAFunction {
                 &cfg,
                 reg_names_ref,
                 families_ref,
-                promoted,
                 control,
             )?;
 
@@ -461,7 +426,6 @@ impl SSAFunction {
                     reg_names: reg_names_ref,
                     families: families_ref,
                 },
-                promoted,
                 &defs,
             );
             PhiPlacement::compute_with_storage_and_control(
@@ -492,7 +456,6 @@ impl SSAFunction {
                 phi_placement: &phi_placement,
                 reg_names: reg_names_ref,
                 call_boundaries,
-                promoted,
             },
             &defs,
             families.clone(),
@@ -576,7 +539,7 @@ impl SSAFunction {
             supervisor_calls: arch
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
-            promoted_slot_sites: promoted.keys().copied().collect(),
+            promoted_slots: crate::dense::IdSet::default(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeSet::new(),
             stack_pointer_carrier: None,

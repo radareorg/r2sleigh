@@ -393,10 +393,10 @@ fn unassigned_reads_at_o2(definition: &str, answer: &Value) -> Option<String> {
         )
     } else {
         (
-            vec!["held-from-entry", "never-assigned", "held-from-entry"],
-            code.contains("1 held from entry, read as residuals (FS_OFFSET_0)")
-                && code.contains("1 never assigned, read as residuals (XMM0_4)")
-                && !code.contains("FS_OFFSET_15"),
+            // The stack-protector check is compiler-inserted, so the canary's reads are gone.
+            vec!["never-assigned"],
+            code.contains("1 never assigned, read as residuals (XMM0_4)")
+                && !code.contains("FS_OFFSET"),
         )
     };
     (causes != expected || !said).then(|| format!("rv_O2 {definition}: {causes:?}\n{code}"))

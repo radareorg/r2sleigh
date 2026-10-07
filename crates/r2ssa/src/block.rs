@@ -339,6 +339,13 @@ impl<V> SSABlock<V> {
         self.ops = ops;
     }
 
+    /// Append one phi, its id minted by `pass`.
+    pub(crate) fn add_phi(&mut self, arena: &mut OpArena, pass: Pass, phi: PhiNode<V>) {
+        self.phi_ids
+            .push(arena.mint(OpOrigin::Derived { from: None, pass }));
+        self.phis.push(phi);
+    }
+
     /// Replace every phi, as [`Self::replace_ops`] does operations.
     pub(crate) fn replace_phis(&mut self, arena: &mut OpArena, pass: Pass, phis: Vec<PhiNode<V>>) {
         for id in self.phi_ids.drain(..) {
@@ -427,6 +434,11 @@ impl<'a, V> BlockMut<'a, V> {
     /// Insert one operation at `at`, derived by `pass` from `from`.
     pub fn insert_op(&mut self, at: usize, op: SSAOp<V>, from: Option<OpId>, pass: Pass) {
         self.block.insert_ops(self.arena, at, pass, [(op, from)]);
+    }
+
+    /// Append one phi, its id minted by `pass`.
+    pub fn push_phi(&mut self, phi: PhiNode<V>, pass: Pass) {
+        self.block.add_phi(self.arena, pass, phi);
     }
 
     /// Append one operation, derived by `pass` from `from`.
@@ -520,7 +532,7 @@ fn varnode_to_name(vn: &Varnode, spell: Spelling<'_>) -> &'static InternedName {
         SpaceId::Unique => intern_fmt(format_args!("tmp:{:x}", vn.offset)),
         SpaceId::Const => intern_fmt(format_args!("const:{:x}", vn.offset)),
         SpaceId::Ram => intern_fmt(format_args!("ram:{:x}", vn.offset)),
-        SpaceId::Custom(id) if id == crate::promote::PROMOTED_SLOT_SPACE => intern_fmt(
+        SpaceId::Custom(id) if id == crate::slot_promotion::PROMOTED_SLOT_SPACE => intern_fmt(
             format_args!("{}", crate::naming::frame_slot_name(vn.offset as i64)),
         ),
         SpaceId::Custom(id) => intern_fmt(format_args!("space{}:{:x}", id, vn.offset)),

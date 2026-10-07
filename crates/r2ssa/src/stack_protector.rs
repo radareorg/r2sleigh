@@ -11,15 +11,11 @@ use std::collections::BTreeSet;
 use crate::arena::OpId;
 use crate::cfg::BlockTerminator;
 use crate::dense::{IdMap, IdSet};
+use crate::frame_address::{Affine, Definitions};
 use crate::function::{EditPlan, SSAFunction, ShapeEdit};
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
 use crate::value_table::VarId;
-
-type Op = SSAOp<VarId>;
-
-/// An address as a root value plus a constant byte offset.
-type Affine = (VarId, i64);
 
 /// One recognised check: what decides it and which operations the compiler inserted for it.
 struct Check {
@@ -118,98 +114,6 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     decided.reorder();
     func.apply_edits(decided);
     func.record_compiler_inserted(inserted, removed);
-}
-
-/// Each variable's defining operation, and the walks over it this check needs.
-struct Definitions {
-    defs: IdMap<VarId, (OpId, Op)>,
-    /// Where each operation sits: its block and its index there.
-    positions: IdMap<OpId, (u64, usize)>,
-    /// A bound on any definition chain: every step moves to an operand defined earlier.
-    values: usize,
-}
-
-impl Definitions {
-    fn of(func: &SSAFunction) -> Self {
-        let values = func.values().len();
-        let mut defs = IdMap::new(values);
-        let mut positions = IdMap::new(func.id_limit());
-        for addr in func.block_addrs() {
-            let Some(block) = func.get_block(*addr) else {
-                continue;
-            };
-            for (index, (id, op)) in block.sited().enumerate() {
-                positions.insert(id, (*addr, index));
-                if let Some(dst) = op.dst() {
-                    defs.insert(*dst, (id, op.clone()));
-                }
-            }
-        }
-        Self {
-            defs,
-            positions,
-            values,
-        }
-    }
-
-    /// Whether operation `a` runs before `b` on every path to `b`.
-    fn precedes(&self, func: &SSAFunction, a: OpId, b: OpId) -> bool {
-        match (self.positions.get(a), self.positions.get(b)) {
-            (Some((block_a, at)), Some((block_b, bt))) if block_a == block_b => at < bt,
-            (Some((block_a, _)), Some((block_b, _))) => func.dominates(*block_a, *block_b),
-            _ => false,
-        }
-    }
-
-    fn op(&self, var: VarId) -> Option<&(OpId, Op)> {
-        self.defs.get(var)
-    }
-
-    /// The value a run of copies forwards.
-    fn copied(&self, mut var: VarId) -> VarId {
-        for _ in 0..self.values {
-            match self.op(var) {
-                Some((_, SSAOp::Copy { src, .. })) => var = *src,
-                _ => return var,
-            }
-        }
-        var
-    }
-
-    /// An address as a root and a constant offset, through copies and constant adds and subtracts.
-    fn affine(&self, func: &SSAFunction, mut var: VarId) -> Affine {
-        let mut offset = 0i64;
-        let constant = |var: VarId| func.var(var).constant_bits().map(|bits| bits as i64);
-        for _ in 0..self.values {
-            match self.op(var) {
-                Some((_, SSAOp::Copy { src, .. })) => var = *src,
-                Some((_, SSAOp::IntAdd { a, b, .. })) if constant(*b).is_some() => {
-                    offset = offset.wrapping_add(constant(*b).unwrap_or(0));
-                    var = *a;
-                }
-                Some((_, SSAOp::IntAdd { a, b, .. })) if constant(*a).is_some() => {
-                    offset = offset.wrapping_add(constant(*a).unwrap_or(0));
-                    var = *b;
-                }
-                Some((_, SSAOp::IntSub { a, b, .. })) if constant(*b).is_some() => {
-                    offset = offset.wrapping_sub(constant(*b).unwrap_or(0));
-                    var = *a;
-                }
-                _ => break,
-            }
-        }
-        (var, offset)
-    }
-
-    /// The load a value is, through copies: its operation and its address.
-    fn load(&self, func: &SSAFunction, var: VarId) -> Option<(OpId, Affine, u32)> {
-        match self.op(self.copied(var)) {
-            Some((id, SSAOp::Load { dst, addr, .. })) => {
-                Some((*id, self.affine(func, *addr), func.var(*dst).size))
-            }
-            _ => None,
-        }
-    }
 }
 
 /// Every store whose address is a root plus a constant, by root; written once, by the walk below.

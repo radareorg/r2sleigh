@@ -328,6 +328,12 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         space: SpaceId::Ram,
         addr: local_addr,
     });
+    // The epilogue restores the saved frame pointer, which keeps its slot a save in memory.
+    block.push(R2ILOp::Load {
+        dst: Varnode::register(8, 8),
+        space: SpaceId::Ram,
+        addr: Varnode::register(0, 8),
+    });
     block.push(R2ILOp::Return { target: ra });
 
     let mut arch = ArchSpec::new("dual-stack-coordinate-test");

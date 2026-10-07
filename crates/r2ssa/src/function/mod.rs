@@ -2607,7 +2607,7 @@ pub struct SSAFunction {
     /// A promoted slot access is a copy of a variable in the prepared
     /// operations, so it is no longer one of the function's memory
     /// operations, and every layer that counts those has to agree.
-    promoted_slot_sites: BTreeSet<(u64, usize)>,
+    promoted_slots: crate::dense::IdSet<crate::arena::OpId>,
     /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
     compiler_inserted: crate::dense::IdSet<crate::arena::OpId>,
     /// The failure blocks a decided stack-protector check removed, whose instructions stay owed.
@@ -2867,6 +2867,11 @@ impl SSAFunction {
                         }
                     }
                 }
+                ShapeEdit::InsertPhi { block, phi } => {
+                    if let Some(mut block) = self.block_for_change(block) {
+                        block.push_phi(phi, crate::arena::Pass::PhiPlacement);
+                    }
+                }
                 ShapeEdit::RemoveEdge { from, to } => self.cfg.remove_edge(from, to),
                 ShapeEdit::SetTerminator { block, terminator } => {
                     self.cfg.set_terminator(block, terminator);
@@ -2958,7 +2963,7 @@ impl Clone for SSAFunction {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
-            promoted_slot_sites: self.promoted_slot_sites.clone(),
+            promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
@@ -3461,8 +3466,19 @@ impl SSAFunction {
     }
 
     /// Which lifted memory operations promotion took out of memory.
-    pub fn promoted_slot_sites(&self) -> &BTreeSet<(u64, usize)> {
-        &self.promoted_slot_sites
+    /// The lifted memory operations slot promotion rewrote, as (block, lifted index).
+    pub fn promoted_slot_sites(&self) -> BTreeSet<(u64, usize)> {
+        self.promoted_slots
+            .iter()
+            .filter_map(|op| match self.arena().origin(op)? {
+                crate::arena::OpOrigin::Lifted { block, index, .. } => Some((*block, *index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn record_promoted_slots(&mut self, ops: crate::dense::IdSet<crate::arena::OpId>) {
+        self.promoted_slots = ops;
     }
 
     /// The operations a decided stack-protector check inserted (`crate::stack_protector`).

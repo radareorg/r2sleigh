@@ -188,15 +188,10 @@ pub(crate) fn register_root_slot(
 }
 
 /// Collect definitions and storage while polling the block/operation scan.
-/// Which op site accesses a promoted stack slot, and the varnode standing for
-/// the slot there. Empty where nothing was promoted.
-pub type PromotedStackSlots = std::collections::BTreeMap<(u64, usize), r2il::Varnode>;
-
 pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + ?Sized>(
     cfg: &CFG,
     reg_names: Option<&RegisterNameMap>,
     families: Option<&RegisterFamilyInfo>,
-    promoted: &PromotedStackSlots,
     control: &C,
 ) -> Result<DefinitionCollection, SsaExecutionStopReason> {
     control.poll()?;
@@ -208,23 +203,8 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for op in &block.ops {
             control.poll()?;
-            // A promoted slot's access defines or reads the slot's own
-            // identity, which is what gives it a merge at a join the same way
-            // a register gets one.
-            if let Some(slot) = promoted.get(&(block.addr, op_idx)) {
-                let identity = RenameIdentity::for_varnode(slot, reg_names, families);
-                storage_by_identity.insert(identity.clone(), identity.storage);
-                match op {
-                    r2il::R2ILOp::Store { .. } => {
-                        defs.entry(identity).or_default().insert(block.addr);
-                    }
-                    _ => {
-                        defs.entry(identity).or_default();
-                    }
-                }
-            }
             for varnode in op.inputs() {
                 if !matches!(varnode.space, r2il::SpaceId::Const) {
                     let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
@@ -390,7 +370,6 @@ pub fn live_in_by_block(
     cfg: &CFG,
     call_boundaries: &crate::rename::CallBoundaryConfig,
     naming: IdentityNaming<'_>,
-    promoted: &PromotedStackSlots,
     defs: &DefinitionSitesByIdentity,
 ) -> HashMap<u64, BTreeSet<RenameIdentity>> {
     let IdentityNaming {
@@ -439,12 +418,7 @@ pub fn live_in_by_block(
             continue;
         };
         present.push(true);
-        let rows = block
-            .ops
-            .iter()
-            .enumerate()
-            .map(|(op_idx, op)| numbering.effect(op, promoted.get(&(block.addr, op_idx))))
-            .collect();
+        let rows = block.ops.iter().map(|op| numbering.effect(op)).collect();
         effects.push(rows);
     }
     // A call or a return reads or writes the whole of each register the
@@ -620,26 +594,8 @@ impl IdentityNumbers<'_> {
         Some(self.bases[*number as usize].clone())
     }
 
-    /// What one operation reads and defines, as renaming writes it. A
-    /// promoted access is a copy of the slot: a load reads the slot and not
-    /// the address, a store reads its value and defines the slot.
-    fn effect(&mut self, op: &r2il::R2ILOp, promoted: Option<&r2il::Varnode>) -> LivenessOpEffect {
-        let copied = promoted.and_then(|slot| match op {
-            r2il::R2ILOp::Load { dst, .. } => Some((slot, dst)),
-            r2il::R2ILOp::Store { val, .. } => Some((val, slot)),
-            _ => None,
-        });
-        if let Some((read, written)) = copied {
-            let reads = (!matches!(read.space, r2il::SpaceId::Const))
-                .then(|| self.bytes(read))
-                .into_iter()
-                .collect();
-            return LivenessOpEffect {
-                boundary: LivenessBoundary::None,
-                kill: Some(self.bytes(written)),
-                reads,
-            };
-        }
+    /// What one operation reads and defines, as renaming writes it.
+    fn effect(&mut self, op: &r2il::R2ILOp) -> LivenessOpEffect {
         let kill = get_op_output_varnode(op).map(|varnode| self.bytes(varnode));
         let reads = op
             .inputs()

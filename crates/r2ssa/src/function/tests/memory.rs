@@ -554,6 +554,12 @@ fn an_escaped_frame_address_keeps_the_places_around_it_in_memory() {
             space: SpaceId::Ram,
             addr: make_unique(0x110, 8),
         },
+        // Stored where anything may read it, `r1` hands the address on.
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_const(0x9000, 8),
+            val: make_reg(16, 8),
+        },
         R2ILOp::Return {
             target: make_reg(8, 8),
         },

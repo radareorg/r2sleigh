@@ -486,7 +486,7 @@ fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId>
                 .value(value)?
                 .canonical_storage
                 .as_ref()
-                .and_then(crate::promote::promoted_slot_offset)
+                .and_then(crate::slot_promotion::promoted_slot_offset)
                 .map(|_| value)
         })
 }
