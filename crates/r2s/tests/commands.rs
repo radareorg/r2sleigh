@@ -819,6 +819,16 @@ mod dispatch_table {
         on(fixture(), script)
     }
 
+    /// The entry spills of `x0`/`x1` hold only the parameters, which the frame model proves in the
+    /// same preparation (doc/adr-frame-model.md, P4.5): each is its parameter, never a local copy.
+    #[test]
+    fn a_spilled_parameter_is_its_parameter() {
+        let run = r2s("pdd @ sym._table_dispatch");
+        assert!(run.ok, "{}", run.out);
+        assert!(!run.out.contains("= X0_0;"), "{}", run.out);
+        assert!(!run.out.contains("= X1_0;"), "{}", run.out);
+    }
+
     #[test]
     fn a_call_through_a_table_renders_as_a_call_through_a_pointer() {
         let run = r2s("s 0x100000420; pdd");
@@ -860,7 +870,7 @@ mod dispatch_table {
             "arg uint64_t arg1 @ x0\n\
              arg uint64_t arg2 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
-             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40"
+             var uint8_t[24] stack_m64 @ entry.sp-0x40"
         );
     }
 

@@ -628,6 +628,7 @@ impl BindingPlan {
                     size,
                     array_layout,
                     source_slot,
+                    role,
                     reload_values,
                     stored_values,
                     callee_allocation,
@@ -640,6 +641,14 @@ impl BindingPlan {
                     *size,
                     array_layout.clone(),
                     *source_slot,
+                    match role {
+                        Some(home @ r2ssa::SourceStackSlotRole::ParameterHome { .. })
+                            if source_slot.is_none() =>
+                        {
+                            Some(*home)
+                        }
+                        _ => None,
+                    },
                     reload_values.clone(),
                     stored_values.clone(),
                     callee_allocation.clone(),
@@ -664,6 +673,7 @@ impl BindingPlan {
             size,
             array_layout,
             source_slot,
+            proved_home,
             reload_values,
             stored_values,
             callee_allocation,
@@ -727,14 +737,14 @@ impl BindingPlan {
                 }
                 continue;
             }
-            let expected_disposition = match (source_slot, callee_allocation) {
+            let expected_disposition = match (source_slot, callee_allocation, proved_home) {
                 // Neither strong form answers, so the object is named by the
                 // width its own accesses agree on. Without even that there is
                 // no geometry to state and it stays refused.
-                (None, None) if size.is_none() => StackObjectDisposition::Refused {
+                (None, None, None) if size.is_none() => StackObjectDisposition::Refused {
                     reason: StackObjectRefusal::MissingSourceIdentity { object },
                 },
-                (None, None) => {
+                (None, None, None) => {
                     let size_bytes = size.expect("the arm above covers a missing width");
                     let Some(width_bits) = size_bytes.checked_mul(8).filter(|width| *width > 0)
                     else {
@@ -834,7 +844,7 @@ impl BindingPlan {
                     }
                     StackObjectDisposition::Bound { binding }
                 }
-                (None, Some(certificate)) => {
+                (None, Some(certificate), None) => {
                     if certificate.object != object
                         || size != Some(certificate.size_bytes)
                         || certificate.accesses.is_empty()
@@ -928,10 +938,10 @@ impl BindingPlan {
                         StackObjectDisposition::Bound { binding }
                     }
                 }
-                (Some(_), Some(_)) => StackObjectDisposition::Refused {
+                (Some(_), Some(_), _) => StackObjectDisposition::Refused {
                     reason: StackObjectRefusal::MissingSourceIdentity { object },
                 },
-                (Some(source_slot), None)
+                (Some(source_slot), None, _)
                     if source_slot.base() != base
                         || source_slot.offset() != offset
                         || size != Some(source_slot.size_bytes())
@@ -949,7 +959,7 @@ impl BindingPlan {
                         reason: StackObjectRefusal::MissingSourceIdentity { object },
                     }
                 }
-                (Some(source_slot), None) => {
+                (declared, _, home) => {
                     let size_bytes = size.expect("source stack object has certified geometry");
                     let Some(width_bits) = size_bytes.checked_mul(8).filter(|width| *width > 0)
                     else {
@@ -970,12 +980,23 @@ impl BindingPlan {
                         }
                         continue;
                     };
-                    let role = super::rules::effective_stack_slot_role(
-                        source_owned,
-                        &source_slot,
-                        base,
-                        offset,
-                    );
+                    // A declared slot's role, or the parameter home the frame proves where none is declared.
+                    let role = match (declared, home) {
+                        (Some(source_slot), _) => super::rules::effective_stack_slot_role(
+                            source_owned,
+                            &source_slot,
+                            base,
+                            offset,
+                        ),
+                        (None, Some(home)) => home,
+                        (None, None) => {
+                            return Err(BindingPlanBuildError::Seal(
+                                BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
+                                    object,
+                                },
+                            ));
+                        }
+                    };
                     let role = super::rules::verified_stack_slot_role(
                         source_owned,
                         &self.machine_projection,

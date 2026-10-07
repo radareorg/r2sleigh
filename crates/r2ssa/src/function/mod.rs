@@ -1317,10 +1317,67 @@ impl SsaArtifact {
     ///
     /// A frame-management slot is not a program object, and neither is one
     /// whose extent nothing states.
+    /// The formal parameter a frame slot is the home of, proved in this preparation: a declarable
+    /// entry-relative slot a parameter's value is stored into (doc/adr-frame-model.md, P4.5).
+    pub fn proved_parameter_home(&self, object: crate::ObjectId) -> Option<u32> {
+        let slot = self.certificates().stack_slots.get(&object)?;
+        if slot.source_slot.is_some()
+            || slot.size.is_none()
+            || slot.base != crate::StackAddressBase::StackPointer
+            || !self.declarable_stack_object(object)
+        {
+            return None;
+        }
+        let facts = self.decompile_prep_facts();
+        slot.stored_values
+            .iter()
+            .find_map(|value| facts.formal_parameter_of(value))
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    /// What a frame slot is: the role its declaration states, or a parameter home the frame proves.
+    pub fn stack_slot_role(
+        &self,
+        object: crate::ObjectId,
+    ) -> Option<r2source::SourceStackSlotRole> {
+        if let Some(declared) = self.certificates().stack_slots.get(&object)?.source_slot {
+            return Some(declared.role());
+        }
+        let parameter_index = self.proved_parameter_home(object)?;
+        let home_storage = self
+            .machine_context()
+            .function_interface()?
+            .parameters()
+            .get(parameter_index as usize)?
+            .register_storage()?;
+        Some(r2source::SourceStackSlotRole::ParameterHome {
+            parameter_index,
+            home_storage,
+        })
+    }
+
+    /// The source type of a frame slot: its declaration's, or a proved home's parameter type at
+    /// the home's width.
+    pub fn stack_slot_logical_type(&self, object: crate::ObjectId) -> Option<u32> {
+        let slot = self.certificates().stack_slots.get(&object)?;
+        if let Some(declared) = slot.source_slot {
+            return declared.logical_type();
+        }
+        let index = self.proved_parameter_home(object)?;
+        let value = self
+            .machine_context()
+            .function_interface()?
+            .parameter_logical_value(index as usize)?;
+        (value.carrier().size_bits() == u64::from(slot.size?) * 8).then(|| value.type_id())
+    }
+
     /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
     pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
         let slot = self.certificates().stack_slots.get(&object)?;
-        if slot.source_slot.is_some() || !self.declarable_stack_object(object) {
+        if slot.source_slot.is_some()
+            || !self.declarable_stack_object(object)
+            || self.proved_parameter_home(object).is_some()
+        {
             return None;
         }
         match slot.array_layout {

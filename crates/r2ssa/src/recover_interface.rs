@@ -2413,11 +2413,13 @@ pub fn recovered_stack_slots(prepared: &crate::SsaArtifact) -> Vec<RecoveredStac
         else {
             continue;
         };
-        let parameter = certificate
-            .stored_values
-            .iter()
-            .find_map(|value| facts.formal_parameter_of(value))
-            .and_then(|index| u32::try_from(index).ok());
+        let parameter = prepared.proved_parameter_home(*object).or_else(|| {
+            certificate
+                .stored_values
+                .iter()
+                .find_map(|value| facts.formal_parameter_of(value))
+                .and_then(|index| u32::try_from(index).ok())
+        });
         slots.push(RecoveredStackSlot {
             offset: certificate.offset,
             size_bytes,

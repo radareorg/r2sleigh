@@ -1558,61 +1558,24 @@ impl Native<'_> {
         self.prepare_with_literals(walked, callees, Vec::new())
     }
 
-    /// The interface the first pass recovered, restated with the frame slots
-    /// it proved.
-    ///
-    /// `None` where the body proves no slot, which is every function that
-    /// keeps its arguments in registers.
+    /// The interface the first pass recovered, restated with the frame slots the debug
+    /// information declares; `None` where it declares none. A slot the body proves is the frame
+    /// model's own (`SsaArtifact::stack_slot_role`), never restated as a declaration.
     fn restated(
         &self,
         artifact: &TrustedSsaArtifact,
         declared: &[r2source::SourceStackSlotSpec],
     ) -> Option<r2source::SourceFunctionInterface> {
-        let prepared = artifact.shared_artifact();
-        let prepared = prepared.as_ref();
-        let interface = prepared.machine_context().function_interface()?;
-        let base_storage = prepared.machine_context().stack_pointer_carrier()?;
-        let proved = r2ssa::recover_interface::recovered_stack_slots(prepared);
-        if proved.is_empty() && declared.is_empty() {
+        if declared.is_empty() {
             return None;
         }
-
-        let slots = proved
-            .iter()
-            .filter_map(|slot| {
-                let parameter = match slot.parameter {
-                    None => {
-                        return Some(r2source::SourceStackSlotSpec::new_local(
-                            r2source::StackAddressBase::StackPointer,
-                            base_storage,
-                            slot.offset,
-                            slot.size_bytes,
-                        ));
-                    }
-                    Some(index) => index,
-                };
-                // A home names the register its parameter arrived in, and the
-                // constructor refuses any other.
-                let home = interface
-                    .parameters()
-                    .get(parameter as usize)?
-                    .register_storage()?;
-                Some(r2source::SourceStackSlotSpec::new_parameter_home(
-                    r2source::StackAddressBase::StackPointer,
-                    base_storage,
-                    slot.offset,
-                    slot.size_bytes,
-                    parameter,
-                    home,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        // What the declaration states about the frame stays stated, extent and
-        // type: the body proves where its own accesses land, and one inside a
-        // declared object is a member of it, not an object of its own.
-        let slots = crate::declared::restated_slots(declared, slots, interface);
-        restate(interface, slots, interface.revision_identity().to_vec())
+        let prepared = artifact.shared_artifact();
+        let interface = prepared.as_ref().machine_context().function_interface()?;
+        restate(
+            interface,
+            declared.to_vec(),
+            interface.revision_identity().to_vec(),
+        )
     }
 
     /// What the binary's debug information declares about the body at this

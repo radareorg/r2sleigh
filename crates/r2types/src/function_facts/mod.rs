@@ -981,14 +981,12 @@ impl SourceOwnedFunctionFacts {
             .certified_entities
             .values()
             .filter_map(|entity| match entity {
-                CertifiedEntity::StackSlot {
-                    size, source_slot, ..
-                } => source_slot
-                    .filter(|source| {
+                CertifiedEntity::StackSlot { size, role, .. } => role
+                    .filter(|role| {
                         matches!(
-                            source.role(),
+                            role,
                             r2ssa::SourceStackSlotRole::ParameterHome { parameter_index, .. }
-                                if parameter_index == slot
+                                if *parameter_index == slot
                         )
                     })
                     .and(*size),
@@ -1621,12 +1619,7 @@ impl FunctionFacts {
                 );
             };
             // A declared stack slot, or the aggregate a pointer parameter points at.
-            let slot_type = prepared
-                .certificates()
-                .stack_slots
-                .get(&memory.object)
-                .and_then(|certificate| certificate.source_slot.as_ref())
-                .and_then(|slot| slot.logical_type());
+            let slot_type = prepared.stack_slot_logical_type(memory.object);
             let pointer_base = slot_type
                 .is_none()
                 .then(|| {
@@ -2247,14 +2240,14 @@ impl FunctionFacts {
         let mut by_parameter = BTreeMap::<u32, BTreeSet<r2ssa::ValueId>>::new();
         for entity in self.render.certified_entities.values() {
             let CertifiedEntity::StackSlot {
-                source_slot,
+                role,
                 reload_values,
                 ..
             } = entity
             else {
                 continue;
             };
-            let Some(index) = source_slot.and_then(|slot| match slot.role() {
+            let Some(index) = role.and_then(|role| match role {
                 r2ssa::SourceStackSlotRole::ParameterHome {
                     parameter_index, ..
                 }

@@ -247,6 +247,9 @@ pub enum CertifiedEntity {
         /// Absence grants no source-variable identity; a separate upstream
         /// callee-allocation proof is required for an anonymous C object.
         source_slot: Option<r2ssa::SourceStackSlotSpec>,
+        /// What the slot is: its declaration's role, or a parameter home the frame proves
+        /// (`SsaArtifact::stack_slot_role`).
+        role: Option<r2ssa::SourceStackSlotRole>,
         /// Values a reload proves to be this slot's contents at full width.
         /// Empty where nothing loads the slot back into a register.
         reload_values: BTreeSet<r2ssa::ValueId>,
@@ -332,12 +335,12 @@ impl CertifiedEntity {
             // ferry it are one variable. A parameter's home is excluded: the
             // parameter entity owns those values and decides there.
             Self::StackSlot {
-                source_slot,
+                role,
                 reload_values,
                 ..
             } if !reload_values.is_empty()
                 && !matches!(
-                    source_slot.map(|slot| slot.role()),
+                    role,
                     Some(
                         r2ssa::SourceStackSlotRole::ParameterHome { .. }
                             | r2ssa::SourceStackSlotRole::Parameter { .. }
@@ -1879,12 +1882,12 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     size: cert.size,
                     array_layout: cert.array_layout.clone(),
                     source_slot: cert.source_slot,
+                    role: prepared.stack_slot_role(*object),
                     reload_values: cert.reload_values.iter().collect(),
                     stored_values: cert.stored_values.iter().collect(),
                     callee_allocation: cert.callee_allocation.clone(),
-                    ty: cert
-                        .source_slot
-                        .and_then(|slot| slot.logical_type())
+                    ty: prepared
+                        .stack_slot_logical_type(*object)
                         .and_then(|type_id| {
                             let graph = prepared
                                 .machine_context()
