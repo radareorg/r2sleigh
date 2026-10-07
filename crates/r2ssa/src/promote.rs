@@ -941,6 +941,8 @@ pub(crate) fn promote_private_stack_slots(
                 R2ILOp::Call { .. } | R2ILOp::CallInd { .. } | R2ILOp::CallOther { .. }
             ) {
                 escape_held(&derived, &mut escaped_anywhere, index, at);
+                // An indexed address handed on may be indexed again either way: `&table[i]`, then `p[-k]`.
+                escape_held(&indexed, &mut escaped_anywhere, index, at);
             }
             // A temporary the lift reuses holds a frame address only until it
             // is next written with something else.
@@ -951,6 +953,7 @@ pub(crate) fn promote_private_stack_slots(
         }
         // A frame address a register still holds leaves the block; an offset may move it either way.
         escape_held(&derived, &mut escaped_anywhere, index, block.ops.len());
+        escape_held(&indexed, &mut escaped_anywhere, index, block.ops.len());
     }
     // One width per place, no place overlapping another, and nothing the source
     // named.
