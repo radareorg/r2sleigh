@@ -1398,6 +1398,8 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) evidenced_roots: BTreeSet<StackAddressRoot>,
     /// How far each evidenced root's indexed accesses reach.
     pub(crate) evidenced_spans: BTreeMap<StackAddressRoot, i64>,
+    /// The evidenced spans that took in another root.
+    pub(crate) evidenced_absorbing: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     pub(crate) callee_write_spans: BTreeMap<StackAddressRoot, i64>,
     /// The positions no frame object extends across.
@@ -1463,6 +1465,7 @@ impl<'a> ObjectModelBuilder<'a> {
             indexed_displacements: crate::dense::IdMap::default(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
+            evidenced_absorbing: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
             frame_boundaries: FrameBoundaries::default(),
             values: empty_value_ranges(),
@@ -1531,6 +1534,7 @@ impl<'a> ObjectModelBuilder<'a> {
             self.frame_boundaries = boundaries;
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;
+            self.evidenced_absorbing = evidenced.absorbing;
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
             stack_roots.sort_unstable();
@@ -1595,7 +1599,15 @@ impl<'a> ObjectModelBuilder<'a> {
             .stack_objects
             .iter()
             .filter_map(|(key, object)| {
-                let end = self.callee_write_spans.get(&key.root)?;
+                // A span that absorbed the places inside it is the object's extent, whoever's.
+                let absorbed = self
+                    .evidenced_spans
+                    .get(&key.root)
+                    .filter(|_| self.evidenced_absorbing.contains(&key.root));
+                let end = [self.callee_write_spans.get(&key.root), absorbed]
+                    .into_iter()
+                    .flatten()
+                    .max()?;
                 let reach = u32::try_from(end.checked_sub(key.root.offset)?).ok()?;
                 Some((*object, reach))
             })
@@ -2147,6 +2159,8 @@ pub(crate) enum ReachingStorageState {
 pub(crate) struct EvidencedStackRoots {
     pub(crate) roots: BTreeSet<StackAddressRoot>,
     pub(crate) spans: BTreeMap<StackAddressRoot, i64>,
+    /// The spans that took in another root: their reach is their object's extent.
+    pub(crate) absorbing: BTreeSet<StackAddressRoot>,
 }
 
 /// Declared stack slots, keyed by the coordinate objects are identified in.

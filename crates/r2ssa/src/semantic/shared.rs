@@ -2215,10 +2215,32 @@ pub(crate) fn evidenced_stack_roots(
             .and_modify(|known| *known = (*known).max(ceiling))
             .or_insert(ceiling);
     }
+    // A span that absorbs a root absorbs that root's span too: overlapping spans of one base
+    // close into one interval, in start order.
+    let mut open: Option<(StackAddressRoot, i64)> = None;
+    let ordered = spans
+        .iter()
+        .map(|(root, end)| (*root, *end))
+        .collect::<Vec<_>>();
+    for (root, end) in ordered {
+        match open {
+            Some((first, reach)) if first.base == root.base && root.offset < reach => {
+                let reach = reach.max(end);
+                spans.insert(first, reach);
+                open = Some((first, reach));
+            }
+            _ => open = Some((root, end)),
+        }
+    }
+    let mut absorbing = BTreeSet::new();
     roots.retain(|root| {
-        let inside = spans.iter().any(|(base, end)| {
-            base.base == root.base && base.offset < root.offset && root.offset < *end
+        let container = spans.iter().find(|(base, end)| {
+            base.base == root.base && base.offset < root.offset && root.offset < **end
         });
+        let inside = container.is_some();
+        if let Some((base, _)) = container {
+            absorbing.insert(*base);
+        }
         if inside {
             r2il::refusal_evidence!(
                 "indexed-span-absorbs",
@@ -2252,7 +2274,11 @@ pub(crate) fn evidenced_stack_roots(
             }
         }
     }
-    EvidencedStackRoots { roots, spans }
+    EvidencedStackRoots {
+        roots,
+        spans,
+        absorbing,
+    }
 }
 
 /// The operand of an indexed address that supplies the index.
