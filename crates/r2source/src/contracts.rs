@@ -3314,6 +3314,9 @@ pub struct SourceMachineRoles {
     /// Whether a call pushes its return address, as `<returnaddress>` says.
     #[serde(default)]
     call_pushes_return_address: Option<bool>,
+    /// The register a frame-keeping function holds its frame base in, as the convention names it.
+    #[serde(default)]
+    frame_pointer_storage: Option<CanonicalStorageId>,
 }
 
 /// Whether a call leaves the frame carriers where they were, as the convention's call effect says.
@@ -3782,7 +3785,25 @@ impl SourceMachineRoles {
             role_register_names: SourceRoleRegisterNames::none(),
             stack_allocation_contract: None,
             call_pushes_return_address: None,
+            frame_pointer_storage: None,
         })
+    }
+
+    /// The same roles, with the register the convention keeps its frame base in.
+    pub fn with_frame_pointer(
+        mut self,
+        frame_pointer: CanonicalStorageId,
+    ) -> Result<Self, SourceMachineRolesError> {
+        if !valid_register_storage(frame_pointer) {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        self.frame_pointer_storage = Some(frame_pointer);
+        Ok(self)
+    }
+
+    /// The register the convention keeps a frame base in, where it names one.
+    pub const fn frame_pointer_storage(&self) -> Option<CanonicalStorageId> {
+        self.frame_pointer_storage
     }
 
     /// Record how the source spelled these carriers.
@@ -3804,9 +3825,11 @@ impl SourceMachineRoles {
         mut self,
         return_address: Option<CanonicalStorageId>,
         stack_pointer: Option<CanonicalStorageId>,
+        frame_pointer: Option<CanonicalStorageId>,
     ) -> Result<Self, SourceMachineRolesError> {
         if return_address.is_some_and(|storage| !valid_register_storage(storage))
             || stack_pointer.is_some_and(|storage| !valid_register_storage(storage))
+            || frame_pointer.is_some_and(|storage| !valid_register_storage(storage))
         {
             return Err(SourceMachineRolesError::InvalidRegisterStorage);
         }
@@ -3817,6 +3840,7 @@ impl SourceMachineRoles {
         }
         self.return_address_storage = return_address;
         self.stack_pointer_storage = stack_pointer;
+        self.frame_pointer_storage = frame_pointer;
         Ok(self)
     }
 

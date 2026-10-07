@@ -2019,8 +2019,19 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         .with_role_register_names(SourceRoleRegisterNames::new(
             Some(return_address_name),
             Some(stack_pointer_name),
-            None,
+            target.convention.frame_pointer,
         ));
+    // The register the convention keeps a frame base in, where the architecture places it.
+    let roles = match target
+        .convention
+        .frame_pointer
+        .map(|name| storage(target.arch, name))
+    {
+        Some(Ok(frame_pointer)) => roles
+            .with_frame_pointer(frame_pointer)
+            .map_err(|_| NativeRefusal::Machine("the frame pointer is not a register storage"))?,
+        _ => roles,
+    };
 
     let slots = convention_slots(target)?;
 

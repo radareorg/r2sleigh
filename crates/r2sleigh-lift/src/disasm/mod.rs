@@ -395,6 +395,7 @@ fn arch_resolved_source(
         .with_arch_resolved_carriers(
             resolve(role_names.return_address()),
             resolve(role_names.stack_pointer()),
+            resolve(role_names.frame_pointer()),
         )
         .map_err(|error| {
             LiftError::Unsupported(format!(

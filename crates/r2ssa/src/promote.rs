@@ -281,6 +281,7 @@ struct SlotAccess {
 pub(crate) fn promote_private_stack_slots(
     blocks: &[R2ILBlock],
     stack_pointer: Option<CanonicalStorageId>,
+    convention_frame_pointer: Option<CanonicalStorageId>,
     interface: Option<&SourceFunctionInterface>,
     call_effect: Option<&crate::SourceCallEffect>,
     calls_refund_stack: bool,
@@ -402,15 +403,12 @@ pub(crate) fn promote_private_stack_slots(
             if dst.space != r2il::SpaceId::Register || is_stack_pointer(dst) {
                 return None;
             }
-            // A frame pointer is a register the convention preserves; any other holds an address passed on.
-            let preserved = call_effect.is_some_and(|effect| {
-                effect.preserves(CanonicalStorageId {
-                    space: CanonicalStorageSpace::Register,
-                    offset: dst.offset,
-                    size: dst.size,
-                })
+            // The frame pointer is the register the convention names for it; any other holds an
+            // address passed on.
+            let named = convention_frame_pointer.is_some_and(|frame_pointer| {
+                frame_pointer.offset == dst.offset && frame_pointer.size == dst.size
             });
-            if !survives_calls(dst) || !preserved {
+            if !survives_calls(dst) || !named {
                 r2il::refusal_evidence!(
                     "promote-stack-slot",
                     "{:#x}:{at} points {dst} at the frame, but a call may clobber it",
@@ -421,13 +419,6 @@ pub(crate) fn promote_private_stack_slots(
             is_stack_pointer(&base)
                 .then(|| (at, dst.clone(), displacement + entry_adjustment(0, at)))
         });
-    // The prologue's write that points the frame pointer at the frame is the base, not an escape.
-    let establishes_frame_pointer = |block_index: usize, at: usize| {
-        block_index == 0
-            && frame_pointer
-                .as_ref()
-                .is_some_and(|(established, _, _)| at == *established)
-    };
     let is_frame_pointer = |varnode: &r2il::Varnode| {
         frame_pointer
             .as_ref()
@@ -509,7 +500,6 @@ pub(crate) fn promote_private_stack_slots(
     // stored or register-held frame address names, which an offset may move either way.
     let mut escaped = BTreeSet::<i64>::new();
     let mut escaped_anywhere = BTreeSet::<i64>::new();
-    let mut frame_pointer_place = None;
     // Every place a register (never a temporary, never the frame base) holds an address of.
     let escape_held = |derived: &Vec<(r2il::Varnode, i64)>,
                        escaped: &mut BTreeSet<i64>,
@@ -520,7 +510,6 @@ pub(crate) fn promote_private_stack_slots(
                 .then_some(*place)
         }));
     };
-    let mut frame_pointer_used = false;
     // A slot the prologue fills with the entry value of a register the
     // convention preserves is that register's save: the function hands the
     // value back through it, and the frame round-trip certificate reads the
@@ -688,7 +677,6 @@ pub(crate) fn promote_private_stack_slots(
                             );
                             return None;
                         };
-                        frame_pointer_used |= is_frame_pointer(&base);
                         let displacement = frame_displacement(
                             &is_stack_pointer,
                             &is_frame_pointer,
@@ -750,7 +738,6 @@ pub(crate) fn promote_private_stack_slots(
                             );
                             return None;
                         };
-                        frame_pointer_used |= is_frame_pointer(&base);
                         let displacement = frame_displacement(
                             &is_stack_pointer,
                             &is_frame_pointer,
@@ -927,14 +914,6 @@ pub(crate) fn promote_private_stack_slots(
                 }
                 _ => {}
             }
-            // The prologue's write that points the frame pointer at the frame records its place, which
-            // escapes only if nothing addresses the frame through it.
-            if let Some(dst) = op.output()
-                && let Some((_, place)) = derived.iter().find(|(held, _)| held == dst)
-                && establishes_frame_pointer(index, at)
-            {
-                frame_pointer_place = Some(*place);
-            }
             // A call may read every register, so a frame address one holds escapes there.
             if matches!(
                 op,
@@ -965,9 +944,6 @@ pub(crate) fn promote_private_stack_slots(
                 && matches!(blocks[access.block].ops[access.op], R2ILOp::Load { .. })
         })
     };
-    if !frame_pointer_used {
-        escaped_anywhere.extend(frame_pointer_place);
-    }
     let mut promotable = BTreeSet::<PromotedSlot>::new();
     for (displacement, sizes) in &widths {
         let is_save = saves.contains(displacement) && read_back(*displacement);
@@ -1133,8 +1109,15 @@ mod tests {
             offset,
             size: 8,
         };
-        promote_private_stack_slots(&[block], Some(storage(0)), None, effect.as_ref(), true)
-            .map_or(0, |promoted| promoted.len())
+        promote_private_stack_slots(
+            &[block],
+            Some(storage(0)),
+            None,
+            None,
+            effect.as_ref(),
+            true,
+        )
+        .map_or(0, |promoted| promoted.len())
     }
 
     #[test]
@@ -1249,6 +1232,7 @@ mod tests {
             promote_private_stack_slots(
                 std::slice::from_ref(&block),
                 Some(storage(0)),
+                Some(storage(40)),
                 None,
                 effect.as_ref(),
                 true,

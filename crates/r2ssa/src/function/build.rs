@@ -189,6 +189,7 @@ impl SSAFunction {
             crate::promote::promote_private_stack_slots(
                 blocks,
                 stack_pointer_carrier,
+                machine_context.machine_roles().frame_pointer_storage(),
                 questions.interface,
                 machine_context.call_effect(),
                 stack_pointer_restored_by_callee.is_some(),
