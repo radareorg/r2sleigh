@@ -5,7 +5,7 @@
 //! source points at the same place. `O(definitions)` to build, `O(chain)` per question.
 
 use crate::arena::OpId;
-use crate::dense::{Csr, IdMap};
+use crate::dense::{Csr, DenseId, IdMap};
 use crate::function::SSAFunction;
 use crate::op::SSAOp;
 use crate::value_table::VarId;
@@ -25,6 +25,8 @@ pub(crate) struct Definitions {
     values: usize,
     /// Where each merge points, where its sources agree (`Merge::Place`).
     merges: IdMap<VarId, Merge>,
+    /// Each value as a root and offset up to the first merge or opaque definition.
+    chains: IdMap<VarId, Affine>,
 }
 
 /// What a merge of addresses is, solved once over every merge of the function.
@@ -75,9 +77,60 @@ impl Definitions {
             positions,
             values,
             merges: IdMap::new(values),
+            chains: IdMap::new(values),
         };
+        definitions.index_chains(func);
         definitions.solve_merges(func);
         definitions
+    }
+
+    /// Every value's chain, each extending its source's: a walk stops at the first value already
+    /// indexed, so every value is stepped once, `O(values)` steps in all.
+    fn index_chains(&mut self, func: &SSAFunction) {
+        for start in 0..self.values {
+            let start = VarId::from_index(start);
+            let mut path = Vec::new();
+            let mut var = start;
+            let (root, mut offset) = loop {
+                if let Some(known) = self.chains.get(var).copied() {
+                    break known;
+                }
+                match self.step(func, var) {
+                    // A definition reads an earlier one, so no path is longer than the values.
+                    Some((source, delta)) if path.len() < self.values => {
+                        path.push((var, delta));
+                        var = source;
+                    }
+                    _ => break (var, 0),
+                }
+            };
+            self.chains.insert(var, (root, offset));
+            for (stepped, delta) in path.into_iter().rev() {
+                offset = offset.wrapping_add(delta);
+                self.chains.insert(stepped, (root, offset));
+            }
+        }
+    }
+
+    /// One step of a chain: the source a copy or a constant add or subtract reads, and by how much
+    /// it moves; none at a merge or anything else.
+    fn step(&self, func: &SSAFunction, var: VarId) -> Option<(VarId, i64)> {
+        if self.phis.get(var).is_some() {
+            return None;
+        }
+        let constant = |var: VarId| self.constant(func, var);
+        match self.op(var)? {
+            (_, SSAOp::Copy { src, .. } | SSAOp::CallRestore { src, .. }) => Some((*src, 0)),
+            (_, SSAOp::IntAdd { a, b, .. }) => match (constant(*b), constant(*a)) {
+                (Some(amount), _) => Some((*a, amount)),
+                (None, Some(amount)) => Some((*b, amount)),
+                (None, None) => None,
+            },
+            (_, SSAOp::IntSub { a, b, .. }) => {
+                constant(*b).map(|amount| (*a, amount.wrapping_neg()))
+            }
+            _ => None,
+        }
     }
 
     /// Every merge's place, on the sparse driver: a cell only falls (`Undefined`, a place,
@@ -199,31 +252,8 @@ impl Definitions {
     }
 
     /// `var` as a root and offset through copies and constant adds and subtracts, stopping at a merge.
-    fn chain(&self, func: &SSAFunction, mut var: VarId) -> Affine {
-        let mut offset = 0i64;
-        let constant = |var: VarId| self.constant(func, var);
-        for _ in 0..self.values {
-            if self.phis.get(var).is_some() {
-                break;
-            }
-            match self.op(var) {
-                Some((_, SSAOp::Copy { src, .. } | SSAOp::CallRestore { src, .. })) => var = *src,
-                Some((_, SSAOp::IntAdd { a, b, .. })) if constant(*b).is_some() => {
-                    offset = offset.wrapping_add(constant(*b).unwrap_or(0));
-                    var = *a;
-                }
-                Some((_, SSAOp::IntAdd { a, b, .. })) if constant(*a).is_some() => {
-                    offset = offset.wrapping_add(constant(*a).unwrap_or(0));
-                    var = *b;
-                }
-                Some((_, SSAOp::IntSub { a, b, .. })) if constant(*b).is_some() => {
-                    offset = offset.wrapping_sub(constant(*b).unwrap_or(0));
-                    var = *a;
-                }
-                _ => break,
-            }
-        }
-        (var, offset)
+    fn chain(&self, _func: &SSAFunction, var: VarId) -> Affine {
+        self.chains.get(var).copied().unwrap_or((var, 0))
     }
 
     /// The load a value is, through copies: its operation, its address and its width.
