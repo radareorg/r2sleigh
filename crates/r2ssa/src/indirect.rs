@@ -84,13 +84,23 @@ fn sign_extend(entry: u64, size: u32) -> u64 {
 pub struct IndexChain {
     pub scale: u64,
     pub displacement: u64,
+    /// The selector's width: a label is its bits, so `-131` in an `int` is `0xffffff7d`.
+    pub selector_bits: u32,
 }
 
 impl IndexChain {
     /// The selector value that reads the entry at `address`, where exactly one does.
     fn preimage(&self, address: u64) -> Option<u64> {
-        let offset = address.checked_sub(self.displacement)?;
-        (self.scale != 0 && offset.is_multiple_of(self.scale)).then(|| offset / self.scale)
+        let offset = i128::from(address) - i128::from(self.displacement);
+        let scale = i128::from(self.scale);
+        if scale == 0 || offset % scale != 0 {
+            return None;
+        }
+        let label = offset / scale;
+        let bits = self.selector_bits.min(64);
+        let fits = label >= -(1i128 << (bits - 1)) && label < (1i128 << bits);
+        // Two's complement at the selector's width: the bits a case value compares equal to.
+        fits.then(|| (label as u64) & (u64::MAX >> (64 - bits)))
     }
 }
 
@@ -244,9 +254,13 @@ fn selector_of(
     address: ValueId,
 ) -> (ValueId, Option<IndexChain>) {
     let (selector, folded) = walk_index(graph, values, address);
+    let selector_bits = graph
+        .value(selector)
+        .map_or(64, |value| value.var.size.saturating_mul(8).clamp(8, 64));
     let indexing = folded.map(|folded| IndexChain {
         scale: folded.scale,
         displacement: folded.displacement,
+        selector_bits,
     });
     (selector, indexing)
 }

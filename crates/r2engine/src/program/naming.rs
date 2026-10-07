@@ -463,8 +463,12 @@ fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
 /// nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
 /// twenty-byte header alike.
 fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
-    let stride = match readers.as_slice() {
-        [first, second, ..] => second.0.saturating_sub(first.0),
+    // The cell size is the gcd of the gaps between transfers: a stub whose slot names no import leaves a gap of two cells.
+    let stride = readers
+        .windows(2)
+        .map(|pair| pair[1].0.saturating_sub(pair[0].0))
+        .fold(0, gcd);
+    match readers.as_slice() {
         // One stub has no neighbour to measure against: its cell runs from where it starts to the section's end, which anchors every cell.
         [(_, start, symbol)] => {
             let stub = Stub {
@@ -474,16 +478,17 @@ fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
             return vec![(*start, stub)];
         }
         [] => return Vec::new(),
-    };
-    if stride == 0 {
-        return Vec::new();
+        _ if stride == 0 => return Vec::new(),
+        _ => {}
     }
-    let count = readers.len() as u64;
+    // Each stub is the cell its own transfer lies in, counted back from the section's end.
     readers
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, (_, _, symbol))| {
-            let from_end = count.checked_sub(index as u64)?.checked_mul(stride)?;
+        .filter_map(|(transfer, _, symbol)| {
+            let from_end = end
+                .checked_sub(transfer)?
+                .div_ceil(stride)
+                .checked_mul(stride)?;
             let stub = Stub {
                 symbol,
                 size: stride,
@@ -491,6 +496,10 @@ fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
             Some((end.checked_sub(from_end)?, stub))
         })
         .collect()
+}
+
+const fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 /// Where a stub begins: the longest tail of its run that only feeds the transfer or does nothing.
@@ -610,6 +619,30 @@ mod tests {
             )]),
         );
         db
+    }
+
+    /// libz's `.plt.sec`: stubs whose slots bind to symbols libz defines name no import, and leave gaps.
+    #[test]
+    fn a_stub_is_the_cell_its_own_transfer_lies_in() {
+        let reader = |transfer: u64, symbol: &str| (transfer, transfer - 4, symbol.to_owned());
+        let named = cells(
+            vec![
+                reader(0x3404, "free"),
+                reader(0x3424, "__stack_chk_fail"),
+                reader(0x3434, "memset"),
+            ],
+            0x3460,
+        );
+        let at = |vaddr: u64| {
+            named
+                .iter()
+                .find(|(start, _)| *start == vaddr)
+                .map(|(_, stub)| (stub.symbol.as_str(), stub.size))
+        };
+        assert_eq!(named.len(), 3);
+        assert_eq!(at(0x3400), Some(("free", 16)));
+        assert_eq!(at(0x3420), Some(("__stack_chk_fail", 16)));
+        assert_eq!(at(0x3430), Some(("memset", 16)));
     }
 
     #[test]
