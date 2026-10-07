@@ -122,6 +122,26 @@ declarations.
 - P4.3: promotion as an SSA rewrite. Exit: `promote.rs`, `PromotedSlot`,
   `promoted_slot_sites` and the `(block, index)`-keyed promoted maps are
   deleted.
+- P4.3 done (2026-10-07): `promote.rs`, its `promoted` map threaded
+  through phi placement and renaming, and `promoted_slot_sites` are
+  deleted. `slot_promotion.rs` runs after SSA construction, before the
+  stack-protector decision, so preparation seals one frame:
+  - `frame_address.rs` resolves an address to a root and offset through
+    copies, constant arithmetic and merges, the merges solved once on
+    `fixpoint::sparse` (height 2). A recursive merge walk took 0pack
+    `0x62ecf0` past 49 minutes.
+  - An address escapes into a call use, a stored value, or a register a
+    call may read (the convention's argument registers, every register
+    without one); the stack and frame pointers are bases, never handed on.
+  - Saves are entry-block stores of a preserved register's entry value
+    (any register without a convention); a save read back stays in memory
+    and bounds what an escape reaches.
+  - Phis go at the iterated frontier where the slot is live (pruned).
+  The census against `promote.rs`: rv_O2 13 -> 11 and branchy_arm64 O1/O2
+  one residual fewer each. Pre-index saves kept in memory exposed the
+  callee-allocation proof reading sp only at the access: P4.3d lets either
+  edge of the access's machine instruction own it, the explicit area
+  first (x86-64's red zone would otherwise mark a `push` implicit).
 - P4.4: exit measured at P4's exit: the 38 x86-64 canary residual traps
   (all on `FS_OFFSET_0`) leave the equivalence baseline.
 - P4 extent, left (2026-10-07): the canary elision let equivalence run

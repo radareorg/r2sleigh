@@ -637,7 +637,7 @@ fn a_calls_return_address_push_is_refunded_by_the_callee() {
         crate::testing::prepared(&[block], &arch, Some(interface), Vec::new(), [storage(0)])
             .expect("artifact");
     assert_eq!(
-        artifact.function().promoted_slot_sites().clone(),
+        promoted_sites(artifact.function()),
         BTreeSet::from([(0x4000, 2), (0x4000, 6)]),
         "the slot is written before the call and read after it"
     );

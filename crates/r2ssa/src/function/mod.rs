@@ -3465,16 +3465,9 @@ impl SSAFunction {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
 
-    /// Which lifted memory operations promotion took out of memory.
-    /// The lifted memory operations slot promotion rewrote, as (block, lifted index).
-    pub fn promoted_slot_sites(&self) -> BTreeSet<(u64, usize)> {
-        self.promoted_slots
-            .iter()
-            .filter_map(|op| match self.arena().origin(op)? {
-                crate::arena::OpOrigin::Lifted { block, index, .. } => Some((*block, *index)),
-                _ => None,
-            })
-            .collect()
+    /// The memory operations slot promotion rewrote into copies.
+    pub fn promoted_slots(&self) -> &crate::dense::IdSet<crate::arena::OpId> {
+        &self.promoted_slots
     }
 
     pub(crate) fn record_promoted_slots(&mut self, ops: crate::dense::IdSet<crate::arena::OpId>) {

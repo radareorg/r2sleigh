@@ -1664,7 +1664,7 @@ fn a_frame_slot_is_promoted_only_where_the_prologue_runs_once() {
             name: "framed",
         };
         let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
-        prepared.artifact().function().promoted_slot_sites().len()
+        prepared.artifact().function().promoted_slots().len()
     };
     assert!(promoted(PROLOGUE_BEFORE_A_LOOP) > 0);
     assert_eq!(promoted(PROLOGUE_IN_A_LOOP), 0);
