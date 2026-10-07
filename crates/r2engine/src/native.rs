@@ -1823,6 +1823,13 @@ impl Native<'_> {
         referenced(body)
             .into_iter()
             .filter(|address| !body.calls.contains(address))
+            // An import's slot is a word the loader fills, not an object the source names: its
+            // relocation's name is the function's, and `&memcpy` is not where the slot is.
+            .filter(|address| {
+                self.program.import_at(*address).is_none()
+                    || r2abi::statement::write_at(self.program.loader_writes(), *address)
+                        .is_none_or(|write| write.place != *address)
+            })
             .filter_map(|address| {
                 let name = self.program.name_at(address)?;
                 // What the type is, rather than what it is called: a name

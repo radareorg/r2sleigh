@@ -193,3 +193,13 @@ fn a_double_moved_as_its_whole_register_is_the_argument() {
     assert!(!x86_64.contains("r2sleigh refused"), "{x86_64}");
     assert!(x86_64.contains("return scale("), "{x86_64}");
 }
+
+/// `_init` reads `__gmon_start__`'s global offset table slot to see whether profiling is linked.
+/// The slot is a word the loader fills, named by the relocation that fills it, not the function:
+/// the read is of the slot's address, never `&__gmon_start__`.
+#[test]
+fn a_slot_the_loader_fills_is_read_at_its_address() {
+    let out = run("frame_pointer_locals_clang_O0g", "pdd @ sym._init");
+    assert!(!out.contains("&__gmon_start__"), "{out}");
+    assert!(out.contains("*(uint64_t*)0x3fd0"), "{out}");
+}

@@ -412,10 +412,17 @@ fn escaped_objects(
                 || facts.indexed_stack_address_root_of(value.id).is_some()
         })
     };
+    // Which objects each tainted value may point into: its own, or what flows into it. Each set
+    // only grows, bounded by the objects, so a value is re-queued at most once per object.
+    let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
     let mut tainted = crate::dense::IdSet::default();
     let mut pending = Vec::new();
     for value in graph.values.iter().map(|value| value.id) {
         if frame_address(value) && tainted.insert(value) {
+            let own = escaping_object(facts, graph, frame, value)
+                .into_iter()
+                .collect();
+            origins.insert(value, own);
             pending.push(value);
         }
     }
@@ -429,6 +436,7 @@ fn escaped_objects(
         model.value_objects.contains_key(&key)
     };
     while let Some(value) = pending.pop() {
+        let from = origins.get(value).cloned().unwrap_or_default();
         for site in graph.use_sites(value) {
             let Some(inst) = graph.inst(site.inst) else {
                 whole = true;
@@ -439,11 +447,36 @@ fn escaped_objects(
                     Some(object) => {
                         escaped.insert(object);
                     }
-                    None => whole = true,
+                    // A merge of a frame address with something else: the objects it may name.
+                    None if !from.is_empty() => escaped.extend(from.iter().copied()),
+                    None => {
+                        r2il::refusal_evidence!(
+                            "frame-reach",
+                            "{value:?} escapes through {:?} at no frame object",
+                            inst.payload
+                        );
+                        whole = true;
+                    }
                 },
-                Carry::Propagates => pending.extend(inst.output.filter(|out| tainted.insert(*out))),
+                Carry::Propagates => {
+                    if let Some(out) = inst.output {
+                        let known = origins.get_or_insert_with(out, BTreeSet::new);
+                        let before = known.len();
+                        known.extend(from.iter().copied());
+                        if tainted.insert(out) || known.len() != before {
+                            pending.push(out);
+                        }
+                    }
+                }
                 Carry::Stops => {}
-                Carry::Everything => whole = true,
+                Carry::Everything => {
+                    r2il::refusal_evidence!(
+                        "frame-reach",
+                        "{value:?} is taken as code or by an unmodelled operation: {:?}",
+                        inst.payload
+                    );
+                    whole = true;
+                }
             }
         }
     }

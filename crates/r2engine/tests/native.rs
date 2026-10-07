@@ -4492,3 +4492,31 @@ fn the_objects_an_escaped_address_reaches_are_one() {
     assert!(declarations[0].contains('['), "{text}");
     assert!(!text.contains("assumed (frame extent"), "{text}");
 }
+
+/// `table[x % 3]` on AArch64, with the divisor held in a register:
+/// `udiv x10, x0, x9; msub x10, x10, x9, x0`.
+const REMAINDER_BY_A_DIVIDE: &[u8] = &[
+    0xff, 0x83, 0x00, 0xd1, // sub sp, sp, #32
+    0x69, 0x00, 0x80, 0xd2, // mov x9, #3
+    0x0a, 0x08, 0xc9, 0x9a, // udiv x10, x0, x9
+    0x4a, 0x81, 0x09, 0x9b, // msub x10, x10, x9, x0
+    0xe1, 0x03, 0x00, 0xf9, // str x1, [sp]
+    0xe2, 0x07, 0x00, 0xf9, // str x2, [sp, #8]
+    0xe3, 0x0b, 0x00, 0xf9, // str x3, [sp, #16]
+    0xe0, 0x7b, 0x6a, 0xf8, // ldr x0, [sp, x10, lsl #3]
+    0xff, 0x83, 0x00, 0x91, // add sp, sp, #32
+    0xc0, 0x03, 0x5f, 0xd6, // ret
+];
+
+/// A divide by a constant is an exact quotient, so its remainder bounds the
+/// index and the table is its three stored rows, none dropped.
+#[test]
+fn a_remainder_by_a_divide_bounds_a_table_index() {
+    let text = rendered_on(
+        &Machine::new("aarch64", "aarch64", 64),
+        REMAINDER_BY_A_DIVIDE,
+        "remainder",
+    );
+    assert!(text.contains("[3];") || text.contains("[24];"), "{text}");
+    assert!(!text.contains("assumed (frame extent"), "{text}");
+}

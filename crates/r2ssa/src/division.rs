@@ -21,8 +21,9 @@ fn op(graph: &SsaGraph, value: ValueId) -> Option<&SSAOp<ValueId>> {
     }
 }
 
+/// The constant a value is, through copies (`mov w10, #3` holds the divisor in a register).
 fn constant(graph: &SsaGraph, value: ValueId) -> Option<u64> {
-    graph.value(value)?.var.constant_bits()
+    graph.value(copied(graph, value))?.var.constant_bits()
 }
 
 fn width_bits(graph: &SsaGraph, value: ValueId) -> Option<u32> {
@@ -91,9 +92,17 @@ fn low_clearing_places(mask: u64, bits: u32) -> Option<u32> {
     (places > 0 && places < bits && mask & width == width & (u64::MAX << places)).then_some(places)
 }
 
-/// `h >> s` as `x / d`, from `h = trunc_N((zext_2N(x) * M) >> N)` with the exactness condition.
+/// `h >> s` as `x / d`: an unsigned divide by a constant, or `h = trunc_N((zext_2N(x) * M) >> N)`
+/// with the exactness condition.
 fn exact_quotient(graph: &SsaGraph, (high, shift): Shifted) -> Option<(ValueId, u64)> {
     let high = copied(graph, high);
+    // A machine that divides spells the quotient itself: unsigned `x / d` for a constant `d`.
+    if shift == 0
+        && let Some(SSAOp::IntDiv { a, b, .. }) = op(graph, high)
+        && let Some(divisor) = constant(graph, *b).filter(|divisor| *divisor > 0)
+    {
+        return Some((*a, divisor));
+    }
     let (high, shift) = match (shift, op(graph, high)) {
         (0, Some(SSAOp::IntRight { a, b, .. })) => (copied(graph, *a), constant(graph, *b)?),
         _ => (high, shift),
