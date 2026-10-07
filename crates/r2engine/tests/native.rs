@@ -2877,8 +2877,10 @@ const AARCH64_NARROWED_ARGUMENT_BESIDE_A_CALL: &[u8] = &[
 /// A call nothing declares takes its arity from the argument registers the
 /// body wrote before it. `x2` it never wrote: the interface declares only its
 /// low byte, and the register is rebuilt from that lane for the whole read at
-/// 0x1008, but the rebuild restates what the caller passed. The call takes
-/// `x0` and `x1` and stops there.
+/// 0x1008, but the rebuild restates what the caller passed, so it is no write.
+/// It is this function's own parameter, though, which the call may be handed
+/// unchanged: the count stops at `x0`, `x1` unproven, and the call is a
+/// residual rather than `undeclared_import(X0_0 + X1_0, 2)` (decided 2026-10-07).
 #[test]
 fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
     let machine = Machine::new("aarch64", "aarch64", 64);
@@ -2915,14 +2917,12 @@ fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
         })
         .collect::<Vec<_>>();
     assert_eq!(slots, [0, 1], "{call:#?}");
+    assert!(!call.arguments_complete, "{call:#?}");
+    assert!(call.results_complete, "{call:#?}");
 
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
-    assert!(response.render_refusal.is_none(), "{text}");
-    assert!(
-        text.contains("undeclared_import(X0_0 + X1_0, 2);"),
-        "{text}"
-    );
+    assert!(!text.contains("undeclared_import(X0_0 + X1_0, 2);"), "{text}");
 }
 
 /// Every register a default prototype names is one register of its

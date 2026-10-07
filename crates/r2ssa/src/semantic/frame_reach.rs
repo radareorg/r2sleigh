@@ -135,8 +135,26 @@ impl FrameReach {
             return Vec::new();
         }
         let frame = FrameIndex::of(model);
-        // Any register's entry value stored whole is its own object: a save, the return
-        // address, a parameter's home.
+        // An entry value of a register no argument arrives in, stored whole, is the compiler's: a
+        // save, the return address, the frame pointer. An argument's may be a local's initial value.
+        let arguments = machine_context
+            .and_then(SourceMachineContext::convention_slots)
+            .map(|slots| {
+                slots
+                    .argument_slots()
+                    .iter()
+                    .chain(slots.float_argument_slots())
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let argument = |storage: CanonicalStorageId| {
+            arguments.iter().any(|slot| {
+                slot.space == storage.space
+                    && slot.offset <= storage.offset
+                    && storage.offset < slot.offset + u64::from(slot.size)
+            })
+        };
         let mut barriers = compiler_slots(function, graph, model, machine_context);
         barriers.extend(graph.insts.iter().filter_map(|inst| match &inst.payload {
             crate::graph::InstPayload::Op(SSAOp::Store { space, .. }) => {
@@ -154,12 +172,14 @@ impl FrameReach {
                         _ => break,
                     }
                 }
-                let entry = graph.value(value).is_some_and(|value| {
-                    value.var.version == 0
-                        && value
-                            .canonical_storage
-                            .is_some_and(|storage| storage.space == CanonicalStorageSpace::Register)
-                }) || graph.formal_projection_storage(value).is_some();
+                let entry = graph
+                    .value(value)
+                    .filter(|value| value.var.version == 0)
+                    .and_then(|value| value.canonical_storage)
+                    .or_else(|| graph.formal_projection_storage(value))
+                    .is_some_and(|storage| {
+                        storage.space == CanonicalStorageSpace::Register && !argument(storage)
+                    });
                 let key = MemoryObjectKey {
                     value: address,
                     space: *space,
@@ -199,7 +219,8 @@ impl FrameReach {
         let mut run: Option<(i64, usize)> = None;
         for (start, objects) in frame.starts.range(..0) {
             let barrier = objects.iter().any(|object| barriers.contains(object));
-            let escaped = objects.iter().all(|object| self.escaped.contains(object));
+            // Bytes any escaped object starts at are reachable, whatever else starts there.
+            let escaped = objects.iter().any(|object| self.escaped.contains(object));
             let opens = objects.iter().any(|object| self.direct.contains(object));
             if run.is_none() && !opens {
                 continue;
@@ -226,8 +247,12 @@ impl FrameReach {
         }
         r2il::refusal_evidence!(
             "frame-reach",
-            "{:#x}: escaped runs merged as {spans:?}; escaped starts {:?}",
+            "{:#x}: escaped runs merged as {spans:?}; barriers at {:?}; escaped starts {:?}",
             function.entry,
+            barriers
+                .iter()
+                .filter_map(|object| frame.start_of(*object))
+                .collect::<BTreeSet<_>>(),
             self.escaped
                 .iter()
                 .filter_map(|object| frame.start_of(*object))
