@@ -2922,7 +2922,10 @@ fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
 
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
-    assert!(!text.contains("undeclared_import(X0_0 + X1_0, 2);"), "{text}");
+    assert!(
+        !text.contains("undeclared_import(X0_0 + X1_0, 2);"),
+        "{text}"
+    );
 }
 
 /// Every register a default prototype names is one register of its
