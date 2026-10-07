@@ -31,11 +31,14 @@ memory accesses, `C` call sites, `L` storage locations the function names,
 2. **The version of a storage location at a point is one lookup.** SSA
    renaming defines one version per `(point, register)`; memory SSA (K1)
    defines one per `(point, location)`. A walk backwards from a call site to
-   find what reaches it answers a question the renaming already answered. The
-   lookup is `O(log W)` for `W` writes of that location when each block keeps
-   the versions it ends with and the reader climbs the dominator tree by
-   preorder interval (the `readVariable` recursion of Braun et al. 2013, made
-   an index).
+   find what reaches it answers a question the renaming already answered.
+   Every `(point, location)` a pass asks is known at the seal (call sites and
+   their carriers, returns and their result slots), so one depth-first walk of
+   the dominator tree with a stack per location answers them all in
+   `O(B + writes + reads)`: the stack's top at a point is the version that
+   reaches it (the `readVariable` recursion of Braun et al. 2013, run once for
+   every reader). It is an index over what renaming and K1 compute, not a
+   second SSA form; D9 stands.
 3. **Interprocedural facts compose bottom-up over the call graph.** A summary
    is a function of the callee's body and its callees' summaries (Sharir and
    Pnueli 1981). Tarjan's components order the call graph in `O(F + Ec)`; a
@@ -66,7 +69,10 @@ memory accesses, `C` call sites, `L` storage locations the function names,
    `k` cells per block costs `O(B · k + phis)` with a sparse state and
    `O(B · V)` with a dense one copied per block. `fixpoint::sparse` is the
    sparse form; `fixpoint::forward` with a dense `IdMap` state is the dense
-   one.
+   one. The sparse fixpoint equals the dense one when the def and use sets
+   over-approximate the real ones and every spurious definition is also a use
+   (Oh et al. 2012, TOPLAS 2014 Theorem 3.23), so a sparse state cuts at every
+   may-def, never only at must-kills.
 9. **Allocation count is a function of the index count, not of `V`.** One
    arena per function, freed at once, and every dense index sized from the
    seal's counts, gives `O(passes)` allocations per function.
@@ -90,7 +96,7 @@ fixpoint is a least fixpoint and so order-independent, and no stage retries.
 | r2ssa `promote` | a backward walk per access with recursion to depth 8 (promote.rs:83, 135, 144) | model 2 | `O(Σ k²)`, a silent cap | read |
 | r2ssa twice | `DeadPhis` (semantic/mod.rs:344, stage.rs:351), formals (stage.rs:216, boundaries.rs:946), `FunctionLiveOut` (function/mod.rs:570, semantic/mod.rs:261), `class_values` (values.rs:192, function/mod.rs:2631), `ValueViews` rebuilt by liveness (liveness.rs:160); the collector twice with no interface (recover_interface.rs:1012, stage.rs:323) | one fact, one owner | 2 × | read |
 | r2ssa silent caps | depth 8 (promote.rs:144), 16 (predicates.rs:374), 32 (expressions.rs:548), a hop cap (optimize.rs:974), a cycle break (forward.rs:198) | D11: a cap that keeps a partial result silently | partial results | read |
-| r2types | `solve_evidence_types` 3 times per function, signedness 6 times, the arena cloned and re-solved until pointer bases stop (evidence.rs:93, 672: at most `2A + 1` rounds), `named_blocks()` copying the function twice, `structs.rs:812` uncapped, `arrays.rs:105` and `globals.rs:160` stopping at 6 rounds; 17 % of 0pack `pdd` inside callee reads (`CalleeFacts::derive`) | model 5 | `O(A · (V + A))` | read; measured share (opack.report) |
+| r2types | `solve_evidence_types` 3 times per function, signedness 6 times, the arena cloned and re-solved until pointer bases stop (evidence.rs:93, 672: at most `2A + 1` rounds), `named_blocks()` copying the function twice, `structs.rs:812` uncapped, `arrays.rs:105` and `globals.rs:160` stopping at 6 rounds; 17 % of 0pack `pdd` inside `CalleeFacts::derive`, which includes the r2types run | model 5 | `O(A · (V + A))` | read; measured share (opack.report) |
 | r2dec | four retry loops, about 51 whole-body walks and one `CFunction` clone per attempt (lib.rs:2933, 3558; placement/mod.rs:3430); `gap_closure_from_seed` 49.7 % of the pumasim Gui constructor before P4's `GapIndex`; `finish_splitting` 89 % of `pe/65535sects.exe` before H | models 6, 7 | attempts × 51 walks | measured (puma.report, pe2.report) |
 | query database | `Analysed` and `Sealed` hold one entry, `Rendered` 16, `Walked` 64, eleven tables unbounded by entries; a second libz pass re-prepares 368 bodies; `prepare_restated` scans every table per block (native.rs:1657) | capacity by entries, not bytes | a second sweep costs the first | measured, review item 9; read |
 
@@ -110,12 +116,12 @@ fixpoint is a least fixpoint and so order-independent, and no stage retries.
 |---|---|---|---|
 | Lift | `Lifted(address, mode)` query; the walk reads it; compact IL | once per byte revision, `O(1)` per read | a whole-program lift cache in bytes: 464 B per op makes pumasim's 2.5 M instructions tens of GB; the budget and the compact IL make residency cheap |
 | SSA | iterated dominance frontier with a live-in prune (Cytron 1991, pruned by Choi 1991), CHK dominators | `O(E · d)` dominators, `O(E + Σ DF)` placement | Braun 2013 direct construction: it needs no dominators, but the dominators are an index every later pass reads, so the saving is the construction alone |
-| Frame and memory | promotion as an SSA rewrite (P4), memory SSA on `fixpoint::forward` for what is not promoted, one storage index | `O(B · L_live)` once; `O(log W)` per lookup | Steensgaard or Andersen points-to over the whole program: a stack object is reached only through what escapes it (the frame model's rule), so per-function reach with callee summaries is exact where it answers and refuses where it does not |
-| Values | strided intervals on the sparse driver with widening at the DFS back-edge phis (doc/ssa.md) | `O((V + E) · h)`, `h ≤ 2 · 64` per value | a solver (SMT) for ranges: no consumer proved its need, and a solver's cost has no `h` |
-| Interprocedural | held summaries over the component DAG, demand bounded to what is held | `Σ prep + Ec · |summary|` per sweep | IFDS or IDE (Reps, Horwitz and Sagiv 1995): `O(E · D³)` for a distributive problem over a domain `D`; the facts here (slots, reach, results) are not distributive, and a summary per body is what the renderer reads |
-| Types | union-find and meet, incremental (model 5) | `O((V + A) · α)` | retypd (Noonan 2016): polymorphic subtyping with a saturation step that is polynomial but cubic in practice; its gain (recursive types) is P9's exit, reachable as a later layer over the same constraints; TIE's constraint solving restarts |
-| Structuring | dominator placement, certified rewrites (SD) | `O(k · (B + E))` | DREAM's condition-based refinement (Yakdan 2015): goto-free, but its conditions grow with nesting and its correctness is not checked against the CFG; rev.ng's comb duplicates to reach reducibility, which the certificate admits only with a complete out-edge set per copy |
-| Terms | directed rewriting with a termination measure and a proof per rule (r2rewrite) | `O(terms · rules applied)` | equality saturation (egg, Willsey 2021): saturation is unbounded without a scheduler, and extraction ties break by cost, not by id, so determinism needs a second rule |
+| Frame and memory | promotion as an SSA rewrite (P4), memory SSA on `fixpoint::forward` for what is not promoted (chi and mu per location, Hardekopf and Lin 2011), one storage index | `O(B · L_live)` once; `O(B + writes + reads)` for the index | Steensgaard or Andersen points-to over the whole program: Steensgaard's `O(N · α(N, N))` holds only field-insensitively, one node per frame (POPL 1996 §8), so the per-slot partition must exist first, and it is the frame model's; a stack object is reached only through what escapes it, so per-function reach with callee summaries is exact where it answers and refuses where it does not. The promotion predicate (adr-frame-model) is the engine's own: the survey verified no published rule for it |
+| Values | strided intervals on the sparse driver with widening at the DFS back-edge phis (doc/ssa.md) | `O((V + E) · h)`, `h ≤ 2 · 64` per value | VSA as published (Balakrishnan and Reps 2004): no stated bound, no soundness theorem, termination by widening points and violations reported as warnings; here the widening set is structural and a violation is refusal evidence. A solver (SMT) for ranges: no consumer proved its need, and a solver's cost has no `h` |
+| Interprocedural | held summaries over the component DAG, demand bounded to what is held | `Σ prep + Ec · |summary|` per sweep | IFDS or IDE (Reps, Horwitz and Sagiv 1995, not re-verified): `O(E · D³)` for a distributive problem over a domain `D`; the facts here (slots, reach, results) are not distributive, and a summary per body is what the renderer reads |
+| Types | union-find and meet, incremental (model 5), over the frame model's per-slot partition | `O((V + A) · α)` | retypd (Noonan 2016, not re-verified): polymorphic subtyping over sketches; its gain (recursive and polymorphic types) is P9's later layer over the same constraints, and its cost is not a bound this ADR can cite; TIE (Lee 2011, not re-verified) solves constraints from scratch |
+| Structuring | dominator placement, certified rewrites (SD); a `goto` left where no measure-decreasing rewrite removes it is a residual | `O(k · (B + E))` | DREAM (Yakdan 2015): goto-free, with no stated bound, no proof, correctness a recompile test of 1,530 coreutils functions, and condition simplification a Boolean minimisation with no bound; `I_S` instead checks every rendered occurrence against its block's out-edge multiset in `O(B + E)`. rev.ng's comb (Gussoni 2020): duplicates to reach reducibility, 1.07× to 1.32× code growth on coreutils, semantics asserted without proof; the certificate admits a copy only with the full out-edge set. SAILR (Basque 2024) traces all 3,002 Hex-Rays gotos on coreutils 9.1 to nine GCC passes with no bound or proof for its deoptimisation, which supports a `goto` as a residual over an invented de-optimisation. Under SSA a condition tests values, so DREAM's rule for a tested variable changed between uses needs no Boolean here |
+| Terms | directed rewriting with a termination measure and a proof per rule (r2rewrite) | `O(terms · rules applied)` | equality saturation (egg, Willsey 2021, not re-verified): saturation needs a scheduler to stop, and extraction picks by a cost function, so a tie needs a rule the engine would have to add; a directed rule with a proof and a measure stops by construction |
 | Render | the D pipeline, one walk per stage, no retry | `O(tree)` | the journal: a transaction log over a tree it rebuilds is the retry loop |
 | Database | the red-green query database with capacities in bytes | `O(deps)` per revalidation | salsa: no byte-range inputs (adr-query-database); Datalog (Soufflé, ddisasm): whole-program relations are the opposite of demand-driven, and a rendering is not a relation |
 
@@ -141,8 +147,8 @@ Each is a prediction, to be measured by the item that owns it.
   PF4 D19's budgets (time, peak RSS, allocation count) as the CI timing job.
 - **SM** (summaries, r2engine and r2ssa): the summary grade of preparation;
   `Summary(f)` held; components on the driver; demand bounded to what is held.
-- **LX** (linear per function, r2ssa): the storage index; the eight passes in
-  the table rewritten to their bound; each twice-computed fact given one owner;
+- **LX** (linear per function, r2ssa): the storage index; the passes in the
+  table rewritten to their bound; each twice-computed fact given one owner;
   the five caps made budgets; F2.1, F2.2, F2.4 and F2.5 land here, and K's rest.
 - **T** (types as one monotone system, r2types): the incremental solver, the
   second system deleted, `FunctionTypeFacts` as indexes over dense ids, C3's
@@ -150,34 +156,63 @@ Each is a prediction, to be measured by the item that owns it.
 
 Their order and the rest of the program are in ROADMAP.md.
 
-## Citations
+## What the survey verified, and what it did not
 
-Filled from the 2026-10-07 survey where the source states the bound; a claim
-whose source hedges it is not cited.
+The 2026-10-07 survey (108 agents, 26 primary sources, 25 claims put to a
+three-vote adversarial check, 21 confirmed, 4 refuted) verified claims on SSA,
+memory SSA, points-to, VSA and structuring only. Type inference, summaries
+and calling conventions, and incremental databases produced no surviving
+claim, so every bound this ADR states for those stages rests on the model
+above and is marked "not re-verified" where a paper is named. Two results
+change what the engine owns:
 
-- Kildall 1973, "A unified approach to global program optimization": the
-  lattice framework and the iteration bound.
-- Kam and Ullman 1976, "Global data flow analysis and iterative algorithms":
-  convergence of chaotic iteration in `h` rounds for monotone frameworks.
-- Wegman and Zadeck 1991, "Constant propagation with conditional branches":
-  sparse (SSA edge) iteration, `O(V + E)` per height.
-- Cytron, Ferrante, Rosen, Wegman and Zadeck 1991, "Efficiently computing
-  static single assignment form": iterated dominance frontiers; Choi,
-  Cytron and Ferrante 1991 for the pruned form.
-- Cooper, Harvey and Kennedy 2001, "A simple, fast dominance algorithm".
-- Braun et al. 2013, "Simple and efficient construction of static single
-  assignment form": the `readVariable` lookup that the storage index makes an
-  index.
-- Sharir and Pnueli 1981, "Two approaches to interprocedural data flow
-  analysis": the functional (summary) approach.
-- Tarjan 1972, "Depth-first search and linear graph algorithms": components in
-  `O(F + Ec)`.
-- Reps, Horwitz and Sagiv 1995, "Precise interprocedural dataflow analysis via
-  graph reachability": IFDS, `O(E · D³)`.
-- Steensgaard 1996, "Points-to analysis in almost linear time": unification
-  with union-find.
-- Noonan, Loginov and Cok 2016, "Polymorphic type inference for machine code"
+- The sparse fixpoint theorem (Oh et al.) is the proof LX's sparse states
+  need: a state cut only at must-kills loses the dense answer.
+- No published strong-update or promotion rule survived (Balakrishnan and
+  Reps 1-2, Hardekopf and Lin 0-3), so the frame model's promotion predicate
+  is the engine's own claim and gets a proof or a mutation target (gate work).
+
+Verified by the survey (the source states the bound or the proof; votes 3-0
+unless noted):
+
+- Braun, Buchwald, Hack, Leißa, Mallon and Zwinkau 2013, "Simple and
+  efficient construction of static single assignment form": construction in
+  `Θ(P + (B + E) · V)` (2-1); minimality proven (Theorem 1) for reducible
+  CFGs only, irreducible ones keep superfluous phis.
+- Steensgaard 1996, "Points-to analysis in almost linear time":
+  `O(N · α(N, N))`, argued in prose; field-insensitive, one node per frame;
+  no soundness claim over binaries.
+- Oh, Heo, Lee, Lee and Yi 2012 (PLDI) and 2014 (TOPLAS, Theorem 3.23):
+  sparse abstract interpretation equals the dense fixpoint under
+  over-approximate def and use sets where every spurious definition is a use.
+- Hardekopf and Lin 2011 (CGO): memory SSA by chi and mu per address-taken
+  variable; `O(I · V)` for access-equivalence partitioning; soundness argued
+  by monotonicity, no theorem.
+- Balakrishnan and Reps 2004 (CC): VSA states no bound and no soundness
+  theorem; termination by widening points (2-1 on the cost reading);
+  violations of the compilation model are reports.
+- Yakdan, Eschweiler, Gerhards-Padilla and Smith 2015 (NDSS), DREAM: no
+  bound, no proof; 1,530 of 1,738 coreutils functions pass a recompile test.
+- Gussoni, Di Federico, Fezzardi and Agosta 2020 (AsiaCCS), rev.ng comb: no
+  bound; duplication 1.07× to 1.32× on coreutils; semantics asserted (2-1 on
+  the semantics reading).
+- Basque et al. 2024 (USENIX Security), SAILR: 3,002 Hex-Rays gotos on
+  coreutils 9.1 trace to nine GCC passes; no bound or proof.
+
+Cited from the primary text, not re-verified by the survey:
+
+- Kildall 1973; Kam and Ullman 1976: the lattice framework and convergence
+  of chaotic iteration in `h` rounds (model 1).
+- Wegman and Zadeck 1991: sparse iteration over SSA edges (model 1).
+- Cytron, Ferrante, Rosen, Wegman and Zadeck 1991; Choi, Cytron and Ferrante
+  1991: iterated dominance frontiers, the pruned form.
+- Cooper, Harvey and Kennedy 2001: the dominator algorithm in use.
+- Sharir and Pnueli 1981: the functional (summary) approach (model 3).
+- Tarjan 1972: components in `O(F + Ec)`.
+- Reps, Horwitz and Sagiv 1995: IFDS, `O(E · D³)`.
+- Lee, Avgerinos and Brumley 2011 (TIE); Noonan, Loginov and Cok 2016
   (retypd).
-- Yakdan, Eschweiler, Gerhards-Padilla and Smith 2015, "No more gotos"
-  (DREAM).
-- Willsey et al. 2021, "egg: fast and extensible equality saturation".
+- Willsey et al. 2021 (egg).
+
+A second survey over types, summaries and databases is the open research
+item; until it runs, T, SM and PF cite the model and the measurements alone.
