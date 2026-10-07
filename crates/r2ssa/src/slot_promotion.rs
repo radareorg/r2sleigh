@@ -194,230 +194,310 @@ fn classify(
     sinks: &Sinks<'_>,
     carried: Option<&BTreeSet<i64>>,
 ) -> (BTreeMap<i64, Vec<Access>>, Reach, BTreeSet<i64>) {
-    let Sinks {
-        calls_refund_stack,
-        read_by_calls,
-        upward_at,
-    } = *sinks;
-    let mut uses = IdMap::<VarId, Vec<(OpId, u64, usize)>>::new(func.values().len());
-    let mut phi_uses = IdMap::<VarId, Vec<VarId>>::new(func.values().len());
-    for addr in func.block_addrs() {
-        let Some(block) = func.get_block(*addr) else {
-            continue;
-        };
-        for (_, phi) in block.sited_phis() {
-            for (_, source) in &phi.sources {
-                phi_uses.get_or_insert_with(*source, Vec::new).push(phi.dst);
-            }
-        }
-        for (index, (id, op)) in block.sited().enumerate() {
-            for source in op.sources() {
-                uses.get_or_insert_with(*source, Vec::new)
-                    .push((id, *addr, index));
-            }
-        }
-    }
-    let mut points = IdMap::<VarId, Point>::new(func.values().len());
-    let mut pending = vec![entry_sp];
-    points.insert(entry_sp, Point::Exact(0));
-    let mut accesses = BTreeMap::<i64, Vec<Access>>::new();
-    let mut reach = Reach {
-        whole: false,
-        both: BTreeSet::new(),
-        up: BTreeSet::new(),
-    };
-    let constant = |var: VarId| defs.constant(func, var);
-    let set =
-        |points: &mut IdMap<VarId, Point>, pending: &mut Vec<VarId>, var: VarId, point: Point| {
-            let joined = points.get(var).map_or(point, |known| known.join(point));
-            if points.get(var) != Some(&joined) {
-                points.insert(var, joined);
-                pending.push(var);
-            }
-        };
-    let escape = |reach: &mut Reach, point: Point| match point {
-        Point::Exact(offset) | Point::Indexed { from: offset, .. } => {
-            reach.both.insert(offset);
-        }
-        Point::Unknown => reach.whole = true,
-    };
-    let escape_up = |reach: &mut Reach, point: Point| match point {
-        Point::Exact(offset)
-        | Point::Indexed {
-            from: offset,
-            up: true,
-        } => {
-            reach.up.insert(offset);
-        }
-        Point::Indexed { from, up: false } => {
-            reach.both.insert(from);
-        }
-        Point::Unknown => reach.whole = true,
-    };
-    let carries = |place: i64| carried.is_none_or(|carried| carried.contains(&place));
-    // What each place holds of the frame's addresses, and the values loaded from it.
-    let mut held = BTreeMap::<i64, Point>::new();
-    let mut loaded = BTreeMap::<i64, Vec<VarId>>::new();
-    let mut carriers = BTreeSet::new();
-    // Stores of an address whose place is not yet known: they escape if it never is.
-    let mut deferred = Vec::<(VarId, VarId)>::new();
+    let mut classifier = Classifier::new(func, defs, entry_sp, sinks, carried);
     loop {
-        while let Some(var) = pending.pop() {
-            let Some(point) = points.get(var).copied() else {
-                continue;
-            };
-            if var != entry_sp && func.storage_of(var).is_some_and(read_by_calls) {
-                escape(&mut reach, point);
-            }
-            for dst in phi_uses.get(var).cloned().unwrap_or_default() {
-                let (root, offset) = defs.affine(func, dst);
-                let merged = if root == entry_sp {
-                    Some(Point::Exact(offset))
-                } else {
-                    merged_sources(defs, &points, dst)
-                };
-                if let Some(merged) = merged {
-                    set(&mut points, &mut pending, dst, merged);
-                }
-            }
-            for (id, block, index) in uses.get(var).cloned().unwrap_or_default() {
-                let Some(op) = func
-                    .get_block(block)
-                    .and_then(|block| block.ops().get(index))
-                else {
-                    continue;
-                };
-                let whole_before = reach.whole;
-                match op {
-                    SSAOp::Load { dst, addr, .. } if *addr == var => {
-                        if let Point::Exact(place) = point {
-                            loaded.entry(place).or_default().push(*dst);
-                            if let Some(address) = held.get(&place).copied() {
-                                set(&mut points, &mut pending, *dst, address);
-                            }
-                        }
-                        access(
-                            &mut accesses,
-                            &mut reach,
-                            point,
-                            id,
-                            block,
-                            index,
-                            func.var(*dst).size,
-                            false,
-                        );
-                    }
-                    SSAOp::Store { addr, val, .. } => {
-                        // A frame address stored: carried by a place that may be promoted, else handed on.
-                        if let Some(address) = points.get(*val).copied() {
-                            match points.get(*addr).copied() {
-                                Some(Point::Exact(place)) if carries(place) => {
-                                    carriers.insert(place);
-                                    let joined = held
-                                        .get(&place)
-                                        .map_or(address, |known| known.join(address));
-                                    if held.insert(place, joined) != Some(joined) {
-                                        for dst in loaded.get(&place).cloned().unwrap_or_default() {
-                                            set(&mut points, &mut pending, dst, joined);
-                                        }
-                                    }
-                                }
-                                Some(_) => escape(&mut reach, address),
-                                None => deferred.push((*val, *addr)),
-                            }
-                        }
-                        if *addr == var && !call_push(func, block, index, *val, calls_refund_stack)
-                        {
-                            access(
-                                &mut accesses,
-                                &mut reach,
-                                point,
-                                id,
-                                block,
-                                index,
-                                func.var(*val).size,
-                                true,
-                            );
-                        }
-                    }
-                    SSAOp::Copy { dst, .. } | SSAOp::CallRestore { dst, .. } => {
-                        set(&mut points, &mut pending, *dst, point);
-                    }
-                    SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
-                        let subtract = matches!(op, SSAOp::IntSub { .. });
-                        let other = if *a == var { *b } else { *a };
-                        let next = match (point, constant(other)) {
-                            _ if subtract && *b == var => Point::Unknown,
-                            (Point::Exact(offset), Some(amount)) => Point::Exact(if subtract {
-                                offset - amount
-                            } else {
-                                offset + amount
-                            }),
-                            (Point::Indexed { from, up }, Some(_)) => Point::Indexed { from, up },
-                            (Point::Exact(from) | Point::Indexed { from, .. }, None) => {
-                                Point::Indexed {
-                                    from,
-                                    up: !subtract && non_negative(func, defs, other),
-                                }
-                            }
-                            (Point::Unknown, _) => Point::Unknown,
-                        };
-                        set(&mut points, &mut pending, *dst, next);
-                    }
-                    SSAOp::CallUse { src } if upward_at(block, index, *src) => {
-                        escape_up(&mut reach, point);
-                    }
-                    SSAOp::CallUse { .. } => escape(&mut reach, point),
-                    // A frame address used as code, or as a value an unmodelled operation reads.
-                    SSAOp::Call { .. }
-                    | SSAOp::CallInd { .. }
-                    | SSAOp::Branch { .. }
-                    | SSAOp::BranchInd { .. }
-                    | SSAOp::Return { .. }
-                    | SSAOp::CallOther { .. } => reach.whole = true,
-                    // Compared, masked or measured, it is a number: it is an address again only if what
-                    // it makes reaches an access or a sink, which its own uses decide.
-                    _ => {
-                        if let Some(dst) = op.dst() {
-                            set(&mut points, &mut pending, *dst, Point::Unknown);
-                        }
-                    }
-                }
-                if reach.whole && !whole_before {
-                    r2il::refusal_evidence!(
-                        "promote-stack-slot",
-                        "{block:#x}:{index} {op:?} takes the frame address {point:?} where no offset places it"
-                    );
-                }
-            }
+        while let Some(var) = classifier.pending.pop() {
+            classifier.visit(var);
         }
         // A merge some of whose sources are frame addresses and some not is one no offset places:
         // a load through it reads another place on some path.
-        let partial = phi_uses
-            .iter()
-            .flat_map(|(_, dsts)| dsts.iter().copied())
-            .filter(|dst| points.get(*dst).is_none())
-            .filter(|dst| {
-                defs.phi_sources(*dst)
-                    .iter()
-                    .any(|source| points.get(*source).is_some())
-            })
-            .collect::<BTreeSet<_>>();
+        let partial = classifier.partial_merges();
         if partial.is_empty() {
             break;
         }
         for dst in partial {
-            set(&mut points, &mut pending, dst, Point::Unknown);
+            classifier.set(dst, Point::Unknown);
         }
     }
-    for (val, addr) in deferred {
-        if points.get(addr).is_none()
-            && let Some(address) = points.get(val).copied()
+    classifier.finish()
+}
+
+/// The classifier's worklist over the frame's addresses, and what it has found.
+struct Classifier<'a> {
+    func: &'a SSAFunction,
+    defs: &'a Definitions,
+    entry_sp: VarId,
+    sinks: &'a Sinks<'a>,
+    carried: Option<&'a BTreeSet<i64>>,
+    uses: IdMap<VarId, Vec<(OpId, u64, usize)>>,
+    phi_uses: IdMap<VarId, Vec<VarId>>,
+    points: IdMap<VarId, Point>,
+    pending: Vec<VarId>,
+    accesses: BTreeMap<i64, Vec<Access>>,
+    reach: Reach,
+    /// What each place holds of the frame's addresses, and the values loaded from it.
+    held: BTreeMap<i64, Point>,
+    loaded: BTreeMap<i64, Vec<VarId>>,
+    carriers: BTreeSet<i64>,
+    /// Stores of an address whose place is not yet known: they escape if it never is.
+    deferred: Vec<(VarId, VarId)>,
+}
+
+impl<'a> Classifier<'a> {
+    fn new(
+        func: &'a SSAFunction,
+        defs: &'a Definitions,
+        entry_sp: VarId,
+        sinks: &'a Sinks<'a>,
+        carried: Option<&'a BTreeSet<i64>>,
+    ) -> Self {
+        let mut uses = IdMap::<VarId, Vec<(OpId, u64, usize)>>::new(func.values().len());
+        let mut phi_uses = IdMap::<VarId, Vec<VarId>>::new(func.values().len());
+        for addr in func.block_addrs() {
+            let Some(block) = func.get_block(*addr) else {
+                continue;
+            };
+            for (_, phi) in block.sited_phis() {
+                for (_, source) in &phi.sources {
+                    phi_uses.get_or_insert_with(*source, Vec::new).push(phi.dst);
+                }
+            }
+            for (index, (id, op)) in block.sited().enumerate() {
+                for source in op.sources() {
+                    uses.get_or_insert_with(*source, Vec::new)
+                        .push((id, *addr, index));
+                }
+            }
+        }
+        let mut points = IdMap::<VarId, Point>::new(func.values().len());
+        points.insert(entry_sp, Point::Exact(0));
+        Self {
+            func,
+            defs,
+            entry_sp,
+            sinks,
+            carried,
+            uses,
+            phi_uses,
+            points,
+            pending: vec![entry_sp],
+            accesses: BTreeMap::new(),
+            reach: Reach {
+                whole: false,
+                both: BTreeSet::new(),
+                up: BTreeSet::new(),
+            },
+            held: BTreeMap::new(),
+            loaded: BTreeMap::new(),
+            carriers: BTreeSet::new(),
+            deferred: Vec::new(),
+        }
+    }
+
+    fn set(&mut self, var: VarId, point: Point) {
+        let joined = self
+            .points
+            .get(var)
+            .map_or(point, |known| known.join(point));
+        if self.points.get(var) != Some(&joined) {
+            self.points.insert(var, joined);
+            self.pending.push(var);
+        }
+    }
+
+    fn escape(&mut self, point: Point) {
+        match point {
+            Point::Exact(offset) | Point::Indexed { from: offset, .. } => {
+                self.reach.both.insert(offset);
+            }
+            Point::Unknown => self.reach.whole = true,
+        }
+    }
+
+    fn escape_up(&mut self, point: Point) {
+        match point {
+            Point::Exact(offset)
+            | Point::Indexed {
+                from: offset,
+                up: true,
+            } => {
+                self.reach.up.insert(offset);
+            }
+            Point::Indexed { from, up: false } => {
+                self.reach.both.insert(from);
+            }
+            Point::Unknown => self.reach.whole = true,
+        }
+    }
+
+    /// Everything `var`'s point reaches: the merges it feeds and each operation reading it.
+    fn visit(&mut self, var: VarId) {
+        let Some(point) = self.points.get(var).copied() else {
+            return;
+        };
+        if var != self.entry_sp
+            && self
+                .func
+                .storage_of(var)
+                .is_some_and(self.sinks.read_by_calls)
         {
-            escape(&mut reach, address);
+            self.escape(point);
+        }
+        for dst in self.phi_uses.get(var).cloned().unwrap_or_default() {
+            let (root, offset) = self.defs.affine(self.func, dst);
+            let merged = if root == self.entry_sp {
+                Some(Point::Exact(offset))
+            } else {
+                merged_sources(self.defs, &self.points, dst)
+            };
+            if let Some(merged) = merged {
+                self.set(dst, merged);
+            }
+        }
+        for (id, block, index) in self.uses.get(var).cloned().unwrap_or_default() {
+            let Some(op) = self
+                .func
+                .get_block(block)
+                .and_then(|block| block.ops().get(index))
+            else {
+                continue;
+            };
+            let whole_before = self.reach.whole;
+            self.read(var, point, op, (id, block, index));
+            if self.reach.whole && !whole_before {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{block:#x}:{index} {op:?} takes the frame address {point:?} where no offset places it"
+                );
+            }
         }
     }
-    (accesses, reach, carriers)
+
+    /// One operation reading `var`, which points at `point`.
+    fn read(&mut self, var: VarId, point: Point, op: &SSAOp<VarId>, site: (OpId, u64, usize)) {
+        let (id, block, index) = site;
+        match op {
+            SSAOp::Load { dst, addr, .. } if *addr == var => {
+                if let Point::Exact(place) = point {
+                    self.loaded.entry(place).or_default().push(*dst);
+                    if let Some(address) = self.held.get(&place).copied() {
+                        self.set(*dst, address);
+                    }
+                }
+                let width = self.func.var(*dst).size;
+                access(
+                    &mut self.accesses,
+                    &mut self.reach,
+                    point,
+                    id,
+                    block,
+                    index,
+                    width,
+                    false,
+                );
+            }
+            SSAOp::Store { addr, val, .. } => {
+                self.store(*addr, *val);
+                if *addr == var
+                    && !call_push(self.func, block, index, *val, self.sinks.calls_refund_stack)
+                {
+                    let width = self.func.var(*val).size;
+                    access(
+                        &mut self.accesses,
+                        &mut self.reach,
+                        point,
+                        id,
+                        block,
+                        index,
+                        width,
+                        true,
+                    );
+                }
+            }
+            SSAOp::Copy { dst, .. } | SSAOp::CallRestore { dst, .. } => self.set(*dst, point),
+            SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
+                let subtract = matches!(op, SSAOp::IntSub { .. });
+                let next = self.displaced(var, point, (*a, *b), subtract);
+                self.set(*dst, next);
+            }
+            SSAOp::CallUse { src } if (self.sinks.upward_at)(block, index, *src) => {
+                self.escape_up(point);
+            }
+            SSAOp::CallUse { .. } => self.escape(point),
+            // A frame address used as code, or as a value an unmodelled operation reads.
+            SSAOp::Call { .. }
+            | SSAOp::CallInd { .. }
+            | SSAOp::Branch { .. }
+            | SSAOp::BranchInd { .. }
+            | SSAOp::Return { .. }
+            | SSAOp::CallOther { .. } => self.reach.whole = true,
+            // Compared, masked or measured, it is a number: it is an address again only if what
+            // it makes reaches an access or a sink, which its own uses decide.
+            _ => {
+                if let Some(dst) = op.dst() {
+                    self.set(*dst, Point::Unknown);
+                }
+            }
+        }
+    }
+
+    /// A frame address stored: carried by a place that may be promoted, else handed on.
+    fn store(&mut self, addr: VarId, val: VarId) {
+        let Some(address) = self.points.get(val).copied() else {
+            return;
+        };
+        let carries = |place: i64| self.carried.is_none_or(|carried| carried.contains(&place));
+        match self.points.get(addr).copied() {
+            Some(Point::Exact(place)) if carries(place) => {
+                self.carriers.insert(place);
+                let joined = self
+                    .held
+                    .get(&place)
+                    .map_or(address, |known| known.join(address));
+                if self.held.insert(place, joined) != Some(joined) {
+                    for dst in self.loaded.get(&place).cloned().unwrap_or_default() {
+                        self.set(dst, joined);
+                    }
+                }
+            }
+            Some(_) => self.escape(address),
+            None => self.deferred.push((val, addr)),
+        }
+    }
+
+    /// Where `var`, at `point`, is moved by the other operand of an add or subtract.
+    fn displaced(&self, var: VarId, point: Point, (a, b): (VarId, VarId), subtract: bool) -> Point {
+        let other = if a == var { b } else { a };
+        match (point, self.defs.constant(self.func, other)) {
+            _ if subtract && b == var => Point::Unknown,
+            (Point::Exact(offset), Some(amount)) => Point::Exact(if subtract {
+                offset - amount
+            } else {
+                offset + amount
+            }),
+            (Point::Indexed { from, up }, Some(_)) => Point::Indexed { from, up },
+            (Point::Exact(from) | Point::Indexed { from, .. }, None) => Point::Indexed {
+                from,
+                up: !subtract && non_negative(self.func, self.defs, other),
+            },
+            (Point::Unknown, _) => Point::Unknown,
+        }
+    }
+
+    fn partial_merges(&self) -> BTreeSet<VarId> {
+        self.phi_uses
+            .iter()
+            .flat_map(|(_, dsts)| dsts.iter().copied())
+            .filter(|dst| self.points.get(*dst).is_none())
+            .filter(|dst| {
+                self.defs
+                    .phi_sources(*dst)
+                    .iter()
+                    .any(|source| self.points.get(*source).is_some())
+            })
+            .collect()
+    }
+
+    fn finish(mut self) -> (BTreeMap<i64, Vec<Access>>, Reach, BTreeSet<i64>) {
+        for (val, addr) in std::mem::take(&mut self.deferred) {
+            if self.points.get(addr).is_none()
+                && let Some(address) = self.points.get(val).copied()
+            {
+                self.escape(address);
+            }
+        }
+        (self.accesses, self.reach, self.carriers)
+    }
 }
 
 /// The join of a merge's sources, once every one is a frame address.
