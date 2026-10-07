@@ -147,6 +147,21 @@ impl ArgumentReach {
         self.unbounded
     }
 
+    /// Whether every place this reaches lies at or above the pointer: a span from it, or an
+    /// index the callee never takes negative, scaled and offset upward.
+    pub fn is_upward(&self) -> bool {
+        !self.unbounded
+            && self.terms.iter().all(|term| match *term {
+                SummaryArgumentReach::Bytes(_) => true,
+                SummaryArgumentReach::Scaled {
+                    stride,
+                    base,
+                    sign_bits,
+                    ..
+                } => stride >= 0 && base >= 0 && sign_bits.is_none(),
+            })
+    }
+
     pub fn terms(&self) -> impl Iterator<Item = SummaryArgumentReach> + '_ {
         self.terms.iter().copied()
     }

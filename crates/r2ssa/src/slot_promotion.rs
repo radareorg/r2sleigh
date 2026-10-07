@@ -96,17 +96,63 @@ pub(crate) fn promote(
         Some(stack_pointer),
         machine.machine_roles().frame_pointer_storage(),
     ];
+    // With a convention each call reads its arguments through `CallUse`; without one, a call may
+    // read any register.
     let read_by_calls = |storage: crate::CanonicalStorageId| {
         calls
+            && arguments.is_none()
             && storage.space == crate::CanonicalStorageSpace::Register
             && !bases.contains(&Some(storage))
-            && arguments.as_ref().is_none_or(|arguments| {
-                arguments
-                    .iter()
-                    .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
-            })
     };
-    let (accesses, reach) = classify(func, &defs, entry_sp, calls_refund_stack, &read_by_calls);
+    // An address a direct callee is proven to reach only upward through escapes only upward.
+    let integer_arguments = machine
+        .convention_slots()
+        .map(|slots| slots.argument_slots().to_vec())
+        .unwrap_or_default();
+    let upward_at = |block: u64, index: usize, src: VarId| {
+        let Some(ops) = func.get_block(block).map(|block| block.ops()) else {
+            return false;
+        };
+        let target = ops[index + 1..].iter().find_map(|op| match op {
+            SSAOp::CallUse { .. } => None,
+            SSAOp::Call { target, .. } => Some(func.var(*target).constant_bits()),
+            _ => Some(None),
+        });
+        let Some(Some(target)) = target else {
+            return false;
+        };
+        let Some(position) = func.storage_of(src).and_then(|storage| {
+            integer_arguments
+                .iter()
+                .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
+        }) else {
+            return false;
+        };
+        machine
+            .callee_argument_reach(target)
+            .and_then(|reach| reach.get(&position))
+            .is_some_and(crate::interproc::ArgumentReach::is_upward)
+    };
+    let sinks = Sinks {
+        calls_refund_stack,
+        read_by_calls: &read_by_calls,
+        upward_at: &upward_at,
+    };
+    // Assume every place may carry an address stored into it; withdraw the places promotion
+    // refuses until the assumption holds. The set only shrinks: at most one round per place.
+    let mut carried: Option<BTreeSet<i64>> = None;
+    let (accesses, reach, promotable) = loop {
+        let (accesses, reach, carriers) = classify(func, &defs, entry_sp, &sinks, carried.as_ref());
+        if reach.whole {
+            break (accesses, reach, BTreeMap::new());
+        }
+        let saves = saves(func, &defs, &accesses, machine);
+        let promotable = eligible(func, &defs, &accesses, &reach, &saves, machine);
+        if carriers.iter().all(|place| promotable.contains_key(place)) {
+            break (accesses, reach, promotable);
+        }
+        carried = Some(promotable.keys().copied().collect());
+    };
     if reach.whole {
         r2il::refusal_evidence!(
             "promote-stack-slot",
@@ -115,8 +161,6 @@ pub(crate) fn promote(
         );
         return IdSet::default();
     }
-    let saves = saves(func, &defs, &accesses, machine);
-    let promotable = eligible(func, &defs, &accesses, &reach, &saves, machine);
     if promotable.is_empty() {
         return IdSet::default();
     }
@@ -130,14 +174,31 @@ pub(crate) fn promote(
     rename(func, &accesses, &promotable)
 }
 
-/// Every exact access to the frame, by entry offset, and what the frame's escapes reach.
+/// Where a frame address leaves through a call.
+struct Sinks<'a> {
+    calls_refund_stack: bool,
+    /// Whether a call may read a register of this storage, where no `CallUse` says which.
+    read_by_calls: &'a dyn Fn(crate::CanonicalStorageId) -> bool,
+    /// Whether the `CallUse` at this block and index hands its value to a callee that reaches
+    /// only upward through it.
+    upward_at: &'a dyn Fn(u64, usize, VarId) -> bool,
+}
+
+/// Every exact access to the frame, by entry offset, what the frame's escapes reach, and the
+/// places an address was stored into. An address stored into a place of `carried` (every place
+/// when `None`) flows to that place's loads instead of escaping.
 fn classify(
     func: &SSAFunction,
     defs: &Definitions,
     entry_sp: VarId,
-    calls_refund_stack: bool,
-    read_by_calls: &dyn Fn(crate::CanonicalStorageId) -> bool,
-) -> (BTreeMap<i64, Vec<Access>>, Reach) {
+    sinks: &Sinks<'_>,
+    carried: Option<&BTreeSet<i64>>,
+) -> (BTreeMap<i64, Vec<Access>>, Reach, BTreeSet<i64>) {
+    let Sinks {
+        calls_refund_stack,
+        read_by_calls,
+        upward_at,
+    } = *sinks;
     let mut uses = IdMap::<VarId, Vec<(OpId, u64, usize)>>::new(func.values().len());
     let mut phi_uses = IdMap::<VarId, Vec<VarId>>::new(func.values().len());
     for addr in func.block_addrs() {
@@ -180,48 +241,61 @@ fn classify(
         }
         Point::Unknown => reach.whole = true,
     };
-    while let Some(var) = pending.pop() {
-        let Some(point) = points.get(var).copied() else {
-            continue;
-        };
-        if var != entry_sp && func.storage_of(var).is_some_and(read_by_calls) {
-            escape(&mut reach, point);
+    let escape_up = |reach: &mut Reach, point: Point| match point {
+        Point::Exact(offset)
+        | Point::Indexed {
+            from: offset,
+            up: true,
+        } => {
+            reach.up.insert(offset);
         }
-        for dst in phi_uses.get(var).cloned().unwrap_or_default() {
-            let (root, offset) = defs.affine(func, dst);
-            let merged = if root == entry_sp {
-                Point::Exact(offset)
-            } else {
-                Point::Unknown
-            };
-            set(&mut points, &mut pending, dst, merged);
+        Point::Indexed { from, up: false } => {
+            reach.both.insert(from);
         }
-        for (id, block, index) in uses.get(var).cloned().unwrap_or_default() {
-            let Some(op) = func
-                .get_block(block)
-                .and_then(|block| block.ops().get(index))
-            else {
+        Point::Unknown => reach.whole = true,
+    };
+    let carries = |place: i64| carried.is_none_or(|carried| carried.contains(&place));
+    // What each place holds of the frame's addresses, and the values loaded from it.
+    let mut held = BTreeMap::<i64, Point>::new();
+    let mut loaded = BTreeMap::<i64, Vec<VarId>>::new();
+    let mut carriers = BTreeSet::new();
+    // Stores of an address whose place is not yet known: they escape if it never is.
+    let mut deferred = Vec::<(VarId, VarId)>::new();
+    loop {
+        while let Some(var) = pending.pop() {
+            let Some(point) = points.get(var).copied() else {
                 continue;
             };
-            let whole_before = reach.whole;
-            match op {
-                SSAOp::Load { dst, addr, .. } if *addr == var => {
-                    access(
-                        &mut accesses,
-                        &mut reach,
-                        point,
-                        id,
-                        block,
-                        index,
-                        func.var(*dst).size,
-                        false,
-                    );
+            if var != entry_sp && func.storage_of(var).is_some_and(read_by_calls) {
+                escape(&mut reach, point);
+            }
+            for dst in phi_uses.get(var).cloned().unwrap_or_default() {
+                let (root, offset) = defs.affine(func, dst);
+                let merged = if root == entry_sp {
+                    Some(Point::Exact(offset))
+                } else {
+                    merged_sources(defs, &points, dst)
+                };
+                if let Some(merged) = merged {
+                    set(&mut points, &mut pending, dst, merged);
                 }
-                SSAOp::Store { addr, val, .. } => {
-                    if *val == var {
-                        escape(&mut reach, point);
-                    }
-                    if *addr == var && !call_push(func, block, index, *val, calls_refund_stack) {
+            }
+            for (id, block, index) in uses.get(var).cloned().unwrap_or_default() {
+                let Some(op) = func
+                    .get_block(block)
+                    .and_then(|block| block.ops().get(index))
+                else {
+                    continue;
+                };
+                let whole_before = reach.whole;
+                match op {
+                    SSAOp::Load { dst, addr, .. } if *addr == var => {
+                        if let Point::Exact(place) = point {
+                            loaded.entry(place).or_default().push(*dst);
+                            if let Some(address) = held.get(&place).copied() {
+                                set(&mut points, &mut pending, *dst, address);
+                            }
+                        }
                         access(
                             &mut accesses,
                             &mut reach,
@@ -229,60 +303,131 @@ fn classify(
                             id,
                             block,
                             index,
-                            func.var(*val).size,
-                            true,
+                            func.var(*dst).size,
+                            false,
                         );
                     }
-                }
-                SSAOp::Copy { dst, .. } | SSAOp::CallRestore { dst, .. } => {
-                    set(&mut points, &mut pending, *dst, point);
-                }
-                SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
-                    let subtract = matches!(op, SSAOp::IntSub { .. });
-                    let other = if *a == var { *b } else { *a };
-                    let next = match (point, constant(other)) {
-                        _ if subtract && *b == var => Point::Unknown,
-                        (Point::Exact(offset), Some(amount)) => Point::Exact(if subtract {
-                            offset - amount
-                        } else {
-                            offset + amount
-                        }),
-                        (Point::Indexed { from, up }, Some(_)) => Point::Indexed { from, up },
-                        (Point::Exact(from) | Point::Indexed { from, .. }, None) => {
-                            Point::Indexed {
-                                from,
-                                up: !subtract && non_negative(func, defs, other),
+                    SSAOp::Store { addr, val, .. } => {
+                        // A frame address stored: carried by a place that may be promoted, else handed on.
+                        if let Some(address) = points.get(*val).copied() {
+                            match points.get(*addr).copied() {
+                                Some(Point::Exact(place)) if carries(place) => {
+                                    carriers.insert(place);
+                                    let joined = held
+                                        .get(&place)
+                                        .map_or(address, |known| known.join(address));
+                                    if held.insert(place, joined) != Some(joined) {
+                                        for dst in loaded.get(&place).cloned().unwrap_or_default() {
+                                            set(&mut points, &mut pending, dst, joined);
+                                        }
+                                    }
+                                }
+                                Some(_) => escape(&mut reach, address),
+                                None => deferred.push((*val, *addr)),
                             }
                         }
-                        (Point::Unknown, _) => Point::Unknown,
-                    };
-                    set(&mut points, &mut pending, *dst, next);
-                }
-                SSAOp::CallUse { .. } => escape(&mut reach, point),
-                // A frame address used as code, or as a value an unmodelled operation reads.
-                SSAOp::Call { .. }
-                | SSAOp::CallInd { .. }
-                | SSAOp::Branch { .. }
-                | SSAOp::BranchInd { .. }
-                | SSAOp::Return { .. }
-                | SSAOp::CallOther { .. } => reach.whole = true,
-                // Compared, masked or measured, it is a number: it is an address again only if what
-                // it makes reaches an access or a sink, which its own uses decide.
-                _ => {
-                    if let Some(dst) = op.dst() {
-                        set(&mut points, &mut pending, *dst, Point::Unknown);
+                        if *addr == var && !call_push(func, block, index, *val, calls_refund_stack)
+                        {
+                            access(
+                                &mut accesses,
+                                &mut reach,
+                                point,
+                                id,
+                                block,
+                                index,
+                                func.var(*val).size,
+                                true,
+                            );
+                        }
+                    }
+                    SSAOp::Copy { dst, .. } | SSAOp::CallRestore { dst, .. } => {
+                        set(&mut points, &mut pending, *dst, point);
+                    }
+                    SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
+                        let subtract = matches!(op, SSAOp::IntSub { .. });
+                        let other = if *a == var { *b } else { *a };
+                        let next = match (point, constant(other)) {
+                            _ if subtract && *b == var => Point::Unknown,
+                            (Point::Exact(offset), Some(amount)) => Point::Exact(if subtract {
+                                offset - amount
+                            } else {
+                                offset + amount
+                            }),
+                            (Point::Indexed { from, up }, Some(_)) => Point::Indexed { from, up },
+                            (Point::Exact(from) | Point::Indexed { from, .. }, None) => {
+                                Point::Indexed {
+                                    from,
+                                    up: !subtract && non_negative(func, defs, other),
+                                }
+                            }
+                            (Point::Unknown, _) => Point::Unknown,
+                        };
+                        set(&mut points, &mut pending, *dst, next);
+                    }
+                    SSAOp::CallUse { src } if upward_at(block, index, *src) => {
+                        escape_up(&mut reach, point);
+                    }
+                    SSAOp::CallUse { .. } => escape(&mut reach, point),
+                    // A frame address used as code, or as a value an unmodelled operation reads.
+                    SSAOp::Call { .. }
+                    | SSAOp::CallInd { .. }
+                    | SSAOp::Branch { .. }
+                    | SSAOp::BranchInd { .. }
+                    | SSAOp::Return { .. }
+                    | SSAOp::CallOther { .. } => reach.whole = true,
+                    // Compared, masked or measured, it is a number: it is an address again only if what
+                    // it makes reaches an access or a sink, which its own uses decide.
+                    _ => {
+                        if let Some(dst) = op.dst() {
+                            set(&mut points, &mut pending, *dst, Point::Unknown);
+                        }
                     }
                 }
-            }
-            if reach.whole && !whole_before {
-                r2il::refusal_evidence!(
-                    "promote-stack-slot",
-                    "{block:#x}:{index} {op:?} takes the frame address {point:?} where no offset places it"
-                );
+                if reach.whole && !whole_before {
+                    r2il::refusal_evidence!(
+                        "promote-stack-slot",
+                        "{block:#x}:{index} {op:?} takes the frame address {point:?} where no offset places it"
+                    );
+                }
             }
         }
+        // A merge some of whose sources are frame addresses and some not is one no offset places:
+        // a load through it reads another place on some path.
+        let partial = phi_uses
+            .iter()
+            .flat_map(|(_, dsts)| dsts.iter().copied())
+            .filter(|dst| points.get(*dst).is_none())
+            .filter(|dst| {
+                defs.phi_sources(*dst)
+                    .iter()
+                    .any(|source| points.get(*source).is_some())
+            })
+            .collect::<BTreeSet<_>>();
+        if partial.is_empty() {
+            break;
+        }
+        for dst in partial {
+            set(&mut points, &mut pending, dst, Point::Unknown);
+        }
     }
-    (accesses, reach)
+    for (val, addr) in deferred {
+        if points.get(addr).is_none()
+            && let Some(address) = points.get(val).copied()
+        {
+            escape(&mut reach, address);
+        }
+    }
+    (accesses, reach, carriers)
+}
+
+/// The join of a merge's sources, once every one is a frame address.
+fn merged_sources(defs: &Definitions, points: &IdMap<VarId, Point>, phi: VarId) -> Option<Point> {
+    let mut joined = None::<Point>;
+    for source in defs.phi_sources(phi) {
+        let point = points.get(*source).copied()?;
+        joined = Some(joined.map_or(point, |known| known.join(point)));
+    }
+    joined
 }
 
 #[expect(

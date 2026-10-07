@@ -155,6 +155,11 @@ impl Definitions {
         }
     }
 
+    /// The sources of the merge defining `var`, empty where no merge does.
+    pub(crate) fn phi_sources(&self, var: VarId) -> &[VarId] {
+        self.phis.get(var).map_or(&[], Vec::as_slice)
+    }
+
     pub(crate) fn op(&self, var: VarId) -> Option<&(OpId, Op)> {
         self.defs.get(var)
     }

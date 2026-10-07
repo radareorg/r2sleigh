@@ -516,6 +516,63 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
 }
 
 #[test]
+fn an_address_kept_in_a_promoted_slot_is_followed_through_it() {
+    // sp -= 32; x = [sp+16] = 7; p = [sp+8] = &x; r1 = *[sp+8]; [0x9000] = r1.
+    // `p` never leaves, so its store carries `&x` to its load, and both places are variables.
+    let sp = make_reg(0, 8);
+    let sites = promotion_fixture(vec![
+        R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: make_const(32, 8),
+        },
+        R2ILOp::IntAdd {
+            dst: make_unique(0x100, 8),
+            a: sp.clone(),
+            b: make_const(16, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_unique(0x100, 8),
+            val: make_const(7, 8),
+        },
+        R2ILOp::IntAdd {
+            dst: make_unique(0x108, 8),
+            a: sp,
+            b: make_const(8, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_unique(0x108, 8),
+            val: make_unique(0x100, 8),
+        },
+        R2ILOp::Load {
+            dst: make_unique(0x110, 8),
+            space: SpaceId::Ram,
+            addr: make_unique(0x108, 8),
+        },
+        R2ILOp::Load {
+            dst: make_reg(16, 8),
+            space: SpaceId::Ram,
+            addr: make_unique(0x110, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_const(0x9000, 8),
+            val: make_reg(16, 8),
+        },
+        R2ILOp::Return {
+            target: make_reg(8, 8),
+        },
+    ]);
+    assert_eq!(
+        sites,
+        BTreeSet::from([(0x4000, 2), (0x4000, 4), (0x4000, 5), (0x4000, 6)]),
+        "the pointer's slot and the slot it holds are both variables"
+    );
+}
+
+#[test]
 fn an_escaped_frame_address_keeps_the_places_around_it_in_memory() {
     // sp -= 32; r1 = sp + 16 (through a temporary, as add-immediate lifts);
     // [sp] = r2; load [sp + 20]. The address in r1 may be offset either way, and no save slot bounds it.
