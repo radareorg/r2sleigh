@@ -22,20 +22,26 @@ fn pdd(fixture: &str, function: &str) -> String {
     String::from_utf8_lossy(&done.stdout).into_owned()
 }
 
-/// `shape_pointer_to_pointer` fills `uint64_t *rows[4]` and hands `rows` to a callee that indexes
-/// it. The partition sees four 8-byte slots and only the first one's address escapes, but nothing
-/// proves where `rows` ends, so every row is reachable and each store stays. Dropping the last
-/// three made the callee read uninitialised rows (equivalence: a fault at `rows[1]`).
+/// `shape_pointer_to_pointer` fills `uint64_t *rows[4]` with the addresses of four locals and
+/// hands `rows` to a callee that indexes it. An escaped address may reach every object from it up
+/// to a slot the compiler owns, so the locals, `rows` and `cursor` are one object: each row is a
+/// store into it, and the callee's arithmetic from `rows` stays inside it (extent rule, merged).
+/// Splitting `rows` into scalars rendered `&rows[0]` indexed past its object, and differed.
 #[test]
 fn every_row_of_an_array_whose_first_address_escapes_is_stored() {
     let out = pdd("shapes_gcc_x64_O0", "sym.shape_pointer_to_pointer");
-    for row in ["stack_m72", "stack_m64", "stack_m56", "stack_m48"] {
-        assert!(out.contains(&format!("{row} = ")), "{row}:\n{out}");
+    assert!(out.contains("uint8_t stack_m120[88];"), "{out}");
+    for (row, local) in [(6, ""), (7, " + 8"), (8, " + 16"), (9, " + 24")] {
+        let store = format!(
+            "r2sleigh_store_u64((uint8_t*)stack_m120 + {row} * sizeof(uint64_t), (uint64_t)stack_m120{local});"
+        );
+        assert!(out.contains(&store), "{store}:\n{out}");
     }
 }
 
-/// Nothing proves `rows` ends where the partition says, so the proof counts every access to it as
-/// rendered under an assumed extent rather than as proven.
+/// Below the lowest object whose own address escapes, an escaped address may still reach down
+/// (an interior address past its object's base), and nothing proves it does not: those accesses
+/// render under an assumed extent and the proof counts them.
 #[test]
 fn accesses_to_an_object_of_unproven_extent_are_counted_as_assumed() {
     let out = pdd("shapes_gcc_x64_O0", "sym.shape_pointer_to_pointer");

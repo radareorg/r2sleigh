@@ -108,6 +108,20 @@ declarations.
   store such an access could read stays (P4.1e). A layout proof (the
   `% d` rewrite) moves an object out of `assumed`. Measured: 46 rendered
   functions with an escaped frame object, 2 with an unbounded index.
+- Extent, amended again (2026-10-07, user decision "merge the reach"): an
+  escaped address may reach every object from it up to the next slot the
+  compiler owns or that holds a register's entry value (a save, the return
+  address, a parameter's home), so that run is one object
+  (`FrameReach::escape_spans`, seeded into the builder as write spans and
+  built once more). C's pointer arithmetic across it is then defined:
+  `shape_pointer_to_pointer`'s `rows[4]` and its neighbours are one
+  88-byte object, where the assumed extent split them into scalars and
+  differed. A run opens at an object whose own address escapes, so the
+  outgoing argument area below the locals (Darwin's variadic tail) stays
+  the call's. Left assumed: an interior address reaching down past its
+  object's base, and indexes no range bounds (39 census functions, from
+  43). Cost: one arm64 -O0 `main` spells an interior address of its merged
+  run through the stack pointer, a residual (r2dec's address spelling, D).
 - P4.0, amended (D1, 2026-10-06): no second model beside the owners.
   `ObjectModelBuilder`, which the certificates, memory SSA, `FrameReach`,
   the binding plan and `afv` already read, grows into the frame model, and

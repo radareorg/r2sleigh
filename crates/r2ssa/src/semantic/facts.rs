@@ -1487,6 +1487,20 @@ impl<'a> ObjectModelBuilder<'a> {
         self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
+    /// Spans an escaped address reaches, each one object: seeded as write spans are.
+    pub(crate) fn escape_spans(&mut self, spans: &[(i64, i64)]) {
+        for (start, end) in spans {
+            let root = StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset: *start,
+            };
+            self.callee_write_spans
+                .entry(root)
+                .and_modify(|known| *known = (*known).max(*end))
+                .or_insert(*end);
+        }
+    }
+
     pub(crate) fn build(
         mut self,
         function: &SSAFunction,

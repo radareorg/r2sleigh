@@ -1374,9 +1374,11 @@ impl SsaArtifact {
     /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
     pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
         let slot = self.certificates().stack_slots.get(&object)?;
+        // A callee's proven reach, or the whole run an escaped address may reach, is its extent.
         if slot.source_slot.is_some()
             || !self.declarable_stack_object(object)
             || self.proved_parameter_home(object).is_some()
+            || self.objects().callee_write_reach.contains_key(&object)
         {
             return None;
         }

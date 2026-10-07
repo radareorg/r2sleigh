@@ -4460,3 +4460,35 @@ fn a_parameter_handed_to_an_unproven_call_leaves_the_arity_unproven() {
     let text = response.output.text();
     assert!(!text.contains("handed()"), "{text}");
 }
+
+/// `a = x + 1` and `b = y + 1` sit side by side, and `&a` goes to a callee
+/// nothing describes.
+const NEIGHBOUR_OF_AN_ESCAPED_LOCAL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 0x1000 sub rsp, 40
+    0x48, 0xff, 0xc7, // 0x1004 inc rdi
+    0x48, 0x89, 0x7c, 0x24, 0x08, // 0x1007 mov [rsp + 8], rdi
+    0x48, 0xff, 0xc6, // 0x100c inc rsi
+    0x48, 0x89, 0x74, 0x24, 0x10, // 0x100f mov [rsp + 16], rsi
+    0x48, 0x8d, 0x7c, 0x24, 0x08, // 0x1014 lea rdi, [rsp + 8]
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1019 call [0x2000]
+    0x48, 0x8b, 0x44, 0x24, 0x10, // 0x1020 mov rax, [rsp + 16]
+    0x48, 0x83, 0xc4, 0x28, // 0x1025 add rsp, 40
+    0xc3, // 0x1029 ret
+];
+
+/// Every object an escaped address may reach is one object, so the callee's
+/// pointer arithmetic from `&a` into `b` is defined C (the extent rule).
+#[test]
+fn the_objects_an_escaped_address_reaches_are_one() {
+    let text = rendered(NEIGHBOUR_OF_AN_ESCAPED_LOCAL, "neighbour");
+    let declarations = text
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("uint") && line.contains("stack_") && !line.contains('=')
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 1, "{text}");
+    assert!(declarations[0].contains('['), "{text}");
+    assert!(!text.contains("assumed (frame extent"), "{text}");
+}

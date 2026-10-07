@@ -41,6 +41,8 @@ pub enum CallFrameReach {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameReach {
     escaped: BTreeSet<ObjectId>,
+    /// The objects whose own address escapes, before the closure around them.
+    direct: BTreeSet<ObjectId>,
     /// A frame address escaped that names no object, so every frame object is
     /// reachable.
     whole: bool,
@@ -88,6 +90,7 @@ impl FrameReach {
         };
         let frame = FrameIndex::of(model);
         let (mut escaped, whole) = escaped_objects(facts, graph, model, &frame);
+        let direct = escaped.clone();
         let barriers = compiler_slots(function, graph, model, machine_context);
         close_upward(&mut escaped, &frame, &barriers);
         let by_call = call_reaches(function, graph, facts, &frame, machine_context);
@@ -104,9 +107,133 @@ impl FrameReach {
         );
         Self {
             escaped,
+            direct,
             whole,
             by_call,
         }
+    }
+}
+
+impl FrameReach {
+    /// Each run of escaped frame objects from the lowest whose own address escapes up to a slot the
+    /// compiler owns or the frame's top, as one span: an escaped address may reach any of
+    /// it, so it is one object, and C's pointer arithmetic across it is defined
+    /// (doc/adr-frame-model.md, extent rule; decided 2026-10-07). Only runs of two or more objects.
+    pub(crate) fn escape_spans(
+        &self,
+        function: &SSAFunction,
+        graph: &SsaGraph,
+        model: &ObjectModel,
+        machine_context: Option<&SourceMachineContext>,
+    ) -> Vec<(i64, i64)> {
+        // Without the convention's saves nothing bounds a run below the return address.
+        if self.whole
+            || machine_context
+                .and_then(SourceMachineContext::call_effect)
+                .is_none()
+        {
+            return Vec::new();
+        }
+        let frame = FrameIndex::of(model);
+        // Any register's entry value stored whole is its own object: a save, the return
+        // address, a parameter's home.
+        let mut barriers = compiler_slots(function, graph, model, machine_context);
+        barriers.extend(graph.insts.iter().filter_map(|inst| match &inst.payload {
+            crate::graph::InstPayload::Op(SSAOp::Store { space, .. }) => {
+                let (address, mut value) = (*inst.inputs.first()?, *inst.inputs.get(1)?);
+                // Through copies and low lanes, as a save of `x29` reads it.
+                for _ in 0..graph.values.len() {
+                    let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+                    match definition.map(|inst| (&inst.payload, inst.inputs.first())) {
+                        Some((
+                            crate::graph::InstPayload::Op(
+                                SSAOp::Copy { .. } | SSAOp::Subpiece { offset: 0, .. },
+                            ),
+                            Some(source),
+                        )) => value = *source,
+                        _ => break,
+                    }
+                }
+                let entry = graph.value(value).is_some_and(|value| {
+                    value.var.version == 0
+                        && value
+                            .canonical_storage
+                            .is_some_and(|storage| storage.space == CanonicalStorageSpace::Register)
+                }) || graph.formal_projection_storage(value).is_some();
+                let key = MemoryObjectKey {
+                    value: address,
+                    space: *space,
+                };
+                entry
+                    .then(|| model.value_objects.get(&key).copied())
+                    .flatten()
+            }
+            _ => None,
+        }));
+        // How far each object's widest access reaches past its start, for a run nothing above ends.
+        let mut widths = BTreeMap::<ObjectId, i64>::new();
+        for inst in &graph.insts {
+            let crate::graph::InstPayload::Op(op) = &inst.payload else {
+                continue;
+            };
+            let (address, accessed, space) = match op {
+                SSAOp::Load { dst, addr, space } => (*addr, *dst, *space),
+                SSAOp::Store { addr, val, space } => (*addr, *val, *space),
+                _ => continue,
+            };
+            let key = MemoryObjectKey {
+                value: address,
+                space,
+            };
+            if let (Some(object), Some(value)) =
+                (model.value_objects.get(&key), graph.value(accessed))
+            {
+                let width = widths.entry(*object).or_default();
+                *width = (*width).max(i64::from(value.var.size));
+            }
+        }
+        let mut spans = Vec::new();
+        // A run opens at an object whose own address escapes: below it lies the argument area
+        // the calls pass on, which is no C object (an interior address reaching down past its
+        // object's base stays the labelled assumption).
+        let mut run: Option<(i64, usize)> = None;
+        for (start, objects) in frame.starts.range(..0) {
+            let barrier = objects.iter().any(|object| barriers.contains(object));
+            let escaped = objects.iter().all(|object| self.escaped.contains(object));
+            let opens = objects.iter().any(|object| self.direct.contains(object));
+            if run.is_none() && !opens {
+                continue;
+            }
+            if barrier || !escaped {
+                if let Some((first, _)) = run.take() {
+                    spans.push((first, *start));
+                }
+                continue;
+            }
+            run = Some(run.map_or((*start, 1), |(first, count)| (first, count + 1)));
+        }
+        // A run nothing above ends stops where its last object's widest access does.
+        if let Some((first, _)) = run {
+            let last = frame.starts.range(first..0).next_back();
+            let end = last
+                .map(|(start, objects)| {
+                    let width = objects.iter().filter_map(|object| widths.get(object)).max();
+                    start.saturating_add(width.copied().unwrap_or(1))
+                })
+                .unwrap_or(0)
+                .min(0);
+            spans.push((first, end));
+        }
+        r2il::refusal_evidence!(
+            "frame-reach",
+            "{:#x}: escaped runs merged as {spans:?}; escaped starts {:?}",
+            function.entry,
+            self.escaped
+                .iter()
+                .filter_map(|object| frame.start_of(*object))
+                .collect::<BTreeSet<_>>()
+        );
+        spans
     }
 }
 
