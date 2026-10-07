@@ -516,9 +516,9 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
 }
 
 #[test]
-fn an_escaped_frame_address_keeps_the_places_above_it_in_memory() {
+fn an_escaped_frame_address_keeps_the_places_around_it_in_memory() {
     // sp -= 32; r1 = sp + 16 (through a temporary, as add-immediate lifts);
-    // [sp] = r2; load [sp + 20]. The address in r1 may reach 16 and above.
+    // [sp] = r2; load [sp + 20]. The address in r1 may be offset either way, and no save slot bounds it.
     let sp = make_reg(0, 8);
     let sites = promotion_fixture(vec![
         R2ILOp::IntSub {
@@ -558,11 +558,7 @@ fn an_escaped_frame_address_keeps_the_places_above_it_in_memory() {
             target: make_reg(8, 8),
         },
     ]);
-    assert_eq!(
-        sites,
-        BTreeSet::from([(0x4000, 4)]),
-        "only the slot below the escape"
-    );
+    assert_eq!(sites, BTreeSet::new(), "both slots stay in memory");
 }
 
 #[test]
