@@ -1,5 +1,5 @@
 {
- "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab): 564 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07).",
+ "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07).",
  "records": {
   "tests/corpus/branchy.c::aarch64-clang-O0::addr_chain": {
    "status": "equal"
@@ -1729,6 +1729,52 @@
   "tests/corpus/values.c::aarch64-clang-O1::value_width_conflict": {
    "status": "equal"
   },
+  "tests/corpus/values.c::aarch64-clang-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_count_bits": {
+   "cause": "[r2dec lowering] r2s refuses: an AArch64 operation with no C spelling yet (unrepresentable operation).",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unrepresentable operation",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_rotate": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::aarch64-clang-O2::value_width_conflict": {
+   "status": "equal"
+  },
   "tests/corpus/values.c::aarch64-gcc-O0::main": {
    "status": "equal"
   },
@@ -1901,6 +1947,23 @@
   "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_op_xor": {
    "status": "equal"
   },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::main": {
+   "cause": "[P7] table_dispatch states no call contract (its own indirect calls have unproven arity), so main's call to it is a residual; it rendered fcn_400680() without its arguments (decision 2026-10-07).",
+   "reason": "r2sleigh_residual_void",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_dispatch": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::aarch64-clang-O2::table_op_xor": {
+   "status": "equal"
+  },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O0::main": {
    "status": "equal"
   },
@@ -1976,6 +2039,18 @@
    "status": "equal"
   },
   "tests/gold/flag_materialisation.c::aarch64-clang-O1::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::aarch64-clang-O2::sum_carry": {
    "status": "equal"
   },
   "tests/gold/flag_materialisation.c::aarch64-gcc-O0::addc": {
@@ -2069,6 +2144,30 @@
    "cause": "[P4 memory] r2s refuses: a frame slot is read before any write the engine sees (declaration placement: read_before_assignment).",
    "reason": "refused: r2sleigh refused fcn: native declaration placement refused: read_before_assignment",
    "status": "refused"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::main": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::aarch64-clang-O2::table_walk": {
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O0::fnv_fold": {
    "status": "equal"
@@ -2254,6 +2353,65 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-clang-O1::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::avg": {
+   "cause": "[r2ssa recover_interface, FP on AArch64] The interface recovers no floating result: the rendering drops the d-register data flow (movi/ldr d/fadd/scvtf/fdiv) and returns x0, here as a counted residual; the double result is in v0.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::bit_count": {
+   "cause": "[lift] r2s refuses: NEON `uaddlv` (the popcount reduction) is an unmodelled machine operation.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: unmodelled machine operation NEON_uaddlv at 0x",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::classify": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::copy_name": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::dispatch": {
+   "cause": "[R, the renderer (D8)] r2s refuses in the observation journal: observation journal: ExactUseRequiresRenderedOccurrence.",
+   "reason": "refused: r2sleigh refused fcn: native rendering refused: observation journal: ExactUseRequiresRenderedOccurrence",
+   "status": "refused"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::fact": {
+   "cause": "[gate-limitation, as on x86-64] The -O0 build of the rendering overruns its budget (four times the original's) at n near 2^31. Clang vectorised the loop into four NEON lanes, which the rendering spells lane by lane through the 256-bit carrier helpers; the original and the -O2 build return. The original needs about 3.3 s of its 5 s there under qemu (1 s natively), so how many such vectors are graded depends on the host's load; the status does not. The x86-64 record of this function is slow for the same reason.",
+   "reason": "O0",
+   "status": "slow"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::fill": {
+   "cause": "[r2dec lowering] A 16-byte machine access (an AArch64 ldp/stp or q-register load/store, which needs only 8- or 4-byte alignment) is spelled as a `__uint128_t` lvalue, which C requires to be 16-byte aligned; UBSan reports the misaligned access. The access must be spelled with the alignment the machine access proves (memcpy).",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::main": {
+   "cause": "[r2dec carrier types] The rendering mixes the 256-bit carrier `struct r2sleigh_bits_256` (the AArch64 vector register file) with `__uint128_t` values, which C rejects: incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019.",
+   "reason": "incompatible type for argument 1 of \u2018r2sleigh_bits_extract_256_64\u2019",
+   "status": "compile-error"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::rotl": {
+   "cause": "[P10 lowering] A rotate (AArch64 `ror`) is spelled as two shifts, `x << r | x >> (W - r)`; where r is 0 or W one of them shifts by the full width, which C leaves undefined (UBSan: shift exponent too large). This function's x86-64 ub records carry the same cause.",
+   "reason": "ubsan",
+   "status": "ub"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::aarch64-clang-O2::sum_array": {
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O0::add": {
