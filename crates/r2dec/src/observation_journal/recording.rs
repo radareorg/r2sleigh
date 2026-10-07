@@ -65,10 +65,7 @@ impl LegacyObservationJournal {
             uses: mut elided_uses,
             writes: mut elided_writes,
             ..
-        } = crate::binding_plan::certificate_elided_cells(
-            source.source(),
-            self.plan.machine_projection(),
-        )?;
+        } = self.plan.certificate_elided_cells()?.clone();
         // A redundant phi edge carries no read: the edge's value is the phi's
         // own, so nothing about it is an operand of a surviving operation. A
         // certificate that answered the same cell was answering for an operand

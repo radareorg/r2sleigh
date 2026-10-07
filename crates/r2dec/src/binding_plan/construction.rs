@@ -1870,8 +1870,10 @@ impl BindingPlan {
             })
             .collect::<BTreeSet<_>>();
         let unspecified = unspecified_reads(source_owned, &dispositions, &parameter_bindings);
+        let elided_cells = certificate_elided_cells(source_owned.source(), &machine_projection);
         let plan = Self {
             authority: source.authority().clone(),
+            elided_cells,
             machine_projection,
             partition,
             bindings: bindings.into_boxed_slice(),

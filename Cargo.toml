@@ -64,6 +64,13 @@ codegen-units = 16
 panic = "unwind"
 strip = true
 
+# Release code with symbols and line tables, for a sampling profiler
+# (`samply record target/profiling/r2s ...`) or a flamegraph.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
+
 # A debug build whose variables a debugger can read. `[profile.dev]` keeps only
 # line tables so that several worktrees of this workspace fit on one disk; this
 # is what to build when a breakpoint has to show a value rather than a line.

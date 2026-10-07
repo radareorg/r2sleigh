@@ -418,12 +418,11 @@ impl<'a> FoldingContext<'a> {
         let names = self.inputs.binding_names?;
         // Reads a certificate already proved render nothing: the cells it names, and
         // every read of an instruction the frame and control certificates elide whole.
-        let elided_uses = crate::binding_plan::certificate_elided_cells(
-            prepared,
-            names.plan().machine_projection(),
-        )
-        .map(|cells| cells.uses)
-        .unwrap_or_default();
+        let empty = BTreeMap::new();
+        let elided_uses = names
+            .plan()
+            .certificate_elided_cells()
+            .map_or(&empty, |cells| &cells.uses);
         let elided_readers = crate::binding_plan::certified_elided_read_instructions(prepared);
         let graph = prepared.graph();
         let block_addr = graph

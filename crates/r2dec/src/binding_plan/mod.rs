@@ -1377,6 +1377,8 @@ enum SealWidthEvidence {
 #[derive(Debug, Clone)]
 pub(crate) struct BindingPlan {
     authority: SsaArtifactAuthority,
+    /// The cells the certificates elide, derived once from the artifact and the projection.
+    elided_cells: Result<CertificateElidedCells, CertificateElidedCellsError>,
     machine_projection: MachineProjection,
     /// One canonical term per value, with the rewrites that produced it and
     /// the instructions rendering it would discharge.
@@ -1511,6 +1513,13 @@ use construction::binding_components;
 impl BindingPlan {
     pub(crate) const fn machine_projection(&self) -> &MachineProjection {
         &self.machine_projection
+    }
+
+    /// The cells the certificates elide.
+    pub(crate) fn certificate_elided_cells(
+        &self,
+    ) -> Result<&CertificateElidedCells, CertificateElidedCellsError> {
+        self.elided_cells.as_ref().map_err(|error| *error)
     }
 
     /// The canonical term of every value and every structured memory
