@@ -152,7 +152,7 @@ pub struct RecoveredInterface {
     return_mechanism: Option<RecoveredReturnMechanism>,
     /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
     result_owners: BTreeSet<u64>,
-    /// Whether an argument slot past the parameters is read.
+    /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
 }
 
@@ -1197,7 +1197,14 @@ fn recover_interface_inner(
         reads
             .iter()
             .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-    });
+    }) || entry_reaches_unproven_call(
+        func,
+        prep,
+        graph,
+        &facts,
+        machine_context,
+        slots.argument_slots().get(integers),
+    );
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}",
@@ -1257,6 +1264,39 @@ fn recover_interface_inner(
         result_owners,
         reads_past_parameters,
     })
+}
+
+/// Whether a call whose arguments are unproven cannot tell what `next` holds, the first slot past
+/// the parameters: parameters are a prefix, so only that slot can extend them. An untouched slot
+/// ends a count, as the call boundary reads it; an unseen one may carry the caller's value.
+fn entry_reaches_unproven_call(
+    func: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    machine_context: Option<&crate::SourceMachineContext>,
+    next: Option<&CanonicalStorageId>,
+) -> bool {
+    let (Some(machine_context), Some(slot)) = (machine_context, next) else {
+        return false;
+    };
+    let unproven = facts.boundaries.calls.values();
+    unproven
+        .filter(|boundary| !boundary.arguments_complete)
+        .filter_map(|boundary| graph.walk_start(boundary.at))
+        .any(|(block_addr, op_index)| {
+            crate::semantic::reaching_abi_value_in_block_with_policy(
+                func,
+                prep,
+                graph,
+                machine_context,
+                block_addr,
+                op_index,
+                *slot,
+                false,
+            )
+            .is_none()
+        })
 }
 
 /// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.

@@ -4424,3 +4424,37 @@ fn a_self_call_takes_the_functions_own_interface() {
         .unwrap_or_else(|| panic!("no self call: {text}"));
     assert_eq!(call.matches(", ").count(), 1, "{text}");
 }
+
+/// `f` calls through memory in a loop with `rsi = b + 1` and `rdi` its own
+/// first argument or the last result, then returns 7; `main` calls `f(3, 5)`.
+const PARAMETERS_HANDED_TO_AN_UNPROVEN_CALL: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xf3, // 0x1001 mov rbx, rsi
+    0x48, 0x8d, 0x73, 0x01, // 0x1004 lea rsi, [rbx + 1]
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1008 call [0x2000]
+    0x48, 0x89, 0xc7, // 0x100f mov rdi, rax
+    0x48, 0x85, 0xc0, // 0x1012 test rax, rax
+    0x75, 0xed, // 0x1015 jne 0x1004
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 0x1017 mov eax, 7
+    0x5b, // 0x101c pop rbx
+    0xc3, // 0x101d ret
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 0x101e mov edi, 3
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1023 mov esi, 5
+    0xe8, 0xd3, 0xff, 0xff, 0xff, // 0x1028 call 0x1000
+    0xc3, // 0x102d ret
+];
+
+/// A body whose first unclaimed argument slot reaches a call of unproven
+/// arity unseen may be passed that argument, so it states no call arity.
+#[test]
+fn a_parameter_handed_to_an_unproven_call_leaves_the_arity_unproven() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: PARAMETERS_HANDED_TO_AN_UNPROVEN_CALL.to_vec(),
+        name: "handed",
+    };
+    let response = decompile(&target, &program, BASE + 0x1e).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("handed()"), "{text}");
+}
