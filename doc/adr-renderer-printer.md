@@ -1,6 +1,6 @@
 # ADR: the renderer is a printer
 
-Status: proposed (ROADMAP R, after F2, P4 and P5; decision D8)
+Status: superseded 2026-10-07 by [adr-decompiler-rewrite](adr-decompiler-rewrite.md) (ROADMAP D, D20). R1 below is done and carries over as D3's rule set; R0 and R2 to R4 are not pursued.
 
 ## Decision
 
