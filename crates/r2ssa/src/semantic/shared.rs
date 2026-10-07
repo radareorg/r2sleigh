@@ -1552,6 +1552,15 @@ pub(crate) fn reaching_storage_states_before(
     graph: &SsaGraph,
     storage: CanonicalStorageId,
 ) -> crate::dense::IdMap<InstId, ReachingStorageState> {
+    reaching_storage_boundaries(function, graph, storage).before
+}
+
+/// The same, with the state at each machine instruction's edges.
+pub(crate) fn reaching_storage_boundaries(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    storage: CanonicalStorageId,
+) -> StorageBoundaries {
     let block_addrs = function.block_addrs().to_vec();
     let mut exits = block_addrs
         .iter()
@@ -1576,19 +1585,51 @@ pub(crate) fn reaching_storage_states_before(
     }
 
     let mut before = crate::dense::IdMap::new(graph.insts.len());
+    let mut instruction_start = crate::dense::IdMap::new(graph.insts.len());
+    let mut instruction_end = crate::dense::IdMap::new(graph.insts.len());
     for block_addr in block_addrs {
         let mut state = block_entry_storage_state(function, graph, &exits, block_addr, storage);
         let Some(block) = function.get_block(block_addr) else {
             continue;
         };
+        // The machine instruction being walked: its stamp, its start state and its insts.
+        let mut pending: (Option<u64>, ReachingStorageState, Vec<InstId>) =
+            (None, state, Vec::new());
         for (op, _) in block.sited() {
+            let instruction = match function.arena().origin(op) {
+                Some(crate::arena::OpOrigin::Lifted { instruction, .. }) => *instruction,
+                _ => None,
+            };
+            if instruction.is_none() || instruction != pending.0 {
+                for inst in pending.2.drain(..) {
+                    instruction_end.insert(inst, state);
+                }
+                pending.0 = instruction;
+                pending.1 = state;
+            }
             if let Some(inst) = graph.inst_for_op(op) {
                 before.insert(inst, state);
+                instruction_start.insert(inst, pending.1);
+                pending.2.push(inst);
             }
             state = transfer_storage_state(graph, op, storage, state);
         }
+        for inst in pending.2 {
+            instruction_end.insert(inst, state);
+        }
     }
-    before
+    StorageBoundaries {
+        before,
+        instruction_start,
+        instruction_end,
+    }
+}
+
+/// A storage's state before each inst, and at the start and end of its machine instruction.
+pub(crate) struct StorageBoundaries {
+    pub(crate) before: crate::dense::IdMap<InstId, ReachingStorageState>,
+    pub(crate) instruction_start: crate::dense::IdMap<InstId, ReachingStorageState>,
+    pub(crate) instruction_end: crate::dense::IdMap<InstId, ReachingStorageState>,
 }
 
 /// The gap from a frame object up to the next one the frame lays out above
