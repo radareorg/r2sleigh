@@ -3570,7 +3570,8 @@ fn apply_decisions_once(
                     }
                     candidate.locals.retain(|local| local.name != symbol);
                     discarded_bindings.insert(binding);
-                    discarded_observations.append(&mut removed_observations);
+                    // `extend`, not `append`: append rebuilds the whole set, quadratic over bindings.
+                    discarded_observations.extend(removed_observations);
                 } else if mentions.mentions(symbol)
                     && let Some(region) = region
                 {
@@ -3707,7 +3708,7 @@ fn apply_decisions_once(
                 mentions.forget_target(*target);
             }
             candidate.locals.retain(|local| local.name != symbol);
-            discarded_observations.append(&mut removed_observations);
+            discarded_observations.extend(removed_observations);
             for declared in declarations.values_mut() {
                 declared.retain(|(declared, _, _)| *declared != binding);
             }

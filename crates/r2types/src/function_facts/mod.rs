@@ -446,9 +446,11 @@ impl FunctionRenderFacts {
         self.member_access(access)?.field_type.as_ref()
     }
 
+    /// The return effects, through their index by returning instruction: O(returns), not O(effects).
     pub fn return_effects(&self) -> impl Iterator<Item = &ReturnValueRenderFact> {
-        self.certified_effects
-            .values()
+        self.return_effects_by_inst
+            .iter()
+            .filter_map(|(_, id)| self.certified_effects.get(id))
             .filter_map(CertifiedEffect::return_fact)
     }
 

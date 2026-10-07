@@ -128,7 +128,9 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
         .iter()
         .filter(|section| section.holds_static_data())
     {
-        let Some(bytes) = source.read(section.vaddr, section.vsize as usize) else {
+        // Bytes the file does not hold read as zeros and hold no text.
+        let held = image.file_backed(section.vaddr, section.vsize);
+        let Some(bytes) = source.read(section.vaddr, held as usize) else {
             continue;
         };
         let end = section.vaddr + bytes.len() as u64;

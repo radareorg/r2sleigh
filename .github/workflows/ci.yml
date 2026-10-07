@@ -176,6 +176,43 @@ jobs:
             --r2s target/ci/r2s \
             --limit 12 --functions 8
 
+  # ── Hostile input (ROADMAP H, D18) ───────────────────────────────
+  #
+  # radare2's fuzzed and PE test binaries, each opened and analysed under a
+  # time and memory budget: a header that states more than the file holds
+  # must cost no more than the file. The pdd budget is today's measure on
+  # pe/65535sects.exe (one 14,189-instruction block); PF lowers it.
+  hostile-gate:
+    name: Hostile Input Gate
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - name: Fetch radare2's fuzzed and PE test binaries
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/testbins"
+          git init -q "$dir"
+          git -C "$dir" remote add origin "$TESTBINS_URL"
+          git -C "$dir" sparse-checkout set fuzzed pe
+          git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$TESTBINS_REF"
+          git -C "$dir" checkout -q FETCH_HEAD
+          test -d "$dir/fuzzed" && test -d "$dir/pe"
+      - name: afl on every file, 30 s and 512 MB each
+        run: |
+          python3 scripts/hostile_sweep.py --r2s target/ci/r2s --command afl \
+            --seconds 30 --mb 512 "$RUNNER_TEMP/testbins/fuzzed" "$RUNNER_TEMP/testbins/pe"
+      - name: pdd on every file, 120 s and 3 GB each
+        run: |
+          python3 scripts/hostile_sweep.py --r2s target/ci/r2s --command pdd \
+            --seconds 120 --mb 3072 "$RUNNER_TEMP/testbins/fuzzed" "$RUNNER_TEMP/testbins/pe"
+
   # ── Census and release timing, against the base ───────────────────
   #
   # Every function of the repository's binaries rendered by the base and by

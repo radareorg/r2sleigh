@@ -66,6 +66,16 @@ impl Container {
         segment.contains(vaddr).then_some(segment)
     }
 
+    /// How many bytes from `vaddr` on, at most `max`, the file holds; the
+    /// rest of a segment is the loader's zeros.
+    pub fn file_backed(&self, vaddr: u64, max: u64) -> u64 {
+        self.segment_at(vaddr).map_or(0, |segment| {
+            (segment.vaddr + segment.file_size)
+                .saturating_sub(vaddr)
+                .min(max)
+        })
+    }
+
     /// Each slot the loader fills with the address of an import, and the
     /// import's name as the record states it.
     ///
