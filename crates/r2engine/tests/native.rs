@@ -4334,3 +4334,66 @@ fn a_lane_written_and_read_back_is_no_parameter() {
         "the signature names a register the function never reads: {text}"
     );
 }
+
+/// `f` is called in a loop with `rsi = 1` and `rdi` the last result, or the
+/// pointer itself on the first pass: the body writes `rsi`, and `rdi` merges.
+const LOOPED_INDIRECT_CALL: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xfb, // 0x1001 mov rbx, rdi
+    0x48, 0xc7, 0xc6, 0x01, 0x00, 0x00, 0x00, // 0x1004 mov rsi, 1
+    0xff, 0xd3, // 0x100b call rbx
+    0x48, 0x89, 0xc7, // 0x100d mov rdi, rax
+    0x48, 0x85, 0xc0, // 0x1010 test rax, rax
+    0x75, 0xef, // 0x1013 jne 0x1004
+    0x5b, // 0x1015 pop rbx
+    0xc3, // 0x1016 ret
+];
+
+/// A call whose first argument slot the scan cannot see, while the body
+/// writes the second, passes an unproven count: it is never a call of none.
+#[test]
+fn an_unseen_argument_below_a_written_one_leaves_the_call_unrendered() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: LOOPED_INDIRECT_CALL.to_vec(),
+        name: "looped",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("(void))"), "{text}");
+    assert!(
+        response.render_refusal.is_some() || text.contains("r2sleigh_residual"),
+        "{text}"
+    );
+}
+
+/// `f` hands `rdi` on unchanged to a call through memory and adds `rsi` to its
+/// result; `main` calls it with `edi = 3, esi = 5`.
+const READS_PAST_ITS_PARAMETERS: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xf3, // 0x1001 mov rbx, rsi
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1004 call [0x2000]
+    0x48, 0x01, 0xd8, // 0x100b add rax, rbx
+    0x5b, // 0x100e pop rbx
+    0xc3, // 0x100f ret
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 0x1010 mov edi, 3
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1015 mov esi, 5
+    0xe8, 0xe1, 0xff, 0xff, 0xff, // 0x101a call 0x1000
+    0xc3, // 0x101f ret
+];
+
+/// A callee that reads an argument slot past its parameters states no arity a
+/// caller may take: the call is never spelled with none.
+#[test]
+fn a_callee_reading_past_its_parameters_states_no_call_arity() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: READS_PAST_ITS_PARAMETERS.to_vec(),
+        name: "past",
+    };
+    let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("past()"), "{text}");
+}

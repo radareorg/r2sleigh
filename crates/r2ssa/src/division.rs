@@ -40,8 +40,12 @@ fn copied(graph: &SsaGraph, mut value: ValueId) -> ValueId {
     value
 }
 
-/// `value` as `k * q` for one `q`: `q + q + q`, `q * 3`, `(q << 1) + q`. `depth` bounds the walk.
-fn linear_multiple(graph: &SsaGraph, value: ValueId, depth: usize) -> Option<(ValueId, u64)> {
+/// A quotient as the value shifted and the places: `h >> s`, or `(v, 0)` for any other `v`.
+type Shifted = (ValueId, u64);
+
+/// `value` as `k * q` for one `q`: `q + q + q`, `q * 3`, `(q << 1) + q`, and `h & -2^j`, which is
+/// `2^j * (h >> j)`. `depth` bounds the walk.
+fn linear_multiple(graph: &SsaGraph, value: ValueId, depth: usize) -> Option<(Shifted, u64)> {
     let depth = depth.checked_sub(1)?;
     let value = copied(graph, value);
     let term = |input: ValueId| linear_multiple(graph, input, depth);
@@ -53,22 +57,46 @@ fn linear_multiple(graph: &SsaGraph, value: ValueId, depth: usize) -> Option<(Va
         Some(SSAOp::IntMult { a, b, .. }) => match (constant(graph, *a), constant(graph, *b)) {
             (_, Some(c)) => term(*a).and_then(|(q, k)| Some((q, k.checked_mul(c)?))),
             (Some(c), _) => term(*b).and_then(|(q, k)| Some((q, k.checked_mul(c)?))),
-            _ => Some((value, 1)),
+            _ => Some(((value, 0), 1)),
         },
         Some(SSAOp::IntLeft { a, b, .. }) => {
             let places = u32::try_from(constant(graph, *b)?).ok()?;
             term(*a).and_then(|(q, k)| Some((q, k.checked_mul(1u64.checked_shl(places)?)?)))
         }
-        _ => Some((value, 1)),
+        Some(SSAOp::IntRight { a, b, .. }) => Some(((copied(graph, *a), constant(graph, *b)?), 1)),
+        Some(SSAOp::IntAnd { a, b, .. }) => {
+            let (h, mask) = match (constant(graph, *a), constant(graph, *b)) {
+                (None, Some(mask)) => (*a, mask),
+                (Some(mask), None) => (*b, mask),
+                _ => return Some(((value, 0), 1)),
+            };
+            let places = low_clearing_places(mask, width_bits(graph, h)?)?;
+            Some((
+                (copied(graph, h), u64::from(places)),
+                1u64.checked_shl(places)?,
+            ))
+        }
+        _ => Some(((value, 0), 1)),
     }
 }
 
-/// `value` as `x / d`, from `trunc_N((zext_2N(x) * M) >> N) >> s` with the exactness condition.
-fn exact_quotient(graph: &SsaGraph, value: ValueId) -> Option<(ValueId, u64)> {
-    let value = copied(graph, value);
-    let (high, shift) = match op(graph, value) {
-        Some(SSAOp::IntRight { a, b, .. }) => (copied(graph, *a), constant(graph, *b)?),
-        _ => (value, 0),
+/// The `j` for which `mask` is `-2^j` at `bits` wide: every bit from `j` up set, none below.
+fn low_clearing_places(mask: u64, bits: u32) -> Option<u32> {
+    let width = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let places = mask.trailing_zeros();
+    (places > 0 && places < bits && mask & width == width & (u64::MAX << places)).then_some(places)
+}
+
+/// `h >> s` as `x / d`, from `h = trunc_N((zext_2N(x) * M) >> N)` with the exactness condition.
+fn exact_quotient(graph: &SsaGraph, (high, shift): Shifted) -> Option<(ValueId, u64)> {
+    let high = copied(graph, high);
+    let (high, shift) = match (shift, op(graph, high)) {
+        (0, Some(SSAOp::IntRight { a, b, .. })) => (copied(graph, *a), constant(graph, *b)?),
+        _ => (high, shift),
     };
     let Some(SSAOp::Subpiece { src, offset, .. }) = op(graph, high) else {
         return None;
@@ -113,7 +141,7 @@ pub(crate) fn exact_divisor(magic: u64, n: u32, s: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::exact_divisor;
+    use super::{exact_divisor, low_clearing_places};
 
     /// Every condition the rule accepts at eight bits divides every eight-bit value exactly.
     #[test]
@@ -131,6 +159,15 @@ mod tests {
             }
         }
         assert!(accepted > 100, "{accepted}");
+    }
+
+    /// `h & -2^j` is `2^j * (h >> j)` only for a mask with every bit from `j` up.
+    #[test]
+    fn a_low_clearing_mask_names_its_places() {
+        assert_eq!(low_clearing_places(0xffff_ffff_ffff_fffe, 64), Some(1));
+        assert_eq!(low_clearing_places(0xffff_fff8, 32), Some(3));
+        assert_eq!(low_clearing_places(0x7fff_ffff_ffff_fffe, 64), None);
+        assert_eq!(low_clearing_places(u64::MAX, 64), None);
     }
 
     /// gcc's `% 3` at sixty-four bits: `M = 0xaaaaaaaaaaaaaaab`, shifted by 65.

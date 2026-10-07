@@ -777,6 +777,8 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
+    /// Whether the body reads an argument slot past its parameters, so its arity is unproven.
+    reads_past_parameters: bool,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1231,6 +1233,7 @@ impl SourceFunctionInterface {
             format_parameter: None,
             variadic: false,
             body_proven_return_address: false,
+            reads_past_parameters: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1281,6 +1284,7 @@ impl SourceFunctionInterface {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
             body_proven_return_address: self.body_proven_return_address,
+            reads_past_parameters: self.reads_past_parameters,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1426,6 +1430,19 @@ impl SourceFunctionInterface {
         self.format_parameter =
             format_parameter.map(|index| crate::confidence::Fact::new(index, self.types.clone()));
         Ok(self)
+    }
+
+    /// Record that the body reads an argument slot past its parameters.
+    #[must_use]
+    pub const fn with_reads_past_parameters(mut self) -> Self {
+        self.reads_past_parameters = true;
+        self
+    }
+
+    /// Whether the body reads an argument slot past its parameters: no caller may take its
+    /// parameter count as the call's arity.
+    pub const fn reads_past_parameters(&self) -> bool {
+        self.reads_past_parameters
     }
 
     /// Whether the declaration says arguments continue past the fixed ones.

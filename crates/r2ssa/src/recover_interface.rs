@@ -152,6 +152,8 @@ pub struct RecoveredInterface {
     return_mechanism: Option<RecoveredReturnMechanism>,
     /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
     result_owners: BTreeSet<u64>,
+    /// Whether an argument slot past the parameters is read.
+    reads_past_parameters: bool,
 }
 
 impl RecoveredInterface {
@@ -1191,6 +1193,11 @@ fn recover_interface_inner(
     };
     let parameters = in_order(slots.argument_slots());
     let integers = parameters.len();
+    let reads_past_parameters = slots.argument_slots()[integers..].iter().any(|slot| {
+        reads
+            .iter()
+            .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
+    });
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}",
@@ -1248,6 +1255,7 @@ fn recover_interface_inner(
         result_is_return_address,
         return_mechanism,
         result_owners,
+        reads_past_parameters,
     })
 }
 
@@ -1396,7 +1404,14 @@ pub fn mint_recovered_interface(
     calling_convention: &str,
 ) -> Option<SourceFunctionInterface> {
     let minted =
-        mint_recovered_interface_inner(recovered, roles, revision_identity, calling_convention);
+        mint_recovered_interface_inner(recovered, roles, revision_identity, calling_convention)
+            .map(|interface| {
+                if recovered.reads_past_parameters {
+                    interface.with_reads_past_parameters()
+                } else {
+                    interface
+                }
+            });
     if minted.is_none() {
         r2il::refusal_evidence!(
             "interface-minting",
@@ -1680,6 +1695,14 @@ pub fn mint_recovered_call_site_interface(
     // A stack parameter is named from the callee's entry stack pointer; the
     // call site names the same slot from its own stack pointer before the
     // transfer spends the return-address slot the callee's mechanism states.
+    if callee.reads_past_parameters() {
+        r2il::refusal_evidence!(
+            "call-site-minting",
+            "the callee reads an argument slot past its {} parameters, so its arity is no call's contract",
+            callee.parameters().len()
+        );
+        return None;
+    }
     let spent = callee.return_mechanism().map_or(0, |mechanism| {
         i64::from(mechanism.stack_pointer_delta_bytes())
     });

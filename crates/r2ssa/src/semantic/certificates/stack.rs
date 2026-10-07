@@ -884,7 +884,13 @@ pub(crate) fn collect_stack_geometry_certificate(
         let Some(inst) = graph.inst(access.id.inst) else {
             continue;
         };
-        if exact_stack_object && inst.inputs.first() == Some(&access.address) {
+        // Only a load or store spells its address as access syntax; a linked load or conditional
+        // store hands the address on as a value, which stays a use of its own.
+        let spelled_as_access = matches!(
+            inst.payload,
+            InstPayload::Op(SSAOp::Load { .. } | SSAOp::Store { .. })
+        );
+        if exact_stack_object && spelled_as_access && inst.inputs.first() == Some(&access.address) {
             stack_address_uses.insert(UseSite {
                 inst: access.id.inst,
                 input_idx: 0,

@@ -836,7 +836,36 @@ pub(crate) fn convention_call_boundary(
                     None => SourceCallArgumentValue::PreservedEntry,
                 }
             }
-            Some(_) | None => break,
+            // An entry value the body never touched, or a caller-supplied one, ends the count.
+            Some(_) => break,
+            // An unseen slot ends the count unless the body writes a later one: then the call may
+            // pass more than counted, and the slot it cannot see may be one of them.
+            None => {
+                let later = convention.argument_slots().iter().skip(position + 1);
+                if let Some(written) = later.copied().find(|slot| {
+                    matches!(
+                        reaching_abi_value_in_block_with_policy(
+                            function,
+                            prep,
+                            graph,
+                            machine_context,
+                            block_addr,
+                            op_index,
+                            *slot,
+                            false,
+                        ),
+                        Some(ReachingAbiState::Value(value))
+                            if graph.written_by_body(value) && !value_is_call_clobber(graph, value)
+                    )
+                }) {
+                    r2il::refusal_evidence!(
+                        "convention-arity-unproven",
+                        "callsite ({block_addr:#x}, {op_index}) cannot see argument slot {position}, yet the body writes {written:?}"
+                    );
+                    return None;
+                }
+                break;
+            }
         };
         arguments.push(SourceCallArgumentFact {
             slot: CallBoundarySlot::Register {
