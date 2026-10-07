@@ -68,6 +68,7 @@ Decisions
 | D18 | Untrusted input is bounded: a read stops at the bytes the file holds, and every pass states its cost; a fuzzed or hostile binary meets the same time and memory budget as any other (2026-10-07, [sweep](doc/reviews/2026-10-performance-and-memory.md)) | H |
 | D19 | Performance is a gate: release time, peak RSS and allocation count are budgeted on named workloads in CI, beside the census | PF |
 | D20 | The decompiler is rewritten, not refactored: r2dec is replaced as a whole from the sealed facts, built beside the old path until the gates agree, then the old path is deleted in the same item (amends D1 for D only; [decompiler-rewrite](doc/adr-decompiler-rewrite.md)) | D |
+| D21 | The source language is a profile: the container states each function's language (Go buildinfo and pclntab, rustc markers, DWARF language, mangling); its profile states conventions, premises, compiler-inserted checks, runtime models, names and the printer. The IR, facts and proof name no language, and C is the default profile, not an assumption ([language-profile](doc/adr-language-profile.md)) | LP |
 
 The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`), so M0's rest reads `.ldefs` and `.dwarf` by changing `vendor/sleigh-config/build.rs`.
 
@@ -89,7 +90,8 @@ The program
 | **P4** One frame model | [frame-model](doc/adr-frame-model.md) | — | one partition, one escape analysis, promotion as an SSA rewrite, canary under its premise; `afv` agrees with `pdd` |
 | **H** Hostile input | [performance-and-memory](doc/reviews/2026-10-performance-and-memory.md) | — | `r2image::initialisers` clamps `.init_array` slots to file bytes (`fuzzed/elf9` hangs on open); `naming::name_strings` scans only file-backed bytes (`fuzzed/file12` 2.1 GB, `file-rs-bf838568` 1.6 GB); `collect_memory_round_trips` indexes accesses by block and ordinal and reads by value (`pe/65535sects.exe` `pdd` > 580 s, writes × accesses); every read of a size from a header is clamped where it is parsed. Exit: every radare2 fuzzed and PE test binary opens and runs `afl` and `pdd` within the PF budget, as a CI job |
 | **PF** Performance foundation | [performance-and-memory](doc/reviews/2026-10-performance-and-memory.md) | — | Sleigh `clearCache` keeps the context and replaces only the disassembly cache (70,543 re-initialisations, ~36% of pumasim `afl`); the specification loads once per process (0.17 s of a 0.47 s `pdd`); a global allocator (jemalloc: 15–36% faster) and pre-sized hot vectors (6.5 GB churned for a 218 MB peak); a callee summary query cheaper than a full preparation (35–42% of `pdd`, 114 callee preparations for sort 0x3f50), which is Q3's rest with P6; sparse dataflow states (`collect_call_result_certificates` copies a whole-function map per block); query capacities sized by a memory budget (a second sweep costs the first); `r2ssa::name::intern` moves into the query database (D11). Exit: D19's budgets in CI on sort 0x3f50, ls main, libz O1 inflate, pumasim `afl` and its Gui constructor, with `pdd` scaling no worse than linear in instructions over the 300+ instruction functions |
-| **D** Decompiler rewrite | [decompiler-rewrite](doc/adr-decompiler-rewrite.md) | R1 (proved simplifiers) carries over as D3's rule set; SD's structurer and certificate as D1 | D0 render input contract; D1 control; D2 values; D3 terms; D4 declarations; D5 print and proof walk; switch at equivalence, census, certification and timing agreement. Exit: `observation_journal`, `binding_plan`, `placement`, `normalize`, `fold`, `analysis/prepared_semantic`, `effect_ledger` and the retries deleted; r2dec under 20k lines; `uncompress2` and `deflateInit2_` render right or refuse |
+| **LP** Language profiles | [language-profile](doc/adr-language-profile.md) | — | LP0 each function's language from the container; LP1 conventions per function (Go ABIInternal on x86-64 and arm64, Rust scalar pairs), boundaries with several results and two-register values; LP2 premises and compiler-inserted checks per profile (C's canary, Go's `morestack`, Rust's bounds and overflow checks), the frame ADR restated against the profile's premise; LP3 runtime models (Go runtime, Rust `core`/`alloc`, C++ ABI) and demangling (Rust legacy and v0, Itanium, Go); LP4 equivalence corpora in Rust, Go and C++ on x86-64 and aarch64. Exit: a Go or Rust function renders under its own convention or refuses with that reason, never under the C one |
+| **D** Decompiler rewrite | [decompiler-rewrite](doc/adr-decompiler-rewrite.md) | R1 (proved simplifiers) carries over as D3's rule set; SD's structurer and certificate as D1 | D0 render input contract, with the language profile; D1 control; D2 values; D3 terms over a language-neutral render tree (tuples, several results, two-register values); D4 declarations; D5 the C printer and the proof walk; switch at equivalence, census, certification and timing agreement. Exit: `observation_journal`, `binding_plan`, `placement`, `normalize`, `fold`, `analysis/prepared_semantic`, `effect_ledger` and the retries deleted; r2dec under 20k lines; `uncompress2` and `deflateInit2_` render right or refuse |
 | **W** Real-binary sweep gate | [real-binary-sweep](doc/reviews/2026-10-real-binary-sweep.md) | jump-table negative cases, PLT stubs by their own transfer, guarded zero-extension bounds (this branch) | coreutils (ls, sort, cp, date, stat) and zlib with DWARF as a CI gate against radare2, objdump and DWARF. Exit: afl finds every function radare2 does (76 missing), survey follows dispatch tables so afl/afb/axt agree with afi/pdf (with P6), the remaining jump-table shapes resolve or refuse, `__assert_fail` and `__stack_chk_fail` are noreturn, preemptible PLT stubs are named, `main` is named in stripped binaries, one function has one spelling, and every disagreement is judged |
 
 ### Analysis
@@ -130,6 +132,7 @@ The program
 | Pinned containers; compiled coverage cells as pinned bytes | gate results independent of the runner |
 | `PipelineTests`/`SelfTestSuite` stall on hosted runners | both gate again |
 | arm64 equivalence in CI (D6) | done with G0 |
+| Rust, Go and C++ equivalence (LP4) | each language graded on its own corpus on both architectures |
 | macOS arm64 equivalence | Mach-O renderings run beside their originals |
 | Stage merges of PR #67 to master | finished items land on master |
 | "Where this stands" generated from CI artifacts | no hand-typed status |
@@ -154,15 +157,18 @@ is replaced by D, and H, PF and W enter the path before it.
    is measured against a fast baseline and not against Sleigh
    re-initialisation and allocator churn.
 4. **P5**: values as an index, which D2 reads.
-5. **D**: the decompiler rewrite (D0 to D5, then the switch): the critical
+5. **LP0–LP1**: each function's language and its convention, before D,
+   since D0's contract carries the profile and D2 places several results.
+6. **D**: the decompiler rewrite (D0 to D5, then the switch): the critical
    path. No renderer policy lands on the old r2dec while it is open.
-6. **W**: the real-binary sweep as a gate; its discovery and naming exits
+7. **W**: the real-binary sweep as a gate; its discovery and naming exits
    run beside D, on their own branch, since they touch r2engine, r2ssa and
-   r2abi, not r2dec.
-7. **P6** return-only demand, then **I**, then **C2–C4**, **P7, P8, P9, P11**.
-8. Beside the path, as small items when a step waits on CI: **L5**, **M6**
+   r2abi, not r2dec. **LP2–LP4** run beside D as well: premises, checks,
+   runtime models and the Rust, Go and C++ corpora.
+8. **P6** return-only demand, then **I**, then **C2–C4**, **P7, P8, P9, P11**.
+9. Beside the path, as small items when a step waits on CI: **L5**, **M6**
    rest, **F2.1–F2.5**, **Q2** rest, **K** rest.
-9. **Surface** on its own branch: S2, A and V3 now; V4, V5 and the rest after D.
+10. **Surface** on its own branch: S2, A and V3 now; V4, V5 and the rest after D.
 
 Every item replaces what it owns and deletes the old path in its own branch
 (D1, amended by D20 for D); at its exit it deletes more than it adds or says

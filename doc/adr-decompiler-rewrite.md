@@ -35,12 +35,12 @@ fact r2ssa, r2types or r2engine owns.
 
 | Stage | Input | Output | Cost |
 |---|---|---|---|
-| D0 contract | `SourceOwnedFunctionFacts`, `DecompileRouteFacts` | `RenderInput`: the sealed IR, certificates, frame model, types, call contracts, route; nothing else | O(1) borrow |
+| D0 contract | `SourceOwnedFunctionFacts`, `DecompileRouteFacts`, the language profile | `RenderInput`: the sealed IR, certificates, frame model, types, call contracts, route, profile; nothing else | O(1) borrow |
 | D1 control | dominator tree, loops, certified predicates and selectors | structured tree over block occurrences, with the §3 certificate of [adr-structure-dominator-tree](adr-structure-dominator-tree.md) | O(blocks + edges) |
 | D2 values | the partition, the frame model's bindings, each value's readers | for each value: a declared name, an inlined term, or a residual | O(values + uses) |
 | D3 expressions | D2's terms | r2rewrite terms, simplified only by proved rules | O(terms × rules applied), each rule decreasing a stated measure |
 | D4 declarations | frame model, `FunctionTypeFacts`, call contracts | locals, parameters, prototypes, globals | O(objects + calls) |
-| D5 print | D1 to D4 | C text and the render tree with each node's obligation ids | O(tree) |
+| D5 print | D1 to D4 | the profile's printer's text (C first) and the render tree with each node's obligation ids | O(tree) |
 | proof | the render tree | every obligation discharged once, residual, or refused | one linear walk |
 
 Rules every stage keeps:
@@ -58,6 +58,11 @@ Rules every stage keeps:
    address, never by hash.
 5. **Budgeted.** Every stage states its cost above, and the D gate times each
    on the large 0pack and pumasim functions.
+
+The render tree is language-neutral ([language-profile](adr-language-profile.md)): a
+call may return several values and a value may span two registers, and the printer the
+profile names spells them. The C printer is the first; it spells several results as a
+struct and a two-register value as a pair.
 
 R's invariants carry over unchanged: the partition comes before inlining, every
 access has one spelling from facts, every effect survives exactly once with one
