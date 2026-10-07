@@ -4397,3 +4397,30 @@ fn a_callee_reading_past_its_parameters_states_no_call_arity() {
     let text = response.output.text();
     assert!(!text.contains("past()"), "{text}");
 }
+
+/// `f(a, b)` calls itself with `(a - 1, b + 1)`, passing `b + 1` through `rdx`
+/// on the way to `rsi`, and returns `b` or zero.
+const SELF_CALL_WITH_A_SCRATCH_REGISTER: &[u8] = &[
+    0x48, 0x85, 0xff, // 0x1000 test rdi, rdi
+    0x74, 0x12, // 0x1003 je 0x1017
+    0x48, 0x8d, 0x56, 0x01, // 0x1005 lea rdx, [rsi + 1]
+    0x48, 0xff, 0xcf, // 0x1009 dec rdi
+    0x48, 0x89, 0xd6, // 0x100c mov rsi, rdx
+    0xe8, 0xec, 0xff, 0xff, 0xff, // 0x100f call 0x1000
+    0x31, 0xc0, // 0x1014 xor eax, eax
+    0xc3, // 0x1016 ret
+    0x48, 0x89, 0xf0, // 0x1017 mov rax, rsi
+    0xc3, // 0x101a ret
+];
+
+/// A call to the function itself takes the interface its body settled, so a
+/// scratch register written before it is no third argument.
+#[test]
+fn a_self_call_takes_the_functions_own_interface() {
+    let text = rendered(SELF_CALL_WITH_A_SCRATCH_REGISTER, "recurse");
+    let call = text
+        .lines()
+        .find(|line| line.contains("recurse(RDI_0"))
+        .unwrap_or_else(|| panic!("no self call: {text}"));
+    assert_eq!(call.matches(", ").count(), 1, "{text}");
+}

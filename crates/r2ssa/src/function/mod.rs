@@ -2375,6 +2375,33 @@ impl TrustedSsaArtifact {
                 minted
             }
         };
+        // A call to this function itself has its contract in the interface just settled.
+        let mut call_interfaces = correlated_call_sites.interfaces;
+        if let Some(own) = function_interface.as_ref() {
+            for call in source.advisory_calls() {
+                if call.target_address() != source.image().entry_address() {
+                    continue;
+                }
+                let Some(identity) = unique_call_site_identity(&blocks, call) else {
+                    continue;
+                };
+                if call_interfaces
+                    .iter()
+                    .any(|known| known.identity() == identity)
+                {
+                    continue;
+                }
+                if let Some(interface) =
+                    crate::recover_interface::mint_recovered_call_site_interface(
+                        own,
+                        identity,
+                        source.source_revision_identity(),
+                    )
+                {
+                    call_interfaces.push(interface);
+                }
+            }
+        }
         let mut machine_context =
             SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
                 blocks.as_slice(),
@@ -2383,7 +2410,7 @@ impl TrustedSsaArtifact {
                 *source.machine_roles(),
                 Some(source.convention_slots().clone()),
                 source.call_effect().cloned(),
-                correlated_call_sites.interfaces,
+                call_interfaces,
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
             );
