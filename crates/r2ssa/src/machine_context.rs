@@ -488,6 +488,8 @@ pub struct SourceMachineContext {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
+    /// Sites whose callee's body leaves its arity unproven: no count read off the registers stands.
+    arity_unproven_sites: BTreeSet<SourceCallSiteIdentity>,
     /// How far each callee is proven to touch through each pointer argument,
     /// by the callee's own entry address. What a callee reaches through one
     /// address is one object in this frame, and the object model is built
@@ -975,6 +977,7 @@ impl SourceMachineContext {
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
+            arity_unproven_sites: BTreeSet::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
             frame_saves: Vec::new(),
@@ -1264,6 +1267,15 @@ impl SourceMachineContext {
         callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     ) {
         self.callee_linkages = callee_linkages;
+    }
+
+    pub(crate) fn set_arity_unproven_sites(&mut self, sites: BTreeSet<SourceCallSiteIdentity>) {
+        self.arity_unproven_sites = sites;
+    }
+
+    /// Whether the callee at this site leaves its arity unproven.
+    pub(crate) fn call_arity_unproven(&self, site: SourceCallSiteIdentity) -> bool {
+        self.arity_unproven_sites.contains(&site)
     }
 
     pub(crate) fn set_callee_names(

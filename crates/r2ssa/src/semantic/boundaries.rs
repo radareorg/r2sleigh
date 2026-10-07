@@ -1196,7 +1196,21 @@ pub(crate) fn collect_source_boundary_facts(
                 boundary.complete = arguments_complete && results_complete;
             }
         }
+        // A callee whose body leaves its arity unproven refuses any count the registers suggest.
+        let arity_unproven = machine_context.is_some_and(|machine_context| {
+            call_site
+                .raw_identity
+                .is_some_and(|identity| machine_context.call_arity_unproven(identity))
+        });
+        if arity_unproven {
+            r2il::refusal_evidence!(
+                "call-arity-unproven",
+                "callsite {:?}: its callee reads past its parameters",
+                call_site.raw_identity
+            );
+        }
         if !boundary.complete
+            && !arity_unproven
             && boundary.calling_convention.is_none()
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)

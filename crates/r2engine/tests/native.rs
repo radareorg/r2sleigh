@@ -4384,7 +4384,8 @@ const READS_PAST_ITS_PARAMETERS: &[u8] = &[
 ];
 
 /// A callee that reads an argument slot past its parameters states no arity a
-/// caller may take: the call is never spelled with none.
+/// caller may take, and no count read off the caller's registers stands: the
+/// call is a residual.
 #[test]
 fn a_callee_reading_past_its_parameters_states_no_call_arity() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -4395,7 +4396,8 @@ fn a_callee_reading_past_its_parameters_states_no_call_arity() {
     };
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
-    assert!(!text.contains("past()"), "{text}");
+    assert!(!text.contains("past("), "{text}");
+    assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// `f(a, b)` calls itself with `(a - 1, b + 1)`, passing `b + 1` through `rdx`
