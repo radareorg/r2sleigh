@@ -134,6 +134,19 @@ declarations.
   of unproven alignment as `*(uint32_t*)`: a renderer defect (R), not P4.
   gcc -O1/O2 `shape_byte_indexed_buffer` moved from residual-trap to an
   honest refusal.
+- P4.5 done (2026-10-07): the frame owns the slots it proves
+  (`SsaArtifact::proved_parameter_home`, `stack_slot_role`,
+  `stack_slot_logical_type`); `restated()` restates only declarations,
+  `restated_slots` is deleted. Removing the restatement exposed
+  `promote.rs` deciding escape upward only: P4.3a-c make a frame address
+  stored or held in a register (at a call or the block's end) escape both
+  ways to a save slot strictly between, take the frame pointer from the
+  convention (`SourceMachineRoles::frame_pointer_storage`), and let an
+  indexed address handed on escape both ways. Cost, judged: clang -O0
+  `shape_pointer_to_pointer` stores `&rows` into `cursor` below it, so
+  `cursor` stays in memory, the callee's reach no longer merges `rows`
+  into one 32-byte object, and the rendering (counted `assumed`) differs
+  where it was equal.
 - P4.5: the restatement removed. Exit: the proved half of `restated_slots`
   is deleted.
 - Exit for the whole of P4: one owner of frame objects, and `afv` agrees with
