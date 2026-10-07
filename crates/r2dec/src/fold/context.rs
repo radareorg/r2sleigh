@@ -25,7 +25,6 @@ pub(crate) enum EffectOccurrenceKind {
 #[derive(Debug, Clone)]
 pub(crate) struct FoldArchConfig {
     pub(crate) ptr_size: u32,
-    pub(crate) arg_regs: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -247,10 +246,7 @@ impl FoldArchConfig {
     /// A test machine of this width stating no argument registers.
     #[cfg(test)]
     pub(crate) const fn for_ptr_size(ptr_size: u32) -> Self {
-        Self {
-            ptr_size,
-            arg_regs: Vec::new(),
-        }
+        Self { ptr_size }
     }
 }
 

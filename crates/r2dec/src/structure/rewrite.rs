@@ -2012,3 +2012,86 @@ impl ControlFlowStructurer<'_, '_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relation(op: BinaryOp) -> CExpr {
+        CExpr::binary(op, CExpr::IntLit(1), CExpr::IntLit(2))
+    }
+
+    /// What a relation over two integer literals, or its negation or disjunction, evaluates to.
+    fn holds(expr: &CExpr) -> bool {
+        let int = |expr: &CExpr| match expr {
+            CExpr::IntLit(value) => *value,
+            other => panic!("not a literal: {other:?}"),
+        };
+        match expr {
+            CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => !holds(operand),
+            CExpr::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => holds(left) || holds(right),
+            CExpr::Binary { op, left, right } => {
+                let (a, b) = (int(left), int(right));
+                match op {
+                    BinaryOp::Eq => a == b,
+                    BinaryOp::Ne => a != b,
+                    BinaryOp::Lt => a < b,
+                    BinaryOp::Le => a <= b,
+                    BinaryOp::Gt => a > b,
+                    BinaryOp::Ge => a >= b,
+                    other => panic!("not an integer relation: {other:?}"),
+                }
+            }
+            other => panic!("not a condition: {other:?}"),
+        }
+    }
+
+    /// Every integer negation `negate_condition` spells is the negation, for every pair of operands in -8..8.
+    #[test]
+    fn every_integer_negation_is_the_negation() {
+        let relations = [
+            BinaryOp::Eq,
+            BinaryOp::Ne,
+            BinaryOp::Lt,
+            BinaryOp::Le,
+            BinaryOp::Gt,
+            BinaryOp::Ge,
+        ];
+        let pairs = (-8..8).flat_map(|a| (-8..8).map(move |b| (a, b)));
+        for ((a, b), op) in pairs.flat_map(|pair| relations.map(|op| (pair, op))) {
+            let rel = |op| CExpr::binary(op, CExpr::IntLit(a), CExpr::IntLit(b));
+            let negated = ControlFlowStructurer::negate_condition(rel(op));
+            assert_eq!(
+                holds(&negated),
+                !holds(&rel(op)),
+                "!({a} {op:?} {b}) as {negated:?}"
+            );
+            for either in relations.map(|other| CExpr::binary(BinaryOp::Or, rel(op), rel(other))) {
+                let negated = ControlFlowStructurer::negate_condition(either.clone());
+                assert_eq!(
+                    holds(&negated),
+                    !holds(&either),
+                    "!({either:?}) as {negated:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordered_float_comparison_negates_to_its_negation_and_an_integer_one_flips() {
+        // A NaN makes `a < b` and `a >= b` both false, so only the integer relation has an opposite.
+        for op in [BinaryOp::FLt, BinaryOp::FLe, BinaryOp::FGt, BinaryOp::FGe] {
+            let negated = ControlFlowStructurer::negate_condition(relation(op));
+            assert_eq!(negated, CExpr::unary(UnaryOp::Not, relation(op)), "{op:?}");
+        }
+        let flipped = ControlFlowStructurer::negate_condition(relation(BinaryOp::Lt));
+        assert_eq!(flipped, relation(BinaryOp::Ge));
+    }
+}

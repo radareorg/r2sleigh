@@ -21,6 +21,7 @@ answer.
 | `float_calls_zig_x86_64_O2g`, `float_calls_zig_aarch64_O2g` | `src/float_calls.c` | `zig cc` 0.17.0 `-O2 -g`: a declared `double` parameter, written as a constant before one call and passed through from the caller's own formal to another; on AArch64 the cspec's float slot is `q0`, wider than the `double` |
 | `float_returns_zig_x86_64_O2g`, `float_returns_zig_aarch64_O2g` | `src/float_returns.c` | `zig cc` 0.17.0 `-O2 -g`: declared `double` results, one a vectorised sum whose result register is written by lane inserts and merged as its root, one a literal `0.0` |
 | `float_moves_zig_x86_64_O2g`, `float_moves_zig_aarch64_O2g` | `src/float_moves.c` | `zig cc` 0.17.0 `-O2 -g`: two `double` arguments swapped by whole-register moves (`movaps`, `fmov`) before a tail call |
+| `float_compares_zig_x86_64_O2g`, `float_compares_zig_aarch64_O2g` | `src/float_compares.c` | `zig cc` 0.17.0 `-O2 -g -fno-sanitize=all`: ordered comparisons of `double` in conditions and results, including `!(a < b)` and `a == b \|\| a < b`, which a NaN makes differ from their integer negations |
 
 `src/` holds sources the equivalence gate must not build as programs of their
 own: a multi-unit program, and fixtures that exist for their debug information

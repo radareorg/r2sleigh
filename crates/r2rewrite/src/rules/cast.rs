@@ -381,3 +381,30 @@ cast_rule!(
         arena.intern(unsigned(w), TermKind::Concat { high, low })
     }]
 );
+
+/// Zeroes above a value are its zero extension: `Concat(0, x) = zext(x)`, the lift's `Insert` over a zero.
+pub static CONCAT_ZERO_HIGH: Rule = Rule {
+    id: "cast.concat_zero_high",
+    group: RuleGroup::Cast,
+    decreases: Measure::Joins,
+    apply: |arena, id| {
+        let TermKind::Concat { high, low } = arena.term(id).kind else {
+            return None;
+        };
+        if crate::canon::literal_bits(arena, high) != Some(0) {
+            return None;
+        }
+        let ty = arena.term(id).ty;
+        let kind = MachineCastKind::ZeroExtend;
+        Some(arena.intern(ty, TermKind::Cast { kind, input: low }))
+    },
+    templates: &[|arena, w, _| {
+        let low = narrow_variable(arena, w, 1);
+        let zero_bits = w - width(arena, low);
+        let zero = r2ssa::MachineBitVector::new(zero_bits, 0).expect("a zero fits");
+        let high = arena.intern(unsigned(zero_bits), TermKind::Literal(zero));
+        arena.intern(unsigned(w), TermKind::Concat { high, low })
+    }],
+    proof_widths: DEFAULT_PROOF_WIDTHS,
+    proof_note: None,
+};

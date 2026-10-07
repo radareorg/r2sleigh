@@ -42,6 +42,8 @@ pub enum RuleGroup {
 pub enum Measure {
     /// Non-leaf nodes of the term, counted as a tree.
     NonLeafNodes,
+    /// Concatenations: a join of two values spelled as one widening removes one.
+    Joins,
     /// Memory reads spelled by address: a subscript rule turns one into an
     /// element read, which is not one.
     Loads,
@@ -61,6 +63,7 @@ pub enum Measure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MeasureVector {
     pub non_leaf_nodes: u64,
+    pub joins: u64,
     pub loads: u64,
     pub selections: u64,
     pub cast_width: u64,
@@ -72,6 +75,7 @@ impl MeasureVector {
     pub fn component(&self, measure: Measure) -> u64 {
         match measure {
             Measure::NonLeafNodes => self.non_leaf_nodes,
+            Measure::Joins => self.joins,
             Measure::Loads => self.loads,
             Measure::Selections => self.selections,
             Measure::CastWidth => self.cast_width,
@@ -97,6 +101,7 @@ fn measure_memo(
     let term = arena.term(id);
     let mut m = MeasureVector {
         non_leaf_nodes: 0,
+        joins: 0,
         loads: 0,
         selections: 0,
         cast_width: 0,
@@ -113,6 +118,9 @@ fn measure_memo(
         m.non_leaf_nodes = 1;
         if matches!(term.kind, TermKind::Load { .. }) {
             m.loads = 1;
+        }
+        if matches!(term.kind, TermKind::Concat { .. }) {
+            m.joins = 1;
         }
         if matches!(
             term.kind,
@@ -137,6 +145,7 @@ fn measure_memo(
         for child in children {
             let c = measure_memo(arena, child, memo);
             m.non_leaf_nodes = m.non_leaf_nodes.saturating_add(c.non_leaf_nodes);
+            m.joins = m.joins.saturating_add(c.joins);
             m.loads = m.loads.saturating_add(c.loads);
             m.selections = m.selections.saturating_add(c.selections);
             m.cast_width = m.cast_width.saturating_add(c.cast_width);
@@ -247,6 +256,7 @@ pub static RULES: &[&Rule] = &[
     &cast::EXTRACT_LOW_OF_CONCAT,
     &cast::EXTRACT_HIGH_OF_CONCAT,
     &cast::CONCAT_OF_EXTRACTS,
+    &cast::CONCAT_ZERO_HIGH,
     &boolean::NOT_EQ,
     &boolean::NOT_NE,
     &boolean::NOT_LT,

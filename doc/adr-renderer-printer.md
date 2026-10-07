@@ -38,14 +38,48 @@ stops retrying when a check fails.
 
 ## Done
 
-Nothing yet.
+- R1a: the CExpr identity and linear folds in fold/op_lower and
+  analysis/prepared_semantic are deleted (867 lines). Each ran only on
+  operands carrying no render observation, which the audited path never
+  has; disabling each left the census byte-identical. Their identities are
+  r2rewrite rules (23 identity rules, proved). `structure/rewrite.rs`'s
+  `negate_condition`'s float hazard is R1e.
+- R1b: zeroes above a value are its zero extension as a proved rule
+  (`cast.concat_zero_high`, decreasing a new `Joins` measure component);
+  import's `Insert`-over-zero shortcut and the printer's `Concat`-of-zero
+  peephole are deleted. Import admits a zero high part of any width as a
+  literal, so a byte lane inserted into a zeroed register imports and
+  widens where the machine renderer spelled masks (29 census functions).
+- R1c (decided 2026-10-06): `inst_combine` stays r2ssa's SSA
+  canonicalisation, since every fact is derived after it and r2rewrite sits
+  above r2ssa; it is proved there instead. Every identity it applies and
+  every fold through a definition is checked against `r2il::eval`,
+  exhaustively at 8 and 16 bits (eval gained `Insert`, an r2il operation it
+  did not model). Its termination is a measure, not a budget: each step makes
+  the operation a copy, makes one more operand a constant, or moves a slice
+  to a strictly shallower definition (longest-path depth, computed once in
+  O(definitions)); a step that lowers nothing is a defect and panics, where
+  the budget kept a partial result. Census byte-identical; no time added.
+- R1d: `CExpr::cast_with_role`'s integer collapses are proved against C's
+  conversion rules over every chain of two and three conversions among the
+  eight integer types and `_Bool`, for every 8- and 16-bit source. The proof
+  found `_Bool` treated as an 8-bit integer: `(uint8_t)(_Bool)x` collapsed
+  to `(uint8_t)x`, 2 where C gives 1. `_Bool` now takes no part in the
+  modular collapses. The pointer collapses rest on C11 6.3.2.3 as cited.
+- R1e: ordered float comparisons are their own operators (`FLt`, `FLe`,
+  `FGt`, `FGe`, printed as `<` and the rest), from the float lowering and
+  the rewriter's float compare terms. `negate_condition` wraps them in `!`
+  where it flips an integer relation: a NaN makes `a < b` and `a >= b` both
+  false. Float compares reach conditions inline through
+  `materialize_term`; the census had no negated one yet.
 
 ## Left
 
 - R0: the render plan beside the current path. Exit: it agrees over the
   census.
-- R1: expressions as r2rewrite terms, with the folds and `inst_combine` as
-  proved rules. Exit: the Rust-side simplifiers are deleted.
+- R1: done (above). Exit as amended 2026-10-06: no simplifier is unproved;
+  each is deleted, an r2rewrite rule, or proved against the evaluator or
+  C's rules where it lives.
 - R2: obligations carried by the tree, with the linear checker. Exit: the
   observation journal is deleted.
 - R3: bindings from the frame model, with certified reloads reading their
