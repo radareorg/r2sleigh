@@ -69,6 +69,56 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
     Some(cast(ty, CExpr::UIntLit(value.bits())))
 }
 
+/// `value`'s low `bits` as an unsigned literal of that width; a 128-bit one is spelled from halves.
+fn wide_literal(bits: u32, value: u128) -> Option<CExpr> {
+    let ty = integer(bits)?;
+    if bits <= 64 {
+        return Some(cast(ty, CExpr::UIntLit(value as u64)));
+    }
+    let high = binary(
+        BinaryOp::Shl,
+        cast(ty.clone(), CExpr::UIntLit((value >> 64) as u64)),
+        CExpr::UIntLit(64),
+    );
+    Some(cast(
+        ty.clone(),
+        binary(
+            BinaryOp::BitOr,
+            high,
+            cast(ty, CExpr::UIntLit(value as u64)),
+        ),
+    ))
+}
+
+/// `root`, `bits` wide, with `lane` written over its bits `lsb..lsb + width`.
+fn insert_lane(bits: u32, (lsb, width): (u32, u32), root: CExpr, lane: CExpr) -> Option<CExpr> {
+    let end = lsb.checked_add(width)?;
+    if width == 0 || end > bits || bits > 128 {
+        return None;
+    }
+    let ty = integer(bits)?;
+    let full = |n: u32| {
+        if n >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << n) - 1
+        }
+    };
+    let hole = full(bits) & !(full(width) << lsb);
+    let kept = binary(
+        BinaryOp::BitAnd,
+        cast(ty.clone(), root),
+        wide_literal(bits, hole)?,
+    );
+    let written = binary(
+        BinaryOp::BitAnd,
+        cast(ty.clone(), lane),
+        wide_literal(bits, full(width))?,
+    );
+    let placed = binary(BinaryOp::Shl, written, CExpr::UIntLit(u64::from(lsb)));
+    Some(cast(ty, binary(BinaryOp::BitOr, kept, placed)))
+}
+
 /// One operator over two operands of `bits`: computed unsigned at least `int` wide, then narrowed.
 fn wrapping(op: BinaryOp, bits: u32, left: CExpr, right: CExpr) -> Option<CExpr> {
     let wide = integer(computed(bits))?;
@@ -649,10 +699,24 @@ impl Spell<'_> {
                 then_expr: Box::new(cast(c_type(&ty)?, child(*if_true)?)),
                 else_expr: Box::new(cast(c_type(&ty)?, child(*if_false)?)),
             }),
+            MachineExprKind::InsertLane {
+                root,
+                lane,
+                lsb_bits,
+                width_bits,
+                ..
+            } => {
+                let lane_ty = child_ty(*lane)?;
+                let as_bits = MachineType::Integer {
+                    width_bits: lane_ty.width_bits(),
+                    signedness: MachineSignedness::Unsigned,
+                };
+                let lane = reclass(child(*lane)?, &lane_ty, &as_bits)?;
+                insert_lane(bits, (*lsb_bits, *width_bits), child(*root)?, lane)
+            }
             // A merge is its variable, which the edges assign; the rest has no single C operator.
             MachineExprKind::Phi { .. }
             | MachineExprKind::PopulationCount { .. }
-            | MachineExprKind::InsertLane { .. }
             | MachineExprKind::GuardedRead { .. }
             | MachineExprKind::ExclusiveStoreSucceeded { .. }
             | MachineExprKind::BlockAnswer { .. } => None,
@@ -684,6 +748,29 @@ mod tests {
                 right: by,
             },
         )
+    }
+
+    #[test]
+    fn a_lane_insert_keeps_the_root_s_other_bits() {
+        let spelled = |expr: Option<crate::ast::CExpr>| format!("{:?}", expr.expect("spelled"));
+        // `setne dl`: one byte at bit 0 of a 64-bit register.
+        let low = super::insert_lane(
+            64,
+            (0, 8),
+            crate::ast::CExpr::UIntLit(1),
+            crate::ast::CExpr::UIntLit(2),
+        );
+        assert!(spelled(low).contains("18446744073709551360"), "~0xff kept");
+        // A lane past the root's width has no C spelling.
+        assert!(
+            super::insert_lane(
+                64,
+                (60, 8),
+                crate::ast::CExpr::UIntLit(1),
+                crate::ast::CExpr::UIntLit(2)
+            )
+            .is_none()
+        );
     }
 
     #[test]
