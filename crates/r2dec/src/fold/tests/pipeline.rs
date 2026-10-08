@@ -1022,6 +1022,7 @@ mod tests {
                     .symbol_for_binding(binding)
                     .expect("dense observed binding name"),
                 stack_offset: None,
+                align: None,
             })
             .collect();
         function.body = body;

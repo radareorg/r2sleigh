@@ -32,7 +32,9 @@ pub(super) struct Values<'a> {
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
-    objects: RefCell<BTreeMap<ObjectId, Option<(SymbolId, u32)>>>,
+    frame: Option<super::frame::Frame>,
+    /// The frame array, once a spelled term names an object in it.
+    frame_array: RefCell<Option<SymbolId>>,
     symbols: Rc<RefCell<SymbolTable>>,
     params: Vec<CParam>,
     locals: RefCell<Vec<CLocal>>,
@@ -563,7 +565,8 @@ impl<'a> Values<'a> {
             readers,
             names: vec![None; graph.values.len()],
             bound,
-            objects: RefCell::new(BTreeMap::new()),
+            frame: super::frame::Frame::of(artifact),
+            frame_array: RefCell::new(None),
             symbols,
             params: Vec::new(),
             locals: RefCell::new(Vec::new()),
@@ -621,56 +624,42 @@ impl<'a> Values<'a> {
                 ty: c,
                 name: id,
                 stack_offset: None,
+                align: None,
             });
         }
     }
 
-    /// The frame array a stack object is spelled as, and its extent: the bytes its certificate states.
+    /// A frame object's address in the function's one frame array (D4), and its extent: the
+    /// array is declared on first use, aligned as the machine's frame is.
     fn object(&self, object: ObjectId) -> Option<(CExpr, u32)> {
-        if let Some(known) = self.objects.borrow().get(&object) {
-            return known.map(|(id, bytes)| (CExpr::var(id), bytes));
-        }
-        // Only storage this function owns is a C local: a slot at or above the entry stack
-        // pointer holds what the caller put there, which a fresh array does not.
-        let slot = self
-            .artifact
-            .certificates()
-            .stack_slots
-            .get(&object)
-            .filter(|slot| {
-                slot.callee_allocation.is_some()
-                    || matches!(
-                        slot.source_slot.map(|source| source.role()),
-                        Some(
-                            r2source::SourceStackSlotRole::Local
-                                | r2source::SourceStackSlotRole::ParameterHome { .. }
-                        )
-                    )
+        let frame = self.frame.as_ref()?;
+        let (index, size) = frame.at(object)?;
+        let array = *self.frame_array.borrow_mut().get_or_insert_with(|| {
+            let ty = CType::Array(
+                Box::new(CType::Int {
+                    bits: 8,
+                    signedness: r2types::Signedness::Unsigned,
+                }),
+                Some(frame.bytes() as usize),
+            );
+            let id =
+                self.symbols
+                    .borrow_mut()
+                    .declare("frame", ty.clone(), SymbolRole::StackLocal(0));
+            self.locals.borrow_mut().push(CLocal {
+                ty,
+                name: id,
+                stack_offset: None,
+                align: Some(frame.alignment()),
             });
-        let declared =
-            slot.and_then(|slot| Some((slot.size?, slot.offset)))
-                .map(|(bytes, offset)| {
-                    let ty = CType::Array(
-                        Box::new(CType::Int {
-                            bits: 8,
-                            signedness: r2types::Signedness::Unsigned,
-                        }),
-                        Some(bytes as usize),
-                    );
-                    let id = self.symbols.borrow_mut().declare(
-                        format!("frame_{}", object.0),
-                        ty.clone(),
-                        SymbolRole::StackLocal(offset),
-                    );
-                    self.locals.borrow_mut().push(CLocal {
-                        ty,
-                        name: id,
-                        stack_offset: None,
-                    });
-                    (id, bytes)
-                });
-        self.objects.borrow_mut().insert(object, declared);
-        declared.map(|(id, bytes)| (CExpr::var(id), bytes))
+            id
+        });
+        let base = CExpr::binary(
+            crate::ast::BinaryOp::Add,
+            CExpr::var(array),
+            CExpr::UIntLit(u64::from(index)),
+        );
+        Some((base, size))
     }
 
     /// The machine type a value is held at: its name's, its producer's term's, else its width.
@@ -1180,6 +1169,7 @@ impl<'a> Values<'a> {
                         ty: c,
                         name: temp,
                         stack_offset: None,
+                        align: None,
                     });
                     out.push(assign(temp, source));
                     staged.push(assign(*name, CExpr::var(temp)));

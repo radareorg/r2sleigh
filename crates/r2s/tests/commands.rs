@@ -397,6 +397,22 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     );
 }
 
+/// The staged pipeline's frame is one array aligned as the machine's (D4): `main` passes `&d`,
+/// `sp + 8` on AArch64, where SP is 16-aligned at entry, to two calls and reads it after each.
+#[test]
+fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/float_calls_zig_aarch64_O2g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ main");
+    for line in [
+        "_Alignas(16) uint8_t frame[32];",
+        "call_store((uint64_t)(frame + 8U));",
+        "(uint64_t)(frame + 8U));",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+}
+
 /// `dec.pipeline=staged` hands `pdd` to the staged decompiler (ROADMAP D): its control is
 /// certified, and the hash loop's values render from the sealed facts with no gap.
 #[test]

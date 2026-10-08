@@ -718,6 +718,9 @@ impl<'c> CodeGenerator<'c> {
         // Local variable declarations
         for local in &func.locals {
             self.emit_indent();
+            if let Some(align) = local.align {
+                self.output.push_str(&format!("_Alignas({align}) "));
+            }
             let name = self.symbols.name(local.name).to_owned();
             self.emit_object_declaration(&local.ty, &name);
             self.output.push_str(";\n");
@@ -2129,11 +2132,13 @@ mod tests {
                     ty: CType::i32(),
                     name: x,
                     stack_offset: Some(-8),
+                    align: None,
                 },
                 CLocal {
                     ty: CType::ptr(CType::i8()),
                     name: crate::symbol::declare(&symbols, "p"),
                     stack_offset: Some(-16),
+                    align: None,
                 },
             ],
             body: vec![

@@ -3,7 +3,6 @@
 
 mod calls;
 mod control;
-#[allow(dead_code)]
 mod frame;
 mod input;
 mod terms;

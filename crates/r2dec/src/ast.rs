@@ -2304,6 +2304,9 @@ pub struct CLocal {
     pub name: crate::symbol::SymbolId,
     /// Stack offset (if known).
     pub stack_offset: Option<i64>,
+    /// The alignment the declaration states (`_Alignas`), where the object keeps the machine's.
+    #[serde(default)]
+    pub align: Option<u32>,
 }
 
 impl CFunction {

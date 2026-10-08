@@ -409,8 +409,8 @@ impl Spell<'_> {
             }
             TermKind::Literal(value) => literal(value),
             TermKind::Variable(_) => None,
-            // A frame address outside an access could reach past its array once C holds it.
-            TermKind::ObjectAddress(_) => None,
+            // A frame address may be held or passed: every place it reaches is a byte of the one array.
+            TermKind::ObjectAddress(object) => Some(cast(integer(bits)?, (self.object)(object)?.0)),
             TermKind::Load { object, address } => {
                 self.load(&ty, self.address(address, bits / 8, Some(object))?)
             }
