@@ -1,6 +1,5 @@
-//! Which language each function's source was written in, as the container states it
-//! (doc/adr-language-profile.md, LP0): compile units first, then a symbol's mangling where the
-//! container states that language; a name alone is a hint, never the proof.
+//! Each function's source language as the container states it (doc/adr-language-profile.md, LP0):
+//! compile units, then a mangling only toward a language the container states apart from names.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -46,9 +45,8 @@ fn mangled(
         .collect()
 }
 
-/// The languages the container states apart from any name a function was given: Go's runtime
-/// tables, rustc's note, compile units, Swift's and Objective-C's sections, a CLR header, and a C++
-/// runtime it links against.
+/// The languages the container states apart from names: Go's tables, rustc's note, compile units,
+/// Swift's and Objective-C's sections, a CLR header, a C++ runtime it links.
 struct Stated {
     go: bool,
     rust: bool,
