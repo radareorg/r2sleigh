@@ -1,5 +1,9 @@
 //! r2s: a radare2-compatible shell over the r2sleigh engine.
 
+// The allocator measured fastest on the named workloads (doc/adr-next-pass.md, D26).
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod commands;
 mod complete;
 mod config;
