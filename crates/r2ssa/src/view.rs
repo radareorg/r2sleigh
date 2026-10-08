@@ -192,10 +192,14 @@ impl ValueViews<VarId> {
             }
             for op in block.ops() {
                 record_offset(op, |id| facts[*id], &mut offsets);
-                if let Some((dst, definition)) = definition_of(op, |id| facts[*id]) {
-                    nodes.push(dst);
-                    definitions.push(definition);
-                }
+            }
+            for (dst, definition) in block
+                .ops()
+                .iter()
+                .filter_map(|op| definition_of(op, |id| facts[*id]))
+            {
+                nodes.push(dst);
+                definitions.push(definition);
             }
         }
         Solver::over(nodes, definitions, facts, offsets).solve()
@@ -837,12 +841,13 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
                 lsb_bits,
             } => {
                 let base = self.input_view(*base, state)?;
+                let lane_end = lsb_bits.saturating_add(self.facts[*lane].0.saturating_mul(8));
                 let continued = match self.offsets.get(*lane).copied() {
-                    Some((source, from)) => {
+                    Some((source, from)) if from == *lsb_bits => {
                         let source = self.input_view(source, state)?;
-                        self.continued(id, &base, &source, *lane, *lsb_bits, from)
+                        self.continued(id, &base, &source, *lsb_bits..lane_end)
                     }
-                    None => None,
+                    _ => None,
                 };
                 // Bits below the lane are the base's whatever the lane is.
                 let below = || {
@@ -869,33 +874,34 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
 }
 
 impl<I: DenseId + std::hash::Hash> Solver<I> {
-    /// `INSERT(base, lane, lsb)` where `lane` is `source`'s bits from `from`: when `from` is `lsb`,
-    /// `base` covers the bits below it and `source` the lane's, all of one root, the output is that
-    /// root up to the lane's end at least.
+    /// `INSERT(base, lane, lane.start)` where `lane` holds `source`'s bits there: the output is the
+    /// shared root up to the lane's end where `base` covers the bits below it and `source` the lane's.
     fn continued(
         &self,
         id: I,
         base: &ValueView<I>,
         source: &ValueView<I>,
-        lane: I,
-        lsb: u32,
-        from: u32,
+        lane: std::ops::Range<u32>,
     ) -> Option<ValueView<I>> {
-        let end = lsb.checked_add(self.facts[lane].0.saturating_mul(8))?;
-        let covers = from == lsb
-            && base.root == source.root
-            && base.prefix_bits >= lsb
-            && source.prefix_bits >= end;
+        let covers = base.root == source.root
+            && base.prefix_bits >= lane.start
+            && source.prefix_bits >= lane.end;
         if !covers {
             return None;
         }
         // Bits the base already stated as the root's past the lane stay stated.
-        if base.prefix_bits >= end {
+        if base.prefix_bits >= lane.end {
             return Some(*base);
         }
         let root_bits = self.facts[base.root].0.saturating_mul(8);
         let width = self.facts[id].0.saturating_mul(8);
-        normalized(base.root, root_bits, end, ViewExtension::Unknown, width)
+        normalized(
+            base.root,
+            root_bits,
+            lane.end,
+            ViewExtension::Unknown,
+            width,
+        )
     }
 }
 
@@ -1038,14 +1044,7 @@ fn representatives<I: DenseId + std::hash::Hash>(
                 .entry((view.root, width, view.prefix_bits, view.extension))
                 .or_insert(*id);
             if first == *id {
-                if view.prefix_bits == width {
-                    match low_lanes.get_mut(view.root) {
-                        Some(lanes) => lanes.push((width, *id)),
-                        None => {
-                            low_lanes.insert(view.root, vec![(width, *id)]);
-                        }
-                    }
-                }
+                note_low_lane(&mut low_lanes, view, width, *id);
                 continue;
             }
             Representative::Value(first)
@@ -1053,6 +1052,19 @@ fn representatives<I: DenseId + std::hash::Hash>(
         representatives.insert(*id, representative);
     }
     (representatives, low_lanes)
+}
+
+/// Record `id`, the first of its class, as its root's low lane at `width` bits where it is exactly that.
+fn note_low_lane<I: DenseId>(low_lanes: &mut LowLanes<I>, view: &ValueView<I>, width: u32, id: I) {
+    if view.prefix_bits != width {
+        return;
+    }
+    match low_lanes.get_mut(view.root) {
+        Some(lanes) => lanes.push((width, id)),
+        None => {
+            low_lanes.insert(view.root, vec![(width, id)]);
+        }
+    }
 }
 
 /// The literal a view of a constant determines at `width` bits, where it fits

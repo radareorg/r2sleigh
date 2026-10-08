@@ -1,10 +1,5 @@
-//! Loads from bytes the program never writes, folded to what they read (ROADMAP P5).
-//!
-//! A load at a literal address whose bytes the capture holds read-only reads
-//! them on every run: the container states nothing writes them, and the
-//! loader does not (doc/adr-next-pass.md). The load becomes a copy of the
-//! constant, so every later stage reads a literal. One pass over the
-//! operations, one search per load.
+//! A load at a literal address of bytes the capture holds read-only reads them on every run, so it
+//! becomes a copy of the constant (ROADMAP P5): one pass over the operations, one search per load.
 
 use crate::function::{EditPlan, SSAFunction};
 use crate::machine_context::SourceMachineContext;

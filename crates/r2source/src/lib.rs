@@ -370,11 +370,8 @@ pub struct OwnedFunctionImage {
     /// Display data: it tells a renderer what to print where a constant points
     /// at text, and carries no claim about behaviour.
     string_literals: Box<[(u64, String)]>,
-    /// Bytes the program never writes at each address the function loads from.
-    ///
-    /// Semantic evidence: a load there reads these bytes on every run, so it
-    /// is folded to them (ROADMAP P5). The capture took only bytes the
-    /// container states are read-only and the loader does not write.
+    /// Bytes the container states read-only and the loader leaves alone, at each address the
+    /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
     read_only: Box<[(u64, Vec<u8>)]>,
     /// Data objects radare2 already knows this function points at.
     ///
