@@ -363,17 +363,20 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
 }
 
 /// `dec.pipeline=staged` hands `pdd` to the staged decompiler (ROADMAP D): its control is
-/// certified, and until D2 every block's operations are one marked gap.
+/// certified, and the hash loop's values render from the sealed facts with no gap.
 #[test]
 fn the_staged_pipeline_writes_pdd_from_the_sealed_facts() {
     let staged = r2s(&format!(
         "e dec.pipeline=staged; pdd @ {FNV1A32}; e dec.pipeline"
     ));
-    assert!(
-        staged.out.contains("r2dec gap: ValuesNotRendered"),
-        "{}",
-        staged.out
-    );
+    for line in [
+        "return (uint64_t)0x811c9dc5U;",
+        "r2sleigh_load_u8((void*)rdi_1)",
+        "* (uint64_t)0x1000193U",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+    assert!(!staged.out.contains("r2dec gap"), "{}", staged.out);
     assert!(!staged.out.contains("r2sleigh refused"), "{}", staged.out);
     assert!(staged.out.ends_with("staged\n"), "{}", staged.out);
     let refused = r2s("e dec.pipeline=fast");

@@ -1,29 +1,50 @@
 //! The staged decompiler (ROADMAP D) through the open program: D1 writes the control, certified,
-//! with every block's operations one gap and every obligation counted as gapped.
+//! around D2's statements, with D3 spelling each term; a call is still a gap.
 
 mod common;
 
-use common::{FORKED, opened};
+use common::{CALLER, FORKED, opened};
 use r2engine::RenderTier;
 
 #[test]
-fn the_staged_pipeline_places_every_block_once_and_gaps_its_values() {
+fn the_staged_pipeline_renders_a_leaf_function_s_values() {
     let rendering = opened()
         .rendered(FORKED, RenderTier::Staged)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
-    // `forked` branches once: one `if` on a residual test, each arm a gap.
-    assert_eq!(
-        text.matches("if (r2sleigh_residual_bool(").count(),
-        1,
+    // `test edi, edi; je L` is the test on the parameter; the merge is one variable both arms assign.
+    assert!(
+        text.contains("if ((uint8_t)((uint32_t)arg0 == (uint32_t)0U))"),
         "{text}"
     );
-    assert!(text.contains("r2dec gap: ValuesNotRendered"), "{text}");
-    let ledger = rendering.response.obligation_ledger.expect("a ledger");
-    let closure = ledger.close();
-    assert!(closure.total > 0, "{text}");
-    assert_eq!(
-        closure.gapped, closure.total,
-        "every obligation is gapped until D2"
+    assert!(text.contains("rax_3 = (uint64_t)0x1000U;"), "{text}");
+    assert!(text.contains("rax_3 = (uint64_t)5U;"), "{text}");
+    assert!(
+        text.contains("return (uint64_t)((uint64_t)rax_3 + (uint64_t)8U);"),
+        "{text}"
     );
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(!text.contains("r2dec gap"), "{text}");
+    let closure = rendering
+        .response
+        .obligation_ledger
+        .expect("a ledger")
+        .close();
+    assert!(closure.total > 0, "{text}");
+    assert_eq!(closure.gapped, 0, "every obligation is rendered: {text}");
+}
+
+#[test]
+fn a_call_is_a_gap_and_its_obligations_are_gapped() {
+    let rendering = opened()
+        .rendered(CALLER, RenderTier::Staged)
+        .expect("the staged pipeline renders");
+    let text = rendering.response.output.text().to_owned();
+    assert!(text.contains("r2dec gap: ValuesNotRendered"), "{text}");
+    let closure = rendering
+        .response
+        .obligation_ledger
+        .expect("a ledger")
+        .close();
+    assert!(closure.gapped > 0, "the call is not rendered: {text}");
 }

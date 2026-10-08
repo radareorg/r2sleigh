@@ -1,8 +1,10 @@
 //! The staged decompiler (doc/adr-decompiler-rewrite.md): one pass per stage over the sealed facts,
-//! a residual wherever they stop. D0 is the input, D1 the control; values are gaps until D2.
+//! a residual wherever they stop. D0 is the input, D1 the control, D2 the values, D3 the terms.
 
 mod control;
 mod input;
+mod terms;
+mod values;
 
 use std::collections::BTreeMap;
 
@@ -46,7 +48,10 @@ pub fn render(
 ) -> Result<Rendered, RenderStop> {
     let work = DecompileWorkControl::new(control, DecompileWorkPhase::Structuring);
     work.poll()?;
-    let written = control::write(input);
+    let name = crate::rendered_name_of(input.name(), input.function().root());
+    let mut c = CFunction::new(name, result_type(input));
+    let values = values::Values::new(input, c.symbols.clone());
+    let written = control::write(input, values.as_ref());
     let function = input.function();
     let mut body = CStmt::Block(written.body);
     let label_block = written
@@ -71,8 +76,13 @@ pub fn render(
     }
     crate::ast::strip_stmt_observations(&mut body);
     work.with_phase(DecompileWorkPhase::Rendering).poll()?;
-    let name = crate::rendered_name_of(input.name(), function.root());
-    let mut c = CFunction::new(name, result_type(input)).with_unknown_params();
+    match &values {
+        Some(values) => {
+            c.params = values.params();
+            c.locals = values.locals();
+        }
+        None => c.params_known = false,
+    }
     c.body = match body {
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
@@ -80,8 +90,13 @@ pub fn render(
     let ready = prepare_function_for_emission(c);
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
     let mut ledger = ObligationLedger::open(input.obligations(), input.graph());
-    for id in input.obligations().obligations().keys() {
-        ledger.record(*id, Outcome::Gapped);
+    match &values {
+        Some(values) => values.close(&mut ledger),
+        None => {
+            for id in input.obligations().obligations().keys() {
+                ledger.record(*id, Outcome::Gapped);
+            }
+        }
     }
     Ok(Rendered {
         function: crate::RenderedFunction::new(emission, ready.function().clone()),

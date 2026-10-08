@@ -1,11 +1,12 @@
 //! D1: the function's control, placed by the dominator tree (doc/adr-structure-dominator-tree.md
-//! §4); until D2 renders values, a block's operations are one gap and a test a residual.
+//! §4), around D2's statements; where D2 has none, a block's operations are one gap.
 
 use std::collections::BTreeMap;
 
 use r2ssa::cfg::BlockTerminator;
 
 use super::RenderInput;
+use super::values::Values;
 use crate::ast::{CExpr, CStmt, CType, GapMarker, SwitchCase};
 use crate::observation_journal::RenderObservationId;
 use crate::prelude::ResidualCause;
@@ -20,7 +21,7 @@ pub(super) struct Written {
 }
 
 /// Write every block once, in the region of its immediate dominator or after the loop it leaves.
-pub(super) fn write(input: &RenderInput<'_>) -> Written {
+pub(super) fn write(input: &RenderInput<'_>, values: Option<&Values<'_>>) -> Written {
     let function = input.function();
     let placement = Placement::compute(
         function.cfg(),
@@ -30,6 +31,7 @@ pub(super) fn write(input: &RenderInput<'_>) -> Written {
     );
     let mut writer = Writer {
         input,
+        values,
         placement: &placement,
         labels: BTreeMap::new(),
         blocks: Vec::new(),
@@ -47,12 +49,13 @@ pub(super) fn write(input: &RenderInput<'_>) -> Written {
 
 struct Writer<'w, 'i> {
     input: &'w RenderInput<'i>,
+    values: Option<&'w Values<'i>>,
     placement: &'w Placement<'i>,
     labels: BTreeMap<u64, String>,
     blocks: Vec<u64>,
 }
 
-impl Writer<'_, '_> {
+impl<'i> Writer<'_, 'i> {
     fn label(&mut self, addr: u64) -> String {
         let next = self.labels.len();
         self.labels
@@ -86,18 +89,34 @@ impl Writer<'_, '_> {
         out
     }
 
-    /// A block's label, its operations as one gap, its arms, and the merges it dominates.
+    /// A block's label, its statements, its arms, and the merges it dominates.
     fn block_region(&mut self, addr: u64) -> CStmt {
         let mut stmts = Vec::new();
         if self.placement.labelled().contains(&addr) {
             stmts.push(CStmt::Label(self.label(addr)));
         }
+        if let Some(values) = self.values {
+            for stmt in values.statements(addr) {
+                stmts.push(self.observe(addr, stmt));
+            }
+        } else {
+            stmts.extend(self.gap(addr));
+        }
+        stmts.extend(self.arms(addr));
+        for merge in self.placement.merges_in(addr).to_vec() {
+            stmts.extend(self.place(merge));
+        }
+        CStmt::Block(stmts)
+    }
+
+    /// A block's operations as one gap, where D2 rendered no values.
+    fn gap(&mut self, addr: u64) -> Option<CStmt> {
         let ops = self
             .input
             .function()
             .get_block(addr)
             .map_or(0, |block| block.ops().len());
-        if ops != 0 {
+        (ops != 0).then(|| {
             let gap = CStmt::Gap(GapMarker {
                 kind: "ValuesNotRendered".to_owned(),
                 origin: "render::control".to_owned(),
@@ -105,13 +124,8 @@ impl Writer<'_, '_> {
                 op_idx: 0,
                 ops,
             });
-            stmts.push(self.observe(addr, gap));
-        }
-        stmts.extend(self.arms(addr));
-        for merge in self.placement.merges_in(addr).to_vec() {
-            stmts.extend(self.place(merge));
-        }
-        CStmt::Block(stmts)
+            self.observe(addr, gap)
+        })
     }
 
     /// The block's terminator, one transfer per edge.
@@ -146,10 +160,13 @@ impl Writer<'_, '_> {
             } => {
                 let then_body = arm(self.edge(addr, true_target));
                 let else_body = arm(self.edge(addr, false_target));
-                let test = self.residual(&CType::Bool);
+                let test = self.spelled(addr, Values::condition, &CType::Bool);
                 vec![self.observe(addr, CStmt::if_stmt(test, then_body, Some(else_body)))]
             }
-            BlockTerminator::Switch { cases, default } => self.switch(addr, &cases, default),
+            BlockTerminator::Switch { cases, default } => {
+                let selector = self.spelled(addr, Values::selector, &super::word(self.input));
+                self.switch(addr, selector, &cases, default)
+            }
             BlockTerminator::IndirectBranch => {
                 let targets = function.successors(addr);
                 let cases = targets
@@ -162,10 +179,16 @@ impl Writer<'_, '_> {
                         let trap = CStmt::Expr(self.residual(&CType::Void));
                         vec![self.observe(addr, trap)]
                     }
-                    false => self.switch(addr, &cases, None),
+                    false => {
+                        let selector = self.residual(&super::word(self.input));
+                        self.switch(addr, selector, &cases, None)
+                    }
                 }
             }
-            BlockTerminator::Return => vec![self.observe(addr, self.return_stmt())],
+            BlockTerminator::Return => {
+                let stmt = self.return_stmt(Some(addr));
+                vec![self.observe(addr, stmt)]
+            }
             // Control never comes back: a void residual traps, so the text ends here as the machine does.
             BlockTerminator::Call {
                 fallthrough: None, ..
@@ -178,11 +201,34 @@ impl Writer<'_, '_> {
         }
     }
 
-    /// A return hands back a residual of the function's result type, or nothing where that is `void`.
-    fn return_stmt(&self) -> CStmt {
-        match super::result_type(self.input) {
+    /// A return hands back what D2 spelled, else a residual of the result type, or nothing for `void`.
+    fn return_stmt(&self, addr: Option<u64>) -> CStmt {
+        let ty = super::result_type(self.input);
+        let spelled = self
+            .values
+            .zip(addr)
+            .and_then(|(values, addr)| Some((values.returned(addr, &ty)?, values, addr)));
+        if let Some((value, values, addr)) = spelled {
+            values.spelled_terminator(addr);
+            return CStmt::Return(value);
+        }
+        match ty {
             CType::Void => CStmt::Return(None),
             ty => CStmt::Return(Some(self.residual(&ty))),
+        }
+    }
+
+    /// The terminator's operand as D2 spelled it, else a residual of `ty`.
+    fn spelled(&self, addr: u64, read: fn(&Values<'i>, u64) -> Option<CExpr>, ty: &CType) -> CExpr {
+        match self
+            .values
+            .and_then(|values| Some((read(values, addr)?, values)))
+        {
+            Some((expr, values)) => {
+                values.spelled_terminator(addr);
+                expr
+            }
+            None => self.residual(ty),
         }
     }
 
@@ -193,8 +239,14 @@ impl Writer<'_, '_> {
             .expect("a machine word has a residual")
     }
 
-    /// A switch on a residual selector, one arm per target; values reaching the default are its own.
-    fn switch(&mut self, addr: u64, cases: &[(u64, u64)], default: Option<u64>) -> Vec<CStmt> {
+    /// A switch on `selector`, one arm per target; values reaching the default are its own.
+    fn switch(
+        &mut self,
+        addr: u64,
+        selector: CExpr,
+        cases: &[(u64, u64)],
+        default: Option<u64>,
+    ) -> Vec<CStmt> {
         let mut by_target = BTreeMap::<u64, Vec<u64>>::new();
         for (value, target) in cases {
             if Some(*target) != default {
@@ -219,23 +271,30 @@ impl Writer<'_, '_> {
             });
         }
         let stmt = CStmt::Switch {
-            expr: self.residual(&super::word(self.input)),
+            expr: selector,
             cases: switch_cases,
             default: default_body,
         };
         vec![self.observe(addr, stmt)]
     }
 
-    /// One edge: the target written here, a `continue`, a `goto`, or a return where it leaves the function.
+    /// One edge: its merge copies, then the target written here, a `continue`, a `goto`, or a
+    /// return where it leaves the function.
     fn edge(&mut self, from: u64, to: u64) -> Vec<CStmt> {
         if self.input.function().cfg().get_block(to).is_none() {
-            return vec![self.observe(from, self.return_stmt())];
+            let stmt = self.return_stmt(None);
+            return vec![self.observe(from, stmt)];
         }
+        let mut out = self
+            .values
+            .map(|values| values.copies(from, to))
+            .unwrap_or_default();
         match self.placement.edge(from, to) {
-            EdgeShape::Inline => self.place(to),
-            EdgeShape::Continue => vec![CStmt::Continue],
-            EdgeShape::Goto => vec![CStmt::Goto(self.label(to))],
+            EdgeShape::Inline => out.extend(self.place(to)),
+            EdgeShape::Continue => out.push(CStmt::Continue),
+            EdgeShape::Goto => out.push(CStmt::Goto(self.label(to))),
         }
+        out
     }
 }
 

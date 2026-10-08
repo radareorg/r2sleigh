@@ -20,6 +20,11 @@ impl<'a> RenderInput<'a> {
         self.facts.source().function()
     }
 
+    /// The sealed artifact, which D2 canonicalises once.
+    pub(crate) fn artifact(&self) -> &'a r2ssa::SsaArtifact {
+        self.facts.source()
+    }
+
     /// The value graph over the sealed function, by dense id.
     pub fn graph(&self) -> &'a SsaGraph {
         self.facts.source().graph()
