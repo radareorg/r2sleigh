@@ -299,7 +299,7 @@ jobs:
           set -o pipefail
           python3 scripts/census.py time --r2s "$RUNNER_TEMP/base/r2s" --r2s "$RUNNER_TEMP/head/r2s" \
             --count-r2s "$RUNNER_TEMP/base-count/r2s" --count-r2s "$RUNNER_TEMP/head-count/r2s" \
-            --bins "$RUNNER_TEMP/testbins/elf" --runs 5 --budget 1.3 --rss-budget 1.3 \
+            --bins "$RUNNER_TEMP/testbins/elf" --runs 5 --budget 1.3 --rss-budget 1.1 \
             --alloc-budget 1.3 | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
