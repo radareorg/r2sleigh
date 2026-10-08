@@ -1472,6 +1472,51 @@ fn rendered(bytes: &'static [u8], name: &'static str) -> String {
     rendered_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
 }
 
+/// x86-64 with a header's prototype for the body at `BASE`, spelled `int`, `uint32_t`, `uint64_t`
+/// or `void *`: a body writing both RAX and XMM0 does not say which one its caller reads.
+fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let mut node = |spelled: &str| {
+        let scalar = |kind, bits| {
+            Type::Scalar(Scalar {
+                kind,
+                width: Width::Bits(bits),
+                name: Some(spelled.to_owned()),
+            })
+        };
+        match spelled {
+            "int" => graph.add(scalar(ScalarKind::Signed, 32)),
+            "uint32_t" => graph.add(scalar(ScalarKind::Unsigned, 32)),
+            "uint64_t" => graph.add(scalar(ScalarKind::Unsigned, 64)),
+            "void *" => {
+                let target = graph.add(Type::Void);
+                graph.add(Type::Pointer { target })
+            }
+            other => panic!("no type spelled {other}"),
+        }
+    };
+    let parameters = parameters
+        .iter()
+        .map(|spelled| Parameter::new(node(spelled), *spelled, None::<String>))
+        .collect();
+    let return_type = node(returns);
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(
+        BASE,
+        Prototype {
+            name: name.to_owned(),
+            parameters,
+            returns: returns.into(),
+            return_type,
+            ..Prototype::default()
+        },
+    );
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    machine.declarations = declarations;
+    machine
+}
+
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
 fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> String {
     let target = machine.target();
@@ -2130,7 +2175,11 @@ const HIGH_QWORD: &[u8] = &[
 /// the argument is a parameter rather than a local nothing assigns.
 #[test]
 fn an_argument_read_back_from_the_high_half_of_a_vector_is_a_parameter() {
-    let text = rendered(HIGH_QWORD, "high_qword");
+    let text = rendered_on(
+        &declaring("high_qword", "uint64_t", &["uint64_t"]),
+        HIGH_QWORD,
+        "high_qword",
+    );
     assert!(text.starts_with("uint64_t high_qword(uint64_t "), "{text}");
     run_rendered(
         "high_qword",
@@ -2223,7 +2272,7 @@ fn a_packed_extension_from_memory_renders_every_lane() {
             "0x00000001u, 0x00000080u, 0x0000007fu, 0x000000feu",
         ),
     ] {
-        let text = rendered(bytes, name);
+        let text = rendered_on(&declaring(name, "int", &["void *", "void *"]), bytes, name);
         assert_packed_extension_rendered(&text);
         run_rendered(
             name,
@@ -2268,7 +2317,11 @@ fn a_packed_extension_of_an_argument_takes_the_argument() {
 }"#,
     );
 
-    let text = rendered(PACKED_SIGN_EXTEND_HIGH_LANE, "sign_extend_high_lane");
+    let text = rendered_on(
+        &declaring("sign_extend_high_lane", "uint64_t", &["uint32_t"]),
+        PACKED_SIGN_EXTEND_HIGH_LANE,
+        "sign_extend_high_lane",
+    );
     assert_packed_extension_rendered(&text);
     assert!(
         text.starts_with("uint64_t sign_extend_high_lane(uint32_t "),
@@ -2344,7 +2397,7 @@ fn a_256_bit_packed_extension_compiles_on_its_own() {
             "(uint32_t)(int32_t)(int8_t)source[i]",
         ),
     ] {
-        let text = rendered(bytes, name);
+        let text = rendered_on(&declaring(name, "int", &["void *", "void *"]), bytes, name);
         assert_packed_extension_rendered(&text);
         assert!(
             text.starts_with("struct r2sleigh_bits_256 {\n    uint8_t bytes[32];\n};\n"),
@@ -2423,7 +2476,7 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         (COPY_16_IN_HALVES, "copy_16_in_halves", 16),
         (COPY_32, "copy_32", 32),
     ] {
-        let text = rendered(bytes, name);
+        let text = rendered_on(&declaring(name, "int", &["void *", "void *"]), bytes, name);
         assert!(!text.contains("byte["), "{text}");
         run_rendered(
             name,
@@ -2453,7 +2506,11 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         );
     }
 
-    let text = rendered(SIGN_EXTEND_STORED_WHOLE, "sign_extend_stored_whole");
+    let text = rendered_on(
+        &declaring("sign_extend_stored_whole", "int", &["void *", "void *"]),
+        SIGN_EXTEND_STORED_WHOLE,
+        "sign_extend_stored_whole",
+    );
     assert_packed_extension_rendered(&text);
     assert!(!text.contains("byte["), "{text}");
     run_rendered(
@@ -2497,7 +2554,7 @@ const UNMODELLED_SHUFFLE: &[u8] = &[
 /// of the block at 0x1000, after the two `movq` zero extensions.
 #[test]
 fn an_unmodelled_user_operation_is_refused_by_name() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
+    let machine = declaring("shuffle", "uint64_t", &["uint64_t", "uint64_t"]);
     let target = machine.target();
     let program = Fixture {
         bytes: UNMODELLED_SHUFFLE.to_vec(),
@@ -2554,8 +2611,9 @@ const REVERSED_WORDS: &[u8] = &[
 /// times, and the four words in reverse order.
 #[test]
 fn a_word_shuffle_renders_what_the_machine_computes() {
-    let widen = rendered(WIDENED_BYTE, "widen");
-    let reverse = rendered(REVERSED_WORDS, "reverse");
+    let declared = |name| declaring(name, "uint64_t", &["uint64_t"]);
+    let widen = rendered_on(&declared("widen"), WIDENED_BYTE, "widen");
+    let reverse = rendered_on(&declared("reverse"), REVERSED_WORDS, "reverse");
     run_rendered(
         "word_shuffle",
         &format!("{widen}\n{reverse}"),
@@ -2649,7 +2707,7 @@ const WIDE_EXCLUSIVE_OR: &[u8] = &[
 /// no C compiler accepts.
 #[test]
 fn an_operator_on_a_wide_carrier_is_refused() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
+    let machine = declaring("wide_xor", "uint64_t", &["void *", "void *"]);
     let target = machine.target();
     let program = Fixture {
         bytes: WIDE_EXCLUSIVE_OR.to_vec(),

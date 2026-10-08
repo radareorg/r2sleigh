@@ -439,6 +439,34 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
     }
 }
 
+/// Stripped `avg` writes both RAX (the loop test) and XMM0 (its double) before returning: the
+/// body does not say which one the caller reads, so each pipeline returns a residual.
+#[test]
+fn a_body_writing_both_result_registers_returns_neither() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    for pipeline in ["legacy", "staged"] {
+        let stripped = on(
+            fixtures.join("rv_O0g_stripped"),
+            &format!("e dec.pipeline={pipeline}; pdd @ 0x12ef"),
+        );
+        assert!(
+            stripped.out.contains("return r2sleigh_residual_u64(")
+                && !stripped.out.contains("return (uint32_t)"),
+            "{pipeline}: {}",
+            stripped.out
+        );
+        let declared = on(
+            fixtures.join("rv_O0g"),
+            &format!("e dec.pipeline={pipeline}; pdd @ sym.avg"),
+        );
+        assert!(
+            declared.out.contains("double avg("),
+            "{pipeline}: {}",
+            declared.out
+        );
+    }
+}
+
 /// A double comes back in XMM0's low lane: the call's result is its bits, the rest of the register
 /// zero, and the return reads the lane back.
 #[test]
@@ -996,7 +1024,7 @@ mod dispatch_table {
         // function-pointer call is the proof the target came from the table
         // rather than from a guess.
         assert!(run.out.contains("_table_dispatch("), "{}", run.out);
-        assert!(run.out.contains(")(X0_0,"), "{}", run.out);
+        assert!(run.out.contains(")((uint64_t)X0_0,"), "{}", run.out);
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
@@ -1026,8 +1054,10 @@ mod dispatch_table {
         let frame = frame.collect::<Vec<_>>().join("\n");
         assert_eq!(
             frame,
-            "arg uint64_t arg1 @ x0\n\
-             arg uint64_t arg2 @ x1\n\
+            // The loaded table leaves q0 written on the path that skips the loop, so the body does
+            // not say whether x0 or v0 is the result, and no returned use makes the arguments unsigned.
+            "arg int64_t arg1 @ x0\n\
+             arg int64_t arg2 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
              var uint8_t[24] stack_m64 @ entry.sp-0x40"
         );

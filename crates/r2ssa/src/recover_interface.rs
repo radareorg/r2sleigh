@@ -812,6 +812,36 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
 /// The carrier the answered returns fill, void where none does, unproven where one is stated nowhere.
 ///
 /// Its width is the widest any return path wrote (doc/adr-written-lanes.md):
+/// Whether an operation of the body reaches a return in the float result register, through any
+/// merge: what a call leaves there is its clobber, and what the caller left is its own.
+fn float_result_written(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    slots: &SourceConventionSlots,
+) -> bool {
+    let Some(float) = slots.float_result_slot() else {
+        return false;
+    };
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[float]);
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = live_out.iter().collect::<Vec<_>>();
+    // Each value is taken once, so the walk ends after at most every value reaching a return.
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) || !graph.written_by_body(value) {
+            continue;
+        }
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            continue;
+        };
+        match &inst.payload {
+            crate::graph::InstPayload::Phi { .. } => pending.extend(inst.inputs.iter().copied()),
+            crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {}
+            crate::graph::InstPayload::Op(_) => return true,
+        }
+    }
+    false
+}
+
 /// one past the highest byte some path computed or moved there, as lifted,
 /// and the carrier's own where a path wrote none of it.
 fn recovered_result(
@@ -1117,6 +1147,11 @@ fn recover_interface_inner(
         let candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
         result = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        // A body that writes both result registers on its way out hands back one of them, and the
+        // body alone does not say which.
+        if result.register().is_some() && float_result_written(func, graph, slots) {
+            result = RecoveredFunctionResult::Unproven;
+        }
         if !candidate_live_out.is_empty()
             && (candidate_live_out.unresolved_blocks().next().is_none()
                 || result.register().is_some())
