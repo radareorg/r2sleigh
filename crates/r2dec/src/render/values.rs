@@ -13,8 +13,9 @@ use r2ssa::{
 };
 
 use super::RenderInput;
+use super::calls::{self, CallPlan};
 use super::terms::{self, Spell};
-use crate::ast::{CExpr, CLocal, CParam, CStmt, CType, GapMarker};
+use crate::ast::{CExpr, CExternDecl, CLocal, CParam, CStmt, CType, GapMarker};
 use crate::prelude::{Helper, ResidualType};
 use crate::symbol::{SymbolId, SymbolRole, SymbolTable};
 
@@ -39,6 +40,12 @@ pub(super) struct Values<'a> {
     rendered: RefCell<Vec<bool>>,
     /// By instruction index: frame teardown a spelled C `return` performs.
     restored: RefCell<Vec<bool>>,
+    /// The calls the facts describe, by instruction.
+    calls: r2ssa::dense::IdMap<InstId, CallPlan>,
+    /// The values a described call's statement assigns.
+    results: r2ssa::dense::IdSet<ValueId>,
+    /// One declaration per callee, which every call to it here must agree with.
+    externs: RefCell<BTreeMap<String, CExternDecl>>,
     little_endian: bool,
 }
 
@@ -244,27 +251,49 @@ fn discharged_insts<'g>(
 struct Readers<'a> {
     graph: &'a SsaGraph,
     inventory: &'a SemanticObligationInventory,
-    returned: r2ssa::dense::IdMap<ValueId, Vec<InstId>>,
+    /// The returns and calls whose boundary reads a value, by value.
+    boundary: r2ssa::dense::IdMap<ValueId, Vec<InstId>>,
+    /// The call a `CALLUSE` hands its carrier to: the next call in its block.
+    used_by: r2ssa::dense::IdMap<InstId, InstId>,
 }
 
 impl<'a> Readers<'a> {
     fn new(graph: &'a SsaGraph, inventory: &'a SemanticObligationInventory) -> Self {
-        let mut returned = r2ssa::dense::IdMap::new(graph.values.len());
+        let mut boundary = r2ssa::dense::IdMap::new(graph.values.len());
         for obligation in inventory.obligations().values() {
-            if obligation.id.kind != SemanticObligationKind::ReturnValue {
+            if !matches!(
+                obligation.id.kind,
+                SemanticObligationKind::ReturnValue | SemanticObligationKind::CallArgument
+            ) {
                 continue;
             }
             let Some(inst) = obligation.source.graph_inst() else {
                 continue;
             };
             for input in &obligation.inputs {
-                returned.get_or_insert_with(*input, Vec::new).push(inst);
+                boundary.get_or_insert_with(*input, Vec::new).push(inst);
+            }
+        }
+        let mut used_by = r2ssa::dense::IdMap::new(graph.insts.len());
+        for block in &graph.blocks {
+            let mut pending = Vec::new();
+            for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
+                match &inst.payload {
+                    InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
+                    InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {
+                        for using in pending.drain(..) {
+                            used_by.insert(using, inst.id);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         Self {
             graph,
             inventory,
-            returned,
+            boundary,
+            used_by,
         }
     }
 
@@ -273,7 +302,7 @@ impl<'a> Readers<'a> {
             .graph
             .use_sites(value)
             .iter()
-            .map(|site| site.inst)
+            .map(|site| self.used_by.get(site.inst).copied().unwrap_or(site.inst))
             .filter(|inst| {
                 matches!(
                     self.inventory.instruction_for_inst(*inst).map(|d| d.state),
@@ -284,7 +313,7 @@ impl<'a> Readers<'a> {
                 )
             });
         let mut readers = live
-            .chain(self.returned.get(value).into_iter().flatten().copied())
+            .chain(self.boundary.get(value).into_iter().flatten().copied())
             .collect::<Vec<_>>();
         readers.sort_unstable();
         readers.dedup();
@@ -413,6 +442,21 @@ impl<'a> Values<'a> {
             )
         };
         let roots = r2rewrite::canonicalize_with(artifact, &projection, &policy, &|_| None).ok()?;
+        let mut planned = r2ssa::dense::IdMap::new(graph.insts.len());
+        let mut results = r2ssa::dense::IdSet::new(graph.values.len());
+        for inst in &graph.insts {
+            if matches!(
+                inst.payload,
+                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. })
+            ) && let Some(plan) =
+                calls::plan(artifact, input.callee_resolution(), inventory, inst.id)
+            {
+                if let Some(result) = plan.result {
+                    results.insert(result);
+                }
+                planned.insert(inst.id, plan);
+            }
+        }
         let mut demand = Demand {
             graph,
             readers: &readers,
@@ -443,6 +487,14 @@ impl<'a> Values<'a> {
                         None => demand.operand(*addr, inst.id),
                     }
                     demand.operand(*val, inst.id);
+                }
+                SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
+                    for argument in planned
+                        .get(inst.id)
+                        .map_or(&[][..], |plan| &plan.arguments[..])
+                    {
+                        demand.operand(*argument, inst.id);
+                    }
                 }
                 SSAOp::CBranch { cond, .. } => demand.operand(*cond, inst.id),
                 SSAOp::Switch { selector } => demand.operand(*selector, inst.id),
@@ -491,6 +543,9 @@ impl<'a> Values<'a> {
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
+            calls: planned,
+            results,
+            externs: RefCell::new(BTreeMap::new()),
             little_endian: matches!(
                 artifact
                     .machine_context()
@@ -743,7 +798,16 @@ impl<'a> Values<'a> {
             SSAOp::Store { addr, val, .. } => {
                 self.store(inst, *addr, *val).map(Some).ok_or(Gap::Store)
             }
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } => Err(Gap::Call),
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
+                self.call(inst).map(Some).ok_or(Gap::Call)
+            }
+            // The described call's statement assigns its result.
+            SSAOp::CallDefine { .. } if output.is_some_and(|o| self.results.contains(o)) => {
+                Ok(None)
+            }
+            SSAOp::CallDefine { .. } if output.is_some_and(|o| self.is_named(o)) => {
+                Err(Gap::Unknown)
+            }
             _ if writes_value(op) => {
                 let Some(output) = output else {
                     return Ok(None);
@@ -776,6 +840,67 @@ impl<'a> Values<'a> {
 
     /// `value` written at the store's cell: its canonical access where import built one, else its
     /// own address operand at the value's width.
+    fn is_named(&self, value: ValueId) -> bool {
+        self.names
+            .get(value.0 as usize)
+            .is_some_and(Option::is_some)
+    }
+
+    /// A described call: its callee by name, its arguments at their own types, its result assigned.
+    fn call(&self, inst: InstId) -> Option<CStmt> {
+        let plan = self.calls.get(inst)?;
+        let mut arguments = Vec::with_capacity(plan.arguments.len());
+        let mut types = Vec::with_capacity(plan.arguments.len());
+        for argument in &plan.arguments {
+            let ty = terms::c_type(&self.value_type(*argument)?)?;
+            arguments.push(CExpr::cast(ty.clone(), self.operand(*argument, inst)?));
+            types.push(ty);
+        }
+        let ret_type = match plan.result {
+            Some(result) => terms::c_type(&self.value_type(result)?)?,
+            None => CType::Void,
+        };
+        let declaration = CExternDecl {
+            name: plan.name.clone(),
+            ret_type,
+            params: Some(types[..plan.fixed].to_vec()),
+            variadic: plan.variadic,
+            noreturn: plan.noreturn,
+            address: plan.address,
+        };
+        // One declaration describes every call to a callee, so calls that disagree cannot both be C.
+        match self.externs.borrow_mut().entry(plan.name.clone()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(declaration);
+            }
+            std::collections::btree_map::Entry::Occupied(slot) if *slot.get() != declaration => {
+                return None;
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+        let callee = CExpr::External {
+            name: plan.name.clone(),
+            kind: plan.kind,
+        };
+        let call = CExpr::call_at(inst, callee, arguments);
+        let assigned = plan
+            .result
+            .and_then(|result| Some((result, self.names.get(result.0 as usize)?.as_ref()?.0)));
+        Some(match assigned {
+            Some((result, name)) => {
+                if let Some(def) = self.graph.def_inst(result) {
+                    self.mark(def);
+                }
+                assign(name, call)
+            }
+            None => CStmt::Expr(call),
+        })
+    }
+
+    pub(super) fn externs(&self) -> Vec<CExternDecl> {
+        self.externs.borrow().values().cloned().collect()
+    }
+
     fn store(&self, inst: InstId, address: ValueId, value: ValueId) -> Option<CStmt> {
         if !self.little_endian {
             return None;

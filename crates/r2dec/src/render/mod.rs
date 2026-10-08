@@ -1,6 +1,7 @@
 //! The staged decompiler (doc/adr-decompiler-rewrite.md): one pass per stage over the sealed facts,
 //! a residual wherever they stop. D0 is the input, D1 the control, D2 the values, D3 the terms.
 
+mod calls;
 mod control;
 mod input;
 mod terms;
@@ -80,6 +81,7 @@ pub fn render(
         Some(values) => {
             c.params = values.params();
             c.locals = values.locals();
+            c.externs = values.externs();
         }
         None => c.params_known = false,
     }

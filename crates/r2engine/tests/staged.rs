@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{CALLER, FORKED, opened};
+use common::{CALLER, FORKED, ONE, opened};
 use r2engine::RenderTier;
 
 #[test]
@@ -35,18 +35,27 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
 }
 
 #[test]
-fn a_call_is_a_gap_and_its_obligations_are_gapped() {
+fn a_described_call_is_written_from_the_callsite_facts() {
     let rendering = opened()
         .rendered(CALLER, RenderTier::Staged)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
-    assert!(text.contains("r2dec gap: CallNotRendered"), "{text}");
-    // The push of the return address is the call's own transfer: no store into the frame.
+    // `call one; ret`: the result register the call leaves is what `caller` returns.
+    assert!(text.contains("uint64_t one(void);"), "{text}");
+    assert!(text.contains("rax_1 = one();"), "{text}");
+    assert!(text.contains("return (uint64_t)rax_1;"), "{text}");
+    // `one` returns, so nothing may tell C otherwise; its return push writes nothing.
+    assert!(!text.contains("noreturn"), "{text}");
     assert!(!text.contains("r2sleigh_store"), "{text}");
-    let closure = rendering
-        .response
-        .obligation_ledger
-        .expect("a ledger")
-        .close();
-    assert!(closure.gapped > 0, "the call is not rendered: {text}");
+    assert!(!text.contains("r2dec gap"), "{text}");
+    let r2engine::EngineRendering::Function(rendered) = &rendering.response.output else {
+        panic!("nothing rendered: {text}");
+    };
+    let links = rendered.emission().links();
+    assert!(
+        links
+            .iter()
+            .any(|link| link.ident == "one" && link.addr == Some(ONE)),
+        "{links:?}"
+    );
 }

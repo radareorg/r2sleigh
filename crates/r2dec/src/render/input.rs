@@ -47,6 +47,11 @@ impl<'a> RenderInput<'a> {
         self.facts.return_type()
     }
 
+    /// Who each call site calls, as r2types resolved it.
+    pub fn callee_resolution(&self) -> Option<&'a r2types::CalleeResolutionFacts> {
+        self.facts.report().callee_resolution()
+    }
+
     /// The name the source states for the function, where it states one.
     pub fn name(&self) -> Option<&'a str> {
         self.function().name.as_deref()
