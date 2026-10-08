@@ -3884,6 +3884,11 @@ fn a_stack_protector_check_is_compiler_inserted_under_a_ub_free_source() {
         output.contains("compiler-inserted (assuming ub-free)"),
         "{output}"
     );
+    // The analysis says what it decided under, whatever the ledger keeps of the check.
+    assert_eq!(
+        response.premises,
+        std::collections::BTreeSet::from([r2source::Premise::UbFreeSource])
+    );
 }
 
 /// The slot is written again before the check, so the check can fail and stays a residual.
@@ -3907,6 +3912,7 @@ fn a_canary_written_twice_is_not_decided() {
     let output = response.output.text();
     assert!(output.contains("FS_OFFSET_0"), "{output}");
     assert!(!output.contains("compiler-inserted"), "{output}");
+    assert!(response.premises.is_empty(), "{:?}", response.premises);
 }
 
 /// Two reads of a thread-local variable at `fs:[0x30]` compared the same way are a program's

@@ -651,7 +651,7 @@ fn eligible(
         })
     };
     let mut promotable = BTreeMap::new();
-    let places = accesses.keys().copied().collect::<Vec<_>>();
+    let overlapped = overlapped_places(accesses);
     for (offset, list) in accesses {
         // At or above the entry stack pointer is the caller's: the return address, stack arguments.
         if *offset >= 0 {
@@ -664,12 +664,7 @@ fn eligible(
         let Some(width) = widths.iter().next().copied().filter(|_| widths.len() == 1) else {
             continue;
         };
-        let overlaps = places.iter().any(|other| {
-            other != offset
-                && accesses[other].iter().any(|access| {
-                    *other < offset + i64::from(width) && *offset < other + i64::from(access.width)
-                })
-        });
+        let overlaps = overlapped.contains(offset);
         let stores = list.iter().filter(|access| access.store).count();
         let read_only_home = stores == 1
             && list.iter().filter(|access| access.store).any(|access| {
@@ -714,6 +709,29 @@ struct Versions {
     next: Vec<u32>,
     rewrites: Vec<Vec<Rewrite>>,
     sources: BTreeMap<(u64, usize), Vec<(u64, u32)>>,
+}
+
+/// The places another place's access overlaps: one sweep of the sorted places, each the interval
+/// from its offset to its widest access's end, `O(places + accesses)`.
+fn overlapped_places(accesses: &BTreeMap<i64, Vec<Access>>) -> BTreeSet<i64> {
+    let spans = accesses
+        .iter()
+        .map(|(offset, list)| {
+            let widest = list.iter().map(|access| access.width).max().unwrap_or(0);
+            (*offset, offset.saturating_add(i64::from(widest)))
+        })
+        .collect::<Vec<_>>();
+    let mut overlapped = BTreeSet::new();
+    // A place before this one that reaches into it is marked by its own next-place test below.
+    let mut reach = i64::MIN;
+    for (index, (offset, end)) in spans.iter().enumerate() {
+        let next_inside = spans.get(index + 1).is_some_and(|(next, _)| next < end);
+        if reach > *offset || next_inside {
+            overlapped.insert(*offset);
+        }
+        reach = reach.max(*end);
+    }
+    overlapped
 }
 
 /// Rewrite every access of every promotable place into copies of its versions, with merges.
@@ -996,4 +1014,66 @@ fn has_call(func: &SSAFunction) -> bool {
             .iter()
             .any(|op| matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dense::DenseId;
+
+    /// Each place another place's access overlaps, by testing every pair: the rule the sweep keeps.
+    fn pairwise_overlaps(accesses: &BTreeMap<i64, Vec<Access>>) -> BTreeSet<i64> {
+        let span = |offset: i64, width: u32| (offset, offset + i64::from(width));
+        let spans = accesses
+            .iter()
+            .flat_map(|(offset, list)| list.iter().map(|access| span(*offset, access.width)))
+            .collect::<Vec<_>>();
+        let mut overlapped = BTreeSet::new();
+        for (offset, end) in &spans {
+            let meets = |(other, other_end): &(i64, i64)| {
+                other != offset && other < end && offset < other_end
+            };
+            if spans.iter().any(meets) {
+                overlapped.insert(*offset);
+            }
+        }
+        overlapped
+    }
+
+    /// The sweep marks exactly the places the pairwise test did, over generated frames.
+    #[test]
+    fn the_overlap_sweep_is_the_pairwise_test() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..2000 {
+            let mut accesses = BTreeMap::<i64, Vec<Access>>::new();
+            for index in 0..next(8) {
+                let offset = -(next(24) as i64) - 1;
+                let width = [1, 2, 4, 8][next(4) as usize];
+                accesses.entry(offset).or_default().push(Access {
+                    op: OpId::from_index(index as usize),
+                    block: 0,
+                    index: index as usize,
+                    width,
+                    store: false,
+                });
+            }
+            let pairwise = pairwise_overlaps(&accesses);
+            let spans = accesses
+                .iter()
+                .map(|(offset, list)| {
+                    (
+                        *offset,
+                        list.iter().map(|access| access.width).collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(overlapped_places(&accesses), pairwise, "{spans:?}");
+        }
+    }
 }

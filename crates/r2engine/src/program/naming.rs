@@ -359,6 +359,8 @@ fn section_stubs(
     // computes its address across three instructions; both answer here.
     // Each reader: where its transfer is, where its run began, and the import.
     let mut readers: Vec<(u64, u64, String)> = Vec::new();
+    // Where every stub transfers through a word the loader writes, named or not: the cells' measure.
+    let mut transfers: Vec<u64> = Vec::new();
     let mut run = fresh_run(section.vaddr);
     // Where each instruction of the run begins, and its first operation.
     let mut starts: Vec<(u64, usize)> = Vec::new();
@@ -421,6 +423,9 @@ fn section_stubs(
         if slot.is_some_and(|slot| container.loader_write_at(slot).is_none()) {
             return Vec::new();
         }
+        if slot.is_some() {
+            transfers.push(leaving_at);
+        }
         if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
             let start = stub_start(&run, &starts, section.align);
             readers.push((leaving_at, start, (*found).to_owned()));
@@ -428,7 +433,7 @@ fn section_stubs(
         run = fresh_run(pc);
         starts.clear();
     }
-    cells(readers, end)
+    cells(readers, &transfers, end)
 }
 
 /// Whether one instruction's operations make a choice no stub makes.
@@ -455,18 +460,19 @@ fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
     })
 }
 
-/// Each stub's cell, from where each reader transfers and the section's end.
+/// Each stub's cell, from where each reader transfers, where every stub transfers, and the section's end.
 ///
 /// The stubs are uniform cells filling the section's tail: whatever header
 /// the linker put first, the last cell ends where the section ends. That
 /// anchors every cell without deciding what a landing pad or an alignment
 /// nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
 /// twenty-byte header alike.
-fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
-    // The cell size is the gcd of the gaps between transfers: a stub whose slot names no import leaves a gap of two cells.
-    let stride = readers
+fn cells(readers: Vec<(u64, u64, String)>, transfers: &[u64], end: u64) -> Vec<(u64, Stub)> {
+    // The cell size is the gcd of the gaps between every stub's transfer: measured over the named
+    // ones alone, unnamed cells spaced evenly between them would make it a multiple of the cell.
+    let stride = transfers
         .windows(2)
-        .map(|pair| pair[1].0.saturating_sub(pair[0].0))
+        .map(|pair| pair[1].saturating_sub(pair[0]))
         .fold(0, gcd);
     match readers.as_slice() {
         // One stub has no neighbour to measure against: its cell runs from where it starts to the section's end, which anchors every cell.
@@ -631,6 +637,7 @@ mod tests {
                 reader(0x3424, "__stack_chk_fail"),
                 reader(0x3434, "memset"),
             ],
+            &[0x3404, 0x3414, 0x3424, 0x3434, 0x3444, 0x3454],
             0x3460,
         );
         let at = |vaddr: u64| {
@@ -643,6 +650,22 @@ mod tests {
         assert_eq!(at(0x3400), Some(("free", 16)));
         assert_eq!(at(0x3420), Some(("__stack_chk_fail", 16)));
         assert_eq!(at(0x3430), Some(("memset", 16)));
+    }
+
+    /// Named stubs two cells apart with an unnamed one between: the cell is the unnamed one's measure too.
+    #[test]
+    fn a_cell_is_measured_by_every_stub_named_or_not() {
+        let reader = |transfer: u64, symbol: &str| (transfer, transfer - 4, symbol.to_owned());
+        let named = cells(
+            vec![reader(0x3404, "free"), reader(0x3424, "memset")],
+            &[0x3404, 0x3414, 0x3424],
+            0x3430,
+        );
+        let sizes = named
+            .iter()
+            .map(|(start, stub)| (*start, stub.symbol.as_str(), stub.size))
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, [(0x3400, "free", 16), (0x3420, "memset", 16)]);
     }
 
     #[test]
