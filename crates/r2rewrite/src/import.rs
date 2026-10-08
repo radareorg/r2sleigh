@@ -149,15 +149,14 @@ impl Import {
         out
     }
 
-    /// Every producer a step absorbed, directly or through what those absorbed.
+    /// Every producer a step absorbed, directly or through what those absorbed. A producer
+    /// has one root, so a producer already collected is a root already walked.
     fn producers(&self, step: &ImportStep) -> BTreeSet<CanonicalInstructionId> {
         let mut producers = BTreeSet::new();
-        let mut seen = HashSet::new();
         let mut stack = vec![step];
         while let Some(step) = stack.pop() {
             for substitution in &step.substitutions {
-                producers.insert(substitution.producer);
-                if seen.insert(substitution.root)
+                if producers.insert(substitution.producer)
                     && let Some(child) = self.step(substitution.root)
                 {
                     stack.push(child);
