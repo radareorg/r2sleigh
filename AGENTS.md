@@ -197,7 +197,9 @@ the engine renders. More in [doc/testing.md](doc/testing.md).
 
 ## Validation Bar
 
-Work runs one roadmap item per branch, with two tiers of checks.
+Work runs one roadmap item per branch, with two tiers of checks. Each item's
+pull request stacks on the one before it (`gh stack link`), so CI grades it
+against its parent and the stack merges bottom first.
 
 Inside an item, per edit: `cargo fmt`, clippy and the tests of the crates
 touched. The old path is deleted when the new owner lands, without running
