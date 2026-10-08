@@ -512,6 +512,10 @@ fn info(session: &Session) -> Result<String, String> {
         }
     ));
     out.push_str(&format!("baddr    {:#010x}\n", image.base_address()));
+    out.push_str(&format!(
+        "lang     {}\n",
+        image.container().languages.program.spelled()
+    ));
     if let Some(entry) = image
         .entry_points()
         .iter()
