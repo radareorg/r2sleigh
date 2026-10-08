@@ -58,3 +58,46 @@ fn without_a_reading_call_the_result_stays_a_residual() {
         );
     }
 }
+
+/// clang -O0's `double first(double *v)`: RAX holds the loaded pointer, and XMM0 the result reloaded
+/// from the frame slot two paths stored it to; the caller stores it with `movsd [rsi], xmm0`.
+const RELOADED_DOUBLE: &[u8] = &[
+    0x55, // 1000 push rbp
+    0x48, 0x89, 0xe5, // 1001 mov rbp, rsp
+    0x48, 0x89, 0x7d, 0xf0, // 1004 mov [rbp - 16], rdi
+    0x48, 0x8b, 0x45, 0xf0, // 1008 mov rax, [rbp - 16]
+    0xf2, 0x0f, 0x10, 0x00, // 100c movsd xmm0, [rax]
+    0xf2, 0x0f, 0x11, 0x45, 0xf8, // 1010 movsd [rbp - 8], xmm0
+    0x48, 0x85, 0xff, // 1015 test rdi, rdi
+    0x74, 0x0a, // 1018 je 0x1024
+    0xf2, 0x0f, 0x10, 0x40, 0x08, // 101a movsd xmm0, [rax + 8]
+    0xf2, 0x0f, 0x11, 0x45, 0xf8, // 101f movsd [rbp - 8], xmm0
+    0xf2, 0x0f, 0x10, 0x45, 0xf8, // 1024 movsd xmm0, [rbp - 8]
+    0x5d, // 1029 pop rbp
+    0xc3, // 102a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102b padding
+    0xe8, 0xcb, 0xff, 0xff, 0xff, // 1030 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1035 movsd [rsi], xmm0
+    0xc3, // 1039 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 103a padding
+];
+
+/// The caller's read makes `first` a `double`, and the reload from its promoted frame slot is that
+/// `double`: the caller declares it so. Uncertified, the declaration was `void` beside an assigned
+/// result, which no C compiler accepts.
+#[test]
+fn a_float_result_reloaded_from_the_frame_is_declared_at_its_type() {
+    let program = Literal::of_code(
+        RELOADED_DOUBLE,
+        &[("first", BASE, 0x2b), ("caller", BASE + 0x30, 0x0a)],
+    );
+    let text = OpenProgram::of(program)
+        .rendered(BASE + 0x30, RenderTier::C)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("double first("), "{text}");
+    assert!(!text.contains("void first("), "{text}");
+}
