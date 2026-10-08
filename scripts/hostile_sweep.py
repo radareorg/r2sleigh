@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run r2s over hostile inputs with a time and memory budget, and report every overrun.
+"""Run r2s over hostile inputs with a time and memory budget, and report every overrun or crash.
 
     python3 scripts/hostile_sweep.py --r2s target/release/r2s DIR... [--command afl] [--seconds 30] [--mb 512]
 
 A file that exceeds the time budget is killed; one that exceeds the memory budget is reported
-with its peak. Exit status is 1 when anything overran, so it can gate.
+with its peak; one whose run exits other than 0 (success) or 1 (a refusal) crashed. Exit status
+is 1 when anything overran or crashed, so it can gate.
 """
 
 import argparse
@@ -57,8 +58,8 @@ def main():
             count += 1
             # Each file in its own process group of one, so the peak is this file's.
             status, elapsed, peak = run(args.r2s, path, args.command, args.seconds)
-            # A signal (a negative status) is a crash; a refusal exits nonzero and is fine.
-            if status == "timeout" or peak > args.mb or (isinstance(status, int) and status < 0):
+            # r2s exits 0 on success and 1 on a refusal; a panic exits 101 and a signal is negative.
+            if status not in (0, 1) or peak > args.mb:
                 over.append((path, status, elapsed, peak))
                 print(f"{path}: {status} after {elapsed:.1f} s, peak {peak:.0f} MB", flush=True)
     print(f"{count} files, {len(over)} over budget ({args.seconds:.0f} s, {args.mb:.0f} MB)")
