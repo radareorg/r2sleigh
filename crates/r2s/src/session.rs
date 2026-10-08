@@ -21,6 +21,8 @@ pub struct Session {
     pub grepped: bool,
     /// Whether a listing shows each instruction's bytes: `asm.bytes`.
     pub bytes: bool,
+    /// Which decompiler writes `pdd` and its forms: `dec.pipeline`.
+    pub tier: r2engine::RenderTier,
 }
 
 impl Session {
@@ -31,6 +33,7 @@ impl Session {
             color: false,
             grepped: false,
             bytes: true,
+            tier: r2engine::RenderTier::C,
             addr: program.start().unwrap_or(0),
             program,
             path: path.to_owned(),

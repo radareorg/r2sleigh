@@ -3,7 +3,7 @@
 //! text against the CFG, and the rewrites that shape it afterwards.
 
 pub(crate) mod certify;
-mod place;
+pub(crate) mod place;
 pub(crate) mod print;
 mod rewrite;
 pub(crate) mod self_update;
@@ -162,7 +162,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .prepared_ssa
             .map(r2ssa::SsaArtifact::authority)
             .ok_or(StructuredRegionBuildError::MissingSourceAuthority)?;
-        let placement = place::Placement::compute(self.func);
+        let placement = place::Placement::compute(
+            self.func.cfg(),
+            self.func.domtree(),
+            self.func.natural_loops(),
+            self.func.root(),
+        );
         crate::stage_timing::mark("structure_analyze");
         self.prepare_certified_for_loops(&placement)?;
         crate::stage_timing::mark("structure_prepare");

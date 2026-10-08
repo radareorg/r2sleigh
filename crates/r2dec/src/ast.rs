@@ -3201,7 +3201,7 @@ pub(crate) fn carry_all_stmt_observations(source: &[CStmt], replacement: CStmt) 
     CStmt::observe_all(statement_ids, replacement)
 }
 
-fn strip_stmt_observations(stmt: &mut CStmt) {
+pub(crate) fn strip_stmt_observations(stmt: &mut CStmt) {
     // A loop rather than one step: this also strips an audit that failed,
     // whose tree is not known to be canonical.
     while let CStmt::Observed { stmt: inner, .. } = stmt {

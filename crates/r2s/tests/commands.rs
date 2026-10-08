@@ -362,6 +362,30 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// `dec.pipeline=staged` hands `pdd` to the staged decompiler (ROADMAP D): its control is
+/// certified, and until D2 every block's operations are one marked gap.
+#[test]
+fn the_staged_pipeline_writes_pdd_from_the_sealed_facts() {
+    let staged = r2s(&format!(
+        "e dec.pipeline=staged; pdd @ {FNV1A32}; e dec.pipeline"
+    ));
+    assert!(
+        staged.out.contains("r2dec gap: ValuesNotRendered"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("r2sleigh refused"), "{}", staged.out);
+    assert!(staged.out.ends_with("staged\n"), "{}", staged.out);
+    let refused = r2s("e dec.pipeline=fast");
+    assert!(
+        refused
+            .out
+            .contains("dec.pipeline takes legacy or staged, not 'fast'"),
+        "{}",
+        refused.out
+    );
+}
+
 /// `e` reads and sets the keys the shell acts on, by radare2's names: a key
 /// it lacks and a value it cannot read are refused, and the value stays.
 #[test]
@@ -371,6 +395,7 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
         run.out,
         "asm.bytes = true\n\
          scr.color = 0\n\
+         dec.pipeline = legacy\n\
          \x20           0x00401330      endbr64\n\
          false\n\
          r2s: asm.bytes takes true or false, not 'maybe'\n",

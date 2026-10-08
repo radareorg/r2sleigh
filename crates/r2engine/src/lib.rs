@@ -1495,6 +1495,8 @@ pub enum RenderTier {
     /// What the binding plan decided about each value: which variable it
     /// became, which expression it was folded into, or why nothing spells it.
     Values,
+    /// The C of the staged decompiler (ROADMAP D), read from the sealed facts alone.
+    Staged,
 }
 
 #[derive(Debug, Clone)]
@@ -2611,7 +2613,7 @@ fn render_listing_tier<C: r2ssa::SsaWorkControl>(
     let listing = match request.tier {
         RenderTier::Values => decompiler.values_input_with_control(input, control),
         RenderTier::Structured => decompiler.structured_input_with_control(input, control),
-        RenderTier::C => return None,
+        RenderTier::C | RenderTier::Staged => return None,
     };
     Some(listing.map_err(|stop| EngineRenderExecutionStop {
         reason: format!("{stop:?}"),
@@ -2671,6 +2673,9 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     // as rendered and fully proven while nothing about it had been proven at
     // all. The route is advice about the function; only the native
     // certificates answer for it.
+    if request.tier == RenderTier::Staged {
+        return render_staged(request, control);
+    }
     let input = decompiler_input_for_engine_request(request);
     // Keep a rendering the decompiler reached before it stopped. Discarding it
     // reports a function that ran out of budget as one that produced nothing,
@@ -2733,6 +2738,49 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
         structuring_executed: false,
         stopped: None,
     })
+}
+
+/// The staged decompiler's rendering (ROADMAP D): a refusal is the certificate's, a stop the request's.
+fn render_staged<C: r2ssa::SsaWorkControl>(
+    request: &EngineDecompileRequest<'_>,
+    control: &C,
+) -> Result<EngineRenderedDecompile, EngineRenderExecutionStop> {
+    let input = r2dec::render::RenderInput::new(
+        &request.sealed.source_owned_facts,
+        request.sealed.render_target.ptr_bits,
+    );
+    match r2dec::render::render(&input, control) {
+        Ok(rendered) => {
+            let (function, ledger) = rendered.into_parts();
+            Ok(EngineRenderedDecompile {
+                product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
+                    output: EngineRendering::Function(Box::new(function)),
+                    obligation_ledger: Some(ledger),
+                    placement_audit: PlacementAudit::NotRun,
+                    render_refusal: None,
+                })),
+                semantic_kernel_warnings: Vec::new(),
+                structuring_executed: true,
+                stopped: None,
+            })
+        }
+        Err(r2dec::render::RenderStop::Stopped(stop)) => Err(engine_render_stop_from_decompiler(
+            stop,
+            None,
+            PlacementAudit::NotRun,
+            None,
+        )),
+        Err(r2dec::render::RenderStop::Refused(reason)) => Err(EngineRenderExecutionStop {
+            reason,
+            phase: EnginePhase::Structuring,
+            obligation_ledger: Box::new(None),
+            placement_audit: PlacementAudit::NotRun,
+            render_refusal: None,
+            certification_completed: false,
+            normalization_completed: false,
+            structuring_completed: true,
+        }),
+    }
 }
 
 fn decompiler_input_for_engine_request(

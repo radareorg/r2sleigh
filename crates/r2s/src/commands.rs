@@ -1378,7 +1378,7 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 /// `pdd`: decompile the function at the cursor, with no radare2 anywhere.
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, RenderTier::C)?;
+    let rendering = session.program.rendered(addr, session.tier)?;
     let roles = match (&rendering.response.output, session.paints()) {
         (r2engine::EngineRendering::Function(rendered), true) => {
             Some(crate::listing::c_roles(rendered.emission().roles()))
@@ -1411,7 +1411,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 /// the two cannot disagree.
 fn decompile_json(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, RenderTier::C)?;
+    let rendering = session.program.rendered(addr, session.tier)?;
     let name = session
         .program
         .names()
@@ -1427,7 +1427,7 @@ fn decompile_json(session: &mut Session, argument: &str) -> Result<String, Strin
 /// call to a callee nothing proved renders from the call site alone.
 fn obligations(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, RenderTier::C)?;
+    let rendering = session.program.rendered(addr, session.tier)?;
     let Some(ledger) = rendering.response.obligation_ledger.as_ref() else {
         return Ok(
             "no obligation ledger: the function did not reach native rendering\n".to_owned(),

@@ -43,6 +43,7 @@ mod observation_journal;
 mod placement;
 pub(crate) mod planner;
 pub mod prelude;
+pub mod render;
 pub mod report;
 pub(crate) mod single_evaluation;
 pub(crate) mod stage_timing;
