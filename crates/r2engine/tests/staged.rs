@@ -32,6 +32,20 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
         .close();
     assert!(closure.total > 0, "{text}");
     assert_eq!(closure.gapped, 0, "every obligation is rendered: {text}");
+    // Each written line names the instructions it stands for, all of them `forked`'s.
+    let r2engine::EngineRendering::Function(rendered) = &rendering.response.output else {
+        panic!("nothing rendered: {text}");
+    };
+    let lines = rendered.emission().lines();
+    assert!(!lines.is_empty(), "{text}");
+    for line in lines {
+        assert!(
+            line.addrs
+                .iter()
+                .all(|addr| (FORKED..FORKED + 0x15).contains(addr)),
+            "{line:?}\n{text}"
+        );
+    }
 }
 
 #[test]

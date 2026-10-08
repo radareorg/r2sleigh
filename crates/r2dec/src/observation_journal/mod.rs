@@ -75,6 +75,11 @@ impl ObservationSealAuthority {
     fn new() -> Self {
         Self(())
     }
+
+    /// The staged pipeline's seal: its writer states the instruction each marker was written for.
+    pub(crate) fn staged() -> Self {
+        Self(())
+    }
 }
 
 #[cfg(test)]

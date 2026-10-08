@@ -12,16 +12,24 @@ use crate::observation_journal::RenderObservationId;
 use crate::prelude::ResidualCause;
 use crate::structure::place::{EdgeShape, Placement};
 
-/// The written body, its labels, and the block each marked statement stands for.
+/// The written body, its labels, and the block and instruction each marked statement stands for.
 pub(super) struct Written {
     pub(super) body: Vec<CStmt>,
     pub(super) labels: BTreeMap<u64, String>,
-    /// By observation index: the block a marked statement was written for.
+    /// By observation index: the block a marked statement was written for, which the certificate reads.
     pub(super) blocks: Vec<u64>,
+    /// By observation index: the instruction, which each emitted line names.
+    pub(super) addresses: Vec<u64>,
+    /// Where the work control stopped the writing, if it did.
+    pub(super) stopped: Option<crate::control::DecompileExecutionStop>,
 }
 
 /// Write every block once, in the region of its immediate dominator or after the loop it leaves.
-pub(super) fn write(input: &RenderInput<'_>, values: Option<&Values<'_>>) -> Written {
+pub(super) fn write(
+    input: &RenderInput<'_>,
+    values: Option<&Values<'_>>,
+    work: &crate::control::DecompileWorkControl<'_>,
+) -> Written {
     let function = input.function();
     let placement = Placement::compute(
         function.cfg(),
@@ -32,9 +40,12 @@ pub(super) fn write(input: &RenderInput<'_>, values: Option<&Values<'_>>) -> Wri
     let mut writer = Writer {
         input,
         values,
+        work,
+        stopped: None,
         placement: &placement,
         labels: BTreeMap::new(),
         blocks: Vec::new(),
+        addresses: Vec::new(),
     };
     for addr in placement.labelled().iter().copied() {
         writer.label(addr);
@@ -44,15 +55,20 @@ pub(super) fn write(input: &RenderInput<'_>, values: Option<&Values<'_>>) -> Wri
         body,
         labels: writer.labels,
         blocks: writer.blocks,
+        addresses: writer.addresses,
+        stopped: writer.stopped,
     }
 }
 
 struct Writer<'w, 'i> {
     input: &'w RenderInput<'i>,
     values: Option<&'w Values<'i>>,
+    work: &'w crate::control::DecompileWorkControl<'w>,
+    stopped: Option<crate::control::DecompileExecutionStop>,
     placement: &'w Placement<'i>,
     labels: BTreeMap<u64, String>,
     blocks: Vec<u64>,
+    addresses: Vec<u64>,
 }
 
 impl<'i> Writer<'_, 'i> {
@@ -64,10 +80,16 @@ impl<'i> Writer<'_, 'i> {
             .clone()
     }
 
-    /// Mark a statement as the one written for `addr`, which is what the certificate reads.
+    /// Mark a statement as the one written for block `addr`, which is what the certificate reads.
     fn observe(&mut self, addr: u64, stmt: CStmt) -> CStmt {
+        self.observe_at(addr, addr, stmt)
+    }
+
+    /// The same, naming the instruction at `at` as the one the statement's line accounts for.
+    fn observe_at(&mut self, addr: u64, at: u64, stmt: CStmt) -> CStmt {
         let id = RenderObservationId::from_dense_index(self.blocks.len());
         self.blocks.push(addr);
+        self.addresses.push(at);
         CStmt::observe_all([id], stmt)
     }
 
@@ -91,14 +113,22 @@ impl<'i> Writer<'_, 'i> {
 
     /// A block's label, its statements, its arms, and the merges it dominates.
     fn block_region(&mut self, addr: u64) -> CStmt {
+        // One poll per block written, so a stop is heard within one block of the work.
+        if self.stopped.is_some() {
+            return CStmt::Block(Vec::new());
+        }
+        if let Err(stop) = self.work.poll() {
+            self.stopped = Some(stop);
+            return CStmt::Block(Vec::new());
+        }
         let mut stmts = Vec::new();
         if self.placement.labelled().contains(&addr) {
             stmts.push(CStmt::Label(self.label(addr)));
         }
         let written = stmts.len();
         if let Some(values) = self.values {
-            for stmt in values.statements(addr) {
-                stmts.push(self.observe(addr, stmt));
+            for (at, stmt) in values.statements(addr) {
+                stmts.push(self.observe_at(addr, at, stmt));
             }
         } else {
             stmts.extend(self.gap(addr));

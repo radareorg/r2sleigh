@@ -52,9 +52,12 @@ pub fn render(
     let name = crate::rendered_name_of(input.name(), input.function().root());
     let mut c = CFunction::new(name, result_type(input));
     let values = values::Values::new(input, c.symbols.clone());
-    let written = control::write(input, values.as_ref());
+    let written = control::write(input, values.as_ref(), &work);
+    if let Some(stop) = written.stopped {
+        return Err(stop.into());
+    }
     let function = input.function();
-    let mut body = CStmt::Block(written.body);
+    let body = CStmt::Block(written.body);
     let label_block = written
         .labels
         .iter()
@@ -75,7 +78,6 @@ pub fn render(
             certificate.violations.first()
         )));
     }
-    crate::ast::strip_stmt_observations(&mut body);
     work.with_phase(DecompileWorkPhase::Rendering).poll()?;
     match &values {
         Some(values) => {
@@ -89,7 +91,17 @@ pub fn render(
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
     };
-    let ready = prepare_function_for_emission(c);
+    let mut ready = prepare_function_for_emission(c);
+    // Each marker names the instruction its statement was written for, so each line names its own.
+    let markers = written.addresses.len();
+    ready.seal_observation_markers(
+        &mut crate::observation_journal::ObservationSealAuthority::staged(),
+        crate::codegen::ObservationLocations::new(
+            written.addresses.into_iter().map(Some).collect(),
+            vec![None; markers],
+            vec![None; markers],
+        ),
+    );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
     let mut ledger = ObligationLedger::open(input.obligations(), input.graph());
     match &values {
@@ -101,7 +113,7 @@ pub fn render(
         }
     }
     Ok(Rendered {
-        function: crate::RenderedFunction::new(emission, ready.function().clone()),
+        function: crate::RenderedFunction::new(emission, ready.into_function()),
         ledger,
     })
 }

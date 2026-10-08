@@ -1982,3 +1982,51 @@ fn audited(decompiler: &Decompiler, input: &DecompilerInput) -> DecompileBinding
         )
         .expect("default decompiler control never stops")
 }
+
+/// The staged writer polls once per block it writes, between the two phase polls, and every poll
+/// is a point the run stops at.
+#[test]
+fn the_staged_writer_polls_once_per_block_it_writes() {
+    struct CountingControl {
+        polls: std::cell::Cell<usize>,
+        stop_at: Option<usize>,
+    }
+
+    impl r2ssa::SsaWorkControl for CountingControl {
+        fn poll(&self) -> Result<(), r2ssa::SsaExecutionStopReason> {
+            let poll = self.polls.get() + 1;
+            self.polls.set(poll);
+            match self.stop_at == Some(poll) {
+                true => Err(r2ssa::SsaExecutionStopReason::Cancelled),
+                false => Ok(()),
+            }
+        }
+    }
+
+    let arch = test_arch_for_decompile();
+    let prepared = prepared_from_ops(
+        vec![R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        }],
+        &arch,
+    );
+    let input = source_owned_decompiler_input(
+        prepared,
+        (r2types::DecompileRouteKind::Standard, "staged polls", None),
+    );
+    let staged = crate::render::RenderInput::new(input.source_owned_facts(), 64);
+    let control = |stop_at| CountingControl {
+        polls: std::cell::Cell::new(0),
+        stop_at,
+    };
+    let unbounded = control(None);
+    crate::render::render(&staged, &unbounded).expect("the staged pipeline renders");
+    assert_eq!(unbounded.polls.get(), 3, "one block, one poll for it");
+    for stop_at in 1..=unbounded.polls.get() {
+        let stopped = crate::render::render(&staged, &control(Some(stop_at)));
+        assert!(
+            matches!(stopped, Err(crate::render::RenderStop::Stopped(_))),
+            "poll {stop_at}"
+        );
+    }
+}

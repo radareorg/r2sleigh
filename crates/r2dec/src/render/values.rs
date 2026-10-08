@@ -749,9 +749,10 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// What a block's live instructions write, in order; a run that cannot be spelled is one gap.
-    pub(super) fn statements(&self, addr: u64) -> Vec<CStmt> {
-        let mut out: Vec<CStmt> = Vec::new();
+    /// What a block's live instructions write, in order, each with the instruction it stands at; a
+    /// run that cannot be spelled is one gap.
+    pub(super) fn statements(&self, addr: u64) -> Vec<(u64, CStmt)> {
+        let mut out: Vec<(u64, CStmt)> = Vec::new();
         let Some(block) = self
             .graph
             .block_id_for_addr(addr)
@@ -777,35 +778,39 @@ impl<'a> Values<'a> {
                 Some(SemanticInstructionState::UnsupportedUnknown) => Err(Gap::Unsupported),
                 _ => Ok(None),
             };
+            let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             match stmt {
                 Ok(Some(stmt)) => {
                     self.mark(inst.id);
-                    out.push(stmt);
+                    out.push((at, stmt));
                 }
                 Ok(None) => {}
-                Err(gap) => self.gap(&mut out, addr, inst.id, gap),
+                Err(gap) => self.gap(&mut out, (addr, at), inst.id, gap),
             }
         }
         out
     }
 
     /// Extend the gap the block's text ends with, or open one at this instruction.
-    fn gap(&self, out: &mut Vec<CStmt>, addr: u64, inst: InstId, gap: Gap) {
+    fn gap(&self, out: &mut Vec<(u64, CStmt)>, (addr, at): (u64, u64), inst: InstId, gap: Gap) {
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
-        if let Some(CStmt::Gap(marker)) = out.last_mut()
+        if let Some((_, CStmt::Gap(marker))) = out.last_mut()
             && marker.op_idx + marker.ops == op_idx
             && marker.kind == gap.kind()
         {
             marker.ops += 1;
             return;
         }
-        out.push(CStmt::Gap(GapMarker {
-            kind: gap.kind().to_owned(),
-            origin: "render::values".to_owned(),
-            block_addr: addr,
-            op_idx,
-            ops: 1,
-        }));
+        out.push((
+            at,
+            CStmt::Gap(GapMarker {
+                kind: gap.kind().to_owned(),
+                origin: "render::values".to_owned(),
+                block_addr: addr,
+                op_idx,
+                ops: 1,
+            }),
+        ));
     }
 
     /// The statement one live instruction owes: `Ok(None)` where it owes none here, `Err` where
