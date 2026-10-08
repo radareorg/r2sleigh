@@ -18,7 +18,7 @@ fn rendered(program: Literal) -> Result<String, String> {
 #[test]
 fn a_go_function_takes_its_arguments_where_go_passes_them() {
     let adds = || Literal::of_code(ADDS, &[("main.adds", BASE, 5)]);
-    let go = rendered(adds().in_go(Some((1, 18)))).expect("Go 1.18 renders");
+    let go = rendered(adds().in_go(Some((1, 18)), Some(&[]))).expect("Go 1.18 renders");
     let signature = go.lines().next().unwrap_or_default();
     assert!(
         signature.contains("RAX_0") && signature.contains("RBX_0"),
@@ -36,7 +36,19 @@ fn a_go_function_takes_its_arguments_where_go_passes_them() {
 
 #[test]
 fn a_go_function_under_the_stack_abi_refuses_with_that_reason() {
-    let adds = Literal::of_code(ADDS, &[("main.adds", BASE, 5)]).in_go(Some((1, 14)));
+    let adds = Literal::of_code(ADDS, &[("main.adds", BASE, 5)]).in_go(Some((1, 14)), None);
     let refused = rendered(adds).expect_err("ABI0 results are on the stack");
     assert!(refused.contains("golang_abi0"), "{refused}");
+}
+
+/// Go 1.17 on: compiled functions run ABIInternal, an assembly one keeps ABI0 behind its wrapper.
+#[test]
+fn an_assembly_go_function_keeps_abi0_and_an_unstated_one_refuses() {
+    let adds = || Literal::of_code(ADDS, &[("main.adds", BASE, 5)]);
+    let assembly = rendered(adds().in_go(Some((1, 18)), Some(&[BASE])))
+        .expect_err("ABI0 results are on the stack");
+    assert!(assembly.contains("golang_abi0"), "{assembly}");
+    // Go 1.17's pclntab marks no function as assembly, so no function's ABI is stated.
+    let unstated = rendered(adds().in_go(Some((1, 17)), None)).expect_err("no ABI is stated");
+    assert!(unstated.contains("states no function's ABI"), "{unstated}");
 }

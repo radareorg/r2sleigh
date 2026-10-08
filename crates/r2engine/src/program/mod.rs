@@ -59,6 +59,10 @@ struct Machines {
     /// What a Go function needs, where the container states any: Go's convention by its
     /// toolchain's version (doc/adr-language-profile.md, LP1).
     go: Option<Result<Assembled, String>>,
+    /// ABI0, where the toolchain's own convention is ABIInternal: its assembly functions keep it.
+    go_abi0: Option<Result<Assembled, String>>,
+    /// ABIInternal refusing, for a function under it whose ABI pclntab does not state.
+    go_unstated: Option<Result<Assembled, String>>,
 }
 
 impl Machines {
@@ -81,30 +85,53 @@ impl Machines {
             .ok_or_else(|| format!("no calling convention for {arch} {bits}"))
             .and_then(|convention| assemble(&machine, container, convention));
         let languages = &container.languages;
-        let go = (languages.program == SourceLanguage::Go
+        let written_in_go = languages.program == SourceLanguage::Go
             || languages
                 .ranges
                 .iter()
-                .any(|(_, language)| *language == SourceLanguage::Go))
-        .then(|| {
-            r2abi::go_calling_convention(&arch, bits, psabi, languages.go_version)
+                .any(|(_, language)| *language == SourceLanguage::Go);
+        let convention = written_in_go
+            .then(|| r2abi::go_calling_convention(&arch, bits, psabi, languages.go_version));
+        let abi0 = r2abi::go_abi0_convention(&arch, bits);
+        let go = convention.map(|convention| {
+            convention
                 .ok_or_else(|| format!("no Go calling convention for {arch} {bits}"))
                 .and_then(|convention| assemble(&machine, container, convention))
         });
+        let go_abi0 = convention
+            .flatten()
+            .zip(abi0)
+            .filter(|(convention, abi0)| convention.name != abi0.name)
+            .map(|(_, abi0)| assemble(&machine, container, abi0));
+        let go_unstated = (go_abi0.is_some() && languages.go_assembly.is_none())
+            .then(|| r2abi::go_unstated_convention(&arch, bits))
+            .flatten()
+            .map(|convention| assemble(&machine, container, convention));
         Ok(Self {
             machine,
             thumb,
             assembled,
             go,
+            go_abi0,
+            go_unstated,
         })
     }
 
     /// What a native request needs for the function at `entry`, by the language it is written in.
+    /// A Go function under a register-based toolchain runs ABIInternal unless pclntab marks it
+    /// assembly, which keeps ABI0; where no table states that, a convention that refuses.
     fn assembled_at(&self, container: &Container, entry: u64) -> Result<&Assembled, String> {
-        match (&self.go, container.languages.at(entry)) {
-            (Some(go), SourceLanguage::Go) => go.as_ref().map_err(Clone::clone),
-            _ => self.assembled.as_ref().map_err(Clone::clone),
-        }
+        let languages = &container.languages;
+        let chosen = match (&self.go, &self.go_abi0, languages.at(entry)) {
+            (Some(go), None, SourceLanguage::Go) => go,
+            (Some(go), Some(abi0), SourceLanguage::Go) => match &languages.go_assembly {
+                Some(assembly) if assembly.contains(&entry) => abi0,
+                Some(_) => go,
+                None => self.go_unstated.as_ref().unwrap_or(abi0),
+            },
+            _ => &self.assembled,
+        };
+        chosen.as_ref().map_err(Clone::clone)
     }
 }
 

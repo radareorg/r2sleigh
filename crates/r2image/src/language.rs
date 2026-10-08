@@ -2,6 +2,7 @@
 //! compile units, then a mangling only toward a language the container states apart from names.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use object::{Object as _, ObjectSection as _};
@@ -22,7 +23,63 @@ pub(crate) fn read(file: &object::File<'_>, symbols: &[Symbol]) -> Languages {
         program,
         ranges: disjoint(units, mangled),
         go_version: go_version(file),
+        go_assembly: go_assembly(file, symbols),
     }
+}
+
+/// `funcFlag_ASM`: the function was written in assembly (Go's `internal/abi.FuncFlagAsm`).
+const FUNC_FLAG_ASM: u8 = 1 << 2;
+
+/// The assembly functions Go's pclntab states, read from its section or `runtime.pclntab`.
+fn go_assembly(file: &object::File<'_>, symbols: &[Symbol]) -> Option<BTreeSet<u64>> {
+    let named = ["__gopclntab", ".gopclntab"]
+        .iter()
+        .find_map(|name| file.section_by_name(name)?.data().ok());
+    let table = named.or_else(|| {
+        let symbol = symbols
+            .iter()
+            .find(|symbol| symbol.defined && symbol.name == "runtime.pclntab")?;
+        read_at(file, symbol.vaddr, usize::try_from(symbol.size).ok()?)
+    })?;
+    pclntab_assembly(table, file.endianness() == object::Endianness::Little)
+}
+
+/// The entries `funcFlag_ASM` marks in a pclntab of Go 1.18's or Go 1.20's layout (the only ones
+/// that state it); `None` for any other layout, or one that does not fit its bytes.
+fn pclntab_assembly(data: &[u8], little: bool) -> Option<BTreeSet<u64>> {
+    let word = |at: usize, size: usize| {
+        let bytes = data.get(at..at.checked_add(size)?)?;
+        Some(read_word(bytes, little))
+    };
+    // `_func.flag`'s offset: Go 1.20 added `startLine` before it.
+    let flag_at = match word(0, 4)? {
+        0xffff_fff0 => 37,
+        0xffff_fff1 => 41,
+        _ => return None,
+    };
+    let pointer = usize::from(*data.get(7)?);
+    if pointer != 4 && pointer != 8 {
+        return None;
+    }
+    let functions = usize::try_from(word(8, pointer)?).ok()?;
+    let text = word(8 + 2 * pointer, pointer)?;
+    let table = usize::try_from(word(8 + 7 * pointer, pointer)?).ok()?;
+    // `functab`: one `(entryoff, funcoff)` pair per function, so a count past the bytes is a lie.
+    if functions.checked_mul(8)? > data.len().checked_sub(table)? {
+        return None;
+    }
+    let mut assembly = BTreeSet::new();
+    for index in 0..functions {
+        let pair = table + index * 8;
+        let (entry, function) = (word(pair, 4)?, word(pair + 4, 4)?);
+        let flag = table
+            .checked_add(usize::try_from(function).ok()?)?
+            .checked_add(flag_at)?;
+        if data.get(flag)? & FUNC_FLAG_ASM != 0 {
+            assembly.insert(text.checked_add(entry)?);
+        }
+    }
+    Some(assembly)
 }
 
 /// The Go version the build information states. ELF and Mach-O name its section; a PE holds it
@@ -624,6 +681,33 @@ mod tests {
 
     /// go-cdetect's header (Go 1.18.1, inline) and dwarf_go_tree's (Go 1.14.7, through
     /// `runtime.buildVersion`'s string header at 0x55e830).
+    /// Go 1.20's layout, little-endian, 8-byte words: two functions, the second assembly.
+    #[test]
+    fn pclntab_states_which_go_functions_are_assembly() {
+        let mut table = vec![0u8; 0x100];
+        table[..4].copy_from_slice(&0xffff_fff1u32.to_le_bytes());
+        table[7] = 8;
+        table[8..16].copy_from_slice(&2u64.to_le_bytes());
+        table[8 + 16..8 + 24].copy_from_slice(&0x40_1000u64.to_le_bytes());
+        table[8 + 56..8 + 64].copy_from_slice(&0x60u64.to_le_bytes());
+        for (index, (entry, function)) in [(0x0u32, 0x20u32), (0x40, 0x50)].iter().enumerate() {
+            let pair = 0x60 + index * 8;
+            table[pair..pair + 4].copy_from_slice(&entry.to_le_bytes());
+            table[pair + 4..pair + 8].copy_from_slice(&function.to_le_bytes());
+        }
+        table[0x60 + 0x50 + 41] = FUNC_FLAG_ASM;
+        assert_eq!(
+            pclntab_assembly(&table, true),
+            Some(BTreeSet::from([0x40_1040]))
+        );
+        // Go 1.16's layout states no flag of the kind, and a count past the bytes is refused.
+        table[..4].copy_from_slice(&0xffff_fffau32.to_le_bytes());
+        assert_eq!(pclntab_assembly(&table, true), None);
+        table[..4].copy_from_slice(&0xffff_fff1u32.to_le_bytes());
+        table[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(pclntab_assembly(&table, true), None);
+    }
+
     #[test]
     fn the_build_information_states_the_go_version() {
         let mut inline = b"\xff Go buildinf:\x08\x02".to_vec();
@@ -686,6 +770,7 @@ mod tests {
             program: SourceLanguage::Go,
             ranges: kept,
             go_version: None,
+            go_assembly: None,
         };
         assert_eq!(languages.at(0x1150), SourceLanguage::C);
         assert_eq!(languages.at(0x3050), SourceLanguage::Rust);

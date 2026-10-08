@@ -100,6 +100,9 @@ pub struct Languages {
     /// The Go toolchain's major and minor version, where `.go.buildinfo` states it: which
     /// convention its functions use (register-based ABIInternal from 1.17 on x86-64).
     pub go_version: Option<(u32, u32)>,
+    /// The entries of the functions Go's pclntab marks as assembly (`funcFlag_ASM`, from Go 1.18),
+    /// which keep ABI0 beside ABIInternal; `None` where no table states it per function.
+    pub go_assembly: Option<BTreeSet<u64>>,
 }
 
 impl Languages {

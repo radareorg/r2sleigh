@@ -326,6 +326,39 @@ pub fn go_calling_convention(
     }
 }
 
+const GO_UNSTATED_REFUSED: &str = "the toolchain states no function's ABI: an assembly body keeps ABI0, which pclntab marks from Go 1.18";
+
+/// A Go function under a register-based toolchain whose pclntab marks no function as assembly:
+/// it runs ABIInternal or ABI0, and nothing the container holds says which.
+const GO_AMD64_UNSTATED: CallingConvention = CallingConvention {
+    refused: Some(GO_UNSTATED_REFUSED),
+    ..GO_AMD64
+};
+
+const GO_ARM64_UNSTATED: CallingConvention = CallingConvention {
+    refused: Some(GO_UNSTATED_REFUSED),
+    ..GO_ARM64
+};
+
+/// The register-based Go convention, refusing: for a function whose ABI the toolchain does not state.
+pub fn go_unstated_convention(arch: &str, bits: u32) -> Option<&'static CallingConvention> {
+    match (crate::family(arch), bits) {
+        (Some("x86"), 64) => Some(&GO_AMD64_UNSTATED),
+        (Some("arm"), 64) => Some(&GO_ARM64_UNSTATED),
+        _ => None,
+    }
+}
+
+/// Go's stack-based ABI0 on this architecture: what an assembly function keeps under a toolchain
+/// whose compiled functions use ABIInternal.
+pub fn go_abi0_convention(arch: &str, bits: u32) -> Option<&'static CallingConvention> {
+    match (crate::family(arch), bits) {
+        (Some("x86"), 64) => Some(&GO_AMD64_ABI0),
+        (Some("arm"), 64) => Some(&GO_ARM64_ABI0),
+        _ => None,
+    }
+}
+
 /// The default calling convention a program for this architecture and
 /// platform runs under.
 pub fn calling_convention(
