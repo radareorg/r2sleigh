@@ -468,17 +468,18 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             })
             .collect::<Vec<_>>();
         let mut held = valued.iter().map(|(_, weight)| weight).sum::<usize>();
-        if held > capacity {
-            valued.sort_unstable_by_key(|(entry, _)| entry.stamp);
-            // The newest stays even alone past the capacity: it is what was just asked for.
-            let newest = valued.len() - 1;
-            for (entry, weight) in valued.into_iter().take(newest) {
-                if held <= capacity {
-                    break;
-                }
-                entry.value = None;
-                held -= weight;
+        if held <= capacity {
+            return;
+        }
+        valued.sort_unstable_by_key(|(entry, _)| entry.stamp);
+        // The newest stays even alone past the capacity: it is what was just asked for.
+        let newest = valued.len() - 1;
+        for (entry, weight) in valued.into_iter().take(newest) {
+            if held <= capacity {
+                break;
             }
+            entry.value = None;
+            held -= weight;
         }
     }
 
