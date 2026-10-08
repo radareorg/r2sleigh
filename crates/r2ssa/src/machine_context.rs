@@ -512,6 +512,8 @@ pub struct SourceMachineContext {
     /// callsite interfaces. Unlike display strings, these are semantic
     /// evidence, because a variadic format literal is count evidence.
     source_string_literals: BTreeMap<u64, String>,
+    /// Bytes the program never writes, by the address a body loads from: what a load there reads.
+    read_only: BTreeMap<u64, Box<[u8]>>,
     /// What the processor specification says registers hold on entry to every function.
     tracked_entry_values: Box<[(CanonicalStorageId, u64)]>,
 }
@@ -985,6 +987,7 @@ impl SourceMachineContext {
             code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
+            read_only: BTreeMap::new(),
             tracked_entry_values,
         }
     }
@@ -1390,6 +1393,36 @@ impl SourceMachineContext {
     /// Retain literal contents from the exact source snapshot before semantic
     /// preparation. Duplicate addresses with different contents are omitted;
     /// ambiguity is not literal evidence.
+    /// Bind the read-only bytes the capture took at each address the body loads from.
+    pub(crate) fn bind_read_only(&mut self, windows: &[(u64, Vec<u8>)]) {
+        self.read_only = windows
+            .iter()
+            .map(|(address, bytes)| (*address, bytes.clone().into_boxed_slice()))
+            .collect();
+    }
+
+    /// What a `size`-byte load at `address` reads, where the capture holds those bytes read-only
+    /// and they fit a constant: one search, in the memory's byte order.
+    pub fn read_only_bits(&self, address: u64, size: u32) -> Option<u64> {
+        let (start, bytes) = self.read_only.range(..=address).next_back()?;
+        let from = usize::try_from(address - start).ok()?;
+        let window = bytes.get(from..from.checked_add(usize::try_from(size).ok()?)?)?;
+        if window.len() > 8 {
+            return None;
+        }
+        let ordered = window.iter().copied();
+        let bits = match self.memory_model.default_endianness() {
+            MachineMemoryEndianness::Little => ordered
+                .rev()
+                .fold(0u64, |bits, byte| (bits << 8) | u64::from(byte)),
+            MachineMemoryEndianness::Big => {
+                ordered.fold(0u64, |bits, byte| (bits << 8) | u64::from(byte))
+            }
+            _ => return None,
+        };
+        Some(bits)
+    }
+
     pub(crate) fn bind_source_string_literals(&mut self, literals: &[(u64, String)]) {
         let mut ambiguous = BTreeSet::new();
         for (address, text) in literals {

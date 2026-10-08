@@ -195,6 +195,15 @@ fn a_double_moved_as_its_whole_register_is_the_argument() {
     assert!(!x86_64.contains("__uint128_t"), "{x86_64}");
 }
 
+/// A load from bytes the program never writes reads what the file holds: `x + 1.0`, not a read of
+/// `.rodata` (P5). A slot the loader fills is still read at its address (below).
+#[test]
+fn a_constant_loaded_from_read_only_data_is_the_literal() {
+    let out = run("float_returns_zig_x86_64_O2g", "pdd @ sym.twice_half");
+    assert!(out.contains("x + 1.0"), "{out}");
+    assert!(!out.contains("*(uint64_t*)0x"), "{out}");
+}
+
 /// `_init` reads `__gmon_start__`'s global offset table slot to see whether profiling is linked.
 /// The slot is a word the loader fills, named by the relocation that fills it, not the function:
 /// the read is of the slot's address, never `&__gmon_start__`.
