@@ -443,15 +443,30 @@ impl ObligationTable {
         self.position(id).is_ok()
     }
 
-    /// Add one obligation, handing back the one it replaced.
-    fn insert(&mut self, obligation: SemanticObligation) -> Option<SemanticObligation> {
-        match self.position(&obligation.id) {
-            Ok(at) => Some(std::mem::replace(&mut self.0[at], obligation)),
-            Err(at) => {
-                self.0.insert(at, obligation);
-                None
-            }
+    /// Add obligations none of which the table holds, in one sort and one merge: `false`, and the
+    /// table untouched, where any identity repeats.
+    fn extend_new(&mut self, mut added: Vec<SemanticObligation>) -> bool {
+        added.sort_by_key(|obligation| obligation.id);
+        let repeated = added.windows(2).any(|pair| pair[0].id == pair[1].id)
+            || added
+                .iter()
+                .any(|obligation| self.contains_key(&obligation.id));
+        if repeated {
+            return false;
         }
+        let held = std::mem::take(&mut self.0);
+        let mut merged = Vec::with_capacity(held.len() + added.len());
+        let (mut held, mut added) = (held.into_iter().peekable(), added.into_iter().peekable());
+        while let (Some(old), Some(new)) = (held.peek(), added.peek()) {
+            let next = match old.id < new.id {
+                true => held.next(),
+                false => added.next(),
+            };
+            merged.extend(next);
+        }
+        merged.extend(held.chain(added));
+        self.0 = merged;
+        true
     }
 
     pub fn len(&self) -> usize {
@@ -1011,6 +1026,8 @@ impl SemanticObligationInventory {
         spans: impl IntoIterator<Item = crate::GenuineNativeInstructionSpan>,
         compiler_inserted_blocks: &BTreeSet<u64>,
     ) -> bool {
+        // Merged into the sorted table once at the end: one insert per span shifts its tail each time.
+        let mut late = Vec::new();
         for span in spans {
             let id = CanonicalInstructionId {
                 block_addr: span.block_addr(),
@@ -1057,18 +1074,18 @@ impl SemanticObligationInventory {
                     },
                 )
                 .is_some()
-                || self
-                    .obligations
-                    .insert(SemanticObligation {
-                        id: obligation_id,
-                        source: SemanticSourceSite::GenuineNativeSpan(span),
-                        inputs: Vec::new(),
-                        edge_use: None,
-                    })
-                    .is_some()
             {
                 return false;
             }
+            late.push(SemanticObligation {
+                id: obligation_id,
+                source: SemanticSourceSite::GenuineNativeSpan(span),
+                inputs: Vec::new(),
+                edge_use: None,
+            });
+        }
+        if !self.obligations.extend_new(late) {
+            return false;
         }
         self.complete = self.derive_is_complete();
         true
@@ -1841,6 +1858,37 @@ fn instruction_is_structural(payload: &InstPayload) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn late_obligations_merge_into_the_table_in_order_or_not_at_all() {
+        let obligation = |block_addr: u64| super::SemanticObligation {
+            id: super::SemanticObligationId {
+                instruction: super::CanonicalInstructionId {
+                    block_addr,
+                    site: super::CanonicalInstructionSite::NativeSpan {
+                        instruction_addr: block_addr,
+                        size: 1,
+                    },
+                },
+                kind: super::SemanticObligationKind::NoNativeSemantics,
+                component: super::SemanticObligationComponent::Whole,
+            },
+            source: super::SemanticSourceSite::GraphInstruction(crate::InstId(0)),
+            inputs: Vec::new(),
+            edge_use: None,
+        };
+        let mut table = super::ObligationTable::of(vec![obligation(0x10), obligation(0x30)]);
+        assert!(table.extend_new(vec![obligation(0x40), obligation(0x20), obligation(0x00)]));
+        let order = table
+            .keys()
+            .map(|id| id.instruction.block_addr)
+            .collect::<Vec<_>>();
+        assert_eq!(order, [0x00, 0x10, 0x20, 0x30, 0x40]);
+        // A repeated identity leaves the table as it was.
+        assert!(!table.extend_new(vec![obligation(0x50), obligation(0x20)]));
+        assert!(!table.extend_new(vec![obligation(0x60), obligation(0x60)]));
+        assert_eq!(table.len(), 5);
+    }
+
     /// The canonical identity of operation `index` of the block at
     /// `block_addr`, as a fixture names it.
     fn operation_at(
