@@ -908,25 +908,21 @@ fn prepared_predicates_recover_signed_less_from_of_sf_flags() {
         space: SpaceId::Unique,
         offset: 0x2000,
         size: 1,
-        meta: None,
     };
     let sf = Varnode {
         space: SpaceId::Unique,
         offset: 0x2001,
         size: 1,
-        meta: None,
     };
     let sub = Varnode {
         space: SpaceId::Unique,
         offset: 0x2002,
         size: 4,
-        meta: None,
     };
     let cond = Varnode {
         space: SpaceId::Unique,
         offset: 0x2003,
         size: 1,
-        meta: None,
     };
     let blocks = vec![
         R2ILBlock {

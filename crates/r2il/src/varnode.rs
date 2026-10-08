@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
-use crate::metadata::VarnodeMetadata;
 use crate::space::SpaceId;
 
 /// A varnode represents a sized piece of data at a specific location.
@@ -23,9 +22,6 @@ pub struct Varnode {
     pub offset: u64,
     /// Size in bytes
     pub size: u32,
-    /// Optional semantic metadata hints.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<VarnodeMetadata>,
 }
 
 impl Varnode {
@@ -35,7 +31,6 @@ impl Varnode {
             space,
             offset,
             size,
-            meta: None,
         }
     }
 
@@ -45,7 +40,6 @@ impl Varnode {
             space: SpaceId::Const,
             offset: value,
             size,
-            meta: None,
         }
     }
 
@@ -55,7 +49,6 @@ impl Varnode {
             space: SpaceId::Register,
             offset,
             size,
-            meta: None,
         }
     }
 
@@ -65,7 +58,6 @@ impl Varnode {
             space: SpaceId::Ram,
             offset: address,
             size,
-            meta: None,
         }
     }
 
@@ -75,14 +67,7 @@ impl Varnode {
             space: SpaceId::Unique,
             offset: id,
             size,
-            meta: None,
         }
-    }
-
-    /// Return a copy of this varnode with metadata attached.
-    pub fn with_meta(mut self, meta: VarnodeMetadata) -> Self {
-        self.meta = Some(meta);
-        self
     }
 
     /// Returns true if this is a constant.
@@ -150,8 +135,6 @@ impl Hash for Varnode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PointerHint, ScalarKind};
-    use std::collections::HashSet;
 
     #[test]
     fn test_constant_varnode() {
@@ -168,44 +151,5 @@ mod tests {
         assert!(!v.is_const());
         assert_eq!(v.offset, 0x10);
         assert_eq!(v.size, 8);
-        assert!(v.meta.is_none());
-    }
-
-    #[test]
-    fn varnode_default_meta_none() {
-        let v = Varnode::default();
-        assert!(v.meta.is_none());
-    }
-
-    #[test]
-    fn varnode_with_meta_roundtrip_json() {
-        let meta = VarnodeMetadata {
-            scalar_kind: Some(ScalarKind::UnsignedInt),
-            pointer_hint: Some(PointerHint::PointerLike),
-            ..Default::default()
-        };
-
-        let v = Varnode::register(0x20, 8).with_meta(meta.clone());
-        let json = serde_json::to_string(&v).expect("serialize");
-        let de: Varnode = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(de, v);
-        assert_eq!(de.meta, Some(meta));
-    }
-
-    #[test]
-    fn varnode_eq_hash_ignores_meta() {
-        let meta = VarnodeMetadata {
-            scalar_kind: Some(ScalarKind::SignedInt),
-            ..Default::default()
-        };
-
-        let a = Varnode::register(0x30, 8);
-        let b = Varnode::register(0x30, 8).with_meta(meta);
-        assert_eq!(a, b);
-
-        let mut set = HashSet::new();
-        set.insert(a);
-        set.insert(b);
-        assert_eq!(set.len(), 1);
     }
 }

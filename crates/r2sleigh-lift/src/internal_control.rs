@@ -90,7 +90,6 @@ pub(crate) fn normalize_instruction_local_control(
                                 .iter()
                                 .find_map(transfer_target_size)
                                 .unwrap_or(8),
-                            meta: None,
                         },
                     };
                     break;

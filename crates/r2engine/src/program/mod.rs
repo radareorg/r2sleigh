@@ -121,7 +121,6 @@ fn assemble(machine: &EmbeddedMachine, container: &Container) -> Result<Assemble
                 space: r2il::SpaceId::Register,
                 offset: register.offset,
                 size: register.size,
-                meta: None,
             })
     });
     let mode = machine
@@ -133,7 +132,6 @@ fn assemble(machine: &EmbeddedMachine, container: &Container) -> Result<Assemble
             space: r2il::SpaceId::Register,
             offset: register.offset,
             size: register.size,
-            meta: None,
         });
     // Which C library's own declarations apply is what the container
     // states of it, and nothing else: `_Exit` is each library's, and

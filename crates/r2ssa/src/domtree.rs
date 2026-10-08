@@ -393,7 +393,6 @@ mod tests {
             space: SpaceId::Const,
             offset: val,
             size,
-            meta: None,
         }
     }
 
@@ -402,7 +401,6 @@ mod tests {
             space: SpaceId::Ram,
             offset: addr,
             size,
-            meta: None,
         }
     }
 

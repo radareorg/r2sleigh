@@ -141,7 +141,6 @@ mod tests {
             space: SpaceId::Register,
             offset: 0x10,
             size: 8,
-            meta: None,
         };
         assert_eq!(varnode_to_name(&vn, None), "reg:10");
     }
@@ -156,7 +155,6 @@ mod tests {
             space: SpaceId::Register,
             offset: 0x10,
             size: 8,
-            meta: None,
         };
         assert_eq!(varnode_to_name(&vn, Some(&map)), "rax");
     }
@@ -171,7 +169,6 @@ mod tests {
             space: SpaceId::Register,
             offset: 0x10,
             size: 8,
-            meta: None,
         };
         assert_eq!(varnode_to_name(&vn, Some(&map)), "reg:10");
     }
@@ -219,7 +216,6 @@ mod tests {
             space: SpaceId::Const,
             offset: 0x42,
             size: 4,
-            meta: None,
         };
         assert_eq!(varnode_to_name(&const_vn, None), "const:42");
 
@@ -227,7 +223,6 @@ mod tests {
             space: SpaceId::Unique,
             offset: 0x1000,
             size: 8,
-            meta: None,
         };
         assert_eq!(varnode_to_name(&tmp_vn, None), "tmp:1000");
 
@@ -235,7 +230,6 @@ mod tests {
             space: SpaceId::Ram,
             offset: 0x400000,
             size: 8,
-            meta: None,
         };
         assert_eq!(varnode_to_name(&ram_vn, None), "ram:400000");
     }

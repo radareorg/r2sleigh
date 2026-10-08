@@ -150,7 +150,6 @@ fn make_const(val: u64, size: u32) -> Varnode {
         space: SpaceId::Const,
         offset: val,
         size,
-        meta: None,
     }
 }
 
@@ -159,7 +158,6 @@ fn make_reg(offset: u64, size: u32) -> Varnode {
         space: SpaceId::Register,
         offset,
         size,
-        meta: None,
     }
 }
 
@@ -168,7 +166,6 @@ fn make_ram(addr: u64, size: u32) -> Varnode {
         space: SpaceId::Ram,
         offset: addr,
         size,
-        meta: None,
     }
 }
 
@@ -177,7 +174,6 @@ fn make_unique(offset: u64, size: u32) -> Varnode {
         space: SpaceId::Unique,
         offset,
         size,
-        meta: None,
     }
 }
 
@@ -1534,7 +1530,6 @@ fn prepared_expression_certificates_require_structural_render_proof() {
         space: SpaceId::Unique,
         offset: 0x2222,
         size: 8,
-        meta: None,
     };
     let userop_blocks = vec![R2ILBlock {
         addr: 0x1720,

@@ -73,29 +73,6 @@ pub enum MemoryClass {
     Unknown,
 }
 
-/// Optional metadata hints attached to a varnode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct VarnodeMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_class: Option<StorageClass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scalar_kind: Option<ScalarKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pointer_hint: Option<PointerHint>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub float_encoding: Option<FloatEncodingHint>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endianness: Option<Endianness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<MemoryPermissions>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub valid_range: Option<MemoryRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bank_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub segment_id: Option<String>,
-}
-
 /// Optional metadata hints attached to an operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct OpMetadata {
@@ -122,31 +99,12 @@ pub struct OpMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpMetadata, VarnodeMetadata};
-    use crate::Endianness;
-
-    #[test]
-    fn varnode_metadata_endianness_serde_omits_when_none() {
-        let meta = VarnodeMetadata::default();
-        let json = serde_json::to_string(&meta).expect("serialize");
-        assert!(!json.contains("endianness"));
-    }
+    use super::OpMetadata;
 
     #[test]
     fn op_metadata_endianness_serde_omits_when_none() {
         let meta = OpMetadata::default();
         let json = serde_json::to_string(&meta).expect("serialize");
         assert!(!json.contains("endianness"));
-    }
-
-    #[test]
-    fn metadata_endianness_roundtrip_when_present() {
-        let meta = VarnodeMetadata {
-            endianness: Some(Endianness::Big),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&meta).expect("serialize");
-        let decoded: VarnodeMetadata = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded.endianness, Some(Endianness::Big));
     }
 }

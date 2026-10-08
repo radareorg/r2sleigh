@@ -108,7 +108,6 @@ mod tests {
             space,
             offset,
             size,
-            meta: None,
         }
     }
 

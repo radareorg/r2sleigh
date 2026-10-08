@@ -2076,7 +2076,6 @@ mod tests {
             space: SpaceId::Const,
             offset: val,
             size,
-            meta: None,
         }
     }
 
@@ -2085,7 +2084,6 @@ mod tests {
             space: SpaceId::Register,
             offset,
             size,
-            meta: None,
         }
     }
 
@@ -2094,7 +2092,6 @@ mod tests {
             space: SpaceId::Unique,
             offset,
             size,
-            meta: None,
         }
     }
 

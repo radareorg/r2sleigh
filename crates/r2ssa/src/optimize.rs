@@ -2422,7 +2422,6 @@ mod sccp_tests {
             space: SpaceId::Const,
             offset: val,
             size,
-            meta: None,
         }
     }
 
@@ -2431,7 +2430,6 @@ mod sccp_tests {
             space: SpaceId::Register,
             offset,
             size,
-            meta: None,
         }
     }
 
@@ -2440,7 +2438,6 @@ mod sccp_tests {
             space: SpaceId::Ram,
             offset: addr,
             size,
-            meta: None,
         }
     }
 
@@ -2966,7 +2963,6 @@ mod chain_tests {
             space: SpaceId::Const,
             offset: val,
             size,
-            meta: None,
         }
     }
 
@@ -2975,7 +2971,6 @@ mod chain_tests {
             space: SpaceId::Register,
             offset,
             size,
-            meta: None,
         }
     }
 
@@ -3102,7 +3097,6 @@ mod signed_flag_tests {
             space: SpaceId::Const,
             offset: val,
             size,
-            meta: None,
         }
     }
 
@@ -3111,7 +3105,6 @@ mod signed_flag_tests {
             space: SpaceId::Register,
             offset,
             size,
-            meta: None,
         }
     }
 

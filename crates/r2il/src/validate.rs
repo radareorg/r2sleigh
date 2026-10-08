@@ -1454,39 +1454,6 @@ fn validate_varnode(
             "output/destination varnode must not be const space",
         ));
     }
-
-    if let Some(meta) = &vn.meta {
-        if let Some(bank_id) = &meta.bank_id
-            && bank_id.trim().is_empty()
-        {
-            issues.push(ValidationIssue::new(
-                "varnode.meta.bank_id.empty",
-                format!("{path}.meta.bank_id"),
-                "metadata bank_id must not be empty when present",
-            ));
-        }
-        if let Some(segment_id) = &meta.segment_id
-            && segment_id.trim().is_empty()
-        {
-            issues.push(ValidationIssue::new(
-                "varnode.meta.segment_id.empty",
-                format!("{path}.meta.segment_id"),
-                "metadata segment_id must not be empty when present",
-            ));
-        }
-        if let Some(range) = meta.valid_range
-            && range.start >= range.end
-        {
-            issues.push(ValidationIssue::new(
-                "varnode.meta.range.invalid",
-                format!("{path}.meta.valid_range"),
-                format!(
-                    "invalid half-open range [{:#x}, {:#x}) (start must be < end)",
-                    range.start, range.end
-                ),
-            ));
-        }
-    }
 }
 
 fn addr_space_size(space: SpaceId, arch: &ArchSpec) -> u32 {
