@@ -44,7 +44,8 @@ impl ControlFlowStructurer<'_, '_> {
     /// The structural rewrites, in order: jumps to the next position and to
     /// the end of a breakable go, loops take their shape, unreferenced labels
     /// go.
-    pub(crate) fn shape(fold_ctx: &crate::fold::FoldingContext<'_>, stmt: CStmt) -> CStmt {
+    /// `fresh` copies a statement as a new occurrence, with markers of its own for the same cells.
+    pub(crate) fn shape(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: CStmt) -> CStmt {
         let mut stmt = stmt;
         let scope = Scope {
             break_to: Cont::Unknown,
@@ -53,7 +54,7 @@ impl ControlFlowStructurer<'_, '_> {
         Self::shape_stmt(&mut stmt, Cont::Unknown, &scope);
         Self::drop_unreferenced_labels(&mut stmt);
         // A skipped block shows only once the jumps to it have gone.
-        Self::duplicate_skipped_tails(fold_ctx, &mut stmt);
+        Self::duplicate_skipped_tails(fresh, &mut stmt);
         Self::shape_stmt(&mut stmt, Cont::Unknown, &scope);
         Self::rotate_loops(&mut stmt);
         Self::drop_unreferenced_labels(&mut stmt);
@@ -277,44 +278,49 @@ impl ControlFlowStructurer<'_, '_> {
     /// paths that do not jump each get their own copy of `T`, and the jumps
     /// then reach the next position and go. Only the text of one block is
     /// duplicated, because that is the unit a compiler merged.
-    fn duplicate_skipped_tails(fold_ctx: &crate::fold::FoldingContext<'_>, stmt: &mut CStmt) {
-        let recurse = |stmt: &mut CStmt| Self::duplicate_skipped_tails(fold_ctx, stmt);
+    fn duplicate_skipped_tails(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: &mut CStmt) {
         match stmt {
             CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-                Self::duplicate_skipped_tails(fold_ctx, stmt)
+                Self::duplicate_skipped_tails(fresh, stmt)
             }
             CStmt::Block(stmts) => {
-                stmts.iter_mut().for_each(recurse);
-                Self::duplicate_in_sequence(fold_ctx, stmts);
+                for stmt in stmts.iter_mut() {
+                    Self::duplicate_skipped_tails(fresh, stmt);
+                }
+                Self::duplicate_in_sequence(fresh, stmts);
             }
             CStmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                Self::duplicate_skipped_tails(fold_ctx, then_body);
+                Self::duplicate_skipped_tails(fresh, then_body);
                 if let Some(else_body) = else_body {
-                    Self::duplicate_skipped_tails(fold_ctx, else_body);
+                    Self::duplicate_skipped_tails(fresh, else_body);
                 }
             }
             CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-                Self::duplicate_skipped_tails(fold_ctx, body)
+                Self::duplicate_skipped_tails(fresh, body)
             }
             CStmt::Switch { cases, default, .. } => {
                 for case in cases {
-                    case.body.iter_mut().for_each(recurse);
-                    Self::duplicate_in_sequence(fold_ctx, &mut case.body);
+                    for stmt in case.body.iter_mut() {
+                        Self::duplicate_skipped_tails(fresh, stmt);
+                    }
+                    Self::duplicate_in_sequence(fresh, &mut case.body);
                 }
                 if let Some(default) = default {
-                    default.iter_mut().for_each(recurse);
-                    Self::duplicate_in_sequence(fold_ctx, default);
+                    for stmt in default.iter_mut() {
+                        Self::duplicate_skipped_tails(fresh, stmt);
+                    }
+                    Self::duplicate_in_sequence(fresh, default);
                 }
             }
             _ => {}
         }
     }
 
-    fn duplicate_in_sequence(fold_ctx: &crate::fold::FoldingContext<'_>, stmts: &mut Vec<CStmt>) {
+    fn duplicate_in_sequence(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmts: &mut Vec<CStmt>) {
         let mut index = 0;
         while index + 2 < stmts.len() {
             // stmts[index] branches, stmts[index + 1] is the skipped block,
@@ -334,13 +340,8 @@ impl ControlFlowStructurer<'_, '_> {
             let tail = stmts.remove(index + 1);
             // The first copy keeps the tail's own observations; every further
             // copy is a fresh occurrence with targets of its own.
-            let mut copies = std::iter::once(tail.clone()).chain(std::iter::repeat_with(|| {
-                fold_ctx
-                    .clone_cached_render_occurrence(std::slice::from_ref(&tail))
-                    .into_iter()
-                    .next()
-                    .unwrap_or(CStmt::Empty)
-            }));
+            let mut copies =
+                std::iter::once(tail.clone()).chain(std::iter::repeat_with(|| fresh(&tail)));
             Self::append_to_falling_arms(&mut stmts[index], &mut copies);
             index += 1;
         }

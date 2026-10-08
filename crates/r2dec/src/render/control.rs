@@ -373,3 +373,72 @@ fn arm(mut stmts: Vec<CStmt>) -> CStmt {
         _ => CStmt::Block(stmts),
     }
 }
+
+/// `stmt` copied as a new occurrence: each marker in it replaced by the one `mint` gives for it.
+pub(super) fn remint(
+    stmt: &CStmt,
+    mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId,
+) -> CStmt {
+    let copy = |stmts: &[CStmt],
+                mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId| {
+        stmts
+            .iter()
+            .map(|stmt| remint(stmt, mint))
+            .collect::<Vec<_>>()
+    };
+    match stmt {
+        CStmt::Observed { .. } => {
+            let ids = stmt
+                .observation_ids()
+                .iter()
+                .map(|id| mint(*id))
+                .collect::<Vec<_>>();
+            CStmt::observe_all(ids, remint(stmt.unobserved(), mint))
+        }
+        CStmt::Block(stmts) => CStmt::Block(copy(stmts, mint)),
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => CStmt::If {
+            cond: cond.clone(),
+            then_body: Box::new(remint(then_body, mint)),
+            else_body: else_body.as_ref().map(|body| Box::new(remint(body, mint))),
+        },
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => CStmt::For {
+            init: init.as_ref().map(|init| Box::new(remint(init, mint))),
+            cond: cond.clone(),
+            update: update.clone(),
+            body: Box::new(remint(body, mint)),
+        },
+        CStmt::While { cond, body } => CStmt::While {
+            cond: cond.clone(),
+            body: Box::new(remint(body, mint)),
+        },
+        CStmt::DoWhile { body, cond } => CStmt::DoWhile {
+            body: Box::new(remint(body, mint)),
+            cond: cond.clone(),
+        },
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => CStmt::Switch {
+            expr: expr.clone(),
+            cases: cases
+                .iter()
+                .map(|case| SwitchCase {
+                    value: case.value.clone(),
+                    body: copy(&case.body, mint),
+                })
+                .collect(),
+            default: default.as_ref().map(|body| copy(body, mint)),
+        },
+        other => other.clone(),
+    }
+}

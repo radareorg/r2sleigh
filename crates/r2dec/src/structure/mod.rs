@@ -184,7 +184,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let elisions =
             std::cell::RefCell::new(crate::observation_journal::RewriteElisions::default());
         let shaped = self.rewrite_stage("shape", &placed, &elisions, stmt, |tree| {
-            Self::shape(fold_ctx, tree)
+            let mut fresh = |stmt: &CStmt| {
+                fold_ctx
+                    .clone_cached_render_occurrence(std::slice::from_ref(stmt))
+                    .into_iter()
+                    .next()
+                    .unwrap_or(CStmt::Empty)
+            };
+            Self::shape(&mut fresh, tree)
         })?;
         crate::stage_timing::mark("structure_shape");
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);

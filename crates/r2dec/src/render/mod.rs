@@ -58,9 +58,26 @@ pub fn render(
         return Err(stop.into());
     }
     let function = input.function();
-    let body = CStmt::Block(written.body);
-    let label_block = written
-        .labels
+    let control::Written {
+        body,
+        labels,
+        mut blocks,
+        mut addresses,
+        ..
+    } = written;
+    // D1.1: SD's readability rewrites; a block's text they copy is a new occurrence of its block.
+    let mut fresh = |stmt: &CStmt| {
+        control::remint(stmt, &mut |id| {
+            let at = id.index() as usize;
+            let copy =
+                crate::observation_journal::RenderObservationId::from_dense_index(blocks.len());
+            blocks.push(blocks[at]);
+            addresses.push(addresses[at]);
+            copy
+        })
+    };
+    let body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
+    let label_block = labels
         .iter()
         .map(|(addr, name)| (name.as_str(), *addr))
         .collect::<BTreeMap<_, _>>();
@@ -69,7 +86,7 @@ pub fn render(
         function.cfg(),
         function.domtree(),
         function.root(),
-        &|id| written.blocks.get(id.index() as usize).copied(),
+        &|id| blocks.get(id.index() as usize).copied(),
         &|name| label_block.get(name).copied(),
         &traps,
     );
@@ -94,11 +111,11 @@ pub fn render(
     };
     let mut ready = prepare_function_for_emission(c);
     // Each marker names the instruction its statement was written for, so each line names its own.
-    let markers = written.addresses.len();
+    let markers = addresses.len();
     ready.seal_observation_markers(
         &mut crate::observation_journal::ObservationSealAuthority::staged(),
         crate::codegen::ObservationLocations::new(
-            written.addresses.into_iter().map(Some).collect(),
+            addresses.into_iter().map(Some).collect(),
             vec![None; markers],
             vec![None; markers],
         ),
