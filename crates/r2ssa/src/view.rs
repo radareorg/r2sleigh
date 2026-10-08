@@ -25,6 +25,8 @@
 //! | `ZEXT(x)` | `x`'s prefix, zero above it (where `x` stated zero or nothing above) |
 //! | `SEXT(x)` | `x`'s prefix, sign above it (zero where `x` stated zero) |
 //! | `INSERT(_, x, 0)`, `PIECE(_, x)` | `x`'s prefix, nothing stated above |
+//! | `INSERT(w, x, k)`, `x` the bits of `y` at `k` | `w`'s prefix grown past `x` where `w` and `y` share a root and cover `k` |
+//! | any other `INSERT(w, x, k > 0)` | `w`'s prefix cut to `k`, nothing stated above |
 //! | a phi | the common view of its inputs, else its own |
 //! | anything else, `SUBPIECE(x, k > 0)` included | its own |
 //!
@@ -135,11 +137,16 @@ type Facts = (u32, Option<u64>);
 pub struct ValueViews<I> {
     views: IdMap<I, ValueView<I>>,
     representatives: IdMap<I, Representative<I>>,
+    low_lanes: LowLanes<I>,
     facts: IdVec<I, Facts>,
 }
 
+/// By root, each width at which a value is exactly the root's low bits, and the first such value.
+type LowLanes<I> = IdMap<I, Vec<(u32, I)>>;
+
 impl<I: DenseId> PartialEq for ValueViews<I> {
     fn eq(&self, other: &Self) -> bool {
+        // The low lanes are read off the views and representatives.
         self.views == other.views
             && self.representatives == other.representatives
             && self.facts == other.facts
@@ -153,6 +160,7 @@ impl<I: DenseId> Default for ValueViews<I> {
         Self {
             views: IdMap::new(0),
             representatives: IdMap::new(0),
+            low_lanes: IdMap::new(0),
             facts: IdVec::from_fn(0, |_| (0, None)),
         }
     }
@@ -174,6 +182,7 @@ impl ValueViews<VarId> {
             nodes.push(lane);
             definitions.push(Definition::Step(root, lane_step(&facts, lane, root)));
         }
+        let mut offsets = IdMap::new(facts.len());
         for block in function.blocks() {
             for phi in block.phis() {
                 nodes.push(phi.dst);
@@ -181,16 +190,15 @@ impl ValueViews<VarId> {
                     phi.sources.iter().map(|(_, source)| *source).collect(),
                 ));
             }
-            for (dst, src, step) in block
-                .ops()
-                .iter()
-                .filter_map(|op| step_of(op, |id| facts[*id]))
-            {
-                nodes.push(*dst);
-                definitions.push(Definition::Step(*src, step));
+            for op in block.ops() {
+                record_offset(op, |id| facts[*id], &mut offsets);
+                if let Some((dst, definition)) = definition_of(op, |id| facts[*id]) {
+                    nodes.push(dst);
+                    definitions.push(definition);
+                }
             }
         }
-        Solver::over(nodes, definitions, facts).solve()
+        Solver::over(nodes, definitions, facts, offsets).solve()
     }
 }
 
@@ -212,13 +220,17 @@ impl ValueViews<ValueId> {
                 definitions.push(Definition::Step(root, lane_step(&facts, lane, root)));
             }
         }
+        let mut offsets = IdMap::new(facts.len());
         for inst in &graph.insts {
+            if let crate::graph::InstPayload::Op(op) = &inst.payload {
+                record_offset(op, |id| facts[*id], &mut offsets);
+            }
             if let Some((dst, definition)) = graph_definition(&facts, inst) {
                 nodes.push(dst);
                 definitions.push(definition);
             }
         }
-        Solver::over(nodes, definitions, facts).solve()
+        Solver::over(nodes, definitions, facts, offsets).solve()
     }
 }
 
@@ -281,6 +293,19 @@ impl<I: DenseId + std::hash::Hash> ValueViews<I> {
             Representative::Literal { bits, size } => Some((bits, size)),
             Representative::Value(value) => Some((self.constant(value)?, self.size(value))),
         }
+    }
+
+    /// The value that is exactly `root`'s low `bits`: the root at its own width, else the first
+    /// value of that class in definition order.
+    pub fn low_lane_value(&self, root: I, bits: u32) -> Option<I> {
+        if self.bits(root) == bits {
+            return Some(root);
+        }
+        self.low_lanes
+            .get(root)?
+            .iter()
+            .find(|(width, _)| *width == bits)
+            .map(|(_, value)| *value)
     }
 
     /// Whether `a` and `b` are the same bits at the same width.
@@ -526,6 +551,53 @@ pub(crate) fn preserves_integer<V>(
         )
 }
 
+/// How an operation defines its output for the solver: one transparent input,
+/// or a lane inserted at a constant position above the low bits.
+fn definition_of<I: Copy>(
+    op: &SSAOp<I>,
+    facts: impl Fn(&I) -> Facts,
+) -> Option<(I, Definition<I>)> {
+    if let Some((dst, src, step)) = step_of(op, &facts) {
+        return Some((*dst, Definition::Step(*src, step)));
+    }
+    let SSAOp::Insert(insert) = op else {
+        return None;
+    };
+    let lsb_bits = u32::try_from(facts(&insert.position).1?)
+        .ok()
+        .filter(|bits| *bits > 0)?;
+    let end = lsb_bits.checked_add(facts(&insert.value).0.saturating_mul(8))?;
+    (end <= facts(&insert.dst).0.saturating_mul(8)).then_some((
+        insert.dst,
+        Definition::Insert {
+            base: insert.src,
+            lane: insert.value,
+            lsb_bits,
+        },
+    ))
+}
+
+/// Which bits of which value a lane is: `SUBPIECE(y, k)` at `k > 0` is `y`'s
+/// bits from `8k`, and a same-width copy of a lane is that lane.
+fn record_offset<I: DenseId>(
+    op: &SSAOp<I>,
+    facts: impl Fn(&I) -> Facts,
+    offsets: &mut IdMap<I, (I, u32)>,
+) {
+    let found = match op {
+        SSAOp::Subpiece { dst, src, offset } if *offset > 0 => {
+            Some((*dst, (*src, offset.saturating_mul(8))))
+        }
+        SSAOp::Copy { dst, src } if facts(dst).0 == facts(src).0 => {
+            offsets.get(*src).map(|lane| (*dst, *lane))
+        }
+        _ => None,
+    };
+    if let Some((lane, source)) = found {
+        offsets.insert(lane, source);
+    }
+}
+
 /// The view of an output, given its input's view.
 fn transfer<I: DenseId>(
     facts: &IdVec<I, Facts>,
@@ -572,6 +644,12 @@ fn transfer<I: DenseId>(
 enum Definition<I> {
     Phi(Vec<I>),
     Step(I, Step),
+    /// `INSERT(base, lane, lsb_bits)` with `lsb_bits > 0`.
+    Insert {
+        base: I,
+        lane: I,
+        lsb_bits: u32,
+    },
 }
 
 struct Solver<I> {
@@ -580,10 +658,17 @@ struct Solver<I> {
     definitions: Vec<Definition<I>>,
     index: IdMap<I, usize>,
     facts: IdVec<I, Facts>,
+    /// Each lane read from another value above its low bits: that value, and the bit it starts at.
+    offsets: IdMap<I, (I, u32)>,
 }
 
 impl<I: DenseId + std::hash::Hash> Solver<I> {
-    fn over(nodes: Vec<I>, definitions: Vec<Definition<I>>, facts: IdVec<I, Facts>) -> Self {
+    fn over(
+        nodes: Vec<I>,
+        definitions: Vec<Definition<I>>,
+        facts: IdVec<I, Facts>,
+        offsets: IdMap<I, (I, u32)>,
+    ) -> Self {
         let mut index = IdMap::new(facts.len());
         for (at, node) in nodes.iter().enumerate() {
             index.insert(*node, at);
@@ -593,6 +678,7 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
             definitions,
             index,
             facts,
+            offsets,
         }
     }
 
@@ -612,6 +698,14 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
                 .filter_map(|source| self.index.get(*source).copied())
                 .collect(),
             Definition::Step(source, _) => self.index.get(*source).copied().into_iter().collect(),
+            Definition::Insert { base, lane, .. } => [
+                Some(*base),
+                self.offsets.get(*lane).map(|(source, _)| *source),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(|input| self.index.get(input).copied())
+            .collect(),
         }
     }
 
@@ -654,10 +748,11 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
                 views.insert(id, view);
             }
         }
-        let representatives = representatives(&self.nodes, &views, &self.facts);
+        let (representatives, low_lanes) = representatives(&self.nodes, &views, &self.facts);
         ValueViews {
             views,
             representatives,
+            low_lanes,
             facts: self.facts,
         }
     }
@@ -736,6 +831,28 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
                     transfer(&self.facts, *step, &input, id).unwrap_or_else(|| self.own(id)),
                 );
             }
+            Definition::Insert {
+                base,
+                lane,
+                lsb_bits,
+            } => {
+                let base = self.input_view(*base, state)?;
+                let continued = match self.offsets.get(*lane).copied() {
+                    Some((source, from)) => {
+                        let source = self.input_view(source, state)?;
+                        self.continued(id, &base, &source, *lane, *lsb_bits, from)
+                    }
+                    None => None,
+                };
+                // Bits below the lane are the base's whatever the lane is.
+                let below = || {
+                    let root_bits = self.facts[base.root].0.saturating_mul(8);
+                    let width = self.facts[id].0.saturating_mul(8);
+                    let prefix = base.prefix_bits.min(*lsb_bits);
+                    normalized(base.root, root_bits, prefix, ViewExtension::Unknown, width)
+                };
+                return Some(continued.or_else(below).unwrap_or_else(|| self.own(id)));
+            }
             Definition::Phi(sources) => sources,
         };
         // An input not reached yet is assumed to agree.
@@ -748,6 +865,37 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
         }
         fallen[node] = true;
         Some(self.own(id))
+    }
+}
+
+impl<I: DenseId + std::hash::Hash> Solver<I> {
+    /// `INSERT(base, lane, lsb)` where `lane` is `source`'s bits from `from`: when `from` is `lsb`,
+    /// `base` covers the bits below it and `source` the lane's, all of one root, the output is that
+    /// root up to the lane's end at least.
+    fn continued(
+        &self,
+        id: I,
+        base: &ValueView<I>,
+        source: &ValueView<I>,
+        lane: I,
+        lsb: u32,
+        from: u32,
+    ) -> Option<ValueView<I>> {
+        let end = lsb.checked_add(self.facts[lane].0.saturating_mul(8))?;
+        let covers = from == lsb
+            && base.root == source.root
+            && base.prefix_bits >= lsb
+            && source.prefix_bits >= end;
+        if !covers {
+            return None;
+        }
+        // Bits the base already stated as the root's past the lane stay stated.
+        if base.prefix_bits >= end {
+            return Some(*base);
+        }
+        let root_bits = self.facts[base.root].0.saturating_mul(8);
+        let width = self.facts[id].0.saturating_mul(8);
+        normalized(base.root, root_bits, end, ViewExtension::Unknown, width)
     }
 }
 
@@ -771,8 +919,7 @@ fn graph_definition(
         crate::graph::InstPayload::Phi { .. } => {
             Some((inst.output?, Definition::Phi(inst.inputs.clone())))
         }
-        crate::graph::InstPayload::Op(op) => step_of(op, |id| facts[*id])
-            .map(|(dst, src, step)| (*dst, Definition::Step(*src, step))),
+        crate::graph::InstPayload::Op(op) => definition_of(op, |id| facts[*id]),
     }
 }
 
@@ -865,12 +1012,13 @@ fn representatives<I: DenseId + std::hash::Hash>(
     order: &[I],
     views: &IdMap<I, ValueView<I>>,
     facts: &IdVec<I, Facts>,
-) -> IdMap<I, Representative<I>> {
+) -> (IdMap<I, Representative<I>>, LowLanes<I>) {
     let bits = |id: I| facts[id].0.saturating_mul(8);
     // The first value of each class, keyed by the class: its root, width,
     // prefix and extension. Only looked up, never iterated.
     let mut first_of_class = HashMap::<(I, u32, u32, ViewExtension), I>::new();
     let mut representatives = IdMap::new(facts.len());
+    let mut low_lanes = LowLanes::<I>::new(facts.len());
     for id in order {
         let Some(view) = views.get(*id) else {
             continue;
@@ -890,13 +1038,21 @@ fn representatives<I: DenseId + std::hash::Hash>(
                 .entry((view.root, width, view.prefix_bits, view.extension))
                 .or_insert(*id);
             if first == *id {
+                if view.prefix_bits == width {
+                    match low_lanes.get_mut(view.root) {
+                        Some(lanes) => lanes.push((width, *id)),
+                        None => {
+                            low_lanes.insert(view.root, vec![(width, *id)]);
+                        }
+                    }
+                }
                 continue;
             }
             Representative::Value(first)
         };
         representatives.insert(*id, representative);
     }
-    representatives
+    (representatives, low_lanes)
 }
 
 /// The literal a view of a constant determines at `width` bits, where it fits
@@ -984,6 +1140,94 @@ mod tests {
             })
             .cloned()
             .expect("a definition of that storage")
+    }
+
+    #[test]
+    fn lanes_copied_in_order_into_a_register_are_the_bits_they_came_from() {
+        // rax's low and high words written from rbx's, in place: rax is rbx (movaps).
+        let mut arch = arch();
+        arch.add_register(RegisterDef::new("eax", 0, 4));
+        arch.add_register(RegisterDef::new("raxh", 4, 4));
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Subpiece {
+            dst: reg(0, 4),
+            src: reg(8, 8),
+            offset: 0,
+        });
+        block.push(R2ILOp::Subpiece {
+            dst: reg(4, 4),
+            src: reg(8, 8),
+            offset: 4,
+        });
+        block.push(R2ILOp::Return { target: reg(0, 8) });
+        let function = SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("raw SSA builds");
+        let views = ValueViews::compute(&function);
+        let table = function.values();
+        let id = |var: &SSAVar| table.id_of(var).expect("interned");
+        // The value returned: the second write, after both lanes.
+        let rax = function
+            .named_blocks()
+            .iter()
+            .flat_map(|block| block.ops())
+            .filter_map(SSAOp::dst)
+            .filter(|dst| dst.name().eq_ignore_ascii_case("rax"))
+            .last()
+            .cloned()
+            .expect("rax written");
+        let rbx = function
+            .named_blocks()
+            .iter()
+            .flat_map(|block| block.ops())
+            .flat_map(SSAOp::sources)
+            .find(|src| src.name().eq_ignore_ascii_case("rbx") && src.version == 0)
+            .cloned()
+            .expect("rbx read at entry");
+        assert!(
+            views.same_bits(id(&rax), id(&rbx)),
+            "{:?}",
+            views.view(id(&rax))
+        );
+    }
+
+    #[test]
+    fn a_lane_written_above_keeps_the_bits_below_it() {
+        // rax's low word from rbx, then its high word a constant: rax's low word is still rbx's.
+        let mut arch = arch();
+        arch.add_register(RegisterDef::new("eax", 0, 4));
+        arch.add_register(RegisterDef::new("raxh", 4, 4));
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Subpiece {
+            dst: reg(0, 4),
+            src: reg(8, 8),
+            offset: 0,
+        });
+        block.push(R2ILOp::Copy {
+            dst: reg(4, 4),
+            src: Varnode::constant(7, 4),
+        });
+        block.push(R2ILOp::Return { target: reg(0, 8) });
+        let function = SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("raw SSA builds");
+        let views = ValueViews::compute(&function);
+        let table = function.values();
+        let rax = function
+            .named_blocks()
+            .iter()
+            .flat_map(|block| block.ops())
+            .filter_map(SSAOp::dst)
+            .filter(|dst| dst.name().eq_ignore_ascii_case("rax"))
+            .last()
+            .cloned()
+            .expect("rax written");
+        let view = views.view(table.id_of(&rax).expect("interned"));
+        assert_eq!(
+            (
+                function.var(view.root).name(),
+                view.prefix_bits,
+                view.extension
+            ),
+            ("rbx", 32, ViewExtension::Unknown),
+            "{view:?}"
+        );
     }
 
     #[test]

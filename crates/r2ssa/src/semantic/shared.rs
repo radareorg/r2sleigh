@@ -1050,6 +1050,42 @@ pub(crate) fn reaching_abi_value_at_end(
     result
 }
 
+/// The value whose bits are exactly the low `storage` bytes of `value`, a wider register value,
+/// where the views prove one other than `value` itself (ROADMAP P5: lanes copied one by one).
+pub(crate) fn proven_low_lane(
+    views: &crate::view::ValueViews<ValueId>,
+    graph: &SsaGraph,
+    value: ValueId,
+    storage: CanonicalStorageId,
+) -> Option<ValueId> {
+    let wider = graph.value(value)?.var.size > storage.size;
+    let bits = storage.size.saturating_mul(8);
+    let view = views.view(value);
+    if !wider || view.prefix_bits < bits {
+        return None;
+    }
+    views
+        .low_lane_value(view.root, bits)
+        .filter(|lane| *lane != value)
+}
+
+/// A register argument narrowed to the value its slot's bits are, with the wider value it was read
+/// from: the boundary fact's `value` and `lane_of`.
+pub(crate) fn narrowed_argument(
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+    value: SourceCallArgumentValue,
+    storage: CanonicalStorageId,
+) -> (SourceCallArgumentValue, Option<ValueId>) {
+    let SourceCallArgumentValue::Value(carrier) = value else {
+        return (value, None);
+    };
+    match prep.and_then(|prep| proven_low_lane(&prep.views, graph, carrier, storage)) {
+        Some(lane) => (SourceCallArgumentValue::Value(lane), Some(carrier)),
+        None => (value, None),
+    }
+}
+
 pub(crate) fn reaching_abi_value_before(
     search: ReachingAbi<'_>,
     block_addr: u64,

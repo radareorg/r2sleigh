@@ -486,6 +486,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
                 storage: argument_storage,
             },
             value: SourceCallArgumentValue::Value(parameter.value),
+            lane_of: None,
         }]
     );
     let certificate = prepared

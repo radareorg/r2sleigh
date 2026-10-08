@@ -185,13 +185,14 @@ fn a_declared_double_result_is_returned() {
 }
 
 /// An argument moved as a whole register holds the slot that is that register's low lane (B3).
+/// x86-64's `movaps` copies the register lane by lane, and the lanes in order are the source's bits (P5).
 #[test]
 fn a_double_moved_as_its_whole_register_is_the_argument() {
     let aarch64 = run("float_moves_zig_aarch64_O2g", "pdd @ sym.swap_call");
     assert!(aarch64.contains("return scale(b, a);"), "{aarch64}");
     let x86_64 = run("float_moves_zig_x86_64_O2g", "pdd @ sym.swap_call");
-    assert!(!x86_64.contains("r2sleigh refused"), "{x86_64}");
-    assert!(x86_64.contains("return scale("), "{x86_64}");
+    assert!(x86_64.contains("return scale(b, a);"), "{x86_64}");
+    assert!(!x86_64.contains("__uint128_t"), "{x86_64}");
 }
 
 /// `_init` reads `__gmon_start__`'s global offset table slot to see whether profiling is linked.

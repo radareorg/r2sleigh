@@ -517,6 +517,7 @@ pub(crate) fn variadic_callsite_arguments(
             arguments.push(SourceCallArgumentFact {
                 slot: CallBoundarySlot::Stack(entry_offset),
                 value: SourceCallArgumentValue::Value(value),
+                lane_of: None,
             });
             continue;
         }
@@ -546,6 +547,7 @@ pub(crate) fn variadic_callsite_arguments(
                 storage: slot,
             },
             value,
+            lane_of: None,
         });
     }
     Ok(arguments)
@@ -938,12 +940,14 @@ pub(crate) fn convention_call_boundary(
                 break;
             }
         };
+        let (value, lane_of) = super::shared::narrowed_argument(prep, graph, value, *slot);
         arguments.push(SourceCallArgumentFact {
             slot: CallBoundarySlot::Register {
                 index,
                 storage: *slot,
             },
             value,
+            lane_of,
         });
     }
     // The convention fills every register slot before the argument area, and a
@@ -1004,6 +1008,7 @@ pub(crate) fn convention_call_boundary(
             arguments.push(SourceCallArgumentFact {
                 slot: CallBoundarySlot::Stack(entry_offset),
                 value: SourceCallArgumentValue::Value(value),
+                lane_of: None,
             });
         }
     }
@@ -1111,12 +1116,17 @@ pub(crate) fn collect_source_boundary_facts(
                                     storage
                                 );
                             }
-                            found.map(|value| SourceCallArgumentFact {
-                                slot: CallBoundarySlot::Register {
-                                    index: argument.index(),
-                                    storage,
-                                },
-                                value,
+                            found.map(|value| {
+                                let (value, lane_of) =
+                                    super::shared::narrowed_argument(prep, graph, value, storage);
+                                SourceCallArgumentFact {
+                                    slot: CallBoundarySlot::Register {
+                                        index: argument.index(),
+                                        storage,
+                                    },
+                                    value,
+                                    lane_of,
+                                }
                             })
                         }
                         r2source::SourceParameterLocation::Stack {
@@ -1150,6 +1160,7 @@ pub(crate) fn collect_source_boundary_facts(
                             found.map(|(value, entry_offset)| SourceCallArgumentFact {
                                 slot: CallBoundarySlot::Stack(entry_offset),
                                 value: SourceCallArgumentValue::Value(value),
+                                lane_of: None,
                             })
                         }
                     })

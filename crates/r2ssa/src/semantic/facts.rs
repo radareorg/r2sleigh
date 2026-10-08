@@ -596,6 +596,9 @@ pub enum SourceCallArgumentValue {
 pub struct SourceCallArgumentFact {
     pub slot: CallBoundarySlot,
     pub value: SourceCallArgumentValue,
+    /// The wider register value the walk reached, where the views prove its low
+    /// bits are exactly `value` (ROADMAP P5); the certificate checks both.
+    pub lane_of: Option<ValueId>,
 }
 
 /// Per-callsite proof of a variadic argument count.
