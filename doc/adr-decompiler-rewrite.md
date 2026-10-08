@@ -69,6 +69,35 @@ access has one spelling from facts, every effect survives exactly once with one
 typed owner. The three ADRs that state them (partition-first, access-syntax,
 semantic-preservation-kernel) fold into this one when D lands.
 
+## D2 and D3, as they are built
+
+The obligation inventory says what must be rendered, so no stage re-derives it.
+
+- **Demand.** An instruction with live obligations owes its statement: a store
+  assigns its cell, a call is written from the callsite facts, a return hands
+  back its boundary value, a branch test is D1's condition. Each obligation
+  names the values it reads; those values, and every value a bound value's
+  term reads, are the rendered values. Every other value is dead, as the
+  inventory already classifies it (proven dead, structural control only).
+- **Inline or bind.** r2rewrite's import absorbs a producer into its reader's
+  term under the expansion policy D2 states: one reader, in the same block,
+  after the producer, with no memory write, call or assignment between; or a
+  term over literals and entry values never redefined (`Multiplicity::Any`).
+  A load never moves past a write. A rendered value no reader absorbed is
+  bound: declared once (D4) and assigned where it is defined.
+- **Merges.** A phi is bound to its own variable, assigned on each incoming
+  edge by one parallel copy, sequentialised with a temporary where it reads
+  what it writes. Coalescing a phi web into one variable is the partition,
+  r2ssa's to state from `ValueLiveness` and `StorageSpans` (D2.1); the old
+  r2dec holds the only partition today.
+- **Spelling (D3).** A canonical term is spelled by its kind, with a
+  conversion exactly where `typed.rs`'s produced and required types differ.
+  A term with no C spelling is a residual of its type, and its obligations
+  are gapped.
+
+Cost: one canonicalisation, `O(terms × rules applied)`, then one pass over
+the operations and their uses.
+
 ## What survives
 
 - The dominator-tree structurer and its certificate (SD, done): ported as D1.
