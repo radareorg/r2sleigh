@@ -156,6 +156,10 @@ pub enum TrustedSleighProfile {
 impl TrustedSleighProfile {
     /// Every profile this build embeds.
     fn embedded() -> Vec<Self> {
+        #[cfg_attr(
+            not(any(feature = "x86", feature = "arm", feature = "mips", feature = "riscv")),
+            expect(unused_mut, reason = "no architecture is enabled")
+        )]
         let mut all = Vec::new();
         #[cfg(feature = "x86")]
         all.extend([Self::X86, Self::X86_64]);

@@ -47,6 +47,34 @@ pub struct RenameContext {
     /// root (doc/adr-register-identity.md). `None` keeps exact-varnode identities.
     families: Option<Arc<RegisterFamilyInfo>>,
     lanes: LaneState,
+    /// The function's call boundary as identities, named once for every call.
+    boundary: BoundaryIdentities,
+}
+
+/// What every call of one function reads and clobbers: its boundary is the function's, not the call's.
+#[derive(Debug, Default)]
+struct BoundaryIdentities {
+    arguments: BTreeSet<RenameIdentity>,
+    clobbered: Arc<BTreeSet<RenameIdentity>>,
+}
+
+impl BoundaryIdentities {
+    fn of(
+        boundary: &CallBoundaryConfig,
+        reg_names: Option<&RegisterNameMap>,
+        families: Option<&RegisterFamilyInfo>,
+    ) -> Self {
+        let named = |storages: &[CanonicalStorageId]| {
+            storages
+                .iter()
+                .map(|storage| crate::phi::clobber_identity(*storage, reg_names, families))
+                .collect::<BTreeSet<_>>()
+        };
+        Self {
+            arguments: named(&boundary.argument_regs),
+            clobbered: Arc::new(named(&boundary.clobbered)),
+        }
+    }
 }
 
 /// The lane temporaries of the instruction being renamed, and the operations
@@ -188,6 +216,7 @@ impl RenameContext {
             next_disambiguator: HashMap::new(),
             families,
             lanes: LaneState::default(),
+            boundary: BoundaryIdentities::default(),
         }
     }
 
@@ -496,6 +525,9 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
     } = inputs;
     control.poll()?;
     let mut ctx = RenameContext::with_families(families);
+    if let Some(boundary) = call_boundaries {
+        ctx.boundary = BoundaryIdentities::of(boundary, inputs.reg_names, ctx.families.as_deref());
+    }
     let mut result = RenamedFunction::new();
 
     // Initialize all variables
@@ -698,9 +730,9 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 block_ops.append(&mut ctx.lanes.prefix);
                 let boundary_reads =
                     if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
-                        && let Some(boundary) = call_boundaries
+                        && call_boundaries.is_some()
                     {
-                        append_call_boundary_reads(block_ops, ctx, boundary, reg_names)
+                        append_call_boundary_reads(block_ops, ctx)
                     } else {
                         Vec::new()
                     };
@@ -931,15 +963,16 @@ fn record_canonical_storage(
     if ambiguous_vars.contains(var) {
         return;
     }
-    if storage_by_var
-        .get(var)
-        .is_some_and(|existing| *existing != storage)
-    {
-        storage_by_var.remove(var);
-        ambiguous_vars.insert(var.clone());
-        return;
+    match storage_by_var.entry(var.clone()) {
+        std::collections::btree_map::Entry::Vacant(vacant) => {
+            vacant.insert(storage);
+        }
+        std::collections::btree_map::Entry::Occupied(held) if *held.get() != storage => {
+            held.remove();
+            ambiguous_vars.insert(var.clone());
+        }
+        std::collections::btree_map::Entry::Occupied(_) => {}
     }
-    storage_by_var.insert(var.clone(), storage);
 }
 
 fn append_call_boundary_defs(
@@ -957,11 +990,7 @@ fn append_call_boundary_defs(
     };
 
     // A call clobbers each family's root once.
-    let clobbered: BTreeSet<RenameIdentity> = call_boundaries
-        .clobbered
-        .iter()
-        .map(|storage| crate::phi::clobber_identity(*storage, reg_names, ctx.families.as_deref()))
-        .collect();
+    let clobbered = Arc::clone(&ctx.boundary.clobbered);
     // A callee's own result carrier comes back changed whatever the convention says.
     let results = callee.result.map_or_else(BTreeSet::new, |reg| {
         callee_result_identities(ctx, reg, reg_names)
@@ -1108,19 +1137,11 @@ fn append_written_lane_inserts(
 fn append_call_boundary_reads(
     block_ops: &mut Vec<SSAOp>,
     ctx: &RenameContext,
-    call_boundaries: &CallBoundaryConfig,
-    reg_names: Option<&RegisterNameMap>,
 ) -> Vec<(SSAVar, CanonicalStorageId)> {
-    let mut read: BTreeSet<RenameIdentity> = BTreeSet::new();
-    for storage in &call_boundaries.argument_regs {
-        let identity = crate::phi::clobber_identity(*storage, reg_names, ctx.families.as_deref());
-        if ctx.knows_identity(&identity) {
-            read.insert(identity);
-        }
-    }
+    let read = ctx.boundary.arguments.iter();
     let mut retained = Vec::new();
-    for identity in read {
-        let src = ctx.read_var(&identity);
+    for identity in read.filter(|identity| ctx.knows_identity(identity)) {
+        let src = ctx.read_var(identity);
         if matches!(
             identity.storage.space,
             crate::CanonicalStorageSpace::Register
