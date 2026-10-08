@@ -397,6 +397,27 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     );
 }
 
+/// A recursive call names the function itself at its own signature: `fact` calls `fact` with
+/// no declaration that could contradict the definition, which C rejects.
+#[test]
+fn a_staged_recursive_call_agrees_with_its_own_definition() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fact");
+    assert!(
+        staged.out.contains("int32_t fact(uint32_t arg0)"),
+        "{}",
+        staged.out
+    );
+    assert!(
+        staged
+            .out
+            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)arg0 - (uint32_t)1U));"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("fact(uint64_t)"), "{}", staged.out);
+}
+
 /// The staged pipeline's frame is one array aligned as the machine's (D4): `main` passes `&d`,
 /// `sp + 8` on AArch64, where SP is 16-aligned at entry, to two calls and reads it after each.
 #[test]

@@ -52,6 +52,18 @@ pub(super) struct Values<'a> {
     externs: RefCell<BTreeMap<String, CExternDecl>>,
     little_endian: bool,
     ptr_bits: u32,
+    /// The function itself as a call to its own entry names it: its name, parameters and result.
+    own: Own,
+}
+
+/// What a recursive call needs of the function it is in.
+struct Own {
+    entry: u64,
+    name: String,
+    /// The parameters' classes, where every one is known.
+    params: Option<Vec<MachineType>>,
+    /// The result's class; `None` for a `void` function.
+    result: Option<MachineType>,
 }
 
 /// Whether an instruction between a producer and its reader is one a moved read or trap may not cross.
@@ -577,6 +589,24 @@ impl<'a> Values<'a> {
             results,
             externs: RefCell::new(BTreeMap::new()),
             ptr_bits: input.ptr_bits(),
+            own: Own {
+                entry: input.function().root(),
+                name: crate::rendered_name_of(input.name(), input.function().root()),
+                params: None,
+                result: match input
+                    .return_type()
+                    .and_then(r2types::ReturnTypeFact::decided)
+                {
+                    Some(CType::Void) => None,
+                    Some(ty) => ty
+                        .bits(input.ptr_bits())
+                        .and_then(|bits| class_of(ty, bits)),
+                    None => Some(MachineType::Integer {
+                        width_bits: input.ptr_bits(),
+                        signedness: r2ssa::MachineSignedness::Unsigned,
+                    }),
+                },
+            },
             little_endian: matches!(
                 artifact
                     .machine_context()
@@ -588,6 +618,9 @@ impl<'a> Values<'a> {
             roots,
         };
         let parameters = parameters(input, artifact);
+        values.own.params = parameters
+            .as_ref()
+            .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
         values.declare(parameters);
         Some(values)
     }
@@ -871,6 +904,9 @@ impl<'a> Values<'a> {
     /// in, its result assigned.
     fn call(&self, inst: InstId) -> Option<CStmt> {
         let plan = self.calls.get(inst)?;
+        if plan.address == Some(self.own.entry) {
+            return self.recursive_call(inst, plan);
+        }
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
         for (argument, class) in &plan.arguments {
@@ -918,6 +954,36 @@ impl<'a> Values<'a> {
         };
         let value = terms::reclass(call, class, held)?;
         if let Some(def) = self.graph.def_inst(*result) {
+            self.mark(def);
+        }
+        Some(assign(*name, value))
+    }
+
+    /// A call to the function's own entry: by its own name and at its own parameters' classes, so
+    /// the call agrees with the definition it stands in.
+    fn recursive_call(&self, inst: InstId, plan: &CallPlan) -> Option<CStmt> {
+        let params = self.own.params.as_ref()?;
+        if params.len() != plan.arguments.len() {
+            return None;
+        }
+        let mut arguments = Vec::with_capacity(params.len());
+        for ((argument, _), class) in plan.arguments.iter().zip(params) {
+            let held = self.value_type(*argument)?;
+            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
+        }
+        let callee = CExpr::External {
+            name: self.own.name.clone(),
+            kind: crate::symbol::ExternalKind::Function,
+        };
+        let call = CExpr::call_at(inst, callee, arguments);
+        let named = plan
+            .result
+            .and_then(|(result, _)| Some((result, self.names.get(result.0 as usize)?.as_ref()?)));
+        let Some((result, (name, held))) = named else {
+            return Some(CStmt::Expr(call));
+        };
+        let value = fit(call, &self.own.result?, held)?;
+        if let Some(def) = self.graph.def_inst(result) {
             self.mark(def);
         }
         Some(assign(*name, value))
@@ -1160,11 +1226,12 @@ impl<'a> Values<'a> {
                 false => out.push(assign(*name, source)),
                 true => {
                     let c = terms::c_type(ty).expect("a named value has a C type");
-                    let temp = self.symbols.borrow_mut().declare(
-                        format!("{}_next", self.symbols.borrow().name(*name)),
-                        c.clone(),
-                        SymbolRole::Carrier,
-                    );
+                    // The name is read before the table is borrowed to declare the temporary.
+                    let next = format!("{}_next", self.symbols.borrow().name(*name));
+                    let temp =
+                        self.symbols
+                            .borrow_mut()
+                            .declare(next, c.clone(), SymbolRole::Carrier);
                     self.locals.borrow_mut().push(CLocal {
                         ty: c,
                         name: temp,
@@ -1331,6 +1398,19 @@ impl Gap {
             Self::Type => "ValueHasNoCType",
             Self::Unknown => "ValueNotComputed",
         }
+    }
+}
+
+/// An integer held at one width passed or returned at another: a cast keeps the low bits a narrower
+/// one carries and zero-extends into a wider one; a float only as `reclass` reinterprets it.
+fn fit(expr: CExpr, from: &MachineType, to: &MachineType) -> Option<CExpr> {
+    let float = |ty: &MachineType| matches!(ty, MachineType::Float { .. });
+    match (float(from), float(to)) {
+        (false, false) => Some(CExpr::cast(
+            terms::c_type(to)?,
+            CExpr::cast(terms::c_type(from)?, expr),
+        )),
+        _ => terms::reclass(expr, from, to),
     }
 }
 

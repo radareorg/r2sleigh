@@ -3,8 +3,9 @@
 
 mod common;
 
-use common::{CALLER, FORKED, ONE, opened};
+use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, opened};
 use r2engine::RenderTier;
+use r2engine::program::OpenProgram;
 
 #[test]
 fn the_staged_pipeline_renders_a_leaf_function_s_values() {
@@ -72,4 +73,21 @@ fn a_described_call_is_written_from_the_callsite_facts() {
             .any(|link| link.ident == "one" && link.addr == Some(ONE)),
         "{links:?}"
     );
+}
+
+/// `L: test rdi, rdi; je D; mov rdx, rax; mov rax, rcx; mov rcx, rdx; sub rdi, 1; jmp L;
+/// D: sub rax, rcx; ret`: the merges swap on the back edge, each copy reading what the other writes.
+#[test]
+fn merges_that_swap_copy_through_a_temporary() {
+    const SWAPS: &[u8] = &[
+        0x48, 0x89, 0xf0, 0x48, 0x89, 0xd1, 0x48, 0x85, 0xff, 0x74, 0x0f, 0x48, 0x89, 0xc2, 0x48,
+        0x89, 0xc8, 0x48, 0x89, 0xd1, 0x48, 0x83, 0xef, 0x01, 0xeb, 0xec, 0x48, 0x29, 0xc8, 0xc3,
+    ];
+    let program = Literal::of_code(SWAPS, &[("swaps", BASE, SWAPS.len() as u64)]).running_on(GLIBC);
+    let rendering = OpenProgram::of(program)
+        .rendered(BASE, RenderTier::Staged)
+        .expect("the staged pipeline renders");
+    let text = rendering.response.output.text().to_owned();
+    assert!(text.contains("_next = "), "{text}");
+    assert!(!text.contains("r2dec gap"), "{text}");
 }
