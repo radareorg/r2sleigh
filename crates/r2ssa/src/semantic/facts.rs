@@ -1347,6 +1347,20 @@ pub struct StructuredDataflowFacts {
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
 }
 
+impl StructuredDataflowFacts {
+    /// The memory accesses one instruction makes, by ordinal: a range of the map, `O(log n)`.
+    pub fn accesses_at(&self, inst: InstId) -> impl Iterator<Item = &StructuredMemoryAccessFact> {
+        let from = StructuredAccessId { inst, ordinal: 0 };
+        let to = StructuredAccessId {
+            inst,
+            ordinal: u32::MAX,
+        };
+        self.memory_accesses
+            .range(from..=to)
+            .map(|(_, access)| access)
+    }
+}
+
 /// Exact, prepared interpretation of an external assumption subject.
 ///
 /// `AnalysisAssumption` keeps the user's source spelling for diagnostics. This

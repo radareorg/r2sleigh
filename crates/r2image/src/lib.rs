@@ -398,6 +398,11 @@ impl Image {
 
         let arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
         let format = map_format(file.format());
+        // A header may state bytes past the file's end; only the bytes the file holds are its.
+        let held = |(offset, size): (u64, u64)| {
+            let len = data.len() as u64;
+            (offset, size.min(len.saturating_sub(offset)))
+        };
 
         // A relocatable object states no addresses: every section says zero, so
         // each is placed at its own file offset above one base, which is the
@@ -415,7 +420,7 @@ impl Image {
         let mut segments: Vec<Segment> = file
             .segments()
             .map(|segment| {
-                let (file_offset, file_size) = segment.file_range();
+                let (file_offset, file_size) = held(segment.file_range());
                 Segment {
                     vaddr: segment.address(),
                     vsize: segment.size(),
@@ -437,7 +442,7 @@ impl Image {
                 .filter(|section| placed(section) != 0 || section.size() != 0)
                 .filter(section_is_loaded)
                 .map(|section| {
-                    let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                    let (file_offset, file_size) = held(section.file_range().unwrap_or((0, 0)));
                     Segment {
                         vaddr: placed(&section),
                         vsize: section.size(),
@@ -456,7 +461,7 @@ impl Image {
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
-                let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                let (file_offset, file_size) = held(section.file_range().unwrap_or((0, 0)));
                 let vaddr = placed(&section);
                 let loaded = section_is_loaded(&section);
                 let stated = section_statement(&file, &section);

@@ -87,11 +87,9 @@ pub(crate) fn collect_machine_return_control_certificates(
                     ..
                 }) => {
                     let accesses = structured
-                        .memory_accesses
-                        .values()
+                        .accesses_at(inst)
                         .filter(|access| {
-                            access.id.inst == inst
-                                && !access.is_write
+                            !access.is_write
                                 && access.value == Some(current)
                                 && access.provenance_complete
                                 && access.space == SpaceId::Ram

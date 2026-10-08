@@ -118,9 +118,7 @@ impl MachineBuilder {
                 let accesses = artifact
                     .facts()
                     .structured
-                    .memory_accesses
-                    .values()
-                    .filter(|access| access.id.inst == inst.id)
+                    .accesses_at(inst.id)
                     .collect::<Vec<_>>();
                 let [access] = accesses.as_slice() else {
                     return Err(MachineBuildError::UnsupportedOperation {
