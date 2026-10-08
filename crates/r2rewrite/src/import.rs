@@ -47,9 +47,8 @@ pub struct Substitution {
     pub producer: CanonicalInstructionId,
 }
 
-/// What one import step recorded: its own rewrites, after those of the producers it absorbed
-/// directly, in operand order. The transitive trace and producer set are walked from these,
-/// never stored per value (each value would copy every producer's below it).
+/// One import step: its own rewrites, after those of the producers it absorbed directly, in
+/// operand order; a value's whole trace and producer set are walked from these on demand.
 #[derive(Debug, Clone, Default)]
 pub struct ImportStep {
     own: Box<[Rewrite]>,
@@ -136,15 +135,12 @@ impl Import {
         let mut out = Vec::new();
         let mut stack = vec![(step, 0)];
         while let Some((step, next)) = stack.pop() {
-            match step.substitutions.get(next) {
-                Some(substitution) => {
-                    stack.push((step, next + 1));
-                    if let Some(child) = self.step(substitution.root) {
-                        stack.push((child, 0));
-                    }
-                }
-                None => out.extend_from_slice(&step.own),
-            }
+            let Some(substitution) = step.substitutions.get(next) else {
+                out.extend_from_slice(&step.own);
+                continue;
+            };
+            stack.push((step, next + 1));
+            stack.extend(self.step(substitution.root).map(|child| (child, 0)));
         }
         out
     }
@@ -155,13 +151,12 @@ impl Import {
         let mut producers = BTreeSet::new();
         let mut stack = vec![step];
         while let Some(step) = stack.pop() {
-            for substitution in &step.substitutions {
-                if producers.insert(substitution.producer)
-                    && let Some(child) = self.step(substitution.root)
-                {
-                    stack.push(child);
-                }
-            }
+            let fresh = step
+                .substitutions
+                .iter()
+                .filter(|substitution| producers.insert(substitution.producer));
+            let children = fresh.filter_map(|substitution| self.step(substitution.root));
+            stack.extend(children);
         }
         producers
     }
