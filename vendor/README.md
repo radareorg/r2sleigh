@@ -6,8 +6,8 @@ list packages; local changes are listed, and a refresh re-applies them.
 
 | Crate | Upstream | Taken from | Local changes |
 |---|---|---|---|
-| `libsla` 1.2.0 | github.com/mnemonikr/libsla, via the 0verflowme fork | `ebf92321` | user-operation names and the parser-cache reset (libsla#18, #19) |
-| `libsla-sys` 0.1.5 | github.com/mnemonikr/libsla-sys, via the 0verflowme fork | `2ddd71ac` (Ghidra `aed1cf1c`) | the same two passthroughs (libsla-sys#8, #9); Ghidra's decompiler C++ only; Ghidra: `SleighBase` keeps the context fields `buildXrefs` found, so `reregisterContext` walks no symbol table, `Sleigh` records whether a decode committed context and can mark its cached parses stale, and the bridge's `clearCache` rebuilds the context only after a commit (ROADMAP PF0) |
+| `libsla` 1.2.0 | github.com/mnemonikr/libsla, via the 0verflowme fork | `ebf92321` | user-operation names and the parser-cache reset (libsla#18, #19); `GhidraSleigh` reads its address spaces once, a space's name is interned, and the p-code emit reads each varnode in place and its space from that list (ROADMAP PF1) |
+| `libsla-sys` 0.1.5 | github.com/mnemonikr/libsla-sys, via the 0verflowme fork | `2ddd71ac` (Ghidra `aed1cf1c`) | the same two passthroughs (libsla-sys#8, #9); `getVarnodeSpace` and `getVarnodeOffset`, which read a varnode where `getAddress` allocated an `Address`; Ghidra's decompiler C++ only; Ghidra: `SleighBase` keeps the context fields `buildXrefs` found, so `reregisterContext` walks no symbol table, `Sleigh` records whether a decode committed context and can mark its cached parses stale, and the bridge's `clearCache` rebuilds the context only after a commit (ROADMAP PF0) |
 | `sleigh-compiler` 2.0.2 | github.com/mnemonikr/sleigh-compiler | crates.io 2.0.2 | builds against `libsla-sys`'s Ghidra sources instead of its own copy, since it links that `libsla` and must see the same class layouts |
 | `sleigh-config` 1.0.1 | github.com/mnemonikr/sleigh-config, via the 0verflowme fork | `71551911` | only the processors the workspace enables (x86, ARM, AARCH64, MIPS, RISCV) and their features |
 

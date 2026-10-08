@@ -269,6 +269,10 @@ mod default {
         fn getAddress(data: &VarnodeData) -> UniquePtr<Address>;
         #[rust_name = "varnode_size"]
         fn getSize(data: &VarnodeData) -> u32;
+        #[rust_name = "varnode_space"]
+        fn getVarnodeSpace(data: &VarnodeData) -> *mut AddrSpace;
+        #[rust_name = "varnode_offset"]
+        fn getVarnodeOffset(data: &VarnodeData) -> u64;
 
         #[namespace = "ghidra"]
         type ContextDatabase;
