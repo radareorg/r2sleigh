@@ -35,7 +35,7 @@ fact r2ssa, r2types or r2engine owns.
 
 | Stage | Input | Output | Cost |
 |---|---|---|---|
-| D0 contract | `SourceOwnedFunctionFacts`, `DecompileRouteFacts`, the language profile | `RenderInput`: the sealed IR, certificates, frame model, types, call contracts, route, profile; nothing else | O(1) borrow |
+| D0 contract | `SourceOwnedFunctionFacts`, `DecompileRouteFacts`, the language profile | `RenderInput`: the sealed IR, certificates, frame model, types, call contracts, route, profile, as indexes over dense ids; nothing else. Served first by an adapter over today's facts, which LX and T replace (ROADMAP D27) | O(1) borrow |
 | D1 control | dominator tree, loops, certified predicates and selectors | structured tree over block occurrences, with the §3 certificate of [adr-structure-dominator-tree](adr-structure-dominator-tree.md) | O(blocks + edges) |
 | D2 values | the partition, the frame model's bindings, each value's readers | for each value: a declared name, an inlined term, or a residual | O(values + uses) |
 | D3 expressions | D2's terms | r2rewrite terms, simplified only by proved rules | O(terms × rules applied), each rule decreasing a stated measure |
@@ -87,9 +87,10 @@ semantic-preservation-kernel) fold into this one when D lands.
 ## How it lands
 
 D amends D1 (restructure, not rewrite) for this item only. r2dec is replaced
-as a whole, so the new pipeline is built beside the old one as
-`r2dec::render`, selected by `DecompilerConfig`. Once it agrees with the old
-path, the old path is deleted in the same item. Agreement means:
+as a whole on the `rebuild` branch (ROADMAP D27): the new pipeline is
+`r2dec::render`, and the old path is deleted once D1 to D5 render, without
+running beside it. The gates below report on `rebuild` and decide its merge.
+Agreement means:
 
 - equivalence: no record moves from `equal` to anything else on x86-64 or
   aarch64, and each other move is read and judged;
@@ -107,7 +108,7 @@ path, the old path is deleted in the same item. Agreement means:
 | D2 + D3 | values and terms render; the census residual count is at most the old path's |
 | D4 | declarations from the frame model and types; `afv` and `pdd` agree on every local |
 | D5 + proof | the proof walk replaces the ledger; `pddj` proof counts agree with equivalence |
-| switch | the gates above hold; the old modules are deleted |
+| switch | the gates above hold; `rebuild` merges to master |
 
 ## Consequences
 
