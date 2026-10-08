@@ -31,11 +31,6 @@ pub(crate) fn fold_loads(func: &mut SSAFunction, context: &SourceMachineContext)
             else {
                 continue;
             };
-            r2il::refusal_evidence!(
-                "read-only-load",
-                "{:#x}: the {size}-byte load at {at:#x} reads {bits:#x}",
-                func.entry
-            );
             let src = minting.constant(bits, size);
             plan.replace(id, SSAOp::Copy { dst: *dst, src });
             folded += 1;
