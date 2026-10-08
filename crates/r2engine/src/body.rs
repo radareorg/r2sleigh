@@ -223,14 +223,6 @@ fn ends_block(terminator: &BlockTerminator) -> bool {
     )
 }
 
-/// What a walk keeps of one decoded instruction unless it keeps the lift.
-#[derive(Debug, Clone)]
-struct Decoded {
-    size: u32,
-    /// Every constant it leaves in the link register.
-    return_addresses: Vec<u64>,
-}
-
 /// What a walk reached that it had not reached before it was last asked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reached {
@@ -303,8 +295,8 @@ impl Trace {
     /// instruction of the body and lies in no range. O(instructions).
     pub fn spans(&self) -> Vec<std::ops::Range<u64>> {
         let mut spans: Vec<std::ops::Range<u64>> = Vec::new();
-        for (&at, one) in &self.0.decoded {
-            let end = at.saturating_add(u64::from(one.size));
+        for (&at, &size) in &self.0.decoded {
+            let end = at.saturating_add(u64::from(size));
             match spans.last_mut() {
                 Some(last) if last.end >= at => last.end = last.end.max(end),
                 _ => spans.push(at..end),
@@ -326,7 +318,7 @@ impl Trace {
                 .iter()
                 .filter(|leader| decoded.contains_key(leader))
                 .count(),
-            bytes: decoded.values().map(|one| u64::from(one.size)).sum(),
+            bytes: decoded.values().map(|size| u64::from(*size)).sum(),
         }
     }
 }
@@ -358,7 +350,11 @@ struct Walk {
     link: Option<r2il::Varnode>,
     /// The register a call writes its target's instruction set to.
     mode: Option<r2il::Varnode>,
-    decoded: BTreeMap<u64, Decoded>,
+    /// The size of each instruction decoded, by address: a whole program's survey holds one per
+    /// instruction, so nothing else rides in it.
+    decoded: BTreeMap<u64, u32>,
+    /// Every constant an instruction leaves in the link register, where it leaves one.
+    return_addresses: BTreeMap<u64, Box<[u64]>>,
     /// The lift of each instruction, where the walk keeps it.
     lifted: Option<BTreeMap<u64, Instruction>>,
     leaders: BTreeSet<u64>,
@@ -393,6 +389,7 @@ impl Walk {
             link: program.return_address_register(),
             mode: program.mode_register(),
             decoded: BTreeMap::new(),
+            return_addresses: BTreeMap::new(),
             lifted: lifting.then(BTreeMap::new),
             leaders: BTreeSet::from([entry]),
             calls: BTreeSet::new(),
@@ -488,11 +485,15 @@ impl Walk {
     /// this instruction's.
     fn returns_after(&self, addr: u64, next: u64) -> bool {
         let mut at = addr;
-        while let Some((start, decoded)) = self.decoded.range(..at).next_back() {
-            if start + u64::from(decoded.size) != at {
+        while let Some((start, size)) = self.decoded.range(..at).next_back() {
+            if start + u64::from(*size) != at {
                 return false;
             }
-            if decoded.return_addresses.contains(&next) {
+            if self
+                .return_addresses
+                .get(start)
+                .is_some_and(|addresses| addresses.contains(&next))
+            {
                 return true;
             }
             if self.leaders.contains(start) {
@@ -615,15 +616,14 @@ impl Walk {
         if ends_block(&instruction.terminator) {
             self.leaders.insert(next);
         }
-        let return_addresses = match &self.link {
-            Some(link) => r2il::return_addresses(&instruction.lifted.ops, link).collect(),
-            None => Vec::new(),
-        };
-        let decoded = Decoded {
-            size: instruction.lifted.size,
-            return_addresses,
-        };
-        self.decoded.insert(addr, decoded);
+        if let Some(link) = &self.link {
+            let addresses =
+                r2il::return_addresses(&instruction.lifted.ops, link).collect::<Box<[_]>>();
+            if !addresses.is_empty() {
+                self.return_addresses.insert(addr, addresses);
+            }
+        }
+        self.decoded.insert(addr, instruction.lifted.size);
         if let Some(lifted) = &mut self.lifted {
             lifted.insert(addr, instruction);
         }
