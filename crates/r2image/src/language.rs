@@ -679,8 +679,6 @@ mod tests {
         );
     }
 
-    /// go-cdetect's header (Go 1.18.1, inline) and dwarf_go_tree's (Go 1.14.7, through
-    /// `runtime.buildVersion`'s string header at 0x55e830).
     /// Go 1.20's layout, little-endian, 8-byte words: two functions, the second assembly.
     #[test]
     fn pclntab_states_which_go_functions_are_assembly() {
@@ -708,6 +706,8 @@ mod tests {
         assert_eq!(pclntab_assembly(&table, true), None);
     }
 
+    /// go-cdetect's header (Go 1.18.1, inline) and dwarf_go_tree's (Go 1.14.7, through
+    /// `runtime.buildVersion`'s string header at 0x55e830).
     #[test]
     fn the_build_information_states_the_go_version() {
         let mut inline = b"\xff Go buildinf:\x08\x02".to_vec();

@@ -556,7 +556,6 @@ impl Literal {
         program
     }
 
-    /// The same program, its container stating this of the platform it runs on.
     /// The same program, stated as Go built by the toolchain of `version`, where one is stated,
     /// its pclntab marking the functions at `assembly` as written in assembly.
     pub fn in_go(mut self, version: Option<(u32, u32)>, assembly: Option<&[u64]>) -> Self {
@@ -569,6 +568,7 @@ impl Literal {
         self
     }
 
+    /// The same program, its container stating this of the platform it runs on.
     pub fn running_on(mut self, evidence: &[PlatformEvidence]) -> Self {
         self.container.platform = evidence.iter().copied().collect();
         self

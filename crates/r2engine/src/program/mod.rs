@@ -117,9 +117,8 @@ impl Machines {
         })
     }
 
-    /// What a native request needs for the function at `entry`, by the language it is written in.
-    /// A Go function under a register-based toolchain runs ABIInternal unless pclntab marks it
-    /// assembly, which keeps ABI0; where no table states that, a convention that refuses.
+    /// What a native request needs for the function at `entry`, by its language: a Go function under
+    /// ABIInternal unless pclntab marks it assembly (ABI0), refusing where no table states which.
     fn assembled_at(&self, container: &Container, entry: u64) -> Result<&Assembled, String> {
         let languages = &container.languages;
         let chosen = match (&self.go, &self.go_abi0, languages.at(entry)) {
