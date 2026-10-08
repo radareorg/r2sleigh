@@ -74,26 +74,43 @@ semantic-preservation-kernel) fold into this one when D lands.
 The obligation inventory says what must be rendered, so no stage re-derives it.
 
 - **Demand.** An instruction with live obligations owes its statement: a store
-  assigns its cell, a call is written from the callsite facts, a return hands
-  back its boundary value, a branch test is D1's condition. Each obligation
-  names the values it reads; those values, and every value a bound value's
-  term reads, are the rendered values. Every other value is dead, as the
-  inventory already classifies it (proven dead, structural control only).
-- **Inline or bind.** r2rewrite's import absorbs a producer into its reader's
-  term under the expansion policy D2 states: one reader, in the same block,
-  after the producer, with no memory write, call or assignment between; or a
-  term over literals and entry values never redefined (`Multiplicity::Any`).
-  A load never moves past a write. A rendered value no reader absorbed is
-  bound: declared once (D4) and assigned where it is defined.
+  writes its cell, a return hands back its boundary value, a branch test is
+  D1's condition, a call is written from the callsite facts (increment 2;
+  until then a call is a gap). A value is rendered when a rendered term reads
+  it, or when its producer owes more than its value (a non-private load).
+  Every other value is dead as the inventory classifies it. r2ssa's
+  certificates elide what needs no C: a frame save its restore undoes
+  (`stack_frame_round_trip_by_inst`), a compiler-inserted check, the push of
+  a call's return address; a spelled C `return` discharges the return
+  address and exit stack pointer it consumes.
+- **Inline or bind.** One rule, used by r2rewrite's import as its expansion
+  policy and by D2 at each statement operand: a producer is absorbed into
+  its reader when the reader is its only live reader, later in the same
+  block, and, where the term reads memory or can trap, no instruction with an
+  effect lies between. A phi reads at the end of the predecessor its edge
+  leaves; a return's boundary read counts as a reader with no graph use. A
+  literal or a term over entry values never redefined (`Multiplicity::Any`)
+  is absorbed anywhere. A merge is never absorbed. A rendered value no reader
+  absorbs is bound to its own local, assigned where it is defined, so a term
+  is valid wherever its producer dominates.
 - **Merges.** A phi is bound to its own variable, assigned on each incoming
-  edge by one parallel copy, sequentialised with a temporary where it reads
-  what it writes. Coalescing a phi web into one variable is the partition,
-  r2ssa's to state from `ValueLiveness` and `StorageSpans` (D2.1); the old
-  r2dec holds the only partition today.
-- **Spelling (D3).** A canonical term is spelled by its kind, with a
-  conversion exactly where `typed.rs`'s produced and required types differ.
-  A term with no C spelling is a residual of its type, and its obligations
-  are gapped.
+  edge by one parallel copy, sequentialised with temporaries when one copy
+  reads what another writes. Coalescing a phi web into one variable is the
+  partition, r2ssa's to state from `ValueLiveness` and `StorageSpans` (D2.1).
+- **Frame.** A stack object is a C byte array only where r2ssa proves the
+  storage is the callee's (`callee_allocation`, or a source slot that is a
+  local or a parameter home); a slot at or above the entry stack pointer
+  holds what the caller put there, which a fresh array does not. A frame
+  address is spelled only as the address of an access inside its own
+  object's certified extent; anywhere else, held in a value or passed on, it
+  is refused until D4 states one frame and its escapes.
+- **Spelling (D3).** A term is spelled by its kind as unsigned C at its
+  width, computed at least `int` wide so promotion cannot overflow, with a
+  shift tested against the width before C shifts, memory read and written by
+  byte copy, and a helper where C has no operator. A term with no exact
+  spelling refuses, and its statement is a gap whose kind names the missing
+  fact (`CallNotRendered`, `TermNotSpelled`, `StoreNotSpelled`,
+  `ValueHasNoCType`, `EffectNotRendered`, `UnsupportedInstruction`).
 
 Cost: one canonicalisation, `O(terms × rules applied)`, then one pass over
 the operations and their uses.
