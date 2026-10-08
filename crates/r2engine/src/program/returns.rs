@@ -28,6 +28,11 @@ impl BodyWalk {
         self.trace.supervisor_calls()
     }
 
+    /// Every direct call target the walk reached.
+    pub(super) fn calls(&self) -> &std::collections::BTreeSet<u64> {
+        self.trace.calls()
+    }
+
     /// The bytes the walk decoded as this body's instructions.
     pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
         self.trace.spans()

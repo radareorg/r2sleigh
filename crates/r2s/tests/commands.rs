@@ -439,30 +439,35 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
     }
 }
 
-/// Stripped `avg` writes both RAX (the loop test) and XMM0 (its double) before returning: the
-/// body does not say which one the caller reads, so each pipeline returns a residual.
+/// Stripped `avg` writes both RAX (its loop test) and XMM0 (its double) before returning. The body
+/// does not say which one is the result; its caller's `movsd` of XMM0 does. Vectorized
+/// `crc32_init` writes both too, and no call reads either, so its return stays a residual.
 #[test]
-fn a_body_writing_both_result_registers_returns_neither() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for pipeline in ["legacy", "staged"] {
-        let stripped = on(
-            fixtures.join("rv_O0g_stripped"),
+        let avg = on(
+            root.join("tests/fixtures/rv_O0g_stripped"),
             &format!("e dec.pipeline={pipeline}; pdd @ 0x12ef"),
         );
         assert!(
-            stripped.out.contains("return r2sleigh_residual_u64(")
-                && !stripped.out.contains("return (uint32_t)"),
+            avg.out.starts_with("double fcn_12ef("),
             "{pipeline}: {}",
-            stripped.out
-        );
-        let declared = on(
-            fixtures.join("rv_O0g"),
-            &format!("e dec.pipeline={pipeline}; pdd @ sym.avg"),
+            avg.out
         );
         assert!(
-            declared.out.contains("double avg("),
+            !avg.out.contains("r2sleigh_residual"),
             "{pipeline}: {}",
-            declared.out
+            avg.out
+        );
+        let unread = on(
+            root.join("tests/coverage/pinned/hashes_gcc_x64_O2"),
+            &format!("e dec.pipeline={pipeline}; pdd @ sym.crc32_init"),
+        );
+        assert!(
+            unread.out.contains("return r2sleigh_residual_u64("),
+            "{pipeline}: {}",
+            unread.out
         );
     }
 }

@@ -175,6 +175,22 @@ pub(super) struct Survey {
     supervisor: BTreeMap<u64, std::collections::BTreeSet<u64>>,
     /// Which walked bodies hold each address.
     holders: crate::discovery::Holders,
+    /// Each function's direct callers among the walked bodies, in address order.
+    callers: BTreeMap<u64, Vec<u64>>,
+}
+
+impl Survey {
+    /// The walked bodies that call `callee` directly, in address order.
+    pub(super) fn callers_of(&self, callee: u64) -> &[u64] {
+        self.callers.get(&callee).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the body at `entry` was walked as Thumb, or why it was not walked.
+    pub(super) fn walked_in(&self, entry: u64) -> Option<Result<bool, &NativeRefusal>> {
+        self.walked
+            .get(&entry)
+            .map(|walked| walked.as_ref().copied())
+    }
 }
 
 /// One instruction that enters the kernel, with the call it makes where the
@@ -722,7 +738,7 @@ fn claimed_by<S: Source + 'static>(
 
 /// Every function discovery finds, compared by identity: a new survey is a new answer.
 #[derive(Clone)]
-pub(super) struct Surveyed(Arc<Survey>);
+pub(super) struct Surveyed(pub(super) Arc<Survey>);
 
 impl PartialEq for Surveyed {
     fn eq(&self, other: &Self) -> bool {
@@ -749,6 +765,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 extents: BTreeMap::new(),
                 supervisor: BTreeMap::new(),
                 holders: crate::discovery::Holders::default(),
+                callers: BTreeMap::new(),
             })));
         }
         let walker = super::returns::Walking::new(view.clone(), true)?;
@@ -767,6 +784,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 (!calls.is_empty()).then(|| (*entry, calls.clone()))
             })
             .collect();
+        // O(call edges): each walked body's direct call targets, inverted.
+        let mut callers = BTreeMap::<u64, Vec<u64>>::new();
+        for (entry, walk) in &found.walks {
+            for &callee in walk.as_ref().map(|walk| walk.calls()).into_iter().flatten() {
+                callers.entry(callee).or_default().push(*entry);
+            }
+        }
         let holders =
             crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
                 let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
@@ -783,6 +807,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             extents,
             supervisor,
             holders,
+            callers,
         })))
     }
 }

@@ -68,6 +68,7 @@ impl MachineProfile {
 pub struct FunctionIdentity {
     address: u64,
     loader_role: Option<SourceLoaderRole>,
+    result_reads: Option<SourceResultReads>,
 }
 
 impl FunctionIdentity {
@@ -79,6 +80,23 @@ impl FunctionIdentity {
     pub const fn loader_role(&self) -> Option<SourceLoaderRole> {
         self.loader_role
     }
+
+    /// What the program's calls to this function read of its result registers, where r2engine read them.
+    pub const fn result_reads(&self) -> Option<SourceResultReads> {
+        self.result_reads
+    }
+}
+
+/// What the program's own calls to a function read of its result registers as each call leaves
+/// them, read off the callers' code (doc/adr-resolved-bodies.md, "Caller reads").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct SourceResultReads {
+    /// Calls whose first touch of the integer result register after the call is a read.
+    pub integer: u32,
+    /// Calls whose first touch of the float result register after the call is a read.
+    pub float: u32,
+    /// The widest of those float reads, in bytes.
+    pub float_bytes: u32,
 }
 
 /// A function the loader itself calls, recorded from the binary's dynamic
@@ -1156,6 +1174,7 @@ mod tests {
             FunctionIdentity {
                 address: 0x1000,
                 loader_role: None,
+                result_reads: None,
             },
             FunctionPresentation {
                 display_name: "fixture".into(),
@@ -1279,6 +1298,7 @@ mod tests {
                 FunctionIdentity {
                     address: 0x2000,
                     loader_role: None,
+                    result_reads: None,
                 },
                 valid.presentation().clone(),
                 valid.image().clone(),

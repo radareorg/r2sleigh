@@ -56,6 +56,29 @@ Known refusals this brings to the 300-function samples (pumasim refusals
 27 -> 27, 0pack 36 -> 37): one observation-journal `ConflictingValue` on a
 merge carrier in 0pack, which R deletes the journal for.
 
+### Caller reads
+
+A body that writes both convention result registers on a path to a return
+(RAX and XMM0 on x86-64: vectorized integer code, or a double function whose
+loop test leaves RAX written) does not say which is its result. r2ssa's
+recovery makes it unproven and says why (`result_ambiguous`), where it
+returned RAX before and miscompiled `avg`.
+
+r2engine then reads the program's calls to it: the walked bodies whose trace
+calls it (`Survey`, inverted once, O(call edges)), each lifted without
+preparation, so no answer waits on the function it is about. After each call,
+the first touch of each result register up to the next transfer is a read (the
+caller takes what the call left there), a write, or nothing. Every reading call
+agreeing on one register decides it, at the widest read's width for a float;
+none, or calls that disagree, leave it unproven. The function is prepared once
+more with that evidence (`SourceResultReads`), only where the first preparation
+was ambiguous.
+
+The evidence is as strong as the body's own writes: a compiler reads a
+clobbered register after a call only as the callee's result. A caller that
+hands the value straight back without reading it (`return f();`) is no
+evidence, and a void function whose callers read nothing stays unproven.
+
 ### Budget
 
 Resolution follows result demands only, so a request resolves what its

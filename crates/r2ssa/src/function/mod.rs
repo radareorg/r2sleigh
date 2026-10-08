@@ -2285,6 +2285,7 @@ impl TrustedSsaArtifact {
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
         let mut result_owners = BTreeSet::new();
+        let mut result_ambiguous = false;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None => 'recovered: {
@@ -2361,11 +2362,13 @@ impl TrustedSsaArtifact {
                     source.convention_slots(),
                     &provisional_machine_context,
                     source.function().loader_role(),
+                    source.function().result_reads(),
                 );
                 let Some(recovered) = recovered else {
                     break 'recovered None;
                 };
                 result_owners.clone_from(recovered.result_owners());
+                result_ambiguous = recovered.result_ambiguous();
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
@@ -2435,6 +2438,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_library(library.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_result_owners(result_owners);
+        machine_context.set_result_ambiguous(result_ambiguous);
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());

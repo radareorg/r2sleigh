@@ -475,6 +475,8 @@ pub struct SourceMachineContext {
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
     result_owners: BTreeSet<u64>,
+    /// Whether the result is unproven because the body writes both result registers.
+    result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
     callee_statements: BTreeMap<u64, CalleeStatement>,
     /// Exact source-owned register geometry; no write policy is stored here.
@@ -971,6 +973,7 @@ impl SourceMachineContext {
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
             result_owners: BTreeSet::new(),
+            result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
             register_geometry_state,
@@ -1161,6 +1164,16 @@ impl SourceMachineContext {
 
     pub(crate) fn set_result_owners(&mut self, owners: BTreeSet<u64>) {
         self.result_owners = owners;
+    }
+
+    /// Whether recovery left the result unproven because the body writes both result registers,
+    /// which what the program's calls read can decide (doc/adr-resolved-bodies.md, "Caller reads").
+    pub const fn result_ambiguous(&self) -> bool {
+        self.result_ambiguous
+    }
+
+    pub(crate) const fn set_result_ambiguous(&mut self, ambiguous: bool) {
+        self.result_ambiguous = ambiguous;
     }
 
     /// What the callee at `target` states, where its unproven result mints no call contract.

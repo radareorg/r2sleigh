@@ -264,6 +264,12 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         }
     }
 
+    fn result_reads(&self, entry: u64) -> Option<r2source::SourceResultReads> {
+        // A survey that is itself preparing this body is a cycle, which reads as no evidence.
+        let reads = self.db.get::<super::reads::ResultReads>(&entry).ok()?;
+        *reads
+    }
+
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {
         let unwind = &self.source().container().unwind;
         unwind
