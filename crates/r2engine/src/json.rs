@@ -162,10 +162,16 @@ impl RenderedFunctionJson {
         definition: String,
     ) -> Self {
         let proof = RenderProofJson::of(response.obligation_ledger.as_ref());
-        // A compiler-inserted elision holds only of a UB-free source.
-        let premises = (proof.compiler_inserted > 0)
-            .then_some(r2source::Premise::UbFreeSource.spelled())
+        // A compiler-inserted elision holds only of a UB-free source, and so does what the analysis
+        // decided under it even where nothing it decided survives to the ledger.
+        let premises = response
+            .premises
+            .iter()
+            .copied()
+            .chain((proof.compiler_inserted > 0).then_some(r2source::Premise::UbFreeSource))
+            .collect::<BTreeSet<_>>()
             .into_iter()
+            .map(r2source::Premise::spelled)
             .collect::<Vec<_>>();
         let rendered = match &response.output {
             EngineRendering::Function(rendered) => rendered,

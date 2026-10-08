@@ -114,6 +114,8 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     decided.reorder();
     func.apply_edits(decided);
     func.record_compiler_inserted(inserted, removed);
+    // Every decided check removed its failure edge, which holds only of a UB-free source.
+    func.record_premise(r2source::Premise::UbFreeSource);
 }
 
 /// Every store whose address is a root plus a constant, by root; written once, by the walk below.

@@ -600,8 +600,30 @@ fn assume(
             .flatten();
         if let Some(now) = now {
             held.insert(solved.class_of(side), now);
+            // `add eax, 0x83; cmp eax, 0x114; ja` writes rax as the zero extension of the compared bits.
+            for widened in zero_extensions(graph, side) {
+                let width = graph
+                    .value(widened)
+                    .map_or(64, |value| width_of(value.var.size));
+                let was = held
+                    .get(&solved.class_of(widened))
+                    .copied()
+                    .or_else(|| solved.state.get(widened.0 as usize).copied())
+                    .unwrap_or_else(|| StridedInterval::top(width));
+                held.insert(solved.class_of(widened), was.meet(&read_at(now, width)));
+            }
         }
     }
+}
+
+/// Every value that zero-extends this one: the same number at a wider width.
+fn zero_extensions(graph: &SsaGraph, value: ValueId) -> impl Iterator<Item = ValueId> + '_ {
+    graph.use_sites(value).iter().filter_map(|site| {
+        let inst = graph.inst(site.inst)?;
+        matches!(inst.payload, InstPayload::Op(SSAOp::IntZExt { .. }))
+            .then_some(inst.output)
+            .flatten()
+    })
 }
 
 /// One arm of a select, under what its condition proves on that arm.
@@ -1334,6 +1356,71 @@ mod tests {
         let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
         assert_eq!(range_of(&ranges, &graph, &index).bounds(), Some((0, 7)));
         assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
+    }
+
+    /// `add eax, 0x83; cmp eax, 0x114; ja`: rax is written before the guard, and the guard still bounds it.
+    #[test]
+    fn a_guard_bounds_the_zero_extension_written_before_it() {
+        let (entry, body, exit) = (0x1000, 0x1010, 0x1020);
+        let selector = var("tmp:sum", 1, 4);
+        let wide = var("rax", 1, 8);
+        let within = var("within", 1, 1);
+        let beyond = var("beyond", 1, 1);
+        let offset = var("offset", 1, 8);
+
+        let mut head = SSABlock::new(entry, 16);
+        head.push(crate::op::SSAOp::IntAdd {
+            dst: selector.clone(),
+            a: var("eax", 0, 4),
+            b: constant(0x83, 4),
+        });
+        head.push(crate::op::SSAOp::IntZExt {
+            dst: wide.clone(),
+            src: selector.clone(),
+        });
+        head.push(crate::op::SSAOp::IntLessEqual {
+            dst: within.clone(),
+            a: selector,
+            b: constant(0x114, 4),
+        });
+        head.push(crate::op::SSAOp::BoolNot {
+            dst: beyond.clone(),
+            src: within,
+        });
+        head.push(crate::op::SSAOp::CBranch {
+            target: constant(exit, 8),
+            cond: beyond,
+        });
+        let mut body_block = SSABlock::new(body, 16);
+        body_block.push(crate::op::SSAOp::IntMult {
+            dst: offset.clone(),
+            a: wide,
+            b: constant(4, 8),
+        });
+        let exit_block = SSABlock::new(exit, 16);
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: exit,
+                        false_target: body,
+                    },
+                ),
+                (body, BlockTerminator::Return),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let function = SSAFunction::from_exact_test_blocks(&[head, body_block, exit_block], cfg);
+        let prep = function.prep_facts_for_test();
+        let graph = SsaGraph::from_function(&function);
+        let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
+        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
+        assert_eq!(
+            range_of(&ranges, &graph, &offset).bounds(),
+            Some((0, 0x450))
+        );
     }
 
     /// Every consumer of the solution reads an operation its inputs fix as that one value, whatever the operand holds.

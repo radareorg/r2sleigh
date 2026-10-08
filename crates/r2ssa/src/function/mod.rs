@@ -2653,6 +2653,8 @@ pub struct SSAFunction {
     compiler_inserted: crate::dense::IdSet<crate::arena::OpId>,
     /// The failure blocks a decided stack-protector check removed, whose instructions stay owed.
     compiler_inserted_blocks: BTreeSet<u64>,
+    /// The premises a rewrite of this function relied on, whatever later became of what it rewrote.
+    premises: BTreeSet<r2source::Premise>,
     /// The architectural stack pointer, as the machine roles name it.
     ///
     /// The roles know it for every function, including one whose signature
@@ -3007,6 +3009,7 @@ impl Clone for SSAFunction {
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
+            premises: self.premises.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
@@ -3527,6 +3530,16 @@ impl SSAFunction {
     ) {
         self.compiler_inserted.extend(ops.iter());
         self.compiler_inserted_blocks.extend(blocks);
+    }
+
+    /// Record a premise a rewrite relied on.
+    pub(crate) fn record_premise(&mut self, premise: r2source::Premise) {
+        self.premises.insert(premise);
+    }
+
+    /// The premises a rewrite of this function relied on: a decided check changed its control flow.
+    pub fn premises(&self) -> &BTreeSet<r2source::Premise> {
+        &self.premises
     }
 
     /// The failure blocks a decided stack-protector check removed.

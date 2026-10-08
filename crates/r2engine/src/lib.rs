@@ -1763,6 +1763,8 @@ pub struct EngineDecompileResponse {
     pub input_quality: Option<r2types::FunctionInputQualityFacts>,
     pub metrics: EngineMetrics,
     pub diagnostics: EngineDiagnostics,
+    /// The premises the analysis relied on, whatever the rendering kept of what they decided.
+    pub premises: BTreeSet<r2source::Premise>,
 }
 
 impl EngineDecompileResponse {
@@ -2314,6 +2316,11 @@ impl EngineSession {
             );
         }
         metrics.work_spent = request.execution.work_spent();
+        let premises = sealed
+            .trusted_ssa
+            .as_ref()
+            .map(|ssa| ssa.artifact().function().premises().clone())
+            .unwrap_or_default();
         EngineDecompileResponse {
             output,
             obligation_ledger,
@@ -2323,6 +2330,7 @@ impl EngineSession {
             input_quality,
             metrics,
             diagnostics,
+            premises,
         }
     }
 }
@@ -2939,6 +2947,7 @@ fn refused_decompile_response_with_metrics_and_audits(
         input_quality,
         metrics,
         diagnostics,
+        premises: BTreeSet::new(),
     }
 }
 
