@@ -1386,13 +1386,10 @@ mod tests {
             .canonical()
             .value(flag)
             .expect("signed-borrow canonical term");
+        let trace = plan.canonical().trace(flag);
         assert!(
-            canonical
-                .trace
-                .iter()
-                .any(|rewrite| rewrite.rule == "literal.flag"),
-            "the proof-backed literal rule must fire: {:?}",
-            canonical.trace
+            trace.iter().any(|rewrite| rewrite.rule == "literal.flag"),
+            "the proof-backed literal rule must fire: {trace:?}"
         );
         assert!(matches!(
             plan.disposition(flag),

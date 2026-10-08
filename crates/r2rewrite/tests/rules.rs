@@ -35,8 +35,9 @@ fn and_of_one_value_is_that_value() {
         roots.arena().term(and.canonical).kind,
         TermKind::Leaf(_)
     ));
-    assert_eq!(and.trace.len(), 1);
-    assert_eq!(and.trace[0].rule, "identity.and_self");
+    let trace = roots.trace(and.value);
+    assert_eq!(trace.len(), 1);
+    assert_eq!(trace[0].rule, "identity.and_self");
     assert!(roots.budget_failures().is_empty());
     assert_eq!(
         roots.rewrite_counts()["identity.and_self"],
@@ -138,7 +139,7 @@ fn identities_compose_through_a_single_use_chain() {
     };
     assert!(matches!(roots.arena().term(left).kind, TermKind::Leaf(_)));
     assert!(matches!(roots.arena().term(right).kind, TermKind::Leaf(_)));
-    let rules: Vec<&str> = xor.trace.iter().map(|r| r.rule).collect();
+    let rules: Vec<&str> = roots.trace(xor.value).iter().map(|r| r.rule).collect();
     assert!(rules.contains(&"identity.or_self"), "{rules:?}");
     // The double negation is gone too, taken by the affine normal form
     // before the rule could see it; the rule still proves on its own shape.
@@ -192,7 +193,7 @@ fn a_difference_compared_with_zero_compares_its_operands() {
     assert_eq!(op, r2ssa::MachineComparisonOp::NotEqual);
     assert!(matches!(roots.arena().term(left).kind, TermKind::Leaf(_)));
     assert!(matches!(roots.arena().term(right).kind, TermKind::Leaf(_)));
-    let rules: Vec<&str> = not.trace.iter().map(|r| r.rule).collect();
+    let rules: Vec<&str> = roots.trace(not.value).iter().map(|r| r.rule).collect();
     // `boolean.not_eq` still runs here. The difference-against-zero half is
     // `r2ssa::optimize::fold_condition_codes`' now: a machine comparison is
     // folded in the graph, where every later stage reads it, so by the time the
@@ -366,7 +367,7 @@ fn a_signed_branch_on_flags_becomes_a_comparison_through_the_difference_by_name(
     assert_eq!(interpretation, r2ssa::MachineSignedness::Signed);
     assert!(matches!(roots.arena().term(left).kind, TermKind::Leaf(_)));
     assert!(matches!(roots.arena().term(right).kind, TermKind::Leaf(_)));
-    let rules: Vec<&str> = branch.trace.iter().map(|r| r.rule).collect();
+    let rules: Vec<&str> = roots.trace(branch.value).iter().map(|r| r.rule).collect();
     // No rule fired: the comparison arrived already folded from
     // `r2ssa::optimize::fold_condition_codes`, which is the point of doing it
     // in the graph. What this test still pins is the shape that reaches the
