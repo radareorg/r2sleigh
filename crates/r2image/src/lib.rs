@@ -8,6 +8,7 @@
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 mod debug;
+mod language;
 mod loader;
 mod platform;
 mod roles;
@@ -624,6 +625,7 @@ impl Image {
         // the image below.
         let declarations = debug::read(&file);
         let unwind = unwind::read(&file);
+        let languages = language::read(&file, &symbols);
 
         let mut entries = Vec::new();
         let declared_entry = file.entry();
@@ -716,6 +718,7 @@ impl Image {
                 declarations,
                 platform,
                 unwind,
+                languages,
             },
             patches: BTreeMap::new(),
             byte_revision: 0,

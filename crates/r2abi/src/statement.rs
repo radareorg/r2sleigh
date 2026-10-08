@@ -54,6 +54,63 @@ pub struct Container {
     pub platform: BTreeSet<PlatformEvidence>,
     /// The frames the call-frame information states, which survive strip.
     pub unwind: crate::frames::UnwindFrames,
+    /// Which language each function's source was written in, as the container states it.
+    pub languages: Languages,
+}
+
+/// A function's source language (doc/adr-language-profile.md): read from what the container
+/// states, never guessed from a name's spelling beyond the mangling its symbol table records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SourceLanguage {
+    #[default]
+    C,
+    Cpp,
+    Rust,
+    Go,
+    /// Stated so its functions are not read under C's convention; no profile renders it yet.
+    Swift,
+    ObjectiveC,
+    /// .NET's intermediate language: the native code is only the loader's stub.
+    Cil,
+}
+
+impl SourceLanguage {
+    /// As radare2's `i` spells it.
+    pub const fn spelled(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Cpp => "c++",
+            Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Swift => "swift",
+            Self::ObjectiveC => "objc",
+            Self::Cil => "cil",
+        }
+    }
+}
+
+/// The program's language, and the ranges whose own language a compile unit or a symbol states.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Languages {
+    /// What the program is written in, as radare2's `lang` says: the language of every
+    /// function no range below states.
+    pub program: SourceLanguage,
+    /// Sorted by start and disjoint.
+    pub ranges: Vec<(Range<u64>, SourceLanguage)>,
+}
+
+impl Languages {
+    /// The language of the function at `vaddr`: one search over the ranges, else the program's.
+    pub fn at(&self, vaddr: u64) -> SourceLanguage {
+        let after = self
+            .ranges
+            .partition_point(|(range, _)| range.start <= vaddr);
+        after
+            .checked_sub(1)
+            .and_then(|index| self.ranges.get(index))
+            .filter(|(range, _)| range.contains(&vaddr))
+            .map_or(self.program, |(_, language)| *language)
+    }
 }
 
 impl Container {
