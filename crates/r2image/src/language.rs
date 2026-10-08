@@ -1,6 +1,8 @@
 //! Which language each function's source was written in, as the container states it
-//! (doc/adr-language-profile.md, LP0): compile units first, then a symbol's recorded mangling.
+//! (doc/adr-language-profile.md, LP0): compile units first, then a symbol's mangling where the
+//! container states that language; a name alone is a hint, never the proof.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use object::{Object as _, ObjectSection as _};
@@ -13,96 +15,125 @@ pub(crate) fn read(file: &object::File<'_>, symbols: &[Symbol]) -> Languages {
     // Mach-O and 32-bit PE (cdecl) decorate every name they define with one leading underscore.
     let decorated = file.format() == object::BinaryFormat::MachO
         || file.format() == object::BinaryFormat::Pe && !file.is_64();
-    let mangling = |symbol: &Symbol| symbol_mangling(symbol, decorated);
     let units = compile_units(file);
-    let mangled = symbols
-        .iter()
-        .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.defined && symbol.size > 0)
-        .filter_map(|symbol| {
-            let language = mangling(symbol)?;
-            Some((
-                symbol.vaddr..symbol.vaddr.saturating_add(symbol.size),
-                language,
-            ))
-        })
-        .collect::<Vec<_>>();
-    let program = program_language(file, symbols, &units, &mangled, &mangling);
+    let stated = Stated::read(file, symbols, &units);
+    let mangled = mangled(symbols, decorated, &|language| stated.states(language));
+    let program = stated.program();
     Languages {
         program,
         ranges: disjoint(units, mangled),
     }
 }
 
-/// The program's language as radare2 reads it: Go's runtime tables, then Rust, then C++, else C.
-fn program_language(
-    file: &object::File<'_>,
+/// Each defined function's range in the language its mangling records, where the container states
+/// that language: a C function may carry an Itanium spelling, and a name is no proof.
+fn mangled(
     symbols: &[Symbol],
-    units: &[(Range<u64>, SourceLanguage)],
-    mangled: &[(Range<u64>, SourceLanguage)],
-    mangling: &dyn Fn(&Symbol) -> Option<SourceLanguage>,
-) -> SourceLanguage {
-    let section = |name: &str| file.section_by_name(name).is_some();
-    let go = [
-        "__gopclntab",
-        ".gopclntab",
-        "__go_buildinfo",
-        ".go.buildinfo",
-    ]
-    .iter()
-    .any(|name| section(name))
-        || symbols
-            .iter()
-            .any(|symbol| symbol.name == "runtime.buildVersion");
-    let states = |language: SourceLanguage| {
-        units
-            .iter()
-            .chain(mangled)
-            .any(|(_, stated)| *stated == language)
-    };
-    let rustc = file
-        .section_by_name(".comment")
-        .and_then(|section| section.data().ok())
-        .is_some_and(|data| data.windows(5).any(|window| window == b"rustc"));
-    // An Itanium name the program defines or imports, a strong import of the C++ ABI (libgcc's
-    // unwinder refers to some weakly in C programs too), or the C++ runtime among its libraries.
-    let cpp_symbol = symbols.iter().any(|symbol| {
-        (symbol.defined || symbol.import) && mangling(symbol) == Some(SourceLanguage::Cpp)
-            || symbol.import && symbol.binding != Binding::Weak && cpp_abi(&symbol.name)
-    });
-    // A name the program defines in Rust's mangling, whether or not its table states a size.
-    let rust_symbol = symbols
+    decorated: bool,
+    stated: &dyn Fn(SourceLanguage) -> bool,
+) -> Vec<(Range<u64>, SourceLanguage)> {
+    symbols
         .iter()
-        .any(|symbol| symbol.defined && mangling(symbol) == Some(SourceLanguage::Rust));
-    let libraries = needed(file);
-    let links = |stem: &str| libraries.iter().any(|library| library.contains(stem));
-    let cpp_import = cpp_symbol || libraries.iter().any(|library| cpp_runtime(library));
-    let named = |prefix: &str| {
-        file.sections()
-            .any(|section| section.name().is_ok_and(|name| name.starts_with(prefix)))
-    };
-    let swift = named("__swift5")
-        || named("swift5_")
-        || links("libswiftCore")
-        || states(SourceLanguage::Swift);
-    // Classes, categories or protocols: Xcode leaves `__objc_imageinfo` in C and C++ programs too.
-    let objc = ["__objc_classlist", "__objc_catlist", "__objc_protolist"]
-        .iter()
-        .any(|name| named(name))
-        || states(SourceLanguage::ObjectiveC);
-    if go {
-        SourceLanguage::Go
-    } else if rustc || rust_symbol || states(SourceLanguage::Rust) {
-        SourceLanguage::Rust
-    } else if swift {
-        SourceLanguage::Swift
-    } else if objc {
-        SourceLanguage::ObjectiveC
-    } else if clr_header(file) {
-        SourceLanguage::Cil
-    } else if cpp_import || states(SourceLanguage::Cpp) {
-        SourceLanguage::Cpp
-    } else {
-        SourceLanguage::C
+        .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.defined && symbol.size > 0)
+        .filter_map(|symbol| {
+            let language =
+                symbol_mangling(symbol, decorated).filter(|language| stated(*language))?;
+            Some((
+                symbol.vaddr..symbol.vaddr.saturating_add(symbol.size),
+                language,
+            ))
+        })
+        .collect()
+}
+
+/// The languages the container states apart from any name a function was given: Go's runtime
+/// tables, rustc's note, compile units, Swift's and Objective-C's sections, a CLR header, and a C++
+/// runtime it links against.
+struct Stated {
+    go: bool,
+    rust: bool,
+    swift: bool,
+    objc: bool,
+    cil: bool,
+    cpp: bool,
+}
+
+impl Stated {
+    fn read(
+        file: &object::File<'_>,
+        symbols: &[Symbol],
+        units: &[(Range<u64>, SourceLanguage)],
+    ) -> Self {
+        let section = |name: &str| file.section_by_name(name).is_some();
+        let unit = |language: SourceLanguage| units.iter().any(|(_, stated)| *stated == language);
+        let named = |prefix: &str| {
+            file.sections()
+                .any(|section| section.name().is_ok_and(|name| name.starts_with(prefix)))
+        };
+        let libraries = needed(file);
+        let links = |stem: &str| libraries.iter().any(|library| library.contains(stem));
+        // An import is a statement of what the program links against, unlike a name it defines;
+        // libgcc's unwinder refers to some of the C++ ABI weakly in C programs too.
+        let cpp_import = symbols.iter().any(|symbol| {
+            symbol.import && symbol.binding != Binding::Weak && cpp_abi(&symbol.name)
+        });
+        Self {
+            go: [
+                "__gopclntab",
+                ".gopclntab",
+                "__go_buildinfo",
+                ".go.buildinfo",
+            ]
+            .iter()
+            .any(|name| section(name))
+                || unit(SourceLanguage::Go),
+            rust: file
+                .section_by_name(".comment")
+                .and_then(|section| section.data().ok())
+                .is_some_and(|data| data.windows(5).any(|window| window == b"rustc"))
+                || unit(SourceLanguage::Rust),
+            swift: named("__swift5")
+                || named("swift5_")
+                || links("libswiftCore")
+                || unit(SourceLanguage::Swift),
+            // Classes, categories or protocols: Xcode leaves `__objc_imageinfo` in C programs too.
+            objc: ["__objc_classlist", "__objc_catlist", "__objc_protolist"]
+                .iter()
+                .any(|name| named(name))
+                || unit(SourceLanguage::ObjectiveC),
+            cil: clr_header(file),
+            cpp: cpp_import
+                || libraries.iter().any(|library| cpp_runtime(library))
+                || unit(SourceLanguage::Cpp),
+        }
+    }
+
+    fn states(&self, language: SourceLanguage) -> bool {
+        match language {
+            SourceLanguage::Go => self.go,
+            SourceLanguage::Rust => self.rust,
+            SourceLanguage::Swift => self.swift,
+            SourceLanguage::ObjectiveC => self.objc,
+            SourceLanguage::Cil => self.cil,
+            SourceLanguage::Cpp => self.cpp,
+            _ => false,
+        }
+    }
+
+    /// The program's language as radare2 reads it: Go, then Rust, Swift, Objective-C, CIL, C++,
+    /// else C.
+    fn program(&self) -> SourceLanguage {
+        [
+            SourceLanguage::Go,
+            SourceLanguage::Rust,
+            SourceLanguage::Swift,
+            SourceLanguage::ObjectiveC,
+            SourceLanguage::Cil,
+            SourceLanguage::Cpp,
+        ]
+        .into_iter()
+        .find(|language| self.states(*language))
+        .unwrap_or(SourceLanguage::C)
     }
 }
 
@@ -211,13 +242,11 @@ fn macho_needed<Mach: object::read::macho::MachHeader>(
 /// ELF's `DT_NEEDED` names, read as the loader reads them: through `PT_DYNAMIC`, the string
 /// table found by `DT_STRTAB`'s address in a `PT_LOAD`, so a dump with no section headers answers.
 fn elf_needed(file: &object::File<'_>) -> Vec<String> {
-    let mut names = match file {
+    match file {
         object::File::Elf32(elf) => needed_through_dynamic(elf),
         object::File::Elf64(elf) => needed_through_dynamic(elf),
         _ => Vec::new(),
-    };
-    names.truncate(LIBRARIES);
-    names
+    }
 }
 
 fn needed_through_dynamic<Elf: object::read::elf::FileHeader>(
@@ -238,26 +267,39 @@ fn needed_through_dynamic<Elf: object::read::elf::FileHeader>(
             .filter(move |entry| entry.d_tag(endian).into() == u64::from(tag))
             .map(move |entry| entry.d_val(endian).into())
     };
-    // Where `DT_STRTAB`'s address lies in the file: the `PT_LOAD` that maps it.
-    let Some(strings) = tagged(object::elf::DT_STRTAB).next().and_then(|vaddr| {
+    // Where `DT_STRTAB`'s address lies in the file: the `PT_LOAD` that maps it, which also bounds
+    // the table where `DT_STRSZ` does not.
+    let Some((strings, mapped)) = tagged(object::elf::DT_STRTAB).next().and_then(|vaddr| {
         headers.iter().find_map(|header| {
             let start: u64 = header.p_vaddr(endian).into();
             let held: u64 = header.p_filesz(endian).into();
             let offset: u64 = header.p_offset(endian).into();
             (header.p_type(endian) == object::elf::PT_LOAD
-                && (start..start + held).contains(&vaddr))
-            .then(|| offset + (vaddr - start))
+                && (start..start.saturating_add(held)).contains(&vaddr))
+            .then(|| (offset + (vaddr - start), held - (vaddr - start)))
         })
     }) else {
         return Vec::new();
     };
+    let size = tagged(object::elf::DT_STRSZ)
+        .next()
+        .unwrap_or(mapped)
+        .min(mapped);
+    let Some(table) = usize::try_from(strings)
+        .ok()
+        .zip(usize::try_from(size).ok())
+        .and_then(|(start, size)| data.get(start..start.checked_add(size)?))
+    else {
+        return Vec::new();
+    };
+    // The budget is spent while reading, so a crafted table costs no more than `LIBRARIES` names.
     tagged(object::elf::DT_NEEDED)
         .filter_map(|name| {
-            let start = usize::try_from(strings.checked_add(name)?).ok()?;
-            let tail = data.get(start..)?;
+            let tail = table.get(usize::try_from(name).ok()?..)?;
             let end = tail.iter().position(|byte| *byte == 0)?;
             Some(String::from_utf8_lossy(&tail[..end]).into_owned())
         })
+        .take(LIBRARIES)
         .collect()
 }
 
@@ -291,13 +333,15 @@ fn mangling(name: &str) -> Option<SourceLanguage> {
             .then_some(SourceLanguage::Rust);
     }
     let rest = name.strip_prefix("_Z")?;
-    // Rust's legacy scheme is Itanium's nested name ending in a 16-digit hash: `17h<hash>E`.
+    // Rust's legacy scheme is Itanium's nested name ending in a 16-digit hash: `17h<hash>E`. Read
+    // as bytes, since an identifier before the hash may be any UTF-8.
+    let bytes = name.as_bytes();
     let hashed = rest.starts_with('N')
-        && name.len() > 20
-        && name.ends_with('E')
-        && name[name.len() - 20..name.len() - 1].starts_with("17h")
-        && name[name.len() - 17..name.len() - 1]
-            .bytes()
+        && bytes.len() > 20
+        && bytes.ends_with(b"E")
+        && bytes[bytes.len() - 20..bytes.len() - 1].starts_with(b"17h")
+        && bytes[bytes.len() - 17..bytes.len() - 1]
+            .iter()
             .all(|byte| byte.is_ascii_hexdigit());
     Some(match hashed {
         true => SourceLanguage::Rust,
@@ -311,16 +355,17 @@ fn compile_units(file: &object::File<'_>) -> Vec<(Range<u64>, SourceLanguage)> {
         object::Endianness::Little => gimli::RunTimeEndian::Little,
         object::Endianness::Big => gimli::RunTimeEndian::Big,
     };
-    let load = |id: gimli::SectionId| -> Result<Slice<'_>, ()> {
-        let data = file
+    // A compressed section (`SHF_COMPRESSED`, or a `.zdebug_` one) is read as its bytes inflated.
+    let load = |id: gimli::SectionId| -> Result<Cow<'_, [u8]>, ()> {
+        Ok(file
             .section_by_name(id.name())
-            .and_then(|section| section.data().ok())
-            .unwrap_or(&[]);
-        Ok(gimli::EndianSlice::new(data, endian))
+            .and_then(|section| section.uncompressed_data().ok())
+            .unwrap_or(Cow::Borrowed(&[])))
     };
-    let Ok(dwarf) = gimli::Dwarf::load(load) else {
+    let Ok(sections) = gimli::DwarfSections::load(load) else {
         return Vec::new();
     };
+    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section, endian));
     let mut found = Vec::new();
     let mut headers = dwarf.units();
     while let Ok(Some(header)) = headers.next() {
@@ -342,9 +387,11 @@ fn unit_language(unit: &gimli::Unit<Slice<'_>>) -> Option<SourceLanguage> {
         return None;
     };
     Some(match language {
-        gimli::DW_LANG_C89 | gimli::DW_LANG_C | gimli::DW_LANG_C99 | gimli::DW_LANG_C11 => {
-            SourceLanguage::C
-        }
+        gimli::DW_LANG_C89
+        | gimli::DW_LANG_C
+        | gimli::DW_LANG_C99
+        | gimli::DW_LANG_C11
+        | gimli::DW_LANG_C17 => SourceLanguage::C,
         gimli::DW_LANG_C_plus_plus
         | gimli::DW_LANG_C_plus_plus_03
         | gimli::DW_LANG_C_plus_plus_11
@@ -353,6 +400,8 @@ fn unit_language(unit: &gimli::Unit<Slice<'_>>) -> Option<SourceLanguage> {
         | gimli::DW_LANG_C_plus_plus_20 => SourceLanguage::Cpp,
         gimli::DW_LANG_Rust => SourceLanguage::Rust,
         gimli::DW_LANG_Go => SourceLanguage::Go,
+        gimli::DW_LANG_Swift => SourceLanguage::Swift,
+        gimli::DW_LANG_ObjC | gimli::DW_LANG_ObjC_plus_plus => SourceLanguage::ObjectiveC,
         _ => return None,
     })
 }
@@ -385,11 +434,17 @@ fn disjoint(
         .map(|(range, _)| range.clone())
         .collect::<Vec<_>>();
     units_sorted.sort_unstable_by_key(|range| range.start);
+    // The furthest end among the units starting at or before each: one search answers an overlap.
+    let reach = units_sorted
+        .iter()
+        .scan(0, |furthest, unit| {
+            *furthest = unit.end.max(*furthest);
+            Some(*furthest)
+        })
+        .collect::<Vec<_>>();
     let inside_unit = |range: &Range<u64>| {
         let after = units_sorted.partition_point(|unit| unit.start < range.end);
-        units_sorted[..after]
-            .iter()
-            .any(|unit| unit.start < range.end && range.start < unit.end)
+        after > 0 && reach[after - 1] > range.start
     };
     ranges.extend(mangled.into_iter().filter(|(range, _)| !inside_unit(range)));
     ranges.sort_by_key(|(range, _)| (range.start, range.end));
@@ -420,6 +475,9 @@ mod tests {
             ("_main", None),
             ("_Runtime", None),
             ("$s4main3fooyyF", Some(SourceLanguage::Swift)),
+            // A multibyte identifier across the hash's byte offsets is read without panicking.
+            ("_ZN6résumé3fooE", Some(SourceLanguage::Cpp)),
+            ("_ZN3fooé17h0123456789abcdeéE", Some(SourceLanguage::Cpp)),
             (
                 "-[AppDelegate application:didFinishLaunchingWithOptions:]",
                 Some(SourceLanguage::ObjectiveC),
@@ -428,6 +486,23 @@ mod tests {
         for (name, expected) in cases {
             assert_eq!(mangling(name), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn a_mangled_name_places_a_function_only_in_a_language_the_container_states() {
+        let symbols = [Symbol {
+            name: "_ZN3foo3barEv".to_owned(),
+            kind: SymbolKind::Function,
+            defined: true,
+            vaddr: 0x1000,
+            size: 0x10,
+            ..Symbol::default()
+        }];
+        assert_eq!(mangled(&symbols, false, &|_| false), []);
+        assert_eq!(
+            mangled(&symbols, false, &|language| language == SourceLanguage::Cpp),
+            [(0x1000..0x1010, SourceLanguage::Cpp)]
+        );
     }
 
     #[test]
