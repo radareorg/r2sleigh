@@ -123,10 +123,12 @@ its array.
 
 - **One array.** The function's own frame is `uint8_t frame[size]`, spanning
   `[low, 0)` in entry-SP coordinates: `low` the least entry offset of any
-  object r2ssa proves the callee's (`callee_allocation.entry_offset`, or
-  `objects().entry_stack_roots` for a source local or parameter home). An
-  object with any byte at or above offset 0 is the caller's (the return
-  address, stack arguments) and is never in it.
+  object whose coordinates r2ssa states (`callee_allocation.entry_offset`, or
+  `objects().entry_stack_roots`). Every byte below the entry stack pointer is
+  the running function's by the ABI; an object with any byte at or above
+  offset 0 is the caller's (the return address, stack arguments) and is never
+  in it. Whether each access stays inside its object is a separate proof: an
+  access at a computed index is spelled only where r2ssa proves the layout.
 - **Addresses.** An object's address is `frame + (offset - low) + pad`. A frame
   address may be held in a value, stored or passed to a call as such a
   pointer, because every place it can reach in the machine's frame is a byte

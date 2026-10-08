@@ -19,10 +19,18 @@ pub(super) struct Spell<'a> {
     pub(super) arena: &'a TermArena,
     /// The variable a value is held in, where it is held at a type C reads as this one.
     pub(super) bound: &'a dyn Fn(ValueId, &MachineType) -> Option<CExpr>,
-    /// A frame object's array and its extent in bytes.
-    pub(super) object: &'a dyn Fn(ObjectId) -> Option<(CExpr, u32)>,
+    /// Where a frame object lies in the frame array.
+    pub(super) object: &'a dyn Fn(ObjectId) -> Option<Placed>,
     /// Whether memory is little-endian, so a byte copy reads a word as the machine does.
     pub(super) little_endian: bool,
+}
+
+/// A frame object's address in the frame array, its extent, and whether r2ssa proves its array
+/// layout, which alone lets an access at a computed index be spelled.
+pub(super) struct Placed {
+    pub(super) base: CExpr,
+    pub(super) extent: u32,
+    pub(super) indexed: bool,
 }
 
 /// The C type a machine type is spelled in: an unsigned integer, or `float` or `double`.
@@ -400,15 +408,68 @@ fn inside(offset: i64, bytes: u32, extent: u32) -> bool {
 }
 
 impl Spell<'_> {
-    fn names_an_object(&self, root: TermId) -> bool {
+    /// The frame objects a term's address arithmetic starts from.
+    fn objects_named(&self, root: TermId) -> Vec<ObjectId> {
+        let mut named = Vec::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             match self.arena.term(id).kind {
-                TermKind::ObjectAddress(_) => return true,
+                TermKind::ObjectAddress(object) => named.push(object),
                 kind => stack.extend(kind.children()),
             }
         }
-        false
+        named.sort_unstable();
+        named.dedup();
+        named
+    }
+
+    /// Whether an address computed into the frame may be spelled: it names no frame object, or one
+    /// object (the access's own, where it states one) whose array layout r2ssa proves.
+    fn computed_into_frame(&self, id: TermId, object: Option<ObjectId>) -> bool {
+        match self.objects_named(id).as_slice() {
+            [] => true,
+            [named] => {
+                object.is_none_or(|object| object == *named)
+                    && (self.object)(*named).is_some_and(|placed| placed.indexed)
+            }
+            _ => false,
+        }
+    }
+
+    /// The address of element `index` of `bytes` each from `base`: a literal index into a frame
+    /// object is held to its extent, a computed one to its proven layout.
+    pub(super) fn subscript(
+        &self,
+        (base, index): (TermId, TermId),
+        bytes: u32,
+        object: Option<ObjectId>,
+    ) -> Option<CExpr> {
+        let literal_index = match self.arena.term(index).kind {
+            TermKind::Literal(value) => i64::try_from(value.bits()).ok(),
+            _ => None,
+        };
+        if let (Some((named, offset)), Some(element)) =
+            (frame_offset(self.arena, base), literal_index)
+        {
+            let at = element.checked_mul(i64::from(bytes))?.checked_add(offset)?;
+            let placed = (self.object)(named)?;
+            if object.is_some_and(|object| object != named) || !inside(at, bytes, placed.extent) {
+                return None;
+            }
+            let ty = integer(self.arena.term(base).ty.width_bits())?;
+            return Some(binary(
+                BinaryOp::Add,
+                cast(ty.clone(), placed.base),
+                cast(ty, CExpr::UIntLit(at as u64)),
+            ));
+        }
+        if !self.computed_into_frame(base, object) {
+            return None;
+        }
+        let wide = integer(self.arena.term(base).ty.width_bits())?;
+        let step = CExpr::UIntLit(u64::from(bytes));
+        let offset = binary(BinaryOp::Mul, cast(wide.clone(), self.term(index)?), step);
+        Some(binary(BinaryOp::Add, cast(wide, self.term(base)?), offset))
     }
 
     /// The address `bytes` are read or written at. A frame address is spelled only inside the
@@ -420,14 +481,17 @@ impl Spell<'_> {
         object: Option<ObjectId>,
     ) -> Option<CExpr> {
         let Some((named, offset)) = frame_offset(self.arena, id) else {
-            return (!self.names_an_object(id)).then(|| self.term(id)).flatten();
+            return self
+                .computed_into_frame(id, object)
+                .then(|| self.term(id))
+                .flatten();
         };
-        let (array, extent) = (self.object)(named)?;
-        if object.is_some_and(|object| object != named) || !inside(offset, bytes, extent) {
+        let placed = (self.object)(named)?;
+        if object.is_some_and(|object| object != named) || !inside(offset, bytes, placed.extent) {
             return None;
         }
         let ty = integer(self.arena.term(id).ty.width_bits())?;
-        let base = cast(ty.clone(), array);
+        let base = cast(ty.clone(), placed.base);
         Some(match offset {
             0 => base,
             offset => binary(BinaryOp::Add, base, cast(ty, CExpr::UIntLit(offset as u64))),
@@ -460,16 +524,14 @@ impl Spell<'_> {
             TermKind::Literal(value) => literal(value),
             TermKind::Variable(_) => None,
             // A frame address may be held or passed: every place it reaches is a byte of the one array.
-            TermKind::ObjectAddress(object) => Some(cast(integer(bits)?, (self.object)(object)?.0)),
+            TermKind::ObjectAddress(object) => {
+                Some(cast(integer(bits)?, (self.object)(object)?.base))
+            }
             TermKind::Load { object, address } => {
                 self.load(&ty, self.address(address, bits / 8, Some(object))?)
             }
             TermKind::Subscript { base, index } => {
-                let step = CExpr::UIntLit(u64::from(bits / 8));
-                let wide = integer(child_bits(base))?;
-                let offset = binary(BinaryOp::Mul, cast(wide.clone(), child(index)?), step);
-                let at = binary(BinaryOp::Add, cast(wide, child(base)?), offset);
-                self.load(&ty, at)
+                self.load(&ty, self.subscript((base, index), bits / 8, None)?)
             }
             TermKind::Arithmetic { op, left, right } => {
                 wrapping(arithmetic(op), bits, child(left)?, child(right)?)

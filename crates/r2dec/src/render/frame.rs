@@ -49,15 +49,15 @@ impl Frame {
         })
     }
 
-    /// The frame of the objects r2ssa proves the callee's, where the convention states the entry
-    /// stack's alignment.
+    /// The frame of the objects whose entry-SP coordinates r2ssa states, where the convention states
+    /// the entry stack's alignment: every byte below the entry stack pointer is the function's own.
     pub(super) fn of(artifact: &SsaArtifact) -> Option<Self> {
         let entry = artifact
             .machine_context()
             .convention_slots()?
             .entry_stack()?;
         let roots = &artifact.facts().objects.entry_stack_roots;
-        let owned = artifact
+        let placed = artifact
             .certificates()
             .stack_slots
             .iter()
@@ -65,19 +65,12 @@ impl Frame {
                 if let Some(allocation) = &slot.callee_allocation {
                     return Some((*object, allocation.entry_offset, allocation.size_bytes));
                 }
-                let local = matches!(
-                    slot.source_slot.map(|source| source.role()),
-                    Some(
-                        r2source::SourceStackSlotRole::Local
-                            | r2source::SourceStackSlotRole::ParameterHome { .. }
-                    )
-                );
                 let root = roots
                     .get(object)
                     .filter(|root| root.base == r2source::StackAddressBase::StackPointer)?;
-                local.then_some((*object, root.offset, slot.size?))
+                Some((*object, root.offset, slot.size?))
             });
-        Self::lay_out(owned, (entry.alignment, entry.residue))
+        Self::lay_out(placed, (entry.alignment, entry.residue))
     }
 
     /// The array's byte index of `object`'s first byte, and the object's size.

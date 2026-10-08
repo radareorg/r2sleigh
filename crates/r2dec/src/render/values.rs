@@ -664,7 +664,7 @@ impl<'a> Values<'a> {
 
     /// A frame object's address in the function's one frame array (D4), and its extent: the
     /// array is declared on first use, aligned as the machine's frame is.
-    fn object(&self, object: ObjectId) -> Option<(CExpr, u32)> {
+    fn object(&self, object: ObjectId) -> Option<terms::Placed> {
         let frame = self.frame.as_ref()?;
         let (index, size) = frame.at(object)?;
         let array = *self.frame_array.borrow_mut().get_or_insert_with(|| {
@@ -692,7 +692,19 @@ impl<'a> Values<'a> {
             CExpr::var(array),
             CExpr::UIntLit(u64::from(index)),
         );
-        Some((base, size))
+        let indexed = matches!(
+            self.artifact
+                .certificates()
+                .stack_slots
+                .get(&object)
+                .map(|slot| &slot.array_layout),
+            Some(r2ssa::StackArrayLayoutDisposition::Proven(_))
+        );
+        Some(terms::Placed {
+            base,
+            extent: size,
+            indexed,
+        })
     }
 
     /// The machine type a value is held at: its name's, its producer's term's, else its width.
@@ -1007,18 +1019,7 @@ impl<'a> Values<'a> {
                         self.spelling(|spell| spell.address(address, bytes, Some(object)))?
                     }
                     TermKind::Subscript { base, index } => {
-                        let wide = terms::c_type(&arena.term(base).ty)?;
-                        let step = CExpr::UIntLit(u64::from(cell.ty.width_bits() / 8));
-                        let offset = CExpr::binary(
-                            crate::ast::BinaryOp::Mul,
-                            CExpr::cast(wide.clone(), self.spell(index)?),
-                            step,
-                        );
-                        CExpr::binary(
-                            crate::ast::BinaryOp::Add,
-                            CExpr::cast(wide, self.spell(base)?),
-                            offset,
-                        )
+                        self.spelling(|spell| spell.subscript((base, index), bytes, None))?
                     }
                     _ => return None,
                 };
