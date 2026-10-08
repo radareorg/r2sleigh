@@ -154,6 +154,38 @@ pub enum TrustedSleighProfile {
 }
 
 impl TrustedSleighProfile {
+    /// Every profile this build embeds.
+    fn embedded() -> Vec<Self> {
+        let mut all = Vec::new();
+        #[cfg(feature = "x86")]
+        all.extend([Self::X86, Self::X86_64]);
+        #[cfg(feature = "arm")]
+        all.extend([
+            Self::ArmCortexLe,
+            Self::ArmThumbLe,
+            Self::Aarch64Le,
+            Self::Aarch64AppleSilicon,
+        ]);
+        #[cfg(feature = "mips")]
+        all.extend([
+            Self::Mips32Be,
+            Self::Mips32Le,
+            Self::Mips64Be,
+            Self::Mips64Le,
+        ]);
+        #[cfg(feature = "riscv")]
+        all.extend([Self::RiscV32Gc, Self::RiscV64Gc]);
+        all
+    }
+
+    /// The profile whose specification is exactly these bytes under this name.
+    fn of_specification(sla: &[u8], pspec: &str, name: &str) -> Option<Self> {
+        Self::embedded().into_iter().find(|profile| {
+            let (profile_sla, profile_pspec, profile_name) = profile.specification();
+            profile_name == name && profile_pspec == pspec && profile_sla == sla
+        })
+    }
+
     pub fn specification(self) -> (&'static [u8], &'static str, &'static str) {
         match self {
             #[cfg(feature = "x86")]
@@ -1631,7 +1663,12 @@ fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
         embedded_specification(&arch_name.to_ascii_lowercase(), windows).ok_or_else(|| {
             LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
         })?;
-    let (arch, disasm) = embedded_arch_and_disassembler(spec.sla, spec.pspec, spec.name)?;
+    // One parse per thread: the trusted lift reads the same specification through its profile.
+    let (arch, disasm) =
+        match TrustedSleighProfile::of_specification(spec.sla, spec.pspec, spec.name) {
+            Some(profile) => Disassembler::shared_arch_and_disassembler(profile)?,
+            None => embedded_arch_and_disassembler(spec.sla, spec.pspec, spec.name)?,
+        };
     Ok(EmbeddedMachine {
         arch,
         disasm,

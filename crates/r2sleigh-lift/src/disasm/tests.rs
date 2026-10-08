@@ -1357,3 +1357,13 @@ fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
     assert!(usual.compiler_spec_of("golang").is_some());
     assert!(windows.compiler_spec_of("golang").is_some());
 }
+
+/// The walk's machine and the trusted lift read one parse of the specification on a thread.
+#[cfg(feature = "x86")]
+#[test]
+fn an_embedded_machine_shares_the_trusted_profile_s_parse() {
+    let machine = embedded_machine("x86-64").expect("x86-64");
+    let trusted =
+        Disassembler::shared_trusted_profile(TrustedSleighProfile::X86_64).expect("trusted");
+    assert!(machine.disasm.shares_loaded_specification(&trusted));
+}
