@@ -2,8 +2,8 @@
 //! through the value an indirect call reaches (doc/adr-decompiler-rewrite.md); any other is a gap.
 
 use r2ssa::{
-    InstId, InstPayload, MachineType, SSAOp, SemanticObligationInventory, SemanticObligationKind,
-    SsaArtifact, ValueId,
+    CallSiteTransfer, CanonicalStorageId, InstId, InstPayload, MachineType, SSAOp,
+    SemanticObligationInventory, SemanticObligationKind, SsaArtifact, ValueId,
 };
 use r2types::{CalleeClass, CalleeResolutionFacts, CallsiteKey};
 
@@ -32,6 +32,9 @@ pub(super) struct CallPlan {
     /// The value the call leaves in its result register and the class it is returned in.
     pub(super) result: Option<(ValueId, MachineType)>,
     pub(super) noreturn: bool,
+    /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
+    /// facts state no result.
+    pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
 }
 
 /// The plan for the call at `inst`, where the facts state every argument, the result and the callee.
@@ -85,7 +88,9 @@ pub(super) fn plan(
         },
         // An indirect call no identity names goes where its target value points.
         _ => match graph.inst(inst).map(|i| &i.payload) {
-            Some(InstPayload::Op(SSAOp::CallInd { target, .. })) => Callee::Through(*target),
+            Some(InstPayload::Op(
+                SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. },
+            )) => Callee::Through(*target),
             _ => return None,
         },
     };
@@ -193,6 +198,13 @@ pub(super) fn plan(
     if matches!(callee, Callee::Through(_)) && certificate.variadic {
         return None;
     }
+    let tail = (certificate.transfer == CallSiteTransfer::TailCall).then(|| {
+        tail_result(
+            artifact,
+            *site,
+            signature.map(|signature| signature.return_type.unaliased()),
+        )
+    });
     Some(CallPlan {
         callee,
         arguments,
@@ -207,5 +219,26 @@ pub(super) fn plan(
             .get(site)
             .and_then(|boundary| boundary.noreturn)
             == Some(true),
+        tail,
     })
+}
+
+/// The register a tail transfer's callee returns in and its class, as the boundary states it and a
+/// signature, where there is one, agrees.
+fn tail_result(
+    artifact: &SsaArtifact,
+    site: r2ssa::CallSiteId,
+    declared: Option<&r2types::CTypeLike>,
+) -> Option<(CanonicalStorageId, MachineType)> {
+    let boundary = artifact.facts().boundaries.calls.get(&site)?;
+    let Some(r2source::SourceCallResult::Register { storage }) = boundary.result_kind else {
+        return None;
+    };
+    let carrier = super::values::carrier_class(artifact, storage, storage.size * 8);
+    let declared = match declared {
+        Some(r2types::CTypeLike::Void) => return None,
+        Some(ty) => Some(super::values::class_of(ty, storage.size * 8)?),
+        None => None,
+    };
+    Some((storage, super::values::agreed(declared, carrier)?))
 }

@@ -347,9 +347,23 @@ impl<'i> Writer<'_, 'i> {
     /// One edge: its merge copies, then the target written here, a `continue`, a `goto`, or a
     /// return where it leaves the function.
     fn edge(&mut self, from: u64, to: u64) -> Vec<CStmt> {
-        // An edge out of the function is a transfer the text does not make, a tail call above all:
-        // a `return` there would drop it, so the text traps.
+        // An edge out of the function is a tail call D2 writes from its certificate; any other
+        // transfer the text cannot make, so it traps rather than return.
         if self.input.function().cfg().get_block(to).is_none() {
+            let ty = super::result_type(self.input);
+            let decided = self
+                .input
+                .return_type()
+                .and_then(r2types::ReturnTypeFact::decided);
+            if let Some(stmts) = self
+                .values
+                .and_then(|values| values.tail_call(from, &ty, decided))
+            {
+                return stmts
+                    .into_iter()
+                    .map(|stmt| self.observe(from, stmt))
+                    .collect();
+            }
             let trap = CStmt::Expr(self.residual(&CType::Void));
             return vec![self.observe(from, trap)];
         }

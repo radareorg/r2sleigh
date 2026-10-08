@@ -380,7 +380,8 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
-    // `call_store` ends in `jmp store`: a `return` would drop the call, so the text traps.
+    // `call_store` ends in `jmp store`: the tail call is written, then the `return` it makes, never
+    // a bare `return` that would drop it.
     let call_store = staged
         .out
         .split("void call_store")
@@ -390,11 +391,12 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .split("void forward")
         .next()
         .unwrap_or(call_store);
-    assert!(!call_store.contains("return"), "{call_store}");
-    assert!(
-        call_store.contains("r2sleigh_residual_void("),
-        "{call_store}"
-    );
+    let call = call_store
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), arg0);")
+        .expect("the tail call");
+    let returned = call_store.find("return;").expect("its return");
+    assert!(call < returned, "{call_store}");
+    assert!(!call_store.contains("r2sleigh_residual"), "{call_store}");
 }
 
 /// An indirect call goes through its target value, cast to the function type its classes state:
@@ -409,6 +411,32 @@ fn a_staged_indirect_call_goes_through_its_target_value() {
         "{}",
         staged.out
     );
+}
+
+/// A tail call returns what its callee leaves in the function's own result register: RAX for
+/// `frame_dummy`, XMM0 for `swap_call`, whose arguments it swaps first.
+#[test]
+fn a_staged_tail_call_returns_its_callee_s_result() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    for (binary, function, line) in [
+        (
+            "rv_O0g",
+            "sym.frame_dummy",
+            "return (uint64_t)register_tm_clones();",
+        ),
+        (
+            "float_moves_zig_x86_64_O2g",
+            "sym.swap_call",
+            "return (double)scale(arg1, arg0);",
+        ),
+    ] {
+        let staged = on(
+            fixtures.join(binary),
+            &format!("e dec.pipeline=staged; pdd @ {function}"),
+        );
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+        assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
+    }
 }
 
 /// A double comes back in XMM0's low lane: the call's result is its bits, the rest of the register

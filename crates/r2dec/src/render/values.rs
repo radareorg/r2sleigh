@@ -305,7 +305,12 @@ impl<'a> Readers<'a> {
             for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
                 match &inst.payload {
                     InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
-                    InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {
+                    InstPayload::Op(
+                        SSAOp::Call { .. }
+                        | SSAOp::CallInd { .. }
+                        | SSAOp::Branch { .. }
+                        | SSAOp::BranchInd { .. },
+                    ) => {
                         for using in pending.drain(..) {
                             used_by.insert(using, inst.id);
                         }
@@ -472,7 +477,12 @@ impl<'a> Values<'a> {
         for inst in &graph.insts {
             if matches!(
                 inst.payload,
-                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. })
+                InstPayload::Op(
+                    SSAOp::Call { .. }
+                        | SSAOp::CallInd { .. }
+                        | SSAOp::Branch { .. }
+                        | SSAOp::BranchInd { .. }
+                )
             ) && let Some(plan) =
                 calls::plan(artifact, input.callee_resolution(), inventory, inst.id)
             {
@@ -519,7 +529,7 @@ impl<'a> Values<'a> {
                     }
                     demand.operand(*val, inst.id);
                 }
-                SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
+                SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Branch { .. } => {
                     for (argument, _) in planned
                         .get(inst.id)
                         .map_or(&[][..], |plan| &plan.arguments[..])
@@ -529,6 +539,16 @@ impl<'a> Values<'a> {
                 }
                 SSAOp::CBranch { cond, .. } => demand.operand(*cond, inst.id),
                 SSAOp::Switch { selector } => demand.operand(*selector, inst.id),
+                // A tail transfer reads its arguments, and its target where it goes through one.
+                SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
+                    let plan = planned.get(inst.id).expect("planned above");
+                    for (argument, _) in &plan.arguments {
+                        demand.operand(*argument, inst.id);
+                    }
+                    if matches!(plan.callee, calls::Callee::Through(_)) {
+                        demand.operand(*target, inst.id);
+                    }
+                }
                 SSAOp::BranchInd { .. } => {
                     let selector = graph
                         .block(inst.block)
@@ -904,17 +924,20 @@ impl<'a> Values<'a> {
     /// in, its result assigned.
     fn call(&self, inst: InstId) -> Option<CStmt> {
         let plan = self.calls.get(inst)?;
-        let (name, kind, address) = match &plan.callee {
-            calls::Callee::Named { address, .. } if *address == Some(self.own.entry) => {
-                return self.recursive_call(inst, plan);
-            }
-            calls::Callee::Named {
-                name,
-                kind,
-                address,
-            } => (name, *kind, *address),
-            calls::Callee::Through(target) => return self.call_through(inst, plan, *target),
-        };
+        if self.calls_itself(plan) {
+            return self.recursive_call(inst, plan);
+        }
+        let call = self.call_expr(inst, plan, plan.result.as_ref().map(|(_, class)| class))?;
+        self.assign_call(inst, plan, call)
+    }
+
+    fn calls_itself(&self, plan: &CallPlan) -> bool {
+        matches!(&plan.callee, calls::Callee::Named { address, .. } if *address == Some(self.own.entry))
+    }
+
+    /// The call's expression, returning `ret`: a named callee is declared once, and one reached
+    /// through its target value is cast to the function type it is called at.
+    fn call_expr(&self, inst: InstId, plan: &CallPlan, ret: Option<&MachineType>) -> Option<CExpr> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
         for (argument, class) in &plan.arguments {
@@ -922,9 +945,29 @@ impl<'a> Values<'a> {
             arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
             types.push(terms::c_type(class)?);
         }
-        let ret_type = match &plan.result {
-            Some((_, class)) => terms::c_type(class)?,
+        let ret_type = match ret {
+            Some(class) => terms::c_type(class)?,
             None => CType::Void,
+        };
+        let (name, kind, address) = match &plan.callee {
+            calls::Callee::Named {
+                name,
+                kind,
+                address,
+            } => (name, *kind, *address),
+            calls::Callee::Through(target) => {
+                // The printer spells a function type in a cast as the pointer to it: `ret (*)(params)`.
+                let pointer = CType::Function {
+                    ret: Box::new(ret_type),
+                    params: types.into_boxed_slice(),
+                };
+                let address = terms::fit_integer(self.operand(*target, inst)?, self.ptr_bits)?;
+                return Some(CExpr::call_at(
+                    inst,
+                    CExpr::cast(pointer, address),
+                    arguments,
+                ));
+            }
         };
         types.truncate(plan.fixed);
         let declaration = CExternDecl {
@@ -949,31 +992,53 @@ impl<'a> Values<'a> {
             name: name.clone(),
             kind,
         };
-        self.assign_call(inst, plan, CExpr::call_at(inst, callee, arguments))
+        Some(CExpr::call_at(inst, callee, arguments))
     }
 
-    /// An indirect call through the function its target value holds, typed by the classes the call
-    /// passes and returns in.
-    fn call_through(&self, inst: InstId, plan: &CallPlan, target: ValueId) -> Option<CStmt> {
-        let mut arguments = Vec::with_capacity(plan.arguments.len());
-        let mut types = Vec::with_capacity(plan.arguments.len());
-        for (argument, class) in &plan.arguments {
-            let held = self.value_type(*argument)?;
-            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
-            types.push(terms::c_type(class)?);
+    /// A tail transfer as C: the call and a bare `return` where the function returns nothing, else
+    /// the return of what the callee leaves in the function's own result register.
+    pub(super) fn tail_call(
+        &self,
+        addr: u64,
+        ty: &CType,
+        decided: Option<&CType>,
+    ) -> Option<Vec<CStmt>> {
+        let (inst, _) = self.terminator(addr)?;
+        let plan = self.calls.get(inst)?;
+        let tail = plan.tail.as_ref()?;
+        if plan.noreturn || self.calls_itself(plan) {
+            return None;
         }
-        let ret = match &plan.result {
-            Some((_, class)) => terms::c_type(class)?,
-            None => CType::Void,
+        let returns = self
+            .artifact
+            .machine_context()
+            .function_interface()?
+            .return_kind();
+        let stmts = match (returns, tail) {
+            (r2source::SourceFunctionReturn::Void, _) => {
+                let call = self.call_expr(inst, plan, tail.as_ref().map(|(_, class)| class))?;
+                vec![CStmt::Expr(call), CStmt::Return(None)]
+            }
+            (r2source::SourceFunctionReturn::Register { storage }, Some((carried, class)))
+                if storage == *carried =>
+            {
+                let carrier = carrier_class(self.artifact, storage, storage.size * 8);
+                let own = match decided {
+                    Some(CType::Void) => return None,
+                    Some(decided) => agreed(class_of(decided, storage.size * 8), carrier)?,
+                    None => match carrier? {
+                        class @ MachineType::Integer { .. } => class,
+                        _ => return None,
+                    },
+                };
+                let call = self.call_expr(inst, plan, Some(class))?;
+                let spelled = fit(call, class, &own)?;
+                vec![CStmt::Return(Some(CExpr::cast(ty.clone(), spelled)))]
+            }
+            _ => return None,
         };
-        // The printer spells a function type in a cast as the pointer to it: `ret (*)(params)`.
-        let pointer = CType::Function {
-            ret: Box::new(ret),
-            params: types.into_boxed_slice(),
-        };
-        let address = terms::fit_integer(self.operand(target, inst)?, self.ptr_bits)?;
-        let callee = CExpr::cast(pointer, address);
-        self.assign_call(inst, plan, CExpr::call_at(inst, callee, arguments))
+        self.mark(inst);
+        Some(stmts)
     }
 
     /// The call as a statement, its result assigned to the value the boundary defines after it.
