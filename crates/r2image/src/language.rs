@@ -21,7 +21,87 @@ pub(crate) fn read(file: &object::File<'_>, symbols: &[Symbol]) -> Languages {
     Languages {
         program,
         ranges: disjoint(units, mangled),
+        go_version: go_version(file),
     }
+}
+
+/// The Go version the build information states. ELF and Mach-O name its section; a PE holds it
+/// in `.data` at a 16-byte boundary, where Go's own `debug/buildinfo` looks.
+fn go_version(file: &object::File<'_>) -> Option<(u32, u32)> {
+    const MAGIC: &[u8] = b"\xff Go buildinf:";
+    let named = ["__go_buildinfo", ".go.buildinfo"]
+        .iter()
+        .find_map(|name| file.section_by_name(name)?.data().ok());
+    let info = named.or_else(|| {
+        let data = file.section_by_name(".data")?.data().ok()?;
+        let at = (0..data.len())
+            .step_by(16)
+            .find(|at| data[*at..].starts_with(MAGIC))?;
+        Some(&data[at..])
+    })?;
+    buildinfo_version(info, &|vaddr, len| read_at(file, vaddr, len))
+}
+
+/// The version in a build information blob: inline after its 32-byte header from Go 1.18
+/// (flag 2), else through its pointer to `runtime.buildVersion`'s string header.
+fn buildinfo_version<'m>(
+    info: &[u8],
+    read: &dyn Fn(u64, usize) -> Option<&'m [u8]>,
+) -> Option<(u32, u32)> {
+    let header = info.get(..32)?;
+    if !header.starts_with(b"\xff Go buildinf:") {
+        return None;
+    }
+    let (word, flags) = (usize::from(header[14]), header[15]);
+    if word != 4 && word != 8 {
+        return None;
+    }
+    let little = flags & 1 == 0;
+    let text: &[u8] = if flags & 2 != 0 {
+        // A uvarint length; a version is shorter than 128 bytes, so one byte.
+        let length = usize::from(*info.get(32).filter(|length| **length < 0x80)?);
+        info.get(33..33 + length)?
+    } else {
+        let string = read(read_word(&header[16..16 + word], little), 2 * word)?;
+        let (start, length) = (
+            read_word(&string[..word], little),
+            read_word(&string[word..], little),
+        );
+        read(start, usize::try_from(length).ok()?.min(32))?
+    };
+    let mut parts = std::str::from_utf8(text)
+        .ok()?
+        .strip_prefix("go")?
+        .split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?;
+    let digits = minor
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(minor.len());
+    Some((major, minor[..digits].parse().ok()?))
+}
+
+/// A word of 4 or 8 bytes in the stated byte order.
+fn read_word(bytes: &[u8], little: bool) -> u64 {
+    let mut buffer = [0u8; 8];
+    match little {
+        true => {
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            u64::from_le_bytes(buffer)
+        }
+        false => {
+            buffer[8 - bytes.len()..].copy_from_slice(bytes);
+            u64::from_be_bytes(buffer)
+        }
+    }
+}
+
+/// `len` file bytes at an address a section maps.
+fn read_at<'d>(file: &object::File<'d>, vaddr: u64, len: usize) -> Option<&'d [u8]> {
+    file.sections().find_map(|section| {
+        let offset = usize::try_from(vaddr.checked_sub(section.address())?).ok()?;
+        section.data().ok()?.get(offset..offset.checked_add(len)?)
+    })
 }
 
 /// Each defined function's range in the language its mangling records, where the container states
@@ -542,6 +622,35 @@ mod tests {
         );
     }
 
+    /// go-cdetect's header (Go 1.18.1, inline) and dwarf_go_tree's (Go 1.14.7, through
+    /// `runtime.buildVersion`'s string header at 0x55e830).
+    #[test]
+    fn the_build_information_states_the_go_version() {
+        let mut inline = b"\xff Go buildinf:\x08\x02".to_vec();
+        inline.resize(32, 0);
+        inline.extend(b"\x08go1.18.1");
+        let none = |_: u64, _: usize| None;
+        assert_eq!(buildinfo_version(&inline, &none), Some((1, 18)));
+
+        let mut pointed = b"\xff Go buildinf:\x08\x00".to_vec();
+        pointed.extend(0x55_e830u64.to_le_bytes());
+        pointed.resize(32, 0);
+        let memory = |vaddr: u64, len: usize| -> Option<&'static [u8]> {
+            let bytes: &'static [u8] = match vaddr {
+                0x55_e830 => b"\x00\x10\x4c\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00\x00",
+                0x4c_1000 => b"go1.14.7",
+                _ => return None,
+            };
+            bytes.get(..len)
+        };
+        assert_eq!(buildinfo_version(&pointed, &memory), Some((1, 14)));
+
+        // A word size the format never states is refused, not read past the header.
+        let mut wide = b"\xff Go buildinf:\x10\x00".to_vec();
+        wide.resize(32, 0);
+        assert_eq!(buildinfo_version(&wide, &memory), None);
+    }
+
     #[test]
     fn a_cxx_runtime_is_named_by_its_library() {
         for library in [
@@ -576,6 +685,7 @@ mod tests {
         let languages = Languages {
             program: SourceLanguage::Go,
             ranges: kept,
+            go_version: None,
         };
         assert_eq!(languages.at(0x1150), SourceLanguage::C);
         assert_eq!(languages.at(0x3050), SourceLanguage::Rust);

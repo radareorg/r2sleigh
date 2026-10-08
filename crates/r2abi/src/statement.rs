@@ -97,6 +97,9 @@ pub struct Languages {
     pub program: SourceLanguage,
     /// Sorted by start and disjoint.
     pub ranges: Vec<(Range<u64>, SourceLanguage)>,
+    /// The Go toolchain's major and minor version, where `.go.buildinfo` states it: which
+    /// convention its functions use (register-based ABIInternal from 1.17 on x86-64).
+    pub go_version: Option<(u32, u32)>,
 }
 
 impl Languages {
