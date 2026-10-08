@@ -25,12 +25,10 @@ pub(super) struct Spell<'a> {
     pub(super) little_endian: bool,
 }
 
-/// A frame object's address in the frame array, its extent, and whether r2ssa proves its array
-/// layout, which alone lets an access at a computed index be spelled.
+/// A frame object's address in the frame array and its extent.
 pub(super) struct Placed {
     pub(super) base: CExpr,
     pub(super) extent: u32,
-    pub(super) indexed: bool,
 }
 
 /// The C type a machine type is spelled in: an unsigned integer, or `float` or `double`.
@@ -429,13 +427,12 @@ impl Spell<'_> {
     }
 
     /// Whether an address computed into the frame may be spelled: it names no frame object, or one
-    /// object (the access's own, where it states one) whose array layout r2ssa proves.
+    /// placed object, the access's own where it states one (ADR "D4's frame", computed indices).
     fn computed_into_frame(&self, id: TermId, object: Option<ObjectId>) -> bool {
         match self.objects_named(id).as_slice() {
             [] => true,
             [named] => {
-                object.is_none_or(|object| object == *named)
-                    && (self.object)(*named).is_some_and(|placed| placed.indexed)
+                object.is_none_or(|object| object == *named) && (self.object)(*named).is_some()
             }
             _ => false,
         }

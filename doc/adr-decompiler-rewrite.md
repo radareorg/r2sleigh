@@ -127,8 +127,13 @@ its array.
   `objects().entry_stack_roots`). Every byte below the entry stack pointer is
   the running function's by the ABI; an object with any byte at or above
   offset 0 is the caller's (the return address, stack arguments) and is never
-  in it. Whether each access stays inside its object is a separate proof: an
-  access at a computed index is spelled only where r2ssa proves the layout.
+  in it. An access at a literal offset or index is spelled only inside its
+  object's extent. One at a computed index is spelled from the one object its
+  address names, as the machine computes it, so the C stays inside `frame`
+  wherever the program's index stays inside the object: the assumption r2ssa's
+  array layout proof makes too, whose index range is MAY evidence clamped to
+  the frame. That proof's geometry (stride, element) types an array; byte
+  arithmetic on `frame` needs none of it.
 - **Addresses.** An object's address is `frame + (offset - low) + pad`. A frame
   address may be held in a value, stored or passed to a call as such a
   pointer, because every place it can reach in the machine's frame is a byte

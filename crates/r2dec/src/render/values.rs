@@ -692,19 +692,7 @@ impl<'a> Values<'a> {
             CExpr::var(array),
             CExpr::UIntLit(u64::from(index)),
         );
-        let indexed = matches!(
-            self.artifact
-                .certificates()
-                .stack_slots
-                .get(&object)
-                .map(|slot| &slot.array_layout),
-            Some(r2ssa::StackArrayLayoutDisposition::Proven(_))
-        );
-        Some(terms::Placed {
-            base,
-            extent: size,
-            indexed,
-        })
+        Some(terms::Placed { base, extent: size })
     }
 
     /// The machine type a value is held at: its name's, its producer's term's, else its width.
