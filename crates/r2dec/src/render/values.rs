@@ -47,6 +47,7 @@ pub(super) struct Values<'a> {
     /// One declaration per callee, which every call to it here must agree with.
     externs: RefCell<BTreeMap<String, CExternDecl>>,
     little_endian: bool,
+    ptr_bits: u32,
 }
 
 /// Whether an instruction between a producer and its reader is one a moved read or trap may not cross.
@@ -451,7 +452,7 @@ impl<'a> Values<'a> {
             ) && let Some(plan) =
                 calls::plan(artifact, input.callee_resolution(), inventory, inst.id)
             {
-                if let Some(result) = plan.result {
+                if let Some((result, _)) = plan.result {
                     results.insert(result);
                 }
                 planned.insert(inst.id, plan);
@@ -489,7 +490,7 @@ impl<'a> Values<'a> {
                     demand.operand(*val, inst.id);
                 }
                 SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                    for argument in planned
+                    for (argument, _) in planned
                         .get(inst.id)
                         .map_or(&[][..], |plan| &plan.arguments[..])
                     {
@@ -546,6 +547,7 @@ impl<'a> Values<'a> {
             calls: planned,
             results,
             externs: RefCell::new(BTreeMap::new()),
+            ptr_bits: input.ptr_bits(),
             little_endian: matches!(
                 artifact
                     .machine_context()
@@ -556,27 +558,21 @@ impl<'a> Values<'a> {
             projection,
             roots,
         };
-        values.declare();
+        let parameters = parameters(input, artifact);
+        values.declare(parameters);
         Some(values)
     }
 
     /// Parameters in their ABI order, then a local per bound value.
-    fn declare(&mut self) {
-        for parameter in self.artifact.facts().boundaries.parameters.values() {
-            let bits = self.graph.var(parameter.value).size * 8;
-            let ty = MachineType::Integer {
-                width_bits: bits,
-                signedness: r2ssa::MachineSignedness::Unsigned,
-            };
-            let Some(c) = terms::c_type(&ty) else {
-                continue;
-            };
+    fn declare(&mut self, parameters: Option<Vec<(u32, ValueId, MachineType)>>) {
+        for (index, value, ty) in parameters.into_iter().flatten() {
+            let c = terms::c_type(&ty).expect("a classed parameter has a C type");
             let name = self.symbols.borrow_mut().declare(
-                format!("arg{}", parameter.index),
+                format!("arg{index}"),
                 c.clone(),
-                SymbolRole::Parameter(parameter.index),
+                SymbolRole::Parameter(index),
             );
-            self.names[parameter.value.0 as usize] = Some((name, ty));
+            self.names[value.0 as usize] = Some((name, ty));
             self.params.push(CParam { ty: c, name });
         }
         for inst in &self.graph.insts {
@@ -651,8 +647,11 @@ impl<'a> Values<'a> {
         declared.map(|(id, bytes)| (CExpr::var(id), bytes))
     }
 
-    /// The machine type a value is held at: its producer's term's, else its storage's width.
+    /// The machine type a value is held at: its name's, its producer's term's, else its width.
     fn value_type(&self, value: ValueId) -> Option<MachineType> {
+        if let Some((_, held)) = self.names.get(value.0 as usize).and_then(Option::as_ref) {
+            return Some(*held);
+        }
         if let Some(canonical) = self.roots.value(value) {
             return Some(self.roots.arena().term(canonical.canonical).ty);
         }
@@ -673,7 +672,7 @@ impl<'a> Values<'a> {
     fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
         let bound = |value: ValueId, ty: &MachineType| {
             let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
-            (terms::c_type(held)? == terms::c_type(ty)?).then(|| CExpr::var(*name))
+            terms::reclass(CExpr::var(*name), held, ty)
         };
         let object = |object: ObjectId| self.object(object);
         read(&Spell {
@@ -846,24 +845,30 @@ impl<'a> Values<'a> {
             .is_some_and(Option::is_some)
     }
 
-    /// A described call: its callee by name, its arguments at their own types, its result assigned.
+    /// A described call: its callee by name, each argument at the class its signature passes it
+    /// in, its result assigned.
     fn call(&self, inst: InstId) -> Option<CStmt> {
         let plan = self.calls.get(inst)?;
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
-        for argument in &plan.arguments {
-            let ty = terms::c_type(&self.value_type(*argument)?)?;
-            arguments.push(CExpr::cast(ty.clone(), self.operand(*argument, inst)?));
-            types.push(ty);
+        for (argument, class) in &plan.arguments {
+            let held = self.value_type(*argument)?;
+            arguments.push(terms::reclass(
+                self.operand(*argument, inst)?,
+                &held,
+                class,
+            )?);
+            types.push(terms::c_type(class)?);
         }
-        let ret_type = match plan.result {
-            Some(result) => terms::c_type(&self.value_type(result)?)?,
+        let ret_type = match &plan.result {
+            Some((_, class)) => terms::c_type(class)?,
             None => CType::Void,
         };
+        types.truncate(plan.fixed);
         let declaration = CExternDecl {
             name: plan.name.clone(),
             ret_type,
-            params: Some(types[..plan.fixed].to_vec()),
+            params: Some(types),
             variadic: plan.variadic,
             noreturn: plan.noreturn,
             address: plan.address,
@@ -883,18 +888,17 @@ impl<'a> Values<'a> {
             kind: plan.kind,
         };
         let call = CExpr::call_at(inst, callee, arguments);
-        let assigned = plan
-            .result
-            .and_then(|result| Some((result, self.names.get(result.0 as usize)?.as_ref()?.0)));
-        Some(match assigned {
-            Some((result, name)) => {
-                if let Some(def) = self.graph.def_inst(result) {
-                    self.mark(def);
-                }
-                assign(name, call)
-            }
-            None => CStmt::Expr(call),
-        })
+        let Some((result, class)) = &plan.result else {
+            return Some(CStmt::Expr(call));
+        };
+        let Some((name, held)) = self.names.get(result.0 as usize).and_then(Option::as_ref) else {
+            return Some(CStmt::Expr(call));
+        };
+        let value = terms::reclass(call, class, held)?;
+        if let Some(def) = self.graph.def_inst(*result) {
+            self.mark(def);
+        }
+        Some(assign(*name, value))
     }
 
     pub(super) fn externs(&self) -> Vec<CExternDecl> {
@@ -939,7 +943,8 @@ impl<'a> Values<'a> {
         };
         let ty = terms::c_type(&cell)?;
         let residual = ResidualType::of(&ty)?;
-        let written = CExpr::cast(ty, self.operand(value, inst)?);
+        let written = terms::reclass(self.operand(value, inst)?, &self.value_type(value)?, &cell)?;
+        let written = CExpr::cast(ty, written);
         let pointer = CExpr::cast(CType::Pointer(Box::new(CType::Void)), address);
         Some(CStmt::Expr(
             Helper::Store(residual).call(vec![pointer, written]),
@@ -965,7 +970,7 @@ impl<'a> Values<'a> {
     }
 
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.
-    pub(super) fn returned(&self, addr: u64, ty: &CType) -> Option<Option<CExpr>> {
+    pub(super) fn returned(&self, addr: u64, ty: Option<&CType>) -> Option<Option<CExpr>> {
         let (inst, op) = self.terminator(addr)?;
         if !matches!(op, SSAOp::Return { .. }) {
             return None;
@@ -975,13 +980,39 @@ impl<'a> Values<'a> {
             .obligations_for_inst(inst)
             .any(|o| o.id.kind == SemanticObligationKind::ReturnValue && o.inputs.is_empty());
         let values = returned_values(self.inventory, inst);
-        match (ty, values.as_slice()) {
-            (CType::Void, _) => Some(None),
-            (_, [value]) if !unproven => {
-                Some(Some(CExpr::cast(ty.clone(), self.operand(*value, inst)?)))
-            }
-            _ => None,
+        let [value] = values.as_slice() else {
+            return matches!(ty, Some(CType::Void)).then_some(None);
+        };
+        if unproven {
+            return None;
         }
+        let held = self.value_type(*value)?;
+        let carrier =
+            self.inventory
+                .obligations_for_inst(inst)
+                .find_map(|o| match o.id.component {
+                    SemanticObligationComponent::RegisterSlot { storage, .. }
+                        if o.id.kind == SemanticObligationKind::ReturnValue =>
+                    {
+                        carrier_class(self.artifact, storage, held.width_bits())
+                    }
+                    _ => None,
+                });
+        // The C return type says which register C returns in: a decided type, else the machine
+        // word, which is right only where the convention returns the value in a general register.
+        let (ty, class) = match ty {
+            Some(CType::Void) => return Some(None),
+            Some(ty) => (
+                ty.clone(),
+                agreed(class_of(ty, held.width_bits()), carrier)?,
+            ),
+            None => match carrier? {
+                class @ MachineType::Integer { .. } => (super::word_type(self.ptr_bits), class),
+                _ => return None,
+            },
+        };
+        let spelled = terms::reclass(self.operand(*value, inst)?, &held, &class)?;
+        Some(Some(CExpr::cast(ty, spelled)))
     }
 
     fn terminator(&self, addr: u64) -> Option<(InstId, &'a SSAOp<ValueId>)> {
@@ -1150,6 +1181,99 @@ impl<'a> Values<'a> {
             let _ = ledger.record(obligation.id, outcome);
         }
     }
+}
+
+/// The class C passes a value of declared type `ty` in, held at `width_bits`: a float of its own
+/// width, or an integer for an integer, boolean, pointer or enum. `None` for anything else.
+pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<MachineType> {
+    match ty.unaliased() {
+        r2types::CTypeLike::Float(bits @ (32 | 64)) if *bits == width_bits => {
+            Some(MachineType::Float { width_bits })
+        }
+        r2types::CTypeLike::Int { .. }
+        | r2types::CTypeLike::Bool
+        | r2types::CTypeLike::Pointer(_)
+        | r2types::CTypeLike::Enum(_)
+            if matches!(width_bits, 8 | 16 | 32 | 64) =>
+        {
+            Some(MachineType::Integer {
+                width_bits,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The class the convention passes a value of `width_bits` held in `storage` in: the slot it lies
+/// in says general or float register. `None` where no slot of the convention holds it.
+pub(super) fn carrier_class(
+    artifact: &SsaArtifact,
+    storage: r2source::CanonicalStorageId,
+    width_bits: u32,
+) -> Option<MachineType> {
+    let slots = artifact.machine_context().convention_slots()?;
+    let within = |slot: &r2source::CanonicalStorageId| {
+        slot.space == storage.space
+            && slot.offset <= storage.offset
+            && storage.offset + u64::from(storage.size) <= slot.offset + u64::from(slot.size)
+    };
+    let general = slots
+        .argument_slots()
+        .iter()
+        .chain(&slots.result_slot())
+        .any(within);
+    let float = (slots.float_argument_slots().iter())
+        .chain(&slots.float_result_slot())
+        .any(within);
+    match (general, float) {
+        (true, false) if matches!(width_bits, 8 | 16 | 32 | 64) => Some(MachineType::Integer {
+            width_bits,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        }),
+        (false, true) if matches!(width_bits, 32 | 64) => Some(MachineType::Float { width_bits }),
+        _ => None,
+    }
+}
+
+/// One class from a declared type and the carrier, where either states it and they agree.
+pub(super) fn agreed(
+    declared: Option<MachineType>,
+    carrier: Option<MachineType>,
+) -> Option<MachineType> {
+    match (declared, carrier) {
+        (Some(declared), Some(carrier)) => (declared == carrier).then_some(declared),
+        (one, other) => one.or(other),
+    }
+}
+
+/// The parameters in ABI order at the class C passes them in: a declared float is a float, a
+/// declared integer, pointer or enum is an integer of its width. `None` where any is unknown, since
+/// C would pass a guessed class in another register (doc/adr-decompiler-rewrite.md).
+fn parameters(
+    input: &RenderInput<'_>,
+    artifact: &SsaArtifact,
+) -> Option<Vec<(u32, ValueId, MachineType)>> {
+    let graph = artifact.graph();
+    artifact
+        .facts()
+        .boundaries
+        .parameters
+        .values()
+        .map(|parameter| {
+            let width_bits = graph.var(parameter.value).size * 8;
+            let declared = input
+                .parameter_declaration(parameter.index as usize, width_bits)
+                .map(|declared| class_of(&declared, width_bits));
+            let carrier = carrier_class(artifact, parameter.abi_storage, width_bits);
+            let class = match declared {
+                Some(None) => return None,
+                Some(Some(declared)) => agreed(Some(declared), carrier)?,
+                None => carrier?,
+            };
+            Some((parameter.index, parameter.value, class))
+        })
+        .collect()
 }
 
 /// Why a live instruction's statement is a gap: the marker's kind, which says what is missing.

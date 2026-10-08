@@ -1,7 +1,7 @@
 //! D3: a canonical term as C (doc/adr-decompiler-rewrite.md). An integer is spelled unsigned at its
 //! width so the C wraps as the machine does; a node with no exact C spelling answers `None`.
 
-use r2rewrite::{TermArena, TermId, TermKind};
+use r2rewrite::{LeafRead, TermArena, TermId, TermKind};
 use r2ssa::{
     MachineArithmeticFlagOp, MachineArithmeticMode, MachineArithmeticOp, MachineBitVector,
     MachineBitwiseOp, MachineBooleanOp, MachineCastKind, MachineComparisonOp, MachineExprId,
@@ -293,6 +293,23 @@ fn concat(bits: u32, low_bits: u32, high: CExpr, low: CExpr) -> Option<CExpr> {
     ))
 }
 
+/// `expr`, of machine type `from`, as `to`: the same C value, or the same bits read as the other
+/// class. A C cast between a float and an integer converts the value, so it never stands for this.
+pub(super) fn reclass(expr: CExpr, from: &MachineType, to: &MachineType) -> Option<CExpr> {
+    if c_type(from)? == c_type(to)? {
+        return Some(expr);
+    }
+    match (from, to) {
+        (MachineType::Float { width_bits }, to) if to.width_bits() == *width_bits => {
+            Some(Helper::float_to_bits(*width_bits)?.call(vec![expr]))
+        }
+        (from, MachineType::Float { width_bits }) if from.width_bits() == *width_bits => {
+            Some(Helper::float_from_bits(*width_bits)?.call(vec![expr]))
+        }
+        _ => None,
+    }
+}
+
 /// A frame object's address plus a literal offset, as `(object, offset)`.
 fn frame_offset(arena: &TermArena, id: TermId) -> Option<(ObjectId, i64)> {
     let signed = |id: TermId| match arena.term(id).kind {
@@ -385,8 +402,11 @@ impl Spell<'_> {
         let child = |id: TermId| self.term(id);
         let child_bits = |id: TermId| self.arena.term(id).ty.width_bits();
         match node.kind {
-            TermKind::Leaf(read) => self.machine(read.expr),
-            TermKind::Opaque(expr) => self.machine(expr),
+            // The projection may hold the same bits at the other class than the term reads them.
+            TermKind::Leaf(LeafRead { expr, .. }) | TermKind::Opaque(expr) => {
+                let held = *self.projection.expr(expr)?.ty();
+                reclass(self.machine(expr)?, &held, &ty)
+            }
             TermKind::Literal(value) => literal(value),
             TermKind::Variable(_) => None,
             // A frame address outside an access could reach past its array once C holds it.

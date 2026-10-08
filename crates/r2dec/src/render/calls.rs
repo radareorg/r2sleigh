@@ -2,8 +2,8 @@
 //! (doc/adr-decompiler-rewrite.md, "D2 and D3, as they are built"); any other is a gap.
 
 use r2ssa::{
-    InstId, InstPayload, SSAOp, SemanticObligationInventory, SemanticObligationKind, SsaArtifact,
-    ValueId,
+    InstId, InstPayload, MachineType, SSAOp, SemanticObligationInventory, SemanticObligationKind,
+    SsaArtifact, ValueId,
 };
 use r2types::{CalleeClass, CalleeResolutionFacts, CallsiteKey};
 
@@ -15,12 +15,13 @@ pub(super) struct CallPlan {
     pub(super) name: String,
     pub(super) kind: ExternalKind,
     pub(super) address: Option<u64>,
-    pub(super) arguments: Vec<ValueId>,
+    /// Each argument and the class the callee's signature passes it in.
+    pub(super) arguments: Vec<(ValueId, MachineType)>,
     /// How many leading arguments the prototype names; the rest are its variadic tail.
     pub(super) fixed: usize,
     pub(super) variadic: bool,
-    /// The value the call leaves in its result register, which the call statement assigns.
-    pub(super) result: Option<ValueId>,
+    /// The value the call leaves in its result register and the class it is returned in.
+    pub(super) result: Option<(ValueId, MachineType)>,
     pub(super) noreturn: bool,
 }
 
@@ -83,16 +84,76 @@ pub(super) fn plan(
         }
         _ => return None,
     };
+    // Each argument passes in the class its register says, which a signature, where there is one,
+    // must agree with; C passes a float in the variadic tail as a double.
+    let signature = identity.signature.as_ref();
+    let width = |value: ValueId| graph.var(value).size * 8;
     let fixed = match (certificate.variadic, certificate.fixed_argument_count) {
         (false, _) => certificate.argument_values.len(),
         (true, Some(fixed)) if fixed <= certificate.argument_values.len() => fixed,
         (true, _) => return None,
     };
+    if signature.is_some_and(|signature| {
+        signature.variadic != certificate.variadic || signature.params.len() != fixed
+    }) {
+        return None;
+    }
+    let located = |value: ValueId| {
+        certificate
+            .argument_certificates
+            .iter()
+            .find(|argument| argument.value == value)
+            .and_then(|argument| match argument.location {
+                r2ssa::CallArgumentLocation::Register { storage } => {
+                    super::values::carrier_class(artifact, storage, width(value))
+                }
+                _ => None,
+            })
+    };
+    let arguments = certificate
+        .argument_values
+        .iter()
+        .enumerate()
+        .map(|(position, value)| {
+            let declared = signature
+                .and_then(|signature| signature.params.get(position))
+                .map(|ty| super::values::class_of(ty, width(*value)));
+            let class = match declared {
+                Some(None) => return None,
+                Some(declared) => super::values::agreed(declared, located(*value))?,
+                None => located(*value)?,
+            };
+            let promoted =
+                position >= fixed && matches!(class, MachineType::Float { width_bits: 32 });
+            (!promoted).then_some((*value, class))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let result = match result {
+        None => None,
+        Some(value) => {
+            let carrier = inventory
+                .obligations_for_inst(inst)
+                .find_map(|o| match o.id.component {
+                    r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
+                        if o.id.kind == SemanticObligationKind::CallResult =>
+                    {
+                        super::values::carrier_class(artifact, storage, width(value))
+                    }
+                    _ => None,
+                });
+            let declared = match signature.map(|signature| signature.return_type.unaliased()) {
+                Some(r2types::CTypeLike::Void) => return None,
+                Some(ty) => Some(super::values::class_of(ty, width(value))?),
+                None => None,
+            };
+            Some((value, super::values::agreed(declared, carrier)?))
+        }
+    };
     Some(CallPlan {
         name: crate::ast::c_identifier(name),
         kind,
         address: certificate.direct_target.or(identity.target_addr),
-        arguments: certificate.argument_values.clone(),
+        arguments,
         fixed,
         variadic: certificate.variadic,
         result,

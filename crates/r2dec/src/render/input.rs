@@ -47,6 +47,15 @@ impl<'a> RenderInput<'a> {
         self.facts.return_type()
     }
 
+    /// What the analysis declares parameter `slot` to be, where it is admissible at `width_bits`.
+    pub fn parameter_declaration(
+        &self,
+        slot: usize,
+        width_bits: u32,
+    ) -> Option<r2types::CTypeLike> {
+        self.facts.parameter_declaration(slot, width_bits)
+    }
+
     /// Who each call site calls, as r2types resolved it.
     pub fn callee_resolution(&self) -> Option<&'a r2types::CalleeResolutionFacts> {
         self.facts.report().callee_resolution()

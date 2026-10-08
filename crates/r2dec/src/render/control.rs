@@ -236,10 +236,14 @@ impl<'i> Writer<'_, 'i> {
     /// A return hands back what D2 spelled, else a residual of the result type, or nothing for `void`.
     fn return_stmt(&self, addr: Option<u64>) -> CStmt {
         let ty = super::result_type(self.input);
+        let decided = self
+            .input
+            .return_type()
+            .and_then(r2types::ReturnTypeFact::decided);
         let spelled = self
             .values
             .zip(addr)
-            .and_then(|(values, addr)| Some((values.returned(addr, &ty)?, values, addr)));
+            .and_then(|(values, addr)| Some((values.returned(addr, decided)?, values, addr)));
         if let Some((value, values, addr)) = spelled {
             values.spelled_terminator(addr);
             return CStmt::Return(value);
@@ -313,9 +317,11 @@ impl<'i> Writer<'_, 'i> {
     /// One edge: its merge copies, then the target written here, a `continue`, a `goto`, or a
     /// return where it leaves the function.
     fn edge(&mut self, from: u64, to: u64) -> Vec<CStmt> {
+        // An edge out of the function is a transfer the text does not make, a tail call above all:
+        // a `return` there would drop it, so the text traps.
         if self.input.function().cfg().get_block(to).is_none() {
-            let stmt = self.return_stmt(None);
-            return vec![self.observe(from, stmt)];
+            let trap = CStmt::Expr(self.residual(&CType::Void));
+            return vec![self.observe(from, trap)];
         }
         let mut out = self
             .values

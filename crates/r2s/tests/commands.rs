@@ -362,6 +362,41 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// The staged pipeline passes each value in the class its register says: `store(double x,
+/// double *p)` takes `x` in a float register and writes its bits, and a tail call is no return.
+#[test]
+fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/float_calls_zig_x86_64_O2g");
+    let staged = on(
+        binary,
+        "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
+    );
+    for line in [
+        "void store(double arg0, uint64_t arg1)",
+        "r2sleigh_store_u64((void*)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
+        "void forward(double arg0, uint64_t arg1)",
+        "store(arg0, arg1);",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+    // `call_store` ends in `jmp store`: a `return` would drop the call, so the text traps.
+    let call_store = staged
+        .out
+        .split("void call_store")
+        .nth(1)
+        .expect("call_store renders");
+    let call_store = call_store
+        .split("void forward")
+        .next()
+        .unwrap_or(call_store);
+    assert!(!call_store.contains("return"), "{call_store}");
+    assert!(
+        call_store.contains("r2sleigh_residual_void("),
+        "{call_store}"
+    );
+}
+
 /// `dec.pipeline=staged` hands `pdd` to the staged decompiler (ROADMAP D): its control is
 /// certified, and the hash loop's values render from the sealed facts with no gap.
 #[test]

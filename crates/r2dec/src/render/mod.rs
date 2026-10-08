@@ -122,8 +122,12 @@ fn result_type(input: &RenderInput<'_>) -> CType {
 
 /// The machine word, unsigned: the storage a result carrier holds.
 fn word(input: &RenderInput<'_>) -> CType {
+    word_type(input.ptr_bits())
+}
+
+fn word_type(bits: u32) -> CType {
     CType::Int {
-        bits: input.ptr_bits(),
+        bits,
         signedness: r2types::Signedness::Unsigned,
     }
 }
