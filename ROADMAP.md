@@ -190,18 +190,27 @@ maintainer accepts broken renderings on `rebuild` until it merges.
    1. **LP1**'s engine half, which opens the branch: done.
    2. **LF**: one Sleigh parse per thread, done; the double lift is SM's
       (measured 2.6 to 5.1% of a large `pdd`).
-   3. **SM**'s summary grade, moved before D on 2026-10-08 by measurement:
-      pumasim 0x23fdf0's `pdd` spends 31.0% preparing callees in full and
-      7.7% in their r2types runs, where a callee read keeps only its
-      interface, preserved carriers, `PreparedCalleeSummary` and signature.
-      The grade is a choice of which consumers run, which LX's rewrites of
-      the passes keep, so it does not wait for LX.
+   3. **LX1**, LX's passes that change no fact shape a renderer reads, so
+      they pay no adapter on the old r2dec: the collector once (interface
+      recovery reads the pass the seal runs), the per-architecture machine
+      tables once, sparse `call_results` states, `version_at` in place of
+      the reaching walks. Measured 2026-10-08 (samply): callee reads are
+      39.9% of pumasim 0x23fdf0's `pdd` and 71.3% of 0pack 0x62ecf0's, of
+      which the SSA build is 8.3% and 13.3% and recovery's provisional fact
+      pass 7.2% and 11.4%; the machine context rebuilds per-architecture
+      tables at 1.2 to 5.5%.
    4. **D**: D0 as the dense contract with its adapter, D1 to D5, then the
       old r2dec deleted (27.6 to 36.3% of a large `pdd`). Beside it on
       `rebuild`: **W**.
-   5. **LX** with F2's rest, behind D0, deleting the adapter; LP1's
-      boundary half with it.
-   6. **T**, behind D0.
+   5. **LX2**, LX's dense fact indexes behind D0, deleting the adapter;
+      LP1's boundary half with it.
+   6. **SM**'s summary grade over LX's passes, then **T**, behind D0.
+      Reversed 2026-10-08: SM had moved before D on the 31.0% callee share;
+      a static map of what a callee read consumes (the summary's obligation
+      authority needs the inventory, objects, memory, addresses, call sites,
+      boundaries and live-out) leaves only the render-only certificate maps
+      and r2types' render build to skip, 4.9% of pumasim 0x23fdf0's `pdd`
+      and 5.7% of 0pack 0x62ecf0's.
    7. `rebuild` merges to master when D's switch criterion and LX's and SM's
       exits hold.
 6. **LP2 to LP4**, then **I**, **C2, C4**, **P7, P8, P9, P11**.
