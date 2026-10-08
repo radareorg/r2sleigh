@@ -40,6 +40,8 @@ pub(super) struct Values<'a> {
     rendered: RefCell<Vec<bool>>,
     /// By instruction index: frame teardown a spelled C `return` performs.
     restored: RefCell<Vec<bool>>,
+    /// The switch dispatch operations r2ssa's certificates own.
+    dispatch: r2ssa::dense::IdSet<InstId>,
     /// The calls the facts describe, by instruction.
     calls: r2ssa::dense::IdMap<InstId, CallPlan>,
     /// The values a described call's statement assigns.
@@ -72,7 +74,15 @@ fn has_effect(inventory: &SemanticObligationInventory, inst: InstId) -> bool {
 
 /// Why r2ssa certifies an instruction needs no C: a frame save the matching restore undoes, or a
 /// compiler-inserted check.
-fn certified_elision(artifact: &SsaArtifact, inst: InstId) -> Option<crate::ledger::ElisionReason> {
+fn certified_elision(
+    artifact: &SsaArtifact,
+    dispatch: &r2ssa::dense::IdSet<InstId>,
+    inst: InstId,
+) -> Option<crate::ledger::ElisionReason> {
+    // A switch's dispatch reaches the case the structured `switch` names; its certificate owns it.
+    if dispatch.contains(inst) {
+        return Some(crate::ledger::ElisionReason::DirectControlTarget);
+    }
     let certificates = artifact.certificates();
     if certificates.compiler_inserted.contains(inst) {
         return Some(crate::ledger::ElisionReason::CompilerInserted);
@@ -467,11 +477,17 @@ impl<'a> Values<'a> {
             discharged: vec![false; graph.insts.len()],
             work: Vec::new(),
         };
+        let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
+        for switch in artifact.certificates().switches.values() {
+            for inst in &switch.dispatch {
+                dispatch.insert(*inst);
+            }
+        }
         let live = |inst: InstId| {
             matches!(
                 inventory.instruction_for_inst(inst).map(|d| d.state),
                 Some(SemanticInstructionState::LiveObligation)
-            ) && certified_elision(artifact, inst).is_none()
+            ) && certified_elision(artifact, &dispatch, inst).is_none()
         };
         // The statements first, so a producer they absorb is not also bound.
         for inst in &graph.insts {
@@ -499,6 +515,15 @@ impl<'a> Values<'a> {
                 }
                 SSAOp::CBranch { cond, .. } => demand.operand(*cond, inst.id),
                 SSAOp::Switch { selector } => demand.operand(*selector, inst.id),
+                SSAOp::BranchInd { .. } => {
+                    let selector = graph
+                        .block(inst.block)
+                        .and_then(|block| artifact.certificates().switches.get(&block.addr))
+                        .and_then(|switch| switch.selector);
+                    if let Some(selector) = selector {
+                        demand.operand(selector, inst.id);
+                    }
+                }
                 SSAOp::Return { .. } => {
                     for value in returned_values(inventory, inst.id) {
                         demand.operand(value, inst.id);
@@ -544,6 +569,7 @@ impl<'a> Values<'a> {
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
+            dispatch,
             calls: planned,
             results,
             externs: RefCell::new(BTreeMap::new()),
@@ -742,7 +768,9 @@ impl<'a> Values<'a> {
                 .instruction_for_inst(inst.id)
                 .map(|d| d.state);
             let stmt = match state {
-                _ if certified_elision(self.artifact, inst.id).is_some() => Ok(None),
+                _ if certified_elision(self.artifact, &self.dispatch, inst.id).is_some() => {
+                    Ok(None)
+                }
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
                 }
@@ -963,10 +991,13 @@ impl<'a> Values<'a> {
     /// The selector a switch ending `addr` reads.
     pub(super) fn selector(&self, addr: u64) -> Option<CExpr> {
         let (inst, op) = self.terminator(addr)?;
-        let SSAOp::Switch { selector } = op else {
-            return None;
+        let selector = match op {
+            SSAOp::Switch { selector } => *selector,
+            // A table dispatch: the certificate states the value its cases are values of.
+            SSAOp::BranchInd { .. } => self.artifact.certificates().switches.get(&addr)?.selector?,
+            _ => return None,
         };
-        self.operand(*selector, inst)
+        self.operand(selector, inst)
     }
 
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.
@@ -1163,7 +1194,7 @@ impl<'a> Values<'a> {
             let certified = obligation
                 .source
                 .graph_inst()
-                .and_then(|inst| certified_elision(self.artifact, inst));
+                .and_then(|inst| certified_elision(self.artifact, &self.dispatch, inst));
             let outcome = match (obligation.id.kind, certified) {
                 (SemanticObligationKind::CompilerInserted, _) => {
                     Outcome::Elided(ElisionReason::CompilerInserted)
