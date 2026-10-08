@@ -557,6 +557,16 @@ impl Literal {
     }
 
     /// The same program, its container stating this of the platform it runs on.
+    /// The same program, stated as Go built by the toolchain of `version`, where one is stated.
+    pub fn in_go(mut self, version: Option<(u32, u32)>) -> Self {
+        self.container.languages = r2engine::program::Languages {
+            program: r2engine::program::SourceLanguage::Go,
+            ranges: Vec::new(),
+            go_version: version,
+        };
+        self
+    }
+
     pub fn running_on(mut self, evidence: &[PlatformEvidence]) -> Self {
         self.container.platform = evidence.iter().copied().collect();
         self
