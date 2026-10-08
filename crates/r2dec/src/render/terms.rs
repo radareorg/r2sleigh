@@ -127,6 +127,11 @@ fn insert_lane(bits: u32, (lsb, width): (u32, u32), root: CExpr, lane: CExpr) ->
     Some(cast(ty, binary(BinaryOp::BitOr, kept, placed)))
 }
 
+/// An integer as the unsigned word of `bits`, the width an address is held at.
+pub(super) fn fit_integer(expr: CExpr, bits: u32) -> Option<CExpr> {
+    Some(cast(integer(bits)?, expr))
+}
+
 /// One operator over two operands of `bits`: computed unsigned at least `int` wide, then narrowed.
 fn wrapping(op: BinaryOp, bits: u32, left: CExpr, right: CExpr) -> Option<CExpr> {
     let wide = integer(computed(bits))?;

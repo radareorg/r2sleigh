@@ -916,9 +916,17 @@ impl<'a> Values<'a> {
     /// in, its result assigned.
     fn call(&self, inst: InstId) -> Option<CStmt> {
         let plan = self.calls.get(inst)?;
-        if plan.address == Some(self.own.entry) {
-            return self.recursive_call(inst, plan);
-        }
+        let (name, kind, address) = match &plan.callee {
+            calls::Callee::Named { address, .. } if *address == Some(self.own.entry) => {
+                return self.recursive_call(inst, plan);
+            }
+            calls::Callee::Named {
+                name,
+                kind,
+                address,
+            } => (name, *kind, *address),
+            calls::Callee::Through(target) => return self.call_through(inst, plan, *target),
+        };
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
         for (argument, class) in &plan.arguments {
@@ -936,15 +944,15 @@ impl<'a> Values<'a> {
         };
         types.truncate(plan.fixed);
         let declaration = CExternDecl {
-            name: plan.name.clone(),
+            name: name.clone(),
             ret_type,
             params: Some(types),
             variadic: plan.variadic,
             noreturn: plan.noreturn,
-            address: plan.address,
+            address,
         };
         // One declaration describes every call to a callee, so calls that disagree cannot both be C.
-        match self.externs.borrow_mut().entry(plan.name.clone()) {
+        match self.externs.borrow_mut().entry(name.clone()) {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(declaration);
             }
@@ -954,10 +962,42 @@ impl<'a> Values<'a> {
             std::collections::btree_map::Entry::Occupied(_) => {}
         }
         let callee = CExpr::External {
-            name: plan.name.clone(),
-            kind: plan.kind,
+            name: name.clone(),
+            kind,
         };
-        let call = CExpr::call_at(inst, callee, arguments);
+        self.assign_call(inst, plan, CExpr::call_at(inst, callee, arguments))
+    }
+
+    /// An indirect call through the function its target value holds, typed by the classes the call
+    /// passes and returns in.
+    fn call_through(&self, inst: InstId, plan: &CallPlan, target: ValueId) -> Option<CStmt> {
+        let mut arguments = Vec::with_capacity(plan.arguments.len());
+        let mut types = Vec::with_capacity(plan.arguments.len());
+        for (argument, class) in &plan.arguments {
+            let held = self.value_type(*argument)?;
+            arguments.push(terms::reclass(
+                self.operand(*argument, inst)?,
+                &held,
+                class,
+            )?);
+            types.push(terms::c_type(class)?);
+        }
+        let ret = match &plan.result {
+            Some((_, class)) => terms::c_type(class)?,
+            None => CType::Void,
+        };
+        // The printer spells a function type in a cast as the pointer to it: `ret (*)(params)`.
+        let pointer = CType::Function {
+            ret: Box::new(ret),
+            params: types.into_boxed_slice(),
+        };
+        let address = terms::fit_integer(self.operand(target, inst)?, self.ptr_bits)?;
+        let callee = CExpr::cast(pointer, address);
+        self.assign_call(inst, plan, CExpr::call_at(inst, callee, arguments))
+    }
+
+    /// The call as a statement, its result assigned to the value the boundary defines after it.
+    fn assign_call(&self, _inst: InstId, plan: &CallPlan, call: CExpr) -> Option<CStmt> {
         let Some((result, class)) = &plan.result else {
             return Some(CStmt::Expr(call));
         };

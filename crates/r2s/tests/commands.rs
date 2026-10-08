@@ -397,6 +397,18 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     );
 }
 
+/// An indirect call goes through its target value, cast to the function type its classes state:
+/// `_init` calls `__gmon_start__` through the pointer it loads, where one is linked.
+#[test]
+fn a_staged_indirect_call_goes_through_its_target_value() {
+    let staged = r2s("e dec.pipeline=staged; pdd @ 0x401000");
+    assert!(
+        staged.out.contains("((uint64_t(*)(void))(uint64_t)rax_1)();"),
+        "{}",
+        staged.out
+    );
+}
+
 /// A recursive call names the function itself at its own signature: `fact` calls `fact` with
 /// no declaration that could contradict the definition, which C rejects.
 #[test]
