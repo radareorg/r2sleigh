@@ -3618,6 +3618,15 @@ pub struct SourceConventionSlots {
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
     variadic_tail_on_stack: bool,
+    /// The entry stack pointer's residue modulo an alignment, where the convention states one.
+    entry_stack: Option<SourceEntryStack>,
+}
+
+/// `sp % alignment == residue` at a function's first instruction, as the convention states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceEntryStack {
+    pub alignment: u32,
+    pub residue: u32,
 }
 
 /// Where the convention puts an argument its registers cannot carry.
@@ -3717,6 +3726,15 @@ impl SourceConventionSlots {
         self
     }
 
+    pub fn with_entry_stack(mut self, entry_stack: Option<SourceEntryStack>) -> Self {
+        self.entry_stack = entry_stack.filter(|stack| stack.residue < stack.alignment);
+        self
+    }
+
+    pub const fn entry_stack(&self) -> Option<SourceEntryStack> {
+        self.entry_stack
+    }
+
     /// Build the candidate slots, rejecting anything that is not a well-formed
     /// register location or that names the same register twice.
     pub fn new(
@@ -3750,6 +3768,7 @@ impl SourceConventionSlots {
             float_result_slot: None,
             stack_arguments: None,
             variadic_tail_on_stack: false,
+            entry_stack: None,
         })
     }
 

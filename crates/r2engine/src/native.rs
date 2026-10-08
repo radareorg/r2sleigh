@@ -2148,7 +2148,13 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
             .and_then(|slots| slots.with_float_slots(float_slots, float_result))
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
             .with_stack_arguments(stack_arguments)
-            .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack),
+            .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack)
+            .with_entry_stack(target.convention.entry_stack.map(|stack| {
+                r2source::SourceEntryStack {
+                    alignment: stack.alignment,
+                    residue: stack.residue,
+                }
+            })),
     )
 }
 
