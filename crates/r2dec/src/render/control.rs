@@ -95,12 +95,17 @@ impl<'i> Writer<'_, 'i> {
         if self.placement.labelled().contains(&addr) {
             stmts.push(CStmt::Label(self.label(addr)));
         }
+        let written = stmts.len();
         if let Some(values) = self.values {
             for stmt in values.statements(addr) {
                 stmts.push(self.observe(addr, stmt));
             }
         } else {
             stmts.extend(self.gap(addr));
+        }
+        // A block that writes nothing and leaves by plain flow still occurs, which the certificate reads.
+        if stmts.len() == written && !self.ends_observed(addr) {
+            stmts.push(self.observe(addr, CStmt::Empty));
         }
         stmts.extend(self.arms(addr));
         for merge in self.placement.merges_in(addr).to_vec() {
@@ -126,6 +131,33 @@ impl<'i> Writer<'_, 'i> {
             });
             self.observe(addr, gap)
         })
+    }
+
+    /// Whether the block's terminator is written as a statement marked for the block.
+    fn ends_observed(&self, addr: u64) -> bool {
+        match self
+            .input
+            .function()
+            .cfg()
+            .get_block(addr)
+            .map(|b| &b.terminator)
+        {
+            Some(BlockTerminator::ConditionalBranch {
+                true_target,
+                false_target,
+            }) => true_target != false_target,
+            Some(
+                BlockTerminator::Switch { .. }
+                | BlockTerminator::IndirectBranch
+                | BlockTerminator::Return
+                | BlockTerminator::Call {
+                    fallthrough: None, ..
+                }
+                | BlockTerminator::IndirectCall { fallthrough: None }
+                | BlockTerminator::None,
+            ) => true,
+            _ => false,
+        }
     }
 
     /// The block's terminator, one transfer per edge.

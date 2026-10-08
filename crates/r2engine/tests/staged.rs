@@ -40,7 +40,9 @@ fn a_call_is_a_gap_and_its_obligations_are_gapped() {
         .rendered(CALLER, RenderTier::Staged)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
-    assert!(text.contains("r2dec gap: ValuesNotRendered"), "{text}");
+    assert!(text.contains("r2dec gap: CallNotRendered"), "{text}");
+    // The push of the return address is the call's own transfer: no store into the frame.
+    assert!(!text.contains("r2sleigh_store"), "{text}");
     let closure = rendering
         .response
         .obligation_ledger

@@ -19,7 +19,8 @@ pub(super) struct Spell<'a> {
     pub(super) arena: &'a TermArena,
     /// The variable a value is held in, where it is held at a type C reads as this one.
     pub(super) bound: &'a dyn Fn(ValueId, &MachineType) -> Option<CExpr>,
-    pub(super) object: &'a dyn Fn(ObjectId) -> Option<CExpr>,
+    /// A frame object's array and its extent in bytes.
+    pub(super) object: &'a dyn Fn(ObjectId) -> Option<(CExpr, u32)>,
     /// Whether memory is little-endian, so a byte copy reads a word as the machine does.
     pub(super) little_endian: bool,
 }
@@ -292,7 +293,80 @@ fn concat(bits: u32, low_bits: u32, high: CExpr, low: CExpr) -> Option<CExpr> {
     ))
 }
 
+/// A frame object's address plus a literal offset, as `(object, offset)`.
+fn frame_offset(arena: &TermArena, id: TermId) -> Option<(ObjectId, i64)> {
+    let signed = |id: TermId| match arena.term(id).kind {
+        TermKind::Literal(value) => {
+            let shift = 64u32.checked_sub(value.width_bits())?;
+            Some(((value.bits() << shift) as i64) >> shift)
+        }
+        _ => None,
+    };
+    let object = |id: TermId| match arena.term(id).kind {
+        TermKind::ObjectAddress(object) => Some(object),
+        _ => None,
+    };
+    match arena.term(id).kind {
+        TermKind::ObjectAddress(object) => Some((object, 0)),
+        TermKind::Arithmetic {
+            op: MachineArithmeticOp::Add,
+            left,
+            right,
+        } => object(left)
+            .zip(signed(right))
+            .or_else(|| object(right).zip(signed(left))),
+        TermKind::Arithmetic {
+            op: MachineArithmeticOp::Subtract,
+            left,
+            right,
+        } => object(left).zip(signed(right)?.checked_neg()),
+        _ => None,
+    }
+}
+
+/// Whether `bytes` at `offset` lie inside an object of `extent` bytes.
+fn inside(offset: i64, bytes: u32, extent: u32) -> bool {
+    offset >= 0
+        && offset
+            .checked_add(i64::from(bytes))
+            .is_some_and(|end| end <= i64::from(extent))
+}
+
 impl Spell<'_> {
+    fn names_an_object(&self, root: TermId) -> bool {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            match self.arena.term(id).kind {
+                TermKind::ObjectAddress(_) => return true,
+                kind => stack.extend(kind.children()),
+            }
+        }
+        false
+    }
+
+    /// The address `bytes` are read or written at. A frame address is spelled only inside the
+    /// extent of the object the access belongs to, so the C never reaches past its array.
+    pub(super) fn address(
+        &self,
+        id: TermId,
+        bytes: u32,
+        object: Option<ObjectId>,
+    ) -> Option<CExpr> {
+        let Some((named, offset)) = frame_offset(self.arena, id) else {
+            return (!self.names_an_object(id)).then(|| self.term(id)).flatten();
+        };
+        let (array, extent) = (self.object)(named)?;
+        if object.is_some_and(|object| object != named) || !inside(offset, bytes, extent) {
+            return None;
+        }
+        let ty = integer(self.arena.term(id).ty.width_bits())?;
+        let base = cast(ty.clone(), array);
+        Some(match offset {
+            0 => base,
+            offset => binary(BinaryOp::Add, base, cast(ty, CExpr::UIntLit(offset as u64))),
+        })
+    }
+
     /// A read of `ty` at the integer `address`, by a byte copy so C reads it as the machine does.
     fn load(&self, ty: &MachineType, address: CExpr) -> Option<CExpr> {
         if !self.little_endian {
@@ -315,8 +389,11 @@ impl Spell<'_> {
             TermKind::Opaque(expr) => self.machine(expr),
             TermKind::Literal(value) => literal(value),
             TermKind::Variable(_) => None,
-            TermKind::ObjectAddress(object) => Some(cast(integer(bits)?, (self.object)(object)?)),
-            TermKind::Load { address, .. } => self.load(&ty, child(address)?),
+            // A frame address outside an access could reach past its array once C holds it.
+            TermKind::ObjectAddress(_) => None,
+            TermKind::Load { object, address } => {
+                self.load(&ty, self.address(address, bits / 8, Some(object))?)
+            }
             TermKind::Subscript { base, index } => {
                 let step = CExpr::UIntLit(u64::from(bits / 8));
                 let wide = integer(child_bits(base))?;
@@ -560,5 +637,47 @@ impl Spell<'_> {
             | MachineExprKind::ExclusiveStoreSucceeded { .. }
             | MachineExprKind::BlockAnswer { .. } => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use r2rewrite::{TermArena, TermKind};
+    use r2ssa::{MachineArithmeticOp, MachineBitVector, MachineType, ObjectId};
+
+    use super::{frame_offset, inside};
+
+    const ADDRESS: MachineType = MachineType::Integer {
+        width_bits: 64,
+        signedness: r2ssa::MachineSignedness::Unsigned,
+    };
+
+    fn displaced(arena: &mut TermArena, op: MachineArithmeticOp, by: u64) -> r2rewrite::TermId {
+        let base = arena.intern(ADDRESS, TermKind::ObjectAddress(ObjectId(3)));
+        let by = MachineBitVector::new(64, by).expect("a 64-bit literal");
+        let by = arena.intern(ADDRESS, TermKind::Literal(by));
+        arena.intern(
+            ADDRESS,
+            TermKind::Arithmetic {
+                op,
+                left: base,
+                right: by,
+            },
+        )
+    }
+
+    #[test]
+    fn a_frame_access_is_spelled_only_inside_its_object() {
+        let mut arena = TermArena::new();
+        let up = displaced(&mut arena, MachineArithmeticOp::Add, 8);
+        let wrapped = displaced(&mut arena, MachineArithmeticOp::Add, 8u64.wrapping_neg());
+        let down = displaced(&mut arena, MachineArithmeticOp::Subtract, 8);
+        assert_eq!(frame_offset(&arena, up), Some((ObjectId(3), 8)));
+        assert_eq!(frame_offset(&arena, wrapped), Some((ObjectId(3), -8)));
+        assert_eq!(frame_offset(&arena, down), Some((ObjectId(3), -8)));
+        assert!(inside(8, 8, 16));
+        // Below the object, or past its end, is another object's memory or none at all.
+        assert!(!inside(-8, 8, 16));
+        assert!(!inside(12, 8, 16));
     }
 }

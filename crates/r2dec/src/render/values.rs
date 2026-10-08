@@ -31,7 +31,7 @@ pub(super) struct Values<'a> {
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
-    objects: RefCell<BTreeMap<ObjectId, Option<SymbolId>>>,
+    objects: RefCell<BTreeMap<ObjectId, Option<(SymbolId, u32)>>>,
     symbols: Rc<RefCell<SymbolTable>>,
     params: Vec<CParam>,
     locals: RefCell<Vec<CLocal>>,
@@ -60,6 +60,23 @@ fn has_effect(inventory: &SemanticObligationInventory, inst: InstId) -> bool {
         Some(SemanticInstructionState::UnsupportedUnknown) => true,
         _ => false,
     }
+}
+
+/// Why r2ssa certifies an instruction needs no C: a frame save the matching restore undoes, or a
+/// compiler-inserted check.
+fn certified_elision(artifact: &SsaArtifact, inst: InstId) -> Option<crate::ledger::ElisionReason> {
+    let certificates = artifact.certificates();
+    if certificates.compiler_inserted.contains(inst) {
+        return Some(crate::ledger::ElisionReason::CompilerInserted);
+    }
+    // The push recording where a call comes back to: the C call is that transfer.
+    if certificates.call_return_address_stores.contains(inst) {
+        return Some(crate::ledger::ElisionReason::CallReturnAddress);
+    }
+    certificates
+        .stack_frame_round_trip_by_inst
+        .contains(inst)
+        .then_some(crate::ledger::ElisionReason::StackFrame)
 }
 
 /// Whether a machine expression reads memory or can trap, so it must stay where the machine runs it.
@@ -319,15 +336,26 @@ impl<'a> Readers<'a> {
         reader: InstId,
     ) -> Option<TermId> {
         let canonical = roots.value(value)?;
-        let def = self.graph.def_inst(value)?;
         let term = canonical.canonical;
         // A leaf of the value itself is a value no producer computes: it is read by name.
         if reads_itself(projection, roots.arena(), term, value) {
             return None;
         }
+        let def = self.graph.def_inst(value);
+        // A merge is the variable its edges assign.
+        if def.is_some_and(|def| {
+            matches!(
+                self.graph.inst(def).map(|inst| &inst.payload),
+                Some(InstPayload::Phi { .. })
+            )
+        }) {
+            return None;
+        }
+        // A literal, or a term over entry values never redefined, reads the same anywhere.
         if canonical.multiplicity == Multiplicity::Any {
             return Some(term);
         }
+        let def = def?;
         (self.of(value) == [reader] && self.movable((projection, roots.arena()), def, reader, term))
             .then_some(term)
     }
@@ -398,7 +426,7 @@ impl<'a> Values<'a> {
             matches!(
                 inventory.instruction_for_inst(inst).map(|d| d.state),
                 Some(SemanticInstructionState::LiveObligation)
-            )
+            ) && certified_elision(artifact, inst).is_none()
         };
         // The statements first, so a producer they absorb is not also bound.
         for inst in &graph.insts {
@@ -409,9 +437,10 @@ impl<'a> Values<'a> {
                 continue;
             }
             match op {
-                SSAOp::Store { val, .. } => {
-                    if let Some(access) = roots.access(store_access(inventory, inst.id)) {
-                        demand.read(access.canonical);
+                SSAOp::Store { addr, val, .. } => {
+                    match roots.access(store_access(inventory, inst.id)) {
+                        Some(access) => demand.read(access.canonical),
+                        None => demand.operand(*addr, inst.id),
                     }
                     demand.operand(*val, inst.id);
                 }
@@ -519,12 +548,28 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// The frame array a stack object is spelled as: bytes of the extent its certificate states.
-    fn object(&self, object: ObjectId) -> Option<CExpr> {
+    /// The frame array a stack object is spelled as, and its extent: the bytes its certificate states.
+    fn object(&self, object: ObjectId) -> Option<(CExpr, u32)> {
         if let Some(known) = self.objects.borrow().get(&object) {
-            return known.map(CExpr::var);
+            return known.map(|(id, bytes)| (CExpr::var(id), bytes));
         }
-        let slot = self.artifact.certificates().stack_slots.get(&object);
+        // Only storage this function owns is a C local: a slot at or above the entry stack
+        // pointer holds what the caller put there, which a fresh array does not.
+        let slot = self
+            .artifact
+            .certificates()
+            .stack_slots
+            .get(&object)
+            .filter(|slot| {
+                slot.callee_allocation.is_some()
+                    || matches!(
+                        slot.source_slot.map(|source| source.role()),
+                        Some(
+                            r2source::SourceStackSlotRole::Local
+                                | r2source::SourceStackSlotRole::ParameterHome { .. }
+                        )
+                    )
+            });
         let declared =
             slot.and_then(|slot| Some((slot.size?, slot.offset)))
                 .map(|(bytes, offset)| {
@@ -545,10 +590,10 @@ impl<'a> Values<'a> {
                         name: id,
                         stack_offset: None,
                     });
-                    id
+                    (id, bytes)
                 });
         self.objects.borrow_mut().insert(object, declared);
-        declared.map(CExpr::var)
+        declared.map(|(id, bytes)| (CExpr::var(id), bytes))
     }
 
     /// The machine type a value is held at: its producer's term's, else its storage's width.
@@ -570,20 +615,23 @@ impl<'a> Values<'a> {
         self.locals.borrow().clone()
     }
 
-    fn spell(&self, term: TermId) -> Option<CExpr> {
+    fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
         let bound = |value: ValueId, ty: &MachineType| {
             let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
             (terms::c_type(held)? == terms::c_type(ty)?).then(|| CExpr::var(*name))
         };
         let object = |object: ObjectId| self.object(object);
-        Spell {
+        read(&Spell {
             projection: &self.projection,
             arena: self.roots.arena(),
             bound: &bound,
             object: &object,
             little_endian: self.little_endian,
-        }
-        .term(term)
+        })
+    }
+
+    fn spell(&self, term: TermId) -> Option<CExpr> {
+        self.spelling(|spell| spell.term(term))
     }
 
     fn mark(&self, inst: InstId) {
@@ -640,10 +688,11 @@ impl<'a> Values<'a> {
                 .instruction_for_inst(inst.id)
                 .map(|d| d.state);
             let stmt = match state {
+                _ if certified_elision(self.artifact, inst.id).is_some() => Ok(None),
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
                 }
-                Some(SemanticInstructionState::UnsupportedUnknown) => Err(()),
+                Some(SemanticInstructionState::UnsupportedUnknown) => Err(Gap::Unsupported),
                 _ => Ok(None),
             };
             match stmt {
@@ -652,23 +701,24 @@ impl<'a> Values<'a> {
                     out.push(stmt);
                 }
                 Ok(None) => {}
-                Err(()) => self.gap(&mut out, addr, inst.id),
+                Err(gap) => self.gap(&mut out, addr, inst.id, gap),
             }
         }
         out
     }
 
     /// Extend the gap the block's text ends with, or open one at this instruction.
-    fn gap(&self, out: &mut Vec<CStmt>, addr: u64, inst: InstId) {
+    fn gap(&self, out: &mut Vec<CStmt>, addr: u64, inst: InstId, gap: Gap) {
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
         if let Some(CStmt::Gap(marker)) = out.last_mut()
             && marker.op_idx + marker.ops == op_idx
+            && marker.kind == gap.kind()
         {
             marker.ops += 1;
             return;
         }
         out.push(CStmt::Gap(GapMarker {
-            kind: "ValuesNotRendered".to_owned(),
+            kind: gap.kind().to_owned(),
             origin: "render::values".to_owned(),
             block_addr: addr,
             op_idx,
@@ -683,14 +733,17 @@ impl<'a> Values<'a> {
         inst: InstId,
         op: &SSAOp<ValueId>,
         output: Option<ValueId>,
-    ) -> Result<Option<CStmt>, ()> {
+    ) -> Result<Option<CStmt>, Gap> {
         match op {
             SSAOp::CBranch { .. }
             | SSAOp::Branch { .. }
             | SSAOp::Switch { .. }
             | SSAOp::Return { .. }
             | SSAOp::BranchInd { .. } => Ok(None),
-            SSAOp::Store { val, .. } => self.store(inst, *val).map(Some).ok_or(()),
+            SSAOp::Store { addr, val, .. } => {
+                self.store(inst, *addr, *val).map(Some).ok_or(Gap::Store)
+            }
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } => Err(Gap::Call),
             _ if writes_value(op) => {
                 let Some(output) = output else {
                     return Ok(None);
@@ -698,17 +751,17 @@ impl<'a> Values<'a> {
                 if !self.bound[inst.0 as usize] {
                     return Ok(None);
                 }
-                let (name, _) = self.names[output.0 as usize].ok_or(())?;
-                let canonical = self.roots.value(output).ok_or(())?;
+                let (name, _) = self.names[output.0 as usize].ok_or(Gap::Type)?;
+                let canonical = self.roots.value(output).ok_or(Gap::Term)?;
                 if reads_itself(
                     &self.projection,
                     self.roots.arena(),
                     canonical.canonical,
                     output,
                 ) {
-                    return Err(());
+                    return Err(Gap::Unknown);
                 }
-                let value = self.spell(canonical.canonical).ok_or(())?;
+                let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
                 self.mark_discharged(output);
                 Ok(Some(CStmt::Expr(CExpr::binary(
                     crate::ast::BinaryOp::Assign,
@@ -717,41 +770,51 @@ impl<'a> Values<'a> {
                 ))))
             }
             _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(None),
-            _ => Err(()),
+            _ => Err(Gap::Effect),
         }
     }
 
-    fn store(&self, inst: InstId, value: ValueId) -> Option<CStmt> {
+    /// `value` written at the store's cell: its canonical access where import built one, else its
+    /// own address operand at the value's width.
+    fn store(&self, inst: InstId, address: ValueId, value: ValueId) -> Option<CStmt> {
         if !self.little_endian {
             return None;
         }
-        let access = self.roots.access(store_access(self.inventory, inst))?;
         let arena = self.roots.arena();
-        let cell = arena.term(access.canonical);
-        let address = match cell.kind {
-            TermKind::Load { address, .. } => self.spell(address)?,
-            TermKind::Subscript { base, index } => {
-                let wide = terms::c_type(&arena.term(base).ty)?;
-                let step = CExpr::UIntLit(u64::from(cell.ty.width_bits() / 8));
-                let offset = CExpr::binary(
-                    crate::ast::BinaryOp::Mul,
-                    CExpr::cast(wide.clone(), self.spell(index)?),
-                    step,
-                );
-                CExpr::binary(
-                    crate::ast::BinaryOp::Add,
-                    CExpr::cast(wide, self.spell(base)?),
-                    offset,
-                )
+        let (address, cell) = match self.roots.access(store_access(self.inventory, inst)) {
+            Some(access) => {
+                let cell = arena.term(access.canonical);
+                let bytes = cell.ty.width_bits() / 8;
+                let address = match cell.kind {
+                    TermKind::Load { object, address } => {
+                        self.spelling(|spell| spell.address(address, bytes, Some(object)))?
+                    }
+                    TermKind::Subscript { base, index } => {
+                        let wide = terms::c_type(&arena.term(base).ty)?;
+                        let step = CExpr::UIntLit(u64::from(cell.ty.width_bits() / 8));
+                        let offset = CExpr::binary(
+                            crate::ast::BinaryOp::Mul,
+                            CExpr::cast(wide.clone(), self.spell(index)?),
+                            step,
+                        );
+                        CExpr::binary(
+                            crate::ast::BinaryOp::Add,
+                            CExpr::cast(wide, self.spell(base)?),
+                            offset,
+                        )
+                    }
+                    _ => return None,
+                };
+                for discharged in discharged_insts(self.graph, access.discharges.iter()) {
+                    self.mark(discharged);
+                }
+                (address, cell.ty)
             }
-            _ => return None,
+            None => (self.operand(address, inst)?, self.value_type(value)?),
         };
-        let ty = terms::c_type(&cell.ty)?;
+        let ty = terms::c_type(&cell)?;
         let residual = ResidualType::of(&ty)?;
         let written = CExpr::cast(ty, self.operand(value, inst)?);
-        for discharged in discharged_insts(self.graph, access.discharges.iter()) {
-            self.mark(discharged);
-        }
         let pointer = CExpr::cast(CType::Pointer(Box::new(CType::Void)), address);
         Some(CStmt::Expr(
             Helper::Store(residual).call(vec![pointer, written]),
@@ -941,13 +1004,18 @@ impl<'a> Values<'a> {
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
-            let outcome = match obligation.id.kind {
-                SemanticObligationKind::CompilerInserted => {
+            let certified = obligation
+                .source
+                .graph_inst()
+                .and_then(|inst| certified_elision(self.artifact, inst));
+            let outcome = match (obligation.id.kind, certified) {
+                (SemanticObligationKind::CompilerInserted, _) => {
                     Outcome::Elided(ElisionReason::CompilerInserted)
                 }
-                SemanticObligationKind::NoNativeSemantics => {
+                (SemanticObligationKind::NoNativeSemantics, _) => {
                     Outcome::Elided(ElisionReason::NoNativeSemantics)
                 }
+                (_, Some(reason)) => Outcome::Elided(reason),
                 _ if index.is_some_and(|i| rendered[i]) => Outcome::Rendered,
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)
@@ -955,6 +1023,38 @@ impl<'a> Values<'a> {
                 _ => Outcome::Gapped,
             };
             let _ = ledger.record(obligation.id, outcome);
+        }
+    }
+}
+
+/// Why a live instruction's statement is a gap: the marker's kind, which says what is missing.
+#[derive(Debug, Clone, Copy)]
+enum Gap {
+    /// The inventory could not account for the instruction.
+    Unsupported,
+    /// A call, until its callsite facts are rendered.
+    Call,
+    /// An effect with no C statement here: a fence, an atomic, a block transfer, a user operation.
+    Effect,
+    Store,
+    /// A value whose term has no exact C spelling.
+    Term,
+    /// A value with no C type to hold it.
+    Type,
+    /// A value no producer computes, such as what a call leaves in a register.
+    Unknown,
+}
+
+impl Gap {
+    const fn kind(self) -> &'static str {
+        match self {
+            Self::Unsupported => "UnsupportedInstruction",
+            Self::Call => "CallNotRendered",
+            Self::Effect => "EffectNotRendered",
+            Self::Store => "StoreNotSpelled",
+            Self::Term => "TermNotSpelled",
+            Self::Type => "ValueHasNoCType",
+            Self::Unknown => "ValueNotComputed",
         }
     }
 }
