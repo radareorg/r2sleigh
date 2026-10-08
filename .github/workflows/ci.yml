@@ -50,7 +50,7 @@ jobs:
         run: |
           sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
             >/dev/null 2>&1 &
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the toolchain the repository pins
         run: rustup toolchain install --profile minimal --component rustfmt,clippy
       # r2rewrite's rule proofs link Z3.
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the toolchain the lints pin
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' tools/dylints/r2sleigh_lints/rust-toolchain)"
@@ -119,7 +119,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the toolchain the repository pins
         run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -144,7 +144,7 @@ jobs:
     needs: build
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: r2s
@@ -188,7 +188,7 @@ jobs:
     needs: build
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
@@ -254,7 +254,7 @@ jobs:
     needs: build
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: r2s
@@ -289,7 +289,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: The harness's contracts, classifier, ratchet and builds
         run: |
           tests/equiv/bounded.sh 300 \
@@ -332,7 +332,7 @@ jobs:
           - name: shapes
             sources: tests/corpus/shapes.c
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: r2s
@@ -369,7 +369,7 @@ jobs:
     if: ${{ !cancelled() }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           pattern: equiv-shard-*
@@ -412,7 +412,7 @@ jobs:
           - name: shapes
             sources: tests/corpus/shapes.c
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: r2s
@@ -455,7 +455,7 @@ jobs:
     if: ${{ !cancelled() }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           pattern: equiv-aarch64-shard-*
@@ -493,7 +493,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the toolchain the repository pins
         run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -519,7 +519,7 @@ jobs:
     needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, equivalence-aarch64, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the toolchain the repository pins
         run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@v2
