@@ -115,6 +115,35 @@ The obligation inventory says what must be rendered, so no stage re-derives it.
 Cost: one canonicalisation, `O(terms × rules applied)`, then one pass over
 the operations and their uses.
 
+## D4's frame, as it is designed
+
+The machine stack below the entry stack pointer is one region; C must see one
+object there, or a pointer formed from one slot and moved to another leaves
+its array.
+
+- **One array.** The function's own frame is `uint8_t frame[size]`, spanning
+  `[low, 0)` in entry-SP coordinates: `low` the least entry offset of any
+  object r2ssa proves the callee's (`callee_allocation.entry_offset`, or
+  `objects().entry_stack_roots` for a source local or parameter home). An
+  object with any byte at or above offset 0 is the caller's (the return
+  address, stack arguments) and is never in it.
+- **Addresses.** An object's address is `frame + (offset - low) + pad`. A frame
+  address may be held in a value, stored or passed to a call as such a
+  pointer, because every place it can reach in the machine's frame is a byte
+  of the array. Escapes stay r2ssa's (`FrameReach`); the array changes only
+  how they are spelled.
+- **Alignment.** A callee may use an escaped address for an aligned access
+  (`movaps`), so the array keeps the machine's alignment: `_Alignas(16)`, and
+  `pad` chosen so `frame + pad` is congruent to `entry_sp + low` modulo 16.
+  The entry stack pointer's residue is the convention's to state
+  (`r2abi::CallingConvention`): SysV AMD64 makes `%rsp + 8` a multiple of 16
+  at entry (psABI §3.2.2), AAPCS64 makes SP a multiple of 16 at any public
+  interface. A convention that states none declares no frame array.
+- **Contents at entry.** The array starts indeterminate, as the machine's frame
+  does; a read before any write is the program's own, and the gate sees it.
+
+Cost: one pass over the frame objects, `O(objects)`.
+
 ## What survives
 
 - The dominator-tree structurer and its certificate (SD, done): ported as D1.
