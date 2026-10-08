@@ -460,10 +460,11 @@ impl<'a> Classifier<'a> {
         let other = if a == var { b } else { a };
         match (point, self.defs.constant(self.func, other)) {
             _ if subtract && b == var => Point::Unknown,
+            // Machine addresses are modular, as in the lifted arithmetic.
             (Point::Exact(offset), Some(amount)) => Point::Exact(if subtract {
-                offset - amount
+                offset.wrapping_sub(amount)
             } else {
-                offset + amount
+                offset.wrapping_add(amount)
             }),
             (Point::Indexed { from, up }, Some(_)) => Point::Indexed { from, up },
             (Point::Exact(from) | Point::Indexed { from, .. }, None) => Point::Indexed {
@@ -696,119 +697,193 @@ fn eligible(
     promotable
 }
 
+/// One rewrite of a slot's access, found by the walk: a load reads `version`, a store defines it.
+enum Rewrite {
+    Load { op: OpId, dst: VarId, version: u32 },
+    Store { op: OpId, val: VarId, version: u32 },
+}
+
+/// A step of the dominator-tree walk: enter a block, or leave one and undo its versions.
+enum Step {
+    Enter(u64),
+    Leave(usize),
+}
+
 /// Rewrite every access of every promotable place into copies of its versions, with merges.
+///
+/// One dominator-tree walk serves every place, each with the version that reaches it and an
+/// undo log: `O(B + E + accesses + merge operands)` (doc/adr-next-pass.md, model 2).
 fn rename(
     func: &mut SSAFunction,
     accesses: &BTreeMap<i64, Vec<Access>>,
     promotable: &BTreeMap<i64, u32>,
 ) -> IdSet<OpId> {
+    let slots = promotable
+        .iter()
+        .map(|(offset, width)| (*offset, *width))
+        .collect::<Vec<_>>();
+    // Per slot and per block, its accesses in op order; per block, every slot's.
+    let mut per_slot = vec![BTreeMap::<u64, Vec<&Access>>::new(); slots.len()];
+    let mut by_block = BTreeMap::<u64, Vec<(usize, &Access)>>::new();
+    for (slot, (offset, _)) in slots.iter().enumerate() {
+        for access in &accesses[offset] {
+            per_slot[slot].entry(access.block).or_default().push(access);
+            by_block
+                .entry(access.block)
+                .or_default()
+                .push((slot, access));
+        }
+    }
+    for blocks in &mut per_slot {
+        for list in blocks.values_mut() {
+            list.sort_by_key(|access| access.index);
+        }
+    }
+    for list in by_block.values_mut() {
+        list.sort_by_key(|(_, access)| access.index);
+    }
+    // A slot's merges are versions 1..=m in block order; its stores follow in walk order.
+    let mut merges = Vec::with_capacity(slots.len());
+    let mut merges_at = BTreeMap::<u64, Vec<usize>>::new();
+    for (slot, blocks) in per_slot.iter().enumerate() {
+        let live_in = live_in(func, blocks);
+        let defined = blocks
+            .iter()
+            .filter(|(_, list)| list.iter().any(|access| access.store))
+            .map(|(block, _)| *block)
+            .collect::<Vec<_>>();
+        let at = func
+            .domtree()
+            .iterated_frontier(&defined)
+            .into_iter()
+            .filter(|block| live_in.contains(block) && func.predecessors(*block).len() >= 2)
+            .collect::<BTreeSet<_>>();
+        for block in &at {
+            merges_at.entry(*block).or_default().push(slot);
+        }
+        merges.push(at.into_iter().zip(1u32..).collect::<BTreeMap<u64, u32>>());
+    }
+    let mut current = vec![0u32; slots.len()];
+    let mut next = merges
+        .iter()
+        .map(|at| at.len() as u32 + 1)
+        .collect::<Vec<_>>();
+    let mut rewrites = (0..slots.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut sources = BTreeMap::<(u64, usize), Vec<(u64, u32)>>::new();
+    let mut undo = Vec::<(usize, u32)>::new();
+    let mut steps = vec![Step::Enter(func.root())];
+    let mut seen = BTreeSet::new();
+    while let Some(step) = steps.pop() {
+        let block = match step {
+            Step::Enter(block) => block,
+            Step::Leave(mark) => {
+                for (slot, version) in undo.drain(mark..).rev() {
+                    current[slot] = version;
+                }
+                continue;
+            }
+        };
+        if !seen.insert(block) {
+            continue;
+        }
+        let mark = undo.len();
+        for slot in merges_at.get(&block).into_iter().flatten() {
+            undo.push((*slot, current[*slot]));
+            current[*slot] = merges[*slot][&block];
+        }
+        for (slot, access) in by_block.get(&block).into_iter().flatten() {
+            let Some(op) = func
+                .get_block(block)
+                .and_then(|b| b.ops().get(access.index))
+            else {
+                continue;
+            };
+            match op {
+                SSAOp::Load { dst, .. } => rewrites[*slot].push(Rewrite::Load {
+                    op: access.op,
+                    dst: *dst,
+                    version: current[*slot],
+                }),
+                SSAOp::Store { val, .. } => {
+                    let version = next[*slot];
+                    next[*slot] += 1;
+                    rewrites[*slot].push(Rewrite::Store {
+                        op: access.op,
+                        val: *val,
+                        version,
+                    });
+                    undo.push((*slot, current[*slot]));
+                    current[*slot] = version;
+                }
+                _ => {}
+            }
+        }
+        for successor in func.successors(block) {
+            for slot in merges_at.get(&successor).into_iter().flatten() {
+                sources
+                    .entry((successor, *slot))
+                    .or_default()
+                    .push((block, current[*slot]));
+            }
+        }
+        steps.push(Step::Leave(mark));
+        for child in func.domtree().children(block).iter().rev() {
+            steps.push(Step::Enter(*child));
+        }
+    }
+    // Mint and edit slot by slot, versions in order, so ids are a function of the walk alone.
     let mut plan = EditPlan::new();
     let mut minting = Minting::new(func.values());
     let mut rewritten = IdSet::default();
-    let root = func.root();
-    for (offset, width) in promotable {
+    for (slot, (offset, width)) in slots.iter().enumerate() {
         let storage = crate::CanonicalStorageId {
             space: crate::CanonicalStorageSpace::Custom(PROMOTED_SLOT_SPACE),
             offset: *offset as u64,
             size: *width,
         };
         let name = crate::naming::frame_slot_name(*offset);
-        let mut version = 0u32;
-        let mut fresh = |minting: &mut Minting<'_>| {
-            version += 1;
-            minting.intern_with_storage(&SSAVar::new(&name, version, *width), storage)
-        };
-        let entry = minting.intern_with_storage(&SSAVar::new(&name, 0, *width), storage);
-        let list = &accesses[offset];
-        // Per block, the accesses in order, and whether the block reads the slot before writing it.
-        let mut by_block = BTreeMap::<u64, Vec<&Access>>::new();
-        for access in list {
-            by_block.entry(access.block).or_default().push(access);
-        }
-        for accesses in by_block.values_mut() {
-            accesses.sort_by_key(|access| access.index);
-        }
-        let live_in = live_in(func, &by_block);
-        let defined = by_block
-            .iter()
-            .filter(|(_, accesses)| accesses.iter().any(|access| access.store))
-            .map(|(block, _)| *block)
+        let ids = (0..next[slot])
+            .map(|version| {
+                minting.intern_with_storage(&SSAVar::new(&name, version, *width), storage)
+            })
             .collect::<Vec<_>>();
-        let merges = func
-            .domtree()
-            .iterated_frontier(&defined)
-            .into_iter()
-            .filter(|block| live_in.contains(block) && func.predecessors(*block).len() >= 2)
-            .collect::<BTreeSet<_>>();
-        let mut merge_dst = BTreeMap::new();
-        for block in &merges {
-            merge_dst.insert(*block, fresh(&mut minting));
+        for rewrite in &rewrites[slot] {
+            let (op, copy) = match *rewrite {
+                Rewrite::Load { op, dst, version } => (
+                    op,
+                    SSAOp::Copy {
+                        dst,
+                        src: ids[version as usize],
+                    },
+                ),
+                Rewrite::Store { op, val, version } => (
+                    op,
+                    SSAOp::Copy {
+                        dst: ids[version as usize],
+                        src: val,
+                    },
+                ),
+            };
+            plan.replace(op, copy);
+            rewritten.insert(op);
         }
-        let mut sources = BTreeMap::<u64, Vec<(u64, VarId)>>::new();
-        // A walk of the dominator tree, each block entered with the version that reaches it.
-        let mut stack = vec![(root, entry)];
-        let mut seen = BTreeSet::new();
-        while let Some((block, reaching)) = stack.pop() {
-            if !seen.insert(block) {
-                continue;
-            }
-            let mut current = merge_dst.get(&block).copied().unwrap_or(reaching);
-            for access in by_block.get(&block).into_iter().flatten() {
-                let Some(op) = func
-                    .get_block(block)
-                    .and_then(|b| b.ops().get(access.index))
-                else {
-                    continue;
-                };
-                match op {
-                    SSAOp::Load { dst, .. } => plan.replace(
-                        access.op,
-                        SSAOp::Copy {
-                            dst: *dst,
-                            src: current,
-                        },
-                    ),
-                    SSAOp::Store { val, .. } => {
-                        let next = fresh(&mut minting);
-                        plan.replace(
-                            access.op,
-                            SSAOp::Copy {
-                                dst: next,
-                                src: *val,
-                            },
-                        );
-                        current = next;
-                    }
-                    _ => continue,
-                }
-                rewritten.insert(access.op);
-            }
-            for successor in func.successors(block) {
-                if merges.contains(&successor) {
-                    sources.entry(successor).or_default().push((block, current));
-                }
-            }
-            for child in func.domtree().children(block).iter().rev() {
-                stack.push((*child, current));
-            }
-        }
-        for block in &merges {
-            let arrived = sources.remove(block).unwrap_or_default();
+        for (block, version) in &merges[slot] {
+            let arrived = sources.remove(&(*block, slot)).unwrap_or_default();
             let phi_sources = func
                 .predecessors(*block)
                 .into_iter()
                 .map(|pred| {
-                    let var = arrived
+                    let reaching = arrived
                         .iter()
                         .find(|(from, _)| *from == pred)
-                        .map_or(entry, |(_, var)| *var);
-                    (pred, var)
+                        .map_or(0, |(_, version)| *version);
+                    (pred, ids[reaching as usize])
                 })
                 .collect();
             plan.reshape(ShapeEdit::InsertPhi {
                 block: *block,
                 phi: PhiNode {
-                    dst: merge_dst[block],
+                    dst: ids[*version as usize],
                     sources: phi_sources,
                     canonical_storage: Some(storage),
                 },
@@ -833,9 +908,9 @@ fn live_in(func: &SSAFunction, by_block: &BTreeMap<u64, Vec<&Access>>) -> BTreeS
             .get(&block)
             .is_some_and(|accesses| accesses.iter().any(|access| access.store))
     };
-    let mut live = func
-        .block_addrs()
-        .iter()
+    // Only blocks that access the slot can read it first: the walk stays in its live range.
+    let mut live = by_block
+        .keys()
         .copied()
         .filter(|block| reads_first(*block))
         .collect::<BTreeSet<_>>();
