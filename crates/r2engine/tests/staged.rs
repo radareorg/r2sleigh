@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, opened};
+use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_STUB, opened};
 use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
@@ -90,4 +90,25 @@ fn merges_that_swap_copy_through_a_temporary() {
     let text = rendering.response.output.text().to_owned();
     assert!(text.contains("_next = "), "{text}");
     assert!(!text.contains("r2dec gap"), "{text}");
+}
+
+/// A stub is one jump through the slot the loader fills with `_Exit`. r2engine's route decides it
+/// once, and both pipelines render the import's declaration, never a body forwarding through it.
+#[test]
+fn an_import_stub_is_its_import_s_declaration_in_both_pipelines() {
+    let mut program = OpenProgram::of(Literal::plt());
+    for tier in [RenderTier::C, RenderTier::Staged] {
+        let text = program
+            .rendered(PLT_STUB, tier)
+            .expect("it renders")
+            .response
+            .output
+            .into_text();
+        assert!(
+            text.contains(&format!("import stub at {PLT_STUB:#x}")) && text.contains("`_Exit`"),
+            "{tier:?}: {text}"
+        );
+        assert!(!text.contains("return"), "{tier:?}: {text}");
+        assert!(!text.contains("r2sleigh_residual"), "{tier:?}: {text}");
+    }
 }

@@ -29,6 +29,13 @@ impl Rendered {
     }
 }
 
+/// An import stub's C, as r2engine's route decides it; it has no body, so no obligation is owed.
+pub fn import_stub(stub: &r2types::ImportStub, ptr_bits: u32) -> crate::RenderedFunction {
+    let ready = crate::import_stub_declaration(stub);
+    let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, ptr_bits);
+    crate::RenderedFunction::new(emission, ready.into_function())
+}
+
 /// Why the staged pipeline wrote no function.
 #[derive(Debug, Clone)]
 pub enum RenderStop {

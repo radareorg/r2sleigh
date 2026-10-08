@@ -868,6 +868,7 @@ fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
             ptr_bits: 64,
         },
         metrics: EngineMetrics::default(),
+        import_stub: None,
     }
 }
 

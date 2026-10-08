@@ -670,6 +670,15 @@ pub struct DecompileRouteFacts {
     pub use_prepared_semantic_view: bool,
 }
 
+/// An import stub as r2engine's route decides it: one tail transfer to the import `name` and
+/// nothing else, rendered as the import's `signature`, or a comment where nothing states one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportStub {
+    pub entry: u64,
+    pub name: String,
+    pub signature: Option<crate::FunctionType>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionInputQualityFacts {
     pub expected_blocks: usize,

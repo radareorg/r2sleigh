@@ -44,6 +44,7 @@ pub use r2sleigh_lift::flow::Flow;
 pub use r2sleigh_lift::{NumberSpan, Syntax};
 
 mod route;
+mod stub;
 
 pub use r2dec::{
     BindingMachineProjectionFailure, BindingObservationAudit, BindingObservationDomainAudit,
@@ -1446,6 +1447,8 @@ pub struct SealedFunctionAnalysis {
     render_target: EngineRenderTarget,
     /// What sealing cost, which every rendering of it reports beside its own.
     metrics: EngineMetrics,
+    /// The import this function is a stub of, which either pipeline renders as its declaration.
+    import_stub: Option<r2types::ImportStub>,
 }
 
 impl SealedFunctionAnalysis {
@@ -1987,6 +1990,8 @@ impl EngineSession {
             EnginePhaseStatus::Executed,
             normalization_started.elapsed(),
         );
+        let import_stub =
+            stub::import_stub(source_owned_facts.source(), source_owned_facts.report());
         Ok(SealedFunctionAnalysis {
             function_name: display_name,
             source_owned_facts,
@@ -1994,6 +1999,7 @@ impl EngineSession {
             input_quality: input_quality_facts,
             render_target,
             metrics,
+            import_stub,
         })
     }
 
@@ -2745,6 +2751,20 @@ fn render_staged<C: r2ssa::SsaWorkControl>(
     request: &EngineDecompileRequest<'_>,
     control: &C,
 ) -> Result<EngineRenderedDecompile, EngineRenderExecutionStop> {
+    if let Some(stub) = &request.sealed.import_stub {
+        let function = r2dec::render::import_stub(stub, request.sealed.render_target.ptr_bits);
+        return Ok(EngineRenderedDecompile {
+            product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
+                output: EngineRendering::Function(Box::new(function)),
+                obligation_ledger: None,
+                placement_audit: PlacementAudit::NotRun,
+                render_refusal: None,
+            })),
+            semantic_kernel_warnings: Vec::new(),
+            structuring_executed: false,
+            stopped: None,
+        });
+    }
     let input = r2dec::render::RenderInput::new(
         &request.sealed.source_owned_facts,
         request.sealed.render_target.ptr_bits,
@@ -2787,6 +2807,7 @@ fn decompiler_input_for_engine_request(
     request: &EngineDecompileRequest<'_>,
 ) -> r2dec::DecompilerInput {
     r2dec::DecompilerInput::new(request.sealed.source_owned_facts.clone())
+        .with_import_stub(request.sealed.import_stub.clone())
 }
 
 /// The measured cost of one decompile, per phase.
