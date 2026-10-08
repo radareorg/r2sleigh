@@ -1449,6 +1449,13 @@ pub struct SealedFunctionAnalysis {
 }
 
 impl SealedFunctionAnalysis {
+    /// The SSA operations this analysis holds: its weight in the query database.
+    pub(crate) fn operations(&self) -> usize {
+        self.trusted_ssa
+            .as_ref()
+            .map_or(0, |ssa| ssa.artifact().function().arena().id_limit())
+    }
+
     pub const fn facts(&self) -> &r2types::SourceOwnedFunctionFacts {
         &self.source_owned_facts
     }

@@ -54,8 +54,13 @@ pub trait Query<I: Inputs>: 'static {
     /// Named in a [`Cycle`].
     const NAME: &'static str;
 
-    /// How many answers are held at once, the oldest dropped first; `None` holds every one.
+    /// How much is held at once, by [`Query::weight`], the oldest dropped first; `None` holds every answer.
     const CAPACITY: Option<usize> = None;
+
+    /// What one answer counts against [`Query::CAPACITY`].
+    fn weight(_value: &Self::Value) -> usize {
+        1
+    }
 
     /// The answer, reading the program only through `db`.
     fn compute(db: &Db<I>, key: &Self::Key) -> Self::Value;
@@ -457,15 +462,23 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         };
         let mut valued = entries
             .values_mut()
-            .filter(|entry| entry.value.is_some())
+            .filter_map(|entry| {
+                let weight = Q::weight(entry.value.as_ref()?);
+                Some((entry, weight))
+            })
             .collect::<Vec<_>>();
-        let excess = valued.len().saturating_sub(capacity);
-        if excess > 0 {
-            valued.sort_unstable_by_key(|entry| entry.stamp);
-            valued
-                .into_iter()
-                .take(excess)
-                .for_each(|entry| entry.value = None);
+        let mut held = valued.iter().map(|(_, weight)| weight).sum::<usize>();
+        if held > capacity {
+            valued.sort_unstable_by_key(|(entry, _)| entry.stamp);
+            // The newest stays even alone past the capacity: it is what was just asked for.
+            let newest = valued.len() - 1;
+            for (entry, weight) in valued.into_iter().take(newest) {
+                if held <= capacity {
+                    break;
+                }
+                entry.value = None;
+                held -= weight;
+            }
         }
     }
 
@@ -761,6 +774,40 @@ mod tests {
             computed + 1,
             "the dropped answer is computed again"
         );
+    }
+
+    /// A byte that weighs itself, ten held at most.
+    struct Weighed;
+    impl Query<Memory> for Weighed {
+        type Key = u64;
+        type Value = u8;
+        const NAME: &'static str = "weighed";
+        const CAPACITY: Option<usize> = Some(10);
+        fn compute(db: &Db<Memory>, &at: &u64) -> u8 {
+            read(db, at..at + 1)[0]
+        }
+        fn weight(value: &u8) -> usize {
+            usize::from(*value)
+        }
+    }
+
+    #[test]
+    fn a_capacity_holds_weight_and_keeps_the_newest_answer() {
+        let db = Db::new(Memory::new(vec![4, 5, 3, 12]));
+        let recomputed = |at: u64| {
+            let computed = db.stats().computed;
+            db.get::<Weighed>(&at).unwrap();
+            db.stats().computed > computed
+        };
+        // 4 and 5 fit in ten; 3 more drops the oldest, 4.
+        for at in [0, 1, 2] {
+            assert!(recomputed(at));
+        }
+        assert!(!recomputed(1) && !recomputed(2), "5 + 3 fit");
+        assert!(recomputed(0), "4 was dropped for 3");
+        // Twelve alone is past the capacity, and is still held as the newest.
+        assert!(recomputed(3));
+        assert!(!recomputed(3));
     }
 
     /// Twice a doubled byte, holding every answer though what it reads may be dropped.
