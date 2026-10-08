@@ -66,7 +66,8 @@ fn a_load_through_a_parameter_plus_a_scaled_index_is_an_element() {
         arena.term(index)
     );
     assert_eq!(
-        load.trace
+        roots
+            .trace(load.value)
             .iter()
             .map(|rewrite| rewrite.rule)
             .collect::<Vec<_>>(),
@@ -113,7 +114,8 @@ fn a_store_through_the_same_address_writes_the_same_element() {
         arena.term(cell.canonical)
     );
     assert_eq!(
-        cell.trace
+        roots
+            .access_trace(store.id)
             .iter()
             .map(|rewrite| rewrite.rule)
             .collect::<Vec<_>>(),

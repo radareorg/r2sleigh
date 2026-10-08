@@ -60,7 +60,7 @@ fn and_of_one_value_reads_two_occurrences_of_one_leaf() {
     assert_eq!(first.inst, second.inst, "both reads are in one instruction");
     assert_eq!((first.ordinal, second.ordinal), (0, 1), "operand order");
     assert!(
-        imported.trace.is_empty(),
+        roots.import().trace(and_value).is_empty(),
         "import records only copy elisions"
     );
     let and = roots
@@ -98,9 +98,10 @@ fn copy_is_elided_and_its_single_use_source_expanded() {
         rax.canonical, and.canonical,
         "the copy's term is the copied term"
     );
-    assert_eq!(rax.trace.len(), 1);
-    assert_eq!(rax.trace[0].rule, COPY_ELIDE);
-    assert_eq!(rax.trace[0].to, and.canonical);
+    let trace = roots.trace(rax.value);
+    assert_eq!(trace.len(), 1);
+    assert_eq!(trace[0].rule, COPY_ELIDE);
+    assert_eq!(trace[0].to, and.canonical);
     let and_producer = projection
         .entity_for_output(and_value)
         .expect("entity")
