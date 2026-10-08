@@ -3,6 +3,16 @@
 use super::super::*;
 use crate::view::ViewRelation;
 
+/// Why a frame object's extent is assumed rather than proven: nothing declares it, no layout proves
+/// it, and code outside its own accesses may reach past them (doc/adr-frame-model.md, extent rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtentAssumption {
+    /// Its address escapes, or an escaped address below it may reach it, and no callee reach bounds it.
+    EscapedAddress,
+    /// It is read or written through an index no value range bounds.
+    UnboundedIndex,
+}
+
 /// Upstream decision for declaring one indexed stack object as an array.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StackArrayLayoutDisposition {
@@ -183,8 +193,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         })
     });
     let explicit_contract = SourceStackAllocationContract::new(contract.growth());
-    let active_stack_pointer_states =
-        reaching_storage_states_before(function, graph, stack_pointer);
+    let active_stack_pointer_states = reaching_storage_boundaries(function, graph, stack_pointer);
     let mut candidates = BTreeMap::new();
 
     for (object, fact) in &objects.objects {
@@ -258,26 +267,35 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         let mut uses_implicit_area = false;
         let mut complete = true;
         for access in &accesses {
-            let Some(active_sp_offset) = active_stack_pointer_states
-                .get(access.id.inst)
-                .copied()
-                .and_then(|state| exact_stack_pointer_offset(prep, graph, state))
-            else {
-                complete = false;
-                break;
+            // The stack pointer at the access, or at either edge of its instruction: one
+            // instruction may move it and access at once (a pre-index `stp`), and nothing runs between.
+            let offsets = [
+                &active_stack_pointer_states.before,
+                &active_stack_pointer_states.instruction_start,
+                &active_stack_pointer_states.instruction_end,
+            ]
+            .map(|states| {
+                states
+                    .get(access.id.inst)
+                    .copied()
+                    .and_then(|state| exact_stack_pointer_offset(prep, graph, state))
+            });
+            let owned_by = |contract: &SourceStackAllocationContract| {
+                offsets.into_iter().flatten().find(|offset| {
+                    contract.owns_entry_relative_range(*offset, entry_root.offset, size_bytes)
+                })
             };
-            if !contract.owns_entry_relative_range(active_sp_offset, entry_root.offset, size_bytes)
-            {
-                complete = false;
-                break;
-            }
-            if !explicit_contract.owns_entry_relative_range(
-                active_sp_offset,
-                entry_root.offset,
-                size_bytes,
-            ) {
-                uses_implicit_area = true;
-            }
+            let active_sp_offset = match (owned_by(&explicit_contract), owned_by(&contract)) {
+                (Some(offset), _) => offset,
+                (None, Some(offset)) => {
+                    uses_implicit_area = true;
+                    offset
+                }
+                (None, None) => {
+                    complete = false;
+                    break;
+                }
+            };
             active_sp_offsets.insert(active_sp_offset);
         }
         if !complete || uses_implicit_area && contains_call {
@@ -866,7 +884,13 @@ pub(crate) fn collect_stack_geometry_certificate(
         let Some(inst) = graph.inst(access.id.inst) else {
             continue;
         };
-        if exact_stack_object && inst.inputs.first() == Some(&access.address) {
+        // Only a load or store spells its address as access syntax; a linked load or conditional
+        // store hands the address on as a value, which stays a use of its own.
+        let spelled_as_access = matches!(
+            inst.payload,
+            InstPayload::Op(SSAOp::Load { .. } | SSAOp::Store { .. })
+        );
+        if exact_stack_object && spelled_as_access && inst.inputs.first() == Some(&access.address) {
             stack_address_uses.insert(UseSite {
                 inst: access.id.inst,
                 input_idx: 0,

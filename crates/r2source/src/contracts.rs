@@ -777,6 +777,8 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
+    /// Whether the body reads an argument slot past its parameters, so its arity is unproven.
+    reads_past_parameters: bool,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1231,6 +1233,7 @@ impl SourceFunctionInterface {
             format_parameter: None,
             variadic: false,
             body_proven_return_address: false,
+            reads_past_parameters: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1281,6 +1284,7 @@ impl SourceFunctionInterface {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
             body_proven_return_address: self.body_proven_return_address,
+            reads_past_parameters: self.reads_past_parameters,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1426,6 +1430,19 @@ impl SourceFunctionInterface {
         self.format_parameter =
             format_parameter.map(|index| crate::confidence::Fact::new(index, self.types.clone()));
         Ok(self)
+    }
+
+    /// Record that the body reads an argument slot past its parameters.
+    #[must_use]
+    pub const fn with_reads_past_parameters(mut self) -> Self {
+        self.reads_past_parameters = true;
+        self
+    }
+
+    /// Whether the body reads an argument slot past its parameters: no caller may take its
+    /// parameter count as the call's arity.
+    pub const fn reads_past_parameters(&self) -> bool {
+        self.reads_past_parameters
     }
 
     /// Whether the declaration says arguments continue past the fixed ones.
@@ -3314,6 +3331,9 @@ pub struct SourceMachineRoles {
     /// Whether a call pushes its return address, as `<returnaddress>` says.
     #[serde(default)]
     call_pushes_return_address: Option<bool>,
+    /// The register a frame-keeping function holds its frame base in, as the convention names it.
+    #[serde(default)]
+    frame_pointer_storage: Option<CanonicalStorageId>,
 }
 
 /// Whether a call leaves the frame carriers where they were, as the convention's call effect says.
@@ -3362,7 +3382,17 @@ pub struct SourceCallEffect {
     clobbered: Box<[CanonicalStorageId]>,
     preserved: Box<[CanonicalStorageId]>,
     system_reserved: Box<[CanonicalStorageId]>,
+    /// Where the platform keeps the stack guard, addressed from one of `system_reserved`.
+    stack_guard: Option<SourceStackGuard>,
     reads: SourceBoundaryReads,
+}
+
+/// Memory at a constant offset from a reserved register's value, where a stack protector's guard is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceStackGuard {
+    pub base: CanonicalStorageId,
+    pub offset: u64,
+    pub width: u32,
 }
 
 /// The registers a call and a return read without an operand naming them.
@@ -3424,6 +3454,7 @@ impl SourceCallEffect {
             clobbered,
             preserved,
             system_reserved: Box::default(),
+            stack_guard: None,
             reads,
         })
     }
@@ -3453,6 +3484,25 @@ impl SourceCallEffect {
             system_reserved,
             ..self
         })
+    }
+
+    /// The same effect, with where the platform keeps the stack guard; its base must be reserved.
+    pub fn with_stack_guard(
+        self,
+        guard: SourceStackGuard,
+    ) -> Result<Self, SourceMachineRolesError> {
+        if !self.reserves(guard.base) {
+            return Err(SourceMachineRolesError::ContradictoryCallEffect);
+        }
+        Ok(Self {
+            stack_guard: Some(guard),
+            ..self
+        })
+    }
+
+    /// Where the platform keeps the stack guard, where it states one.
+    pub const fn stack_guard(&self) -> Option<&SourceStackGuard> {
+        self.stack_guard.as_ref()
     }
 
     /// The registers the convention names as destroyed, sorted.
@@ -3752,7 +3802,25 @@ impl SourceMachineRoles {
             role_register_names: SourceRoleRegisterNames::none(),
             stack_allocation_contract: None,
             call_pushes_return_address: None,
+            frame_pointer_storage: None,
         })
+    }
+
+    /// The same roles, with the register the convention keeps its frame base in.
+    pub fn with_frame_pointer(
+        mut self,
+        frame_pointer: CanonicalStorageId,
+    ) -> Result<Self, SourceMachineRolesError> {
+        if !valid_register_storage(frame_pointer) {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        self.frame_pointer_storage = Some(frame_pointer);
+        Ok(self)
+    }
+
+    /// The register the convention keeps a frame base in, where it names one.
+    pub const fn frame_pointer_storage(&self) -> Option<CanonicalStorageId> {
+        self.frame_pointer_storage
     }
 
     /// Record how the source spelled these carriers.
@@ -3774,9 +3842,11 @@ impl SourceMachineRoles {
         mut self,
         return_address: Option<CanonicalStorageId>,
         stack_pointer: Option<CanonicalStorageId>,
+        frame_pointer: Option<CanonicalStorageId>,
     ) -> Result<Self, SourceMachineRolesError> {
         if return_address.is_some_and(|storage| !valid_register_storage(storage))
             || stack_pointer.is_some_and(|storage| !valid_register_storage(storage))
+            || frame_pointer.is_some_and(|storage| !valid_register_storage(storage))
         {
             return Err(SourceMachineRolesError::InvalidRegisterStorage);
         }
@@ -3787,6 +3857,7 @@ impl SourceMachineRoles {
         }
         self.return_address_storage = return_address;
         self.stack_pointer_storage = stack_pointer;
+        self.frame_pointer_storage = frame_pointer;
         Ok(self)
     }
 

@@ -22,6 +22,20 @@ pub(crate) fn collect_object_and_memory_facts(
     let mut object_model = builder.build(function, graph, values);
     object_model.frame_reach =
         FrameReach::of(function, prep, graph, &object_model, machine_context);
+    // A run of objects an escaped address may reach is one object: built again with each run as
+    // a span, once, since a merged run escapes as the run did.
+    let spans =
+        object_model
+            .frame_reach
+            .escape_spans(function, graph, &object_model, machine_context);
+    if !spans.is_empty() {
+        let mut builder =
+            ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
+        builder.escape_spans(&spans);
+        object_model = builder.build(function, graph, values);
+        object_model.frame_reach =
+            FrameReach::of(function, prep, graph, &object_model, machine_context);
+    }
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);

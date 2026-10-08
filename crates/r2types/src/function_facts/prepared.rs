@@ -40,28 +40,6 @@ pub struct StackSlotOwnerRenderAuthorization {
     pub name: String,
 }
 
-pub(crate) fn stack_slot_offset(slot: &StackSlotKey) -> i64 {
-    slot.offset
-}
-
-pub(crate) fn stack_slot_matches_offset(slot: &StackSlotKey, offset: i64) -> bool {
-    stack_slot_offset(slot) == offset
-}
-
-pub(crate) fn visible_stack_binding_kind_is_renderable(kind: &VisibleBindingKind) -> bool {
-    matches!(
-        kind,
-        VisibleBindingKind::Param | VisibleBindingKind::Local | VisibleBindingKind::StackObject
-    )
-}
-
-pub(crate) fn external_stack_slot_role_is_renderable(role: ExternalStackSlotRole) -> bool {
-    matches!(
-        role,
-        ExternalStackSlotRole::Local | ExternalStackSlotRole::StackArg
-    )
-}
-
 pub(crate) fn recovered_stack_owner_name_is_renderable(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     !lower.is_empty()
@@ -74,58 +52,6 @@ pub(crate) fn recovered_stack_owner_name_is_renderable(name: &str) -> bool {
         && !lower.starts_with("local_")
         && !lower.starts_with("arg_")
         && !lower.starts_with("var_")
-}
-
-pub(crate) fn remember_stack_param_owner_name(
-    candidate: &mut Option<String>,
-    name: &str,
-) -> Option<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Some(());
-    }
-    if let Some(existing) = candidate.as_ref() {
-        return existing.eq_ignore_ascii_case(name).then_some(());
-    }
-    *candidate = Some(name.to_string());
-    Some(())
-}
-
-pub(crate) fn stack_owner_type_is_renderable(ty: &CTypeLike) -> bool {
-    !matches!(ty, CTypeLike::Unknown | CTypeLike::Void)
-}
-
-pub(crate) fn signature_param_name_type_is_renderable(
-    signature: Option<&FunctionSignatureSpec>,
-    name: &str,
-) -> bool {
-    signature
-        .into_iter()
-        .flat_map(|signature| signature.params.iter())
-        .any(|param| {
-            param.name.eq_ignore_ascii_case(name)
-                && param
-                    .ty
-                    .as_ref()
-                    .is_some_and(stack_owner_type_is_renderable)
-        })
-}
-
-pub(crate) fn indexed_param_home_name<'a>(
-    signature: Option<&'a FunctionSignatureSpec>,
-    slot: &ExternalStackSlotSpec,
-) -> Option<&'a str> {
-    if !matches!(slot.role, ExternalStackSlotRole::ParamHome) {
-        return None;
-    }
-    let param = signature?.params.get(slot.param_index?)?;
-    let name = param.name.trim();
-    (!name.is_empty()
-        && param
-            .ty
-            .as_ref()
-            .is_some_and(stack_owner_type_is_renderable))
-    .then_some(name)
 }
 
 pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
@@ -321,6 +247,9 @@ pub enum CertifiedEntity {
         /// Absence grants no source-variable identity; a separate upstream
         /// callee-allocation proof is required for an anonymous C object.
         source_slot: Option<r2ssa::SourceStackSlotSpec>,
+        /// What the slot is: its declaration's role, or a parameter home the frame proves
+        /// (`SsaArtifact::stack_slot_role`).
+        role: Option<r2ssa::SourceStackSlotRole>,
         /// Values a reload proves to be this slot's contents at full width.
         /// Empty where nothing loads the slot back into a register.
         reload_values: BTreeSet<r2ssa::ValueId>,
@@ -406,12 +335,12 @@ impl CertifiedEntity {
             // ferry it are one variable. A parameter's home is excluded: the
             // parameter entity owns those values and decides there.
             Self::StackSlot {
-                source_slot,
+                role,
                 reload_values,
                 ..
             } if !reload_values.is_empty()
                 && !matches!(
-                    source_slot.map(|slot| slot.role()),
+                    role,
                     Some(
                         r2ssa::SourceStackSlotRole::ParameterHome { .. }
                             | r2ssa::SourceStackSlotRole::Parameter { .. }
@@ -1953,12 +1882,12 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     size: cert.size,
                     array_layout: cert.array_layout.clone(),
                     source_slot: cert.source_slot,
+                    role: prepared.stack_slot_role(*object),
                     reload_values: cert.reload_values.iter().collect(),
                     stored_values: cert.stored_values.iter().collect(),
                     callee_allocation: cert.callee_allocation.clone(),
-                    ty: cert
-                        .source_slot
-                        .and_then(|slot| slot.logical_type())
+                    ty: prepared
+                        .stack_slot_logical_type(*object)
                         .and_then(|type_id| {
                             let graph = prepared
                                 .machine_context()

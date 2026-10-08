@@ -281,8 +281,42 @@ impl<S: Source + 'static> OpenProgram<S> {
         let read = |sealed: &SealedFunctionAnalysis| {
             super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
         };
-        self.read_sealed(entry, &prepared, read)?
-            .map_err(|refused| refused.diagnostics.route_reason.unwrap_or_default())
+        let mut info = self
+            .read_sealed(entry, &prepared, read)?
+            .map_err(|refused| refused.diagnostics.route_reason.unwrap_or_default())?;
+        // The frame's locals are the ones the rendering declares, so afv and pdd name the same objects (ADR frame-model).
+        if let Some(locals) = self.declared_frame_locals(entry) {
+            info.locals = locals;
+        }
+        Ok(info)
+    }
+
+    /// The frame locals the C rendering declares, at their entry-stack offsets; none where it refused.
+    fn declared_frame_locals(&self, entry: u64) -> Option<Vec<super::info::Local>> {
+        let key = (entry, self.view().thumb_at(entry), RenderTier::C);
+        let render = self.db.get::<super::analysis::Rendered>(&key).ok()?;
+        let drawn = render.0.as_ref().ok()?;
+        let crate::EngineRendering::Function(rendered) = &drawn.rendering.response.output else {
+            return None;
+        };
+        let declared = rendered
+            .emission()
+            .variables()
+            .iter()
+            .filter_map(|variable| {
+                let r2dec::report::VariableLocation::Frame { offset } = variable.location else {
+                    return None;
+                };
+                Some(super::info::Local {
+                    name: variable.name.clone(),
+                    base: super::info::StackBase::StackPointer,
+                    offset,
+                    ty: variable.ty.clone(),
+                })
+            });
+        let mut locals: Vec<_> = declared.collect();
+        locals.sort_by_key(|local| local.offset);
+        Some(locals)
     }
 
     /// The operations Sleigh produced for one function, before any analysis.

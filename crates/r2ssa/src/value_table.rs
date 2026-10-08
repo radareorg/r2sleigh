@@ -136,11 +136,11 @@ impl ValueTable {
             minted.base,
             "a plan's minted variables join the table they were numbered past"
         );
-        for var in minted.vars {
+        for (var, storage) in minted.vars.into_iter().zip(minted.storage) {
             let id = VarId::from_len(self.vars.len());
             self.index.insert(var.clone(), id);
             self.vars.push(var);
-            self.storage.push(None);
+            self.storage.push(storage);
         }
     }
 }
@@ -167,6 +167,7 @@ impl VarId {
 pub(crate) struct Minting<'t> {
     table: &'t ValueTable,
     vars: Vec<SSAVar>,
+    storage: Vec<Option<CanonicalStorageId>>,
     index: HashMap<SSAVar, VarId>,
 }
 
@@ -175,6 +176,7 @@ pub(crate) struct Minting<'t> {
 pub(crate) struct Minted {
     base: usize,
     vars: Vec<SSAVar>,
+    storage: Vec<Option<CanonicalStorageId>>,
 }
 
 impl Minted {
@@ -188,6 +190,7 @@ impl<'t> Minting<'t> {
         Self {
             table,
             vars: Vec::new(),
+            storage: Vec::new(),
             index: HashMap::new(),
         }
     }
@@ -204,7 +207,21 @@ impl<'t> Minting<'t> {
         }
         let id = VarId::from_len(self.table.len() + self.vars.len());
         self.vars.push(var.clone());
+        self.storage.push(None);
         self.index.insert(var.clone(), id);
+        id
+    }
+
+    /// As [`Self::intern`], a new variable holding the lifted storage `storage`.
+    pub(crate) fn intern_with_storage(
+        &mut self,
+        var: &SSAVar,
+        storage: CanonicalStorageId,
+    ) -> VarId {
+        let id = self.intern(var);
+        if let Some(index) = (id.0 as usize).checked_sub(self.table.len()) {
+            self.storage[index] = Some(storage);
+        }
         id
     }
 
@@ -228,6 +245,7 @@ impl<'t> Minting<'t> {
         Minted {
             base: self.table.len(),
             vars: self.vars,
+            storage: self.storage,
         }
     }
 }

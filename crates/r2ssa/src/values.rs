@@ -353,7 +353,19 @@ fn transfer(
     match op {
         SSAOp::Copy { .. } | SSAOp::CallRestore { .. } => at_width(input(0)),
         SSAOp::IntAdd { .. } => at_width(input(0)).add(&at_width(input(1))),
-        SSAOp::IntSub { .. } => at_width(input(0)).sub(&at_width(input(1))),
+        SSAOp::IntSub { .. } => {
+            let difference = at_width(input(0)).sub(&at_width(input(1)));
+            // `x - d * (x / d)` with an exact quotient is `x % d` (`crate::division`).
+            match (inst.inputs.first(), inst.inputs.get(1)) {
+                (Some(x), Some(t)) => match crate::division::remainder_divisor(graph, *x, *t) {
+                    Some(divisor) => {
+                        difference.meet(&StridedInterval::interval(width, 0, divisor - 1))
+                    }
+                    None => difference,
+                },
+                _ => difference,
+            }
+        }
         SSAOp::IntMult { .. } => at_width(input(0)).mul(&at_width(input(1))),
         SSAOp::IntLeft { .. } => match places(1) {
             Some(places) => at_width(input(0)).shl(places),

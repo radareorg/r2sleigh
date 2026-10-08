@@ -2,42 +2,13 @@
 
 use super::*;
 
-pub(crate) fn private_stack_objects(
-    graph: &SsaGraph,
-    objects: &ObjectModel,
-    structured: &StructuredDataflowFacts,
-    live_out: &crate::liveout::FunctionLiveOut,
-) -> BTreeSet<ObjectId> {
-    let mut private = BTreeSet::new();
-    let mut access_addresses = BTreeSet::<(InstId, ValueId)>::new();
-    for access in structured.memory_accesses.values() {
-        if access.space == SpaceId::Ram {
-            access_addresses.insert((access.id.inst, access.address));
-        }
+/// Frame objects no address of which leaves the function: the one escape analysis, `FrameReach` (doc/adr-frame-model.md).
+pub(crate) fn private_stack_objects(objects: &ObjectModel) -> BTreeSet<ObjectId> {
+    if objects.frame_reach.whole() {
+        return BTreeSet::new();
     }
-    let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
-    // Every value that names some stack address. Arithmetic from one slot's
-    // base to another slot's address stays inside the frame and is not escape.
-    let mut stack_addresses = crate::dense::IdSet::<ValueId>::default();
-    for (key, object) in &objects.value_objects {
-        if key.space != SpaceId::Ram {
-            continue;
-        }
-        addresses_by_object
-            .entry(*object)
-            .or_default()
-            .insert(key.value);
-        if objects.object(*object).is_some_and(|fact| {
-            matches!(
-                fact.kind,
-                ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
-            )
-        }) {
-            stack_addresses.insert(key.value);
-        }
-    }
-    for (object, fact) in &objects.objects {
-        if !matches!(
+    let frame = objects.objects.iter().filter(|(_, fact)| {
+        matches!(
             fact.kind,
             ObjectKind::StackSlot {
                 space: SpaceId::Ram,
@@ -46,121 +17,10 @@ pub(crate) fn private_stack_objects(
                 space: SpaceId::Ram,
                 ..
             }
-        ) {
-            continue;
-        }
-        // No value names the object, so no address of it exists to leave
-        // the function: nothing outside can reach it, vacuously.
-        let Some(addresses) = addresses_by_object.get(object) else {
-            private.insert(*object);
-            continue;
-        };
-        match stack_address_escape(
-            graph,
-            &access_addresses,
-            &stack_addresses,
-            live_out,
-            addresses,
-        ) {
-            Some(site) => r2il::refusal_evidence!(
-                "private-stack-objects",
-                "object {object:?} is not private: an address naming it reaches {site:?} by {:?}",
-                graph
-                    .inst(site.inst)
-                    .map(|inst| format!("{:?}", inst.payload)
-                        .chars()
-                        .take(120)
-                        .collect::<String>())
-            ),
-            None => {
-                private.insert(*object);
-            }
-        }
-    }
-    private
-}
-
-/// Where a slot's address leaves the function, if anywhere.
-///
-/// A pointer from outside can name a slot only if the slot's address left the
-/// function, so the walk follows everything computed from the address forward
-/// until it is stored, passed to a call, handed back to the caller, or used as
-/// the address of an access the model could not place. A value that names
-/// another stack slot is that slot's address and stops the walk; a flag or a
-/// merge computed from the address is followed like any other value, and is
-/// no escape unless what it feeds is.
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query; the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
-    )
-)]
-pub(crate) fn stack_address_escape(
-    graph: &SsaGraph,
-    access_addresses: &BTreeSet<(InstId, ValueId)>,
-    stack_addresses: &crate::dense::IdSet<ValueId>,
-    live_out: &crate::liveout::FunctionLiveOut,
-    addresses: &BTreeSet<ValueId>,
-) -> Option<UseSite> {
-    let mut pending = addresses.iter().copied().collect::<Vec<_>>();
-    let mut seen = BTreeSet::new();
-    while let Some(value) = pending.pop() {
-        if !seen.insert(value) {
-            continue;
-        }
-        let derived = !addresses.contains(&value);
-        if live_out.contains(value) {
-            return graph.use_sites(value).first().copied().or_else(|| {
-                graph
-                    .def_inst(value)
-                    .map(|inst| UseSite { inst, input_idx: 0 })
-            });
-        }
-        for site in graph.use_sites(value) {
-            let Some(inst) = graph.inst(site.inst) else {
-                return Some(*site);
-            };
-            if site.input_idx == 0 && access_addresses.contains(&(site.inst, value)) {
-                // The object's own access, or an access the model could not
-                // place through a value computed from the address.
-                if derived {
-                    return Some(*site);
-                }
-                continue;
-            }
-            match &inst.payload {
-                InstPayload::Phi { .. } => {}
-                InstPayload::Op(op) => match op {
-                    SSAOp::CBranch { .. } | SSAOp::Branch { .. } => continue,
-                    SSAOp::Store { .. }
-                    | SSAOp::BlockTransfer { .. }
-                    | SSAOp::StoreConditional { .. }
-                    | SSAOp::StoreGuarded { .. }
-                    | SSAOp::AtomicCAS { .. }
-                    | SSAOp::Load { .. }
-                    | SSAOp::LoadLinked { .. }
-                    | SSAOp::LoadGuarded { .. }
-                    | SSAOp::CallUse { .. }
-                    | SSAOp::Call { .. }
-                    | SSAOp::CallInd { .. }
-                    | SSAOp::CallOther { .. }
-                    | SSAOp::BranchInd { .. }
-                    | SSAOp::Switch { .. }
-                    | SSAOp::Return { .. } => return Some(*site),
-                    _ => {}
-                },
-            }
-            let Some(output) = inst.output else {
-                return Some(*site);
-            };
-            if stack_addresses.contains(output) {
-                continue;
-            }
-            pending.push(output);
-        }
-    }
-    None
+        )
+    });
+    let private = frame.filter(|(object, _)| !objects.frame_reach.escaped(**object));
+    private.map(|(object, _)| *object).collect()
 }
 
 /// Every store that puts back into its object exactly what the object held.

@@ -205,6 +205,48 @@ impl Program for Fixture {
     }
 }
 
+/// A fixture whose program states that one function never returns.
+struct Halting {
+    fixture: Fixture,
+    halts: u64,
+}
+
+impl r2engine::body::Program for Halting {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.fixture.is_entry(vaddr)
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        callee != self.halts
+    }
+}
+
+impl Program for Halting {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+}
+
 #[test]
 fn a_function_is_decompiled_from_bytes_alone() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -1622,7 +1664,7 @@ fn a_frame_slot_is_promoted_only_where_the_prologue_runs_once() {
             name: "framed",
         };
         let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
-        prepared.artifact().function().promoted_slot_sites().len()
+        prepared.artifact().function().promoted_slots().len()
     };
     assert!(promoted(PROLOGUE_BEFORE_A_LOOP) > 0);
     assert_eq!(promoted(PROLOGUE_IN_A_LOOP), 0);
@@ -2835,8 +2877,10 @@ const AARCH64_NARROWED_ARGUMENT_BESIDE_A_CALL: &[u8] = &[
 /// A call nothing declares takes its arity from the argument registers the
 /// body wrote before it. `x2` it never wrote: the interface declares only its
 /// low byte, and the register is rebuilt from that lane for the whole read at
-/// 0x1008, but the rebuild restates what the caller passed. The call takes
-/// `x0` and `x1` and stops there.
+/// 0x1008, but the rebuild restates what the caller passed, so it is no write.
+/// It is this function's own parameter, though, which the call may be handed
+/// unchanged: the count stops at `x0`, `x1` unproven, and the call is a
+/// residual rather than `undeclared_import(X0_0 + X1_0, 2)` (decided 2026-10-07).
 #[test]
 fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
     let machine = Machine::new("aarch64", "aarch64", 64);
@@ -2873,12 +2917,13 @@ fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
         })
         .collect::<Vec<_>>();
     assert_eq!(slots, [0, 1], "{call:#?}");
+    assert!(!call.arguments_complete, "{call:#?}");
+    assert!(call.results_complete, "{call:#?}");
 
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
-    assert!(response.render_refusal.is_none(), "{text}");
     assert!(
-        text.contains("undeclared_import(X0_0 + X1_0, 2);"),
+        !text.contains("undeclared_import(X0_0 + X1_0, 2);"),
         "{text}"
     );
 }
@@ -3801,6 +3846,126 @@ fn a_call_does_not_redefine_the_register_the_platform_reserves() {
     );
 }
 
+/// A stack-protector check: the canary is stored from `fs:[0x28]`, reloaded, compared with a
+/// second read of the guard, and a mismatch calls a function that never returns.
+const CANARY_CHECKED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp+8], rax
+    0x31, 0xc0, // 1012 xor eax, eax
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1014 mov rdx, [rsp+8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1019 sub rdx, fs:[0x28]
+    0x75, 0x05, // 1022 jne 0x1029
+    0x48, 0x83, 0xc4, 0x18, // 1024 add rsp, 0x18
+    0xc3, // 1028 ret
+    0xe8, 0x02, 0x00, 0x00, 0x00, // 1029 call 0x1030
+    0x90, 0x90, // 102e padding
+    0xeb, 0xfe, // 1030 jmp 0x1030
+];
+
+/// Under `Premise::UbFreeSource` the canary still holds the guard, so the check passes: the
+/// rendering reads no thread pointer, calls nothing, and says which premise it assumed.
+#[test]
+fn a_stack_protector_check_is_compiler_inserted_under_a_ub_free_source() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes: CANARY_CHECKED.to_vec(),
+            name: "canary_checked",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("return 0;"), "{output}");
+    assert!(!output.contains("fcn_1030"), "{output}");
+    assert!(
+        output.contains("compiler-inserted (assuming ub-free)"),
+        "{output}"
+    );
+}
+
+/// The slot is written again before the check, so the check can fail and stays a residual.
+#[test]
+fn a_canary_written_twice_is_not_decided() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0x48, 0x89, 0x44, 0x24, 0x08]); // 1014 mov [rsp+8], rax
+    bytes.extend(&CANARY_CHECKED[0x14..0x22]); // 1019 the reload and compare
+    bytes.extend([0x75, 0x05]); // 1027 jne 0x102e
+    bytes.extend(&CANARY_CHECKED[0x24..0x29]); // 1029 add rsp; ret
+    bytes.extend([0xe8, 0x02, 0x00, 0x00, 0x00, 0x90, 0x90, 0xeb, 0xfe]); // 102e call 0x1035
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_overwritten",
+        },
+        halts: 0x1035,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+/// Two reads of a thread-local variable at `fs:[0x30]` compared the same way are a program's
+/// own check: a call between may change the variable, and only `fs:[0x28]` is the platform's guard.
+#[test]
+fn a_thread_local_read_twice_is_no_stack_guard() {
+    let mut bytes = CANARY_CHECKED.to_vec();
+    bytes[0x09] = 0x30; // 1004 mov rax, fs:[0x30]
+    bytes[0x1e] = 0x30; // 1019 sub rdx, fs:[0x30]
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "thread_local_checked",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+/// The canary is still in RAX at `ret`, so the function returns the guard: that read is the
+/// program's and keeps its residual, while the check and the slot are still the compiler's.
+#[test]
+fn a_canary_the_function_returns_keeps_its_read() {
+    let mut bytes = CANARY_CHECKED.to_vec();
+    bytes[0x12..0x14].copy_from_slice(&[0x90, 0x90]); // 1012 no `xor eax, eax`
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_returned",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("fcn_1030"), "{output}");
+    assert!(output.contains("compiler-inserted"), "{output}");
+}
+
+/// The failure path calls a function that returns, so nothing proves the check is a protector.
+#[test]
+fn a_check_whose_failure_returns_is_not_decided() {
+    let bytes = CANARY_CHECKED.to_vec();
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes,
+        name: "canary_returning_failure",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
 /// `a` and `b` spilled to the frame and reloaded for each division.
 const DIVIDE_AFTER_RELOAD: &[u8] = &[
@@ -4171,4 +4336,190 @@ fn a_lane_written_and_read_back_is_no_parameter() {
         parameters, "uint64_t RDI_0, uint64_t RSI_0",
         "the signature names a register the function never reads: {text}"
     );
+}
+
+/// `f` is called in a loop with `rsi = 1` and `rdi` the last result, or the
+/// pointer itself on the first pass: the body writes `rsi`, and `rdi` merges.
+const LOOPED_INDIRECT_CALL: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xfb, // 0x1001 mov rbx, rdi
+    0x48, 0xc7, 0xc6, 0x01, 0x00, 0x00, 0x00, // 0x1004 mov rsi, 1
+    0xff, 0xd3, // 0x100b call rbx
+    0x48, 0x89, 0xc7, // 0x100d mov rdi, rax
+    0x48, 0x85, 0xc0, // 0x1010 test rax, rax
+    0x75, 0xef, // 0x1013 jne 0x1004
+    0x5b, // 0x1015 pop rbx
+    0xc3, // 0x1016 ret
+];
+
+/// A call whose first argument slot the scan cannot see, while the body
+/// writes the second, passes an unproven count: it is never a call of none.
+#[test]
+fn an_unseen_argument_below_a_written_one_leaves_the_call_unrendered() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: LOOPED_INDIRECT_CALL.to_vec(),
+        name: "looped",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("(void))"), "{text}");
+    assert!(
+        response.render_refusal.is_some() || text.contains("r2sleigh_residual"),
+        "{text}"
+    );
+}
+
+/// `f` hands `rdi` on unchanged to a call through memory and adds `rsi` to its
+/// result; `main` calls it with `edi = 3, esi = 5`.
+const READS_PAST_ITS_PARAMETERS: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xf3, // 0x1001 mov rbx, rsi
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1004 call [0x2000]
+    0x48, 0x01, 0xd8, // 0x100b add rax, rbx
+    0x5b, // 0x100e pop rbx
+    0xc3, // 0x100f ret
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 0x1010 mov edi, 3
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1015 mov esi, 5
+    0xe8, 0xe1, 0xff, 0xff, 0xff, // 0x101a call 0x1000
+    0xc3, // 0x101f ret
+];
+
+/// A callee that reads an argument slot past its parameters states no arity a
+/// caller may take, and no count read off the caller's registers stands: the
+/// call is a residual.
+#[test]
+fn a_callee_reading_past_its_parameters_states_no_call_arity() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: READS_PAST_ITS_PARAMETERS.to_vec(),
+        name: "past",
+    };
+    let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("past("), "{text}");
+    assert!(text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// `f(a, b)` calls itself with `(a - 1, b + 1)`, passing `b + 1` through `rdx`
+/// on the way to `rsi`, and returns `b` or zero.
+const SELF_CALL_WITH_A_SCRATCH_REGISTER: &[u8] = &[
+    0x48, 0x85, 0xff, // 0x1000 test rdi, rdi
+    0x74, 0x12, // 0x1003 je 0x1017
+    0x48, 0x8d, 0x56, 0x01, // 0x1005 lea rdx, [rsi + 1]
+    0x48, 0xff, 0xcf, // 0x1009 dec rdi
+    0x48, 0x89, 0xd6, // 0x100c mov rsi, rdx
+    0xe8, 0xec, 0xff, 0xff, 0xff, // 0x100f call 0x1000
+    0x31, 0xc0, // 0x1014 xor eax, eax
+    0xc3, // 0x1016 ret
+    0x48, 0x89, 0xf0, // 0x1017 mov rax, rsi
+    0xc3, // 0x101a ret
+];
+
+/// A call to the function itself takes the interface its body settled, so a
+/// scratch register written before it is no third argument.
+#[test]
+fn a_self_call_takes_the_functions_own_interface() {
+    let text = rendered(SELF_CALL_WITH_A_SCRATCH_REGISTER, "recurse");
+    let call = text
+        .lines()
+        .find(|line| line.contains("recurse(RDI_0"))
+        .unwrap_or_else(|| panic!("no self call: {text}"));
+    assert_eq!(call.matches(", ").count(), 1, "{text}");
+}
+
+/// `f` calls through memory in a loop with `rsi = b + 1` and `rdi` its own
+/// first argument or the last result, then returns 7; `main` calls `f(3, 5)`.
+const PARAMETERS_HANDED_TO_AN_UNPROVEN_CALL: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xf3, // 0x1001 mov rbx, rsi
+    0x48, 0x8d, 0x73, 0x01, // 0x1004 lea rsi, [rbx + 1]
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1008 call [0x2000]
+    0x48, 0x89, 0xc7, // 0x100f mov rdi, rax
+    0x48, 0x85, 0xc0, // 0x1012 test rax, rax
+    0x75, 0xed, // 0x1015 jne 0x1004
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 0x1017 mov eax, 7
+    0x5b, // 0x101c pop rbx
+    0xc3, // 0x101d ret
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 0x101e mov edi, 3
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1023 mov esi, 5
+    0xe8, 0xd3, 0xff, 0xff, 0xff, // 0x1028 call 0x1000
+    0xc3, // 0x102d ret
+];
+
+/// A body whose first unclaimed argument slot reaches a call of unproven
+/// arity unseen may be passed that argument, so it states no call arity.
+#[test]
+fn a_parameter_handed_to_an_unproven_call_leaves_the_arity_unproven() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: PARAMETERS_HANDED_TO_AN_UNPROVEN_CALL.to_vec(),
+        name: "handed",
+    };
+    let response = decompile(&target, &program, BASE + 0x1e).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("handed()"), "{text}");
+}
+
+/// `a = x + 1` and `b = y + 1` sit side by side, and `&a` goes to a callee
+/// nothing describes.
+const NEIGHBOUR_OF_AN_ESCAPED_LOCAL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 0x1000 sub rsp, 40
+    0x48, 0xff, 0xc7, // 0x1004 inc rdi
+    0x48, 0x89, 0x7c, 0x24, 0x08, // 0x1007 mov [rsp + 8], rdi
+    0x48, 0xff, 0xc6, // 0x100c inc rsi
+    0x48, 0x89, 0x74, 0x24, 0x10, // 0x100f mov [rsp + 16], rsi
+    0x48, 0x8d, 0x7c, 0x24, 0x08, // 0x1014 lea rdi, [rsp + 8]
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1019 call [0x2000]
+    0x48, 0x8b, 0x44, 0x24, 0x10, // 0x1020 mov rax, [rsp + 16]
+    0x48, 0x83, 0xc4, 0x28, // 0x1025 add rsp, 40
+    0xc3, // 0x1029 ret
+];
+
+/// Every object an escaped address may reach is one object, so the callee's
+/// pointer arithmetic from `&a` into `b` is defined C (the extent rule).
+#[test]
+fn the_objects_an_escaped_address_reaches_are_one() {
+    let text = rendered(NEIGHBOUR_OF_AN_ESCAPED_LOCAL, "neighbour");
+    let declarations = text
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("uint") && line.contains("stack_") && !line.contains('=')
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 1, "{text}");
+    assert!(declarations[0].contains('['), "{text}");
+    assert!(!text.contains("assumed (frame extent"), "{text}");
+}
+
+/// `table[x % 3]` on AArch64, with the divisor held in a register:
+/// `udiv x10, x0, x9; msub x10, x10, x9, x0`.
+const REMAINDER_BY_A_DIVIDE: &[u8] = &[
+    0xff, 0x83, 0x00, 0xd1, // sub sp, sp, #32
+    0x69, 0x00, 0x80, 0xd2, // mov x9, #3
+    0x0a, 0x08, 0xc9, 0x9a, // udiv x10, x0, x9
+    0x4a, 0x81, 0x09, 0x9b, // msub x10, x10, x9, x0
+    0xe1, 0x03, 0x00, 0xf9, // str x1, [sp]
+    0xe2, 0x07, 0x00, 0xf9, // str x2, [sp, #8]
+    0xe3, 0x0b, 0x00, 0xf9, // str x3, [sp, #16]
+    0xe0, 0x7b, 0x6a, 0xf8, // ldr x0, [sp, x10, lsl #3]
+    0xff, 0x83, 0x00, 0x91, // add sp, sp, #32
+    0xc0, 0x03, 0x5f, 0xd6, // ret
+];
+
+/// A divide by a constant is an exact quotient, so its remainder bounds the
+/// index and the table is its three stored rows, none dropped.
+#[test]
+fn a_remainder_by_a_divide_bounds_a_table_index() {
+    let text = rendered_on(
+        &Machine::new("aarch64", "aarch64", 64),
+        REMAINDER_BY_A_DIVIDE,
+        "remainder",
+    );
+    assert!(text.contains("[3];") || text.contains("[24];"), "{text}");
+    assert!(!text.contains("assumed (frame extent"), "{text}");
 }

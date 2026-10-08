@@ -101,10 +101,9 @@ fn spell_argument(session: &Session, entry: u64, argument: &Argument) -> String 
     format!("arg {} {}{at}", argument.ty, argument_name(argument))
 }
 
-/// `var <type> stack_mN @ <base><offset>`, named as the decompiler names it.
+/// `var <type> <name> @ <base><offset>`, named as the decompiler names it.
 fn spell_local(local: &Local) -> String {
     let ty = &local.ty;
-    let side = if local.offset < 0 { 'm' } else { 'p' };
     let magnitude = local.offset.unsigned_abs();
     let sign = if local.offset < 0 { '-' } else { '+' };
     // Offsets are from the base at entry, not from the stack pointer where the body runs.
@@ -113,7 +112,7 @@ fn spell_local(local: &Local) -> String {
         r2engine::program::info::StackBase::FramePointer => "fp",
         r2engine::program::info::StackBase::Realigned => "realigned.sp",
     };
-    format!("var {ty} stack_{side}{magnitude} @ {base}{sign}{magnitude:#x}")
+    format!("var {ty} {} @ {base}{sign}{magnitude:#x}", local.name)
 }
 
 /// `afb`: the function's basic blocks, one per line in address order, as

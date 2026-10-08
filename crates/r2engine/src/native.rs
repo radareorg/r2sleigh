@@ -1558,61 +1558,24 @@ impl Native<'_> {
         self.prepare_with_literals(walked, callees, Vec::new())
     }
 
-    /// The interface the first pass recovered, restated with the frame slots
-    /// it proved.
-    ///
-    /// `None` where the body proves no slot, which is every function that
-    /// keeps its arguments in registers.
+    /// The interface the first pass recovered, restated with the frame slots the debug
+    /// information declares; `None` where it declares none. A slot the body proves is the frame
+    /// model's own (`SsaArtifact::stack_slot_role`), never restated as a declaration.
     fn restated(
         &self,
         artifact: &TrustedSsaArtifact,
         declared: &[r2source::SourceStackSlotSpec],
     ) -> Option<r2source::SourceFunctionInterface> {
-        let prepared = artifact.shared_artifact();
-        let prepared = prepared.as_ref();
-        let interface = prepared.machine_context().function_interface()?;
-        let base_storage = prepared.machine_context().stack_pointer_carrier()?;
-        let proved = r2ssa::recover_interface::recovered_stack_slots(prepared);
-        if proved.is_empty() && declared.is_empty() {
+        if declared.is_empty() {
             return None;
         }
-
-        let slots = proved
-            .iter()
-            .filter_map(|slot| {
-                let parameter = match slot.parameter {
-                    None => {
-                        return Some(r2source::SourceStackSlotSpec::new_local(
-                            r2source::StackAddressBase::StackPointer,
-                            base_storage,
-                            slot.offset,
-                            slot.size_bytes,
-                        ));
-                    }
-                    Some(index) => index,
-                };
-                // A home names the register its parameter arrived in, and the
-                // constructor refuses any other.
-                let home = interface
-                    .parameters()
-                    .get(parameter as usize)?
-                    .register_storage()?;
-                Some(r2source::SourceStackSlotSpec::new_parameter_home(
-                    r2source::StackAddressBase::StackPointer,
-                    base_storage,
-                    slot.offset,
-                    slot.size_bytes,
-                    parameter,
-                    home,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        // What the declaration states about the frame stays stated, extent and
-        // type: the body proves where its own accesses land, and one inside a
-        // declared object is a member of it, not an object of its own.
-        let slots = crate::declared::restated_slots(declared, slots, interface);
-        restate(interface, slots, interface.revision_identity().to_vec())
+        let prepared = artifact.shared_artifact();
+        let interface = prepared.as_ref().machine_context().function_interface()?;
+        restate(
+            interface,
+            declared.to_vec(),
+            interface.revision_identity().to_vec(),
+        )
     }
 
     /// What the binary's debug information declares about the body at this
@@ -1723,9 +1686,13 @@ impl Native<'_> {
         let lifted = Disassembler::lift_owned_function(snapshot)
             .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
         let evidence = callees.evidence(library);
-        let artifact =
-            TrustedSsaArtifact::prepare_with_callee_interfaces(lifted, &self.control, &evidence)
-                .map_err(NativeRefusal::of_preparation)?;
+        let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
+            lifted,
+            &self.control,
+            &evidence,
+            &accepted_premises(),
+        )
+        .map_err(NativeRefusal::of_preparation)?;
         Ok(Arc::new(artifact))
     }
 }
@@ -1856,6 +1823,13 @@ impl Native<'_> {
         referenced(body)
             .into_iter()
             .filter(|address| !body.calls.contains(address))
+            // An import's slot is a word the loader fills, not an object the source names: its
+            // relocation's name is the function's, and `&memcpy` is not where the slot is.
+            .filter(|address| {
+                self.program.import_at(*address).is_none()
+                    || r2abi::statement::write_at(self.program.loader_writes(), *address)
+                        .is_none_or(|write| write.place != *address)
+            })
             .filter_map(|address| {
                 let name = self.program.name_at(address)?;
                 // What the type is, rather than what it is called: a name
@@ -2052,8 +2026,19 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         .with_role_register_names(SourceRoleRegisterNames::new(
             Some(return_address_name),
             Some(stack_pointer_name),
-            None,
+            target.convention.frame_pointer,
         ));
+    // The register the convention keeps a frame base in, where the architecture places it.
+    let roles = match target
+        .convention
+        .frame_pointer
+        .map(|name| storage(target.arch, name))
+    {
+        Some(Ok(frame_pointer)) => roles
+            .with_frame_pointer(frame_pointer)
+            .map_err(|_| NativeRefusal::Machine("the frame pointer is not a register storage"))?,
+        _ => roles,
+    };
 
     let slots = convention_slots(target)?;
 
@@ -2216,6 +2201,19 @@ pub fn call_effect(
     SourceBoundaryReads::new(call_reads, return_reads)
         .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
         .and_then(|effect| effect.with_system_reserved(system_reserved))
+        .and_then(
+            |effect| match r2abi::stack_guard(&arch.name, bits, platform) {
+                Some(guard) => match place(guard.register) {
+                    Some(base) => effect.with_stack_guard(r2source::SourceStackGuard {
+                        base,
+                        offset: guard.offset,
+                        width: guard.width,
+                    }),
+                    None => Ok(effect),
+                },
+                None => Ok(effect),
+            },
+        )
         .inspect_err(|error| {
             r2il::refusal_evidence!("call-effect", "{}: {error:?}", prototype.name);
         })
@@ -2287,4 +2285,10 @@ pub(crate) fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId,
             size: register.size,
         })
         .ok_or_else(|| NativeRefusal::UnknownRegister(name.to_owned()))
+}
+
+/// The premises the engine grants every derivation: a UB-free source, so a stack-protector check
+/// passes (doc/adr-frame-model.md, P4.4). A consumer that refuses it is item A's.
+pub(crate) fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
+    std::collections::BTreeSet::from([r2source::Premise::UbFreeSource])
 }

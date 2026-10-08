@@ -34,9 +34,11 @@ pub(crate) mod deadphi;
 pub(crate) mod defuse;
 pub(crate) mod demand;
 pub mod dense;
+pub(crate) mod division;
 pub mod domtree;
 pub mod fate;
 pub mod fixpoint;
+pub(crate) mod frame_address;
 pub mod function;
 pub mod graph;
 pub mod indirect;
@@ -50,6 +52,7 @@ pub(crate) mod machine_context;
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
+pub use naming::frame_object_name;
 pub mod natural_loops;
 pub(crate) mod obligation;
 pub(crate) mod op;
@@ -57,13 +60,14 @@ pub(crate) mod optimize;
 pub mod origin;
 pub(crate) mod phi;
 pub(crate) mod printf;
-pub(crate) mod promote;
 pub(crate) mod reaching_rules;
 pub mod recover_interface;
 pub(crate) mod rename;
 pub(crate) mod semantic;
 mod slice;
+pub(crate) mod slot_promotion;
 pub mod span;
+pub(crate) mod stack_protector;
 mod strided;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -154,7 +158,6 @@ pub use obligation::{
 };
 pub use op::{AtomicCasOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
 pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
-pub use promote::promoted_slot_offset;
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,
@@ -166,8 +169,8 @@ pub use semantic::{
     CallResultValueRelation, CallSiteFact, CallSiteFacts, CallSiteId, CallSiteTransfer,
     CalleeStackAllocationCertificate, CallsiteCertificate, CompareKind, CompareProvenance,
     ControlDomain, ControlDomainFacts, ControlDomainId, ControlGuard, EntryAffineForm,
-    ForLoopCertificate, FrameReach, GlobalObjectKey, IfRegionCertificate, InductionFact,
-    InductionStep, LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact,
+    ExtentAssumption, ForLoopCertificate, FrameReach, GlobalObjectKey, IfRegionCertificate,
+    InductionFact, InductionStep, LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact,
     LoopCarrierMemberRole, LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips,
     MachineReturnControlCertificate, MemberRunPlace, MemberRunSource, MemberRunStoreCertificate,
     MemberRunStoreMember, MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey,
@@ -188,6 +191,7 @@ pub use semantic::{
     value_reaching,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
+pub use slot_promotion::promoted_slot_offset;
 pub use strided::StridedInterval;
 pub use value_table::{ValueTable, VarId};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};

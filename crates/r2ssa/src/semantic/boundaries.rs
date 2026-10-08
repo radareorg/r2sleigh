@@ -555,6 +555,8 @@ pub(crate) fn variadic_callsite_arguments(
 pub(crate) struct ConventionCallBoundary {
     pub(crate) calling_convention: String,
     pub(crate) arguments: Vec<SourceCallArgumentFact>,
+    /// Whether the registers prove how many arguments the call takes; the results stand either way.
+    pub(crate) arguments_proven: bool,
     pub(crate) results: Vec<CallBoundaryValueFact>,
 }
 
@@ -797,7 +799,73 @@ pub(crate) fn convention_call_boundary(
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
+    // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
+    let result_slot = |slot: CanonicalStorageId| {
+        machine_context
+            .abi_model()
+            .return_registers()
+            .iter()
+            .any(|register| {
+                let storage = register.storage();
+                storage.space == slot.space && storage.offset == slot.offset
+            })
+    };
+    // Whether this function itself takes `slot` as a parameter, where its interface says.
+    let own_parameter = |slot: CanonicalStorageId| {
+        machine_context
+            .function_interface()
+            .is_some_and(|interface| {
+                interface
+                    .parameters()
+                    .iter()
+                    .filter_map(|parameter| parameter.register_storage())
+                    .any(|storage| storage.space == slot.space && storage.offset == slot.offset)
+            })
+    };
+    // A slot past `position` the body writes, reached through slots that could each be an
+    // argument too. Arguments fill in order, so an untouched slot that is no parameter of this
+    // function, which nothing could pass, proves the count ends below it.
+    let written_later = |position: usize| {
+        for slot in convention
+            .argument_slots()
+            .iter()
+            .skip(position + 1)
+            .copied()
+        {
+            match reaching_abi_value_in_block_with_policy(
+                function,
+                prep,
+                graph,
+                machine_context,
+                block_addr,
+                op_index,
+                slot,
+                false,
+            ) {
+                Some(ReachingAbiState::Value(value))
+                    if graph.written_by_body(value) && !value_is_call_clobber(graph, value) =>
+                {
+                    return Some(slot);
+                }
+                Some(ReachingAbiState::PreservedEntry) if !own_parameter(slot) => return None,
+                // What a call left outside its result is garbage: nothing a callee could take.
+                Some(ReachingAbiState::Value(value))
+                    if value_is_call_clobber(graph, value) && !result_slot(slot) =>
+                {
+                    return None;
+                }
+                Some(ReachingAbiState::Value(value))
+                    if !graph.written_by_body(value) && !own_parameter(slot) =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    };
     let mut arguments = Vec::new();
+    let mut arguments_proven = true;
     for (position, slot) in convention.argument_slots().iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {
             break;
@@ -816,10 +884,21 @@ pub(crate) fn convention_call_boundary(
             position < at_least,
         );
         let value = match reaching {
-            // What an earlier call left is nothing this body passed, unless the callee proves it reads it.
+            // What an earlier call left ends the count, unless the body writes a later slot: then the
+            // result may be passed on (an accumulator) and the count is unproven.
             Some(ReachingAbiState::Value(value))
                 if value_is_call_clobber(graph, value) && position >= at_least =>
             {
+                if result_slot(*slot)
+                    && let Some(written) = written_later(position)
+                {
+                    r2il::refusal_evidence!(
+                        "convention-arity-unproven",
+                        "callsite ({block_addr:#x}, {op_index}) holds a call's result in argument slot {position}, yet the body writes {written:?}"
+                    );
+                    arguments_proven = false;
+                    break;
+                }
                 break;
             }
             Some(ReachingAbiState::Value(value)) if graph.written_by_body(value) => {
@@ -836,7 +915,28 @@ pub(crate) fn convention_call_boundary(
                     None => SourceCallArgumentValue::PreservedEntry,
                 }
             }
-            Some(_) | None => break,
+            // A slot the body did not write (an untouched or caller-supplied entry value, or one
+            // it cannot see) ends the count unless the body writes a later one, or the slot holds
+            // this function's own parameter: either way the call may be passed it.
+            Some(_) | None => {
+                if own_parameter(*slot) {
+                    r2il::refusal_evidence!(
+                        "convention-arity-unproven",
+                        "callsite ({block_addr:#x}, {op_index}) may hand on parameter slot {position}"
+                    );
+                    arguments_proven = false;
+                    break;
+                }
+                if let Some(written) = written_later(position) {
+                    r2il::refusal_evidence!(
+                        "convention-arity-unproven",
+                        "callsite ({block_addr:#x}, {op_index}) did not write argument slot {position}, yet the body writes {written:?}"
+                    );
+                    arguments_proven = false;
+                    break;
+                }
+                break;
+            }
         };
         arguments.push(SourceCallArgumentFact {
             slot: CallBoundarySlot::Register {
@@ -921,6 +1021,7 @@ pub(crate) fn convention_call_boundary(
     Some(ConventionCallBoundary {
         calling_convention: convention.calling_convention().to_string(),
         arguments,
+        arguments_proven,
         results,
     })
 }
@@ -1167,7 +1268,21 @@ pub(crate) fn collect_source_boundary_facts(
                 boundary.complete = arguments_complete && results_complete;
             }
         }
+        // A callee whose body leaves its arity unproven refuses any count the registers suggest.
+        let arity_unproven = machine_context.is_some_and(|machine_context| {
+            call_site
+                .raw_identity
+                .is_some_and(|identity| machine_context.call_arity_unproven(identity))
+        });
+        if arity_unproven {
+            r2il::refusal_evidence!(
+                "call-arity-unproven",
+                "callsite {:?}: its callee reads past its parameters",
+                call_site.raw_identity
+            );
+        }
         if !boundary.complete
+            && !arity_unproven
             && boundary.calling_convention.is_none()
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
@@ -1208,7 +1323,8 @@ pub(crate) fn collect_source_boundary_facts(
                 // the machine rather than from a prototype, so every argument
                 // found is a fixed one as far as anything here can tell.
                 boundary.variadic = Some(false);
-                boundary.fixed_argument_count = Some(convention.arguments.len());
+                boundary.fixed_argument_count =
+                    Some(convention.arguments.len()).filter(|_| convention.arguments_proven);
                 boundary.arguments = convention.arguments;
                 boundary.results = convention.results;
                 // Deliberately not the result kind. Where the convention says a
@@ -1217,9 +1333,9 @@ pub(crate) fn collect_source_boundary_facts(
                 // tail transfer as proof that its target returns a value. What
                 // the callee returns stays unproven; the renderer's disposition
                 // decides what a transfer through this boundary looks like.
-                boundary.complete = true;
-                boundary.arguments_complete = true;
+                boundary.arguments_complete = convention.arguments_proven;
                 boundary.results_complete = true;
+                boundary.complete = convention.arguments_proven;
             }
         }
         facts.calls.insert(call_site.id, boundary);

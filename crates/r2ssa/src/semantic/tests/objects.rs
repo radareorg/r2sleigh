@@ -328,6 +328,12 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         space: SpaceId::Ram,
         addr: local_addr,
     });
+    // The epilogue restores the saved frame pointer, which keeps its slot a save in memory.
+    block.push(R2ILOp::Load {
+        dst: Varnode::register(8, 8),
+        space: SpaceId::Ram,
+        addr: Varnode::register(0, 8),
+    });
     block.push(R2ILOp::Return { target: ra });
 
     let mut arch = ArchSpec::new("dual-stack-coordinate-test");
@@ -726,10 +732,11 @@ fn a_stack_position_nothing_accesses_or_passes_on_has_no_extent() {
         (None, false),
         "a position with no access and no escaping address is not an object to declare"
     );
+    // Handing its address on proves no width: the gap to the next object is a layout, not an extent (ADR frame-model).
     assert_eq!(
         passed_through(&artifact(true)),
-        (Some(8), true),
-        "the same position is a buffer once its address is handed on, and the frame's gap is its extent"
+        (None, false),
+        "an escaping position nothing sizes has no extent"
     );
 }
 

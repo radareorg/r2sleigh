@@ -79,6 +79,82 @@ fn callee_stack_allocation_reaches_unchanged_sp_through_loop_fixpoint() {
     assert_eq!(certificate.active_sp_offsets.as_ref(), [-8]);
 }
 
+/// A pre-index store writes below the stack pointer and moves it there in one
+/// instruction; the instruction's end owns the slot, so the callee allocates it.
+#[test]
+fn a_pre_index_store_is_allocated_by_its_own_instruction() {
+    let sp = Varnode::register(32, 8);
+    let below = Varnode::unique(0x6100, 8);
+    let mut push = R2ILBlock::new(0x6100, 4);
+    push.push(R2ILOp::IntSub {
+        dst: below.clone(),
+        a: sp.clone(),
+        b: Varnode::constant(16, 8),
+    });
+    push.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: below.clone(),
+        val: Varnode::register(40, 8),
+    });
+    push.push(R2ILOp::Copy {
+        dst: sp.clone(),
+        src: below,
+    });
+    for index in 0..push.ops.len() {
+        push.stamp_instruction(index, 0x6100);
+    }
+    let mut pop = R2ILBlock::new(0x6104, 4);
+    pop.push(R2ILOp::Load {
+        dst: Varnode::register(40, 8),
+        space: SpaceId::Ram,
+        addr: sp.clone(),
+    });
+    pop.push(R2ILOp::IntAdd {
+        dst: sp.clone(),
+        a: sp,
+        b: Varnode::constant(16, 8),
+    });
+    for index in 0..pop.ops.len() {
+        pop.stamp_instruction(index, 0x6104);
+    }
+    let mut ret = R2ILBlock::new(0x6108, 4);
+    ret.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+
+    let roles =
+        SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+            .and_then(|roles| {
+                roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
+                    SourceStackGrowth::LowerAddresses,
+                ))
+            })
+            .expect("exact downward stack allocation roles");
+    let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+        &[push, pop, ret],
+        Some(&return_boundary_arch()),
+        Some(preserved_stack_interface()),
+        roles,
+        Vec::new(),
+    )
+    .expect("pre-index artifact");
+    let [store] = artifact
+        .inst_at(0x6100, 1)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
+        .expect("the pre-index store")
+    else {
+        panic!("one saved definition")
+    };
+    let certificate = artifact
+        .certificates()
+        .stack_slots
+        .get(&store.location.object)
+        .and_then(|slot| slot.callee_allocation.as_ref())
+        .expect("the instruction's own stack pointer write allocates the slot");
+    assert_eq!(certificate.entry_offset, -16);
+    assert_eq!(certificate.active_sp_offsets.as_ref(), [-16]);
+}
+
 #[test]
 fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
     let sp = Varnode::register(32, 8);

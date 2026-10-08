@@ -1317,13 +1317,128 @@ impl SsaArtifact {
     ///
     /// A frame-management slot is not a program object, and neither is one
     /// whose extent nothing states.
+    /// The formal parameter a frame slot is the home of, proved in this preparation: a declarable
+    /// entry-relative slot a parameter's value is stored into (doc/adr-frame-model.md, P4.5).
+    pub fn proved_parameter_home(&self, object: crate::ObjectId) -> Option<u32> {
+        let slot = self.certificates().stack_slots.get(&object)?;
+        if slot.source_slot.is_some()
+            || slot.size.is_none()
+            || slot.base != crate::StackAddressBase::StackPointer
+            || !self.declarable_stack_object(object)
+        {
+            return None;
+        }
+        let facts = self.decompile_prep_facts();
+        slot.stored_values
+            .iter()
+            .find_map(|value| facts.formal_parameter_of(value))
+            .and_then(|index| u32::try_from(index).ok())
+    }
+
+    /// What a frame slot is: the role its declaration states, or a parameter home the frame proves.
+    pub fn stack_slot_role(
+        &self,
+        object: crate::ObjectId,
+    ) -> Option<r2source::SourceStackSlotRole> {
+        if let Some(declared) = self.certificates().stack_slots.get(&object)?.source_slot {
+            return Some(declared.role());
+        }
+        let parameter_index = self.proved_parameter_home(object)?;
+        let home_storage = self
+            .machine_context()
+            .function_interface()?
+            .parameters()
+            .get(parameter_index as usize)?
+            .register_storage()?;
+        Some(r2source::SourceStackSlotRole::ParameterHome {
+            parameter_index,
+            home_storage,
+        })
+    }
+
+    /// The source type of a frame slot: its declaration's, or a proved home's parameter type at
+    /// the home's width.
+    pub fn stack_slot_logical_type(&self, object: crate::ObjectId) -> Option<u32> {
+        let slot = self.certificates().stack_slots.get(&object)?;
+        if let Some(declared) = slot.source_slot {
+            return declared.logical_type();
+        }
+        let index = self.proved_parameter_home(object)?;
+        let value = self
+            .machine_context()
+            .function_interface()?
+            .parameter_logical_value(index as usize)?;
+        (value.carrier().size_bits() == u64::from(slot.size?) * 8).then(|| value.type_id())
+    }
+
+    /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
+    pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
+        let slot = self.certificates().stack_slots.get(&object)?;
+        // A callee's proven reach, or the whole run an escaped address may reach, is its extent.
+        if slot.source_slot.is_some()
+            || !self.declarable_stack_object(object)
+            || self.proved_parameter_home(object).is_some()
+            || self.objects().callee_write_reach.contains_key(&object)
+        {
+            return None;
+        }
+        match slot.array_layout {
+            crate::StackArrayLayoutDisposition::Proven(_) => None,
+            crate::StackArrayLayoutDisposition::Refused(
+                crate::StackArrayLayoutRefusal::MissingConstantOffset,
+            ) => Some(crate::ExtentAssumption::UnboundedIndex),
+            _ => self
+                .objects()
+                .frame_reach
+                .escaped(object)
+                .then_some(crate::ExtentAssumption::EscapedAddress),
+        }
+    }
+
     pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
         !self.frame_managed_stack_object(object)
+            && !self.call_return_address_object(object)
+            && !self.compiler_inserted_stack_object(object)
             && self
                 .certificates()
                 .stack_slots
                 .get(&object)
                 .is_some_and(|slot| slot.size.is_some_and(|size| size > 0))
+    }
+
+    /// Whether every access to this object is a call pushing its return address: the callee's frame, not a local.
+    pub fn call_return_address_object(&self, object: crate::ObjectId) -> bool {
+        self.object_accessed_only_by(
+            object,
+            &self.certificates().call_return_address_stores,
+            true,
+        )
+    }
+
+    /// Whether every access to this object is one a decided stack-protector check inserted: the canary.
+    pub fn compiler_inserted_stack_object(&self, object: crate::ObjectId) -> bool {
+        self.object_accessed_only_by(object, &self.certificates().compiler_inserted, false)
+    }
+
+    /// Whether the object has an access and every access is an instruction of `insts` (each a write, if asked).
+    fn object_accessed_only_by(
+        &self,
+        object: crate::ObjectId,
+        insts: &crate::dense::IdSet<crate::graph::InstId>,
+        writes_only: bool,
+    ) -> bool {
+        let stores = insts;
+        let mut accesses = self
+            .structured()
+            .memory_accesses
+            .values()
+            .filter(|access| access.object == object);
+        let mut any = false;
+        let pushed = accesses.all(|access| {
+            any = true;
+            (access.is_write || !writes_only) && stores.contains(access.id.inst)
+        });
+        any && pushed
     }
 
     /// The entry-relative offset of a stack object addressed from the entry stack pointer.
@@ -1684,6 +1799,8 @@ struct CorrelatedCallSites {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each correlated site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
+    /// The sites whose callee's body leaves its arity unproven.
+    arity_unproven: BTreeSet<SourceCallSiteIdentity>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1695,6 +1812,7 @@ fn correlate_call_site_interfaces(
     let mut interfaces = Vec::new();
     let mut callee_linkages = BTreeMap::new();
     let mut callee_names = BTreeMap::new();
+    let mut arity_unproven = BTreeSet::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, call) else {
             // The source named a call the lift does not have exactly one
@@ -1739,6 +1857,9 @@ fn correlate_call_site_interfaces(
             let Some(callee) = recovered else {
                 continue;
             };
+            if callee.reads_past_parameters() {
+                arity_unproven.insert(identity);
+            }
             if let Some(mut interface) =
                 crate::recover_interface::mint_recovered_call_site_interface(
                     callee,
@@ -1843,6 +1964,7 @@ fn correlate_call_site_interfaces(
         interfaces,
         callee_linkages,
         callee_names,
+        arity_unproven,
     }
 }
 
@@ -2060,7 +2182,12 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::prepare_with_callee_interfaces(lifted, control, &CalleeEvidence::default())
+        Self::prepare_with_callee_interfaces(
+            lifted,
+            control,
+            &CalleeEvidence::default(),
+            &BTreeSet::new(),
+        )
     }
 
     /// Prepare, describing each call whose callee body came in this capture.
@@ -2071,6 +2198,7 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
         evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
     ) -> Result<Self, SsaPrepareError> {
         let CalleeEvidence {
             interfaces: callee_interfaces,
@@ -2191,6 +2319,8 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
                 provisional_machine_context.set_callee_statements(&callee_statements);
+                // The preliminary build may be the one sealed, so it decides under the same premises.
+                provisional_machine_context.set_accepted_premises(premises.clone());
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
@@ -2254,6 +2384,37 @@ impl TrustedSsaArtifact {
                 minted
             }
         };
+        // A call to this function itself has its contract in the interface just settled.
+        let mut call_interfaces = correlated_call_sites.interfaces;
+        let mut arity_unproven = correlated_call_sites.arity_unproven;
+        if let Some(own) = function_interface.as_ref() {
+            for call in source.advisory_calls() {
+                if call.target_address() != source.image().entry_address() {
+                    continue;
+                }
+                let Some(identity) = unique_call_site_identity(&blocks, call) else {
+                    continue;
+                };
+                if call_interfaces
+                    .iter()
+                    .any(|known| known.identity() == identity)
+                {
+                    continue;
+                }
+                if own.reads_past_parameters() {
+                    arity_unproven.insert(identity);
+                }
+                if let Some(interface) =
+                    crate::recover_interface::mint_recovered_call_site_interface(
+                        own,
+                        identity,
+                        source.source_revision_identity(),
+                    )
+                {
+                    call_interfaces.push(interface);
+                }
+            }
+        }
         let mut machine_context =
             SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
                 blocks.as_slice(),
@@ -2262,18 +2423,20 @@ impl TrustedSsaArtifact {
                 *source.machine_roles(),
                 Some(source.convention_slots().clone()),
                 source.call_effect().cloned(),
-                correlated_call_sites.interfaces,
+                call_interfaces,
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
             );
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
+        machine_context.set_arity_unproven_sites(arity_unproven);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_result_owners(result_owners);
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());
+        machine_context.set_accepted_premises(premises.clone());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.
@@ -2485,7 +2648,11 @@ pub struct SSAFunction {
     /// A promoted slot access is a copy of a variable in the prepared
     /// operations, so it is no longer one of the function's memory
     /// operations, and every layer that counts those has to agree.
-    promoted_slot_sites: BTreeSet<(u64, usize)>,
+    promoted_slots: crate::dense::IdSet<crate::arena::OpId>,
+    /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
+    compiler_inserted: crate::dense::IdSet<crate::arena::OpId>,
+    /// The failure blocks a decided stack-protector check removed, whose instructions stay owed.
+    compiler_inserted_blocks: BTreeSet<u64>,
     /// The architectural stack pointer, as the machine roles name it.
     ///
     /// The roles know it for every function, including one whose signature
@@ -2741,6 +2908,11 @@ impl SSAFunction {
                         }
                     }
                 }
+                ShapeEdit::InsertPhi { block, phi } => {
+                    if let Some(mut block) = self.block_for_change(block) {
+                        block.push_phi(phi, crate::arena::Pass::PhiPlacement);
+                    }
+                }
                 ShapeEdit::RemoveEdge { from, to } => self.cfg.remove_edge(from, to),
                 ShapeEdit::SetTerminator { block, terminator } => {
                     self.cfg.set_terminator(block, terminator);
@@ -2832,7 +3004,9 @@ impl Clone for SSAFunction {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
-            promoted_slot_sites: self.promoted_slot_sites.clone(),
+            promoted_slots: self.promoted_slots.clone(),
+            compiler_inserted: self.compiler_inserted.clone(),
+            compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
@@ -3332,9 +3506,32 @@ impl SSAFunction {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
 
-    /// Which lifted memory operations promotion took out of memory.
-    pub fn promoted_slot_sites(&self) -> &BTreeSet<(u64, usize)> {
-        &self.promoted_slot_sites
+    /// The memory operations slot promotion rewrote into copies.
+    pub fn promoted_slots(&self) -> &crate::dense::IdSet<crate::arena::OpId> {
+        &self.promoted_slots
+    }
+
+    pub(crate) fn record_promoted_slots(&mut self, ops: crate::dense::IdSet<crate::arena::OpId>) {
+        self.promoted_slots = ops;
+    }
+
+    /// The operations a decided stack-protector check inserted (`crate::stack_protector`).
+    pub fn compiler_inserted(&self) -> &crate::dense::IdSet<crate::arena::OpId> {
+        &self.compiler_inserted
+    }
+
+    pub(crate) fn record_compiler_inserted(
+        &mut self,
+        ops: crate::dense::IdSet<crate::arena::OpId>,
+        blocks: BTreeSet<u64>,
+    ) {
+        self.compiler_inserted.extend(ops.iter());
+        self.compiler_inserted_blocks.extend(blocks);
+    }
+
+    /// The failure blocks a decided stack-protector check removed.
+    pub fn compiler_inserted_blocks(&self) -> &BTreeSet<u64> {
+        &self.compiler_inserted_blocks
     }
 
     /// Set the function name.

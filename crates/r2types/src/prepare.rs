@@ -288,16 +288,8 @@ pub(crate) fn recover_vars_from_prepared_ssa(
         .stack_slots
         .values()
         .map(|slot| {
-            let size = slot.size.unwrap_or_else(|| {
-                prepared
-                    .certificates()
-                    .memory_accesses
-                    .values()
-                    .filter(|access| access.object == slot.object)
-                    .map(|access| access.width)
-                    .max()
-                    .unwrap_or(0)
-            });
+            // The certified extent alone; a slot nothing sizes has none (doc/adr-frame-model.md, one extent rule).
+            let size = slot.size.unwrap_or(0);
             RecoveredVariable {
                 name: if slot.offset < 0 {
                     format!("var_{:x}", slot.offset.unsigned_abs())

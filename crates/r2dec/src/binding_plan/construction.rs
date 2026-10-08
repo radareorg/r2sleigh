@@ -1032,6 +1032,7 @@ impl BindingPlan {
         let direct_call_targets = super::certified_direct_call_target_values(source);
         let call_return_addresses = super::certified_call_return_address_values(source);
         let stack_frame_values = certified_stack_frame_values(source);
+        let compiler_inserted_values = super::certified_compiler_inserted_values(source);
         let stack_geometry_values = certified_stack_geometry_values(source);
         let unobserved_values = source.unobserved_values();
         let effectful = super::rules::effectful_definition_values(source);
@@ -1111,6 +1112,14 @@ impl BindingPlan {
             } else if direct_call_targets.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: crate::ledger::ElisionReason::DirectCallTarget,
+                    proof: ValueElisionProof {
+                        authority: source.authority().clone(),
+                        value: graph_value.id,
+                    },
+                };
+            } else if compiler_inserted_values.contains(&graph_value.id) {
+                dispositions[index] = ValueDisposition::Elided {
+                    reason: crate::ledger::ElisionReason::CompilerInserted,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1469,6 +1478,7 @@ impl BindingPlan {
                     size,
                     array_layout,
                     source_slot,
+                    role: slot_role,
                     reload_values,
                     stored_values,
                     callee_allocation,
@@ -1482,6 +1492,15 @@ impl BindingPlan {
                         *object,
                         StackObjectDisposition::Elided {
                             reason: crate::ledger::ElisionReason::StackFrame,
+                        },
+                    );
+                    continue;
+                }
+                if source.compiler_inserted_stack_object(*object) {
+                    stack_objects.insert(
+                        *object,
+                        StackObjectDisposition::Elided {
+                            reason: crate::ledger::ElisionReason::CompilerInserted,
                         },
                     );
                     continue;
@@ -1539,7 +1558,13 @@ impl BindingPlan {
                     );
                     continue;
                 };
-                if let Some(certificate) = callee_allocation {
+                // A home the frame proves is its parameter, whatever storage proof the spill also has.
+                let home_proved = source_slot.is_none()
+                    && matches!(
+                        slot_role,
+                        Some(r2ssa::SourceStackSlotRole::ParameterHome { .. })
+                    );
+                if let Some(certificate) = callee_allocation.as_ref().filter(|_| !home_proved) {
                     if source_slot.is_some()
                         || certificate.object != *object
                         || certificate.size_bytes != size_bytes
@@ -1587,90 +1612,98 @@ impl BindingPlan {
                         ),
                         *id,
                         declaration_type,
-                        Some(if certificate.entry_offset < 0 {
-                            format!("stack_m{}", certificate.entry_offset.unsigned_abs())
-                        } else {
-                            format!("stack_p{}", certificate.entry_offset.unsigned_abs())
-                        }),
+                        Some(r2ssa::frame_object_name(certificate.entry_offset)),
                         source_owned.source().caller_stack_object(*object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
                 }
-                let Some(source_slot) = *source_slot else {
-                    // Named by the width its own accesses agree on, at the
-                    // position the object model proved. A local like any other;
-                    // only the origin of its geometry differs.
-                    let declaration_type = super::rules::declaration_type_for_stack_object(
-                        source_owned,
-                        *object,
-                        width_bits,
-                        source
-                            .machine_context()
-                            .memory_model()
-                            .default_address_bits(),
-                    );
-                    let binding = bind_stack_object(
-                        &mut bindings,
-                        shared_reload_binding(
-                            &dispositions,
-                            &bound_values,
-                            reload_values,
-                            stored_values,
-                            &declaration_type,
-                        ),
-                        *id,
-                        declaration_type,
-                        Some(if *offset < 0 {
-                            format!("stack_m{}", offset.unsigned_abs())
-                        } else {
-                            format!("stack_p{}", offset.unsigned_abs())
-                        }),
-                        source_owned.source().caller_stack_object(*object),
-                    )?;
-                    stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
-                    continue;
+                // A slot no declaration names is a local, unless the frame proves it a parameter's home.
+                let proved_home = match slot_role {
+                    Some(home @ r2ssa::SourceStackSlotRole::ParameterHome { .. }) => Some(*home),
+                    _ => None,
                 };
-                let recovered_array_size_matches = matches!(
-                    array_layout,
-                    r2ssa::StackArrayLayoutDisposition::Proven(layout)
-                        if layout.object == *object
-                            && u32::try_from(layout.extent).ok() == Some(size_bytes)
-                            && (source_slot.size_bytes() == size_bytes
-                                || source_slot.size_bytes() == layout.element_width)
-                );
-                if source_slot.base() != *base
-                    || source_slot.offset() != *offset
-                    || size_bytes != source_slot.size_bytes() && !recovered_array_size_matches
-                {
-                    // Three fields can disagree and the refusal names none of
-                    // them, which is the difference between a trace and a
-                    // search: a slot the source declared one byte wide under
-                    // an object the body reads four bytes of is a different
-                    // repair from one at another offset.
-                    r2il::refusal_evidence!(
-                        "stack-object-identity",
-                        "{object:?}: body says {base:?}{offset:+} size {size_bytes}, \
-                         source slot says {:?}{:+} size {}, recovered array {}",
-                        source_slot.base(),
-                        source_slot.offset(),
-                        source_slot.size_bytes(),
-                        recovered_array_size_matches
-                    );
-                    stack_objects.insert(
-                        *object,
-                        StackObjectDisposition::Refused {
-                            reason: StackObjectRefusal::MissingSourceIdentity { object: *object },
-                        },
-                    );
-                    continue;
-                }
-                let role = super::rules::effective_stack_slot_role(
-                    source_owned,
-                    &source_slot,
-                    *base,
-                    *offset,
-                );
+                let role = match *source_slot {
+                    Some(source_slot) => {
+                        let recovered_array_size_matches = matches!(
+                            array_layout,
+                            r2ssa::StackArrayLayoutDisposition::Proven(layout)
+                                if layout.object == *object
+                                    && u32::try_from(layout.extent).ok() == Some(size_bytes)
+                                    && (source_slot.size_bytes() == size_bytes
+                                        || source_slot.size_bytes() == layout.element_width)
+                        );
+                        if source_slot.base() != *base
+                            || source_slot.offset() != *offset
+                            || size_bytes != source_slot.size_bytes()
+                                && !recovered_array_size_matches
+                        {
+                            // Three fields can disagree and the refusal names none of
+                            // them, which is the difference between a trace and a
+                            // search: a slot the source declared one byte wide under
+                            // an object the body reads four bytes of is a different
+                            // repair from one at another offset.
+                            r2il::refusal_evidence!(
+                                "stack-object-identity",
+                                "{object:?}: body says {base:?}{offset:+} size {size_bytes}, \
+                             source slot says {:?}{:+} size {}, recovered array {}",
+                                source_slot.base(),
+                                source_slot.offset(),
+                                source_slot.size_bytes(),
+                                recovered_array_size_matches
+                            );
+                            stack_objects.insert(
+                                *object,
+                                StackObjectDisposition::Refused {
+                                    reason: StackObjectRefusal::MissingSourceIdentity {
+                                        object: *object,
+                                    },
+                                },
+                            );
+                            continue;
+                        }
+                        super::rules::effective_stack_slot_role(
+                            source_owned,
+                            &source_slot,
+                            *base,
+                            *offset,
+                        )
+                    }
+                    None => match proved_home {
+                        Some(home) => home,
+                        None => {
+                            // Named by the width its own accesses agree on, at the
+                            // position the object model proved. A local like any other;
+                            // only the origin of its geometry differs.
+                            let declaration_type = super::rules::declaration_type_for_stack_object(
+                                source_owned,
+                                *object,
+                                width_bits,
+                                source
+                                    .machine_context()
+                                    .memory_model()
+                                    .default_address_bits(),
+                            );
+                            let binding = bind_stack_object(
+                                &mut bindings,
+                                shared_reload_binding(
+                                    &dispositions,
+                                    &bound_values,
+                                    reload_values,
+                                    stored_values,
+                                    &declaration_type,
+                                ),
+                                *id,
+                                declaration_type,
+                                Some(r2ssa::frame_object_name(*offset)),
+                                source_owned.source().caller_stack_object(*object),
+                            )?;
+                            stack_objects
+                                .insert(*object, StackObjectDisposition::Bound { binding });
+                            continue;
+                        }
+                    },
+                };
                 let role = super::rules::verified_stack_slot_role(
                     source_owned,
                     &machine_projection,
@@ -1694,11 +1727,7 @@ impl BindingPlan {
                                 .memory_model()
                                 .default_address_bits(),
                         );
-                        let name_hint = Some(if *offset < 0 {
-                            format!("stack_m{}", offset.unsigned_abs())
-                        } else {
-                            format!("stack_p{}", offset.unsigned_abs())
-                        });
+                        let name_hint = Some(r2ssa::frame_object_name(*offset));
                         let binding = bind_stack_object(
                             &mut bindings,
                             shared_reload_binding(
@@ -1827,8 +1856,7 @@ impl BindingPlan {
         crate::stage_timing::mark("plan_objects");
         let super::rules::EscapedFrameObjects {
             escaped: escaped_frame_objects,
-            reached_by_callee: callee_reached_frame_objects,
-        } = super::rules::frame_objects_with_escaped_address(source_owned, &machine_projection);
+        } = super::rules::frame_objects_with_escaped_address(source_owned);
         let return_address_objects = stack_objects
             .keys()
             .copied()
@@ -1842,8 +1870,10 @@ impl BindingPlan {
             })
             .collect::<BTreeSet<_>>();
         let unspecified = unspecified_reads(source_owned, &dispositions, &parameter_bindings);
+        let elided_cells = certificate_elided_cells(source_owned.source(), &machine_projection);
         let plan = Self {
             authority: source.authority().clone(),
+            elided_cells,
             machine_projection,
             partition,
             bindings: bindings.into_boxed_slice(),
@@ -1852,7 +1882,6 @@ impl BindingPlan {
             stack_objects,
             unspecified,
             escaped_frame_objects,
-            callee_reached_frame_objects,
             return_address_objects,
             access_syntax,
             typed: std::cell::OnceCell::new(),

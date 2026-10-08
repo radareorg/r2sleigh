@@ -85,11 +85,19 @@ impl FormalDependence {
         for (value, formal) in formal_values(prepared, abi) {
             bits[value.0 as usize] |= bit(formal);
         }
+        // A call no callee states the arity of may read every argument register: an indirect
+        // one, or one whose count the registers left unproven.
         let indirect = prepared
             .call_sites()
             .by_id
             .values()
-            .any(|call| call.direct_target.is_none());
+            .any(|call| call.direct_target.is_none())
+            || prepared
+                .facts()
+                .boundaries
+                .calls
+                .values()
+                .any(|boundary| !boundary.arguments_complete);
         let carriers = abi
             .argument_storages()
             .filter(|_| indirect)
@@ -136,15 +144,26 @@ impl FormalDependence {
     /// boundary lists the carriers this body wrote, and the callee may read
     /// every other argument register as well, whatever it holds there.
     pub(crate) fn passed_to_call(&self, prepared: &SsaArtifact, call: crate::CallSiteId) -> u64 {
-        let Some(boundary) = prepared
-            .facts()
-            .boundaries
-            .calls
-            .get(&call)
-            .filter(|boundary| boundary.arguments_complete)
-        else {
+        let Some(boundary) = prepared.facts().boundaries.calls.get(&call) else {
             return u64::MAX;
         };
+        // An unproven count may take any argument register: what each holds at the call, and
+        // whatever the frame exposes, since a stack word it passes is the body's to have stored.
+        if !boundary.arguments_complete {
+            return self
+                .carriers
+                .iter()
+                .map(|(storage, states)| match states.get(boundary.at) {
+                    Some(ReachingStorageState::Value(value)) => self.handed(prepared, *value),
+                    Some(ReachingStorageState::PreservedEntry) => {
+                        self.entry_bits(prepared, *storage)
+                    }
+                    Some(ReachingStorageState::Unknown | ReachingStorageState::Conflict) | None => {
+                        u64::MAX
+                    }
+                })
+                .fold(self.exposed, |left, right| left | right);
+        }
         let listed = boundary
             .arguments
             .iter()
@@ -486,7 +505,7 @@ fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId>
                 .value(value)?
                 .canonical_storage
                 .as_ref()
-                .and_then(crate::promote::promoted_slot_offset)
+                .and_then(crate::slot_promotion::promoted_slot_offset)
                 .map(|_| value)
         })
 }

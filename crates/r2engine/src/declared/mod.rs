@@ -13,7 +13,7 @@ mod c_type;
 mod frame;
 mod graph;
 
-pub(crate) use frame::{rebased, restated_slots};
+pub(crate) use frame::rebased;
 use graph::Interned;
 
 use r2abi::{Arrival, DataModel, Prototype, ScalarKind, Type, TypeGraph, TypeId};

@@ -153,7 +153,6 @@ impl<'a> FoldingContext<'a> {
                     &self.symbols,
                     analysis::PreparedSemanticViewInputs {
                         prepared,
-                        stack_slots: self.inputs.stack_slots,
                         visible_bindings: self.inputs.visible_bindings,
                         function_facts: self.inputs.function_facts,
                         #[cfg(test)]
@@ -959,7 +958,11 @@ impl<'a> FoldingContext<'a> {
         else {
             return None;
         };
-        Some(names.plan().binding(binding)?.declaration_type().clone())
+        // An access into an array writes at the type the access is rendered at, which the caller has.
+        match names.plan().binding(binding)?.declaration_type() {
+            CType::Array(..) => None,
+            declared => Some(declared.clone()),
+        }
     }
 
 

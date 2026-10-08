@@ -36,6 +36,9 @@ pub struct RenderedFunctionJson {
     /// A translation unit that compiles on its own.
     pub code: String,
     pub proof: RenderProofJson,
+    /// The premises the rendering assumed (`Premise::spelled`); empty where it assumed none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub premises: Vec<&'static str>,
     pub variables: Vec<RenderedVariableJson>,
     /// One-based lines of `code`, each with the instructions it accounts for.
     pub lines: Vec<RenderedLineJson>,
@@ -57,9 +60,8 @@ pub struct RenderRefusalJson {
 /// in for. `split` counts the obligations rendered through a variable the
 /// reaching-values check split out of a shared one, so that every read sees
 /// the value it stands for; they are not also counted as `rendered`.
-/// `compiler_inserted` and `assumed` are the columns compiler-inserted idioms
-/// and assumed arities answer into; nothing answers into them yet, so they
-/// are zero.
+/// `compiler_inserted` counts a stack-protector check elided under
+/// `Premise::UbFreeSource`; `assumed` counts accesses to frame objects whose extent is assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct RenderProofJson {
     pub total: usize,
@@ -139,10 +141,11 @@ impl RenderProofJson {
             rendered: closure.rendered - split,
             split,
             elided: closure.elided,
+            compiler_inserted: closure.compiler_inserted,
+            assumed: closure.assumed,
             refused: closure.refused,
             residual: closure.gapped,
             unaccounted: closure.unattributed,
-            ..Self::default()
         }
     }
 }
@@ -159,6 +162,11 @@ impl RenderedFunctionJson {
         definition: String,
     ) -> Self {
         let proof = RenderProofJson::of(response.obligation_ledger.as_ref());
+        // A compiler-inserted elision holds only of a UB-free source.
+        let premises = (proof.compiler_inserted > 0)
+            .then_some(r2source::Premise::UbFreeSource.spelled())
+            .into_iter()
+            .collect::<Vec<_>>();
         let rendered = match &response.output {
             EngineRendering::Function(rendered) => rendered,
             // A listing is what the engine answers with when nothing was
@@ -178,6 +186,7 @@ impl RenderedFunctionJson {
                     }),
                     code: text.clone(),
                     proof,
+                    premises,
                     variables: Vec::new(),
                     lines: Vec::new(),
                     links: Vec::new(),
@@ -200,6 +209,7 @@ impl RenderedFunctionJson {
             refused: refused.map(|reason| RenderRefusalJson { reason }),
             code: emission.unit().to_owned(),
             proof,
+            premises,
             variables: emission.variables().iter().map(variable_json).collect(),
             lines: emission
                 .lines()

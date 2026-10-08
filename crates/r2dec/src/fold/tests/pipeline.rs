@@ -778,7 +778,6 @@ mod tests {
             ptr_size: 8,
         }));
         let empty_u64 = Box::leak(Box::new(HashMap::new()));
-        let empty_stack_slots = Box::leak(Box::new(BTreeMap::new()));
         let empty_visible = Box::leak(Box::new(Vec::new()));
         FoldingContext::from_inputs(FoldInputs {
             function_return_type: None,
@@ -789,7 +788,6 @@ mod tests {
             function_names: empty_u64,
             binary_symbols: empty_u64,
             function_facts: empty_function_facts(),
-            stack_slots: empty_stack_slots,
             visible_bindings: empty_visible,
             prepared_ssa: None,
             prepared_semantic_view: None,
@@ -1481,6 +1479,12 @@ mod tests {
             dst: Varnode::unique(0x280, 8),
             a: Varnode::register(0x28, 8),
             b: Varnode::constant(8, 8),
+        });
+        // Spilled twice, so the declared home is no single-store slot promotion could take.
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x280, 8),
+            val: Varnode::register(0x10, 8),
         });
         entry.push(R2ILOp::Store {
             space: SpaceId::Ram,
@@ -3055,7 +3059,6 @@ mod tests {
             &ctx.symbols,
             crate::analysis::PreparedSemanticViewInputs {
                 prepared: &prepared,
-                stack_slots: ctx.inputs.stack_slots,
                 visible_bindings: ctx.inputs.visible_bindings,
                 function_facts: ctx.inputs.function_facts,
                 certified_rendering_required: false,

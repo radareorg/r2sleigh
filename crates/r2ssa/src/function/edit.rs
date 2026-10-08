@@ -63,6 +63,8 @@ pub(crate) enum ShapeEdit {
         id: OpId,
         phi: PhiNode<VarId>,
     },
+    /// Add a phi to `block`.
+    InsertPhi { block: u64, phi: PhiNode<VarId> },
     /// Drop from every phi of `block` the source arriving from `pred`.
     DropPhiSources { block: u64, pred: u64 },
     /// Remove the control-flow edge `from -> to`.

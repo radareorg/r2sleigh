@@ -393,6 +393,8 @@ pub struct PreparedFunctionCertificates {
     pub callsites: BTreeMap<CallSiteId, CallsiteCertificate>,
     /// Every call's return-address store, for the ledgers that ask per op.
     pub call_return_address_stores: crate::dense::IdSet<InstId>,
+    /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
+    pub compiler_inserted: crate::dense::IdSet<InstId>,
     pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
     pub call_results_by_inst: crate::dense::IdMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
@@ -402,38 +404,6 @@ pub struct PreparedFunctionCertificates {
     /// Merges of two values that the one condition above them selects between.
     pub two_way_selections: crate::dense::IdMap<InstId, TwoWaySelectionCertificate>,
     pub failures: Vec<PreparedProofFailure>,
-}
-
-pub(crate) fn frame_gap_extent(
-    objects: &ObjectModel,
-    base: StackAddressBase,
-    offset: i64,
-) -> Option<u32> {
-    if offset >= 0 {
-        return None;
-    }
-    let next = objects
-        .objects
-        .values()
-        .filter_map(|fact| match fact.kind {
-            ObjectKind::StackSlot {
-                base: other_base,
-                offset: other,
-                ..
-            }
-            | ObjectKind::FrameObject {
-                base: other_base,
-                offset: other,
-                ..
-            } if other_base == base && other > offset => Some(other),
-            _ => None,
-        })
-        .min()
-        .unwrap_or(0)
-        .min(0);
-    u32::try_from(next - offset)
-        .ok()
-        .filter(|extent| *extent > 0)
 }
 
 /// Remove the certified byte stride from one offset without manufacturing a
@@ -970,16 +940,6 @@ pub(crate) fn collect_prepared_function_certificates(
                     None
                 } else {
                     accessed_object_storage(graph, values, objects, structured, *object)
-                        // No access sizes it and nothing declares it, but its address left the body: a buffer a callee fills.
-                        // The frame lays it out between its neighbours, and that gap is its extent, as bytes.
-                        // An address that never leaves and is never accessed is a stack position, not an object, and the gap says nothing about it.
-                        .or_else(|| {
-                            objects
-                                .address_escapes(*object)
-                                .then(|| frame_gap_extent(objects, base, offset))
-                                .flatten()
-                                .map(|extent| (extent, true))
-                        })
                 };
                 r2il::refusal_evidence!(
                     "stack-slot-storage",
@@ -1327,6 +1287,7 @@ pub(crate) fn collect_prepared_function_certificates(
     }
     let (returns, returns_by_inst) =
         collect_return_value_certificates(boundaries, graph, machine_context, &stack_reloads);
+    let compiler_inserted = unobserved_compiler_inserted(function, graph, &returns);
 
     PreparedFunctionCertificates {
         loops,
@@ -1344,6 +1305,7 @@ pub(crate) fn collect_prepared_function_certificates(
         machine_return_control_by_inst,
         callsites,
         call_return_address_stores,
+        compiler_inserted,
         call_results,
         call_results_by_inst,
         call_results_by_callsite,
@@ -1498,4 +1460,83 @@ pub(crate) struct BoundaryStackArgument {
     pub(crate) index: usize,
     pub(crate) value: ValueId,
     pub(crate) entry_offset: i64,
+}
+
+/// The operations a decided stack-protector check inserted that nothing outside them observes.
+///
+/// One the program still reads (a carrier returned holding the canary) keeps its statement, and
+/// so do the operations it reads; at most one liveness pass, `O(V + E)`, per operation released.
+fn unobserved_compiler_inserted(
+    function: &crate::function::SSAFunction,
+    graph: &crate::graph::SsaGraph,
+    returns: &[ReturnValueCertificate],
+) -> crate::dense::IdSet<InstId> {
+    let mut inserted = function
+        .compiler_inserted()
+        .iter()
+        .filter_map(|op| graph.inst_for_op(op))
+        .collect::<crate::dense::IdSet<_>>();
+    loop {
+        let observed = observed_values(graph, returns, &inserted);
+        let released = inserted
+            .iter()
+            .filter(|inst| {
+                graph
+                    .inst(*inst)
+                    .and_then(|inst| inst.output)
+                    .is_some_and(|value| observed[value.0 as usize])
+            })
+            .collect::<Vec<_>>();
+        if released.is_empty() {
+            return inserted;
+        }
+        for inst in released {
+            inserted.remove(inst);
+        }
+    }
+}
+
+/// Every value an effect, a return or a call reads, through the operations that compute it,
+/// with the operations in `silent` read by nothing.
+fn observed_values(
+    graph: &crate::graph::SsaGraph,
+    returns: &[ReturnValueCertificate],
+    silent: &crate::dense::IdSet<InstId>,
+) -> Vec<bool> {
+    let mut observed = vec![false; graph.values.len()];
+    let mut pending = returns
+        .iter()
+        .map(|certificate| certificate.value)
+        .collect::<Vec<_>>();
+    for inst in &graph.insts {
+        let effect = match &inst.payload {
+            crate::graph::InstPayload::Op(op) => {
+                inst.output.is_none()
+                    || matches!(
+                        op,
+                        crate::SSAOp::Call { .. }
+                            | crate::SSAOp::CallInd { .. }
+                            | crate::SSAOp::CallOther { .. }
+                    )
+            }
+            _ => false,
+        };
+        if effect && !silent.contains(inst.id) {
+            pending.extend(inst.inputs.iter().copied());
+        }
+    }
+    while let Some(value) = pending.pop() {
+        let Some(seen) = observed.get_mut(value.0 as usize) else {
+            continue;
+        };
+        if std::mem::replace(seen, true) {
+            continue;
+        }
+        if let Some(definition) = graph.def_inst(value).and_then(|inst| graph.inst(inst))
+            && !silent.contains(definition.id)
+        {
+            pending.extend(definition.inputs.iter().copied());
+        }
+    }
+    observed
 }

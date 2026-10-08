@@ -152,6 +152,8 @@ pub struct RecoveredInterface {
     return_mechanism: Option<RecoveredReturnMechanism>,
     /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
     result_owners: BTreeSet<u64>,
+    /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
+    reads_past_parameters: bool,
 }
 
 impl RecoveredInterface {
@@ -1191,6 +1193,18 @@ fn recover_interface_inner(
     };
     let parameters = in_order(slots.argument_slots());
     let integers = parameters.len();
+    let reads_past_parameters = slots.argument_slots()[integers..].iter().any(|slot| {
+        reads
+            .iter()
+            .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
+    }) || entry_reaches_unproven_call(
+        func,
+        prep,
+        graph,
+        &facts,
+        machine_context,
+        slots.argument_slots().get(integers),
+    );
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}",
@@ -1248,7 +1262,41 @@ fn recover_interface_inner(
         result_is_return_address,
         return_mechanism,
         result_owners,
+        reads_past_parameters,
     })
+}
+
+/// Whether a call whose arguments are unproven cannot tell what `next` holds, the first slot past
+/// the parameters: parameters are a prefix, so only that slot can extend them. An untouched slot
+/// ends a count, as the call boundary reads it; an unseen one may carry the caller's value.
+fn entry_reaches_unproven_call(
+    func: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    machine_context: Option<&crate::SourceMachineContext>,
+    next: Option<&CanonicalStorageId>,
+) -> bool {
+    let (Some(machine_context), Some(slot)) = (machine_context, next) else {
+        return false;
+    };
+    let unproven = facts.boundaries.calls.values();
+    unproven
+        .filter(|boundary| !boundary.arguments_complete)
+        .filter_map(|boundary| graph.walk_start(boundary.at))
+        .any(|(block_addr, op_index)| {
+            crate::semantic::reaching_abi_value_in_block_with_policy(
+                func,
+                prep,
+                graph,
+                machine_context,
+                block_addr,
+                op_index,
+                *slot,
+                false,
+            )
+            .is_none()
+        })
 }
 
 /// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.
@@ -1396,7 +1444,14 @@ pub fn mint_recovered_interface(
     calling_convention: &str,
 ) -> Option<SourceFunctionInterface> {
     let minted =
-        mint_recovered_interface_inner(recovered, roles, revision_identity, calling_convention);
+        mint_recovered_interface_inner(recovered, roles, revision_identity, calling_convention)
+            .map(|interface| {
+                if recovered.reads_past_parameters {
+                    interface.with_reads_past_parameters()
+                } else {
+                    interface
+                }
+            });
     if minted.is_none() {
         r2il::refusal_evidence!(
             "interface-minting",
@@ -1680,6 +1735,14 @@ pub fn mint_recovered_call_site_interface(
     // A stack parameter is named from the callee's entry stack pointer; the
     // call site names the same slot from its own stack pointer before the
     // transfer spends the return-address slot the callee's mechanism states.
+    if callee.reads_past_parameters() {
+        r2il::refusal_evidence!(
+            "call-site-minting",
+            "the callee reads an argument slot past its {} parameters, so its arity is no call's contract",
+            callee.parameters().len()
+        );
+        return None;
+    }
     let spent = callee.return_mechanism().map_or(0, |mechanism| {
         i64::from(mechanism.stack_pointer_delta_bytes())
     });
@@ -2413,11 +2476,13 @@ pub fn recovered_stack_slots(prepared: &crate::SsaArtifact) -> Vec<RecoveredStac
         else {
             continue;
         };
-        let parameter = certificate
-            .stored_values
-            .iter()
-            .find_map(|value| facts.formal_parameter_of(value))
-            .and_then(|index| u32::try_from(index).ok());
+        let parameter = prepared.proved_parameter_home(*object).or_else(|| {
+            certificate
+                .stored_values
+                .iter()
+                .find_map(|value| facts.formal_parameter_of(value))
+                .and_then(|index| u32::try_from(index).ok())
+        });
         slots.push(RecoveredStackSlot {
             offset: certificate.offset,
             size_bytes,

@@ -146,6 +146,9 @@ pub enum SemanticObligationKind {
     /// `nop dword [rax]` is the case that matters, and calling it unknown
     /// refused eight otherwise-complete functions.
     NoNativeSemantics,
+    /// An instruction of a stack-protector failure path a decided check removed
+    /// (`crate::stack_protector`), which the program never reaches under `Premise::UbFreeSource`.
+    CompilerInserted,
     LoopCarriedState,
     LiveStateTransition,
     LiveValueProducer,
@@ -164,6 +167,7 @@ impl SemanticObligationKind {
             self,
             Self::VolatileOrUnknownEffect
                 | Self::NoNativeSemantics
+                | Self::CompilerInserted
                 | Self::LoopCarriedState
                 | Self::LiveStateTransition
                 | Self::LiveValueProducer
@@ -188,6 +192,7 @@ impl std::fmt::Display for SemanticObligationKind {
             Self::MemoryOrdering => "memory-ordering",
             Self::VolatileOrUnknownEffect => "volatile-or-unknown",
             Self::NoNativeSemantics => "no-native-semantics",
+            Self::CompilerInserted => "compiler-inserted",
             Self::LoopCarriedState => "loop-carried-state",
             Self::LiveStateTransition => "live-state-transition",
             Self::LiveValueProducer => "live-value-producer",
@@ -294,6 +299,8 @@ pub enum SemanticInstructionState {
     ProvenDead,
     StructuralControlOnly,
     UnsupportedUnknown,
+    /// A span of a stack-protector failure path a decided check removed; it owes one obligation.
+    CompilerInserted,
 }
 
 /// Exact source owner for one semantic site.
@@ -322,6 +329,7 @@ impl std::fmt::Display for SemanticInstructionState {
             Self::ProvenDead => "proven-dead",
             Self::StructuralControlOnly => "structural-control-only",
             Self::UnsupportedUnknown => "unsupported-unknown",
+            Self::CompilerInserted => "compiler-inserted",
         };
         f.write_str(label)
     }
@@ -925,6 +933,7 @@ impl SemanticObligationInventory {
     pub(crate) fn bind_genuine_native_spans(
         &mut self,
         spans: impl IntoIterator<Item = crate::GenuineNativeInstructionSpan>,
+        compiler_inserted_blocks: &BTreeSet<u64>,
     ) -> bool {
         for span in spans {
             let id = CanonicalInstructionId {
@@ -937,12 +946,25 @@ impl SemanticObligationInventory {
             if self.native_spans.insert(id, span).is_some() {
                 return false;
             }
-            if span.canonical_op_count() != 0 {
+            // A span of a removed failure block keeps an obligation the rendering answers as compiler-inserted.
+            let inserted = compiler_inserted_blocks.contains(&span.block_addr());
+            if span.canonical_op_count() != 0 && !inserted {
                 continue;
             }
+            let (kind, state) = if span.canonical_op_count() == 0 {
+                (
+                    SemanticObligationKind::NoNativeSemantics,
+                    SemanticInstructionState::UnsupportedUnknown,
+                )
+            } else {
+                (
+                    SemanticObligationKind::CompilerInserted,
+                    SemanticInstructionState::CompilerInserted,
+                )
+            };
             let obligation_id = SemanticObligationId {
                 instruction: id,
-                kind: SemanticObligationKind::NoNativeSemantics,
+                kind,
                 component: SemanticObligationComponent::Whole,
             };
             let mut obligations = InstructionObligations::default();
@@ -954,7 +976,7 @@ impl SemanticObligationInventory {
                     SemanticInstructionDisposition {
                         id,
                         source: SemanticSourceSite::GenuineNativeSpan(span),
-                        state: SemanticInstructionState::UnsupportedUnknown,
+                        state,
                         obligations,
                     },
                 )
@@ -1135,7 +1157,14 @@ impl SemanticObligationInventory {
             .native_spans
             .values()
             .filter(|span| span.canonical_op_count() == 0)
-            .count();
+            .count()
+            + self
+                .span_instructions
+                .values()
+                .filter(|disposition| {
+                    disposition.state == SemanticInstructionState::CompilerInserted
+                })
+                .count();
         if self.schema_version != SEMANTIC_OBLIGATION_SCHEMA_VERSION
             || !self.construction_failures.is_empty()
             || self.disposition_count() != self.source_instruction_count + zero_op_span_count
@@ -1172,7 +1201,8 @@ impl SemanticObligationInventory {
                 }
                 SemanticSourceSite::GenuineNativeSpan(source_span) => {
                     self.native_spans.get(id).is_none_or(|span| {
-                        span.canonical_op_count() != 0
+                        (span.canonical_op_count() != 0)
+                            != (instruction.state == SemanticInstructionState::CompilerInserted)
                             || *span != source_span
                             || id.block_addr != span.block_addr()
                             || !matches!(
@@ -1201,6 +1231,7 @@ impl SemanticObligationInventory {
                 instruction.state,
                 SemanticInstructionState::LiveObligation
                     | SemanticInstructionState::UnsupportedUnknown
+                    | SemanticInstructionState::CompilerInserted
             );
             if should_have_obligations == instruction.obligations.is_empty() {
                 return false;
@@ -1248,7 +1279,10 @@ impl SemanticObligationInventory {
                         size,
                     } if instruction_addr == span.instruction_addr() && size == span.size()
                 )
-                || (span.canonical_op_count() == 0) != self.span_instructions.contains_key(id)
+                || (span.canonical_op_count() == 0)
+                    != self.span_instructions.get(id).is_some_and(|disposition| {
+                        disposition.state != SemanticInstructionState::CompilerInserted
+                    })
             {
                 return false;
             }

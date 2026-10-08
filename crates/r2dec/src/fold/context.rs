@@ -10,9 +10,9 @@ use crate::analysis;
 use crate::ast::CExpr;
 use crate::ast::CType;
 use r2ssa::{BlockId, InstId, SemanticObligationId, SsaArtifact, UseSite, ValueId};
-use r2types::{CalleeFact, CalleeResolutionFacts, FunctionFacts};
 #[cfg(test)]
-use r2types::{ExternalStackSlotSpec, StackSlotKey, VisibleBinding};
+use r2types::VisibleBinding;
+use r2types::{CalleeFact, CalleeResolutionFacts, FunctionFacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum EffectOccurrenceKind {
@@ -37,8 +37,6 @@ pub(crate) struct FoldInputs<'a> {
     /// rendering declares.
     pub(crate) binary_symbols: &'a HashMap<u64, String>,
     pub(crate) function_facts: &'a FunctionFacts,
-    #[cfg(test)]
-    pub(crate) stack_slots: &'a BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     #[cfg(test)]
     pub(crate) visible_bindings: &'a [VisibleBinding],
     pub(crate) function_return_type: Option<&'a CType>,
@@ -203,6 +201,76 @@ pub(crate) struct FoldingContext<'a> {
     /// What each planned gap owns, so opening it does not mistake its own
     /// plan for another gap's claim.
     pub(crate) gap_plans: std::cell::RefCell<std::collections::BTreeMap<InstId, BTreeSet<InstId>>>,
+    /// What every gap reads of the whole function, derived at the first gap.
+    gap_index: std::cell::OnceCell<GapIndex>,
+}
+
+/// The whole-function facts a gap's closure reads, derived once per render: each is a pure
+/// function of the sealed artifact, so rebuilding it per gap cost gaps x function size.
+#[derive(Default)]
+struct GapIndex {
+    elided_readers: BTreeSet<InstId>,
+    /// Who reads a value through the convention, and what each such reader reads that way.
+    implicit_readers: BTreeMap<ValueId, BTreeSet<InstId>>,
+    implicit_operands: BTreeMap<InstId, BTreeSet<ValueId>>,
+    /// A call and the `CallDefine`s certified at its site, each naming the others.
+    statement_mates: BTreeMap<InstId, Vec<InstId>>,
+}
+
+impl GapIndex {
+    fn of(prepared: &r2ssa::SsaArtifact) -> Self {
+        let mut index = Self {
+            elided_readers: crate::binding_plan::certified_elided_read_instructions(prepared),
+            ..Self::default()
+        };
+        let mut implicit_read = |value: ValueId, reader: InstId| {
+            index
+                .implicit_readers
+                .entry(value)
+                .or_default()
+                .insert(reader);
+            index
+                .implicit_operands
+                .entry(reader)
+                .or_default()
+                .insert(value);
+        };
+        for certificate in prepared.certificates().callsites.values() {
+            let stack = certificate
+                .stack_argument_values
+                .iter()
+                .map(|argument| argument.value);
+            for value in certificate.argument_values.iter().copied().chain(stack) {
+                implicit_read(value, certificate.at);
+            }
+        }
+        for boundary in prepared.facts().boundaries.returns.values() {
+            for value in boundary.values.iter().map(|fact| fact.value) {
+                implicit_read(value, boundary.at);
+            }
+        }
+        for result in prepared.certificates().call_results.values() {
+            let Some(call) = prepared
+                .certificates()
+                .callsites
+                .get(&result.call_site)
+                .map(|site| site.at)
+            else {
+                continue;
+            };
+            index
+                .statement_mates
+                .entry(call)
+                .or_default()
+                .push(result.at);
+            index
+                .statement_mates
+                .entry(result.at)
+                .or_default()
+                .push(call);
+        }
+        index
+    }
 }
 
 /// Why a gap was planned, in the terms the marker prints.
@@ -359,6 +427,7 @@ impl<'a> FoldingContext<'a> {
             gapped_sites: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             gap_anchors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             gap_plans: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            gap_index: std::cell::OnceCell::new(),
         }
     }
 
@@ -420,13 +489,17 @@ impl<'a> FoldingContext<'a> {
         let names = self.inputs.binding_names?;
         // Reads a certificate already proved render nothing: the cells it names, and
         // every read of an instruction the frame and control certificates elide whole.
-        let elided_uses = crate::binding_plan::certificate_elided_cells(
-            prepared,
-            names.plan().machine_projection(),
-        )
-        .map(|cells| cells.uses)
-        .unwrap_or_default();
-        let elided_readers = crate::binding_plan::certified_elided_read_instructions(prepared);
+        let empty = BTreeMap::new();
+        let elided_uses = names
+            .plan()
+            .certificate_elided_cells()
+            .map_or(&empty, |cells| &cells.uses);
+        let GapIndex {
+            elided_readers,
+            implicit_readers,
+            implicit_operands,
+            statement_mates,
+        } = self.gap_index.get_or_init(|| GapIndex::of(prepared));
         let graph = prepared.graph();
         let block_addr = graph
             .inst(seed)
@@ -456,52 +529,8 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
 
-        // A call takes its arguments and a return its value through the
-        // convention, so neither reader is an SSA use the walk below sees, and
-        // neither value is an SSA input of the instruction that reads it. Both
-        // directions of the walk need the pairing, so it is recorded both ways
-        // round as it is built.
-        let mut implicit_readers: std::collections::BTreeMap<ValueId, BTreeSet<InstId>> =
-            std::collections::BTreeMap::new();
-        let mut implicit_operands: std::collections::BTreeMap<InstId, BTreeSet<ValueId>> =
-            std::collections::BTreeMap::new();
-        let mut implicit_read = |value: ValueId, reader: InstId| {
-            implicit_readers.entry(value).or_default().insert(reader);
-            implicit_operands.entry(reader).or_default().insert(value);
-        };
-        for certificate in prepared.certificates().callsites.values() {
-            for value in certificate.argument_values.iter().copied().chain(
-                certificate
-                    .stack_argument_values
-                    .iter()
-                    .map(|argument| argument.value),
-            ) {
-                implicit_read(value, certificate.at);
-            }
-        }
-        for boundary in prepared.facts().boundaries.returns.values() {
-            for value in boundary.values.iter().map(|fact| fact.value) {
-                implicit_read(value, boundary.at);
-            }
-        }
-
-        // A call and the `CallDefine`s certified at its site are one statement:
-        // the call supplies the effect and each define owns a result lane.
-        let mut statement_mates: std::collections::BTreeMap<InstId, Vec<InstId>> =
-            std::collections::BTreeMap::new();
-        for result in prepared.certificates().call_results.values() {
-            let Some(call) = prepared
-                .certificates()
-                .callsites
-                .get(&result.call_site)
-                .map(|site| site.at)
-            else {
-                continue;
-            };
-            statement_mates.entry(call).or_default().push(result.at);
-            statement_mates.entry(result.at).or_default().push(call);
-        }
-
+        // A call takes its arguments and a return its value through the convention, so neither
+        // is an SSA use the walk sees; `implicit_readers` pairs them both ways (`GapIndex`).
         // An instruction an earlier gap owns is accounted for already; a
         // second gap claiming its cells would answer them twice.
         let mut already = self.gapped_sites.borrow().clone();
@@ -1984,9 +2013,6 @@ impl<'a> FoldingContext<'a> {
         #[cfg(test)]
         static EMPTY_U64_STRING: OnceLock<HashMap<u64, String>> = OnceLock::new();
         #[cfg(test)]
-        static EMPTY_STACK_SLOTS: OnceLock<BTreeMap<StackSlotKey, ExternalStackSlotSpec>> =
-            OnceLock::new();
-        #[cfg(test)]
         static EMPTY_VISIBLE_BINDINGS: OnceLock<Vec<VisibleBinding>> = OnceLock::new();
         static ARCH64: OnceLock<FoldArchConfig> = OnceLock::new();
         static ARCH32: OnceLock<FoldArchConfig> = OnceLock::new();
@@ -2007,8 +2033,6 @@ impl<'a> FoldingContext<'a> {
             #[cfg(test)]
             binary_symbols: EMPTY_U64_STRING.get_or_init(HashMap::new),
             function_facts: empty_function_facts(),
-            #[cfg(test)]
-            stack_slots: EMPTY_STACK_SLOTS.get_or_init(BTreeMap::new),
             #[cfg(test)]
             visible_bindings: EMPTY_VISIBLE_BINDINGS.get_or_init(Vec::new),
             function_return_type: None,

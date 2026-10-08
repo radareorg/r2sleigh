@@ -21,8 +21,6 @@ pub(crate) struct VarTypeCandidateContext<'a> {
     pub(crate) current_context_maps: &'a SignatureContextMaps,
     pub(crate) merged_signature: Option<&'a FunctionSignatureSpec>,
     pub(crate) slot_type_overrides: &'a HashMap<usize, String>,
-    pub(crate) stack_slots: &'a BTreeMap<StackSlotKey, ExternalStackVarSpec>,
-    pub(crate) existing_types: &'a HashMap<String, String>,
     pub(crate) stack_access_widths: &'a BTreeMap<StackSlotKey, BTreeSet<u32>>,
     pub(crate) stack_access_signedness:
         &'a BTreeMap<StackSlotKey, BTreeSet<ScalarSignednessEvidence>>,
@@ -34,50 +32,6 @@ pub(crate) struct VarTypeCandidateContext<'a> {
 pub(crate) enum VisibleBindingKey {
     Param(usize),
     Stack(StackSlotKey),
-}
-
-pub(crate) fn slot_spec_for_recovered_var<'a>(
-    var: &RecoveredVariable,
-    stack_slots: &'a BTreeMap<StackSlotKey, ExternalStackVarSpec>,
-) -> Option<&'a ExternalStackVarSpec> {
-    if let Some(slot_key) = stack_slot_key_for_recovered_var(var)
-        && let Some(slot) = stack_slots.get(&slot_key)
-    {
-        return Some(slot);
-    }
-    None
-}
-
-pub(crate) fn slot_role_is_hidden(role: ExternalStackSlotRole) -> bool {
-    matches!(
-        role,
-        ExternalStackSlotRole::ParamHome
-            | ExternalStackSlotRole::SavedReg
-            | ExternalStackSlotRole::SavedFp
-    )
-}
-
-pub(crate) fn slot_role_allows_external_local_identity(role: ExternalStackSlotRole) -> bool {
-    matches!(
-        role,
-        ExternalStackSlotRole::Local
-            | ExternalStackSlotRole::StackArg
-            | ExternalStackSlotRole::Unknown
-    )
-}
-
-pub(crate) fn visible_binding_kind_for_slot_role(
-    role: ExternalStackSlotRole,
-) -> VisibleBindingKind {
-    match role {
-        ExternalStackSlotRole::Local => VisibleBindingKind::Local,
-        ExternalStackSlotRole::StackArg => VisibleBindingKind::Param,
-        ExternalStackSlotRole::ParamHome => VisibleBindingKind::HiddenHome,
-        ExternalStackSlotRole::SavedReg | ExternalStackSlotRole::SavedFp => {
-            VisibleBindingKind::HiddenSaved
-        }
-        ExternalStackSlotRole::Unknown => VisibleBindingKind::Unknown,
-    }
 }
 
 pub(crate) fn visible_binding_key_for_recovered_var(
@@ -167,7 +121,6 @@ pub(crate) fn merge_visible_binding(existing: &mut VisibleBinding, candidate: Vi
 pub(crate) fn build_visible_bindings(
     merged_signature: Option<&FunctionSignatureSpec>,
     register_params: &[crate::context::ExternalRegisterParamSpec],
-    stack_slots: &BTreeMap<StackSlotKey, ExternalStackVarSpec>,
     recovered_vars: &[RecoveredVariable],
     var_type_candidates: &[VarTypeCandidate],
     var_rename_candidates: &[VarRenameCandidate],
@@ -233,35 +186,6 @@ pub(crate) fn build_visible_bindings(
                 }
             })
             .or_insert(ty);
-    }
-
-    for (slot_key, slot_spec) in stack_slots {
-        let key = slot_spec
-            .param_index
-            .filter(|_| matches!(slot_spec.role, ExternalStackSlotRole::StackArg))
-            .map(VisibleBindingKey::Param)
-            .unwrap_or_else(|| VisibleBindingKey::Stack(*slot_key));
-        let candidate = VisibleBinding {
-            name: slot_spec
-                .param_name
-                .as_ref()
-                .filter(|_| matches!(slot_spec.role, ExternalStackSlotRole::StackArg))
-                .cloned()
-                .or_else(|| (!slot_spec.name.is_empty()).then(|| slot_spec.name.clone()))
-                .unwrap_or_else(|| match key {
-                    VisibleBindingKey::Param(idx) => format!("arg{}", idx + 1),
-                    VisibleBindingKey::Stack(_) => "local".to_string(),
-                }),
-            ty: slot_spec.ty.clone(),
-            kind: visible_binding_kind_for_slot_role(slot_spec.role),
-            stack_slot: Some(*slot_key),
-            param_index: slot_spec.param_index,
-            source_reg: slot_spec.source_reg.clone(),
-        };
-        bindings
-            .entry(key)
-            .and_modify(|existing| merge_visible_binding(existing, candidate.clone()))
-            .or_insert(candidate);
     }
 
     for var in recovered_vars {
@@ -353,11 +277,6 @@ pub(crate) fn build_var_type_candidates(
 ) -> Vec<VarTypeCandidate> {
     let mut out = Vec::with_capacity(vars.len());
     for var in vars {
-        let slot_spec = slot_spec_for_recovered_var(var, ctx.stack_slots);
-        if slot_spec.is_some_and(|spec| slot_role_is_hidden(spec.role)) {
-            continue;
-        }
-
         let mut source = TypeFactSource::LocalInferred;
         let mut confidence = if var
             .recovered_type(ctx.ptr_bits)
@@ -410,22 +329,6 @@ pub(crate) fn build_var_type_candidates(
             evidence.push(TypeEvidence::SsaFieldOffsetPattern);
         }
 
-        if let Some(existing_ty) = ctx.existing_types.get(&var.name)
-            && !type_name_is_generic(existing_ty)
-        {
-            if type_name_is_generic(&chosen_type) {
-                chosen_type = existing_ty.clone();
-                confidence = 98;
-                source = TypeFactSource::ExistingState;
-                evidence.push(TypeEvidence::ExistingStackType);
-            } else if !existing_ty.eq_ignore_ascii_case(&chosen_type) {
-                diagnostics.conflicts.push(format!(
-                    "var `{}` existing type `{}` conflicts with inferred `{}`",
-                    var.name, existing_ty, chosen_type
-                ));
-            }
-        }
-
         let exact_access_bits = exact_stack_access_bits(var, ctx.stack_access_widths);
         if exact_access_bits
             .is_some_and(|bits| integer_type_bits(&chosen_type, ctx.ptr_bits) == Some(bits))
@@ -444,38 +347,6 @@ pub(crate) fn build_var_type_candidates(
             confidence = confidence.max(97);
             source = TypeFactSource::DataflowRanked;
             evidence.push(TypeEvidence::CanonicalStackSignedness);
-        }
-
-        if let Some(ext) = slot_spec
-            && let Some(ext_ty) = ext.ty.as_ref()
-            && slot_role_allows_external_local_identity(ext.role)
-        {
-            let ext_ty_str = render_signature_type(ext_ty, ctx.ptr_bits);
-            let external_conflicts_with_exact_integer_width =
-                exact_access_bits.is_some_and(|bits| {
-                    integer_type_bits(&chosen_type, ctx.ptr_bits) == Some(bits)
-                        && integer_type_bits(&ext_ty_str, ctx.ptr_bits)
-                            .is_some_and(|external_bits| external_bits != bits)
-                });
-            let external_should_override = !type_name_is_generic(&ext_ty_str)
-                && !external_conflicts_with_exact_integer_width
-                && (type_name_is_generic(&chosen_type)
-                    || (matches!(source, TypeFactSource::LocalInferred)
-                        && is_low_signal_storage_scalar_type(&chosen_type, ctx.ptr_bits)));
-            if external_conflicts_with_exact_integer_width {
-                diagnostics.conflicts.push(format!(
-                    "var `{}` external stack type `{}` conflicts with canonical {}-bit memory accesses",
-                    var.name,
-                    ext_ty_str,
-                    exact_access_bits.unwrap()
-                ));
-            }
-            if external_should_override {
-                chosen_type = ext_ty_str;
-                confidence = 97;
-                source = TypeFactSource::ExternalTypeDb;
-                evidence.push(TypeEvidence::ExternalStackAnnotation);
-            }
         }
 
         let Some(var_type) = parse_c_type_like(&chosen_type, ctx.ptr_bits) else {
@@ -506,52 +377,11 @@ pub(crate) fn build_var_type_candidates(
 pub(crate) fn build_var_rename_candidates(
     vars: &[RecoveredVariable],
     param_names: &HashMap<usize, String>,
-    stack_slots: &BTreeMap<StackSlotKey, ExternalStackVarSpec>,
 ) -> Vec<VarRenameCandidate> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
 
     for var in vars {
-        let slot_spec = slot_spec_for_recovered_var(var, stack_slots);
-
-        if let Some(ext) = slot_spec
-            && ext.name != var.name
-            && is_low_quality_stack_name(&var.name)
-            && !is_low_quality_stack_name(&ext.name)
-            && slot_role_allows_external_local_identity(ext.role)
-        {
-            let target_name = sanitize_c_identifier(&ext.name).unwrap_or_else(|| ext.name.clone());
-            let edge = format!("{}->{target_name}", var.name);
-            if !target_name.is_empty() && target_name != var.name && seen.insert(edge) {
-                out.push(VarRenameCandidate {
-                    name: var.name.clone(),
-                    target_name,
-                    confidence: 94,
-                    source: TypeFactSource::ExternalTypeDb,
-                    evidence: vec![TypeEvidence::ExternalStackName],
-                });
-            }
-        }
-
-        if let Some(ext) = slot_spec
-            && matches!(ext.role, ExternalStackSlotRole::StackArg)
-            && let Some(param_name) = ext.param_name.as_ref()
-            && is_low_quality_stack_name(&var.name)
-        {
-            let target_name =
-                sanitize_c_identifier(param_name).unwrap_or_else(|| param_name.clone());
-            let edge = format!("{}->{target_name}", var.name);
-            if !target_name.is_empty() && target_name != var.name && seen.insert(edge) {
-                out.push(VarRenameCandidate {
-                    name: var.name.clone(),
-                    target_name,
-                    confidence: 95,
-                    source: TypeFactSource::SignatureRegistry,
-                    evidence: vec![TypeEvidence::ExternalParamName],
-                });
-            }
-        }
-
         let arg_slot = var
             .name
             .strip_prefix("arg")
@@ -576,8 +406,4 @@ pub(crate) fn build_var_rename_candidates(
     }
 
     out
-}
-
-pub(crate) fn is_low_signal_storage_scalar_type(ty: &str, ptr_bits: u32) -> bool {
-    parse_c_type_like(ty, ptr_bits).is_some_and(|parsed| matches!(parsed, CTypeLike::Int { .. }))
 }

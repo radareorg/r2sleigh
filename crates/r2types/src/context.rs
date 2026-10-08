@@ -16,18 +16,6 @@ pub struct ExternalRegisterParamSpec {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExternalStackSlotSpec {
-    pub name: String,
-    pub ty: Option<CTypeLike>,
-    pub role: ExternalStackSlotRole,
-    pub param_index: Option<usize>,
-    pub param_name: Option<String>,
-    pub source_reg: Option<String>,
-}
-
-pub type ExternalStackVarSpec = ExternalStackSlotSpec;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedExternalContext {
     pub context_schema_version: Option<u64>,
     pub context_dirty_epoch: Option<u64>,
@@ -37,7 +25,6 @@ pub struct ParsedExternalContext {
     pub merged_signature: Option<FunctionSignatureSpec>,
     pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
-    pub stack_slots: BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     pub external_type_db: ExternalTypeDb,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
     /// Where the program's loaded sections lie, which is where a constant can name one of its objects.
@@ -93,20 +80,6 @@ impl ProgramExtents {
 }
 
 pub use r2ssa::StackAddressBase as ExternalStackBase;
-
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalStackSlotRole {
-    Local,
-    StackArg,
-    ParamHome,
-    SavedReg,
-    SavedFp,
-    #[default]
-    Unknown,
-}
 
 pub type StackSlotKey = r2ssa::StackAddressRoot;
 

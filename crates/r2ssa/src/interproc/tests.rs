@@ -2460,3 +2460,20 @@ fn a_sign_extended_index_reaches_only_as_far_as_its_sign_bit_is_clear() {
     assert_eq!(through.bytes(|_| Some(9)), Some(40), "{through:?}");
     assert_eq!(through.bytes(|_| Some(1 << 31)), None, "{through:?}");
 }
+
+/// A reach is upward only where no term can land below the pointer.
+#[test]
+fn a_reach_is_upward_only_where_no_term_lands_below_the_pointer() {
+    let scaled = |stride, base, sign_bits| SummaryArgumentReach::Scaled {
+        argument: 1,
+        stride,
+        base,
+        width: 8,
+        sign_bits,
+    };
+    assert!(ArgumentReach::from([SummaryArgumentReach::Bytes(16), scaled(8, 0, None)]).is_upward());
+    assert!(!ArgumentReach::from([scaled(8, 0, Some(32))]).is_upward());
+    assert!(!ArgumentReach::from([scaled(-8, 0, None)]).is_upward());
+    assert!(!ArgumentReach::from([scaled(8, -8, None)]).is_upward());
+    assert!(!ArgumentReach::unbounded().is_upward());
+}

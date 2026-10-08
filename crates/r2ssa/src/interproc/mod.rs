@@ -147,6 +147,21 @@ impl ArgumentReach {
         self.unbounded
     }
 
+    /// Whether every place this reaches lies at or above the pointer: a span from it, or an
+    /// index the callee never takes negative, scaled and offset upward.
+    pub fn is_upward(&self) -> bool {
+        !self.unbounded
+            && self.terms.iter().all(|term| match *term {
+                SummaryArgumentReach::Bytes(_) => true,
+                SummaryArgumentReach::Scaled {
+                    stride,
+                    base,
+                    sign_bits,
+                    ..
+                } => stride >= 0 && base >= 0 && sign_bits.is_none(),
+            })
+    }
+
     pub fn terms(&self) -> impl Iterator<Item = SummaryArgumentReach> + '_ {
         self.terms.iter().copied()
     }
@@ -705,6 +720,7 @@ fn prepared_obligations_require_unknown_effects(prepared: &SsaArtifact) -> bool 
         || inventory.obligations().values().any(|obligation| {
             obligation.id.kind == crate::SemanticObligationKind::VolatileOrUnknownEffect
                 && !only_variadic_tail_unproven(prepared, obligation.id.instruction)
+                && !only_arity_unproven(prepared, obligation.id.instruction)
         })
 }
 
@@ -734,6 +750,23 @@ fn only_variadic_tail_unproven(
                 && site.variadic_argument_count_refusal.is_some()
                 && site.results_complete
         })
+}
+
+/// A call whose one gap is how many arguments it takes composes as an indirect call does: the
+/// dependence reads what each argument register holds at it (`FormalDependence::passed_to_call`).
+fn only_arity_unproven(prepared: &SsaArtifact, instruction: crate::CanonicalInstructionId) -> bool {
+    let crate::CanonicalInstructionSite::Op(op) = instruction.site else {
+        return false;
+    };
+    let Some(inst) = prepared.graph().inst_for_op(op) else {
+        return false;
+    };
+    prepared
+        .call_sites()
+        .by_inst
+        .get(inst)
+        .and_then(|call_site| prepared.facts().boundaries.calls.get(call_site))
+        .is_some_and(|boundary| !boundary.arguments_complete && boundary.results_complete)
 }
 
 fn unknown_call_argument_state(

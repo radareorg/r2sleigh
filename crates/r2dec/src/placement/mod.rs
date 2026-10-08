@@ -642,7 +642,7 @@ pub(crate) fn collect_final_placement_occurrences(
                     let read_by_callee = matches!(
                         names.plan().binding_role(binding),
                         Some(crate::binding_plan::BindingRole::StackObject { object })
-                            if names.plan().callee_reached_frame_objects().contains(&object)
+                            if names.plan().escaped_frame_objects().contains(&object)
                     );
                     writes.push(FinalBindingWrite {
                         binding,

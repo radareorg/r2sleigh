@@ -9,8 +9,8 @@
 
 use r2abi::{FrameBase, Prototype};
 use r2source::{
-    CanonicalStorageId, SourceLogicalValue, SourceStackSlotName, SourceStackSlotRole,
-    SourceStackSlotSpec, StackAddressBase,
+    CanonicalStorageId, SourceLogicalValue, SourceStackSlotName, SourceStackSlotSpec,
+    StackAddressBase,
 };
 use r2ssa::TrustedSsaArtifact;
 
@@ -332,65 +332,4 @@ fn spilled_distance(artifact: &TrustedSsaArtifact, prototype: &Prototype) -> Opt
         }
     }
     stated
-}
-
-/// The frame a restatement states: every declared slot as declared, and each
-/// slot the body proves only where no declaration covers it.
-///
-/// The declaration says what the source put where; the body proves where its
-/// own accesses land, and it proves nothing against a declaration it lies
-/// inside. A home the body proves takes its parameter's type, and one for a
-/// parameter the declaration already homes is the same statement made twice.
-/// The declared slots are disjoint, so one search per proved slot finds the
-/// only declared slot it could overlap: `O((S + D) log D)`.
-pub(crate) fn restated_slots(
-    declared: &[SourceStackSlotSpec],
-    proved: Vec<SourceStackSlotSpec>,
-    interface: &r2source::SourceFunctionInterface,
-) -> Vec<SourceStackSlotSpec> {
-    let mut sorted = declared.to_vec();
-    sorted.sort_by_key(|slot| (slot.base(), slot.offset()));
-    let homed = declared
-        .iter()
-        .filter_map(|slot| match slot.role() {
-            SourceStackSlotRole::ParameterHome {
-                parameter_index, ..
-            } => Some(parameter_index),
-            _ => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let covered = |slot: &SourceStackSlotSpec| {
-        let end = slot.offset().saturating_add(i64::from(slot.size_bytes()));
-        let after =
-            sorted.partition_point(|other| (other.base(), other.offset()) < (slot.base(), end));
-        after.checked_sub(1).is_some_and(|index| {
-            let other = &sorted[index];
-            other.base() == slot.base()
-                && other.offset().saturating_add(i64::from(other.size_bytes())) > slot.offset()
-        })
-    };
-    let mut slots = declared.to_vec();
-    for slot in proved {
-        if covered(&slot) {
-            continue;
-        }
-        let SourceStackSlotRole::ParameterHome {
-            parameter_index, ..
-        } = slot.role()
-        else {
-            slots.push(slot);
-            continue;
-        };
-        if homed.contains(&parameter_index) {
-            continue;
-        }
-        let typed = interface
-            .parameter_logical_value(parameter_index as usize)
-            .filter(|value| value.carrier().size_bits() == u64::from(slot.size_bytes()) * 8);
-        slots.push(match typed {
-            Some(value) => slot.with_logical_type(value.type_id()),
-            None => slot,
-        });
-    }
-    slots
 }

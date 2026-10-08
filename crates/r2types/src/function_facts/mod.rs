@@ -12,11 +12,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::callee::{CalleeIdentityContext, CalleeResolutionFacts, CallsiteKey};
-use crate::context::{ExternalStackSlotRole, ExternalStackSlotSpec, StackSlotKey};
 use crate::facts::{
-    CalleeFact, CalleeLinkage, FunctionSignatureSpec, FunctionTypeFacts,
-    OutParamCertificateEvidence, OutParamCertificateSource, SignatureCertificateSource,
-    VisibleBindingKind,
+    CalleeFact, CalleeLinkage, FunctionTypeFacts, OutParamCertificateEvidence,
+    OutParamCertificateSource, SignatureCertificateSource,
 };
 use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
 
@@ -897,6 +895,25 @@ impl SourceOwnedFunctionFacts {
         Arc::ptr_eq(&self.source, source)
     }
 
+    /// The source's name for the slot a frame object occupies, asked at the coordinate the source declared it.
+    pub fn stack_object_declared_name(&self, object: r2ssa::ObjectId) -> Option<&str> {
+        let slot = self
+            .source()
+            .certificates()
+            .stack_slots
+            .get(&object)?
+            .source_slot?;
+        self.report()
+            .display_names()
+            .stack_slot(slot.base(), slot.offset())
+    }
+
+    /// What a frame object is called: its declared name, else where it sits from its base.
+    pub fn stack_object_name(&self, object: r2ssa::ObjectId, offset: i64) -> String {
+        let declared = self.stack_object_declared_name(object);
+        declared.map_or_else(|| r2ssa::frame_object_name(offset), str::to_owned)
+    }
+
     pub fn report(&self) -> &FunctionFacts {
         &self.report
     }
@@ -964,14 +981,12 @@ impl SourceOwnedFunctionFacts {
             .certified_entities
             .values()
             .filter_map(|entity| match entity {
-                CertifiedEntity::StackSlot {
-                    size, source_slot, ..
-                } => source_slot
-                    .filter(|source| {
+                CertifiedEntity::StackSlot { size, role, .. } => role
+                    .filter(|role| {
                         matches!(
-                            source.role(),
+                            role,
                             r2ssa::SourceStackSlotRole::ParameterHome { parameter_index, .. }
-                                if parameter_index == slot
+                                if *parameter_index == slot
                         )
                     })
                     .and(*size),
@@ -1454,163 +1469,6 @@ impl FunctionFacts {
             .map(String::as_str)
     }
 
-    pub fn authorized_stack_slot_owner_render(
-        &self,
-        object: r2ssa::ObjectId,
-        offset: i64,
-        name: &str,
-    ) -> Option<StackSlotOwnerRenderAuthorization> {
-        let name = name.trim();
-        if name.is_empty() {
-            return None;
-        }
-        let render_offset = self.render.stack_slot_offset(object)?;
-        if render_offset != offset || !self.stack_owner_name_is_renderable(offset, name) {
-            return None;
-        }
-        Some(StackSlotOwnerRenderAuthorization {
-            object,
-            offset,
-            name: name.to_string(),
-        })
-    }
-
-    pub fn authorized_stack_slot_owner_render_by_offset(
-        &self,
-        offset: i64,
-        name: &str,
-    ) -> Option<StackSlotOwnerRenderAuthorization> {
-        let mut matching_objects = self
-            .render
-            .stack_slots()
-            .filter_map(|(object, _, slot_offset, _)| (slot_offset == offset).then_some(object));
-        let object = matching_objects.next()?;
-        if matching_objects.next().is_some() {
-            return None;
-        }
-        self.authorized_stack_slot_owner_render(object, offset, name)
-    }
-
-    pub fn authorized_stack_param_owner_render(
-        &self,
-        object: r2ssa::ObjectId,
-        offset: i64,
-    ) -> Option<StackSlotOwnerRenderAuthorization> {
-        let render_offset = self.render.stack_slot_offset(object)?;
-        if render_offset != offset {
-            return None;
-        }
-        if let Some(name) = self.stack_param_owner_name_for_offset(offset) {
-            return self.authorized_stack_slot_owner_render(object, offset, &name);
-        }
-        None
-    }
-
-    fn stack_param_owner_name_for_offset(&self, offset: i64) -> Option<String> {
-        let mut candidate = None;
-        for (slot_key, slot) in &self.types.stack_slots {
-            if stack_slot_matches_offset(slot_key, offset)
-                && matches!(
-                    slot.role,
-                    ExternalStackSlotRole::StackArg | ExternalStackSlotRole::ParamHome
-                )
-            {
-                if let Some(name) =
-                    indexed_param_home_name(self.types.merged_signature.as_ref(), slot)
-                {
-                    remember_stack_param_owner_name(&mut candidate, name)?;
-                    continue;
-                }
-                if let Some(name) = slot
-                    .param_name
-                    .as_ref()
-                    .filter(|name| !name.trim().is_empty())
-                    .filter(|name| {
-                        slot.ty.as_ref().is_some_and(stack_owner_type_is_renderable)
-                            || (matches!(slot.role, ExternalStackSlotRole::ParamHome)
-                                && signature_param_name_type_is_renderable(
-                                    self.types.merged_signature.as_ref(),
-                                    name,
-                                ))
-                    })
-                {
-                    remember_stack_param_owner_name(&mut candidate, name)?;
-                    continue;
-                }
-                if !slot.name.trim().is_empty() {
-                    remember_stack_param_owner_name(&mut candidate, &slot.name)?;
-                }
-            }
-        }
-        if candidate.is_some() {
-            return candidate;
-        }
-
-        for binding in &self.types.visible_bindings {
-            let Some(slot) = binding.stack_slot.as_ref() else {
-                continue;
-            };
-            if stack_slot_matches_offset(slot, offset)
-                && matches!(binding.kind, VisibleBindingKind::Param)
-                && binding
-                    .ty
-                    .as_ref()
-                    .is_some_and(stack_owner_type_is_renderable)
-                && !binding.name.trim().is_empty()
-            {
-                remember_stack_param_owner_name(&mut candidate, &binding.name)?;
-            }
-        }
-        candidate
-    }
-
-    fn stack_owner_name_is_renderable(&self, offset: i64, name: &str) -> bool {
-        self.types.visible_bindings.iter().any(|binding| {
-            let Some(slot) = binding.stack_slot.as_ref() else {
-                return false;
-            };
-            binding.name.eq_ignore_ascii_case(name)
-                && stack_slot_matches_offset(slot, offset)
-                && binding
-                    .ty
-                    .as_ref()
-                    .is_some_and(stack_owner_type_is_renderable)
-                && visible_stack_binding_kind_is_renderable(&binding.kind)
-        }) || self.types.stack_slots.iter().any(|(slot_key, slot)| {
-            if !stack_slot_matches_offset(slot_key, offset) {
-                return false;
-            }
-            if let Some(canonical_name) =
-                indexed_param_home_name(self.types.merged_signature.as_ref(), slot)
-            {
-                return canonical_name.eq_ignore_ascii_case(name);
-            }
-            (slot.name.eq_ignore_ascii_case(name)
-                || (matches!(
-                    slot.role,
-                    ExternalStackSlotRole::StackArg | ExternalStackSlotRole::ParamHome
-                ) && slot
-                    .param_name
-                    .as_ref()
-                    .is_some_and(|param_name| param_name.eq_ignore_ascii_case(name))))
-                && (slot.ty.as_ref().is_some_and(stack_owner_type_is_renderable)
-                    || (matches!(slot.role, ExternalStackSlotRole::ParamHome)
-                        && slot.param_name.as_ref().is_some_and(|param_name| {
-                            param_name.eq_ignore_ascii_case(name)
-                                && signature_param_name_type_is_renderable(
-                                    self.types.merged_signature.as_ref(),
-                                    param_name,
-                                )
-                        })))
-                && (external_stack_slot_role_is_renderable(slot.role)
-                    || (matches!(slot.role, ExternalStackSlotRole::ParamHome)
-                        && slot
-                            .param_name
-                            .as_ref()
-                            .is_some_and(|param_name| param_name.eq_ignore_ascii_case(name))))
-        })
-    }
-
     pub fn authorized_recovered_stack_slot_owner_render(
         &self,
         object: r2ssa::ObjectId,
@@ -1761,12 +1619,7 @@ impl FunctionFacts {
                 );
             };
             // A declared stack slot, or the aggregate a pointer parameter points at.
-            let slot_type = prepared
-                .certificates()
-                .stack_slots
-                .get(&memory.object)
-                .and_then(|certificate| certificate.source_slot.as_ref())
-                .and_then(|slot| slot.logical_type());
+            let slot_type = prepared.stack_slot_logical_type(memory.object);
             let pointer_base = slot_type
                 .is_none()
                 .then(|| {
@@ -2072,7 +1925,7 @@ impl FunctionFacts {
                 && cert.element_stride == candidate.element_stride
                 && match &cert.base {
                     Some(crate::facts::ArrayIndexBase::Param { index }) => *index == candidate.slot,
-                    Some(crate::facts::ArrayIndexBase::StackSlot { .. }) | None => true,
+                    None => true,
                 }
         })
     }
@@ -2387,14 +2240,14 @@ impl FunctionFacts {
         let mut by_parameter = BTreeMap::<u32, BTreeSet<r2ssa::ValueId>>::new();
         for entity in self.render.certified_entities.values() {
             let CertifiedEntity::StackSlot {
-                source_slot,
+                role,
                 reload_values,
                 ..
             } = entity
             else {
                 continue;
             };
-            let Some(index) = source_slot.and_then(|slot| match slot.role() {
+            let Some(index) = role.and_then(|role| match role {
                 r2ssa::SourceStackSlotRole::ParameterHome {
                     parameter_index, ..
                 }
@@ -2860,7 +2713,6 @@ impl FunctionFacts {
         let recovered = crate::evidence::solve_evidence_types(source, &signatures, ptr_bits);
         if !recovered.is_empty() {
             self.apply_recovered_parameter_types(source, &recovered, ptr_bits);
-            self.apply_recovered_stack_slot_types(&recovered, ptr_bits);
         }
         recovered
     }
@@ -2910,55 +2762,6 @@ impl FunctionFacts {
         if changed {
             self.types
                 .certify_current_signature_with_source(SignatureCertificateSource::LocalInference);
-        }
-    }
-
-    /// The type of each stack home the solver reached.
-    fn apply_recovered_stack_slot_types(
-        &mut self,
-        recovered: &crate::EvidenceTypes,
-        ptr_bits: u32,
-    ) {
-        let type_db = &self.types.external_type_db;
-        let mut retyped: Vec<(String, CTypeLike)> = Vec::new();
-        for (key, ty) in recovered.stack_slot_types() {
-            let Some(slot) = self.types.stack_slots.get_mut(key) else {
-                continue;
-            };
-            let replace = match slot.ty.as_ref() {
-                None => true,
-                Some(existing) => {
-                    recovered_type_outranks(existing, ty, ptr_bits, type_db)
-                        || recovered_scalar_signedness_outranks(existing, ty, ptr_bits)
-                }
-            };
-            if !replace {
-                continue;
-            }
-            slot.ty = Some(ty.clone());
-            retyped.push((slot.name.clone(), ty.clone()));
-        }
-        if retyped.is_empty() {
-            return;
-        }
-        for (name, ty) in retyped {
-            for binding in self
-                .types
-                .visible_bindings
-                .iter_mut()
-                .filter(|binding| binding.name == name)
-            {
-                let replace = match binding.ty.as_ref() {
-                    None => true,
-                    Some(existing) => {
-                        recovered_type_outranks(existing, &ty, ptr_bits, type_db)
-                            || recovered_scalar_signedness_outranks(existing, &ty, ptr_bits)
-                    }
-                };
-                if replace {
-                    binding.ty = Some(ty.clone());
-                }
-            }
         }
     }
 

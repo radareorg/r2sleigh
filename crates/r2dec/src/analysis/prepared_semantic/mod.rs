@@ -13,10 +13,7 @@ use r2types::{
     FunctionCallResultFacts, FunctionCallsiteFacts, FunctionFacts,
 };
 #[cfg(test)]
-use r2types::{
-    ExternalStackBase, ExternalStackSlotRole, ExternalStackSlotSpec, StackSlotKey, VisibleBinding,
-    VisibleBindingKind,
-};
+use r2types::{ExternalStackBase, StackSlotKey, VisibleBinding, VisibleBindingKind};
 
 use super::{DecompilerFacts, SSABlock, UseInfo, ValueProvenance};
 use crate::ast::{BinaryOp, CExpr, UnaryOp};
@@ -61,18 +58,11 @@ pub(crate) struct PreparedSemanticView {
     pub(crate) member_projected_accesses: HashSet<(u64, u32)>,
     #[cfg(test)]
     pub(crate) certified_rendering_required: bool,
-    #[cfg(test)]
-    pub(crate) authorized_stack_owner_names: BTreeMap<i64, BTreeSet<String>>,
-    #[cfg(test)]
-    pub(crate) authorized_stack_owner_names_by_object:
-        BTreeMap<(r2ssa::ObjectId, i64), BTreeSet<String>>,
     pub(crate) certified_loop_carrier_values: BTreeSet<ValueId>,
 }
 
 pub(crate) struct PreparedSemanticViewInputs<'a> {
     pub(crate) prepared: &'a SsaArtifact,
-    #[cfg(test)]
-    pub(crate) stack_slots: &'a BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     #[cfg(test)]
     pub(crate) visible_bindings: &'a [VisibleBinding],
     pub(crate) function_facts: &'a FunctionFacts,
@@ -212,8 +202,6 @@ impl PreparedSemanticView {
         #[cfg(test)]
         populate_stack_aliases(&mut view, &inputs);
         populate_stack_offsets(&mut view, inputs.prepared);
-        #[cfg(test)]
-        populate_authorized_stack_owner_names(&mut view, &inputs);
         let named = NamedBlocks::of(inputs.prepared.function());
         populate_owner_exprs(symbols, &mut view, &inputs, &named);
         populate_call_result_sources(&mut view, inputs.call_result_facts());
@@ -559,22 +547,6 @@ fn populate_stack_aliases(
             entry.binding_kind = Some(binding.kind);
         }
     }
-
-    for (slot_key, slot) in inputs.stack_slots {
-        let offset = prepared_stack_slot_offset(slot_key);
-        let name = prepared_stack_visible_name(slot);
-        let visible_name = name.clone().unwrap_or_else(|| synthetic_stack_name(offset));
-        let entry = view
-            .stack_aliases_by_offset
-            .entry(offset)
-            .or_insert_with(|| StackAliasView {
-                visible_name: visible_name.clone(),
-                binding_kind: None,
-            });
-        if entry.visible_name.is_empty() {
-            entry.visible_name = visible_name;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -582,86 +554,6 @@ fn prepared_stack_slot_offset(slot: &StackSlotKey) -> i64 {
     match slot.base {
         ExternalStackBase::FramePointer => slot.offset.saturating_abs().saturating_neg(),
         _ => slot.offset,
-    }
-}
-
-#[cfg(test)]
-fn record_authorized_stack_owner_name(
-    view: &mut PreparedSemanticView,
-    function_facts: &FunctionFacts,
-    offset: i64,
-    name: &str,
-) {
-    let name = name.trim();
-    for object in function_facts
-        .render_facts()
-        .stack_slots()
-        .filter_map(|(object, _, slot_offset, _)| (slot_offset == offset).then_some(object))
-    {
-        if let Some(authorization) =
-            function_facts.authorized_stack_slot_owner_render(object, offset, name)
-        {
-            view.authorized_stack_owner_names_by_object
-                .entry((authorization.object, authorization.offset))
-                .or_default()
-                .insert(name.to_ascii_lowercase());
-        }
-    }
-    if function_facts
-        .authorized_stack_slot_owner_render_by_offset(offset, name)
-        .is_some()
-    {
-        view.authorized_stack_owner_names
-            .entry(offset)
-            .or_default()
-            .insert(name.to_ascii_lowercase());
-    }
-}
-
-#[cfg(test)]
-fn populate_authorized_stack_owner_names(
-    view: &mut PreparedSemanticView,
-    inputs: &PreparedSemanticViewInputs<'_>,
-) {
-    let function_facts = inputs.function_facts;
-    let alias_candidates: Vec<_> = view
-        .stack_aliases_by_offset
-        .iter()
-        .map(|(offset, alias)| (*offset, alias.visible_name.clone()))
-        .collect();
-    for (offset, name) in alias_candidates {
-        record_authorized_stack_owner_name(view, function_facts, offset, &name);
-    }
-    for binding in inputs.visible_bindings {
-        let Some(slot) = binding.stack_slot.as_ref() else {
-            continue;
-        };
-        if !matches!(
-            binding.kind,
-            VisibleBindingKind::Param | VisibleBindingKind::Local | VisibleBindingKind::StackObject
-        ) {
-            continue;
-        }
-        record_authorized_stack_owner_name(
-            view,
-            function_facts,
-            prepared_stack_slot_offset(slot),
-            &binding.name,
-        );
-    }
-    for (slot_key, slot) in inputs.stack_slots {
-        if !matches!(
-            slot.role,
-            ExternalStackSlotRole::Local | ExternalStackSlotRole::StackArg
-        ) {
-            continue;
-        }
-        record_authorized_stack_owner_name(
-            view,
-            function_facts,
-            prepared_stack_slot_offset(slot_key),
-            &slot.name,
-        );
     }
 }
 
@@ -2057,53 +1949,8 @@ fn stack_program_expr_for_memory_location(
 }
 
 #[cfg(test)]
-fn prepared_stack_owner_recovery_allowed(
-    view: &PreparedSemanticView,
-    offset: i64,
-    name: &str,
-) -> bool {
+fn prepared_stack_owner_recovery_allowed(view: &PreparedSemanticView) -> bool {
     !view.certified_rendering_required
-        || view
-            .authorized_stack_owner_names
-            .get(&offset)
-            .is_some_and(|names| names.contains(&name.to_ascii_lowercase()))
-}
-
-#[cfg(test)]
-fn prepared_stack_owner_offset_authorized(view: &PreparedSemanticView, offset: i64) -> bool {
-    !view.certified_rendering_required
-        || view
-            .authorized_stack_owner_names
-            .get(&offset)
-            .is_some_and(|names| !names.is_empty())
-}
-
-#[cfg(test)]
-fn prepared_stack_alias_name_for_object_offset(
-    symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    view: &PreparedSemanticView,
-    object: r2ssa::ObjectId,
-    offset: i64,
-) -> Option<String> {
-    let authorized = view
-        .authorized_stack_owner_names_by_object
-        .get(&(object, offset))?;
-    if view.binding_names.is_some() {
-        return view
-            .admitted_stack_symbol(object)
-            .map(|symbol| crate::symbol::spelling(symbols, symbol).to_string());
-    }
-    #[cfg(test)]
-    {
-        preferred_stack_alias_name(view, offset)
-            .filter(|alias| authorized.contains(&alias.to_ascii_lowercase()))
-            .or_else(|| authorized.iter().next().cloned())
-    }
-    #[cfg(not(test))]
-    {
-        let _ = (symbols, authorized);
-        None
-    }
 }
 
 fn prepared_stack_program_expr_for_object_offset(
@@ -2112,22 +1959,9 @@ fn prepared_stack_program_expr_for_object_offset(
     object: r2ssa::ObjectId,
     offset: i64,
 ) -> Option<CExpr> {
-    if view.binding_names.is_some() {
-        return view.admitted_stack_symbol(object).map(CExpr::Var);
-    }
-    #[cfg(test)]
-    {
-        let _ = view
-            .authorized_stack_owner_names_by_object
-            .get(&(object, offset))?;
-        prepared_stack_alias_name_for_object_offset(symbols, view, object, offset)
-            .map(|name| crate::symbol::var_ref(symbols, name))
-    }
-    #[cfg(not(test))]
-    {
-        let _ = (symbols, offset);
-        None
-    }
+    let _ = (symbols, offset);
+    view.binding_names.as_ref()?;
+    view.admitted_stack_symbol(object).map(CExpr::Var)
 }
 
 fn prepared_stack_object_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option<r2ssa::ObjectId> {
@@ -2168,7 +2002,7 @@ fn prepared_stack_alias_name_for_offset(
 ) -> Option<String> {
     preferred_stack_alias_name(view, offset)
         .filter(|alias| !alias.is_empty())
-        .filter(|alias| prepared_stack_owner_recovery_allowed(view, offset, alias))
+        .filter(|_| prepared_stack_owner_recovery_allowed(view))
 }
 
 fn prepared_stack_alias_expr_for_offset(
@@ -2623,7 +2457,7 @@ fn local_store_owner_expr_for_offset(
     before_idx: usize,
     offset: i64,
 ) -> Option<CExpr> {
-    if !prepared_stack_owner_offset_authorized(view, offset) {
+    if !prepared_stack_owner_recovery_allowed(view) {
         return None;
     }
     let prefer_stack_object = preferred_stack_alias_name(view, offset)
@@ -2687,27 +2521,6 @@ fn is_generic_prepared_stack_alias(name: &str) -> bool {
         || name.starts_with("local_")
         || name.starts_with("stack_")
         || name.starts_with("arg_")
-}
-
-#[cfg(test)]
-fn prepared_stack_visible_name(slot: &ExternalStackSlotSpec) -> Option<String> {
-    (!slot.name.is_empty()
-        && matches!(
-            slot.role,
-            ExternalStackSlotRole::Local
-                | ExternalStackSlotRole::StackArg
-                | ExternalStackSlotRole::Unknown
-        ))
-    .then(|| slot.name.clone())
-}
-
-#[cfg(test)]
-fn synthetic_stack_name(offset: i64) -> String {
-    if offset < 0 {
-        format!("local_{:x}", (-offset) as u64)
-    } else {
-        format!("stack_{:x}", offset as u64)
-    }
 }
 
 /// Bind every value the prepared objects place on the stack to its identity.

@@ -911,6 +911,8 @@ impl CertifiedSilence {
         // slot the plan had already elided.
         insts.extend(certified_return_control_insts(source));
         insts.extend(certificates.stack_geometry.insts.iter());
+        // A decided stack-protector check's own loads and stores, which the C has no statement for.
+        insts.extend(certificates.compiler_inserted.iter());
         // The copy that puts a callee's address in a temporary before the
         // call. The call spells the callee's name, so this assigns an object
         // the plan has elided and no statement can name.
@@ -970,6 +972,17 @@ pub(super) fn certified_stack_frame_values(source: &r2ssa::SsaArtifact) -> BTree
         .collect()
 }
 
+/// The values a decided stack-protector check's inserted operations define (`ElisionReason::CompilerInserted`).
+pub(super) fn certified_compiler_inserted_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    source
+        .certificates()
+        .compiler_inserted
+        .iter()
+        .filter_map(|inst| graph.inst(inst)?.output)
+        .collect()
+}
+
 /// The instructions whose operand reads a certificate already answers for.
 ///
 /// These are read from the same certificates the observation journal reads, so
@@ -997,6 +1010,7 @@ pub(super) fn certified_elided_read_instructions(
                 .flat_map(|certificate| certificate.insts.iter().copied()),
         )
         .chain(certificates.stack_geometry.insts.iter())
+        .chain(certificates.compiler_inserted.iter())
         .chain(certified_return_control_insts(source))
         .chain(certified_call_return_address_insts(source))
         .chain(certified_direct_call_target_insts(source))
@@ -1363,6 +1377,8 @@ enum SealWidthEvidence {
 #[derive(Debug, Clone)]
 pub(crate) struct BindingPlan {
     authority: SsaArtifactAuthority,
+    /// The cells the certificates elide, derived once from the artifact and the projection.
+    elided_cells: Result<CertificateElidedCells, CertificateElidedCellsError>,
     machine_projection: MachineProjection,
     /// One canonical term per value, with the rewrites that produced it and
     /// the instructions rendering it would discharge.
@@ -1401,8 +1417,6 @@ pub(crate) struct BindingPlan {
     /// on the stack is bound to a temporary rather than inlined, and the escape
     /// is the same fact either way.
     escaped_frame_objects: BTreeSet<r2ssa::ObjectId>,
-    /// Frame objects a call is proven to reach through an argument.
-    callee_reached_frame_objects: BTreeSet<r2ssa::ObjectId>,
     /// How each memory access is spelled, decided from the facts; absent when refused.
     access_syntax: BTreeMap<r2ssa::StructuredAccessId, access_syntax::AccessSyntax>,
     /// The C type at every boundary of the projection, under these
@@ -1501,6 +1515,13 @@ impl BindingPlan {
         &self.machine_projection
     }
 
+    /// The cells the certificates elide.
+    pub(crate) fn certificate_elided_cells(
+        &self,
+    ) -> Result<&CertificateElidedCells, CertificateElidedCellsError> {
+        self.elided_cells.as_ref().map_err(|error| *error)
+    }
+
     /// The canonical term of every value and every structured memory
     /// access, as the rewriter proved them equal to what the machine wrote.
     pub(crate) const fn canonical(&self) -> &r2rewrite::CanonicalRoots {
@@ -1566,8 +1587,8 @@ impl BindingPlan {
     }
 
     /// The frame objects a call is proven to reach through an address this function handed it.
-    pub(crate) fn callee_reached_frame_objects(&self) -> &BTreeSet<r2ssa::ObjectId> {
-        &self.callee_reached_frame_objects
+    pub(crate) fn escaped_frame_objects(&self) -> &BTreeSet<r2ssa::ObjectId> {
+        &self.escaped_frame_objects
     }
 
     /// The slots the caller pushed the return address into.

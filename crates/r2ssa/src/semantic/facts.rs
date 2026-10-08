@@ -290,12 +290,6 @@ pub struct ObjectModel {
     pub indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
-    /// Stack objects whose address leaves this body as a value.
-    pub escaping_addresses: BTreeSet<ObjectId>,
-    /// Stack objects a call is handed an address into, so the callee may
-    /// write any of their bytes: the object's own contents are then defined
-    /// by the call as much as by any store this body makes.
-    pub callee_reached: BTreeSet<ObjectId>,
     /// Which frame objects outside code can touch: those whose address
     /// escapes, and each call's argument area (`frame_reach`).
     pub frame_reach: FrameReach,
@@ -357,11 +351,6 @@ impl ObjectModel {
 
     pub fn escaped_unknown_object(&self, space: SpaceId) -> Option<ObjectId> {
         self.escaped_unknown.get(&ObjectSpaceId(space)).copied()
-    }
-
-    /// Whether this object's address leaves the body as a value.
-    pub fn address_escapes(&self, object: ObjectId) -> bool {
-        self.escaping_addresses.contains(&object)
     }
 
     /// The parameter a chain of pointee objects starts from, if it starts
@@ -1409,14 +1398,12 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) evidenced_roots: BTreeSet<StackAddressRoot>,
     /// How far each evidenced root's indexed accesses reach.
     pub(crate) evidenced_spans: BTreeMap<StackAddressRoot, i64>,
-    /// Roots whose address leaves the body as a value.
-    pub(crate) escaping_roots: BTreeSet<StackAddressRoot>,
+    /// The evidenced spans that took in another root.
+    pub(crate) evidenced_absorbing: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     pub(crate) callee_write_spans: BTreeMap<StackAddressRoot, i64>,
     /// The positions no frame object extends across.
     pub(crate) frame_boundaries: FrameBoundaries,
-    /// Every frame address a call is handed, bounded or not.
-    pub(crate) callee_handed_roots: BTreeSet<StackAddressRoot>,
     /// What every value can be, for an index's lower bound.
     pub(crate) values: &'a crate::values::ValueRanges,
     /// Addresses whose displaced parent is being resolved, against a cycle.
@@ -1478,10 +1465,9 @@ impl<'a> ObjectModelBuilder<'a> {
             indexed_displacements: crate::dense::IdMap::default(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
-            escaping_roots: BTreeSet::new(),
+            evidenced_absorbing: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
             frame_boundaries: FrameBoundaries::default(),
-            callee_handed_roots: BTreeSet::new(),
             values: empty_value_ranges(),
             resolving: crate::dense::IdSet::default(),
             stack_pointer_carrier: machine_context
@@ -1504,6 +1490,20 @@ impl<'a> ObjectModelBuilder<'a> {
         self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
+    /// Spans an escaped address reaches, each one object: seeded as write spans are.
+    pub(crate) fn escape_spans(&mut self, spans: &[(i64, i64)]) {
+        for (start, end) in spans {
+            let root = StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset: *start,
+            };
+            self.callee_write_spans
+                .entry(root)
+                .and_modify(|known| *known = (*known).max(*end))
+                .or_insert(*end);
+        }
+    }
+
     pub(crate) fn build(
         mut self,
         function: &SSAFunction,
@@ -1514,12 +1514,6 @@ impl<'a> ObjectModelBuilder<'a> {
         if let Some(facts) = self.facts {
             let callee_spans =
                 callee_write_spans(facts, function, graph, self.machine_context, values);
-            self.callee_handed_roots = callee_spans
-                .spans
-                .iter()
-                .map(|(start, _)| *start)
-                .chain(callee_spans.unbounded.iter().copied())
-                .collect();
             let boundaries = FrameBoundaries::of(facts, graph, self.machine_context);
             for (start, end) in callee_spans.spans {
                 self.callee_write_spans
@@ -1540,7 +1534,7 @@ impl<'a> ObjectModelBuilder<'a> {
             self.frame_boundaries = boundaries;
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;
-            self.escaping_roots = evidenced.escaping;
+            self.evidenced_absorbing = evidenced.absorbing;
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
             stack_roots.sort_unstable();
@@ -1605,31 +1599,17 @@ impl<'a> ObjectModelBuilder<'a> {
             .stack_objects
             .iter()
             .filter_map(|(key, object)| {
-                let end = self.callee_write_spans.get(&key.root)?;
+                // A span that absorbed the places inside it is the object's extent, whoever's.
+                let absorbed = self
+                    .evidenced_spans
+                    .get(&key.root)
+                    .filter(|_| self.evidenced_absorbing.contains(&key.root));
+                let end = [self.callee_write_spans.get(&key.root), absorbed]
+                    .into_iter()
+                    .flatten()
+                    .max()?;
                 let reach = u32::try_from(end.checked_sub(key.root.offset)?).ok()?;
                 Some((*object, reach))
-            })
-            .collect();
-        let escaping_addresses = self
-            .stack_objects
-            .iter()
-            .filter(|(key, _)| self.escaping_roots.contains(&key.root))
-            .map(|(_, object)| *object)
-            .collect();
-        // The object an address a call is handed lies in: the nearest object
-        // that starts at or below it in the same base, since objects start at
-        // their roots and do not overlap.
-        let callee_reached = self
-            .callee_handed_roots
-            .iter()
-            .filter_map(|handed| {
-                self.stack_objects
-                    .iter()
-                    .filter(|(key, _)| {
-                        key.root.base == handed.base && key.root.offset <= handed.offset
-                    })
-                    .max_by_key(|(key, _)| key.root.offset)
-                    .map(|(_, object)| *object)
             })
             .collect();
         let frame_ceilings = self
@@ -1643,8 +1623,6 @@ impl<'a> ObjectModelBuilder<'a> {
             .collect();
         ObjectModel {
             callee_write_reach,
-            escaping_addresses,
-            callee_reached,
             frame_reach: FrameReach::default(),
             frame_ceilings,
             objects: self.objects,
@@ -2177,11 +2155,12 @@ pub(crate) enum ReachingStorageState {
     Conflict,
 }
 
-/// The frame positions an object starts at, how far each reaches, and the ones whose address leaves the body.
+/// The frame positions an object starts at, and how far each reaches.
 pub(crate) struct EvidencedStackRoots {
     pub(crate) roots: BTreeSet<StackAddressRoot>,
     pub(crate) spans: BTreeMap<StackAddressRoot, i64>,
-    pub(crate) escaping: BTreeSet<StackAddressRoot>,
+    /// The spans that took in another root: their reach is their object's extent.
+    pub(crate) absorbing: BTreeSet<StackAddressRoot>,
 }
 
 /// Declared stack slots, keyed by the coordinate objects are identified in.

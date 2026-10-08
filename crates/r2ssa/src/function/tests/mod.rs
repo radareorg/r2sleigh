@@ -2537,6 +2537,17 @@ fn a_call_keeps_the_merged_half_of_a_register_it_writes_part_of() {
     }
 }
 
+/// The lifted (block, index) of each memory operation promotion rewrote.
+fn promoted_sites(func: &SSAFunction) -> BTreeSet<(u64, usize)> {
+    func.promoted_slots()
+        .iter()
+        .filter_map(|op| match func.arena().origin(op)? {
+            crate::arena::OpOrigin::Lifted { block, index, .. } => Some((*block, *index)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn promotion_fixture(ops: Vec<R2ILOp>) -> BTreeSet<(u64, usize)> {
     let mut arch = ArchSpec::new("promotion-test");
     arch.addr_size = 8;
@@ -2566,7 +2577,7 @@ fn promotion_fixture(ops: Vec<R2ILOp>) -> BTreeSet<(u64, usize)> {
     }
     let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
         .expect("artifact");
-    artifact.function().promoted_slot_sites().clone()
+    promoted_sites(artifact.function())
 }
 
 fn promotion_fixture_with_argument(
@@ -2601,7 +2612,7 @@ fn promotion_fixture_with_argument(
     }
     let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
         .expect("artifact");
-    artifact.function().promoted_slot_sites().clone()
+    promoted_sites(artifact.function())
 }
 
 /// Three instructions, one lifted operation each, in one block.
