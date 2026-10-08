@@ -142,6 +142,10 @@ type Green<V> = (Rc<V>, Rc<[Dep]>);
 #[derive(Default)]
 struct Frame {
     deps: Vec<Dep>,
+    /// Where the last byte range sits in `deps`: a read touching it widens it in place.
+    last_bytes: Option<usize>,
+    /// The keys already recorded, by query: asking one again adds no dependency.
+    asked: BTreeMap<TypeId, Box<dyn Any>>,
     taken: BTreeSet<*const Dep>,
     /// Whether it read a stopped answer, which makes its own answer the request's too.
     stopped: bool,
@@ -261,7 +265,20 @@ impl<I: Inputs + 'static> Db<I> {
 
     /// Record that the query running reads `range`.
     pub fn reads(&self, range: Range<u64>) {
-        self.record(Dep::Bytes(range));
+        let mut frames = self.frames.borrow_mut();
+        let Some(frame) = frames.last_mut() else {
+            return;
+        };
+        if let Some(Dep::Bytes(last)) = frame.last_bytes.and_then(|at| frame.deps.get_mut(at))
+            && range.start <= last.end
+            && last.start <= range.end
+        {
+            last.start = last.start.min(range.start);
+            last.end = last.end.max(range.end);
+            return;
+        }
+        frame.last_bytes = Some(frame.deps.len());
+        frame.deps.push(Dep::Bytes(range));
     }
 
     /// The answer to `Q` at `key`, reused where nothing it read has moved.
@@ -278,12 +295,29 @@ impl<I: Inputs + 'static> Db<I> {
         };
         // An answer not held has no entry to depend on: it tainted the asker or handed it its reads.
         if changed_at.is_some() {
-            self.record(Dep::Query {
+            self.record_query::<Q>(key);
+        }
+        Ok(value)
+    }
+
+    /// Record that the query running asked `Q` at `key`, once per frame.
+    fn record_query<Q: Query<I>>(&self, key: &Q::Key) {
+        let mut frames = self.frames.borrow_mut();
+        let Some(frame) = frames.last_mut() else {
+            return;
+        };
+        let asked = frame
+            .asked
+            .entry(TypeId::of::<Q>())
+            .or_insert_with(|| Box::new(BTreeSet::<Q::Key>::new()))
+            .downcast_mut::<BTreeSet<Q::Key>>()
+            .expect("a query's asked keys are kept under its own type");
+        if asked.insert(key.clone()) {
+            frame.deps.push(Dep::Query {
                 table: TypeId::of::<Q>(),
                 key: Rc::new(key.clone()),
             });
         }
-        Ok(value)
     }
 
     /// `Q`'s answer at `key` where held and good; never computes, and records the answer's own dependencies, so no cycle closes.
@@ -353,12 +387,6 @@ impl<I: Inputs + 'static> Db<I> {
                 query: PhantomData,
             })
         }))
-    }
-
-    fn record(&self, dep: Dep) {
-        if let Some(frame) = self.frames.borrow_mut().last_mut() {
-            frame.deps.push(dep);
-        }
     }
 }
 
@@ -886,6 +914,42 @@ mod tests {
         fn compute(db: &Db<Memory>, key: &u64) -> Result<u64, Cycle> {
             db.get::<Loop>(key).and_then(|inner| inner.as_ref().clone())
         }
+    }
+
+    /// A sum read one byte at a time past the half `Sum` answers, which it asks twice.
+    struct Bytewise;
+    impl Query<Memory> for Bytewise {
+        type Key = (u64, u64);
+        type Value = u64;
+        const NAME: &'static str = "bytewise";
+        fn compute(db: &Db<Memory>, &(start, end): &(u64, u64)) -> u64 {
+            let half = start + (end - start) / 2;
+            let first = *db.get::<Sum>(&(start, half)).expect("acyclic");
+            assert_eq!(*db.get::<Sum>(&(start, half)).expect("acyclic"), first);
+            let rest = (half..end).map(|at| u64::from(read(db, at..at + 1)[0]));
+            first + rest.sum::<u64>()
+        }
+    }
+
+    /// Adjacent reads widen one recorded range and a query asked twice is recorded once;
+    /// every byte either covers still invalidates the answer.
+    #[test]
+    fn merged_reads_and_repeated_asks_still_track_every_byte() {
+        let mut db = Db::new(Memory::new((0..16).collect()));
+        assert_eq!(*db.get::<Bytewise>(&(0, 8)).unwrap(), 28);
+        db.inputs_mut().write(12, 0);
+        assert_eq!(*db.get::<Bytewise>(&(0, 8)).unwrap(), 28);
+        assert_eq!(
+            db.stats().computed,
+            2,
+            "a write past the range moves nothing"
+        );
+        db.inputs_mut().write(7, 0);
+        assert_eq!(*db.get::<Bytewise>(&(0, 8)).unwrap(), 21);
+        db.inputs_mut().write(4, 0);
+        assert_eq!(*db.get::<Bytewise>(&(0, 8)).unwrap(), 17);
+        db.inputs_mut().write(1, 0);
+        assert_eq!(*db.get::<Bytewise>(&(0, 8)).unwrap(), 16);
     }
 
     #[test]
