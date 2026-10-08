@@ -417,6 +417,83 @@ pub struct SemanticObligation {
     pub edge_use: Option<UseSite>,
 }
 
+/// Every obligation of one function, sorted by identity: one vector searched by halving, where
+/// a tree held each eighty-byte identity twice (key and value) beside its node overhead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObligationTable(Vec<SemanticObligation>);
+
+impl ObligationTable {
+    /// The table of these obligations; of two with one identity the later stands, as a map's insert.
+    fn of(mut obligations: Vec<SemanticObligation>) -> Self {
+        obligations.reverse();
+        obligations.sort_by_key(|obligation| obligation.id);
+        obligations.dedup_by_key(|obligation| obligation.id);
+        Self(obligations)
+    }
+
+    fn position(&self, id: &SemanticObligationId) -> Result<usize, usize> {
+        self.0.binary_search_by(|obligation| obligation.id.cmp(id))
+    }
+
+    pub fn get(&self, id: &SemanticObligationId) -> Option<&SemanticObligation> {
+        self.position(id).ok().map(|at| &self.0[at])
+    }
+
+    pub fn contains_key(&self, id: &SemanticObligationId) -> bool {
+        self.position(id).is_ok()
+    }
+
+    /// Add one obligation, handing back the one it replaced.
+    fn insert(&mut self, obligation: SemanticObligation) -> Option<SemanticObligation> {
+        match self.position(&obligation.id) {
+            Ok(at) => Some(std::mem::replace(&mut self.0[at], obligation)),
+            Err(at) => {
+                self.0.insert(at, obligation);
+                None
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &SemanticObligationId> {
+        self.0.iter().map(|obligation| &obligation.id)
+    }
+
+    pub fn values(&self) -> std::slice::Iter<'_, SemanticObligation> {
+        self.0.iter()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&SemanticObligationId, &SemanticObligation)> {
+        self.0.iter().map(|obligation| (&obligation.id, obligation))
+    }
+}
+
+impl<'a> IntoIterator for &'a ObligationTable {
+    type Item = (&'a SemanticObligationId, &'a SemanticObligation);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, SemanticObligation>,
+        fn(&'a SemanticObligation) -> (&'a SemanticObligationId, &'a SemanticObligation),
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|obligation| (&obligation.id, obligation))
+    }
+}
+
+/// Serialized as the identity-keyed map it replaced.
+impl Serialize for ObligationTable {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.iter())
+    }
+}
+
 /// Complete source inventory for one prepared function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObligationInventoryFailureKind {
@@ -449,7 +526,7 @@ pub struct SemanticObligationInventory {
     /// canonical operation for. They have no graph instruction to be indexed
     /// by, and there are none in an ordinary function.
     span_instructions: BTreeMap<CanonicalInstructionId, SemanticInstructionDisposition>,
-    obligations: BTreeMap<SemanticObligationId, SemanticObligation>,
+    obligations: ObligationTable,
     by_inst: Vec<Option<CanonicalInstructionId>>,
     native_spans: BTreeMap<CanonicalInstructionId, crate::GenuineNativeInstructionSpan>,
     construction_failures: Vec<ObligationInventoryFailure>,
@@ -471,7 +548,7 @@ impl SemanticObligationInventory {
             source_instruction_count,
             instructions: vec![None; source_instruction_count],
             span_instructions: BTreeMap::new(),
-            obligations: BTreeMap::new(),
+            obligations: ObligationTable::default(),
             by_inst: vec![None; source_instruction_count],
             native_spans: BTreeMap::new(),
             construction_failures: Vec::new(),
@@ -868,6 +945,7 @@ impl SemanticObligationInventory {
         let mut inventory = Self::empty(graph.insts.len());
         inventory.construction_failures = construction_failures;
         inventory.unstructured_cycle_blocks = structured.unstructured_cycle_blocks.clone();
+        let mut obligations = Vec::new();
         for inst in &graph.insts {
             let Some(id) = canonical_ids.get(inst.id).copied() else {
                 continue;
@@ -903,17 +981,14 @@ impl SemanticObligationInventory {
                     component,
                 };
                 obligation_ids.insert(obligation_id);
-                inventory.obligations.insert(
-                    obligation_id,
-                    SemanticObligation {
-                        id: obligation_id,
-                        source: SemanticSourceSite::GraphInstruction(inst.id),
-                        inputs: explicit_inputs
-                            .remove(&(inst.id, kind, component))
-                            .unwrap_or_else(|| inst.inputs.clone()),
-                        edge_use: explicit_edge_uses.remove(&(inst.id, kind, component)),
-                    },
-                );
+                obligations.push(SemanticObligation {
+                    id: obligation_id,
+                    source: SemanticSourceSite::GraphInstruction(inst.id),
+                    inputs: explicit_inputs
+                        .remove(&(inst.id, kind, component))
+                        .unwrap_or_else(|| inst.inputs.clone()),
+                    edge_use: explicit_edge_uses.remove(&(inst.id, kind, component)),
+                });
             }
             inventory.by_inst[inst.id.0 as usize] = Some(id);
             inventory.instructions[inst.id.0 as usize] = Some(SemanticInstructionDisposition {
@@ -923,6 +998,7 @@ impl SemanticObligationInventory {
                 obligations: obligation_ids,
             });
         }
+        inventory.obligations = ObligationTable::of(obligations);
         inventory.complete = inventory.derive_is_complete();
         inventory
     }
@@ -983,15 +1059,12 @@ impl SemanticObligationInventory {
                 .is_some()
                 || self
                     .obligations
-                    .insert(
-                        obligation_id,
-                        SemanticObligation {
-                            id: obligation_id,
-                            source: SemanticSourceSite::GenuineNativeSpan(span),
-                            inputs: Vec::new(),
-                            edge_use: None,
-                        },
-                    )
+                    .insert(SemanticObligation {
+                        id: obligation_id,
+                        source: SemanticSourceSite::GenuineNativeSpan(span),
+                        inputs: Vec::new(),
+                        edge_use: None,
+                    })
                     .is_some()
             {
                 return false;
@@ -1116,7 +1189,7 @@ impl SemanticObligationInventory {
         &self.native_spans
     }
 
-    pub fn obligations(&self) -> &BTreeMap<SemanticObligationId, SemanticObligation> {
+    pub fn obligations(&self) -> &ObligationTable {
         &self.obligations
     }
 
@@ -1251,13 +1324,11 @@ impl SemanticObligationInventory {
             }
         }
         for (id, obligation) in &self.obligations {
-            if obligation.id != *id
-                || self
-                    .disposition_of(id.instruction, obligation.source)
-                    .is_none_or(|instruction| {
-                        instruction.source != obligation.source
-                            || !instruction.obligations.contains(id)
-                    })
+            if self
+                .disposition_of(id.instruction, obligation.source)
+                .is_none_or(|instruction| {
+                    instruction.source != obligation.source || !instruction.obligations.contains(id)
+                })
                 || match (id.kind, id.component, obligation.source) {
                     (
                         SemanticObligationKind::LiveStateTransition,
@@ -2962,8 +3033,8 @@ mod tests {
         let mut inventory = artifact.obligations().clone();
         let obligation = inventory
             .obligations
-            .values_mut()
-            .next()
+            .0
+            .first_mut()
             .expect("source obligation");
         obligation.source = SemanticSourceSite::GraphInstruction(InstId(u32::MAX));
         // The inventory decides this once, where it is built, so a mapping
