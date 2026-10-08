@@ -26,6 +26,8 @@ crossterm.workspace = true
 [features]
 default = []
 sleigh = ["r2engine/x86", "r2engine/arm", "r2engine/riscv"]
+# Count allocations; with R2S_ALLOCATIONS set, print the count after a script (the timing gate).
+alloc-count = []
 
 [lints]
 workspace = true
