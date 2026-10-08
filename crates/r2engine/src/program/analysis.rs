@@ -63,7 +63,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
         let target = view
             .machine_in(thumb)
             .ok_or("no Sleigh specification for this architecture")
-            .and_then(|machine| view.target_of(machine).map_err(|_| "unassembled"));
+            .and_then(|machine| view.target_of(machine, entry).map_err(|_| "unassembled"));
         let Ok(target) = target else {
             return Analysis(Err(NativeRefusal::Machine("the machine is not assembled")));
         };
@@ -116,7 +116,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
         let view = View::new(db, true);
         let Some(Ok(target)) = view
             .machine_in(thumb)
-            .map(|machine| view.target_of(machine))
+            .map(|machine| view.target_of(machine, entry))
         else {
             return Walking(Err(NativeRefusal::Machine("the machine is not assembled")));
         };
@@ -170,7 +170,7 @@ pub(super) fn callee_read<S: Source + 'static>(
     let view = View::new(db, true);
     let target = view
         .machine_in(thumb)
-        .map(|machine| view.target_of(machine));
+        .map(|machine| view.target_of(machine, address));
     let walked = db
         .get::<Walked>(&(address, thumb))
         .expect("a walk asks for no callee");
@@ -227,7 +227,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
         let view = View::new(db, true);
         let target = view
             .machine_in(key.1)
-            .map(|machine| view.target_of(machine));
+            .map(|machine| view.target_of(machine, key.0));
         let Some(Ok(target)) = target else {
             return Sealing::Unanalysed;
         };

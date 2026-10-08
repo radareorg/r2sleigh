@@ -170,6 +170,11 @@ pub enum NativeRefusal {
     /// The carriers or the convention slots are not a machine this engine can
     /// describe.
     Machine(&'static str),
+    /// The function's convention passes what no call boundary states (doc/adr-language-profile.md).
+    Convention {
+        name: &'static str,
+        reason: &'static str,
+    },
     Capture(r2source::SnapshotValidationError),
     Lift(String),
     Prepare(String),
@@ -216,6 +221,7 @@ impl std::fmt::Display for NativeRefusal {
             Self::NoStackPointer => write!(f, "the compiler specification names no stack pointer"),
             Self::UnknownRegister(name) => write!(f, "this architecture has no register {name}"),
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
+            Self::Convention { name, reason } => write!(f, "under the {name} convention: {reason}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),
             Self::Stopped(stop) => write!(f, "{stop}"),
@@ -972,6 +978,11 @@ fn analyse(
     entry: u64,
     walk: &Walk,
 ) -> Result<Prepared, NativeRefusal> {
+    // A convention whose boundaries carry what none states refuses before anything is read.
+    if let Some(reason) = target.convention.refused {
+        let name = target.convention.name;
+        return Err(NativeRefusal::Convention { name, reason });
+    }
     let native = Native {
         target,
         program,
@@ -2130,7 +2141,7 @@ fn convention_slots(target: &NativeTarget<'_>) -> Result<SourceConventionSlots, 
     // step between entries.
     let stack_arguments = target
         .compiler
-        .stack_arguments
+        .stack_arguments()
         .and_then(|(offset, align)| r2source::SourceStackArgumentPlacement::new(offset, align));
     Ok(
         SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)

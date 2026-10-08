@@ -1592,16 +1592,25 @@ pub struct EmbeddedMachine {
     /// The compiler specification of the platform's usual toolchain: the
     /// stack pointer, the return address and the prototype models.
     pub compiler_spec: &'static str,
-    /// The Windows toolchain's specification, where the language's
-    /// definitions (`.ldefs`, compiler id `windows`) name one: a PE runs
-    /// under its prototypes rather than the usual toolchain's.
-    pub windows_compiler_spec: Option<&'static str>,
+    /// Every compiler the language's definitions (`.ldefs`) name, by id, with its
+    /// specification: `windows` for a PE's toolchain, `golang` for Go's.
+    pub compilers: Vec<(String, &'static str)>,
     /// The language's DWARF register numbering.
     pub dwarf: crate::profile::DwarfRegisters,
     /// The processor context this machine decodes in, as the snapshot's
     /// machine tuple spells it: `arm` and `thumb` share one instruction set
     /// and one architecture name, and only this tells the trusted lift apart.
     pub cpu: &'static str,
+}
+
+impl EmbeddedMachine {
+    /// The specification of the compiler an id names, where the language's definitions name it.
+    pub fn compiler_spec_of(&self, id: &str) -> Option<&'static str> {
+        self.compilers
+            .iter()
+            .find(|(compiler, _)| compiler == id)
+            .map(|(_, spec)| *spec)
+    }
 }
 
 /// Load the embedded machine an architecture name selects.
@@ -1627,7 +1636,7 @@ fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
         arch,
         disasm,
         compiler_spec: spec.cspec,
-        windows_compiler_spec: spec.windows_cspec,
+        compilers: spec.compilers,
         dwarf: crate::profile::DwarfRegisters::parse(spec.dwarf),
         cpu: spec.cpu,
     })
@@ -1647,7 +1656,7 @@ struct EmbeddedSpecification {
     sla: &'static [u8],
     pspec: &'static str,
     cspec: &'static str,
-    windows_cspec: Option<&'static str>,
+    compilers: Vec<(String, &'static str)>,
     /// The language's DWARF register numbering.
     dwarf: &'static str,
     name: &'static str,
@@ -1766,7 +1775,11 @@ fn embedded_specification(arch_name: &str, windows: bool) -> Option<EmbeddedSpec
         sla: slas.iter().find(|(sla, _)| *sla == definition.sla)?.1,
         pspec: file(chosen.pspec.unwrap_or(&definition.pspec))?,
         cspec: file(usual)?,
-        windows_cspec: definition.compiler("windows").and_then(file),
+        compilers: definition
+            .compilers
+            .iter()
+            .filter_map(|(id, spec)| Some((id.clone(), file(spec)?)))
+            .collect(),
         dwarf: definition
             .dwarf
             .as_deref()

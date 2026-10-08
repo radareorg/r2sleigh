@@ -56,6 +56,9 @@ struct Machines {
     /// one. Which functions it decodes is what `modes` says.
     thumb: Option<EmbeddedMachine>,
     assembled: Result<Assembled, String>,
+    /// What a Go function needs, where the container states any: Go's convention by its
+    /// toolchain's version (doc/adr-language-profile.md, LP1).
+    go: Option<Result<Assembled, String>>,
 }
 
 impl Machines {
@@ -72,36 +75,71 @@ impl Machines {
         let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
             .transpose()
             .map_err(|error| error.to_string())?;
-        let assembled = assemble(&machine, container);
+        let psabi = kernel(container);
+        let bits = container.arch.bits;
+        let assembled = r2abi::calling_convention(&arch, bits, psabi)
+            .ok_or_else(|| format!("no calling convention for {arch} {bits}"))
+            .and_then(|convention| assemble(&machine, container, convention));
+        let languages = &container.languages;
+        let go = (languages.program == SourceLanguage::Go
+            || languages
+                .ranges
+                .iter()
+                .any(|(_, language)| *language == SourceLanguage::Go))
+        .then(|| {
+            r2abi::go_calling_convention(&arch, bits, psabi, languages.go_version)
+                .ok_or_else(|| format!("no Go calling convention for {arch} {bits}"))
+                .and_then(|convention| assemble(&machine, container, convention))
+        });
         Ok(Self {
             machine,
             thumb,
             assembled,
+            go,
         })
+    }
+
+    /// What a native request needs for the function at `entry`, by the language it is written in.
+    fn assembled_at(&self, container: &Container, entry: u64) -> Result<&Assembled, String> {
+        match (&self.go, container.languages.at(entry)) {
+            (Some(go), SourceLanguage::Go) => go.as_ref().map_err(Clone::clone),
+            _ => self.assembled.as_ref().map_err(Clone::clone),
+        }
     }
 }
 
-/// Assemble what a native request needs of the machine, once per program: constant while it is open.
-fn assemble(machine: &EmbeddedMachine, container: &Container) -> Result<Assembled, String> {
-    let arch = machine.arch.name.clone();
+/// Assemble what a native request needs of the machine under one convention, once per program:
+/// constant while it is open.
+fn assemble(
+    machine: &EmbeddedMachine,
+    container: &Container,
+    convention: &'static r2abi::CallingConvention,
+) -> Result<Assembled, String> {
     let bits = container.arch.bits;
     // The system's ABI says which register it reserves for the thread
     // pointer and which control registers it makes callee-saved. A system
     // fact, so a static ELF that names no C library has it too; which
     // library's declarations apply is `platform`'s question.
     let psabi = kernel(container);
-    let convention = r2abi::calling_convention(&arch, bits, psabi)
-        .ok_or_else(|| format!("no calling convention for {arch} {bits}"))?;
-    // A PE runs under the Windows toolchain's prototypes where the
-    // language names one; anything else under the usual toolchain's.
-    let specification = match container.format {
-        Format::Pe => machine
-            .windows_compiler_spec
+    // A convention that names its compiler's prototype runs under it; a PE under the Windows
+    // toolchain's where the language names one; anything else under the usual toolchain's.
+    let specification = match (convention.prototype, container.format) {
+        (Some((compiler, _)), _) => machine
+            .compiler_spec_of(compiler)
+            .ok_or_else(|| format!("the language names no {compiler} compiler"))?,
+        (None, Format::Pe) => machine
+            .compiler_spec_of("windows")
             .unwrap_or(machine.compiler_spec),
-        _ => machine.compiler_spec,
+        (None, _) => machine.compiler_spec,
     };
     let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
         .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
+    let compiler = match convention.prototype {
+        Some((_, prototype)) => compiler
+            .under(prototype)
+            .ok_or_else(|| format!("the compiler specification states no {prototype}"))?,
+        None => compiler,
+    };
     let call_effect = crate::native::call_effect(
         &machine.arch,
         bits,
@@ -612,6 +650,12 @@ impl<S: Source> ProgramInputs<S> {
     /// What a native request needs of the machine, where it loaded and was assembled.
     fn assembled(&self) -> Option<&Assembled> {
         self.machines().ok()?.assembled.as_ref().ok()
+    }
+
+    /// What a native request needs for the function at `entry`.
+    fn assembled_at(&self, entry: u64) -> Result<&Assembled, String> {
+        self.machines()?
+            .assembled_at(self.source.container(), entry)
     }
 }
 

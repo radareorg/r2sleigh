@@ -31,10 +31,13 @@
 	</context_data>
 
   <stackpointer register="sp" space="ram"/>
+  <returnaddress>
+    <register name="x30"/>
+  </returnaddress>
   <funcptr align="4"/>     <!-- Function pointers are word aligned and leastsig bit may encode otherstuff -->
   
     <default_proto>
-		<prototype name="abi-internal" extrapop="8" stackshift="8">
+		<prototype name="abi-internal" extrapop="0" stackshift="0">
 			<input>
 				<pentry minsize="4" maxsize="8" metatype="float">
 					<register name="q0"/>
@@ -192,14 +195,15 @@
                 <register name="x15"/>
 			</killedbycall>
 			<unaffected>
-				<register name="x16"/>
-				<register name="x17"/>
+				<register name="x18"/>
+				<register name="x28"/>
+				<register name="x29"/>
 				<register name="sp"/>
 			</unaffected>
 		</prototype>
 	</default_proto>
 	
-	<prototype name="abi0" extrapop="8" stackshift="8">
+	<prototype name="abi0" extrapop="0" stackshift="0">
 		<input>
 			<pentry minsize="1" maxsize="500" align="8">
 				<addr offset="8" space="stack"/>
@@ -228,8 +232,9 @@
 			<register name="x15"/>
 		</killedbycall>
 		<unaffected>
-			<register name="x16"/>
-			<register name="x17"/>
+			<register name="x18"/>
+			<register name="x28"/>
+			<register name="x29"/>
 			<register name="sp"/>
 		</unaffected>
 	</prototype>

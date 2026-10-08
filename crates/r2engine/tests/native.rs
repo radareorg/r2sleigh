@@ -103,7 +103,7 @@ impl Machine {
         let default = under(platform, embedded.compiler_spec);
         let name = default.convention.name;
         let mut conventions = BTreeMap::from([(name, default)]);
-        if let Some(windows) = embedded.windows_compiler_spec {
+        if let Some(windows) = embedded.compiler_spec_of("windows") {
             let ms = under(Platform::Windows, windows);
             if ms.convention.name != name {
                 conventions.insert(ms.convention.name, ms);

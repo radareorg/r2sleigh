@@ -170,6 +170,12 @@ pub struct CallingConvention {
     pub variadic_count_register: Option<&'static str>,
     /// The register a frame-keeping function holds its frame base in.
     pub frame_pointer: Option<&'static str>,
+    /// The compiler specification and the prototype in it, where the convention is not the
+    /// platform toolchain's default.
+    pub prototype: Option<(&'static str, &'static str)>,
+    /// What its boundaries carry that no call boundary states, which refuses every function
+    /// under it.
+    pub refused: Option<&'static str>,
     /// The documents that state these.
     pub citation: &'static str,
 }
@@ -180,6 +186,8 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: Some("al"),
+    prototype: None,
+    refused: None,
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
@@ -192,6 +200,8 @@ const MICROSOFT_X64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: None,
+    prototype: None,
+    refused: None,
     citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
                defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer",
 };
@@ -202,6 +212,8 @@ const I386_CDECL: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("ebp"),
     variadic_count_register: None,
+    prototype: None,
+    refused: None,
     citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
                defines no red zone; its register table gives %ebp the frame pointer role",
 };
@@ -212,6 +224,8 @@ const AAPCS64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("x29"),
     variadic_count_register: None,
+    prototype: None,
+    refused: None,
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer",
@@ -231,6 +245,8 @@ const AAPCS32: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("r11"),
     variadic_count_register: None,
+    prototype: None,
+    refused: None,
     citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"; AAPCS32 leaves the frame pointer to the platform, and GCC in ARM state keeps it in r11, the APCS fp",
@@ -242,9 +258,73 @@ const RISCV_LP64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("s0"),
     variadic_count_register: None,
+    prototype: None,
+    refused: None,
     citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
                no red zone; \"Register Convention\": x8 \"s0/fp Saved register/frame pointer\"",
 };
+
+const GO_AMD64: CallingConvention = CallingConvention {
+    name: "golang",
+    red_zone_bytes: 0,
+    variadic_tail_on_stack: false,
+    variadic_count_register: None,
+    frame_pointer: Some("rbp"),
+    prototype: Some(("golang", "abi-internal")),
+    refused: None,
+    citation: "Go internal ABI (src/cmd/compile/abi-internal.md), amd64: \"RBP | Frame pointer \
+               | Same | Same\"; it defines no red zone",
+};
+
+const GO_ARM64: CallingConvention = CallingConvention {
+    frame_pointer: Some("x29"),
+    citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R29 | Frame pointer \
+               | Same | Same\"; it defines no red zone",
+    ..GO_AMD64
+};
+
+/// Go's stack-based ABI0: results come back in the caller's frame, where no boundary reads them.
+const GO_ABI0_REFUSED: &str = "Go ABI0 returns results on the stack, which no call boundary states";
+
+const GO_AMD64_ABI0: CallingConvention = CallingConvention {
+    name: "golang_abi0",
+    prototype: Some(("golang", "abi0")),
+    refused: Some(GO_ABI0_REFUSED),
+    ..GO_AMD64
+};
+
+const GO_ARM64_ABI0: CallingConvention = CallingConvention {
+    name: "golang_abi0",
+    prototype: Some(("golang", "abi0")),
+    refused: Some(GO_ABI0_REFUSED),
+    ..GO_ARM64
+};
+
+/// The convention a Go function uses, by the toolchain's version (`None` where the program
+/// states none: build information predates Go 1.13, so ABI0).
+///
+/// Go 1.17 release notes: register-based arguments and results "enabled for Linux, macOS, and
+/// Windows on the 64-bit x86 architecture"; Go 1.18: "64-bit ARM (`GOARCH=arm64`) [...] as
+/// well as 64-bit x86 architecture (`GOARCH=amd64`) on all operating systems".
+pub fn go_calling_convention(
+    arch: &str,
+    bits: u32,
+    platform: Platform,
+    version: Option<(u32, u32)>,
+) -> Option<&'static CallingConvention> {
+    let at_least = |minor: u32| version.is_some_and(|version| version >= (1, minor));
+    let first_systems = matches!(
+        platform,
+        Platform::Linux | Platform::Darwin | Platform::Windows
+    );
+    match (crate::family(arch), bits) {
+        (Some("x86"), 64) if at_least(18) || at_least(17) && first_systems => Some(&GO_AMD64),
+        (Some("x86"), 64) => Some(&GO_AMD64_ABI0),
+        (Some("arm"), 64) if at_least(18) => Some(&GO_ARM64),
+        (Some("arm"), 64) => Some(&GO_ARM64_ABI0),
+        _ => None,
+    }
+}
 
 /// The default calling convention a program for this architecture and
 /// platform runs under.
@@ -313,6 +393,36 @@ pub fn platform_registers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The register ABI arrived in Go 1.17 on three amd64 ports and in 1.18 everywhere else.
+    #[test]
+    fn a_go_function_s_convention_follows_its_toolchain() {
+        let name = |arch, platform, version| {
+            go_calling_convention(arch, 64, platform, version).map(|row| row.name)
+        };
+        assert_eq!(name("x86", Platform::Linux, Some((1, 17))), Some("golang"));
+        assert_eq!(
+            name("x86", Platform::Unknown, Some((1, 17))),
+            Some("golang_abi0")
+        );
+        assert_eq!(
+            name("x86", Platform::Unknown, Some((1, 18))),
+            Some("golang")
+        );
+        assert_eq!(
+            name("x86", Platform::Linux, Some((1, 14))),
+            Some("golang_abi0")
+        );
+        assert_eq!(name("x86", Platform::Linux, None), Some("golang_abi0"));
+        assert_eq!(
+            name("arm", Platform::Darwin, Some((1, 17))),
+            Some("golang_abi0")
+        );
+        assert_eq!(name("arm", Platform::Darwin, Some((1, 21))), Some("golang"));
+        assert_eq!(name("riscv", Platform::Linux, Some((1, 21))), None);
+        let abi0 = go_calling_convention("x86", 64, Platform::Linux, None).expect("ABI0");
+        assert!(abi0.refused.is_some());
+    }
 
     fn duty(arch: &str, bits: u32, platform: Platform, register: &str) -> Option<RegisterDuty> {
         platform_registers(arch, bits, platform)
