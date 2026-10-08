@@ -931,11 +931,7 @@ impl<'a> Values<'a> {
         let mut types = Vec::with_capacity(plan.arguments.len());
         for (argument, class) in &plan.arguments {
             let held = self.value_type(*argument)?;
-            arguments.push(terms::reclass(
-                self.operand(*argument, inst)?,
-                &held,
-                class,
-            )?);
+            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
             types.push(terms::c_type(class)?);
         }
         let ret_type = match &plan.result {
@@ -975,11 +971,7 @@ impl<'a> Values<'a> {
         let mut types = Vec::with_capacity(plan.arguments.len());
         for (argument, class) in &plan.arguments {
             let held = self.value_type(*argument)?;
-            arguments.push(terms::reclass(
-                self.operand(*argument, inst)?,
-                &held,
-                class,
-            )?);
+            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
             types.push(terms::c_type(class)?);
         }
         let ret = match &plan.result {
@@ -1004,7 +996,7 @@ impl<'a> Values<'a> {
         let Some((name, held)) = self.names.get(result.0 as usize).and_then(Option::as_ref) else {
             return Some(CStmt::Expr(call));
         };
-        let value = terms::reclass(call, class, held)?;
+        let value = fit(call, class, held)?;
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }
@@ -1126,7 +1118,7 @@ impl<'a> Values<'a> {
                     SemanticObligationComponent::RegisterSlot { storage, .. }
                         if o.id.kind == SemanticObligationKind::ReturnValue =>
                     {
-                        carrier_class(self.artifact, storage, held.width_bits())
+                        carrier_class(self.artifact, storage, storage.size * 8)
                     }
                     _ => None,
                 });
@@ -1143,7 +1135,7 @@ impl<'a> Values<'a> {
                 _ => return None,
             },
         };
-        let spelled = terms::reclass(self.operand(*value, inst)?, &held, &class)?;
+        let spelled = fit(self.operand(*value, inst)?, &held, &class)?;
         Some(Some(CExpr::cast(ty, spelled)))
     }
 
@@ -1321,8 +1313,11 @@ impl<'a> Values<'a> {
 /// width, or an integer for an integer, boolean, pointer or enum. `None` for anything else.
 pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<MachineType> {
     match ty.unaliased() {
-        r2types::CTypeLike::Float(bits @ (32 | 64)) if *bits == width_bits => {
-            Some(MachineType::Float { width_bits })
+        // A float may travel as the low lane of a wider vector register.
+        r2types::CTypeLike::Float(bits @ (32 | 64))
+            if *bits <= width_bits && matches!(width_bits, 32 | 64 | 128) =>
+        {
+            Some(MachineType::Float { width_bits: *bits })
         }
         r2types::CTypeLike::Int { .. }
         | r2types::CTypeLike::Bool
@@ -1340,7 +1335,8 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
 }
 
 /// The class the convention passes a value of `width_bits` held in `storage` in: the slot it lies
-/// in says general or float register. `None` where no slot of the convention holds it.
+/// in says general or float register, `storage`'s own size the width (a float's lane of a vector
+/// register). `None` where no slot of the convention holds it.
 pub(super) fn carrier_class(
     artifact: &SsaArtifact,
     storage: r2source::CanonicalStorageId,
@@ -1375,8 +1371,12 @@ pub(super) fn agreed(
     declared: Option<MachineType>,
     carrier: Option<MachineType>,
 ) -> Option<MachineType> {
+    // The register says which kind; the declaration, where there is one, says the width within it.
+    let float = |ty: &MachineType| matches!(ty, MachineType::Float { .. });
     match (declared, carrier) {
-        (Some(declared), Some(carrier)) => (declared == carrier).then_some(declared),
+        (Some(declared), Some(carrier)) => (float(&declared) == float(&carrier)
+            && declared.width_bits() <= carrier.width_bits())
+        .then_some(declared),
         (one, other) => one.or(other),
     }
 }
@@ -1405,6 +1405,10 @@ fn parameters(
                 Some(Some(declared)) => agreed(Some(declared), carrier)?,
                 None => carrier?,
             };
+            // A parameter is declared at its value's own width: a lane of it is read by name.
+            if class.width_bits() != width_bits {
+                return None;
+            }
             Some((parameter.index, parameter.value, class))
         })
         .collect()
@@ -1446,11 +1450,29 @@ impl Gap {
 /// one carries and zero-extends into a wider one; a float only as `reclass` reinterprets it.
 fn fit(expr: CExpr, from: &MachineType, to: &MachineType) -> Option<CExpr> {
     let float = |ty: &MachineType| matches!(ty, MachineType::Float { .. });
+    let lane = |bits: u32| MachineType::Integer {
+        width_bits: bits,
+        signedness: r2ssa::MachineSignedness::Unsigned,
+    };
+    if terms::c_type(from)? == terms::c_type(to)? {
+        return Some(expr);
+    }
+    let (wide, narrow) = (from.width_bits(), to.width_bits());
     match (float(from), float(to)) {
         (false, false) => Some(CExpr::cast(
             terms::c_type(to)?,
             CExpr::cast(terms::c_type(from)?, expr),
         )),
+        // A float passed in the low lane of a wider register: its low bits, read as the float.
+        (false, true) if wide > narrow => {
+            let low = CExpr::cast(terms::c_type(&lane(narrow))?, expr);
+            terms::reclass(low, &lane(narrow), to)
+        }
+        // A float returned in a wider register: its bits, the rest zero as the ABI leaves them unstated.
+        (true, false) if narrow > wide => {
+            let bits = terms::reclass(expr, from, &lane(wide))?;
+            Some(CExpr::cast(terms::c_type(to)?, bits))
+        }
         _ => terms::reclass(expr, from, to),
     }
 }

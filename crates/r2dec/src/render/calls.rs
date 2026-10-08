@@ -133,7 +133,7 @@ pub(super) fn plan(
             .find(|argument| argument.value == value)
             .and_then(|argument| match argument.location {
                 r2ssa::CallArgumentLocation::Register { storage } => {
-                    super::values::carrier_class(artifact, storage, width(value))
+                    super::values::carrier_class(artifact, storage, storage.size * 8)
                 }
                 _ => None,
             })
@@ -159,16 +159,29 @@ pub(super) fn plan(
     let result = match result {
         None => None,
         Some(value) => {
-            let carrier = inventory
-                .obligations_for_inst(inst)
-                .find_map(|o| match o.id.component {
-                    r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
-                        if o.id.kind == SemanticObligationKind::CallResult =>
-                    {
-                        super::values::carrier_class(artifact, storage, width(value))
-                    }
-                    _ => None,
-                });
+            // The boundary's result storage is the carrier's own: a double's lane of a vector register.
+            let carrier = match artifact
+                .facts()
+                .boundaries
+                .calls
+                .get(site)
+                .and_then(|boundary| boundary.result_kind)
+            {
+                Some(r2source::SourceCallResult::Register { storage }) => {
+                    super::values::carrier_class(artifact, storage, storage.size * 8)
+                }
+                // Undescribed: the slot the result obligation names, at its own width.
+                _ => inventory
+                    .obligations_for_inst(inst)
+                    .find_map(|o| match o.id.component {
+                        r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
+                            if o.id.kind == SemanticObligationKind::CallResult =>
+                        {
+                            super::values::carrier_class(artifact, storage, storage.size * 8)
+                        }
+                        _ => None,
+                    }),
+            };
             let declared = match signature.map(|signature| signature.return_type.unaliased()) {
                 Some(r2types::CTypeLike::Void) => return None,
                 Some(ty) => Some(super::values::class_of(ty, width(value))?),

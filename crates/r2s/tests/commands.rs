@@ -403,10 +403,27 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
 fn a_staged_indirect_call_goes_through_its_target_value() {
     let staged = r2s("e dec.pipeline=staged; pdd @ 0x401000");
     assert!(
-        staged.out.contains("((uint64_t(*)(void))(uint64_t)rax_1)();"),
+        staged
+            .out
+            .contains("((uint64_t(*)(void))(uint64_t)rax_1)();"),
         "{}",
         staged.out
     );
+}
+
+/// A double comes back in XMM0's low lane: the call's result is its bits, the rest of the register
+/// zero, and the return reads the lane back.
+#[test]
+fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
+    let binary =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
+    for line in [
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper(arg0, arg1));",
+        "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
 }
 
 /// A recursive call names the function itself at its own signature: `fact` calls `fact` with
