@@ -1,0 +1,16 @@
+[package]
+name = "sleigh-compiler"
+version = "2.0.2"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mnemonikr/sleigh-compiler"
+description = "Rust bindings for the Ghidra SLEIGH compiler. Used to compile processor .slaspec files into .sla files"
+categories = ["security", "compilers", "api-bindings"]
+
+[dependencies]
+cxx = "1.0"
+thiserror = "2.0"
+libsla-sys = "0.1"
+
+[build-dependencies]
+cxx-build = "1.0"

@@ -461,6 +461,13 @@ void DisassemblyCache::initialize(int4 min,int4 hashsize)
     hashtable[i] = pos;		// Make sure all hashtable positions point to a real ParserContext
 }
 
+void DisassemblyCache::invalidate(void)
+
+{
+  for(int4 i=0;i<minimumreuse;++i)
+    list[i]->setParserState(ParserContext::uninitialized);
+}
+
 void DisassemblyCache::free(void)
 
 {
@@ -519,6 +526,7 @@ Sleigh::Sleigh(LoadImage *ld,ContextDatabase *c_db)
   context_db = c_db;
   cache = new ContextCache(c_db);
   discache = (DisassemblyCache *)0;
+  contextcommitted = false;
 }
 
 void Sleigh::clearForDelete(void)
@@ -548,6 +556,17 @@ void Sleigh::reset(LoadImage *ld,ContextDatabase *c_db)
   context_db = c_db;
   cache = new ContextCache(c_db);
   discache = (DisassemblyCache *)0;
+  contextcommitted = false;
+}
+
+/// r2sleigh: a parse whose state is \e uninitialized is parsed again from the bytes and context
+/// at its address, as a cache miss would be.
+void Sleigh::invalidateParseCache(void) const
+
+{
+  if (discache != (DisassemblyCache *)0)
+    discache->invalidate();
+  pcode_cache.clear();
 }
 
 /// The .sla file from the document store is loaded and cache objects are prepared
@@ -751,7 +770,8 @@ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
   }
   
   ParserContext *pos = obtainContext(baseaddr,ParserContext::pcode);
-  pos->applyCommits();
+  if (pos->applyCommits())
+    contextcommitted = true;
   fallOffset = pos->getLength();
   
   if (pos->getDelaySlot()>0) {
@@ -759,7 +779,8 @@ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
     do {
     // Do not pass pos->getNaddr() to obtainContext, as pos may have been previously cached and had naddr adjusted
       ParserContext *delaypos = obtainContext(pos->getAddr() + fallOffset,ParserContext::pcode);
-      delaypos->applyCommits();
+      if (delaypos->applyCommits())
+	contextcommitted = true;
       int4 len = delaypos->getLength();
       fallOffset += len;
       bytecount += len;

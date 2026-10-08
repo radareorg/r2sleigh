@@ -105,6 +105,7 @@ void SleighBase::buildXrefs(vector<string> &errorPairs)
       ContextField *field = (ContextField *)csym->getPatternValue();
       int4 startbit = field->getStartBit();
       int4 endbit = field->getEndBit();
+      contextsymbols.push_back(csym);
       registerContext(csym->getName(),startbit,endbit);
     }
   }
@@ -115,18 +116,10 @@ void SleighBase::buildXrefs(vector<string> &errorPairs)
 void SleighBase::reregisterContext(void)
 
 {
-  SymbolScope *glb = symtab.getGlobalScope();
-  SymbolTree::const_iterator iter;
-  SleighSymbol *sym;
-  for(iter=glb->begin();iter!=glb->end();++iter) {
-    sym = *iter;
-    if (sym->getType() == SleighSymbol::context_symbol) {
-      ContextSymbol *csym = (ContextSymbol *)sym;
-      ContextField *field = (ContextField *)csym->getPatternValue();
-      int4 startbit = field->getStartBit();
-      int4 endbit = field->getEndBit();
-      registerContext(csym->getName(),startbit,endbit);
-    }
+  // r2sleigh: the fields buildXrefs found, in the same symbol-table order, with no walk per reset.
+  for(ContextSymbol *csym : contextsymbols) {
+    ContextField *field = (ContextField *)csym->getPatternValue();
+    registerContext(csym->getName(),field->getStartBit(),field->getEndBit());
   }
 }
 

@@ -67,6 +67,7 @@ protected:
   uint4 unique_allocatemask;	///< Bits that are guaranteed to be zero in the unique allocation scheme
   uint4 numSections;		///< Number of \e named sections
   SourceFileIndexer indexer;    ///< source file index used when generating SLEIGH constructor debug info
+  vector<ContextSymbol *> contextsymbols;	///< Context fields found by buildXrefs (r2sleigh: a reset registers these without a symbol-table walk)
   void buildXrefs(vector<string> &errorPairs);	///< Build register map. Collect user-ops and context-fields.
   void reregisterContext(void);	///< Reregister context fields for a new executable
   AddrSpace *decodeSlaSpace(Decoder &decoder,const Translate *trans); ///< Add a space parsed from a .sla file
