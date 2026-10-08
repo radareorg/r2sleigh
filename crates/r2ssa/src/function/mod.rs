@@ -1824,8 +1824,6 @@ struct CorrelatedCallSites {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each correlated site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
-    /// The sites whose callee's body leaves its arity unproven.
-    arity_unproven: BTreeSet<SourceCallSiteIdentity>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1837,7 +1835,6 @@ fn correlate_call_site_interfaces(
     let mut interfaces = Vec::new();
     let mut callee_linkages = BTreeMap::new();
     let mut callee_names = BTreeMap::new();
-    let mut arity_unproven = BTreeSet::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, call) else {
             // The source named a call the lift does not have exactly one
@@ -1882,9 +1879,6 @@ fn correlate_call_site_interfaces(
             let Some(callee) = recovered else {
                 continue;
             };
-            if callee.reads_past_parameters() {
-                arity_unproven.insert(identity);
-            }
             if let Some(mut interface) =
                 crate::recover_interface::mint_recovered_call_site_interface(
                     callee,
@@ -1990,7 +1984,6 @@ fn correlate_call_site_interfaces(
         interfaces,
         callee_linkages,
         callee_names,
-        arity_unproven,
     }
 }
 
@@ -2415,7 +2408,6 @@ impl TrustedSsaArtifact {
         };
         // A call to this function itself has its contract in the interface just settled.
         let mut call_interfaces = correlated_call_sites.interfaces;
-        let mut arity_unproven = correlated_call_sites.arity_unproven;
         if let Some(own) = function_interface.as_ref() {
             for call in source.advisory_calls() {
                 if call.target_address() != source.image().entry_address() {
@@ -2429,9 +2421,6 @@ impl TrustedSsaArtifact {
                     .any(|known| known.identity() == identity)
                 {
                     continue;
-                }
-                if own.reads_past_parameters() {
-                    arity_unproven.insert(identity);
                 }
                 if let Some(interface) =
                     crate::recover_interface::mint_recovered_call_site_interface(
@@ -2459,7 +2448,6 @@ impl TrustedSsaArtifact {
             );
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
-        machine_context.set_arity_unproven_sites(arity_unproven);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());

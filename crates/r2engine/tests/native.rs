@@ -4459,11 +4459,10 @@ const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0xc3, // 0x101f ret
 ];
 
-/// A callee that reads an argument slot past its parameters states no arity a
-/// caller may take, and no count read off the caller's registers stands: the
-/// call is a residual.
+/// A callee whose parameters are a floor mints no contract; a call to it takes what the caller
+/// provably wrote, at least the floor: `past(3, 5)` (doc/adr-resolved-bodies.md, "Demand").
 #[test]
-fn a_callee_reading_past_its_parameters_states_no_call_arity() {
+fn a_callee_whose_parameters_are_a_floor_takes_what_its_caller_wrote() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
@@ -4472,8 +4471,45 @@ fn a_callee_reading_past_its_parameters_states_no_call_arity() {
     };
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
-    assert!(!text.contains("past("), "{text}");
-    assert!(text.contains("r2sleigh_residual"), "{text}");
+    assert!(text.contains("past(3, 5)"), "{text}");
+}
+
+/// `f` hands every argument register on unread to a call through memory; the caller writes `edi`
+/// and, on one of two paths each, `esi`.
+const AN_ARGUMENT_MERGED_FROM_TWO_WRITES: &[u8] = &[
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1000 call [0x2000]
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 0x1007 mov eax, 7
+    0xc3, // 0x100c ret
+    0xcc, 0xcc, 0xcc, // 0x100d padding
+    0x85, 0xff, // 0x1010 test edi, edi
+    0x74, 0x07, // 0x1012 je 0x101b
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1014 mov esi, 5
+    0xeb, 0x05, // 0x1019 jmp 0x1020
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 0x101b mov esi, 7
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 0x1020 mov edi, 3
+    0xe8, 0xd6, 0xff, 0xff, 0xff, // 0x1025 call 0x1000
+    0xc3, // 0x102a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 0x102b padding
+];
+
+/// Past the callee's floor, a slot the count cannot see but the caller writes on some path may be
+/// an argument: the call is a residual, never `merged(3)` without the `esi` it was handed.
+#[test]
+fn an_argument_merged_from_two_writes_past_the_floor_refuses_the_count() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: AN_ARGUMENT_MERGED_FROM_TWO_WRITES.to_vec(),
+        name: "merged",
+    };
+    let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("merged(3)"), "{text}");
+    assert!(
+        response.render_refusal.is_some() || text.contains("r2sleigh_residual"),
+        "{text}"
+    );
 }
 
 /// `f(a, b)` calls itself with `(a - 1, b + 1)`, passing `b + 1` through `rdx`

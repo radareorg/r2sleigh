@@ -789,6 +789,17 @@ pub(crate) fn reaching_stack_slot_value(
     agreed
 }
 
+/// Whether the body writes `slot` anywhere other than as a call's clobber. O(values).
+fn body_writes(graph: &SsaGraph, slot: CanonicalStorageId) -> bool {
+    graph.values.iter().any(|value| {
+        value
+            .canonical_storage
+            .is_some_and(|storage| register_storages_overlap(storage, slot))
+            && graph.written_by_body(value.id)
+            && !value_is_call_clobber(graph, value.id)
+    })
+}
+
 pub(crate) fn convention_call_boundary(
     function: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -799,6 +810,7 @@ pub(crate) fn convention_call_boundary(
     op_index: usize,
     at_least: usize,
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
+    written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
@@ -812,11 +824,12 @@ pub(crate) fn convention_call_boundary(
                 storage.space == slot.space && storage.offset == slot.offset
             })
     };
-    // Whether this function itself takes `slot` as a parameter, where its interface says.
+    // Whether this function itself may take `slot` as a parameter: its interface says, and while
+    // recovery has none yet, any slot the body did not write may be one it hands on.
     let own_parameter = |slot: CanonicalStorageId| {
         machine_context
             .function_interface()
-            .is_some_and(|interface| {
+            .is_none_or(|interface| {
                 interface
                     .parameters()
                     .iter()
@@ -921,7 +934,13 @@ pub(crate) fn convention_call_boundary(
             // it cannot see) ends the count unless the body writes a later one, or the slot holds
             // this function's own parameter: either way the call may be passed it.
             Some(_) | None => {
-                if own_parameter(*slot) {
+                // A merge the walk cannot resolve may hold an argument where the body writes the
+                // register at all; a merge of arrivals and call clobbers holds none.
+                let unseen_write = reaching.is_none()
+                    && *written_anywhere
+                        .entry(*slot)
+                        .or_insert_with(|| body_writes(graph, *slot));
+                if unseen_write || own_parameter(*slot) {
                     r2il::refusal_evidence!(
                         "convention-arity-unproven",
                         "callsite ({block_addr:#x}, {op_index}) may hand on parameter slot {position}"
@@ -1054,6 +1073,8 @@ pub(crate) fn collect_source_boundary_facts(
         ..SourceBoundaryFacts::default()
     };
 
+    // Whether the body writes each argument register an unseen slot asks of, found once per register.
+    let mut written_anywhere = BTreeMap::new();
     for call_site in call_sites.by_id.values() {
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
@@ -1279,21 +1300,9 @@ pub(crate) fn collect_source_boundary_facts(
                 boundary.complete = arguments_complete && results_complete;
             }
         }
-        // A callee whose body leaves its arity unproven refuses any count the registers suggest.
-        let arity_unproven = machine_context.is_some_and(|machine_context| {
-            call_site
-                .raw_identity
-                .is_some_and(|identity| machine_context.call_arity_unproven(identity))
-        });
-        if arity_unproven {
-            r2il::refusal_evidence!(
-                "call-arity-unproven",
-                "callsite {:?}: its callee reads past its parameters",
-                call_site.raw_identity
-            );
-        }
+        // A callee that mints no contract (a floor of parameters, or an unproven result) is called
+        // with what this body provably wrote, at least what the callee reads (CalleeStatement).
         if !boundary.complete
-            && !arity_unproven
             && boundary.calling_convention.is_none()
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
@@ -1311,6 +1320,7 @@ pub(crate) fn collect_source_boundary_facts(
                 op_index,
                 stated.map_or(0, |statement| statement.at_least),
                 &entry_values,
+                &mut written_anywhere,
             );
             // One record of what the fallback was asked and what it answered.
             r2il::refusal_evidence!(
@@ -1337,13 +1347,16 @@ pub(crate) fn collect_source_boundary_facts(
                 boundary.fixed_argument_count =
                     Some(convention.arguments.len()).filter(|_| convention.arguments_proven);
                 boundary.arguments = convention.arguments;
+                // The convention's result is a guess about the caller's side; the callee's own proven
+                // result, where its statement carries one, is the callee's fact (CalleeStatement).
+                boundary.result_kind =
+                    stated
+                        .and_then(|statement| statement.result)
+                        .filter(|result| {
+                            !matches!(result, SourceCallResult::Void)
+                                || convention.results.is_empty()
+                        });
                 boundary.results = convention.results;
-                // Deliberately not the result kind. Where the convention says a
-                // result would be left is a fact about the caller's side, and
-                // recording it here would make interface recovery read a thunk's
-                // tail transfer as proof that its target returns a value. What
-                // the callee returns stays unproven; the renderer's disposition
-                // decides what a transfer through this boundary looks like.
                 boundary.arguments_complete = convention.arguments_proven;
                 boundary.results_complete = true;
                 boundary.complete = convention.arguments_proven;

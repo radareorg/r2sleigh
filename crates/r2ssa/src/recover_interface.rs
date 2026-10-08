@@ -1379,6 +1379,7 @@ fn recover_interface_inner(
         (RecoveredFunctionResult::Unproven, Some(slot)) => result_owners(func, graph, &facts, slot),
         _ => BTreeSet::new(),
     };
+
     Some(RecoveredInterface {
         parameters: parameters.into_boxed_slice(),
         stack_parameters: stack_parameters.into_boxed_slice(),
@@ -1392,9 +1393,8 @@ fn recover_interface_inner(
     })
 }
 
-/// Whether a call whose arguments are unproven cannot tell what `next` holds, the first slot past
-/// the parameters: parameters are a prefix, so only that slot can extend them. An untouched slot
-/// ends a count, as the call boundary reads it; an unseen one may carry the caller's value.
+/// Whether a call of unproven arity may be handed `next`, the first slot past the parameters
+/// (parameters are a prefix, so only it can extend them): unseen there, or the arrival untouched.
 fn entry_reaches_unproven_call(
     func: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -1421,7 +1421,10 @@ fn entry_reaches_unproven_call(
                 *slot,
                 false,
             )
-            .is_none()
+            .is_none_or(|state| match state {
+                crate::semantic::ReachingAbiState::PreservedEntry => true,
+                crate::semantic::ReachingAbiState::Value(value) => !graph.written_by_body(value),
+            })
         })
 }
 

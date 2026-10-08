@@ -37,17 +37,22 @@ demand is for results only:
   and only where some owner then states its result.
 - `Demand(f)` is the cycle of result demands `f` is in, by Tarjan over the
   owners; members of one cycle read each other resolved alone.
-- A callee whose interface still has an unproven result mints no call
-  contract; a call to it reads the registers the caller wrote, and at least
-  as many as the callee's own body proves it reads (`CalleeStatement`).
+- A callee whose interface mints no call contract, its result unproven or
+  its parameters a floor, is stated instead (`CalleeStatement`): a call to it
+  reads the registers the caller provably wrote, at least as many as the
+  callee's own body proves it reads, and takes the result the body proves.
 
-The limit: parameters stay what each body proves alone. A thunk whose
-target forwards an argument to a body nothing describes reports only the
-arguments it reads itself, so a caller can pass fewer than the source does
-(`QString::operator=(const char*)` renders with its `this` alone). Marking
-such parameter lists a floor and reading more at the call site was measured
-and rejected: the extra arguments were registers written for other reasons
-(`murmur3_32`'s rotate count), which AGENTS forbids as invented arguments.
+Parameters a body proves alone are a floor wherever an argument register
+reaches a call of unproven arity untouched or unseen: recovery, with no
+interface yet, counts any untouched slot as one it may hand on. A caller then
+passes what it wrote; past the floor, a slot the count cannot see (a merge)
+refuses the call where the caller writes that register on some path, and
+ends the count where only arrivals and call clobbers merge there. Before,
+recovery stopped silently at the untouched slot and minted an exact
+zero-argument contract: gcc -O2 hashes `main` called `combined()` without the
+buffer it reads, and crashed. A caller that hands its own untouched slot on to
+a floor callee is still counted as ending there; closing that costs C++
+methods their calls and waits on prototypes for mangled imports (LP).
 
 The first preparation recovers the interface; a restated one is handed it,
 so the owners are taken from the first.
