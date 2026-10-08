@@ -11,6 +11,9 @@ use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAn
 /// A shared answer compared by identity: a recomputed analysis is a new one, never backdated.
 pub(super) struct Shared<T>(pub(super) Arc<T>);
 
+/// SSA operations the analyses, and apart the sealings, hold at once (doc/adr-next-pass.md, PF3).
+const OPERATIONS_HELD: usize = 200_000;
+
 impl<T> Clone for Shared<T> {
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
@@ -40,8 +43,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
     type Key = (u64, bool);
     type Value = Analysis;
     const NAME: &'static str = "analysed";
-    /// A prepared body is megabytes; a session asks about one function at a time.
-    const CAPACITY: Option<usize> = Some(1);
+    /// SSA operations held, about 1.6 KB each with its sealing (doc/adr-next-pass.md, PF3).
+    const CAPACITY: Option<usize> = Some(OPERATIONS_HELD);
+
+    fn weight(value: &Analysis) -> usize {
+        value.0.as_ref().map_or(1, |prepared| {
+            prepared
+                .artifact()
+                .artifact()
+                .function()
+                .arena()
+                .id_limit()
+                .max(1)
+        })
+    }
 
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Analysis {
         let view = View::new(db, true);
@@ -193,7 +208,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
     type Key = (u64, bool);
     type Value = Sealing;
     const NAME: &'static str = "sealed";
-    const CAPACITY: Option<usize> = Some(1);
+    const CAPACITY: Option<usize> = Some(OPERATIONS_HELD);
+
+    fn weight(value: &Sealing) -> usize {
+        match value {
+            Sealing::Sealed(sealed) => sealed.0.operations().max(1),
+            _ => 1,
+        }
+    }
 
     fn compute(db: &Db<ProgramInputs<S>>, key: &(u64, bool)) -> Sealing {
         let analysis = db

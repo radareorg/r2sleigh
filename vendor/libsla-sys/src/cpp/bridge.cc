@@ -94,6 +94,15 @@ uint4 getSize(const VarnodeData &data) {
     return data.size;
 }
 
+/// r2sleigh: a varnode's space and offset, read in place where getAddress allocates an Address.
+AddrSpace *getVarnodeSpace(const VarnodeData &data) {
+    return data.space;
+}
+
+uint8 getVarnodeOffset(const VarnodeData &data) {
+    return data.offset;
+}
+
 const Document& parseDocumentIntoStore(DocumentStorage &store, const std::string &data) {
     std::stringstream ss;
     ss << data;
@@ -165,9 +174,13 @@ std::unique_ptr<std::vector<std::string>> SleighProxy::getUserOpNamesProxy() con
 }
 
 /// Discard every parser context cached by instruction address while retaining
-/// the decoded Sleigh specification. Ghidra's public reset path rebuilds the
-/// context and disassembly caches without decoding the specification again.
+/// the decoded Sleigh specification. Context no decode committed is still the
+/// specification's, so only the parses go; otherwise the context is rebuilt too.
 void SleighProxy::clearCache(const DocumentStorage &processorSpec) {
+    if (!contextCommitted()) {
+        invalidateParseCache();
+        return;
+    }
     context = construct_new_context();
     reset(loader.get(), context.get());
     DocumentStorage store;

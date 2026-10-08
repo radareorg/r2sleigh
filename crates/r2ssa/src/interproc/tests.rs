@@ -164,7 +164,6 @@ fn reg(offset: u64, size: u32) -> Varnode {
         space: SpaceId::Register,
         offset,
         size,
-        meta: None,
     }
 }
 
@@ -181,7 +180,6 @@ fn ram(offset: u64, size: u32) -> Varnode {
         space: SpaceId::Ram,
         offset,
         size,
-        meta: None,
     }
 }
 

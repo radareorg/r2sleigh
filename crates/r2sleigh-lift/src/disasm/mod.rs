@@ -62,7 +62,7 @@ struct LoadedSpecification {
     /// operand body may spell an alias the canonical map does not keep.
     register_names: std::collections::BTreeSet<String>,
     /// Exact mapping extracted with the architecture metadata for this session.
-    space_map: HashMap<AddressSpaceId, SpaceId>,
+    space_map: crate::sleigh::SpaceMap,
     /// Register the processor spec names as the program counter.
     program_counter: String,
     /// Architecture exactly as `extract_architecture` derived it, before any
@@ -1946,7 +1946,6 @@ impl Disassembler {
                 space: r2il::SpaceId::Register,
                 offset: storage.offset,
                 size: storage.size,
-                meta: None,
             });
         for block in source.image().blocks() {
             let size = u32::try_from(block.bytes().len()).map_err(|_| {
@@ -3562,7 +3561,6 @@ impl Disassembler {
             space,
             offset: vn.address.offset,
             size,
-            meta: None,
         })
     }
 

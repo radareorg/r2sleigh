@@ -119,6 +119,7 @@ public:
   DisassemblyCache(Translate *trans,ContextCache *ccache,AddrSpace *cspace,int4 cachesize,int4 windowsize);	///< Constructor
   ~DisassemblyCache(void) { free(); }	///< Destructor
   ParserContext *getParserContext(const Address &addr);		///< Get the parser for a particular Address
+  void invalidate(void);	///< r2sleigh: mark every cached parse stale, keeping the allocations
 };
 
 /// \brief Build p-code from a pre-parsed instruction
@@ -165,6 +166,7 @@ class Sleigh : public SleighBase {
   ContextCache *cache;			///< Cache of recently used context values
   mutable DisassemblyCache *discache;	///< Cache of recently parsed instructions
   mutable PcodeCacher pcode_cache;	///< Cache of p-code data just prior to emitting
+  mutable bool contextcommitted;	///< r2sleigh: a decode has committed context since the last reset
   void clearForDelete(void);		///< Delete the context and disassembly caches
 protected:
   ParserContext *obtainContext(const Address &addr,int4 state) const;
@@ -174,6 +176,8 @@ public:
   Sleigh(LoadImage *ld,ContextDatabase *c_db);		///< Constructor
   virtual ~Sleigh(void);				///< Destructor
   void reset(LoadImage *ld,ContextDatabase *c_db);	///< Reset the engine for a new program
+  bool contextCommitted(void) const { return contextcommitted; }	///< r2sleigh: has a decode committed context since the last reset
+  void invalidateParseCache(void) const;	///< r2sleigh: forget every parse; the context database stays
   virtual void initialize(DocumentStorage &store);
   virtual void registerContext(const string &name,int4 sbit,int4 ebit);
   virtual void setContextDefault(const string &nm,uintm val);

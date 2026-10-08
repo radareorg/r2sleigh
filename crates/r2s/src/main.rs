@@ -1,5 +1,6 @@
 //! r2s: a radare2-compatible shell over the r2sleigh engine.
 
+mod allocator;
 mod commands;
 mod complete;
 mod config;
@@ -73,6 +74,7 @@ fn main() {
     if let Some(script) = cli.command {
         // A quit is how a script ends, not a failure of it.
         let run = run_script(&mut session, &mut reader, &script);
+        allocator::report();
         std::process::exit(if run.failed { 1 } else { 0 });
     }
 

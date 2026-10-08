@@ -27,11 +27,9 @@ use std::time::{Duration, Instant};
 
 use r2il::R2ILBlock;
 use r2ssa::SsaArtifact;
+use r2types::FunctionFacts;
 #[cfg(test)]
 use r2types::FunctionTypeFacts;
-use r2types::{
-    FunctionFacts, MetadataScalarKind, TypeHint, merge_type_hint, type_hint_from_value_metadata,
-};
 use serde::{Deserialize, Serialize};
 
 mod json;
@@ -262,64 +260,6 @@ pub fn engine_ptr_bits(arch: Option<&r2il::ArchSpec>) -> u32 {
 
 pub fn engine_effective_ptr_bits(arch: &r2il::ArchSpec) -> u32 {
     r2il::effective_arch_address_size(arch).saturating_mul(8)
-}
-
-fn metadata_scalar_kind_from_r2il(kind: r2il::ScalarKind) -> MetadataScalarKind {
-    match kind {
-        r2il::ScalarKind::Bool => MetadataScalarKind::Bool,
-        r2il::ScalarKind::SignedInt => MetadataScalarKind::SignedInt,
-        r2il::ScalarKind::UnsignedInt => MetadataScalarKind::UnsignedInt,
-        r2il::ScalarKind::Float => MetadataScalarKind::Float,
-        r2il::ScalarKind::Bitvector => MetadataScalarKind::Bitvector,
-        r2il::ScalarKind::Unknown => MetadataScalarKind::Unknown,
-    }
-}
-
-fn metadata_type_hint_for_varnode(vn: &r2il::Varnode) -> Option<TypeHint> {
-    let meta = vn.meta.as_ref()?;
-    let pointer_like = meta
-        .pointer_hint
-        .is_some_and(|hint| !matches!(hint, r2il::PointerHint::Unknown));
-    let scalar_kind = meta.scalar_kind.map(metadata_scalar_kind_from_r2il);
-
-    type_hint_from_value_metadata(pointer_like, scalar_kind, vn.size)
-}
-
-pub fn collect_register_type_hints_with_names<F>(
-    r2il_blocks: &[R2ILBlock],
-    mut register_name: F,
-) -> HashMap<String, TypeHint>
-where
-    F: FnMut(&r2il::Varnode) -> Option<String>,
-{
-    let mut hints = HashMap::new();
-
-    let mut visit = |vn: &r2il::Varnode| {
-        if !vn.is_register() {
-            return;
-        }
-        let Some(hint) = metadata_type_hint_for_varnode(vn) else {
-            return;
-        };
-        let Some(name) = register_name(vn) else {
-            return;
-        };
-
-        merge_type_hint(&mut hints, name.to_ascii_lowercase(), hint);
-    };
-
-    for block in r2il_blocks {
-        for op in &block.ops {
-            if let Some(vn) = op.output() {
-                visit(vn);
-            }
-            for vn in op.inputs() {
-                visit(vn);
-            }
-        }
-    }
-
-    hints
 }
 
 /// The machine a rendering is for: the lifted machine's identity and pointer width.
@@ -1310,23 +1250,6 @@ impl EngineAnalyzeRequest {
         Self::full_semantics_from_input(engine_analyze_request_input_from_function(input))
     }
 
-    pub fn full_semantics_for_function_with_register_names<F>(
-        mut input: EngineAnalyzeFunctionRequestInput,
-        register_name: F,
-    ) -> Self
-    where
-        F: FnMut(&r2il::Varnode) -> Option<String>,
-    {
-        if input.function.semantic_metadata_enabled {
-            for (name, hint) in
-                collect_register_type_hints_with_names(&input.function.blocks, register_name)
-            {
-                merge_type_hint(&mut input.reg_type_hints, name, hint);
-            }
-        }
-        Self::full_semantics_for_function(input)
-    }
-
     pub fn from_input_with_compile_missing_semantics(
         input: EngineAnalyzeRequestInput,
         compile_missing_semantics: bool,
@@ -1526,6 +1449,13 @@ pub struct SealedFunctionAnalysis {
 }
 
 impl SealedFunctionAnalysis {
+    /// The SSA operations this analysis holds: its weight in the query database.
+    pub(crate) fn operations(&self) -> usize {
+        self.trusted_ssa
+            .as_ref()
+            .map_or(0, |ssa| ssa.artifact().function().arena().id_limit())
+    }
+
     pub const fn facts(&self) -> &r2types::SourceOwnedFunctionFacts {
         &self.source_owned_facts
     }

@@ -1608,7 +1608,6 @@ fn kept_across_a_call(machine: &r2sleigh_lift::EmbeddedMachine, bits: u32) -> Ve
             space: SpaceId::Register,
             offset: storage.offset,
             size: storage.size,
-            meta: None,
         })
         .collect()
 }

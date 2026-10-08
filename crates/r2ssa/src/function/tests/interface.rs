@@ -277,7 +277,6 @@ fn symbolic_function_ssa_recovers_indirect_call_target_from_copied_ram_literal()
         space: SpaceId::Unique,
         offset: 0x10,
         size: 8,
-        meta: None,
     };
     let blocks = vec![
         R2ILBlock {
@@ -322,7 +321,6 @@ fn resolved_call_target_uses_canonical_copied_const_root_when_fact_is_unresolved
         space: SpaceId::Unique,
         offset: 0x10,
         size: 8,
-        meta: None,
     };
     let blocks = vec![R2ILBlock {
         addr: 0x1310,

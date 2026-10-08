@@ -109,6 +109,8 @@ void initialize_attribute_id();
 
 unique_ptr<Address> getAddress(const VarnodeData &data);
 uint4 getSize(const VarnodeData &data);
+AddrSpace *getVarnodeSpace(const VarnodeData &data);
+uint8 getVarnodeOffset(const VarnodeData &data);
 const Document& parseDocumentIntoStore(DocumentStorage &store, const std::string &data);
 const Element& getDocumentRoot(const Document& document);
 

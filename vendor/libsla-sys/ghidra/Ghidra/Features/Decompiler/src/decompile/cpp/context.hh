@@ -108,7 +108,7 @@ public:
   void setCalladdr(const Address &ad) { calladdr = ad; }
   void addCommit(TripleSymbol *sym,int4 num,uintm mask,bool flow,ConstructState *point);
   void clearCommits(void) { contextcommit.clear(); }
-  void applyCommits(void);
+  bool applyCommits(void);	///< Commit global context changes (r2sleigh: \b true if there were any)
   const Address &getAddr(void) const { return addr; }
   const Address &getNaddr(void) const { return naddr; }
   const Address &getN2addr(void) const;

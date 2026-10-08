@@ -290,11 +290,24 @@ impl std::fmt::Display for AddressSpace {
     }
 }
 
+/// One spelling per address-space name for the process: a specification has a handful, and a
+/// borrowed name makes every [`AddressSpace`] clone a copy (r2sleigh).
+fn interned_space_name(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(found) = names.iter().find(|known| **known == name) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.push(leaked);
+    leaked
+}
+
 impl From<&sys::AddrSpace> for AddressSpace {
     fn from(address_space: &sys::AddrSpace) -> Self {
         Self {
             id: address_space.into(),
-            name: Cow::Owned(address_space.name().to_string()),
+            name: Cow::Borrowed(interned_space_name(&address_space.name().to_string_lossy())),
             word_size: address_space.word_size().try_into().unwrap(),
             address_size: address_space.address_size().try_into().unwrap(),
             space_type: address_space.space_type().into(),
@@ -491,12 +504,38 @@ impl api::AssemblyEmit for NativeDisassemblyOutput {
     }
 }
 
-#[derive(Default)]
-struct PcodeDisassemblyOutput {
+/// The p-code of one decode, its spaces read from the specification's list (r2sleigh: each
+/// varnode once cost an allocated `Address`, four calls and a copy of its space's name).
+struct PcodeDisassemblyOutput<'a> {
+    spaces: &'a [AddressSpace],
     instructions: Vec<PcodeInstruction>,
 }
 
-impl api::PcodeEmit for PcodeDisassemblyOutput {
+impl PcodeDisassemblyOutput<'_> {
+    fn space(&self, space: *mut sys::AddrSpace) -> AddressSpace {
+        let id = space as usize;
+        match self.spaces.iter().find(|known| known.id.raw_id() == id) {
+            Some(known) => known.clone(),
+            // SAFETY: Sleigh hands out only spaces it owns, which outlive the decode.
+            None => unsafe { &*space }.into(),
+        }
+    }
+
+    fn varnode(&self, varnode: &sys::VarnodeData) -> VarnodeData {
+        let size = sys::varnode_size(varnode);
+        VarnodeData {
+            address: Address {
+                offset: sys::varnode_offset(varnode),
+                address_space: self.space(sys::varnode_space(varnode)),
+            },
+            size: size.try_into().unwrap_or_else(|err| {
+                panic!("unable to convert Ghidra varnode size: {size}. {err}")
+            }),
+        }
+    }
+}
+
+impl api::PcodeEmit for PcodeDisassemblyOutput<'_> {
     fn dump(
         &mut self,
         address: &sys::Address,
@@ -504,15 +543,19 @@ impl api::PcodeEmit for PcodeDisassemblyOutput {
         output_variable: Option<&sys::VarnodeData>,
         input_variables: &CxxVector<sys::VarnodeData>,
     ) {
-        self.instructions.push(PcodeInstruction {
-            address: address.into(),
+        let instruction = PcodeInstruction {
+            address: Address {
+                offset: address.offset(),
+                address_space: self.space(address.address_space()),
+            },
             op_code: op_code.into(),
             inputs: input_variables
                 .into_iter()
-                .map(Into::<VarnodeData>::into)
+                .map(|input| self.varnode(input))
                 .collect(),
-            output: output_variable.map(Into::<VarnodeData>::into),
-        });
+            output: output_variable.map(|output| self.varnode(output)),
+        };
+        self.instructions.push(instruction);
     }
 }
 
@@ -693,9 +736,14 @@ impl GhidraSleighBuilder<HasSpec> {
                 source: Box::new(err),
             })?;
 
+        let spaces = (0..sleigh.num_spaces())
+            // SAFETY: Address spaces returned from sleigh are safe to dereference
+            .map(|i| AddressSpace::from(unsafe { &*sleigh.address_space(i) }))
+            .collect();
         Ok(GhidraSleigh {
             sleigh,
             processor_spec: self.store,
+            spaces,
         })
     }
 }
@@ -706,6 +754,8 @@ pub struct GhidraSleigh {
     sleigh: UniquePtr<sys::SleighProxy>,
     /// The processor context defaults reapplied after a decode-cache reset.
     processor_spec: UniquePtr<sys::DocumentStorage>,
+    /// The specification's address spaces, read once: a reset keeps them (r2sleigh).
+    spaces: Vec<AddressSpace>,
 }
 
 impl GhidraSleigh {
@@ -726,6 +776,10 @@ impl GhidraSleigh {
     /// Converts an address space to a system address space. Returns `None` if the provided address
     /// space cannot be mapped to a system address space.
     fn sys_address_space(&self, address_space: &AddressSpace) -> Option<*mut sys::AddrSpace> {
+        // One of this specification's own spaces is its id; another is matched by name.
+        if self.spaces.iter().any(|known| known == address_space) {
+            return Some(address_space.id.raw_id() as *mut sys::AddrSpace);
+        }
         for i in 0..self.sleigh.num_spaces() {
             let sys_addr_space = self.sleigh.address_space(i);
 
@@ -745,14 +799,7 @@ impl Sleigh for GhidraSleigh {
     }
 
     fn address_spaces(&self) -> Vec<AddressSpace> {
-        let num_spaces = self.sleigh.num_spaces();
-        let mut addr_spaces = Vec::with_capacity(num_spaces as usize);
-        for i in 0..num_spaces {
-            // SAFETY: Address spaces returned from sleigh are safe to dereference
-            let raw_addr_space = unsafe { &*self.sleigh.address_space(i) };
-            addr_spaces.push(raw_addr_space.into());
-        }
-        addr_spaces
+        self.spaces.clone()
     }
 
     /// Get the register name for a varnode targeting a register. This will return `None` if the
@@ -797,7 +844,10 @@ impl Sleigh for GhidraSleigh {
         let sys_address = self.sys_address(&address).expect("invalid address");
         let loader = InstructionLoaderWrapper(loader);
         let rust_loader = rust::RustLoadImage(&loader);
-        let mut output = PcodeDisassemblyOutput::default();
+        let mut output = PcodeDisassemblyOutput {
+            spaces: &self.spaces,
+            instructions: Vec::new(),
+        };
         let mut emitter = rust::RustPcodeEmit(&mut output);
         let response = self.sleigh.disassemble_pcode(
             &rust_loader,

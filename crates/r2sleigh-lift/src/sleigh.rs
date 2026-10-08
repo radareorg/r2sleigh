@@ -15,7 +15,34 @@ use crate::context::LiftContext;
 
 pub(crate) struct ExtractedSleighArchitecture {
     pub arch: ArchSpec,
-    pub space_map: HashMap<AddressSpaceId, SpaceId>,
+    pub space_map: SpaceMap,
+}
+
+/// Sleigh's address spaces and the r2il space each maps to: a handful, read per varnode, so a
+/// scan of a short list replaces a hash of each id.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SpaceMap(Vec<(AddressSpaceId, SpaceId)>);
+
+impl SpaceMap {
+    pub(crate) fn get(&self, id: &AddressSpaceId) -> Option<&SpaceId> {
+        self.0
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, space)| space)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl std::ops::Index<&AddressSpaceId> for SpaceMap {
+    type Output = SpaceId;
+
+    fn index(&self, id: &AddressSpaceId) -> &SpaceId {
+        self.get(id).expect("a mapped address space")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,11 +276,11 @@ pub(crate) fn extract_address_space_map(
     ctx: &mut LiftContext,
     spaces: &[AddressSpace],
     default_space: AddressSpaceId,
-) -> Result<HashMap<AddressSpaceId, SpaceId>, LiftError> {
+) -> Result<SpaceMap, LiftError> {
     let mut saw_default_space = false;
     let mut source_ids = HashSet::new();
     let mut target_ids = HashSet::new();
-    let mut space_map = HashMap::new();
+    let mut space_map = SpaceMap::default();
 
     for space in spaces {
         if !source_ids.insert(space.id) {
@@ -305,7 +332,7 @@ pub(crate) fn extract_address_space_map(
                 space.name
             )));
         }
-        space_map.insert(space.id, space_id);
+        space_map.0.push((space.id, space_id));
 
         if is_default {
             if saw_default_space {

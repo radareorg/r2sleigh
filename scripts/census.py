@@ -3,9 +3,11 @@
 
   census.py run  --r2s R2S --out DIR [BINARY...]   pdd every function into DIR/<binary>.txt
   census.py diff BASE_DIR HEAD_DIR [--report FILE] summary of moved renderings; the diff to FILE
-  census.py time --r2s BASE --r2s HEAD [--runs N] [--budget R] --bins DIR
-                                                   median release pdd time per case; fails when
-                                                   HEAD exceeds R x BASE or the outputs differ
+  census.py time --r2s BASE --r2s HEAD [--runs N] [--budget R] [--rss-budget R]
+                 [--count-r2s BASE --count-r2s HEAD] [--alloc-budget R] --bins DIR
+                                                   median release time and peak RSS per case, and
+                                                   the allocation count from alloc-count builds;
+                                                   fails when HEAD exceeds a budget x BASE
 
 With no binaries, `run` reads the repository's own: tests/coverage/pinned,
 tests/fixtures and, where the coverage sweep compiled them, tests/coverage/artifacts/bin.
@@ -19,13 +21,16 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-# The functions where a quadratic pass shows first, in radare2's test binaries.
-TIMED = [("0pack", "0x0058e3d0"), ("0pack", "0x0062ecf0"),
-         ("pumasim", "0x0023fdf0"), ("pumasim", "0x004baf30")]
+# The functions where a quadratic pass shows first, and the two largest listings, in radare2's test binaries.
+TIMED = [("0pack", "pdd @ 0x0058e3d0"), ("0pack", "pdd @ 0x0062ecf0"),
+         ("pumasim", "pdd @ 0x0023fdf0"), ("pumasim", "pdd @ 0x004baf30"),
+         ("pumasim", "afl"), ("0pack", "afl")]
+ALLOCATIONS = re.compile(r"^r2s: allocations: (\d+)$", re.MULTILINE)
 
 
 def corpus():
@@ -100,31 +105,65 @@ def diff(args):
         Path(args.report).write_text("".join(report))
 
 
+def measured(binary, command, executable):
+    """Wall seconds, this child's own peak RSS in MB, its output, and the allocations it reported."""
+    with tempfile.TemporaryFile() as out:
+        start = time.perf_counter()
+        child = subprocess.Popen([executable, "-q", "-c", command, str(binary)],
+                                 stdout=out, stderr=subprocess.STDOUT,
+                                 env={**os.environ, "R2S_ALLOCATIONS": "1"})
+        # wait4 reaps this child alone, so its rusage is this run's and no other's.
+        _, _, usage = os.wait4(child.pid, 0)
+        seconds = time.perf_counter() - start
+        child.returncode = 0
+        out.seek(0)
+        text = out.read().decode(errors="replace")
+    # ru_maxrss is bytes on macOS and KiB on Linux.
+    peak = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024) / (1 << 20)
+    found = ALLOCATIONS.search(text)
+    return seconds, peak, ALLOCATIONS.sub("", text), int(found.group(1)) if found else None
+
+
 def time_cases(args):
-    base, head = args.r2s
-    failed = False
-    print("| case | base s | head s | ratio | output |\n|---|---|---|---|---|")
-    for name, address in TIMED:
+    failed = []
+    print("| case | base s | head s | ratio | base MB | head MB | ratio | allocations | output |\n"
+          "|---|---|---|---|---|---|---|---|---|")
+    for name, command in TIMED:
         binary = Path(args.bins) / name
         if not binary.exists():
-            print(f"| {name} {address} | missing | | | |")
+            print(f"| {name} {command} | missing | | | | | | | |")
             continue
-        seconds, digests = {}, {}
-        for side, executable in (("base", base), ("head", head)):
-            runs = []
-            for _ in range(args.runs):
-                start = time.perf_counter()
-                text = r2s(binary, f"pdd @ {address}", executable)
-                runs.append(time.perf_counter() - start)
-            seconds[side] = statistics.median(runs)
-            digests[side] = hashlib.sha256(text.encode()).hexdigest()[:12]
+        seconds, peaks, digests, counts = {}, {}, {}, {}
+        for side, executable in zip(("base", "head"), args.r2s):
+            runs = [measured(binary, command, executable) for _ in range(args.runs)]
+            seconds[side] = statistics.median(run[0] for run in runs)
+            peaks[side] = max(run[1] for run in runs)
+            digests[side] = hashlib.sha256(runs[-1][2].encode()).hexdigest()[:12]
+        # A base built before the count existed has no counting build; head's count stands alone.
+        for side, executable in zip(("base", "head"), args.count_r2s or ()):
+            if Path(executable).exists():
+                counts[side] = measured(binary, command, executable)[3]
         ratio = seconds["head"] / seconds["base"]
+        rss = peaks["head"] / peaks["base"]
+        allocations = ""
+        if counts.get("base") and counts.get("head"):
+            allocated = counts["head"] / counts["base"]
+            allocations = f"{counts['base']:,} -> {counts['head']:,} ({allocated:.2f})"
+            if allocated > args.alloc_budget:
+                failed.append(f"{name} {command}: {allocated:.2f}x the base's allocations")
+        elif counts.get("head"):
+            allocations = f"{counts['head']:,}"
+        if ratio > args.budget:
+            failed.append(f"{name} {command}: {ratio:.2f}x the base's time")
+        if rss > args.rss_budget:
+            failed.append(f"{name} {command}: {rss:.2f}x the base's peak RSS")
         same = digests["base"] == digests["head"]
-        failed |= ratio > args.budget
-        print(f"| {name} {address} | {seconds['base']:.2f} | {seconds['head']:.2f} | "
-              f"{ratio:.2f} | {'same' if same else 'moved'} |")
+        print(f"| {name} {command} | {seconds['base']:.2f} | {seconds['head']:.2f} | {ratio:.2f} | "
+              f"{peaks['base']:.0f} | {peaks['head']:.0f} | {rss:.2f} | {allocations} | "
+              f"{'same' if same else 'moved'} |")
+    for line in failed:
+        print(line, file=sys.stderr)
     if failed:
-        print(f"a case took more than {args.budget}x its base time", file=sys.stderr)
         sys.exit(1)
 
 
@@ -146,10 +185,15 @@ def main():
     p.add_argument("--bins", required=True)
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("--budget", type=float, default=1.25)
+    p.add_argument("--rss-budget", type=float, default=1.3)
+    p.add_argument("--count-r2s", action="append")
+    p.add_argument("--alloc-budget", type=float, default=1.3)
     p.set_defaults(func=time_cases)
     args = parser.parse_args()
     if args.command == "time" and len(args.r2s) != 2:
         parser.error("time takes --r2s twice: base, then head")
+    if args.command == "time" and args.count_r2s and len(args.count_r2s) != 2:
+        parser.error("time takes --count-r2s twice: base, then head")
     args.func(args)
 
 

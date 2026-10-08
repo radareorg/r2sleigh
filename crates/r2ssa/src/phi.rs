@@ -66,7 +66,6 @@ impl RenameIdentity {
             space: r2il::SpaceId::Register,
             offset: root.offset,
             size: root.width,
-            meta: None,
         };
         Self::from_varnode(&varnode, reg_names)
     }
@@ -234,7 +233,6 @@ pub(crate) fn clobber_identity(
         space: r2il::SpaceId::Register,
         offset: storage.offset,
         size: storage.size,
-        meta: None,
     };
     RenameIdentity::for_varnode(&varnode, reg_names, families)
 }

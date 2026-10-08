@@ -106,6 +106,7 @@ opt-level = 1
 sleigh-config = { path = "vendor/sleigh-config" }
 libsla = { path = "vendor/libsla" }
 libsla-sys = { path = "vendor/libsla-sys" }
+sleigh-compiler = { path = "vendor/sleigh-compiler" }
 
 # The structural lints are measured rather than denied.
 #

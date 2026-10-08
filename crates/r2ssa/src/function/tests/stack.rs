@@ -257,7 +257,6 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
                         space: SpaceId::Unique,
                         offset: 0x10,
                         size: 8,
-                        meta: None,
                     },
                     a: make_reg(24, 8),
                     b: make_const(0x20, 8),
@@ -269,7 +268,6 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
                         space: SpaceId::Unique,
                         offset: 0x10,
                         size: 8,
-                        meta: None,
                     },
                 },
                 R2ILOp::Store {
@@ -727,7 +725,6 @@ fn prepared_callsite_refuses_display_named_stack_home_arguments() {
         space: SpaceId::Unique,
         offset: 0x1740,
         size: 8,
-        meta: None,
     };
     let blocks = vec![R2ILBlock {
         addr: 0x1740,

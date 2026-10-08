@@ -346,7 +346,6 @@ fn annotate_register_names(value: &mut Value, disasm: &Disassembler) {
                             space: SpaceId::Register,
                             offset,
                             size: size32,
-                            meta: None,
                         };
                         if let Some(name) = disasm.register_name(&vn) {
                             map.insert("name".to_string(), Value::String(name));
@@ -420,7 +419,7 @@ struct DecResidualJson {
 #[cfg(all(test, feature = "x86"))]
 mod tests {
     use super::*;
-    use r2il::{MemoryClass, OpMetadata, ScalarKind, VarnodeMetadata};
+    use r2il::{MemoryClass, OpMetadata};
     use r2sleigh_lift::build_arch_spec;
     use std::collections::BTreeMap;
 
@@ -541,16 +540,12 @@ mod tests {
     }
 
     #[test]
-    fn lift_json_includes_op_and_varnode_metadata() {
+    fn lift_json_includes_op_metadata() {
         let (disasm, spec) = x86_disasm_and_spec();
         let mut block = R2ILBlock::new(0x1000, 1);
-        let vn_meta = VarnodeMetadata {
-            scalar_kind: Some(ScalarKind::UnsignedInt),
-            ..Default::default()
-        };
         block.push_with_metadata(
             R2ILOp::Copy {
-                dst: Varnode::register(0, 8).with_meta(vn_meta),
+                dst: Varnode::register(0, 8),
                 src: Varnode::constant(1, 8),
             },
             Some(OpMetadata {
@@ -579,11 +574,6 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).expect("json");
 
         assert!(parsed.get("op_metadata").is_some(), "expected op metadata");
-        assert!(
-            parsed.to_string().contains("\"meta\""),
-            "expected varnode metadata in output: {}",
-            parsed
-        );
     }
 
     #[test]
