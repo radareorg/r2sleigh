@@ -193,19 +193,11 @@ fn shift(
     let shifted = match kind {
         MachineShiftKind::Left => cast(
             ty.clone(),
-            binary(
-                BinaryOp::Shl,
-                cast(wide.clone(), value.clone()),
-                count.clone(),
-            ),
+            binary(BinaryOp::Shl, cast(wide, value.clone()), count.clone()),
         ),
         MachineShiftKind::LogicalRight => cast(
             ty.clone(),
-            binary(
-                BinaryOp::Shr,
-                cast(wide.clone(), value.clone()),
-                count.clone(),
-            ),
+            binary(BinaryOp::Shr, cast(wide, value.clone()), count.clone()),
         ),
         MachineShiftKind::ArithmeticRight => {
             let sty = signed(bits)?;
@@ -225,10 +217,10 @@ fn shift(
             CExpr::Ternary {
                 cond: Box::new(negative),
                 then_expr: Box::new(cast(ty.clone(), CExpr::UIntLit(u64::MAX))),
-                else_expr: Box::new(cast(ty.clone(), CExpr::UIntLit(0))),
+                else_expr: Box::new(cast(ty, CExpr::UIntLit(0))),
             }
         }
-        _ => cast(ty.clone(), CExpr::UIntLit(0)),
+        _ => cast(ty, CExpr::UIntLit(0)),
     };
     // The count is tested before the shift runs, so C never shifts by its width or more.
     Some(CExpr::Ternary {

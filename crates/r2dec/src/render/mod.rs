@@ -52,7 +52,7 @@ pub fn render(
     work.poll()?;
     let name = crate::rendered_name_of(input.name(), input.function().root());
     let mut c = CFunction::new(name, result_type(input));
-    let values = values::Values::new(input, c.symbols.clone());
+    let values = values::Values::new(input, std::rc::Rc::clone(&c.symbols));
     let written = control::write(input, values.as_ref(), &work);
     if let Some(stop) = written.stopped {
         return Err(stop.into());
