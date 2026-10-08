@@ -359,7 +359,7 @@ fn section_stubs(
     // computes its address across three instructions; both answer here.
     // Each reader: where its transfer is, where its run began, and the import.
     let mut readers: Vec<(u64, u64, String)> = Vec::new();
-    // Where every stub transfers through a word the loader writes, named or not: the cells' measure.
+    // Where every stub transfers through a slot the container states, named or not: the cells' measure.
     let mut transfers: Vec<u64> = Vec::new();
     let mut run = fresh_run(section.vaddr);
     // Where each instruction of the run begins, and its first operation.
@@ -423,7 +423,18 @@ fn section_stubs(
         if slot.is_some_and(|slot| container.loader_write_at(slot).is_none()) {
             return Vec::new();
         }
-        if slot.is_some() {
+        // A stub's slot is a word the container states the loader fills with an address or a
+        // symbol; the header's reserved resolver word states nothing and lies at another phase.
+        let stated = slot
+            .and_then(|slot| container.loader_write_at(slot))
+            .is_some_and(|write| {
+                !matches!(
+                    write.kind,
+                    r2abi::statement::WriteKind::Unknown
+                        | r2abi::statement::WriteKind::NotAnAddress
+                )
+            });
+        if stated || slot.is_some_and(|slot| slots.contains_key(&slot)) {
             transfers.push(leaving_at);
         }
         if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
