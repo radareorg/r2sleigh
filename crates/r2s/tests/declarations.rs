@@ -57,12 +57,61 @@ fn a_struct_parameter_costs_the_function_none_of_its_types() {
     // used to appear through exactly that stale identity -- the reload taken
     // for the parameter -- and comes back when a load is typed by the
     // declared pointee of the variable it reads through.)
-    assert!(out.contains("while ((uint64_t)n != 0)"), "{out}");
-    assert!(out.contains("n = (const struct node*)"), "{out}");
+    let by_name =
+        out.contains("while ((uint64_t)n != 0)") && out.contains("n = (const struct node*)");
+    // ADR D4's one `frame` array: the slot afv lists at `struct node*` takes the entry `n` once and
+    // a loaded successor after, and nothing else reads the entry `n`.
+    let home = (common::afv_locals(&afv).into_values()).find(|(_, ty)| ty == "struct node*");
+    let writes = common::stack_writes(&out, &afv);
+    let at_home = (writes.iter())
+        .filter(|(at, _)| home.as_ref().is_some_and(|(home, _)| at == home))
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    let entry_reads = (out.split(|c: char| !c.is_ascii_alphanumeric() && c != '_'))
+        .filter(|word| *word == "n")
+        .count();
+    let by_home = matches!(at_home.as_slice(), [entered, walked]
+        if common::bare(entered) == "n" && !common::starts_from(&out, walked, "n"))
+        && entry_reads == 2;
+    assert!(by_name || by_home, "{afv}\n{out}");
+    assert!(!out.contains("n->next"), "{out}");
     assert!(!out.contains("r2sleigh_residual"), "{out}");
     assert!(
         out.contains("struct node {"),
         "the rendering defines what it reads through:\n{out}"
+    );
+}
+
+/// Staged spells a parameter, a callee and a function pointer at their declared types and defines
+/// each tag it spells once, reading no member the declaration does not type at the access.
+#[test]
+fn staged_declares_the_struct_and_function_pointer_types_the_source_states() {
+    let list_len = run("rv_O0g", "e dec.pipeline=staged; pdd @ sym.list_len");
+    assert!(
+        list_len.contains("int32_t list_len(const struct node* n)"),
+        "{list_len}"
+    );
+    assert!(
+        !list_len.contains("->") && !list_len.contains(".next"),
+        "{list_len}"
+    );
+    let main = run("rv_O0g", "e dec.pipeline=staged; pdd @ sym.main");
+    for c in [&list_len, &main] {
+        assert_eq!(c.matches("struct node {").count(), 1, "{c}");
+        assert!(c.find("struct node {") < c.find("struct node*"), "{c}");
+    }
+    assert!(
+        main.contains("int32_t list_len(const struct node*);"),
+        "{main}"
+    );
+    assert!(
+        main.contains("int32_t dispatch(int32_t(*)(int32_t, int32_t), int32_t);"),
+        "{main}"
+    );
+    let dispatch = run("rv_O0g", "e dec.pipeline=staged; pdd @ sym.dispatch");
+    assert!(
+        dispatch.contains("int32_t dispatch(int32_t (*fn)(int32_t, int32_t), int32_t a)"),
+        "{dispatch}"
     );
 }
 

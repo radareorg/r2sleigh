@@ -76,6 +76,12 @@ impl<'a> RenderInput<'a> {
             .or_else(|| report.display_names().parameter(slot))
     }
 
+    /// The types the function's declaration states, as one graph: its aggregates' layouts.
+    pub fn type_graph(&self) -> Option<&'a r2ssa::SourceTypeGraph> {
+        (self.facts.source().machine_context().function_interface())
+            .and_then(r2ssa::SourceFunctionInterface::type_graph)
+    }
+
     /// Who each call site calls, as r2types resolved it.
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
     pub fn declared_call_prototypes(&self) -> usize {

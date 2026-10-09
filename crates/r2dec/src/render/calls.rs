@@ -51,14 +51,18 @@ pub(super) struct Prototype {
 
 impl Prototype {
     /// `signature` as C spells it, where it names `fixed` parameters and every type is spellable.
-    pub(super) fn of(signature: &r2types::FunctionType, fixed: usize) -> Option<Self> {
+    pub(super) fn of(
+        signature: &r2types::FunctionType,
+        fixed: usize,
+        defines: &dyn Fn(&str) -> bool,
+    ) -> Option<Self> {
         if signature.params.len() != fixed {
             return None;
         }
         let params = (signature.params.iter())
-            .map(|ty| spellable(ty).filter(|ty| *ty != CType::Void))
+            .map(|ty| spellable(ty, defines).filter(|ty| *ty != CType::Void))
             .collect::<Option<Vec<_>>>()?;
-        let ret = spellable(&signature.return_type)?;
+        let ret = spellable(&signature.return_type, defines)?;
         Some(Self { params, ret })
     }
 
@@ -75,7 +79,9 @@ impl Prototype {
         }
         let width = |ty: &CType| match ty.unaliased() {
             CType::Int { bits, .. } if matches!(bits, 8 | 16 | 32 | 64) => Some(CType::uint(*bits)),
-            CType::Pointer(_) => Some(CType::uint(ptr_bits)),
+            CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+                Some(CType::uint(ptr_bits))
+            }
             CType::Float(bits @ (32 | 64)) => Some(CType::Float(*bits)),
             _ => None,
         };
@@ -164,7 +170,9 @@ pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> b
     let (float, bits) = match declared {
         CType::Const(inner) => return held_as(inner, class, ptr_bits),
         CType::Typedef { ty, .. } => return held_as(ty, class, ptr_bits),
-        CType::Pointer(_) => (false, ptr_bits),
+        CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+            (false, ptr_bits)
+        }
         CType::Int { bits, .. } => (false, *bits),
         CType::Bool => (false, 8),
         CType::Float(bits) => (true, *bits),
@@ -173,9 +181,9 @@ pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> b
     matches!(class, MachineType::Float { .. }) == float && class.width_bits() == bits
 }
 
-/// `ty` as C spells it with no definition of its own: a standard scalar, or a pointer to one, to
-/// `void` or to `char`; a typedef is its target, `char` excepted. A tagged or unknown type is not.
-pub(super) fn spellable(ty: &CType) -> Option<CType> {
+/// `ty` as C spells it: a standard scalar, a pointer to one, `void`, `char` or a tag the unit
+/// `defines`, or a function pointer of such types; a typedef is its target, `char` excepted.
+pub(super) fn spellable(ty: &CType, defines: &dyn Fn(&str) -> bool) -> Option<CType> {
     match ty {
         CType::Void | CType::Bool | CType::Float(32 | 64) => Some(ty.clone()),
         CType::Int {
@@ -183,10 +191,31 @@ pub(super) fn spellable(ty: &CType) -> Option<CType> {
             signedness: r2types::Signedness::Signed | r2types::Signedness::Unsigned,
         } => Some(ty.clone()),
         CType::Typedef { name, .. } if name == "char" => Some(ty.clone()),
-        CType::Typedef { ty, .. } => spellable(ty),
-        CType::Pointer(pointee) => Some(CType::Pointer(Box::new(spellable(pointee)?))),
-        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner)?))),
+        CType::Typedef { ty, .. } => spellable(ty, defines),
+        CType::Pointer(pointee) => Some(CType::Pointer(Box::new(pointee_spelling(
+            pointee, defines,
+        )?))),
+        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner, defines)?))),
+        CType::Function { ret, params } => Some(CType::Function {
+            ret: Box::new(spellable(ret, defines)?),
+            params: (params.iter())
+                .map(|ty| spellable(ty, defines).filter(|ty| *ty != CType::Void))
+                .collect::<Option<_>>()?,
+        }),
+        CType::UnprototypedFunction(ret) => Some(CType::UnprototypedFunction(Box::new(spellable(
+            ret, defines,
+        )?))),
         _ => None,
+    }
+}
+
+/// What a pointer points at, as C spells it: a tag the unit `defines`, qualified or not, or any
+/// spellable type.
+fn pointee_spelling(ty: &CType, defines: &dyn Fn(&str) -> bool) -> Option<CType> {
+    match ty {
+        CType::Struct(tag) | CType::Union(tag) => defines(tag).then(|| ty.clone()),
+        CType::Const(inner) => Some(CType::Const(Box::new(pointee_spelling(inner, defines)?))),
+        ty => spellable(ty, defines),
     }
 }
 
@@ -641,17 +670,33 @@ mod tests {
         assert!(Prototype::of_widths(&void, 3, false, 64).is_some());
     }
 
-    /// A tagged type needs a definition the unit does not hold, so the prototype is not spelled.
+    /// A tag is spelled behind a pointer only where the unit defines it, and a function pointer
+    /// only where each of its types is spelled.
     #[test]
-    fn a_prototype_naming_a_struct_is_not_spelled() {
+    fn a_prototype_names_a_struct_only_where_the_unit_defines_it() {
         let node = CType::Pointer(Box::new(CType::Const(Box::new(CType::Struct(
             "node".to_string(),
         )))));
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
+        let binary = CType::Function {
+            ret: Box::new(int32.clone()),
+            params: vec![int32.clone(), int32.clone()].into_boxed_slice(),
+        };
         let signature = r2types::FunctionType {
             return_type: CType::Void,
-            params: vec![node],
+            params: vec![node.clone(), binary.clone()],
             variadic: false,
         };
-        assert_eq!(Prototype::of(&signature, 1), None);
+        assert_eq!(Prototype::of(&signature, 2, &|_| false), None);
+        let defined = Prototype::of(&signature, 2, &|tag| tag == "node");
+        assert_eq!(defined.map(|p| p.params), Some(vec![node, binary]));
+        let by_value = r2types::FunctionType {
+            params: vec![CType::Struct("node".to_string())],
+            ..signature
+        };
+        assert_eq!(Prototype::of(&by_value, 1, &|_| true), None);
     }
 }
