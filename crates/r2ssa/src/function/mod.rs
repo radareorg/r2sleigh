@@ -2387,8 +2387,7 @@ impl TrustedSsaArtifact {
                     &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
-                    source.function().loader_role(),
-                    source.function().result_reads(),
+                    crate::recover_interface::Stated::of(source.function()),
                 );
                 let Some(recovered) = recovered else {
                     break 'recovered None;

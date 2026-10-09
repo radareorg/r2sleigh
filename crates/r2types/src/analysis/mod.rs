@@ -95,6 +95,28 @@ impl TypeAnalysis {
         &self.function_facts
     }
 
+    /// The render-authorized signature, or where the result is one of two carriers, the body's
+    /// arity, exact in its interface.
+    fn signature_for_callers(&self) -> Option<std::borrow::Cow<'_, crate::FunctionSignatureSpec>> {
+        let type_facts = self.function_facts.type_facts();
+        if let Some(signature) = type_facts.render_authorized_signature() {
+            return Some(std::borrow::Cow::Borrowed(signature));
+        }
+        let interface = self.source.machine_context().function_interface()?;
+        interface.result_carriers()?;
+        let parameters = interface.parameters().len();
+        match type_facts.merged_signature.as_ref() {
+            Some(signature) => (signature.params.len() == parameters)
+                .then_some(std::borrow::Cow::Borrowed(signature)),
+            None => (parameters == 0).then(|| {
+                std::borrow::Cow::Owned(crate::FunctionSignatureSpec {
+                    ret_type: None,
+                    params: Vec::new(),
+                })
+            }),
+        }
+    }
+
     /// Export the signature this exact retained body proves for its callers.
     ///
     /// The opaque result keeps the SSA and physical interface that authorize
@@ -103,19 +125,7 @@ impl TypeAnalysis {
         let entry = self.source.function().entry;
         let interface = self.source.machine_context().function_interface();
         let carriers = interface.and_then(r2ssa::SourceFunctionInterface::result_carriers);
-        let type_facts = self.function_facts.type_facts();
-        // A result one of two carriers leaves the body's arity, exact in its interface, the statement.
-        let none = crate::FunctionSignatureSpec {
-            ret_type: None,
-            params: Vec::new(),
-        };
-        let Some(signature) = type_facts.render_authorized_signature().or_else(|| {
-            let parameters = interface.filter(|_| carriers.is_some())?.parameters().len();
-            match type_facts.merged_signature.as_ref() {
-                Some(signature) => (signature.params.len() == parameters).then_some(signature),
-                None => (parameters == 0).then_some(&none),
-            }
-        }) else {
+        let Some(signature) = self.signature_for_callers() else {
             r2il::refusal_evidence!(
                 "callee-signature",
                 "{entry:#x}: no render-authorized signature; certificate={:?}",

@@ -1032,7 +1032,27 @@ pub fn recover_interface(
     slots: &SourceConventionSlots,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, None, slots, None, loader_role, None)
+    let stated = Stated {
+        loader_role,
+        result_reads: None,
+    };
+    recover_interface_inner(func, None, slots, None, stated)
+}
+
+/// What the program states about a function beside its body: the loader's hook, its callers' reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Stated {
+    loader_role: Option<r2source::SourceLoaderRole>,
+    result_reads: Option<r2source::SourceResultReads>,
+}
+
+impl Stated {
+    pub(crate) const fn of(function: &r2source::FunctionIdentity) -> Self {
+        Self {
+            loader_role: function.loader_role(),
+            result_reads: function.result_reads(),
+        }
+    }
 }
 
 /// Recover an interface while retaining exact source-owned call boundaries.
@@ -1047,17 +1067,9 @@ pub(crate) fn recover_interface_with_context(
     prep: &crate::function::Provisional,
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
-    loader_role: Option<r2source::SourceLoaderRole>,
-    result_reads: Option<r2source::SourceResultReads>,
+    stated: Stated,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(
-        func,
-        Some(prep),
-        slots,
-        Some(machine_context),
-        loader_role,
-        result_reads,
-    )
+    recover_interface_inner(func, Some(prep), slots, Some(machine_context), stated)
 }
 
 /// `loader_role` is the source's record that the program loader calls this
@@ -1069,8 +1081,10 @@ fn recover_interface_inner(
     provisional: Option<&crate::function::Provisional>,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
-    loader_role: Option<r2source::SourceLoaderRole>,
-    result_reads: Option<r2source::SourceResultReads>,
+    Stated {
+        loader_role,
+        result_reads,
+    }: Stated,
 ) -> Option<RecoveredInterface> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
@@ -1996,8 +2010,7 @@ mod tests {
             &function.prep_facts_for_test(),
             &candidates(),
             context,
-            None,
-            None,
+            Stated::default(),
         )
     }
 

@@ -821,7 +821,7 @@ fn resolved_alone(
             imports.record(*owner, facts);
         }
     }
-    let resolved = native.resolve(address, &walked.root, &walked.tables, &imports, false);
+    let resolved = native.resolve(address, walked, &imports, false);
     resolved.map_err(|refusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
@@ -1005,7 +1005,7 @@ fn analyse(
         unread,
     } = read_callees(&native, target, &root, entry, ptr_bits);
 
-    let (artifact, _) = native.resolve(entry, &root, &tables, &callees, true)?;
+    let (artifact, _) = native.resolve(entry, walk, &callees, true)?;
     let tables = tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1257,11 +1257,11 @@ impl Native<'_> {
     fn resolve(
         &self,
         entry: u64,
-        root: &Walked,
-        tables: &[NativePointerTable],
+        walk: &Walk,
         callees: &Callees,
         caller_reads: bool,
     ) -> Result<Resolution, NativeRefusal> {
+        let (root, tables) = (&walk.root, &walk.tables[..]);
         // What the binary's own debug information says this function takes is a
         // declaration, exactly as an import's is, so it is placed in the
         // convention's slots the same way and the body is prepared against it.
