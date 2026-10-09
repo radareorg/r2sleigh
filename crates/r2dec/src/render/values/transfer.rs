@@ -51,6 +51,16 @@ fn answer_read(graph: &SsaGraph, value: ValueId) -> Option<(InstId, Part, InstId
     Some((def.id, part, transfer.id))
 }
 
+/// The C types of one walk: each element, the addresses, the count, and what the source holds.
+struct Walked {
+    element_bits: u32,
+    element: CType,
+    address: CType,
+    count: CType,
+    source: CType,
+    pointer_source: bool,
+}
+
 impl Values<'_> {
     /// The loop `inst` runs, then each part of its answer some reader reads, assigned.
     pub(super) fn block_transfer(
@@ -58,29 +68,14 @@ impl Values<'_> {
         inst: InstId,
         transfer: &BlockTransferOp<ValueId>,
     ) -> Option<CStmt> {
-        if transfer.space != r2il::SpaceId::Ram || !self.little_endian {
-            return None;
-        }
-        if self.graph.var(transfer.direction).constant_bits() != Some(0) {
-            r2il::refusal_evidence!(
-                "block-transfer",
-                "{inst:?}: the direction is not a settled zero, so neither walk can be spelled"
-            );
-            return None;
-        }
-        let element_bits = transfer.element_size.checked_mul(8)?;
-        let element = integer_type(element_bits)?;
-        let address_bits = self.value_bits(transfer.destination)?;
-        let address = integer_type(address_bits).filter(|_| address_bits >= 32)?;
-        let count = integer_type(self.value_bits(transfer.count)?)?;
-        let pointer_source = matches!(
-            transfer.kind,
-            r2il::BlockTransferKind::Move | r2il::BlockTransferKind::Compare(_)
-        );
-        let source = match pointer_source {
-            true => address.clone(),
-            false => element.clone(),
-        };
+        let Walked {
+            element_bits,
+            element,
+            address,
+            count,
+            source,
+            pointer_source,
+        } = self.walked(inst, transfer)?;
         // The machine reads each operand once, before the walk: each is held, so a term that
         // reads memory is not read again after the walk writes it.
         let (to, from, limit) = (
@@ -145,6 +140,42 @@ impl Values<'_> {
         let bits = (self.value_bits(transfer.count)?, element_bits);
         self.assign_answer(inst, bits, &parts, &mut stmts);
         Some(CStmt::Block(stmts))
+    }
+
+    /// The C types one walk of `transfer` moves through, where it can be spelled: RAM, little
+    /// endian, a settled forward direction, and an address of at least 32 bits.
+    fn walked(&self, inst: InstId, transfer: &BlockTransferOp<ValueId>) -> Option<Walked> {
+        if transfer.space != r2il::SpaceId::Ram || !self.little_endian {
+            return None;
+        }
+        if self.graph.var(transfer.direction).constant_bits() != Some(0) {
+            r2il::refusal_evidence!(
+                "block-transfer",
+                "{inst:?}: the direction is not a settled zero, so neither walk can be spelled"
+            );
+            return None;
+        }
+        let element_bits = transfer.element_size.checked_mul(8)?;
+        let element = integer_type(element_bits)?;
+        let address_bits = self.value_bits(transfer.destination)?;
+        let address = integer_type(address_bits).filter(|_| address_bits >= 32)?;
+        let count = integer_type(self.value_bits(transfer.count)?)?;
+        let pointer_source = matches!(
+            transfer.kind,
+            r2il::BlockTransferKind::Move | r2il::BlockTransferKind::Compare(_)
+        );
+        let source = match pointer_source {
+            true => address.clone(),
+            false => element.clone(),
+        };
+        Some(Walked {
+            element_bits,
+            element,
+            address,
+            count,
+            source,
+            pointer_source,
+        })
     }
 
     /// A scan's or a compare's body: the element held (and the source's, for a compare), the step,
