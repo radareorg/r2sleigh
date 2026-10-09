@@ -64,7 +64,6 @@ pub fn render(
     if let Some(stop) = written.stopped {
         return Err(stop.into());
     }
-    let function = input.function();
     let control::Written {
         body,
         labels,
@@ -84,25 +83,7 @@ pub fn render(
         })
     };
     let body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
-    let label_block = labels
-        .iter()
-        .map(|(addr, name)| (name.as_str(), *addr))
-        .collect::<BTreeMap<_, _>>();
-    let certificate = crate::structure::certify::certify(
-        &body,
-        function.cfg(),
-        function.domtree(),
-        function.root(),
-        &|id| blocks.get(id.index() as usize).copied(),
-        &|name| label_block.get(name).copied(),
-        &traps,
-    );
-    if !certificate.ok() {
-        return Err(RenderStop::Refused(format!(
-            "control certificate: {certificate} {:?}",
-            certificate.violations.first()
-        )));
-    }
+    certify_control(input, &body, &blocks, &labels)?;
     work.with_phase(DecompileWorkPhase::Rendering).poll()?;
     match &values {
         Some(values) => {
@@ -128,8 +109,47 @@ pub fn render(
         ),
     );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
+    let ledger = close_ledger(input, values.as_ref());
+    Ok(Rendered {
+        function: crate::RenderedFunction::new(emission, ready.into_function()),
+        ledger,
+    })
+}
+
+/// SD's §3 certificate over the shaped body, or the refusal that names its first violation.
+fn certify_control(
+    input: &RenderInput<'_>,
+    body: &CStmt,
+    blocks: &[u64],
+    labels: &BTreeMap<u64, String>,
+) -> Result<(), RenderStop> {
+    let function = input.function();
+    let label_block = labels
+        .iter()
+        .map(|(addr, name)| (name.as_str(), *addr))
+        .collect::<BTreeMap<_, _>>();
+    let certificate = crate::structure::certify::certify(
+        body,
+        function.cfg(),
+        function.domtree(),
+        function.root(),
+        &|id| blocks.get(id.index() as usize).copied(),
+        &|name| label_block.get(name).copied(),
+        &traps,
+    );
+    if certificate.ok() {
+        return Ok(());
+    }
+    Err(RenderStop::Refused(format!(
+        "control certificate: {certificate} {:?}",
+        certificate.violations.first()
+    )))
+}
+
+/// What became of each obligation: D2's account, or every one a gap where D2 did not run.
+fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) -> ObligationLedger {
     let mut ledger = ObligationLedger::open(input.obligations(), input.graph());
-    match &values {
+    match values {
         Some(values) => values.close(&mut ledger),
         None => {
             for id in input.obligations().obligations().keys() {
@@ -137,10 +157,7 @@ pub fn render(
             }
         }
     }
-    Ok(Rendered {
-        function: crate::RenderedFunction::new(emission, ready.into_function()),
-        ledger,
-    })
+    ledger
 }
 
 /// Whether a statement ends control: a residual traps where it is evaluated.

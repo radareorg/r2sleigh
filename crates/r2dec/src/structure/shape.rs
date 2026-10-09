@@ -283,12 +283,7 @@ impl ControlFlowStructurer<'_, '_> {
             CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
                 Self::duplicate_skipped_tails(fresh, stmt)
             }
-            CStmt::Block(stmts) => {
-                for stmt in stmts.iter_mut() {
-                    Self::duplicate_skipped_tails(fresh, stmt);
-                }
-                Self::duplicate_in_sequence(fresh, stmts);
-            }
+            CStmt::Block(stmts) => Self::duplicate_in_body(fresh, stmts),
             CStmt::If {
                 then_body,
                 else_body,
@@ -304,20 +299,22 @@ impl ControlFlowStructurer<'_, '_> {
             }
             CStmt::Switch { cases, default, .. } => {
                 for case in cases {
-                    for stmt in case.body.iter_mut() {
-                        Self::duplicate_skipped_tails(fresh, stmt);
-                    }
-                    Self::duplicate_in_sequence(fresh, &mut case.body);
+                    Self::duplicate_in_body(fresh, &mut case.body);
                 }
                 if let Some(default) = default {
-                    for stmt in default.iter_mut() {
-                        Self::duplicate_skipped_tails(fresh, stmt);
-                    }
-                    Self::duplicate_in_sequence(fresh, default);
+                    Self::duplicate_in_body(fresh, default);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Each statement of a body, then the body's own sequence.
+    fn duplicate_in_body(fresh: &mut dyn FnMut(&CStmt) -> CStmt, body: &mut Vec<CStmt>) {
+        for stmt in body.iter_mut() {
+            Self::duplicate_skipped_tails(fresh, stmt);
+        }
+        Self::duplicate_in_sequence(fresh, body);
     }
 
     fn duplicate_in_sequence(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmts: &mut Vec<CStmt>) {

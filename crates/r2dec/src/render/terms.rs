@@ -146,12 +146,68 @@ fn comparison(op: MachineComparisonOp) -> BinaryOp {
     }
 }
 
+/// `0 - x` at `bits`, wrapping as the machine does.
+fn negate(bits: u32, x: CExpr) -> Option<CExpr> {
+    let zero = cast(integer(bits)?, CExpr::UIntLit(0));
+    wrapping(BinaryOp::Sub, bits, zero, x)
+}
+
+/// `~x` at `bits`, computed no narrower than `int`.
+fn bitwise_not(bits: u32, x: CExpr) -> Option<CExpr> {
+    let inverted = CExpr::unary(UnaryOp::BitNot, cast(integer(computed(bits))?, x));
+    Some(cast(integer(bits)?, inverted))
+}
+
+/// A boolean's negation: its low bit flipped.
+fn boolean_not(bits: u32, x: CExpr) -> Option<CExpr> {
+    let one = cast(integer(bits)?, CExpr::UIntLit(1));
+    wrapping(BinaryOp::BitXor, bits, x, one)
+}
+
+/// `bits` of a `wide`-bit `input` from bit `lsb`.
+fn extract((wide, bits): (u32, u32), input: CExpr, lsb: u32) -> Option<CExpr> {
+    let shifted = binary(
+        BinaryOp::Shr,
+        cast(integer(wide)?, input),
+        CExpr::UIntLit(u64::from(lsb)),
+    );
+    Some(cast(integer(bits)?, shifted))
+}
+
+/// `condition ? if_true : if_false`, each arm at `ty`.
+fn select(ty: &MachineType, condition: CExpr, if_true: CExpr, if_false: CExpr) -> Option<CExpr> {
+    Some(CExpr::Ternary {
+        cond: Box::new(condition),
+        then_expr: Box::new(cast(c_type(ty)?, if_true)),
+        else_expr: Box::new(cast(c_type(ty)?, if_false)),
+    })
+}
+
+/// A float comparison, as a byte holding 0 or 1.
+fn float_compare(op: MachineComparisonOp, bits: u32, left: CExpr, right: CExpr) -> Option<CExpr> {
+    let test = binary(comparison(op), left, right);
+    Some(cast(integer(bits)?, test))
+}
+
+/// A quotient or remainder at `bits` under `interpretation`.
+fn divide(
+    (op, interpretation): (BinaryOp, MachineSignedness),
+    bits: u32,
+    dividend: CExpr,
+    divisor: CExpr,
+) -> Option<CExpr> {
+    let operand = match interpretation {
+        MachineSignedness::Signed => signed(bits)?,
+        MachineSignedness::Unsigned => integer(bits)?,
+    };
+    let quotient = binary(op, cast(operand.clone(), dividend), cast(operand, divisor));
+    Some(cast(integer(bits)?, quotient))
+}
+
 /// A comparison of two `bits`-wide operands under `interpretation`, as a byte holding 0 or 1.
 fn compare(
-    op: MachineComparisonOp,
-    interpretation: MachineSignedness,
-    bits: u32,
-    result_bits: u32,
+    (op, interpretation): (MachineComparisonOp, MachineSignedness),
+    (bits, result_bits): (u32, u32),
     left: CExpr,
     right: CExpr,
 ) -> Option<CExpr> {
@@ -228,6 +284,16 @@ fn shift(
         then_expr: Box::new(past),
         else_expr: Box::new(shifted),
     })
+}
+
+/// A flag of two `bits`-wide operands, as a `result_bits` integer holding 0 or 1.
+fn flag_at(
+    op: MachineArithmeticFlagOp,
+    (bits, result_bits): (u32, u32),
+    left: CExpr,
+    right: CExpr,
+) -> Option<CExpr> {
+    Some(cast(integer(result_bits)?, flag(op, bits, left, right)?))
 }
 
 fn flag(op: MachineArithmeticFlagOp, bits: u32, left: CExpr, right: CExpr) -> Option<CExpr> {
@@ -502,6 +568,13 @@ impl Spell<'_> {
         Some(Helper::Load(residual).call(vec![pointer]))
     }
 
+    /// A machine expression a term reads at `ty`: the projection may hold the same bits at the
+    /// other class than the term reads them.
+    fn leaf(&self, expr: MachineExprId, ty: &MachineType) -> Option<CExpr> {
+        let held = *self.projection.expr(expr)?.ty();
+        reclass(self.machine(expr)?, &held, ty)
+    }
+
     /// The term as C of its own machine type; `None` where C has no exact spelling of it.
     pub(super) fn term(&self, id: TermId) -> Option<CExpr> {
         let node = self.arena.term(id);
@@ -510,11 +583,7 @@ impl Spell<'_> {
         let child = |id: TermId| self.term(id);
         let child_bits = |id: TermId| self.arena.term(id).ty.width_bits();
         match node.kind {
-            // The projection may hold the same bits at the other class than the term reads them.
-            TermKind::Leaf(LeafRead { expr, .. }) | TermKind::Opaque(expr) => {
-                let held = *self.projection.expr(expr)?.ty();
-                reclass(self.machine(expr)?, &held, &ty)
-            }
+            TermKind::Leaf(LeafRead { expr, .. }) | TermKind::Opaque(expr) => self.leaf(expr, &ty),
             TermKind::Literal(value) => literal(value),
             TermKind::Variable(_) => None,
             // A frame address may be held or passed: every place it reaches is a byte of the one array.
@@ -530,25 +599,13 @@ impl Spell<'_> {
             TermKind::Arithmetic { op, left, right } => {
                 wrapping(arithmetic(op), bits, child(left)?, child(right)?)
             }
-            TermKind::Negate(input) => {
-                let zero = cast(integer(bits)?, CExpr::UIntLit(0));
-                wrapping(BinaryOp::Sub, bits, zero, child(input)?)
-            }
+            TermKind::Negate(input) => negate(bits, child(input)?),
             TermKind::Bitwise { op, left, right } => {
                 wrapping(bitwise(op), bits, child(left)?, child(right)?)
             }
-            TermKind::BitwiseNot(input) => Some(cast(
-                integer(bits)?,
-                CExpr::unary(
-                    UnaryOp::BitNot,
-                    cast(integer(computed(bits))?, child(input)?),
-                ),
-            )),
+            TermKind::BitwiseNot(input) => bitwise_not(bits, child(input)?),
             TermKind::Boolean { op, left, right } => boolean(op, bits, child(left)?, child(right)?),
-            TermKind::BooleanNot(input) => {
-                let one = cast(integer(bits)?, CExpr::UIntLit(1));
-                wrapping(BinaryOp::BitXor, bits, child(input)?, one)
-            }
+            TermKind::BooleanNot(input) => boolean_not(bits, child(input)?),
             TermKind::Shift {
                 kind,
                 overshift,
@@ -567,28 +624,19 @@ impl Spell<'_> {
                 left,
                 right,
             } => compare(
-                op,
-                interpretation,
-                child_bits(left),
-                bits,
+                (op, interpretation),
+                (child_bits(left), bits),
                 child(left)?,
                 child(right)?,
             ),
             TermKind::Flag { op, left, right } => {
-                let flag = flag(op, child_bits(left), child(left)?, child(right)?)?;
-                Some(cast(integer(bits)?, flag))
+                flag_at(op, (child_bits(left), bits), child(left)?, child(right)?)
             }
-            TermKind::Cast { kind, input } => {
+            TermKind::Cast { kind, input } | TermKind::FloatCast { kind, input } => {
                 convert(kind, &self.arena.term(input).ty, &ty, child(input)?)
             }
             TermKind::Extract { input, lsb_bits } => {
-                let wide = integer(child_bits(input))?;
-                let shifted = binary(
-                    BinaryOp::Shr,
-                    cast(wide, child(input)?),
-                    CExpr::UIntLit(u64::from(lsb_bits)),
-                );
-                Some(cast(integer(bits)?, shifted))
+                extract((child_bits(input), bits), child(input)?, lsb_bits)
             }
             TermKind::Concat { high, low } => {
                 concat(bits, child_bits(low), child(high)?, child(low)?)
@@ -597,14 +645,7 @@ impl Spell<'_> {
                 condition,
                 if_true,
                 if_false,
-            } => Some(CExpr::Ternary {
-                cond: Box::new(child(condition)?),
-                then_expr: Box::new(cast(c_type(&ty)?, child(if_true)?)),
-                else_expr: Box::new(cast(c_type(&ty)?, child(if_false)?)),
-            }),
-            TermKind::FloatCast { kind, input } => {
-                convert(kind, &self.arena.term(input).ty, &ty, child(input)?)
-            }
+            } => select(&ty, child(condition)?, child(if_true)?, child(if_false)?),
             TermKind::FloatArithmetic { op, left, right } => {
                 Some(float_binary(op, child(left)?, child(right)?))
             }
@@ -612,8 +653,7 @@ impl Spell<'_> {
                 float_unary(op, child_bits(input), &ty, child(input)?)
             }
             TermKind::FloatCompare { op, left, right } => {
-                let test = binary(comparison(op), child(left)?, child(right)?);
-                Some(cast(integer(bits)?, test))
+                float_compare(op, bits, child(left)?, child(right)?)
             }
         }
     }
@@ -631,6 +671,71 @@ impl Spell<'_> {
             MachineExprKind::Constant { value, .. } => literal(*value),
             MachineExprKind::MemoryRead { address, .. } => self.load(&ty, child(*address)?),
             MachineExprKind::Copy { input } => child(*input),
+            kind @ (MachineExprKind::Arithmetic { .. }
+            | MachineExprKind::ArithmeticFlag { .. }
+            | MachineExprKind::Divide { .. }
+            | MachineExprKind::Remainder { .. }
+            | MachineExprKind::Negate { .. }
+            | MachineExprKind::Bitwise { .. }
+            | MachineExprKind::BitwiseNot { .. }
+            | MachineExprKind::BooleanNot { .. }
+            | MachineExprKind::Boolean { .. }
+            | MachineExprKind::Shift { .. }
+            | MachineExprKind::Compare { .. }) => self.machine_integer(kind, ty),
+            MachineExprKind::Cast { kind, input } => {
+                convert(*kind, &child_ty(*input)?, &ty, child(*input)?)
+            }
+            MachineExprKind::Extract { input, lsb_bits } => {
+                extract((child_bits(*input)?, bits), child(*input)?, *lsb_bits)
+            }
+            MachineExprKind::Concat { high, low } => {
+                concat(bits, child_bits(*low)?, child(*high)?, child(*low)?)
+            }
+            MachineExprKind::FloatArithmetic { op, left, right } => {
+                Some(float_binary(*op, child(*left)?, child(*right)?))
+            }
+            MachineExprKind::FloatUnary { op, input } => {
+                float_unary(*op, child_bits(*input)?, &ty, child(*input)?)
+            }
+            MachineExprKind::FloatCompare { op, left, right } => {
+                float_compare(*op, bits, child(*left)?, child(*right)?)
+            }
+            MachineExprKind::Select {
+                condition,
+                if_true,
+                if_false,
+            } => select(&ty, child(*condition)?, child(*if_true)?, child(*if_false)?),
+            MachineExprKind::InsertLane {
+                root,
+                lane,
+                lsb_bits,
+                width_bits,
+                ..
+            } => {
+                let lane_ty = child_ty(*lane)?;
+                let as_bits = MachineType::Integer {
+                    width_bits: lane_ty.width_bits(),
+                    signedness: MachineSignedness::Unsigned,
+                };
+                let lane = reclass(child(*lane)?, &lane_ty, &as_bits)?;
+                insert_lane(bits, (*lsb_bits, *width_bits), child(*root)?, lane)
+            }
+            // A merge is its variable, which the edges assign; the rest has no single C operator.
+            MachineExprKind::Phi { .. }
+            | MachineExprKind::PopulationCount { .. }
+            | MachineExprKind::GuardedRead { .. }
+            | MachineExprKind::ExclusiveStoreSucceeded { .. }
+            | MachineExprKind::BlockAnswer { .. } => None,
+        }
+    }
+
+    /// An integer operation's machine expression as C, at `ty`.
+    fn machine_integer(&self, kind: &MachineExprKind, ty: MachineType) -> Option<CExpr> {
+        let bits = ty.width_bits();
+        let child = |id: MachineExprId| self.machine(id);
+        let child_bits =
+            |id: MachineExprId| self.projection.expr(id).map(|node| node.ty().width_bits());
+        match kind {
             // Checked arithmetic traps on overflow, which no C operator states.
             MachineExprKind::Arithmetic {
                 mode: MachineArithmeticMode::Checked,
@@ -660,39 +765,23 @@ impl Spell<'_> {
                 divisor,
                 ..
             } => {
-                let op = match node.kind() {
+                let op = match kind {
                     MachineExprKind::Divide { .. } => BinaryOp::Div,
                     _ => BinaryOp::Mod,
                 };
-                let operand = match interpretation {
-                    MachineSignedness::Signed => signed(bits)?,
-                    MachineSignedness::Unsigned => integer(bits)?,
-                };
-                let quotient = binary(
-                    op,
-                    cast(operand.clone(), child(*dividend)?),
-                    cast(operand, child(*divisor)?),
-                );
-                Some(cast(integer(bits)?, quotient))
+                divide(
+                    (op, *interpretation),
+                    bits,
+                    child(*dividend)?,
+                    child(*divisor)?,
+                )
             }
-            MachineExprKind::Negate { input, .. } => {
-                let zero = cast(integer(bits)?, CExpr::UIntLit(0));
-                wrapping(BinaryOp::Sub, bits, zero, child(*input)?)
-            }
+            MachineExprKind::Negate { input, .. } => negate(bits, child(*input)?),
             MachineExprKind::Bitwise { op, left, right } => {
                 wrapping(bitwise(*op), bits, child(*left)?, child(*right)?)
             }
-            MachineExprKind::BitwiseNot { input } => Some(cast(
-                integer(bits)?,
-                CExpr::unary(
-                    UnaryOp::BitNot,
-                    cast(integer(computed(bits))?, child(*input)?),
-                ),
-            )),
-            MachineExprKind::BooleanNot { input } => {
-                let one = cast(integer(bits)?, CExpr::UIntLit(1));
-                wrapping(BinaryOp::BitXor, bits, child(*input)?, one)
-            }
+            MachineExprKind::BitwiseNot { input } => bitwise_not(bits, child(*input)?),
+            MachineExprKind::BooleanNot { input } => boolean_not(bits, child(*input)?),
             MachineExprKind::Boolean { op, left, right } => {
                 boolean(*op, bits, child(*left)?, child(*right)?)
             }
@@ -714,68 +803,12 @@ impl Spell<'_> {
                 left,
                 right,
             } => compare(
-                *op,
-                *interpretation,
-                child_bits(*left)?,
-                bits,
+                (*op, *interpretation),
+                (child_bits(*left)?, bits),
                 child(*left)?,
                 child(*right)?,
             ),
-            MachineExprKind::Cast { kind, input } => {
-                convert(*kind, &child_ty(*input)?, &ty, child(*input)?)
-            }
-            MachineExprKind::Extract { input, lsb_bits } => {
-                let wide = integer(child_bits(*input)?)?;
-                let shifted = binary(
-                    BinaryOp::Shr,
-                    cast(wide, child(*input)?),
-                    CExpr::UIntLit(u64::from(*lsb_bits)),
-                );
-                Some(cast(integer(bits)?, shifted))
-            }
-            MachineExprKind::Concat { high, low } => {
-                concat(bits, child_bits(*low)?, child(*high)?, child(*low)?)
-            }
-            MachineExprKind::FloatArithmetic { op, left, right } => {
-                Some(float_binary(*op, child(*left)?, child(*right)?))
-            }
-            MachineExprKind::FloatUnary { op, input } => {
-                float_unary(*op, child_bits(*input)?, &ty, child(*input)?)
-            }
-            MachineExprKind::FloatCompare { op, left, right } => {
-                let test = binary(comparison(*op), child(*left)?, child(*right)?);
-                Some(cast(integer(bits)?, test))
-            }
-            MachineExprKind::Select {
-                condition,
-                if_true,
-                if_false,
-            } => Some(CExpr::Ternary {
-                cond: Box::new(child(*condition)?),
-                then_expr: Box::new(cast(c_type(&ty)?, child(*if_true)?)),
-                else_expr: Box::new(cast(c_type(&ty)?, child(*if_false)?)),
-            }),
-            MachineExprKind::InsertLane {
-                root,
-                lane,
-                lsb_bits,
-                width_bits,
-                ..
-            } => {
-                let lane_ty = child_ty(*lane)?;
-                let as_bits = MachineType::Integer {
-                    width_bits: lane_ty.width_bits(),
-                    signedness: MachineSignedness::Unsigned,
-                };
-                let lane = reclass(child(*lane)?, &lane_ty, &as_bits)?;
-                insert_lane(bits, (*lsb_bits, *width_bits), child(*root)?, lane)
-            }
-            // A merge is its variable, which the edges assign; the rest has no single C operator.
-            MachineExprKind::Phi { .. }
-            | MachineExprKind::PopulationCount { .. }
-            | MachineExprKind::GuardedRead { .. }
-            | MachineExprKind::ExclusiveStoreSucceeded { .. }
-            | MachineExprKind::BlockAnswer { .. } => None,
+            _ => None,
         }
     }
 }

@@ -59,68 +59,11 @@ pub(super) fn plan(
     let graph = artifact.graph();
     let identity = resolution
         .and_then(|resolution| resolution.identity_for_callsite(CallsiteKey { at: inst }));
-    let kind = identity.and_then(|identity| match identity.class {
-        CalleeClass::Imported | CalleeClass::ExternalSymbol => Some(ExternalKind::Import),
-        CalleeClass::Internal => Some(ExternalKind::Function),
-        // A function no symbol names, at the address the call reaches.
-        CalleeClass::RawAddress
-            if identity.target_addr.is_some()
-                && identity.target_addr == certificate.direct_target =>
-        {
-            Some(ExternalKind::Function)
-        }
-        _ => None,
-    });
-    let name = identity.and_then(|identity| {
-        identity
-            .display_name
-            .as_deref()
-            .or(identity.normalized_name.as_deref())
-            .or(identity.raw_name.as_deref())
-    });
-    let callee = match (kind, name) {
-        (Some(kind), Some(name)) => Callee::Named {
-            name: crate::ast::c_identifier(name),
-            kind,
-            address: certificate
-                .direct_target
-                .or(identity.and_then(|i| i.target_addr)),
-        },
-        // An indirect call no identity names goes where its target value points.
-        _ => match graph.inst(inst).map(|i| &i.payload) {
-            Some(InstPayload::Op(
-                SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. },
-            )) => Callee::Through(*target),
-            _ => return None,
-        },
-    };
-    let mut results = inventory
-        .obligations_for_inst(inst)
-        .filter(|o| o.id.kind == SemanticObligationKind::CallResult)
-        .flat_map(|o| o.inputs.iter().copied())
-        .collect::<Vec<_>>();
-    results.sort_unstable();
-    results.dedup();
-    let result = match results.as_slice() {
-        [] => None,
-        // The result is what the boundary defines after the call, so the call is what assigns it.
-        [one]
-            if matches!(
-                graph
-                    .def_inst(*one)
-                    .and_then(|def| graph.inst(def))
-                    .map(|i| &i.payload),
-                Some(InstPayload::Op(SSAOp::CallDefine { .. }))
-            ) =>
-        {
-            Some(*one)
-        }
-        _ => return None,
-    };
+    let callee = callee(certificate, identity, graph, inst)?;
+    let result = result_value(inventory, graph, inst)?;
     // Each argument passes in the class its register says, which a signature, where there is one,
     // must agree with; C passes a float in the variadic tail as a double.
     let signature = identity.and_then(|identity| identity.signature.as_ref());
-    let width = |value: ValueId| graph.var(value).size * 8;
     let fixed = match (certificate.variadic, certificate.fixed_argument_count) {
         (false, _) => certificate.argument_values.len(),
         (true, Some(fixed)) if fixed <= certificate.argument_values.len() => fixed,
@@ -131,69 +74,13 @@ pub(super) fn plan(
     }) {
         return None;
     }
-    let located = |value: ValueId| {
-        certificate
-            .argument_certificates
-            .iter()
-            .find(|argument| argument.value == value)
-            .and_then(|argument| match argument.location {
-                r2ssa::CallArgumentLocation::Register { storage } => {
-                    super::values::carrier_class(artifact, storage, storage.size * 8)
-                }
-                _ => None,
-            })
-    };
-    let arguments = certificate
-        .argument_values
-        .iter()
-        .enumerate()
-        .map(|(position, value)| {
-            let declared = signature
-                .and_then(|signature| signature.params.get(position))
-                .map(|ty| super::values::class_of(ty, width(*value)));
-            let class = match declared {
-                Some(None) => return None,
-                Some(declared) => super::values::agreed(declared, located(*value))?,
-                None => located(*value)?,
-            };
-            let promoted =
-                position >= fixed && matches!(class, MachineType::Float { width_bits: 32 });
-            (!promoted).then_some((*value, class))
-        })
-        .collect::<Option<Vec<_>>>()?;
+    let arguments = arguments(artifact, certificate, signature, fixed)?;
     let result = match result {
         None => None,
-        Some(value) => {
-            // The boundary's result storage is the carrier's own: a double's lane of a vector register.
-            let carrier = match artifact
-                .facts()
-                .boundaries
-                .calls
-                .get(site)
-                .and_then(|boundary| boundary.result_kind)
-            {
-                Some(r2source::SourceCallResult::Register { storage }) => {
-                    super::values::carrier_class(artifact, storage, storage.size * 8)
-                }
-                // Undescribed: the slot the result obligation names, at its own width.
-                _ => inventory
-                    .obligations_for_inst(inst)
-                    .find_map(|o| match o.id.component {
-                        r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
-                            if o.id.kind == SemanticObligationKind::CallResult =>
-                        {
-                            super::values::carrier_class(artifact, storage, storage.size * 8)
-                        }
-                        _ => None,
-                    }),
-            };
-            let declared = match signature.map(|signature| signature.return_type.unaliased()) {
-                Some(r2types::CTypeLike::Void) => return None,
-                Some(ty) => Some(super::values::class_of(ty, width(value))?),
-                None => None,
-            };
-            Some((value, super::values::agreed(declared, carrier)?))
-        }
+        Some(value) => Some((
+            value,
+            result_class(artifact, (*site, inst), signature, value)?,
+        )),
     };
     if matches!(callee, Callee::Through(_)) && certificate.variadic {
         return None;
@@ -241,4 +128,163 @@ fn tail_result(
         None => None,
     };
     Some((storage, super::values::agreed(declared, carrier)?))
+}
+
+/// Who the call at `inst` reaches: the callee r2types names, or the value an indirect call's
+/// target holds where no identity names it.
+fn callee(
+    certificate: &r2ssa::CallsiteCertificate,
+    identity: Option<&r2types::CalleeIdentity>,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> Option<Callee> {
+    let kind = identity.and_then(|identity| match identity.class {
+        CalleeClass::Imported | CalleeClass::ExternalSymbol => Some(ExternalKind::Import),
+        CalleeClass::Internal => Some(ExternalKind::Function),
+        // A function no symbol names, at the address the call reaches.
+        CalleeClass::RawAddress
+            if identity.target_addr.is_some()
+                && identity.target_addr == certificate.direct_target =>
+        {
+            Some(ExternalKind::Function)
+        }
+        _ => None,
+    });
+    let name = identity.and_then(|identity| {
+        identity
+            .display_name
+            .as_deref()
+            .or(identity.normalized_name.as_deref())
+            .or(identity.raw_name.as_deref())
+    });
+    match (kind, name) {
+        (Some(kind), Some(name)) => Some(Callee::Named {
+            name: crate::ast::c_identifier(name),
+            kind,
+            address: certificate
+                .direct_target
+                .or(identity.and_then(|i| i.target_addr)),
+        }),
+        // An indirect call no identity names goes where its target value points.
+        _ => match graph.inst(inst).map(|i| &i.payload) {
+            Some(InstPayload::Op(
+                SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. },
+            )) => Some(Callee::Through(*target)),
+            _ => None,
+        },
+    }
+}
+
+/// The value the call at `inst` assigns its result to: `Some(None)` where it has none, `None` where
+/// the obligations name more than the one value the boundary defines after the call.
+fn result_value(
+    inventory: &SemanticObligationInventory,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> Option<Option<ValueId>> {
+    let mut results = inventory
+        .obligations_for_inst(inst)
+        .filter(|o| o.id.kind == SemanticObligationKind::CallResult)
+        .flat_map(|o| o.inputs.iter().copied())
+        .collect::<Vec<_>>();
+    results.sort_unstable();
+    results.dedup();
+    match results.as_slice() {
+        [] => Some(None),
+        // The result is what the boundary defines after the call, so the call is what assigns it.
+        [one]
+            if matches!(
+                graph
+                    .def_inst(*one)
+                    .and_then(|def| graph.inst(def))
+                    .map(|i| &i.payload),
+                Some(InstPayload::Op(SSAOp::CallDefine { .. }))
+            ) =>
+        {
+            Some(Some(*one))
+        }
+        _ => None,
+    }
+}
+
+/// Each argument and the class it passes in: its register's, which a signature, where there is
+/// one, must agree with; C passes a float in the variadic tail as a double.
+fn arguments(
+    artifact: &SsaArtifact,
+    certificate: &r2ssa::CallsiteCertificate,
+    signature: Option<&r2types::FunctionType>,
+    fixed: usize,
+) -> Option<Vec<(ValueId, MachineType)>> {
+    let width = |value: ValueId| artifact.graph().var(value).size * 8;
+    let located = |value: ValueId| {
+        certificate
+            .argument_certificates
+            .iter()
+            .find(|argument| argument.value == value)
+            .and_then(|argument| match argument.location {
+                r2ssa::CallArgumentLocation::Register { storage } => {
+                    super::values::carrier_class(artifact, storage, storage.size * 8)
+                }
+                _ => None,
+            })
+    };
+    certificate
+        .argument_values
+        .iter()
+        .enumerate()
+        .map(|(position, value)| {
+            let declared = signature
+                .and_then(|signature| signature.params.get(position))
+                .map(|ty| super::values::class_of(ty, width(*value)));
+            let class = match declared {
+                Some(None) => return None,
+                Some(declared) => super::values::agreed(declared, located(*value))?,
+                None => located(*value)?,
+            };
+            let promoted =
+                position >= fixed && matches!(class, MachineType::Float { width_bits: 32 });
+            (!promoted).then_some((*value, class))
+        })
+        .collect::<Option<Vec<_>>>()
+}
+
+/// The class the call's result `value` is returned in: the boundary's carrier, a declared type
+/// agreeing; `None` where a signature declares `void` or the two disagree.
+fn result_class(
+    artifact: &SsaArtifact,
+    (site, inst): (r2ssa::CallSiteId, InstId),
+    signature: Option<&r2types::FunctionType>,
+    value: ValueId,
+) -> Option<MachineType> {
+    let inventory = artifact.obligations();
+    let width = |value: ValueId| artifact.graph().var(value).size * 8;
+    // The boundary's result storage is the carrier's own: a double's lane of a vector register.
+    let carrier = match artifact
+        .facts()
+        .boundaries
+        .calls
+        .get(&site)
+        .and_then(|boundary| boundary.result_kind)
+    {
+        Some(r2source::SourceCallResult::Register { storage }) => {
+            super::values::carrier_class(artifact, storage, storage.size * 8)
+        }
+        // Undescribed: the slot the result obligation names, at its own width.
+        _ => inventory
+            .obligations_for_inst(inst)
+            .find_map(|o| match o.id.component {
+                r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
+                    if o.id.kind == SemanticObligationKind::CallResult =>
+                {
+                    super::values::carrier_class(artifact, storage, storage.size * 8)
+                }
+                _ => None,
+            }),
+    };
+    let declared = match signature.map(|signature| signature.return_type.unaliased()) {
+        Some(r2types::CTypeLike::Void) => return None,
+        Some(ty) => Some(super::values::class_of(ty, width(value))?),
+        None => None,
+    };
+    super::values::agreed(declared, carrier)
 }

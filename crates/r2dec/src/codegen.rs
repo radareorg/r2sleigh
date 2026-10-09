@@ -1141,6 +1141,32 @@ impl<'c> CodeGenerator<'c> {
         }
     }
 
+    /// An unsigned literal: one near the top of its 64 bits reads as the negative offset it is,
+    /// except under a cast wider than 64 bits, where a negative spelling would sign-extend.
+    fn emit_unsigned(&mut self, val: u64) {
+        let wide = std::mem::take(&mut self.wide_literal);
+        if val > LIKELY_NEGATIVE_THRESHOLD && wide {
+            self.output.push_str(&format!("0x{val:x}ULL"));
+        } else if val > LIKELY_NEGATIVE_THRESHOLD {
+            let neg = (!val).wrapping_add(1);
+            self.output.push_str(&format!("-0x{:x}", neg));
+        } else {
+            self.output
+                .push_str(&format!("{}U", format_unsigned_literal(val)));
+        }
+    }
+
+    /// `(ty)inner`; a literal under a cast wider than 64 bits keeps its unsigned spelling.
+    fn emit_cast(&mut self, ty: &CType, inner: &CExpr, my_prec: u8) {
+        self.output.push('(');
+        self.emit_type(ty);
+        self.output.push(')');
+        self.wide_literal = matches!(ty, CType::Int { bits, .. } if *bits > 64)
+            && matches!(inner.unobserved(), CExpr::UIntLit(_));
+        self.emit_expr(inner, my_prec);
+        self.wide_literal = false;
+    }
+
     /// Emit an expression with parent precedence for parenthesization.
     fn emit_expr(&mut self, expr: &CExpr, parent_prec: u8) {
         if !self.charge() {
@@ -1165,19 +1191,7 @@ impl<'c> CodeGenerator<'c> {
                 };
                 self.output.push_str(&rendered);
             }
-            CExpr::UIntLit(val) => {
-                // Check if this looks like a negative offset (high bit set, close to max)
-                if *val > LIKELY_NEGATIVE_THRESHOLD && std::mem::take(&mut self.wide_literal) {
-                    self.output.push_str(&format!("0x{val:x}ULL"));
-                } else if *val > LIKELY_NEGATIVE_THRESHOLD {
-                    // Convert to negative: two's complement
-                    let neg = (!*val).wrapping_add(1);
-                    self.output.push_str(&format!("-0x{:x}", neg));
-                } else {
-                    self.output
-                        .push_str(&format!("{}U", format_unsigned_literal(*val)));
-                }
-            }
+            CExpr::UIntLit(val) => self.emit_unsigned(*val),
             // The shortest spelling that reads back to the same value; a
             // `float` literal carries its suffix so it is not a double.
             CExpr::FloatLit(val, 32) => {
@@ -1288,15 +1302,7 @@ impl<'c> CodeGenerator<'c> {
             }
             CExpr::Cast {
                 ty, expr: inner, ..
-            } => {
-                self.output.push('(');
-                self.emit_type(ty);
-                self.output.push(')');
-                self.wide_literal = matches!(ty, CType::Int { bits, .. } if *bits > 64)
-                    && matches!(inner.unobserved(), CExpr::UIntLit(_));
-                self.emit_expr(inner, my_prec);
-                self.wide_literal = false;
-            }
+            } => self.emit_cast(ty, inner, my_prec),
             CExpr::Call { func, args, .. } => self.emit_call(func, args, my_prec),
             CExpr::Subscript { base, index } => {
                 self.emit_expr(base, my_prec);

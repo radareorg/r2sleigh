@@ -234,6 +234,106 @@ impl Demand<'_> {
         }
     }
 
+    /// Which instructions bind their value: the statements' reads first, so a producer they absorb
+    /// is not also bound, then each producer that owes more than its value, readers first.
+    fn bind_all(
+        mut self,
+        input: &RenderInput<'_>,
+        planned: &r2ssa::dense::IdMap<InstId, CallPlan>,
+        dispatch: &r2ssa::dense::IdSet<InstId>,
+    ) -> Vec<bool> {
+        let (artifact, inventory) = (input.artifact(), input.obligations());
+        let live = |inst: InstId| {
+            matches!(
+                inventory.instruction_for_inst(inst).map(|d| d.state),
+                Some(SemanticInstructionState::LiveObligation)
+            ) && certified_elision(artifact, dispatch, inst).is_none()
+        };
+        for inst in &self.graph.insts {
+            let InstPayload::Op(op) = &inst.payload else {
+                continue;
+            };
+            if live(inst.id) {
+                self.statement(input, planned, inst, op);
+                self.drain();
+            }
+        }
+        for inst in self.graph.insts.iter().rev() {
+            let index = inst.id.0 as usize;
+            let owes = match &inst.payload {
+                InstPayload::Phi { .. } => false,
+                InstPayload::Op(op) => {
+                    writes_value(op)
+                        && inventory
+                            .obligations_for_inst(inst.id)
+                            .any(|o| o.id.kind != SemanticObligationKind::LiveValueProducer)
+                }
+            };
+            if let Some(output) = inst.output
+                && owes
+                && live(inst.id)
+                && !self.bound[index]
+                && !self.discharged[index]
+            {
+                self.bind(output);
+                self.drain();
+            }
+        }
+        self.bound
+    }
+
+    /// What one live instruction's statement reads.
+    fn statement(
+        &mut self,
+        input: &RenderInput<'_>,
+        planned: &r2ssa::dense::IdMap<InstId, CallPlan>,
+        inst: &r2ssa::GraphInst,
+        op: &SSAOp<ValueId>,
+    ) {
+        let (artifact, inventory) = (input.artifact(), input.obligations());
+        match op {
+            SSAOp::Store { addr, val, .. } => {
+                match self.roots.access(store_access(inventory, inst.id)) {
+                    Some(access) => self.read(access.canonical),
+                    None => self.operand(*addr, inst.id),
+                }
+                self.operand(*val, inst.id);
+            }
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Branch { .. } => {
+                let plan = planned.get(inst.id);
+                for (argument, _) in plan.map_or(&[][..], |plan| &plan.arguments[..]) {
+                    self.operand(*argument, inst.id);
+                }
+            }
+            SSAOp::CBranch { cond, .. } => self.operand(*cond, inst.id),
+            SSAOp::Switch { selector } => self.operand(*selector, inst.id),
+            // A tail transfer reads its arguments, and its target where it goes through one.
+            SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
+                let plan = planned.get(inst.id).expect("planned above");
+                for (argument, _) in &plan.arguments {
+                    self.operand(*argument, inst.id);
+                }
+                if matches!(plan.callee, calls::Callee::Through(_)) {
+                    self.operand(*target, inst.id);
+                }
+            }
+            SSAOp::BranchInd { .. } => {
+                let selector = (self.graph.block(inst.block))
+                    .and_then(|block| artifact.certificates().switches.get(&block.addr))
+                    .and_then(|switch| switch.selector);
+                if let Some(selector) = selector {
+                    self.operand(selector, inst.id);
+                }
+            }
+            SSAOp::Return { .. } => {
+                for value in returned_values(inventory, inst.id) {
+                    self.operand(value, inst.id);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn drain(&mut self) {
         while let Some(value) = self.work.pop() {
             let Some(def) = self
@@ -243,21 +343,120 @@ impl Demand<'_> {
             else {
                 continue;
             };
-            match &def.payload {
-                InstPayload::Phi { .. } => {
-                    for input in def.inputs.clone() {
-                        self.operand(input, def.id);
-                    }
-                }
-                InstPayload::Op(_) => {
-                    if let Some(canonical) = self.roots.value(value) {
-                        self.discharge(value);
-                        self.read(canonical.canonical);
-                    }
-                }
-            }
+            self.read_definition(
+                value,
+                def.id,
+                matches!(def.payload, InstPayload::Phi { .. }),
+            );
         }
     }
+
+    /// A merge reads each input on its edge; an operation, what its term reads.
+    fn read_definition(&mut self, value: ValueId, def: InstId, merge: bool) {
+        if merge {
+            let inputs = self
+                .graph
+                .inst(def)
+                .map(|inst| inst.inputs.clone())
+                .unwrap_or_default();
+            for input in inputs {
+                self.operand(input, def);
+            }
+        } else if let Some(canonical) = self.roots.value(value) {
+            self.discharge(value);
+            self.read(canonical.canonical);
+        }
+    }
+}
+
+/// Each `CALLUSE` of `block` and the call it hands its carrier to, the next in the block.
+fn call_uses(
+    graph: &SsaGraph,
+    block: &r2ssa::GraphBlock,
+    used_by: &mut r2ssa::dense::IdMap<InstId, InstId>,
+) {
+    let mut pending = Vec::new();
+    for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
+        match &inst.payload {
+            InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
+            InstPayload::Op(
+                SSAOp::Call { .. }
+                | SSAOp::CallInd { .. }
+                | SSAOp::Branch { .. }
+                | SSAOp::BranchInd { .. },
+            ) => {
+                for using in pending.drain(..) {
+                    used_by.insert(using, inst.id);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The canonical terms: a value is inlined where it is duplicable, or where its one reader can
+/// move it there; any other is bound.
+fn canonical_roots(
+    artifact: &SsaArtifact,
+    projection: &MachineProjection,
+    readers: &Readers<'_>,
+) -> Option<CanonicalRoots> {
+    let graph = artifact.graph();
+    let policy = |query: &ExpansionQuery<'_>| {
+        if r2rewrite::term_is_duplicable(
+            query.projection,
+            query.arena,
+            query.entry_never_redefined,
+            query.producer_term,
+        ) {
+            return true;
+        }
+        let read_by = readers.of(query.value);
+        let (Some(def), [only]) = (graph.def_inst(query.value), read_by.as_slice()) else {
+            return false;
+        };
+        readers.movable(
+            (query.projection, query.arena),
+            def,
+            *only,
+            query.producer_term,
+        )
+    };
+    r2rewrite::canonicalize_with(artifact, projection, &policy, &|_| None).ok()
+}
+
+/// Each call's plan, by its instruction, and the values those calls assign their results to.
+fn plan_calls(
+    input: &RenderInput<'_>,
+) -> (
+    r2ssa::dense::IdMap<InstId, CallPlan>,
+    r2ssa::dense::IdSet<ValueId>,
+) {
+    let (artifact, graph, inventory) = (input.artifact(), input.graph(), input.obligations());
+    let mut planned = r2ssa::dense::IdMap::new(graph.insts.len());
+    let mut results = r2ssa::dense::IdSet::new(graph.values.len());
+    for inst in &graph.insts {
+        let call = matches!(
+            inst.payload,
+            InstPayload::Op(
+                SSAOp::Call { .. }
+                    | SSAOp::CallInd { .. }
+                    | SSAOp::Branch { .. }
+                    | SSAOp::BranchInd { .. }
+            )
+        );
+        let Some(plan) = call
+            .then(|| calls::plan(artifact, input.callee_resolution(), inventory, inst.id))
+            .flatten()
+        else {
+            continue;
+        };
+        if let Some((result, _)) = plan.result {
+            results.insert(result);
+        }
+        planned.insert(inst.id, plan);
+    }
+    (planned, results)
 }
 
 /// The instructions a term computes in place of reading their values.
@@ -301,23 +500,7 @@ impl<'a> Readers<'a> {
         }
         let mut used_by = r2ssa::dense::IdMap::new(graph.insts.len());
         for block in &graph.blocks {
-            let mut pending = Vec::new();
-            for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
-                match &inst.payload {
-                    InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
-                    InstPayload::Op(
-                        SSAOp::Call { .. }
-                        | SSAOp::CallInd { .. }
-                        | SSAOp::Branch { .. }
-                        | SSAOp::BranchInd { .. },
-                    ) => {
-                        for using in pending.drain(..) {
-                            used_by.insert(using, inst.id);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            call_uses(graph, block, &mut used_by);
         }
         Self {
             graph,
@@ -350,9 +533,8 @@ impl<'a> Readers<'a> {
         readers
     }
 
-    /// Whether `reader` may compute the producer's term in place of `def`: later in the same
-    /// block, with no effect between where the term reads memory or can trap. A phi reads at the
-    /// end of each predecessor whose edge carries the value.
+    /// Whether `reader` may compute the producer's term in place of `def`: later in its block, no
+    /// effect between where the term reads memory or traps; a phi reads at each carrying edge.
     fn movable(
         &self,
         (projection, arena): (&MachineProjection, &TermArena),
@@ -451,48 +633,15 @@ impl<'a> Values<'a> {
         let inventory = input.obligations();
         let projection = MachineProjection::from_artifact(artifact).ok()?;
         let readers = Readers::new(graph, inventory);
-        let policy = |query: &ExpansionQuery<'_>| {
-            if r2rewrite::term_is_duplicable(
-                query.projection,
-                query.arena,
-                query.entry_never_redefined,
-                query.producer_term,
-            ) {
-                return true;
-            }
-            let read_by = readers.of(query.value);
-            let (Some(def), [only]) = (graph.def_inst(query.value), read_by.as_slice()) else {
-                return false;
-            };
-            readers.movable(
-                (query.projection, query.arena),
-                def,
-                *only,
-                query.producer_term,
-            )
-        };
-        let roots = r2rewrite::canonicalize_with(artifact, &projection, &policy, &|_| None).ok()?;
-        let mut planned = r2ssa::dense::IdMap::new(graph.insts.len());
-        let mut results = r2ssa::dense::IdSet::new(graph.values.len());
-        for inst in &graph.insts {
-            if matches!(
-                inst.payload,
-                InstPayload::Op(
-                    SSAOp::Call { .. }
-                        | SSAOp::CallInd { .. }
-                        | SSAOp::Branch { .. }
-                        | SSAOp::BranchInd { .. }
-                )
-            ) && let Some(plan) =
-                calls::plan(artifact, input.callee_resolution(), inventory, inst.id)
-            {
-                if let Some((result, _)) = plan.result {
-                    results.insert(result);
-                }
-                planned.insert(inst.id, plan);
+        let roots = canonical_roots(artifact, &projection, &readers)?;
+        let (planned, results) = plan_calls(input);
+        let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
+        for switch in artifact.certificates().switches.values() {
+            for inst in &switch.dispatch {
+                dispatch.insert(*inst);
             }
         }
-        let mut demand = Demand {
+        let bound = Demand {
             graph,
             readers: &readers,
             projection: &projection,
@@ -500,96 +649,8 @@ impl<'a> Values<'a> {
             bound: vec![false; graph.insts.len()],
             discharged: vec![false; graph.insts.len()],
             work: Vec::new(),
-        };
-        let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
-        for switch in artifact.certificates().switches.values() {
-            for inst in &switch.dispatch {
-                dispatch.insert(*inst);
-            }
         }
-        let live = |inst: InstId| {
-            matches!(
-                inventory.instruction_for_inst(inst).map(|d| d.state),
-                Some(SemanticInstructionState::LiveObligation)
-            ) && certified_elision(artifact, &dispatch, inst).is_none()
-        };
-        // The statements first, so a producer they absorb is not also bound.
-        for inst in &graph.insts {
-            let InstPayload::Op(op) = &inst.payload else {
-                continue;
-            };
-            if !live(inst.id) {
-                continue;
-            }
-            match op {
-                SSAOp::Store { addr, val, .. } => {
-                    match roots.access(store_access(inventory, inst.id)) {
-                        Some(access) => demand.read(access.canonical),
-                        None => demand.operand(*addr, inst.id),
-                    }
-                    demand.operand(*val, inst.id);
-                }
-                SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Branch { .. } => {
-                    for (argument, _) in planned
-                        .get(inst.id)
-                        .map_or(&[][..], |plan| &plan.arguments[..])
-                    {
-                        demand.operand(*argument, inst.id);
-                    }
-                }
-                SSAOp::CBranch { cond, .. } => demand.operand(*cond, inst.id),
-                SSAOp::Switch { selector } => demand.operand(*selector, inst.id),
-                // A tail transfer reads its arguments, and its target where it goes through one.
-                SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
-                    let plan = planned.get(inst.id).expect("planned above");
-                    for (argument, _) in &plan.arguments {
-                        demand.operand(*argument, inst.id);
-                    }
-                    if matches!(plan.callee, calls::Callee::Through(_)) {
-                        demand.operand(*target, inst.id);
-                    }
-                }
-                SSAOp::BranchInd { .. } => {
-                    let selector = graph
-                        .block(inst.block)
-                        .and_then(|block| artifact.certificates().switches.get(&block.addr))
-                        .and_then(|switch| switch.selector);
-                    if let Some(selector) = selector {
-                        demand.operand(selector, inst.id);
-                    }
-                }
-                SSAOp::Return { .. } => {
-                    for value in returned_values(inventory, inst.id) {
-                        demand.operand(value, inst.id);
-                    }
-                }
-                _ => {}
-            }
-            demand.drain();
-        }
-        // A producer that owes more than its value is bound where it stands; readers come first.
-        for inst in graph.insts.iter().rev() {
-            let index = inst.id.0 as usize;
-            let owes = match &inst.payload {
-                InstPayload::Phi { .. } => false,
-                InstPayload::Op(op) => {
-                    writes_value(op)
-                        && inventory
-                            .obligations_for_inst(inst.id)
-                            .any(|o| o.id.kind != SemanticObligationKind::LiveValueProducer)
-                }
-            };
-            if let Some(output) = inst.output
-                && owes
-                && live(inst.id)
-                && !demand.bound[index]
-                && !demand.discharged[index]
-            {
-                demand.bind(output);
-                demand.drain();
-            }
-        }
-        let bound = demand.bound;
+        .bind_all(input, &planned, &dispatch);
         let mut values = Self {
             artifact,
             graph,
@@ -1237,16 +1298,10 @@ impl<'a> Values<'a> {
             if self.bound[def.0 as usize] || !seen.insert(def) {
                 continue;
             }
-            for input in self.graph.inst(def).map_or(&[][..], |i| &i.inputs[..]) {
-                if self
-                    .graph
-                    .use_sites(*input)
-                    .iter()
-                    .all(|site| seen.contains(&site.inst))
-                {
-                    work.push(*input);
-                }
-            }
+            let inputs = self.graph.inst(def).map_or(&[][..], |i| &i.inputs[..]);
+            work.extend(inputs.iter().copied().filter(|input| {
+                (self.graph.use_sites(*input).iter()).all(|site| seen.contains(&site.inst))
+            }));
         }
         seen.into_iter().collect()
     }
@@ -1387,9 +1442,8 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
     }
 }
 
-/// The class the convention passes a value of `width_bits` held in `storage` in: the slot it lies
-/// in says general or float register, `storage`'s own size the width (a float's lane of a vector
-/// register). `None` where no slot of the convention holds it.
+/// The class a value `width_bits` wide passes in, held in `storage`: its slot says general or
+/// float register, `storage`'s size the width (a float's lane); `None` outside every slot.
 pub(super) fn carrier_class(
     artifact: &SsaArtifact,
     storage: r2source::CanonicalStorageId,
@@ -1434,9 +1488,8 @@ pub(super) fn agreed(
     }
 }
 
-/// The parameters in ABI order at the class C passes them in: a declared float is a float, a
-/// declared integer, pointer or enum is an integer of its width. `None` where any is unknown, since
-/// C would pass a guessed class in another register (doc/adr-decompiler-rewrite.md).
+/// The parameters in ABI order at the class C passes them in (a declared float a float, else an
+/// integer of its width); `None` where any is unknown (doc/adr-decompiler-rewrite.md).
 fn parameters(
     input: &RenderInput<'_>,
     artifact: &SsaArtifact,

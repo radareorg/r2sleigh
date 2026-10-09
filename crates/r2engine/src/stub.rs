@@ -28,52 +28,7 @@ pub(crate) fn import_stub(
         return None;
     }
     let graph = prepared.graph();
-    let machine = prepared.machine_context();
-    let clobbered = machine
-        .call_clobbered_carriers()
-        .iter()
-        .map(|storage| storage.location())
-        .collect::<std::collections::BTreeSet<_>>();
-    let arguments = machine
-        .abi_model()
-        .argument_registers()
-        .iter()
-        .map(|slot| slot.storage().location())
-        .collect::<std::collections::BTreeSet<_>>();
-    let transfer_inputs = graph
-        .inst(callsite.at)
-        .map(|inst| inst.inputs.to_vec())
-        .unwrap_or_default();
-    let observable = graph.insts.iter().find(|inst| {
-        if matches!(
-            inst.payload,
-            r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { .. } | r2ssa::SSAOp::Call { .. })
-        ) {
-            return true;
-        }
-        let Some(output) = inst.output else {
-            return false;
-        };
-        if transfer_inputs.contains(&output) {
-            return false;
-        }
-        // A write nothing reads and nothing carries out is the transfer's
-        // own bookkeeping, such as the program counter it sets.
-        if graph.use_sites(output).is_empty() && !prepared.live_out().contains(output) {
-            return false;
-        }
-        graph
-            .value(output)
-            .and_then(|value| value.canonical_storage)
-            .is_some_and(|storage| match storage.space {
-                r2ssa::CanonicalStorageSpace::Ram => true,
-                r2ssa::CanonicalStorageSpace::Register => {
-                    let location = storage.location();
-                    arguments.contains(&location) || !clobbered.contains(&location)
-                }
-                _ => false,
-            })
-    });
+    let observable = observable_beside(prepared, callsite.at);
     if let Some(inst) = observable {
         r2il::refusal_evidence!(
             "import-stub-declaration",
@@ -132,5 +87,60 @@ pub(crate) fn import_stub(
         entry: prepared.function().entry,
         name: name.to_owned(),
         signature: certified.or_else(|| identity.signature.clone()),
+    })
+}
+
+/// An instruction that defines state a caller observes beside the transfer at `at`: a store, a
+/// call, or a register write the transfer does not carry and the convention preserves or passes.
+fn observable_beside(
+    prepared: &r2ssa::SsaArtifact,
+    at: r2ssa::InstId,
+) -> Option<&r2ssa::GraphInst> {
+    let graph = prepared.graph();
+    let machine = prepared.machine_context();
+    let clobbered = machine
+        .call_clobbered_carriers()
+        .iter()
+        .map(|storage| storage.location())
+        .collect::<std::collections::BTreeSet<_>>();
+    let arguments = machine
+        .abi_model()
+        .argument_registers()
+        .iter()
+        .map(|slot| slot.storage().location())
+        .collect::<std::collections::BTreeSet<_>>();
+    let transfer_inputs = graph
+        .inst(at)
+        .map(|inst| inst.inputs.to_vec())
+        .unwrap_or_default();
+    graph.insts.iter().find(|inst| {
+        if matches!(
+            inst.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { .. } | r2ssa::SSAOp::Call { .. })
+        ) {
+            return true;
+        }
+        let Some(output) = inst.output else {
+            return false;
+        };
+        if transfer_inputs.contains(&output) {
+            return false;
+        }
+        // A write nothing reads and nothing carries out is the transfer's
+        // own bookkeeping, such as the program counter it sets.
+        if graph.use_sites(output).is_empty() && !prepared.live_out().contains(output) {
+            return false;
+        }
+        graph
+            .value(output)
+            .and_then(|value| value.canonical_storage)
+            .is_some_and(|storage| match storage.space {
+                r2ssa::CanonicalStorageSpace::Ram => true,
+                r2ssa::CanonicalStorageSpace::Register => {
+                    let location = storage.location();
+                    arguments.contains(&location) || !clobbered.contains(&location)
+                }
+                _ => false,
+            })
     })
 }
