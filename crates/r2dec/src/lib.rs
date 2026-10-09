@@ -4130,7 +4130,9 @@ fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
     match ty.unaliased() {
         CType::Bool => Some(8),
         CType::Int { bits, .. } | CType::Float(bits) | CType::BitVector(bits) => Some(*bits),
-        CType::Pointer(_) | CType::Function { .. } => Some(pointer_bits),
+        CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+            Some(pointer_bits)
+        }
         CType::Array(element, Some(len)) => {
             c_object_storage_bits(element, pointer_bits)?.checked_mul(u32::try_from(*len).ok()?)
         }

@@ -64,7 +64,9 @@ pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64>
         CTypeLike::Int { bits, .. } | CTypeLike::Float(bits) => {
             Some((u64::from(*bits).saturating_add(7) / 8).max(1))
         }
-        CTypeLike::Pointer(_) => Some((ptr_bits / 8).max(1) as u64),
+        CTypeLike::Pointer(_) | CTypeLike::UnprototypedFunction(_) => {
+            Some((ptr_bits / 8).max(1) as u64)
+        }
         CTypeLike::Array(inner, Some(count)) => {
             type_like_size_bytes(inner, ptr_bits).map(|size| size.saturating_mul(*count as u64))
         }

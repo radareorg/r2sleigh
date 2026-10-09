@@ -641,7 +641,8 @@ impl<'a> EvidenceBuilder<'a> {
             CTypeLike::Void
             | CTypeLike::Unknown
             | CTypeLike::BitVector(_)
-            | CTypeLike::Function { .. } => None,
+            | CTypeLike::Function { .. }
+            | CTypeLike::UnprototypedFunction(_) => None,
             CTypeLike::Bool => Some(self.arena.bool_ty()),
             CTypeLike::Int { bits, signedness } => Some(self.arena.int(*bits, *signedness)),
             CTypeLike::Float(bits) => Some(self.arena.float(*bits)),

@@ -63,7 +63,7 @@ impl Conversion<'_> {
             },
             Type::Pointer { target } => match self.convert(*target, true) {
                 // The type layer spells a function type as a pointer to one.
-                code @ CTypeLike::Function { .. } => code,
+                code @ (CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_)) => code,
                 target => CTypeLike::Pointer(Box::new(target)),
             },
             Type::Array { element, count } => CTypeLike::Array(
@@ -106,6 +106,10 @@ impl Conversion<'_> {
             // What a name stands for, which is what the call is read with;
             // the spelling that keeps the name travels beside the signature.
             Type::Typedef { target, .. } => self.convert(*target, pointee),
+            // A code type the declaration gives no parameters for (r2abi's `func`).
+            Type::Code(signature) if !signature.prototyped => {
+                CTypeLike::UnprototypedFunction(Box::new(self.convert(signature.returns, false)))
+            }
             Type::Code(_) | Type::Refused(_) => CTypeLike::Unknown,
         }
     }

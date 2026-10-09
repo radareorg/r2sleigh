@@ -65,6 +65,9 @@ pub enum CTypeLike {
     /// that spells `char *` where the library says `const char *` is a
     /// different type to the compiler, and it refuses the redeclaration.
     Const(Box<CTypeLike>),
+    /// A pointer to a function whose parameters its declaration does not state (`int (*)()`), as
+    /// `Function` is a pointer to one whose parameters it does.
+    UnprototypedFunction(Box<CTypeLike>),
     Unknown,
 }
 
@@ -428,6 +431,8 @@ pub fn render_c_type_like(ty: &CTypeLike) -> String {
             };
             format!("{}(*)({params})", render_c_type_like(ret))
         }
+        // The empty list is the declaration's own: it states no parameters (C17's `int (*)()`).
+        CTypeLike::UnprototypedFunction(ret) => format!("{}(*)()", render_c_type_like(ret)),
         CTypeLike::Unknown => "/* unknown */".to_string(),
     }
 }
@@ -495,6 +500,10 @@ pub fn c_object_declaration(ty: &CTypeLike, name: &str) -> String {
                         .join(", ")
                 };
                 declarator = format!("(*{declarator})({params})");
+                element = ret;
+            }
+            CTypeLike::UnprototypedFunction(ret) => {
+                declarator = format!("(*{declarator})()");
                 element = ret;
             }
             // A pointer binds looser than the array or call that follows it,

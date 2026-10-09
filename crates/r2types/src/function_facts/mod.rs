@@ -594,7 +594,9 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         }
         // `Function` is this model's spelling for a pointer to function, so it
         // occupies exactly what a pointer does.
-        CTypeLike::Pointer(_) | CTypeLike::Function { .. } => Some(ptr_bits),
+        CTypeLike::Pointer(_) | CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_) => {
+            Some(ptr_bits)
+        }
         CTypeLike::Array(element, Some(count)) => {
             declaration_type_width_bits(element, ptr_bits)?.checked_mul(u32::try_from(*count).ok()?)
         }

@@ -728,7 +728,9 @@ pub(crate) fn scalar_element_stride(ty: &CTypeLike, ptr_bits: u32) -> Option<u64
         | CTypeLike::Enum(_)
         | CTypeLike::BitVector(_)
         | CTypeLike::Function { .. } => None,
-        CTypeLike::Pointer(_) => Some((ptr_bits / 8).max(1) as u64),
+        CTypeLike::Pointer(_) | CTypeLike::UnprototypedFunction(_) => {
+            Some((ptr_bits / 8).max(1) as u64)
+        }
     }
 }
 
@@ -1293,7 +1295,8 @@ pub(crate) fn collect_aggregate_type_names(ty: &CTypeLike, out: &mut Vec<String>
         | CTypeLike::Int { .. }
         | CTypeLike::Float(_)
         | CTypeLike::BitVector(_)
-        | CTypeLike::Function { .. } => {}
+        | CTypeLike::Function { .. }
+        | CTypeLike::UnprototypedFunction(_) => {}
     }
 }
 
