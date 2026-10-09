@@ -22,11 +22,18 @@ use crate::ledger::{ObligationLedger, Outcome};
 pub struct Rendered {
     function: crate::RenderedFunction,
     ledger: ObligationLedger,
+    /// A stop that came once the control was written and certified: the body is what was reached.
+    stopped: Option<DecompileExecutionStop>,
 }
 
 impl Rendered {
     pub fn into_parts(self) -> (crate::RenderedFunction, ObligationLedger) {
         (self.function, self.ledger)
+    }
+
+    /// The stop the rendering was asked for after its body was certified, if any.
+    pub const fn stopped(&self) -> Option<&DecompileExecutionStop> {
+        self.stopped.as_ref()
     }
 }
 
@@ -90,7 +97,8 @@ pub fn render(
     certify_control(input, &body, &blocks, &labels, &never_return)?;
     let mut body = body;
     body.visit_stmts_mut(&mut |stmt| select_one_assignment(&c.symbols.borrow(), stmt));
-    work.with_phase(DecompileWorkPhase::Rendering).poll()?;
+    // What remains is linear emission of a certified body, so a stop here keeps what was reached.
+    let stopped = work.with_phase(DecompileWorkPhase::Rendering).poll().err();
     match &values {
         Some(values) => {
             c.params = values.params();
@@ -131,6 +139,7 @@ pub fn render(
     Ok(Rendered {
         function: crate::RenderedFunction::new(emission, ready.into_function()),
         ledger,
+        stopped,
     })
 }
 
