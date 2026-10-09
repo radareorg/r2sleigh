@@ -3009,33 +3009,31 @@ const WIDE_EXCLUSIVE_OR: &[u8] = &[
 ];
 
 /// An operator on a carrier wider than any C integer has no C spelling: the
-/// carrier is a struct, and a struct has no `^`. The function is refused as
-/// such, rather than rendered as `struct r2sleigh_bits_256 x = a ^ b;`, which
-/// no C compiler accepts.
+/// carrier is a struct, and a struct has no `^`. The exclusive or is a gap,
+/// rather than `struct r2sleigh_bits_256 x = a ^ b;`, which no C compiler
+/// accepts; the loads around it are byte copies, and the unit compiles.
 #[test]
-fn an_operator_on_a_wide_carrier_is_refused() {
+fn an_operator_on_a_wide_carrier_is_a_gap() {
     let machine = declaring("wide_xor", "uint64_t", &["void *", "void *"]);
     let target = machine.target();
     let program = Fixture {
         bytes: WIDE_EXCLUSIVE_OR.to_vec(),
         name: "wide_xor",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let text = response.output.text().to_string();
-    assert_eq!(
-        response.render_refusal,
-        Some(r2dec::DecompileRenderRefusal::UnrepresentableOperation),
-        "{text}"
+    let rendered = Rendered::of(&staged(&target, &program, BASE).expect("decompile"));
+    assert!(
+        rendered.contains("r2dec gap: TermNotSpelled at 0x1000:20 "),
+        "{rendered}"
     );
     assert!(
-        text.starts_with(
-            "/* r2sleigh refused wide_xor: native rendering refused: unrepresentable operation"
-        ),
-        "{text}"
+        rendered.contains("= r2sleigh_bits_load_256((void*)(uint64_t)arg1);"),
+        "{rendered}"
     );
-    for operator in [" ^ ", " | ", " << ", " >> ", " & "] {
-        assert!(!text.contains(operator), "{operator:?} in {text}");
-    }
+    run_rendered(
+        "wide_xor",
+        &[&rendered],
+        "int main(void) {\n    return 0;\n}",
+    );
 }
 
 /// Two values held across a call to an import nothing declares, then stored:
