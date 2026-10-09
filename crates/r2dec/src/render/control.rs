@@ -294,8 +294,17 @@ impl<'i> Writer<'_, 'i> {
             values.spelled_terminator(addr, &stmt);
             return stmt;
         }
+        // The interface proves no result: what this return hands back is unproven, not a gap.
+        let unproven = self
+            .input
+            .return_type()
+            .is_some_and(r2types::ReturnTypeFact::is_unproven);
         match ty {
             CType::Void => CStmt::Return(None),
+            ty if unproven => CStmt::Return(Some(
+                crate::prelude::residual(&ty, ResidualCause::UnprovenReturn)
+                    .unwrap_or_else(|| self.residual(&ty)),
+            )),
             ty => CStmt::Return(Some(self.residual(&ty))),
         }
     }
