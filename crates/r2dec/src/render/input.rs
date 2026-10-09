@@ -106,6 +106,12 @@ impl<'a> RenderInput<'a> {
         graded.or(identity)
     }
 
+    /// The text at each address the capture proves holds it: static data the program never writes,
+    /// as r2engine states it in the snapshot. The one table legacy's literals read.
+    pub fn string_literals(&self) -> &'a std::collections::BTreeMap<u64, String> {
+        self.facts.report().display_names().strings()
+    }
+
     pub fn callee_resolution(&self) -> Option<&'a r2types::CalleeResolutionFacts> {
         self.facts.report().callee_resolution()
     }

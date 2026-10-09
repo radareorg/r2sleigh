@@ -605,6 +605,91 @@ fn a_staged_call_passes_a_declared_import_its_declared_types() {
     assert!(text.contains("strlen((const char*)"), "{text}");
 }
 
+/// `strlen(0x2000); strlen(0x2010)`, with `strlen` an import's stub at 0x1018.
+const STRLEN_TWICE: &[u8] = &[
+    0xbf, 0x00, 0x20, 0x00, 0x00, // 0x1000 mov edi, 0x2000
+    0xe8, 0x0e, 0x00, 0x00, 0x00, // 0x1005 call 0x1018
+    0xbf, 0x10, 0x20, 0x00, 0x00, // 0x100a mov edi, 0x2010
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 0x100f call 0x1018
+    0xc3, // 0x1014 ret
+    0x00, 0x00, 0x00, // padding to 0x1018
+    0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 0x1018 strlen's stub
+];
+const TEXTS: u64 = 0x2000;
+/// "hi" at 0x2000, which the program states is static data, and "no" at 0x2010, which it does not.
+const TEXT_BYTES: [u8; 32] = [
+    b'h', b'i', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, b'n', b'o', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0,
+];
+
+/// `STRLEN_TWICE` as code and `TEXT_BYTES` as read-only data at `TEXTS`.
+struct Texts;
+
+impl r2engine::body::Program for Texts {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => STRLEN_TWICE,
+            false => &TEXT_BYTES,
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = TEXTS + TEXT_BYTES.len() as u64;
+        code_region(STRLEN_TWICE.len(), vaddr).or_else(|| {
+            (TEXTS..end)
+                .contains(&vaddr)
+                .then_some(r2engine::body::Region {
+                    start: TEXTS,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: false,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1018)
+    }
+}
+
+impl Program for Texts {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (TEXTS..TEXTS + 0x10).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1018).then(|| "strlen".to_owned())
+    }
+}
+
+/// Staged passes the address of text the program states as a string literal, and the address of
+/// bytes it does not state as text as the number it is.
+#[test]
+fn a_staged_call_passes_a_proven_string_as_a_literal() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let response = staged(&target, &Texts, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("strlen(\"hi\");"), "{text}");
+    assert!(!text.contains("\"no\""), "{text}");
+    assert!(text.contains("0x2010"), "{text}");
+}
+
 #[test]
 fn a_declared_prototype_gives_an_import_its_arguments() {
     let machine = Machine::new("x86-64", "x86-64", 64);

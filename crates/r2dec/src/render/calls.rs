@@ -71,6 +71,27 @@ pub(super) fn to_declared(argument: CExpr, from: &CType, to: &CType) -> CExpr {
     }
 }
 
+/// The literal `text` passed as `to`: C converts a `char*` to a pointer to `const char` or to
+/// `void` with no cast, and any other type takes one.
+pub(super) fn text_as(text: &str, to: &CType) -> CExpr {
+    let literal = CExpr::StringLit(text.to_owned());
+    let implicit = match to {
+        CType::Pointer(pointee) => {
+            let pointee = match &**pointee {
+                CType::Const(inner) => &**inner,
+                other => other,
+            };
+            matches!(pointee, CType::Void)
+                || matches!(pointee, CType::Typedef { name, .. } if name == "char")
+        }
+        _ => false,
+    };
+    match implicit {
+        true => literal,
+        false => CExpr::cast(to.clone(), literal),
+    }
+}
+
 /// What the call `plan` describes returns, read at `class`.
 pub(super) fn read_result(plan: &CallPlan, call: CExpr, class: &MachineType) -> Option<CExpr> {
     match &plan.declared {
