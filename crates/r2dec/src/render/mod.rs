@@ -97,6 +97,9 @@ pub fn render(
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
     };
+    let ledger = close_ledger(input, values.as_ref());
+    // The proof line every rendering opens with: what became of each obligation the source owes.
+    crate::note_unproven_constructs(&mut c, Some(&ledger), 0, 0, 0, &[]);
     let mut ready = prepare_function_for_emission(c);
     // Each marker names the instruction its statement was written for, so each line names its own.
     let markers = addresses.len();
@@ -109,7 +112,6 @@ pub fn render(
         ),
     );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
-    let ledger = close_ledger(input, values.as_ref());
     Ok(Rendered {
         function: crate::RenderedFunction::new(emission, ready.into_function()),
         ledger,

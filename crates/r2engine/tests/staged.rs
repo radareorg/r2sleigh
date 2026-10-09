@@ -26,6 +26,12 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
     );
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains("r2dec gap"), "{text}");
+    // The proof line every rendering opens with, from the obligation ledger the staged pipeline closes.
+    assert!(
+        text.contains("/* r2dec proof: no individual construct is marked;")
+            && text.contains("13 source obligations: 10 rendered, 3 elided, 0 refused;"),
+        "{text}"
+    );
     let closure = rendering
         .response
         .obligation_ledger
