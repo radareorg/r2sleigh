@@ -18,8 +18,8 @@ pub enum ExtentAssumption {
 pub enum StackArrayLayoutDisposition {
     /// No prepared access reaches this object through an indexed address.
     NotIndexed,
-    /// Every access agrees on the element width and the index graph contains
-    /// an exact non-negative constant establishing the last byte offset.
+    /// Every access agrees on the element width and every index has an upper
+    /// bound; the largest is the last byte offset.
     Proven(StackArrayLayoutCertificate),
     /// The object is indexed, but the exact geometry required by C was absent.
     Refused(StackArrayLayoutRefusal),
@@ -58,6 +58,7 @@ pub enum StackArrayElementIndex {
 pub enum StackArrayLayoutRefusal {
     IncompleteAccessProvenance,
     ConflictingAccessWidths,
+    /// An indexed access has no upper bound, so no constant offset ends the object.
     MissingConstantOffset,
     InvalidExtent,
     DisplacedIndexBase,

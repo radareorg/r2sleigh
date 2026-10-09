@@ -2374,6 +2374,90 @@ fn indexed_stack_array_geometry_is_certified_or_refused_at_its_owner() {
     );
 }
 
+/// Two byte stores into one stack object: one at a masked index, one at an index no range bounds.
+fn bounded_and_unbounded_stack_artifact() -> SsaArtifact {
+    let sp = Varnode::register(32, 8);
+    let bounded = Varnode::unique(0x7300, 8);
+    let bounded_address = Varnode::unique(0x7308, 8);
+    let unbounded_address = Varnode::unique(0x7310, 8);
+    let mut block = R2ILBlock::new(0x7300, 4);
+    block.push(R2ILOp::IntSub {
+        dst: sp.clone(),
+        a: sp.clone(),
+        b: Varnode::constant(16, 8),
+    });
+    block.push(R2ILOp::IntAnd {
+        dst: bounded.clone(),
+        a: Varnode::register(8, 8),
+        b: Varnode::constant(15, 8),
+    });
+    block.push(R2ILOp::IntAdd {
+        dst: bounded_address.clone(),
+        a: sp.clone(),
+        b: bounded,
+    });
+    block.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: bounded_address,
+        val: Varnode::constant(7, 1),
+    });
+    block.push(R2ILOp::IntAdd {
+        dst: unbounded_address.clone(),
+        a: sp,
+        b: Varnode::register(24, 8),
+    });
+    block.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: unbounded_address,
+        val: Varnode::constant(9, 1),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    let roles =
+        SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+            .and_then(|roles| {
+                roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
+                    SourceStackGrowth::LowerAddresses,
+                ))
+            })
+            .expect("bounded and unbounded machine roles");
+    SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+        &[block],
+        Some(&return_boundary_arch()),
+        Some(preserved_stack_interface()),
+        roles,
+        Vec::new(),
+    )
+    .expect("bounded and unbounded artifact")
+}
+
+#[test]
+fn one_unbounded_index_refuses_the_layout_a_bounded_index_would_prove() {
+    let artifact = bounded_and_unbounded_stack_artifact();
+    let indexed = artifact
+        .facts()
+        .structured
+        .memory_accesses
+        .values()
+        .filter(|access| artifact.objects().address_is_indexed(access.address))
+        .map(|access| access.object)
+        .collect::<Vec<_>>();
+    assert_eq!(indexed.len(), 2, "both stores are indexed");
+    assert_eq!(indexed[0], indexed[1], "both stores reach one object");
+    // The masked store alone bounds the object at 16 bytes; the other store may land anywhere.
+    assert_eq!(
+        indexed_stack_layout(&artifact),
+        &super::StackArrayLayoutDisposition::Refused(
+            super::StackArrayLayoutRefusal::MissingConstantOffset,
+        )
+    );
+    assert_eq!(
+        artifact.extent_assumption(indexed[0]),
+        Some(crate::ExtentAssumption::UnboundedIndex)
+    );
+}
+
 #[test]
 fn control_domains_intersect_shared_default_paths() {
     let blocks = vec![
