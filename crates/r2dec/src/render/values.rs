@@ -60,6 +60,8 @@ pub(super) struct Values<'a> {
     externs: RefCell<BTreeMap<String, CExternDecl>>,
     /// The text the capture proves at each address, which a passed constant address is.
     strings: &'a BTreeMap<u64, String>,
+    /// The objects the program names that an access here reaches, each declared once.
+    globals: super::globals::Globals<'a>,
     little_endian: bool,
     ptr_bits: u32,
     /// The function itself as a call to its own entry names it: its name, parameters and result.
@@ -728,6 +730,7 @@ impl<'a> Values<'a> {
             results,
             externs: RefCell::new(BTreeMap::new()),
             strings: input.string_literals(),
+            globals: super::globals::Globals::of(input),
             ptr_bits: input.ptr_bits(),
             own: Own::of(input),
             little_endian: matches!(
@@ -871,11 +874,13 @@ impl<'a> Values<'a> {
             None => None,
         };
         let object = |object: ObjectId| self.object(object);
+        let global = |at: u64, class: &MachineType, store: bool| self.global(at, class, store);
         read(&Spell {
             projection: &self.projection,
             arena: self.roots.arena(),
             bound: &bound,
             object: &object,
+            global: &global,
             little_endian: self.little_endian,
         })
     }
@@ -1317,6 +1322,23 @@ impl<'a> Values<'a> {
         self.externs.borrow().values().cloned().collect()
     }
 
+    pub(super) fn extern_objects(&self) -> Vec<crate::ast::CExternObject> {
+        self.globals.objects()
+    }
+
+    /// The object the program names at `at`, unless its identifier names something else here.
+    fn global(&self, at: u64, class: &MachineType, store: bool) -> Option<super::globals::Named> {
+        self.globals.at(at, class, store, |name| {
+            name == self.own.name
+                || self
+                    .externs
+                    .try_borrow()
+                    .map_or(true, |externs| externs.contains_key(name))
+                || (self.symbols.try_borrow())
+                    .map_or(true, |symbols| symbols.by_name(name).is_some())
+        })
+    }
+
     fn store(&self, inst: InstId, address: ValueId, value: ValueId) -> Option<CStmt> {
         if !self.little_endian {
             return None;
@@ -1343,9 +1365,21 @@ impl<'a> Values<'a> {
             None => (self.operand(address, inst)?, self.value_type(value)?),
         };
         let ty = terms::c_type(&cell)?;
-        let residual = ResidualType::of(&ty)?;
         let written = terms::reclass(self.operand(value, inst)?, &self.value_type(value)?, &cell)?;
-        let written = CExpr::cast(ty, written);
+        let written = CExpr::cast(ty.clone(), written);
+        let named = crate::literal_value(&address).and_then(|at| self.global(at, &cell, true));
+        let address = match named {
+            Some(super::globals::Named {
+                object: Some((object, declared)),
+                ..
+            }) => {
+                let written = calls::to_declared(written, &ty, &declared);
+                return Some(CStmt::Expr(CExpr::assign(object, written)));
+            }
+            Some(named) => named.address,
+            None => address,
+        };
+        let residual = ResidualType::of(&ty)?;
         let pointer = CExpr::cast(CType::Pointer(Box::new(CType::Void)), address);
         Some(CStmt::Expr(
             Helper::Store(residual).call(vec![pointer, written]),

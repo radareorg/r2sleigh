@@ -21,6 +21,8 @@ pub(super) struct Spell<'a> {
     pub(super) bound: &'a dyn Fn(ValueId, &MachineType) -> Option<CExpr>,
     /// Where a frame object lies in the frame array.
     pub(super) object: &'a dyn Fn(ObjectId) -> Option<Placed>,
+    /// The object the program names at a literal address, read (`false`) or written as a class.
+    pub(super) global: &'a dyn Fn(u64, &MachineType, bool) -> Option<super::globals::Named>,
     /// Whether memory is little-endian, so a byte copy reads a word as the machine does.
     pub(super) little_endian: bool,
 }
@@ -618,6 +620,15 @@ impl Spell<'_> {
 
     /// A read of `ty` at the integer `address`, by a byte copy so C reads it as the machine does.
     fn load(&self, ty: &MachineType, address: CExpr) -> Option<CExpr> {
+        let named = crate::literal_value(&address).and_then(|at| (self.global)(at, ty, false));
+        let address = match named {
+            Some(super::globals::Named {
+                object: Some((object, declared)),
+                ..
+            }) => return super::calls::from_declared(object, &declared, ty),
+            Some(named) => named.address,
+            None => address,
+        };
         if !self.little_endian {
             return None;
         }

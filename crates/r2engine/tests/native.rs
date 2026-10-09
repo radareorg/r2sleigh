@@ -722,6 +722,110 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     );
 }
 
+/// `total = counter + *(uint32_t*)0x2008`, each a 32-bit access at a literal address.
+const SUM_GLOBALS: &[u8] = &[
+    0x8b, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1000 mov eax, [0x2000]
+    0x03, 0x04, 0x25, 0x08, 0x20, 0x00, 0x00, // 0x1007 add eax, [0x2008]
+    0x89, 0x04, 0x25, 0x10, 0x20, 0x00, 0x00, // 0x100e mov [0x2010], eax
+    0xc3, // 0x1015 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+const GLOBALS: u64 = 0x2000;
+
+/// `SUM_GLOBALS` as code and 24 writable bytes at `GLOBALS`, naming `counter` at 0x2000 and
+/// `total` at 0x2010; 0x2008 has no name.
+struct Globals;
+
+impl r2engine::body::Program for Globals {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => SUM_GLOBALS,
+            false => &[0; 24],
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = GLOBALS + 24;
+        code_region(SUM_GLOBALS.len(), vaddr).or_else(|| {
+            (GLOBALS..end)
+                .contains(&vaddr)
+                .then_some(r2engine::body::Region {
+                    start: GLOBALS,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: true,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE
+    }
+}
+
+impl Program for Globals {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (GLOBALS..GLOBALS + 24).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        match vaddr {
+            BASE => Some("sum".to_owned()),
+            0x2000 => Some("counter".to_owned()),
+            0x2010 => Some("total".to_owned()),
+            _ => None,
+        }
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+/// Staged spells an access at the address of an object the program names by that name, at the
+/// type its debug information declares (`int counter`) or through its bytes where none is
+/// declared (`char total[]`); an address no symbol names stays the number it is.
+#[test]
+fn a_staged_access_to_a_named_global_spells_its_name() {
+    use r2abi::{DataObject, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let int = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(32),
+        name: Some("int".to_owned()),
+    }));
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_object(
+        0x2000,
+        DataObject {
+            name: "counter".to_owned(),
+            ty: int,
+            size_bytes: Some(4),
+        },
+    );
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    machine.declarations = declarations;
+    let target = machine.target();
+    let response = staged(&target, &Globals, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("extern int32_t counter;"), "{text}");
+    assert!(text.contains("= (uint32_t)counter;"), "{text}");
+    assert!(text.contains("extern char total[];"), "{text}");
+    assert!(text.contains("&total"), "{text}");
+    assert!(!text.contains("0x2000"), "{text}");
+    assert!(!text.contains("0x2010"), "{text}");
+    assert!(text.contains("0x2008"), "{text}");
+}
+
 /// add x0, x0, 1; ret
 const AARCH64_ADD_ONE: &[u8] = &[
     0x00, 0x04, 0x00, 0x91, // 0x1000 add x0, x0, 1

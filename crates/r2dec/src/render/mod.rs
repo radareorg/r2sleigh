@@ -4,6 +4,7 @@
 mod calls;
 mod control;
 mod frame;
+mod globals;
 mod input;
 mod terms;
 mod values;
@@ -89,6 +90,7 @@ pub fn render(
             c.params = values.params();
             c.locals = values.locals();
             c.externs = values.externs();
+            c.extern_objects = values.extern_objects();
         }
         None => c.params_known = false,
     }

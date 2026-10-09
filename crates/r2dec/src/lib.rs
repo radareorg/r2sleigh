@@ -4308,7 +4308,7 @@ pub(crate) fn name_of_constant_address(
 /// with anything left that is not an identifier character replaced, so the
 /// rendered program declares `progName` rather than a dotted spelling no
 /// compiler accepts.
-fn c_identifier_for_data_symbol(flag: &str) -> String {
+pub(crate) fn c_identifier_for_data_symbol(flag: &str) -> String {
     const SPACES: [&str; 6] = ["obj.", "reloc.", "segment.", "section.", "str.", "sym."];
     let mut name = flag;
     loop {
