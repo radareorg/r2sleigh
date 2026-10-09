@@ -3370,15 +3370,31 @@ fn a_repeated_move_walks_the_way_the_specification_says() {
         bytes: REPEATED_MOVE.to_vec(),
         name: "copy",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let text = response.output.text();
-    assert!(response.render_refusal.is_none(), "{text}");
-    assert!(text.contains("uint64_t* to = (uint64_t*)RDI_0;"), "{text}");
+    let rendered = Rendered::of(&staged(&target, &program, BASE).expect("decompile"));
     assert!(
-        text.contains("to[transferred] = ((uint64_t*)RSI_0)[transferred];"),
-        "{text}"
+        rendered.contains("uint64_t to = (uint64_t)arg0;"),
+        "{rendered}"
     );
-    assert!(text.contains("while (transferred != RDX_0)"), "{text}");
+    assert!(
+        rendered.contains("uint64_t from = (uint64_t)arg1;"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("while (transferred != count)"),
+        "{rendered}"
+    );
+    run_rendered(
+        "copy",
+        &[&rendered],
+        r#"int main(void) {
+    uint64_t words[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    copy((uint64_t)(uintptr_t)&words[0], (uint64_t)(uintptr_t)&words[4], 3);
+    /* Ascending one element at a time, as the machine walks. */
+    copy((uint64_t)(uintptr_t)&words[5], (uint64_t)(uintptr_t)&words[4], 3);
+    const uint64_t want[8] = {5, 6, 7, 4, 5, 5, 5, 5};
+    return memcmp(words, want, sizeof want) != 0;
+}"#,
+    );
 }
 
 /// A block copy after a call to an import nothing declares, from callee-saved registers:
@@ -3404,40 +3420,57 @@ const MOVE_AFTER_A_CALL: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1020 the stub's slot
 ];
 
-/// The entry's clear direction flag survives a call because every x86 convention preserves it.
+/// The entry's clear direction flag survives a call because every x86 convention preserves it, so
+/// the copy walks forward.
 #[test]
 fn a_clear_direction_flag_survives_a_call() {
+    use r2dec::prelude::ResidualCause;
     let machine = Machine::new("x86-64", "x86-64", 64);
     let program = ImportCaller {
         bytes: MOVE_AFTER_A_CALL,
         stub: 0x1012,
     };
     for convention in ["amd64", "ms"] {
-        let response = decompile(&machine.under(convention), &program, BASE).expect("decompile");
+        let response = staged(&machine.under(convention), &program, BASE).expect("decompile");
         let text = response.output.text();
         assert!(response.render_refusal.is_none(), "{convention}\n{text}");
-        // The import states no result, so the return is a residual. The
-        // move's operands are registers the function entered holding, which C
-        // cannot spell, so each read of one is a residual too: four in all.
+        // The import states no result, so the return is a residual. The move's operands are
+        // registers the function entered holding, which C cannot spell: a residual each.
         assert!(marks_an_unproven_return(text), "{convention}\n{text}");
+        let r2engine::EngineRendering::Function(rendered) = &response.output else {
+            panic!("{convention}\n{text}");
+        };
+        let causes = rendered
+            .emission()
+            .residuals()
+            .iter()
+            .map(|site| site.cause)
+            .collect::<Vec<_>>();
+        assert_eq!(causes.len(), 4, "{convention}\n{text}");
         assert_eq!(
-            text.matches("r2sleigh_residual_").count(),
-            4,
+            causes[..3],
+            [ResidualCause::HeldFromEntry; 3],
+            "{convention}\n{text}"
+        );
+        for held in ["to", "from", "count"] {
+            assert!(
+                text.contains(&format!(
+                    "uint64_t {held} = (uint64_t)r2sleigh_residual_u64("
+                )),
+                "{convention}\n{text}"
+            );
+        }
+        // Ascending, which is what a clear flag means.
+        assert!(
+            text.contains("(to + (uint64_t)transferred * (uint64_t)8U)"),
             "{convention}\n{text}"
         );
         assert!(
-            text.contains("; 3 held from entry, read as residuals (R12_0, RBP_0, RBX_0)"),
+            text.contains("transferred = transferred + 1U;"),
             "{convention}\n{text}"
         );
-        // The copy still walks forward, which is what a clear flag means. The
-        // residuals' site numbers are the emitter's text order, not pinned here.
         assert!(
-            text.contains("to[transferred] = ((uint64_t*)r2sleigh_residual_u64("),
-            "{convention}\n{text}"
-        );
-        assert!(text.contains("transferred++;"), "{convention}\n{text}");
-        assert!(
-            text.contains("while (transferred != r2sleigh_residual_u64("),
+            text.contains("while (transferred != count)"),
             "{convention}\n{text}"
         );
     }
