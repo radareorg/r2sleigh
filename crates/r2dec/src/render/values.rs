@@ -797,8 +797,11 @@ impl<'a> Values<'a> {
                 }
                 None => class,
             };
+            let declared_name = (input.declared_parameter_name(index as usize))
+                .map(crate::ast::c_identifier)
+                .filter(|name| spells_an_identifier(name));
             let name = self.symbols.borrow_mut().declare(
-                format!("arg{index}"),
+                declared_name.unwrap_or_else(|| format!("arg{index}")),
                 c.clone(),
                 SymbolRole::Parameter(index),
             );
@@ -1254,6 +1257,10 @@ impl<'a> Values<'a> {
                 ));
             }
         };
+        // A parameter or local of the callee's name would shadow the function it calls.
+        if (self.symbols.try_borrow()).map_or(true, |symbols| symbols.by_name(name).is_some()) {
+            return needed(None, inst, "callee name a declared variable holds");
+        }
         types.truncate(plan.fixed);
         let declaration = CExternDecl {
             name: name.clone(),
@@ -1791,6 +1798,21 @@ pub(super) fn agreed(
     }
 }
 
+/// Whether `name` is an identifier C leaves to the program: no keyword, nothing reserved to the
+/// implementation (C11 7.1.3), and none of the helpers' own prefix.
+fn spells_an_identifier(name: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+        "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+        "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+        "union", "unsigned", "void", "volatile", "while", "bool", "true", "false",
+    ];
+    let reserved = name.starts_with("__")
+        || (name.starts_with('_') && name[1..].starts_with(|c: char| c.is_ascii_uppercase()))
+        || name.starts_with("r2sleigh_");
+    !name.starts_with(|c: char| c.is_ascii_digit()) && !reserved && !KEYWORDS.contains(&name)
+}
+
 /// The parameters in ABI order at the class C passes them in (a declared float a float, else an
 /// integer of its width); `None` where any is unknown (doc/adr-decompiler-rewrite.md).
 fn parameters(
@@ -1947,4 +1969,18 @@ fn writes_value(op: &SSAOp<ValueId>) -> bool {
             | SSAOp::CpuId { .. }
             | SSAOp::New { .. }
     ) && op.dst().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    /// A declared name another language allows can still be a C keyword or reserved spelling.
+    #[test]
+    fn a_declared_name_c_reserves_is_no_identifier() {
+        for name in ["n", "values", "_count", "x2"] {
+            assert!(super::spells_an_identifier(name), "{name}");
+        }
+        for name in ["double", "char", "__x", "_Value", "r2sleigh_load_u8", "2x"] {
+            assert!(!super::spells_an_identifier(name), "{name}");
+        }
+    }
 }
