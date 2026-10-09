@@ -409,15 +409,16 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         binary,
         "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
     );
-    // The pointer parameter is declared as DWARF states it, and read as its word; `forward`'s `x + 1.0`
-    // adds the double whose bits the constant is, never the integer those bits spell.
+    // Each parameter is declared as DWARF states it, by its name, and the pointer read as its word;
+    // `forward`'s `x + 1.0` adds the double whose bits the constant is, never the integer those bits
+    // spell.
     for line in [
-        "void store(double arg0, double* arg1)",
-        "r2sleigh_store_u64((void*)(uint64_t)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
-        "void forward(double arg0, double* arg1)",
+        "void store(double x, double* p)",
+        "r2sleigh_store_u64((void*)(uint64_t)p, (uint64_t)r2sleigh_float_to_bits_64(x + x));",
+        "void forward(double x, double* p)",
         "void store(double, double*);",
-        "store(arg0, (double*)(uint64_t)arg1);",
-        "store(arg0 + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (double*)(uint64_t)arg1);",
+        "store(x, (double*)(uint64_t)p);",
+        "store(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (double*)(uint64_t)p);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
@@ -433,7 +434,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .next()
         .unwrap_or(call_store);
     let call = call_store
-        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (double*)(uint64_t)arg0);")
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (double*)(uint64_t)p);")
         .expect("the tail call");
     let returned = call_store.find("return;").expect("its return");
     assert!(call < returned, "{call_store}");
@@ -586,7 +587,7 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
         (
             "float_moves_zig_x86_64_O2g",
             "sym.swap_call",
-            "return (double)scale(arg1, arg0);",
+            "return (double)scale(b, a);",
         ),
     ] {
         let staged = on(
@@ -660,9 +661,9 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
     for line in [
-        "double from_b(const double* arg0, int64_t arg1)",
+        "double from_b(const double* values, int64_t count)",
         "double helper(const double*, int64_t);",
-        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)arg0, (int64_t)arg1));",
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)values, (int64_t)count));",
         "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
@@ -676,14 +677,14 @@ fn a_staged_recursive_call_agrees_with_its_own_definition() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fact");
     assert!(
-        staged.out.contains("int32_t fact(int32_t arg0)"),
+        staged.out.contains("int32_t fact(int32_t n)"),
         "{}",
         staged.out
     );
     assert!(
         staged
             .out
-            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)arg0 - (uint32_t)1U));"),
+            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)n - (uint32_t)1U));"),
         "{}",
         staged.out
     );

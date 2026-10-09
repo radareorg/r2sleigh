@@ -65,6 +65,17 @@ impl<'a> RenderInput<'a> {
             .flatten()
     }
 
+    /// The name the source gives parameter `slot`: its certified signature's, else the one its
+    /// debug information or symbols state; a positional placeholder is no name.
+    pub fn declared_parameter_name(&self, slot: usize) -> Option<&'a str> {
+        let report = self.facts.report();
+        (report.type_facts().render_authorized_signature())
+            .and_then(|signature| signature.params.get(slot))
+            .map(|parameter| parameter.name.as_str())
+            .filter(|name| !r2types::is_generic_arg_name(name))
+            .or_else(|| report.display_names().parameter(slot))
+    }
+
     /// Who each call site calls, as r2types resolved it.
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
     pub fn declared_call_prototypes(&self) -> usize {
