@@ -1366,7 +1366,11 @@ impl<'a> Values<'a> {
         };
         let ty = terms::c_type(&cell)?;
         let written = terms::reclass(self.operand(value, inst)?, &self.value_type(value)?, &cell)?;
-        let written = CExpr::cast(ty.clone(), written);
+        // C casts only to a scalar (C17 6.5.4): a carrier is already its own type.
+        let written = match ty {
+            CType::BitVector(_) => written,
+            _ => CExpr::cast(ty.clone(), written),
+        };
         let named = crate::literal_value(&address).and_then(|at| self.global(at, &cell, true));
         let address = match named {
             Some(super::globals::Named {
@@ -1379,11 +1383,13 @@ impl<'a> Values<'a> {
             Some(named) => named.address,
             None => address,
         };
-        let residual = ResidualType::of(&ty)?;
         let pointer = CExpr::cast(CType::Pointer(Box::new(CType::Void)), address);
-        Some(CStmt::Expr(
-            Helper::Store(residual).call(vec![pointer, written]),
-        ))
+        Some(CStmt::Expr(match ty {
+            CType::BitVector(bits) => {
+                crate::bitvector::BitVectorHelper::store(bits)?.call(vec![pointer, written])
+            }
+            ty => Helper::Store(ResidualType::of(&ty)?).call(vec![pointer, written]),
+        }))
     }
 
     /// The test a conditional branch ending `addr` takes its true edge on.

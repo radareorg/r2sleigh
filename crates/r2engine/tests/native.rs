@@ -1461,7 +1461,7 @@ fn a_struct_stride_through_a_scalar_pointer_is_not_subscripted_by_the_scalar() {
     assert!(!text.contains(".f_"), "{text}");
     run_rendered(
         "rec_index",
-        &text,
+        &[&text],
         r#"int main(void) {
     int32_t recs[4][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}, {13, 14, 15, 16}};
     if ((int32_t)rec_index((void*)recs, 2, 100) != 109) {
@@ -1701,8 +1701,46 @@ const REPEATED_COMPARE: &[u8] = &[
 ];
 
 /// Render x86-64 bytes mapped at `BASE`, refusing nothing.
-fn rendered(bytes: &'static [u8], name: &'static str) -> String {
+fn rendered(bytes: &'static [u8], name: &'static str) -> Rendered {
     rendered_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
+}
+
+/// A function as a reader is shown it, and the translation unit a compiler is handed: the unit
+/// defines the helpers the definition calls.
+struct Rendered {
+    text: String,
+    unit: String,
+    signature: String,
+}
+
+impl Rendered {
+    fn of(response: &r2engine::EngineDecompileResponse) -> Self {
+        let text = response.output.text();
+        assert!(response.render_refusal.is_none(), "{text}");
+        let r2engine::EngineRendering::Function(rendered) = &response.output else {
+            panic!("no function was rendered:\n{text}");
+        };
+        let emission = rendered.emission();
+        Self {
+            text: text.to_owned(),
+            unit: emission.unit().to_owned(),
+            signature: emission.signature().expect("a defined function").to_owned(),
+        }
+    }
+}
+
+impl std::ops::Deref for Rendered {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Rendered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 /// x86-64 with a header's prototype for the body at `BASE`, spelled `int`, `uint32_t`, `uint64_t`
@@ -1752,12 +1790,11 @@ fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
 
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
 /// The function at `BASE` in both pipelines, legacy then staged, each rendered without a refusal.
-fn rendered_both(bytes: &'static [u8], name: &'static str) -> [String; 2] {
+fn rendered_both(bytes: &'static [u8], name: &'static str) -> [Rendered; 2] {
     rendered_both_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
 }
 
-/// Legacy's definition and staged's translation unit, which defines the helpers it calls.
-fn rendered_both_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> [String; 2] {
+fn rendered_both_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> [Rendered; 2] {
     let target = machine.target();
     let program = Fixture {
         bytes: bytes.to_vec(),
@@ -1765,53 +1802,59 @@ fn rendered_both_on(machine: &Machine, bytes: &'static [u8], name: &'static str)
     };
     let legacy = decompile(&target, &program, BASE).expect("decompile");
     let staged = staged(&target, &program, BASE).expect("decompile");
-    for response in [&legacy, &staged] {
-        let text = response.output.text();
-        assert!(response.render_refusal.is_none(), "{text}");
-    }
-    let unit = match &staged.output {
-        r2engine::EngineRendering::Function(rendered) => rendered.emission().unit().to_string(),
-        other => other.text().to_string(),
-    };
-    [legacy.output.text().to_string(), unit]
+    [Rendered::of(&legacy), Rendered::of(&staged)]
 }
 
-fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> String {
+fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> Rendered {
     let target = machine.target();
     let program = Fixture {
         bytes: bytes.to_vec(),
         name,
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let text = response.output.text().to_string();
-    assert!(response.render_refusal.is_none(), "{text}");
-    text
+    Rendered::of(&decompile(&target, &program, BASE).expect("decompile"))
 }
 
-/// Compile the rendered function under a C harness and run it; the harness exits zero when every check holds.
+/// Compile each rendered unit as its own translation unit beside a C harness, and run it; the
+/// harness exits zero when every check holds.
 ///
 /// A rendering that never returns is as wrong as one that returns the wrong
 /// value, so the harness is killed by `SIGALRM` if it is still running after
 /// thirty seconds, and the check fails instead of hanging the suite.
-fn run_rendered(name: &str, function: &str, harness: &str) {
+fn run_rendered(name: &str, units: &[&Rendered], harness: &str) {
     let dir = std::env::temp_dir().join(format!("r2engine-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch directory");
-    let source = dir.join("rendered.c");
     let binary = dir.join("rendered");
+    let mut sources = Vec::new();
+    for (index, rendered) in units.iter().enumerate() {
+        let source = dir.join(format!("rendered_{index}.c"));
+        std::fs::write(&source, &rendered.unit).expect("write the rendering");
+        sources.push(source);
+    }
+    let prototypes = units
+        .iter()
+        .map(|rendered| format!("{};\n", rendered.signature))
+        .collect::<String>();
+    let main = dir.join("harness.c");
     std::fs::write(
-        &source,
+        &main,
         format!(
             "#define _POSIX_C_SOURCE 200809L\n#include <stdint.h>\n#include <string.h>\n\
              #include <unistd.h>\n\
              __attribute__((constructor)) static void r2engine_watchdog(void) {{ alarm(30); }}\n\
-             {function}\n{harness}\n"
+             {prototypes}\n{harness}\n"
         ),
     )
-    .expect("write the rendering");
+    .expect("write the harness");
+    let function = units
+        .iter()
+        .map(|rendered| rendered.unit.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let compiled = std::process::Command::new("cc")
         .args(["-std=c11", "-w", "-o"])
         .arg(&binary)
-        .arg(&source)
+        .args(&sources)
+        .arg(&main)
         .output()
         .expect("a C compiler");
     assert!(
@@ -1839,7 +1882,7 @@ fn a_repeated_scan_renders_as_the_walk_it_is() {
     assert!(text.contains("break;"), "{text}");
     run_rendered(
         "scan",
-        &text,
+        &[&text],
         r#"int main(void) {
     const char *words[] = {"", "a", "hello", "bash"};
     for (int i = 0; i < 4; i++) {
@@ -1859,7 +1902,7 @@ fn a_repeated_compare_leaves_the_flags_of_its_last_pair() {
     assert!(text.contains("if (other != element)"), "{text}");
     run_rendered(
         "compare",
-        &text,
+        &[&text],
         r#"static int sign(int value) { return (value > 0) - (value < 0); }
 int main(void) {
     const struct { const char *dst, *src; uint64_t n; } cases[] = {
@@ -1980,7 +2023,7 @@ fn a_loop_at_the_entry_carries_what_its_latch_writes() {
     let text = rendered(ENTRY_LOOP, "entry_loop");
     run_rendered(
         "entry_loop",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t n[] = {1, 2, 5, 10, 3};
     const uint64_t acc[] = {0, 0, 0, 7, 100};
@@ -2032,7 +2075,7 @@ fn an_entry_with_two_latches_merges_the_caller_and_both_latches() {
     let text = rendered(ENTRY_LOOP_TWO_LATCHES, "two_latches");
     run_rendered(
         "two_latches",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t n[] = {0, 1, 4, 4, 9};
     const uint64_t flag[] = {1, 1, 1, 0, 3};
@@ -2055,7 +2098,7 @@ fn mutual_tail_recursion_takes_both_partners_steps() {
     let text = rendered(MUTUAL_TAIL_RECURSION, "mutual_even");
     run_rendered(
         "mutual_even",
-        &text,
+        &[&text],
         r#"static uint64_t ref_odd(uint64_t depth, uint64_t accumulator);
 static uint64_t ref_even(uint64_t depth, uint64_t accumulator) {
     return depth == 0 ? accumulator ^ 0xa5a5a5a5u : ref_odd(depth - 1u, accumulator * 31u + depth);
@@ -2095,7 +2138,7 @@ fn an_and_that_clears_one_bit_takes_the_whole_argument() {
     );
     run_rendered(
         "clear_low_bit",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t cases[] = {
         0x1234567890abcdefULL, 0, 1, 0xffffffffffffffffULL, 0x8000000000000001ULL,
@@ -2142,7 +2185,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     );
     run_rendered(
         "mask24_of_edi",
-        &text,
+        &[&text],
         r#"int main(void) {
     if (mask24_of_edi(0xabcdef12u) != 0xcdef12u) {
         return 1;
@@ -2164,7 +2207,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     );
     run_rendered(
         "mask24_of_rdi",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t cases[] = {
         0xffffffffffffffffULL, 0x1234567890abcdefULL, 0xabcdef12ULL, 0, 0x80000000ff000000ULL,
@@ -2189,7 +2232,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     );
     run_rendered(
         "mask24_of_w0",
-        &text,
+        &[&text],
         r#"int main(void) {
     if (mask24_of_w0(0xabcdef12u) != 0xcdef12u) {
         return 1;
@@ -2244,7 +2287,7 @@ fn a_write_to_part_of_a_register_keeps_the_rest_of_it() {
     let text = rendered(FLIP_LOW_BYTE, "flip_low_byte");
     run_rendered(
         "flip_low_byte",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t cases[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL, 0xff00ULL};
     for (int i = 0; i < 4; i++) {
@@ -2259,7 +2302,7 @@ fn a_write_to_part_of_a_register_keeps_the_rest_of_it() {
     let text = rendered(REPLACE_SECOND_BYTE, "replace_second_byte");
     run_rendered(
         "replace_second_byte",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t roots[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL};
     const uint64_t lanes[] = {0xa5, 0x1ff, 0};
@@ -2278,7 +2321,7 @@ fn a_write_to_part_of_a_register_keeps_the_rest_of_it() {
     let text = rendered(REPLACE_LOW_WORD, "replace_low_word");
     run_rendered(
         "replace_low_word",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t roots[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL};
     const uint64_t lanes[] = {0xa5a5, 0x1ffff, 0};
@@ -2331,7 +2374,7 @@ fn a_store_writes_the_bytes_the_instruction_writes() {
     let text = rendered(TYPED_COMPETE, "typed_compete");
     run_rendered(
         "typed_compete",
-        &text,
+        &[&text],
         r#"#include <sys/mman.h>
 /* -std=c11 hides the Linux names; the values are the kernel's. */
 #ifndef MAP_ANONYMOUS
@@ -2393,7 +2436,7 @@ fn an_and_that_keeps_six_or_seven_bytes_takes_the_whole_register() {
         );
         run_rendered(
             name,
-            &text,
+            &[&text],
             &format!(
                 r#"int main(void) {{
     const uint64_t cases[] = {{
@@ -2441,7 +2484,7 @@ fn an_argument_read_back_from_the_high_half_of_a_vector_is_a_parameter() {
     assert!(text.starts_with("uint64_t high_qword(uint64_t "), "{text}");
     run_rendered(
         "high_qword",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint64_t cases[] = {
         0x1234567890abcdefULL, 0, 1, 0xffffffffffffffffULL, 0x8000000000000001ULL,
@@ -2534,7 +2577,7 @@ fn a_packed_extension_from_memory_renders_every_lane() {
         assert_packed_extension_rendered(&text);
         run_rendered(
             name,
-            &text,
+            &[&text],
             &format!(
                 r#"int main(void) {{
     const uint8_t source[4] = {{0x01, 0x80, 0x7f, 0xfe}};
@@ -2565,7 +2608,7 @@ fn a_packed_extension_of_an_argument_takes_the_argument() {
     );
     run_rendered(
         "sign_extend_argument",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
     uint32_t got[4];
@@ -2587,7 +2630,7 @@ fn a_packed_extension_of_an_argument_takes_the_argument() {
     );
     run_rendered(
         "sign_extend_high_lane",
-        &text,
+        &[&text],
         r#"int main(void) {
     if (sign_extend_high_lane(0x80000000u) != 0xffffffffffff8000ULL) {
         return 1;
@@ -2667,7 +2710,7 @@ fn a_256_bit_packed_extension_compiles_on_its_own() {
         );
         run_rendered(
             name,
-            &text,
+            &[&text],
             &format!(
                 r#"int main(void) {{
     const uint8_t source[8] = {{0x01, 0x80, 0x7f, 0xfe, 0x00, 0xff, 0x81, 0x7e}};
@@ -2735,14 +2778,12 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         (COPY_32, "copy_32", 32),
     ] {
         let machine = declaring(name, "int", &["void *", "void *"]);
-        // Staged has no 256-bit carrier yet (ROADMAP D, wide values), so it is graded to 16 bytes.
-        let pipelines = if width > 16 { 1 } else { 2 };
         let rendered = rendered_both_on(&machine, bytes, name);
-        for (pipeline, text) in ["legacy", "staged"].iter().zip(rendered).take(pipelines) {
+        for (pipeline, text) in ["legacy", "staged"].iter().zip(rendered) {
             assert!(!text.contains("byte["), "{text}");
             run_rendered(
                 &format!("{name}_{pipeline}"),
-                &text,
+                &[&text],
                 &format!(
                     r#"int main(void) {{
     _Alignas(32) uint8_t source[48];
@@ -2778,7 +2819,7 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
     assert!(!text.contains("byte["), "{text}");
     run_rendered(
         "sign_extend_stored_whole",
-        &text,
+        &[&text],
         r#"int main(void) {
     const uint8_t source[4] = {0x01, 0x80, 0x7f, 0xfe};
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
@@ -2879,7 +2920,7 @@ fn a_word_shuffle_renders_what_the_machine_computes() {
     let reverse = rendered_on(&declared("reverse"), REVERSED_WORDS, "reverse");
     run_rendered(
         "word_shuffle",
-        &format!("{widen}\n{reverse}"),
+        &[&widen, &reverse],
         r#"int main(void) {
     const uint64_t cases[] = {0, 1, 0xff, 0x1234, 0x80c3, 0x0123456789abcdefull, ~0ull};
     for (int i = 0; i < 7; i++) {
@@ -2926,7 +2967,7 @@ fn a_bit_scan_renders_as_the_count_it_computes() {
     {
         run_rendered(
             &format!("bit_scan_{pipeline}"),
-            &format!("{trailing}\n{lowest}"),
+            &[trailing, lowest],
             r#"int main(void) {
     const uint64_t cases[] = {0, 1, 2, 0x80, 0x100, 0x8000000000000000ull, 0x0123456789abcde0ull, ~0ull};
     for (int i = 0; i < 8; i++) {
@@ -4348,7 +4389,7 @@ fn a_reload_read_after_its_variable_is_overwritten_gets_a_variable_of_its_own() 
     let text = rendered(DIVIDE_AFTER_RELOAD, "mul_div");
     run_rendered(
         "mul_div",
-        &text,
+        &[&text],
         r#"int main(void) {
     const int64_t cases[][2] = {{7, 3}, {-7, 3}, {100, -9}, {0, 5}, {5, 0}, {-1, 1}};
     for (int i = 0; i < 6; i++) {
@@ -4433,7 +4474,7 @@ fn a_lane_write_whose_other_bytes_nobody_reads_does_not_read_them() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     run_rendered(
         "bool_relay",
-        &text,
+        &[&text],
         r#"int main(void) {
     const int cases[][2] = {{1, 1}, {1, 0}, {0, 1}, {0, 0}, {-3, 4}, {5, -2}};
     for (int i = 0; i < 6; i++) {
