@@ -949,7 +949,7 @@ impl<'a> FoldingContext<'a> {
         // pointer-width load of it is that function's address. The bytes in
         // the file are not it: a relocation fills the slot, so reading the
         // image there reaches an encoding rather than a code address.
-        if let Some(value) = crate::literal_value(&addr_expr)
+        if let Some(value) = crate::ast::literal_value(&addr_expr)
             && r2types::declaration_type_width_bits(&elem_ty, self.pointer_bits())
                 == Some(self.pointer_bits())
             && let Some(named) = self.code_pointer_entry_expr(value)
@@ -966,7 +966,7 @@ impl<'a> FoldingContext<'a> {
         }
         // A `reloc.` flag says the slot holds the address of the named symbol,
         // so a pointer-width load from it is that address, not the object.
-        if let Some(value) = crate::literal_value(&addr_expr)
+        if let Some(value) = crate::ast::literal_value(&addr_expr)
             && r2types::declaration_type_width_bits(&elem_ty, self.pointer_bits())
                 == Some(self.pointer_bits())
             && self

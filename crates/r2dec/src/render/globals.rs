@@ -58,7 +58,7 @@ impl<'a> Globals<'a> {
         if symbol.starts_with("reloc.") || self.functions.contains_key(&address) {
             return None;
         }
-        let name = crate::c_identifier_for_data_symbol(symbol);
+        let name = c_identifier_for_data_symbol(symbol);
         let fact = self.types.get(address);
         // A stated type C cannot spell without its definition declares nothing, and is no `char[]`.
         let declared = match fact {
@@ -119,5 +119,52 @@ fn declarable(ty: &CType) -> Option<CType> {
             Some(CType::Const(Box::new(declarable(inner)?)))
         }
         ty => calls::spellable(ty, &|_, _| false),
+    }
+}
+
+/// Whether a string literal can stand where `required` is wanted: only a pointer to `char`, the
+/// C string convention, since a literal ends at its NUL and other readers may read past it.
+pub(crate) fn string_literal_serves(required: &CType, _ptr_bits: u32) -> bool {
+    let CType::Pointer(inner) = required else {
+        return false;
+    };
+    let pointee = match &**inner {
+        CType::Const(inner) => &**inner,
+        other => other,
+    };
+    matches!(pointee, CType::Typedef { name, .. } if name == "char")
+}
+
+/// The C name for a radare2 data flag.
+///
+/// The fact is kept as radare2 stated it -- `obj.progName`, `reloc.stderr` --
+/// because that is what the analysis said and what the proof line answers for.
+/// What C can take is the name without the flag space that qualifies it, and
+/// with anything left that is not an identifier character replaced, so the
+/// rendered program declares `progName` rather than a dotted spelling no
+/// compiler accepts.
+pub(crate) fn c_identifier_for_data_symbol(flag: &str) -> String {
+    const SPACES: [&str; 6] = ["obj.", "reloc.", "segment.", "section.", "str.", "sym."];
+    let mut name = flag;
+    loop {
+        let Some(stripped) = SPACES.iter().find_map(|space| name.strip_prefix(space)) else {
+            break;
+        };
+        name = stripped;
+    }
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("g_{cleaned}")
+    } else {
+        cleaned
     }
 }

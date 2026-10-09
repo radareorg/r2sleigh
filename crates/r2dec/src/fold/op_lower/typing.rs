@@ -84,14 +84,15 @@ impl FoldingContext<'_> {
         // A constant address is named here, where the requirement is stated.
         // Asked of the literal itself: an address the lift folded into a load
         // arrives typed as the carrier and is still the number it spells.
-        if (matches!(from, Some(CValue::Constant)) || crate::literal_value(&expr).is_some())
+        if (matches!(from, Some(CValue::Constant)) || crate::ast::literal_value(&expr).is_some())
             && let Some((named, named_type)) = crate::name_of_constant_address(
                 &expr,
                 self.inputs.function_facts.display_names().strings(),
                 self.inputs.function_facts.display_names().symbols(),
                 &self.inputs.function_facts.type_facts().program_data_objects,
                 &mut self.named_data_objects.borrow_mut(),
-                operand == Operand::Value && crate::string_literal_serves(to, self.pointer_bits()),
+                operand == Operand::Value
+                    && crate::render::globals::string_literal_serves(to, self.pointer_bits()),
             )
         {
             return super::convert::convert(

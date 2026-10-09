@@ -7,7 +7,7 @@ pub(crate) mod place;
 pub(crate) mod print;
 mod rewrite;
 pub(crate) mod self_update;
-mod shape;
+pub(crate) mod shape;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -191,7 +191,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     .next()
                     .unwrap_or(CStmt::Empty)
             };
-            Self::shape(&mut fresh, tree)
+            shape::shape(&mut fresh, tree)
         })?;
         crate::stage_timing::mark("structure_shape");
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);

@@ -5,10 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use crate::ast::RenderObservationId;
 #[cfg(test)]
 use crate::ast::stmt_has_render_observations;
 use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType, has_render_observations};
-use crate::observation_journal::{ObservationSealAuthority, RenderObservationId};
 
 /// Threshold for detecting 64-bit negative values stored as unsigned.
 /// Values above this are likely negative offsets (within ~65536 of u64::MAX).
@@ -65,6 +65,21 @@ impl Default for CodeGenConfig {
             emit_comments: true,
             use_c99_types: true,
         }
+    }
+}
+
+/// Capability required to expose a marked emission tree for journal sealing.
+/// Only the journal's seal and the staged writer construct it.
+pub(crate) struct ObservationSealAuthority(());
+
+impl ObservationSealAuthority {
+    pub(crate) fn new() -> Self {
+        Self(())
+    }
+
+    /// The staged pipeline's seal: its writer states the instruction each marker was written for.
+    pub(crate) fn staged() -> Self {
+        Self(())
     }
 }
 
@@ -1413,8 +1428,7 @@ impl<'c> CodeGenerator<'c> {
 
     fn emit_comment_text(&mut self, text: &str) {
         let symbols = &self.symbols;
-        let text =
-            crate::sanitize_comment_text_keeping(text, |token| symbols.by_name(token).is_some());
+        let text = sanitize_comment_text_keeping(text, |token| symbols.by_name(token).is_some());
         self.output.push_str(&text);
     }
 
@@ -1618,6 +1632,165 @@ fn operand_precedence_floor(parent: BinaryOp, operand: &CExpr, default: u8) -> u
         operand.precedence().saturating_add(1)
     } else {
         default
+    }
+}
+
+pub(crate) fn sanitize_comment_text(text: &str) -> String {
+    sanitize_comment_text_keeping(text, |_| false)
+}
+
+/// Sanitize a comment, keeping every token `declared` says the function
+/// declares.
+///
+/// The sanitizer exists to keep machine labels a reader cannot find in the
+/// body out of the prose around it. A name the function declares is one the
+/// reader can find: the body spells it, and a comment that rewrote it to
+/// "register" would disagree with the line below it.
+pub(crate) fn sanitize_comment_text_keeping(text: &str, declared: impl Fn(&str) -> bool) -> String {
+    let flattened = text.replace("*/", "* /").replace(['\r', '\n'], " ");
+    sanitize_comment_raw_tokens(&sanitize_comment_debug_ids(&flattened), declared)
+}
+
+fn sanitize_comment_debug_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        let replacement = if rest.starts_with("ValueId(") {
+            Some("value")
+        } else if rest.starts_with("ObjectId(") {
+            Some("object")
+        } else {
+            None
+        };
+        if let Some(replacement) = replacement {
+            out.push_str(replacement);
+            if let Some(end) = rest.find(')') {
+                index += end + 1;
+            } else {
+                break;
+            }
+            continue;
+        }
+        let ch = rest.chars().next().expect("valid char boundary");
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn sanitize_comment_raw_tokens(text: &str, declared: impl Fn(&str) -> bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    let flush_token = |out: &mut String, token: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        if declared(token) {
+            out.push_str(token);
+        } else if let Some(replacement) = sanitized_comment_token(token) {
+            out.push_str(replacement);
+        } else {
+            out.push_str(token);
+        }
+        token.clear();
+    };
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
+            token.push(ch);
+        } else {
+            flush_token(&mut out, &mut token);
+            out.push(ch);
+        }
+    }
+    flush_token(&mut out, &mut token);
+    out
+}
+
+fn sanitized_comment_token(token: &str) -> Option<&'static str> {
+    let lower = token.to_ascii_lowercase();
+    if matches!(lower.as_str(), "fake_stack_slot" | "saved_fp") {
+        return Some("stack slot");
+    }
+    if is_ssa_versioned_register_label(token) {
+        return Some("register");
+    }
+    if lower.starts_with("tmp:") || lower.starts_with("ram:") {
+        return Some("temporary");
+    }
+    for prefix in ["stack_", "slot_", "local_", "arg_", "var_"] {
+        if let Some(suffix) = lower.strip_prefix(prefix)
+            && raw_stack_suffix_label(suffix)
+        {
+            return Some("stack slot");
+        }
+    }
+    if let Some(rest) = lower.strip_prefix('t')
+        && rest.len() >= 3
+        && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Some("temporary");
+    }
+    None
+}
+
+fn raw_stack_suffix_label(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
+    let suffix = suffix.strip_suffix('h').unwrap_or(suffix);
+    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_ssa_versioned_register_label(name: &str) -> bool {
+    let Some((base, suffix)) = name.rsplit_once('_') else {
+        return false;
+    };
+    // An SSA label: an uppercase register base and a version.
+    !base.is_empty()
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        && base.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && base
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+/// A rendering and the tree it was rendered from.
+///
+/// The emitter accepts no raw `CFunction`, so the only way to hold both is to
+/// take them from the one run that produced them. A consumer that wants to
+/// walk the C and a consumer that wants to read it are then looking at the
+/// same function, and the two cannot drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedFunction {
+    emission: Emission,
+    function: CFunction,
+}
+
+impl RenderedFunction {
+    pub(crate) const fn new(emission: Emission, function: CFunction) -> Self {
+        Self { emission, function }
+    }
+
+    /// The C, as the certified emitter wrote it.
+    pub fn text(&self) -> &str {
+        self.emission.definition()
+    }
+
+    pub fn into_text(self) -> String {
+        self.emission.into_definition()
+    }
+
+    /// The same C as its own translation unit, with where each line came from.
+    pub const fn emission(&self) -> &Emission {
+        &self.emission
+    }
+
+    /// The tree that C was written from, for a consumer that walks rather than parses.
+    pub const fn function(&self) -> &CFunction {
+        &self.function
     }
 }
 

@@ -1,4 +1,6 @@
 use super::*;
+use crate::codegen::sanitize_comment_text;
+use crate::render::proof::note_unproven_constructs;
 use r2il::{
     ArchSpec, R2ILBlock, R2ILOp, RegisterBitSlice, RegisterDef, RegisterProjection,
     RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
@@ -1879,73 +1881,36 @@ fn sealed_region_occurrence_mismatch_is_a_render_refusal() {
 /// is not meant to grow.
 #[test]
 fn a_c_conversion_is_spelled_only_where_the_conversion_rules_live() {
-    let sources: &[(&str, &str)] = &[
-        (
-            "fold/op_lower/convert.rs",
-            include_str!("fold/op_lower/convert.rs"),
-        ),
-        (
-            "fold/op_lower/implementation.rs",
-            include_str!("fold/op_lower/implementation.rs"),
-        ),
-        (
-            "fold/op_lower/subscript_renderer.rs",
-            include_str!("fold/op_lower/subscript_renderer.rs"),
-        ),
-        (
-            "fold/op_lower/projection.rs",
-            include_str!("fold/op_lower/projection.rs"),
-        ),
-        (
-            "fold/op_lower/memory_renderer.rs",
-            include_str!("fold/op_lower/memory_renderer.rs"),
-        ),
-        (
-            "fold/op_lower/lowering.rs",
-            include_str!("fold/op_lower/lowering.rs"),
-        ),
-        ("lib.rs", include_str!("lib.rs")),
-        (
-            "analysis/prepared_semantic/mod.rs",
-            include_str!("analysis/prepared_semantic/mod.rs"),
-        ),
-        ("placement/mod.rs", include_str!("placement/mod.rs")),
-        (
-            "observation_journal/mod.rs",
-            include_str!("observation_journal/mod.rs"),
-        ),
-        (
-            "observation_journal/recording.rs",
-            include_str!("observation_journal/recording.rs"),
-        ),
-        (
-            "observation_journal/sealing.rs",
-            include_str!("observation_journal/sealing.rs"),
-        ),
-        // Not permitted: these are checked to be free of conversions.
-        ("ast.rs", include_str!("ast.rs")),
-        ("codegen.rs", include_str!("codegen.rs")),
-        ("structure/rewrite.rs", include_str!("structure/rewrite.rs")),
-        ("structure/shape.rs", include_str!("structure/shape.rs")),
-        ("structure/place.rs", include_str!("structure/place.rs")),
-        (
-            "binding_plan/rules.rs",
-            include_str!("binding_plan/rules.rs"),
-        ),
-        (
-            "binding_plan/access_syntax.rs",
-            include_str!("binding_plan/access_syntax.rs"),
-        ),
-        ("fold/stack.rs", include_str!("fold/stack.rs")),
-        (
-            "fold/op_lower/calls.rs",
-            include_str!("fold/op_lower/calls.rs"),
-        ),
-        (
-            "fold/op_lower/typing.rs",
-            include_str!("fold/op_lower/typing.rs"),
-        ),
-    ];
+    // Every source file under `src/` but test fixtures, so a deleted file leaves the guard intact.
+    fn sources(dir: &std::path::Path, root: &std::path::Path, into: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("source directory") {
+            let path = entry.expect("source entry").path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name == "tests" || name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            if path.is_dir() {
+                sources(&path, root, into);
+                continue;
+            }
+            if !name.ends_with(".rs") {
+                continue;
+            }
+            let relative = path.strip_prefix(root).expect("under src");
+            let relative = relative.to_str().expect("utf-8 path").replace('\\', "/");
+            into.push((
+                relative,
+                std::fs::read_to_string(&path).expect("source file"),
+            ));
+        }
+    }
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+    let mut files = Vec::new();
+    sources(root, root, &mut files);
+    files.sort();
     let permitted = [
         "fold/op_lower/convert.rs",
         "fold/op_lower/implementation.rs",
@@ -1957,20 +1922,37 @@ fn a_c_conversion_is_spelled_only_where_the_conversion_rules_live() {
         "analysis/prepared_semantic/mod.rs",
         "placement/mod.rs",
         "observation_journal/mod.rs",
+        "prelude.rs",
+        "render/calls.rs",
+        "render/mod.rs",
+        "render/terms.rs",
+        "render/values.rs",
+        "render/values/transfer.rs",
     ];
     let spells_a_conversion = |source: &str| {
         source.contains(concat!("CExpr::", "cast("))
             || source.contains(concat!("CExpr::", "pointer_width_cast("))
     };
-    let offenders: Vec<&str> = sources
+    let offenders: Vec<&str> = files
         .iter()
-        .filter(|(name, source)| spells_a_conversion(source) && !permitted.contains(name))
-        .map(|(name, _)| *name)
+        .filter(|(name, source)| spells_a_conversion(source) && !permitted.contains(&name.as_str()))
+        .map(|(name, _)| name.as_str())
         .collect();
     assert!(
         offenders.is_empty(),
         "a C conversion is spelled outside the files that own the conversion rules: {offenders:?}"
     );
+    for name in [
+        "ast.rs",
+        "codegen.rs",
+        "structure/shape.rs",
+        "structure/certify.rs",
+    ] {
+        assert!(
+            files.iter().any(|(file, _)| file == name),
+            "{name} is scanned"
+        );
+    }
 }
 
 /// Render with the default control and assemble the build's audit product.

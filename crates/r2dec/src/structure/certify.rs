@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 use r2ssa::cfg::{BlockTerminator, CFG};
 use r2ssa::domtree::DomTree;
 
+use crate::ast::RenderObservationId;
 use crate::ast::{CExpr, CStmt};
-use crate::observation_journal::RenderObservationId;
 use crate::structured_region::StructuredRegionKind;
 
 /// What a terminator says about one of its edges.
@@ -1322,7 +1322,7 @@ pub(crate) fn report(
 mod tests {
     use super::*;
     use crate::ast::SwitchCase;
-    use crate::observation_journal::test_render_observation_id;
+    use crate::ast::test_render_observation_id;
     use r2ssa::cfg::BasicBlock;
 
     fn cfg(entry: u64, blocks: &[(u64, BlockTerminator)]) -> CFG {
@@ -1750,7 +1750,7 @@ mod tests {
         );
         let mut body = CStmt::Block(vec![at(0x10, arms), at(0x40, CStmt::Return(None))]);
         let mut selections = BTreeSet::new();
-        crate::structure::ControlFlowStructurer::select(
+        crate::structure::shape::select(
             &mut body,
             &|_, value| value,
             &|id| Some(u64::from(id.index())),
@@ -1826,7 +1826,7 @@ mod tests {
                 CStmt::if_stmt(cond(), CStmt::Block(then_arm), Some(CStmt::Block(else_arm))),
             );
             let mut selections = BTreeSet::new();
-            crate::structure::ControlFlowStructurer::select(
+            crate::structure::shape::select(
                 &mut stmt,
                 &|_, value| value,
                 &|id| Some(u64::from(id.index())),

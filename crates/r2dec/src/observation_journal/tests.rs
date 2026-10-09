@@ -10,6 +10,7 @@ use r2ssa::{
 };
 
 use super::*;
+use crate::ast::test_render_observation_id;
 use crate::ast::{CLocal, CType};
 use crate::binding_plan::{BindingId, BindingNameResolution, ValueDisposition, ValueRefusal};
 use crate::structured_region::{

@@ -1463,6 +1463,11 @@ impl RenderObservationId {
     }
 }
 
+#[cfg(test)]
+pub(crate) const fn test_render_observation_id(index: u32) -> RenderObservationId {
+    RenderObservationId::from_index(index)
+}
+
 /// Test-only marker allocator. Production IDs are owned by the sealed journal.
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -1488,7 +1493,7 @@ impl RenderObservationOwner {
             .next
             .checked_add(1)
             .ok_or(RenderObservationAllocationError::IdSpaceExhausted)?;
-        let id = crate::observation_journal::test_render_observation_id(self.next);
+        let id = test_render_observation_id(self.next);
         self.next = next;
         Ok(id)
     }
@@ -2503,9 +2508,7 @@ impl ReachableObservations {
             .enumerate()
             .filter_map(|(index, reachable)| {
                 if *reachable {
-                    u32::try_from(index)
-                        .ok()
-                        .map(crate::observation_journal::test_render_observation_id)
+                    u32::try_from(index).ok().map(test_render_observation_id)
                 } else {
                     None
                 }
@@ -3416,6 +3419,17 @@ pub(crate) fn strip_stmt_observations(stmt: &mut CStmt) {
         | CStmt::Label(_)
         | CStmt::Comment(_)
         | CStmt::Gap(_) => {}
+    }
+}
+
+/// The unsigned value of an integer literal, ignoring any cast around it.
+pub(crate) fn literal_value(expr: &CExpr) -> Option<u64> {
+    match expr {
+        CExpr::Observed { expr, .. } => literal_value(expr),
+        CExpr::UIntLit(value) => Some(*value),
+        CExpr::IntLit(value) => u64::try_from(*value).ok(),
+        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => literal_value(inner),
+        _ => None,
     }
 }
 

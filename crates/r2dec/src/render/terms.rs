@@ -751,7 +751,7 @@ impl Spell<'_> {
 
     /// A read of `ty` at the integer `address`, by a byte copy so C reads it as the machine does.
     fn load(&self, ty: &MachineType, address: CExpr) -> Option<CExpr> {
-        let named = crate::literal_value(&address).and_then(|at| (self.global)(at, ty, false));
+        let named = crate::ast::literal_value(&address).and_then(|at| (self.global)(at, ty, false));
         let address = match named {
             Some(super::globals::Named {
                 object: Some((object, declared)),

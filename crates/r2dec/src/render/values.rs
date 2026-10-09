@@ -52,7 +52,7 @@ pub(super) struct Values<'a> {
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
     /// The values read as residuals because C has no value for them, which the proof line names.
-    unassigned: RefCell<Vec<crate::UnassignedRead>>,
+    unassigned: RefCell<Vec<super::proof::UnassignedRead>>,
     /// What the text being spelled reads and absorbs, kept only once a statement or test holding it is.
     pending: RefCell<Attempt>,
     /// The switch dispatch operations r2ssa's certificates own.
@@ -80,7 +80,7 @@ pub(super) struct Values<'a> {
 /// One statement attempt: the residual reads and absorbed producers its text holds.
 #[derive(Default)]
 struct Attempt {
-    reads: Vec<crate::UnassignedRead>,
+    reads: Vec<super::proof::UnassignedRead>,
     marks: Vec<InstId>,
 }
 
@@ -111,7 +111,7 @@ impl Own {
         };
         Self {
             entry: input.function().root(),
-            name: crate::rendered_name_of(input.name(), input.function().root()),
+            name: super::rendered_name_of(input.name(), input.function().root()),
             params: None,
             result,
         }
@@ -1013,7 +1013,7 @@ impl<'a> Values<'a> {
                 &terms::c_type(held)?,
                 crate::prelude::ResidualCause::NeverAssigned,
             );
-            self.unassigned_read(value, crate::UnassignedCause::Unassigned, held);
+            self.unassigned_read(value, super::proof::UnassignedCause::Unassigned, held);
             return read;
         }
         let var = CExpr::var(name);
@@ -1062,11 +1062,11 @@ impl<'a> Values<'a> {
         });
         let (cause, residual) = match argument {
             true => (
-                crate::UnassignedCause::UnadmittedArgument,
+                super::proof::UnassignedCause::UnadmittedArgument,
                 crate::prelude::ResidualCause::UnadmittedArgument,
             ),
             false => (
-                crate::UnassignedCause::Held,
+                super::proof::UnassignedCause::Held,
                 crate::prelude::ResidualCause::HeldFromEntry,
             ),
         };
@@ -1077,14 +1077,19 @@ impl<'a> Values<'a> {
 
     /// Record a read the proof line names once its text is kept; the name is declared, as the value
     /// it names, so the line keeps it, and no statement spells it.
-    fn unassigned_read(&self, value: ValueId, cause: crate::UnassignedCause, ty: &MachineType) {
+    fn unassigned_read(
+        &self,
+        value: ValueId,
+        cause: super::proof::UnassignedCause,
+        ty: &MachineType,
+    ) {
         let name = self.graph.var(value).display_name();
         if let (Ok(mut symbols), Some(c)) = (self.symbols.try_borrow_mut(), terms::c_type(ty))
             && symbols.by_name(&name).is_none()
         {
             symbols.declare(name.clone(), c, SymbolRole::Carrier);
         }
-        (self.pending.borrow_mut().reads).push(crate::UnassignedRead { cause, name });
+        (self.pending.borrow_mut().reads).push(super::proof::UnassignedRead { cause, name });
     }
 
     /// `value` as `reader` reads it, with what its spelling reads and absorbs, kept apart.
@@ -1110,7 +1115,7 @@ impl<'a> Values<'a> {
     }
 
     /// The values read as residuals for want of a value, each once, by cause and name.
-    pub(super) fn unassigned(&self) -> Vec<crate::UnassignedRead> {
+    pub(super) fn unassigned(&self) -> Vec<super::proof::UnassignedRead> {
         let mut reads = self.unassigned.borrow().clone();
         reads.sort();
         reads.dedup();
@@ -1375,7 +1380,9 @@ impl<'a> Values<'a> {
             *argument = terms::at_sink(ty, std::mem::replace(argument, CExpr::IntLit(0)));
         }
         for ((argument, ty), text) in arguments.iter_mut().zip(types).zip(texts) {
-            if let Some(text) = text.filter(|_| crate::string_literal_serves(ty, self.ptr_bits)) {
+            if let Some(text) =
+                text.filter(|_| super::globals::string_literal_serves(ty, self.ptr_bits))
+            {
                 *argument = calls::text_as(text, ty);
             }
         }
@@ -1675,7 +1682,7 @@ impl<'a> Values<'a> {
             CType::BitVector(_) => written,
             _ => CExpr::cast(ty.clone(), written),
         };
-        let named = crate::literal_value(&address).and_then(|at| self.global(at, &cell, true));
+        let named = crate::ast::literal_value(&address).and_then(|at| self.global(at, &cell, true));
         let address = match named {
             Some(super::globals::Named {
                 object: Some((object, declared)),
