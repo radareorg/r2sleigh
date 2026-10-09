@@ -78,6 +78,11 @@ The evidence is as strong as the body's own writes: a compiler reads a
 clobbered register after a call only as the callee's result. A caller that
 hands the value straight back without reading it (`return f();`) is no
 evidence, and a void function whose callers read nothing stays unproven.
+Follow-up: a function left unproven this way mints no call contract, so its
+calls take their arguments from what each caller wrote (the statement below)
+where its own parameters are exact. A contract whose parameters are exact and
+whose result is one of two carriers, each call resolving it by what its caller
+reads, would keep them.
 
 ### Budget
 
