@@ -39,6 +39,18 @@ declarations.
 - **Promotion is an SSA rewrite.** A private, non-escaping object whose every
   access is a full-width load or store of one value becomes that value. The
   rewrite reads the frame model, replacing pre-SSA `promote.rs`.
+- **Dead frame stores.** `PreparedFunctionCertificates::dead_frame_stores`
+  holds every access of a frame object the function allocates at each of its
+  accesses (`CalleeStackAllocationCertificate`) when every access is a write,
+  the object does not escape, no call reaches it (`FrameReach`: an unbounded
+  call reaches every object, a bounded one its argument area), and its extent
+  is not assumed (`extent_assumption`, which also covers its own unbounded
+  index). The set is empty while any frame read has an unbounded index: since
+  objects partition the frame, only such a read can land on another object.
+  An object whose extent a declaration, a parameter home or a callee's write
+  reach states is not assumed. Filled once per sealed artifact (and per
+  `with_assumptions`), O(objects + accesses + calls), plus O(accesses) for
+  each object with an assumed extent (its declarability scan); r2dec reads it.
 - **No feedback.** A declaration belongs to the debug information and a proof
   to the frame model, and neither is restated as the other (C).
 - **Consumers read it:** the certificates, memory SSA (its locations become
