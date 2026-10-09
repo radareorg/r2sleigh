@@ -10,6 +10,8 @@
 
 #![cfg(feature = "sleigh")]
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -1180,7 +1182,7 @@ mod listing {
 /// An aarch64 Mach-O whose dispatcher calls through a table of function
 /// pointers, which is the shape the engine has to derive for itself.
 mod dispatch_table {
-    use super::{Run, on};
+    use super::{Run, common, on};
     use std::path::PathBuf;
 
     fn fixture() -> PathBuf {
@@ -1218,10 +1220,21 @@ mod dispatch_table {
         let pointer = call.split_once("(*)(").map_or("", |(_, rest)| rest);
         let parameters = pointer.split_once(')').map_or("", |(list, _)| list);
         assert_eq!(parameters.split(", ").count(), 2, "{call}");
-        let arguments = call.rsplit_once(")(").map_or("", |(_, rest)| rest);
-        assert_eq!(
-            arguments.trim_end_matches(';').matches(", ").count(),
-            1,
+        let open = call.rfind(")(").map_or(0, |at| at + 1);
+        let arguments = common::arguments_at(call, open);
+        assert_eq!(arguments.len(), 2, "{call}");
+        // The first argument is x0 on entry: the first parameter, through its spill and the loop.
+        let parameters = common::parameter_names(&run.out);
+        assert_eq!(parameters.len(), 2, "{}", run.out);
+        assert!(
+            common::starts_from(&run.out, &arguments[0], &parameters[0]),
+            "{} does not start from {}: {}",
+            arguments[0],
+            parameters[0],
+            run.out
+        );
+        assert!(
+            !common::starts_from(&run.out, &arguments[1], &parameters[0]),
             "{call}"
         );
         assert!(run.out.contains("0 refused"), "{}", run.out);
