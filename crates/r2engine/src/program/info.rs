@@ -266,8 +266,8 @@ fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> 
     ))
 }
 
-/// Every declarable stack object, and every frame slot promotion took out of memory: what `afv`
-/// lists where no rendering declares the frame (`OpenProgram::function_info`).
+/// Every declarable stack object, and every frame slot promotion took out of memory: the frame
+/// model `afv` lists for either pipeline.
 fn locals(
     artifact: &r2ssa::SsaArtifact,
     sealed: &SourceOwnedFunctionFacts,
@@ -277,14 +277,32 @@ fn locals(
         .iter()
         .filter_map(|entity| object(artifact, sealed, entity))
         .collect::<Vec<_>>();
+    // A frame-management slot is no local: a slot promotion holds the value a return reads as its
+    // return address in is that address's save (r2ssa's return boundary names the value).
+    let graph = artifact.graph();
+    let mut returns_to = r2ssa::dense::IdSet::new(graph.values.len());
+    for boundary in artifact.facts().boundaries.returns.values() {
+        if let Some(address) = &boundary.return_address {
+            returns_to.insert(address.value);
+        }
+    }
+    let saves_return_address = |value: r2ssa::ValueId| {
+        matches!(
+            graph.def_inst(value).and_then(|def| graph.inst(def)),
+            Some(r2ssa::GraphInst {
+                payload: r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { src, .. }),
+                ..
+            }) if returns_to.contains(*src)
+        )
+    };
     let held = objects
         .iter()
         .map(|local| local.offset)
         .collect::<BTreeSet<_>>();
-    let promoted = artifact
-        .graph()
+    let promoted = graph
         .values
         .iter()
+        .filter(|value| !saves_return_address(value.id))
         .filter_map(|value| value.canonical_storage)
         .filter_map(|storage| Some((r2ssa::promoted_slot_offset(&storage)?, storage.size)))
         .filter(|(offset, _)| !r2ssa::SsaArtifact::caller_frame_offset(*offset))
