@@ -83,7 +83,11 @@ pub fn render(
         })
     };
     let body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
-    certify_control(input, &body, &blocks, &labels)?;
+    let never_return = values
+        .as_ref()
+        .map(values::Values::never_returning)
+        .unwrap_or_default();
+    certify_control(input, &body, &blocks, &labels, &never_return)?;
     work.with_phase(DecompileWorkPhase::Rendering).poll()?;
     match &values {
         Some(values) => {
@@ -159,6 +163,7 @@ fn certify_control(
     body: &CStmt,
     blocks: &[u64],
     labels: &BTreeMap<u64, String>,
+    never_return: &std::collections::BTreeSet<String>,
 ) -> Result<(), RenderStop> {
     let function = input.function();
     let label_block = labels
@@ -172,7 +177,7 @@ fn certify_control(
         function.root(),
         &|id| blocks.get(id.index() as usize).copied(),
         &|name| label_block.get(name).copied(),
-        &traps,
+        &|stmt| traps(stmt) || calls_never_returning(stmt, never_return),
     );
     if certificate.ok() {
         return Ok(());
@@ -200,6 +205,12 @@ fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) ->
 /// Whether a statement ends control: a residual traps where it is evaluated.
 fn traps(stmt: &CStmt) -> bool {
     matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
+}
+
+/// Whether a statement is a call to a callee declared never to return, which ends control there.
+fn calls_never_returning(stmt: &CStmt, never_return: &std::collections::BTreeSet<String>) -> bool {
+    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
+        if matches!(&**func, CExpr::External { name, .. } if never_return.contains(name)))
 }
 
 /// The function's result type: what the analysis decided, else the machine word.

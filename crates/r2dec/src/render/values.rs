@@ -1376,6 +1376,32 @@ impl<'a> Values<'a> {
         Some(assign(*name, value))
     }
 
+    /// The callees a written call declares never to return.
+    pub(super) fn never_returning(&self) -> std::collections::BTreeSet<String> {
+        (self.externs.borrow().values())
+            .filter(|declaration| declaration.noreturn)
+            .map(|declaration| declaration.name.clone())
+            .collect()
+    }
+
+    /// Whether the block at `addr` ends in a written call its callee is declared never to return from.
+    pub(super) fn ends_never_returning(&self, addr: u64) -> bool {
+        let Some(block) = (self.graph.block_id_for_addr(addr)).and_then(|id| self.graph.block(id))
+        else {
+            return false;
+        };
+        let last_call = block.insts.iter().rev().copied().find(|id| {
+            matches!(
+                self.graph.inst(*id).map(|at| &at.payload),
+                Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
+            )
+        });
+        last_call.is_some_and(|inst| {
+            self.calls.get(inst).is_some_and(|plan| plan.noreturn)
+                && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
+        })
+    }
+
     pub(super) fn externs(&self) -> Vec<CExternDecl> {
         self.externs.borrow().values().cloned().collect()
     }
