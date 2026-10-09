@@ -12,6 +12,8 @@ use r2ssa::{
     SemanticObligationKind, SsaArtifact, SsaGraph, StructuredAccessId, ValueId,
 };
 
+mod transfer;
+
 use super::RenderInput;
 use super::calls::{self, CallPlan};
 use super::terms::{self, Spell};
@@ -357,6 +359,11 @@ impl Demand<'_> {
             }
             SSAOp::CBranch { cond, .. } => self.operand(*cond, inst.id),
             SSAOp::Switch { selector } => self.operand(*selector, inst.id),
+            SSAOp::BlockTransfer(transfer) => {
+                for value in [transfer.destination, transfer.source, transfer.count] {
+                    self.operand(value, inst.id);
+                }
+            }
             // A tail transfer reads its arguments, and its target where it goes through one.
             SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
                 let plan = planned.get(inst.id).expect("planned above");
@@ -409,6 +416,8 @@ impl Demand<'_> {
             for input in inputs {
                 self.operand(input, def);
             }
+        } else if transfer::reads_answer(self.graph, value) {
+            // The walk assigns it from its own variables; its term reads nothing by name.
         } else if let Some(canonical) = self.roots.value(value) {
             self.discharge(value);
             self.read(canonical.canonical);
@@ -450,6 +459,9 @@ fn canonical_roots(
 ) -> Option<CanonicalRoots> {
     let graph = artifact.graph();
     let policy = |query: &ExpansionQuery<'_>| {
+        if transfer::reads_answer(graph, query.value) {
+            return false;
+        }
         if r2rewrite::term_is_duplicable(
             query.projection,
             query.arena,
@@ -631,6 +643,10 @@ impl<'a> Readers<'a> {
         value: ValueId,
         reader: InstId,
     ) -> Option<TermId> {
+        // A part of a block operation's answer is the walk's to assign: it is read by name.
+        if transfer::reads_answer(self.graph, value) {
+            return None;
+        }
         let canonical = roots.value(value)?;
         let term = canonical.canonical;
         // A leaf of the value itself is a value no producer computes: it is read by name.
@@ -917,10 +933,15 @@ impl<'a> Values<'a> {
                 self.mark_discharged(value);
                 Some(spelled)
             }
-            None => {
-                let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
-                self.read_name(value, *name, held)
-            }
+            None => match self.names.get(value.0 as usize)?.as_ref() {
+                Some((name, held)) => self.read_name(value, *name, held),
+                // What a register held at entry that no parameter admits: C cannot read it.
+                None if self.graph.def_inst(value).is_none() => crate::prelude::residual(
+                    &terms::c_type(&self.value_type(value)?)?,
+                    crate::prelude::ResidualCause::HeldFromEntry,
+                ),
+                None => None,
+            },
         }
     }
 
@@ -1055,6 +1076,16 @@ impl<'a> Values<'a> {
             }
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 self.call(inst).map(Some).ok_or(Gap::Call)
+            }
+            SSAOp::BlockTransfer(transfer) => self
+                .block_transfer(inst, transfer)
+                .map(Some)
+                .ok_or(Gap::Effect),
+            // The block operation's statement assigns the part of its answer this reads.
+            SSAOp::Subpiece { .. }
+                if output.is_some_and(|o| transfer::reads_answer(self.graph, o)) =>
+            {
+                Ok(None)
             }
             // The described call's statement assigns its result.
             SSAOp::CallDefine { .. } if output.is_some_and(|o| self.results.contains(o)) => {
