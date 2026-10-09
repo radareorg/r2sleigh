@@ -7,8 +7,8 @@ use r2ssa::cfg::BlockTerminator;
 
 use super::RenderInput;
 use super::values::Values;
+use crate::ast::RenderObservationId;
 use crate::ast::{CExpr, CStmt, CType, GapMarker, SwitchCase};
-use crate::observation_journal::RenderObservationId;
 use crate::prelude::ResidualCause;
 use crate::structure::place::{EdgeShape, Placement};
 

@@ -1444,7 +1444,24 @@ fn transparent_expr_slices_eq(left: &[CExpr], right: &[CExpr]) -> bool {
             .all(|(left, right)| left.transparently_eq(right))
 }
 
-pub use crate::observation_journal::RenderObservationId;
+/// Opaque dense identity of one marked AST occurrence: the staged writer's per-statement marker and
+/// the legacy journal's alike. Neither serializable nor deserializable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RenderObservationId(u32);
+
+impl RenderObservationId {
+    pub(crate) const fn index(self) -> u32 {
+        self.0
+    }
+
+    pub(crate) fn from_dense_index(index: usize) -> Self {
+        Self(u32::try_from(index).expect("validated observation domain fits u32"))
+    }
+
+    pub(crate) const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+}
 
 /// Test-only marker allocator. Production IDs are owned by the sealed journal.
 #[cfg(test)]

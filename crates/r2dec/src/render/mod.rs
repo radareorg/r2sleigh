@@ -75,8 +75,7 @@ pub fn render(
     let mut fresh = |stmt: &CStmt| {
         control::remint(stmt, &mut |id| {
             let at = id.index() as usize;
-            let copy =
-                crate::observation_journal::RenderObservationId::from_dense_index(blocks.len());
+            let copy = crate::ast::RenderObservationId::from_dense_index(blocks.len());
             blocks.push(blocks[at]);
             addresses.push(addresses[at]);
             copy
