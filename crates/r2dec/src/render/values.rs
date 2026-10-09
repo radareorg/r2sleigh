@@ -1506,6 +1506,10 @@ impl<'a> Values<'a> {
             return Some(CStmt::Expr(call));
         };
         let Some((name, held)) = self.names.get(result.0 as usize).and_then(Option::as_ref) else {
+            // No rendered text reads the result, so the call written for its effect discards it.
+            if let Some(def) = self.graph.def_inst(*result) {
+                self.mark(def);
+            }
             return Some(CStmt::Expr(call));
         };
         let value = fit(calls::read_result(plan, call, class)?, class, held)?;
@@ -1677,6 +1681,13 @@ impl<'a> Values<'a> {
         let selector = self.operand(selector, inst);
         self.keep_reads();
         selector
+    }
+
+    /// Record the jump ending `addr` written: the certified control states its one edge.
+    pub(super) fn transferred(&self, addr: u64) {
+        if let Some((inst, SSAOp::Branch { .. })) = self.terminator(addr) {
+            self.mark(inst);
+        }
     }
 
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.

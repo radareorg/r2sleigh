@@ -479,8 +479,8 @@ impl Walker<'_> {
             CStmt::Switch { cases, default, .. } => {
                 self.walk_switch(open, cases, default.as_deref())
             }
-            // A call the prototype declares `noreturn` ends the text here.
-            CStmt::Expr(_) if (self.terminal_call)(stmt) => {
+            // A call the prototype declares `noreturn`, or a transfer the caller says traps, ends the text here.
+            CStmt::Expr(_) | CStmt::Gap(_) if (self.terminal_call)(stmt) => {
                 for (id, _) in open {
                     self.occurrences[id].returned = true;
                 }

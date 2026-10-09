@@ -113,6 +113,7 @@ pub fn render(
         stmt => vec![stmt],
     };
     drop_unmentioned_locals(&mut c);
+    crate::ast::respell_nonconforming_main(&mut c, input.function().entry);
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
     // The proof line every rendering opens with: what became of each obligation the source owes.
@@ -309,9 +310,10 @@ fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) ->
     ledger
 }
 
-/// Whether a statement ends control: a residual traps where it is evaluated.
+/// Whether a statement ends control: a residual or a marked gap traps where it is evaluated.
 fn traps(stmt: &CStmt) -> bool {
-    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
+    matches!(stmt, CStmt::Gap(marker) if control::ends_control(marker))
+        || matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
 }
 
 /// Whether a statement is a call to a callee declared never to return, which ends control there.
