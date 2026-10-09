@@ -1605,6 +1605,41 @@ pub fn mint_recovered_interface(
     minted
 }
 
+/// A float result's own type node, after the integers in `types`: its id and width.
+fn float_type(
+    recovered: &RecoveredInterface,
+    types: &mut Vec<SourceType>,
+) -> Option<Option<(u32, u32)>> {
+    let Some(result) = recovered
+        .result()
+        .register()
+        .filter(|result| result.float())
+    else {
+        return Some(None);
+    };
+    let bits = storage_bits(result.observed())?;
+    let id = u32::try_from(types.len()).ok()?;
+    let (size, align) = (u64::from(bits), u64::from(bits));
+    types.push(SourceType::new(id, SourceTypeKind::Float, size, align));
+    Some(Some((id, bits)))
+}
+
+/// A float result's return: its own type node `id`, read at the low `bits` of its slot.
+fn float_return(
+    result: RecoveredResult,
+    (id, bits): (u32, u32),
+) -> Option<(SourceFunctionReturn, Option<SourceLogicalValue>)> {
+    let kind = if bits < result.slot().size.checked_mul(8)? {
+        SourceCarrierKind::LowBits
+    } else {
+        SourceCarrierKind::Full
+    };
+    let logical =
+        SourceLogicalValue::new(id, SourceCarrierProjection::new(kind, 0, u64::from(bits)));
+    let storage = result.slot();
+    Some((SourceFunctionReturn::Register { storage }, Some(logical)))
+}
+
 fn mint_recovered_interface_inner(
     recovered: &RecoveredInterface,
     roles: &SourceMachineRoles,
@@ -1672,11 +1707,6 @@ fn mint_recovered_interface_inner(
                 .map(|parameter| parameter.slot_bytes().checked_mul(8)),
         )
         .collect::<Option<Vec<_>>>()?;
-    // A float result is its own type node, after the integers.
-    let float_bits = match recovered.result().register() {
-        Some(result) if result.float() => Some(storage_bits(result.observed())?),
-        _ => None,
-    };
     let result_width = match recovered.result().register() {
         Some(result) if !result.float() => {
             let bits = storage_bits(result.observed())?;
@@ -1703,19 +1733,7 @@ fn mint_recovered_interface_inner(
             .into()
         })
         .collect::<Option<Vec<SourceType>>>()?;
-    let float_type = match float_bits {
-        Some(bits) => {
-            let id = u32::try_from(types.len()).ok()?;
-            types.push(SourceType::new(
-                id,
-                SourceTypeKind::Float,
-                u64::from(bits),
-                u64::from(bits),
-            ));
-            Some((id, bits))
-        }
-        None => None,
-    };
+    let float_type = float_type(recovered, &mut types)?;
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
     let type_id = |bits: u32, signed: bool| -> Option<u32> {
         widths
@@ -1799,21 +1817,7 @@ fn mint_recovered_interface_inner(
             Some(logical(bits, signed, result.slot().size.checked_mul(8)?)?),
         ),
         (RecoveredFunctionResult::Register(result), None) if result.float() => {
-            let (id, bits) = float_type?;
-            let kind = if bits < result.slot().size.checked_mul(8)? {
-                SourceCarrierKind::LowBits
-            } else {
-                SourceCarrierKind::Full
-            };
-            (
-                SourceFunctionReturn::Register {
-                    storage: result.slot(),
-                },
-                Some(SourceLogicalValue::new(
-                    id,
-                    SourceCarrierProjection::new(kind, 0, u64::from(bits)),
-                )),
-            )
+            float_return(result, float_type?)?
         }
         // A body nobody read owns this result, so nothing is claimed for it.
         (RecoveredFunctionResult::Unproven, _) => (SourceFunctionReturn::Unproven, None),
@@ -1852,9 +1856,15 @@ fn mint_recovered_interface_inner(
     } else {
         interface
     };
-    // A stacked return names the slot the call spent, which is what places
-    // the argument area at a call site; a stack parameter without it would
-    // be looked for at the wrong offset, so the interface is not minted.
+    with_stacked_return(recovered, interface)
+}
+
+/// A stacked return names the slot the call spent, which places the argument area at a call site;
+/// a stack parameter without it would be read at the wrong offset, so no interface is minted.
+fn with_stacked_return(
+    recovered: &RecoveredInterface,
+    interface: SourceFunctionInterface,
+) -> Option<SourceFunctionInterface> {
     let Some(RecoveredReturnMechanism::Stacked { slot_bytes }) = recovered.return_mechanism()
     else {
         return Some(interface);

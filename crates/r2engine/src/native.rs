@@ -1251,9 +1251,8 @@ struct Native<'a> {
 }
 
 impl Native<'_> {
-    /// One body prepared, restated and prepared again against `callees`: one function's whole preparation, whoever asks.
-    /// `caller_reads`: whether an ambiguous result is decided by every call in the program, which
-    /// only the function's own rendering asks; a caller decides it at its call (doc/adr-resolved-bodies.md).
+    /// One body prepared, restated and prepared again against `callees`. With `caller_reads`, every
+    /// call decides an ambiguous result; only its own rendering asks (doc/adr-resolved-bodies.md).
     fn resolve(
         &self,
         entry: u64,

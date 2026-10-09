@@ -4,9 +4,8 @@
 use r2il::{R2ILBlock, R2ILOp, Varnode};
 use r2source::{CanonicalStorageId, SourceResultReads};
 
-/// The reads of the call at `index`: a read before any write of a result register is a read of
-/// what the call left there; a write, a transfer or the block's end is not. A call its own
-/// instruction may skip reads nothing, since what follows may see the value from before it.
+/// The reads after the call at `index`: a result register read before a write, a transfer or the
+/// block's end; none where the call's own instruction may skip it.
 pub fn reads_after_call(
     block: &R2ILBlock,
     index: usize,
@@ -17,7 +16,7 @@ pub fn reads_after_call(
     if predicated(block, index) {
         return reads;
     }
-    let (mut integer_open, mut float_open) = (integer, float);
+    let mut open = Open { integer, float };
     for op in block.ops.iter().skip(index + 1) {
         if op.is_control_flow() {
             break;
@@ -28,32 +27,45 @@ pub fn reads_after_call(
             op => op.inputs(),
         };
         for input in inputs {
-            if integer_open.is_some_and(|slot| overlaps(input, slot)) {
-                reads.integer = 1;
-                integer_open = None;
-            }
-            if let Some(slot) = float_open.filter(|slot| overlaps(input, *slot)) {
-                reads.float = 1;
-                // A read wider than the result lane (a whole-register move) says nothing of the width.
-                if input.size <= slot.size {
-                    reads.float_bytes = input.size;
-                }
-                float_open = None;
-            }
+            open.read(input, &mut reads);
         }
         if let Some(output) = op.output() {
-            if integer_open.is_some_and(|slot| overlaps(output, slot)) {
-                integer_open = None;
-            }
-            if float_open.is_some_and(|slot| overlaps(output, slot)) {
-                float_open = None;
-            }
+            open.write(output);
         }
-        if integer_open.is_none() && float_open.is_none() {
+        if open.integer.is_none() && open.float.is_none() {
             break;
         }
     }
     reads
+}
+
+/// The result registers no write has covered since the call.
+struct Open {
+    integer: Option<CanonicalStorageId>,
+    float: Option<CanonicalStorageId>,
+}
+
+impl Open {
+    fn read(&mut self, input: &Varnode, reads: &mut SourceResultReads) {
+        if self.integer.is_some_and(|slot| overlaps(input, slot)) {
+            reads.integer = 1;
+            self.integer = None;
+        }
+        let Some(slot) = self.float.filter(|slot| overlaps(input, *slot)) else {
+            return;
+        };
+        reads.float = 1;
+        // A read wider than the result lane (a whole-register move) says nothing of the width.
+        if input.size <= slot.size {
+            reads.float_bytes = input.size;
+        }
+        self.float = None;
+    }
+
+    fn write(&mut self, output: &Varnode) {
+        self.integer = self.integer.filter(|slot| !overlaps(output, *slot));
+        self.float = self.float.filter(|slot| !overlaps(output, *slot));
+    }
 }
 
 /// Whether the call at `index` is one its own instruction may skip (an ARM32 conditional `bl`

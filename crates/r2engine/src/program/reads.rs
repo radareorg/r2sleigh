@@ -1,6 +1,5 @@
 //! What the program's calls to a function read of its result registers (doc/adr-resolved-bodies.md,
-//! "Caller reads"): each caller discovery walked is lifted, never prepared, so no answer waits on the
-//! function it is about.
+//! "Caller reads"): each caller is lifted, never prepared, so no answer waits on its own function.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,18 +38,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
             else {
                 continue;
             };
-            for block in &body.blocks {
-                for (index, op) in block.lifted.ops.iter().enumerate() {
-                    if !matches!(op, R2ILOp::Call { target } if target.offset == callee) {
-                        continue;
-                    }
-                    reads = reads.and(r2ssa::caller_reads::reads_after_call(
-                        &block.lifted,
-                        index,
-                        slots.result_slot(),
-                        slots.float_result_slot(),
-                    ));
-                }
+            let calls = body.blocks.iter().flat_map(|block| {
+                let ops = block.lifted.ops.iter().enumerate();
+                ops.filter(
+                    |(_, op)| matches!(op, R2ILOp::Call { target } if target.offset == callee),
+                )
+                .map(move |(index, _)| (&block.lifted, index))
+            });
+            for (lifted, index) in calls {
+                reads = reads.and(r2ssa::caller_reads::reads_after_call(
+                    lifted,
+                    index,
+                    slots.result_slot(),
+                    slots.float_result_slot(),
+                ));
             }
         }
         (reads.integer > 0 || reads.float > 0).then_some(reads)

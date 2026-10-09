@@ -439,9 +439,8 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
     }
 }
 
-/// Stripped `avg` writes both RAX (its loop test) and XMM0 (its double) before returning. The body
-/// does not say which one is the result; its caller's `movsd` of XMM0 does. Vectorized
-/// `crc32_init` writes both too, and no call reads either, so its return stays a residual.
+/// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); its caller's `movsd` of XMM0
+/// says which is the result. Vectorized `crc32_init` writes both, no call reads either: a residual.
 #[test]
 fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

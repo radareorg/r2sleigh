@@ -84,8 +84,7 @@ const RELOADED_DOUBLE: &[u8] = &[
 ];
 
 /// The caller's read makes `first` a `double`, and the reload from its promoted frame slot is that
-/// `double`: the caller declares it so. Uncertified, the declaration was `void` beside an assigned
-/// result, which no C compiler accepts.
+/// `double`; uncertified, `first` was declared `void` beside an assigned result.
 #[test]
 fn a_float_result_reloaded_from_the_frame_is_declared_at_its_type() {
     let program = Literal::of_code(
@@ -115,9 +114,8 @@ const A64_READ_AS_DOUBLE: &[u8] = &[
     0xd5, // 101c padding
 ];
 
-/// AArch64's float result slot is all of q0; the double the caller reads is d0, the lane a
-/// declared double returns in. Typed at q0, the return was never certified, and a caller's
-/// legacy rendering declared `f` `void` beside the result it assigned, which no compiler accepts.
+/// AArch64's float result slot is all of q0; the double the caller reads is its d0 lane. Typed at
+/// q0 the return was never certified, and legacy declared `f` `void` beside an assigned result.
 #[test]
 fn an_aarch64_float_result_is_its_lane() {
     let program = Literal::of_code(
