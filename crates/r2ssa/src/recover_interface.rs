@@ -713,8 +713,10 @@ fn body_proven_result(
         .into_iter()
         .filter_map(|candidate| {
             let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
-            (!live_out.is_empty() && live_out.unresolved_blocks().next().is_none())
-                .then_some((candidate, live_out))
+            (!live_out.is_empty()
+                && live_out.unresolved_blocks().next().is_none()
+                && !restored_from_its_save(graph, facts, &live_out, candidate))
+            .then_some((candidate, live_out))
         });
     let first = candidates.next()?;
     candidates
@@ -726,6 +728,40 @@ fn body_proven_result(
                 .register()
                 .is_some()
         })
+}
+
+/// Whether every value `live_out` hands back in `storage` is the caller's own, reloaded from the
+/// frame slot the body saved it to (`push rbp` ... `pop rbp`): a preserved register is no result.
+fn restored_from_its_save(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
+    storage: CanonicalStorageId,
+) -> bool {
+    let accesses = &facts.structured.memory_accesses;
+    let saves_storage = |write: &crate::semantic::StructuredMemoryAccessFact| {
+        let saved = write.value.and_then(|value| {
+            crate::semantic::exact_copy_chain_to_entry_storage(graph, value, write.width)
+        });
+        saved.is_some_and(|(saved, ..)| saved == storage)
+    };
+    live_out.iter().all(|value| {
+        let value = crate::constant::root_of(graph, value);
+        let Some(read) =
+            (accesses.values()).find(|access| !access.is_write && access.value == Some(value))
+        else {
+            return false;
+        };
+        let mut writes = (accesses.values())
+            .filter(|access| access.object == read.object && access.is_write)
+            .peekable();
+        writes.peek().is_some()
+            && writes.all(|write| {
+                write.provenance_complete
+                    && (write.width, write.object_offset) == (read.width, read.object_offset)
+                    && saves_storage(write)
+            })
+    })
 }
 
 /// The result the returns prove; a walk that reaches no return proves void only where non-returning calls close the body.

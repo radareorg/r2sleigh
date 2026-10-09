@@ -528,6 +528,19 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
     );
 }
 
+/// `push rbp; mov rbp, rsp; pop rbp; ret`, an empty `void` function with a frame pointer.
+const EMPTY_FRAME: &[u8] = &[0x55, 0x48, 0x89, 0xe5, 0x5d, 0xc3];
+
+/// The body writes RBP only to restore the caller's, so it is no result: rendered as one, the
+/// function returned the caller's frame pointer, which its source never does.
+#[test]
+fn a_frame_pointer_the_body_restores_is_no_result() {
+    for text in rendered_both(EMPTY_FRAME, "empty_frame") {
+        assert!(text.contains("void empty_frame(void)"), "{text}");
+        assert!(!text.contains("RBP") && !text.contains("rbp"), "{text}");
+    }
+}
+
 /// A program where the called address is a library function by name, as an
 /// import stub is: no body worth reading, and a declared prototype instead.
 struct Importing;
