@@ -632,9 +632,13 @@ impl Spell<'_> {
         if !self.little_endian {
             return None;
         }
-        let residual = ResidualType::of(&c_type(ty)?)?;
         let pointer = cast(CType::Pointer(Box::new(CType::Void)), address);
-        Some(Helper::Load(residual).call(vec![pointer]))
+        match c_type(ty)? {
+            CType::BitVector(bits) => {
+                Some(crate::bitvector::BitVectorHelper::load(bits)?.call(vec![pointer]))
+            }
+            ty => Some(Helper::Load(ResidualType::of(&ty)?).call(vec![pointer])),
+        }
     }
 
     /// A machine expression a term reads at `ty`: the projection may hold the same bits at the

@@ -90,6 +90,10 @@ pub enum BitVectorHelper {
     Insert { carrier_bits: u32, field_bits: u32 },
     /// A field widened with zeroes to the whole carrier.
     ZeroExtend { field_bits: u32, carrier_bits: u32 },
+    /// The carrier read from memory, by a byte copy.
+    Load { carrier_bits: u32 },
+    /// The carrier written to memory, by a byte copy.
+    Store { carrier_bits: u32 },
 }
 
 impl BitVectorHelper {
@@ -127,7 +131,17 @@ impl BitVectorHelper {
         .checked()
     }
 
-    /// `(carrier_bits, field_bits)`.
+    /// A `carrier_bits` carrier read from memory.
+    pub(crate) fn load(carrier_bits: u32) -> Option<Self> {
+        is_supported(carrier_bits).then_some(Self::Load { carrier_bits })
+    }
+
+    /// A `carrier_bits` carrier written to memory.
+    pub(crate) fn store(carrier_bits: u32) -> Option<Self> {
+        is_supported(carrier_bits).then_some(Self::Store { carrier_bits })
+    }
+
+    /// `(carrier_bits, field_bits)`; a whole-carrier access has the carrier as its field.
     const fn widths(self) -> (u32, u32) {
         match self {
             Self::Extract {
@@ -142,6 +156,9 @@ impl BitVectorHelper {
                 field_bits,
                 carrier_bits,
             } => (carrier_bits, field_bits),
+            Self::Load { carrier_bits } | Self::Store { carrier_bits } => {
+                (carrier_bits, carrier_bits)
+            }
         }
     }
 
@@ -167,6 +184,8 @@ impl BitVectorHelper {
                 field_bits,
                 carrier_bits,
             } => format!("r2sleigh_bits_zero_extend_{field_bits}_{carrier_bits}"),
+            Self::Load { carrier_bits } => format!("r2sleigh_bits_load_{carrier_bits}"),
+            Self::Store { carrier_bits } => format!("r2sleigh_bits_store_{carrier_bits}"),
         }
     }
 
@@ -254,6 +273,26 @@ impl BitVectorHelper {
                     set = set_bit("carrier", carrier_bits, "bit"),
                 )
             }
+            Self::Load { carrier_bits } => {
+                let carrier = spelled(carrier_bits);
+                format!(
+                    "static inline {carrier} {name}(const void *at)\n\
+                     {{\n\
+                     \x20   {carrier} carrier;\n\
+                     \x20   __builtin_memcpy(&carrier, at, sizeof carrier);\n\
+                     \x20   return carrier;\n\
+                     }}\n"
+                )
+            }
+            Self::Store { carrier_bits } => {
+                let carrier = spelled(carrier_bits);
+                format!(
+                    "static inline void {name}(void *at, {carrier} carrier)\n\
+                     {{\n\
+                     \x20   __builtin_memcpy(at, &carrier, sizeof carrier);\n\
+                     }}\n"
+                )
+            }
         }
     }
 }
@@ -330,6 +369,10 @@ mod tests {
         assert!(BitVectorHelper::insert(256, 24).is_none());
         assert!(BitVectorHelper::zero_extend(512, 256).is_none());
         assert!(BitVectorHelper::insert(256, 256).is_none());
+        assert!(BitVectorHelper::load(256).is_some());
+        assert!(BitVectorHelper::store(512).is_some());
+        assert!(BitVectorHelper::load(128).is_none());
+        assert!(BitVectorHelper::store(192).is_none());
     }
 
     /// A helper whose field is itself a carrier names both carriers, so the
