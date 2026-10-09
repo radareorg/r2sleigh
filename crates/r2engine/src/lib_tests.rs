@@ -1283,7 +1283,9 @@ fn refused_effect_obligations_produce_a_typed_engine_refusal() {
         None,
         metrics,
         EngineDiagnostics::default(),
-        Some(FunctionFacts::default().with_input_quality(sentinel_quality.clone())),
+        Some(std::sync::Arc::new(
+            FunctionFacts::default().with_input_quality(sentinel_quality.clone()),
+        )),
         obligation_ledger,
         PlacementAudit::NotRun,
         None,

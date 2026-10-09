@@ -1165,8 +1165,8 @@ struct DecompilerContext {
     pub function_names: std::collections::HashMap<u64, String>,
     #[cfg(test)]
     pub symbols: std::collections::HashMap<u64, String>,
-    /// Canonical combined type and semantic facts.
-    function_facts: FunctionFacts,
+    /// Canonical combined type and semantic facts, shared with the sealed owner.
+    function_facts: std::sync::Arc<FunctionFacts>,
 }
 
 impl DecompilerContext {
@@ -1183,7 +1183,7 @@ impl DecompilerContext {
             function_names: std::collections::HashMap::new(),
             #[cfg(test)]
             symbols: std::collections::HashMap::new(),
-            function_facts: function_facts.report().clone(),
+            function_facts: function_facts.shared_report(),
         }
     }
 }
@@ -2748,7 +2748,7 @@ impl Decompiler {
             .into_iter()
             .map(|(name, sig)| (name, sig.into()))
             .collect();
-        self.context.function_facts.replace_type_facts(type_facts);
+        std::sync::Arc::make_mut(&mut self.context.function_facts).replace_type_facts(type_facts);
     }
 
     /// Set externally recovered host type database.
@@ -2756,13 +2756,13 @@ impl Decompiler {
     pub fn set_external_type_db(&mut self, external_type_db: ExternalTypeDb) {
         let mut type_facts = self.context.type_facts().clone();
         type_facts.external_type_db = external_type_db;
-        self.context.function_facts.replace_type_facts(type_facts);
+        std::sync::Arc::make_mut(&mut self.context.function_facts).replace_type_facts(type_facts);
     }
 
     /// Set externally recovered type facts.
     #[cfg(test)]
     pub fn set_type_facts(&mut self, type_facts: FunctionTypeFacts) {
-        self.context.function_facts.replace_type_facts(type_facts);
+        std::sync::Arc::make_mut(&mut self.context.function_facts).replace_type_facts(type_facts);
     }
 
     /// Decompile a prepared function with an explicit typed context payload.

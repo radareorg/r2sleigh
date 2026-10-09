@@ -739,7 +739,8 @@ pub struct FunctionFacts {
 #[derive(Debug, Clone)]
 pub struct SourceOwnedFunctionFacts {
     source: Arc<r2ssa::SsaArtifact>,
-    report: FunctionFacts,
+    /// Shared: the engine's response and the decompiler's context read this one report.
+    report: Arc<FunctionFacts>,
     evidence_types: crate::EvidenceTypes,
     _callee_signatures: BTreeMap<u64, SourceOwnedCalleeSignature>,
 }
@@ -879,7 +880,7 @@ impl SourceOwnedFunctionFacts {
             crate::solve_evidence_types(source.as_ref(), &report.callsite_signatures(), ptr_bits);
         Some(Self {
             source,
-            report,
+            report: Arc::new(report),
             evidence_types,
             _callee_signatures: callee_signatures,
         })
@@ -920,13 +921,18 @@ impl SourceOwnedFunctionFacts {
         &self.report
     }
 
+    /// The report itself, for a consumer that keeps it past this borrow.
+    pub fn shared_report(&self) -> Arc<FunctionFacts> {
+        Arc::clone(&self.report)
+    }
+
     /// Exact ValueId/ObjectId-keyed type solution for the retained source.
     pub fn evidence_types(&self) -> &crate::EvidenceTypes {
         &self.evidence_types
     }
 
     /// What this function returns, decided once for `afi` and every rendering.
-    pub const fn return_type(&self) -> Option<&ReturnTypeFact> {
+    pub fn return_type(&self) -> Option<&ReturnTypeFact> {
         self.report.return_type()
     }
 

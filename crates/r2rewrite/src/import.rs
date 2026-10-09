@@ -38,11 +38,21 @@ pub struct ImportedValue {
     pub producer: CanonicalInstructionId,
     /// The value's own instruction as a term, with expanded producers inside.
     pub term: TermId,
-    /// Copy elisions performed while building `term`, in application order.
-    pub trace: Vec<Rewrite>,
-    /// Producers expanded into `term`, transitively. Rendering `term` renders
-    /// these instructions at this value's site.
-    pub substituted: BTreeSet<CanonicalInstructionId>,
+}
+
+/// A producer whose term a read absorbed: the root it was imported as, and its instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Substitution {
+    pub root: MachineExprId,
+    pub producer: CanonicalInstructionId,
+}
+
+/// One import step: its own rewrites, after those of the producers it absorbed directly, in
+/// operand order; a value's whole trace and producer set are walked from these on demand.
+#[derive(Debug, Clone, Default)]
+pub struct ImportStep {
+    own: Box<[Rewrite]>,
+    substitutions: Box<[Substitution]>,
 }
 
 /// The cell one structured memory access reads or writes, as a term.
@@ -55,14 +65,15 @@ pub struct ImportedValue {
 pub struct ImportedAccess {
     pub access: StructuredAccessId,
     pub term: TermId,
-    pub trace: Vec<Rewrite>,
-    pub substituted: BTreeSet<CanonicalInstructionId>,
+    step: ImportStep,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Import {
     values: Vec<Option<ImportedValue>>,
     accesses: BTreeMap<StructuredAccessId, ImportedAccess>,
+    /// Each imported root's step, by root.
+    roots: Vec<Option<ImportStep>>,
     /// Entry values whose storage no instruction of the function writes.
     entry_never_redefined: BTreeSet<ValueId>,
 }
@@ -82,6 +93,72 @@ impl Import {
 
     pub fn accesses(&self) -> impl Iterator<Item = &ImportedAccess> {
         self.accesses.values()
+    }
+
+    /// Every rewrite import applied to build a value's term, in application order.
+    pub fn trace(&self, value: ValueId) -> Vec<Rewrite> {
+        self.value(value)
+            .and_then(|imported| self.step(imported.base_root))
+            .map_or_else(Vec::new, |step| self.flattened(step))
+    }
+
+    /// Every rewrite import applied to build an access's cell, in application order.
+    pub fn access_trace(&self, access: StructuredAccessId) -> Vec<Rewrite> {
+        self.access(access)
+            .map_or_else(Vec::new, |imported| self.flattened(&imported.step))
+    }
+
+    /// The producers expanded into a value's term, transitively: rendering the term renders
+    /// these instructions at the value's site.
+    pub fn substituted(&self, value: ValueId) -> BTreeSet<CanonicalInstructionId> {
+        self.value(value)
+            .and_then(|imported| self.step(imported.base_root))
+            .map_or_else(BTreeSet::new, |step| self.producers(step))
+    }
+
+    /// The producers expanded into an access's cell, transitively.
+    pub fn access_substituted(
+        &self,
+        access: StructuredAccessId,
+    ) -> BTreeSet<CanonicalInstructionId> {
+        self.access(access)
+            .map_or_else(BTreeSet::new, |imported| self.producers(&imported.step))
+    }
+
+    fn step(&self, root: MachineExprId) -> Option<&ImportStep> {
+        self.roots.get(root.index())?.as_ref()
+    }
+
+    /// A step's substitutions' rewrites, each flattened in order, then its own: a post-order walk
+    /// on an explicit stack, as a substitution chain may be as deep as the function is long.
+    fn flattened(&self, step: &ImportStep) -> Vec<Rewrite> {
+        let mut out = Vec::new();
+        let mut stack = vec![(step, 0)];
+        while let Some((step, next)) = stack.pop() {
+            let Some(substitution) = step.substitutions.get(next) else {
+                out.extend_from_slice(&step.own);
+                continue;
+            };
+            stack.push((step, next + 1));
+            stack.extend(self.step(substitution.root).map(|child| (child, 0)));
+        }
+        out
+    }
+
+    /// Every producer a step absorbed, directly or through what those absorbed. A producer
+    /// has one root, so a producer already collected is a root already walked.
+    fn producers(&self, step: &ImportStep) -> BTreeSet<CanonicalInstructionId> {
+        let mut producers = BTreeSet::new();
+        let mut stack = vec![step];
+        while let Some(step) = stack.pop() {
+            let fresh = step
+                .substitutions
+                .iter()
+                .filter(|substitution| producers.insert(substitution.producer));
+            let children = fresh.filter_map(|substitution| self.step(substitution.root));
+            stack.extend(children);
+        }
+        producers
     }
 
     /// Whether every read `term` makes is of a literal or of an entry value
@@ -293,8 +370,15 @@ fn entry_values_never_redefined(graph: &r2ssa::SsaGraph) -> BTreeSet<ValueId> {
 #[derive(Debug, Clone)]
 struct RootImport {
     term: TermId,
-    trace: Vec<Rewrite>,
-    substituted: BTreeSet<CanonicalInstructionId>,
+    own: Vec<Rewrite>,
+    substitutions: Vec<Substitution>,
+    opaque: bool,
+}
+
+/// What a reader of a root needs of it; its step stays in the importer's table.
+#[derive(Debug, Clone, Copy)]
+struct RootTerm {
+    term: TermId,
     opaque: bool,
 }
 
@@ -431,8 +515,7 @@ pub fn import_with(
                 ImportedAccess {
                     access: *access,
                     term: root.term,
-                    trace: root.trace.clone(),
-                    substituted: root.substituted.clone(),
+                    step: importer.step(entity.root()),
                 },
             );
         }
@@ -442,8 +525,6 @@ pub fn import_with(
                 base_root: entity.root(),
                 producer: entity.producer(),
                 term: root.term,
-                trace: root.trace,
-                substituted: root.substituted,
             });
         }
     }
@@ -455,17 +536,42 @@ pub fn import_with(
             accesses.insert(*access, imported);
         }
     }
+    let mut roots = Vec::new();
+    for (root, imported) in importer.roots {
+        if roots.len() <= root.index() {
+            roots.resize(root.index() + 1, None);
+        }
+        roots[root.index()] = Some(ImportStep {
+            own: imported.own.into(),
+            substitutions: imported.substitutions.into(),
+        });
+    }
     Import {
         values,
         accesses,
+        roots,
         entry_never_redefined: importer.entry_never_redefined,
     }
 }
 
 impl Importer<'_> {
-    fn import_root(&mut self, root: MachineExprId, inst: InstId) -> RootImport {
+    /// A root's step as imported so far: what a load's cell shares with its value.
+    fn step(&self, root: MachineExprId) -> ImportStep {
+        self.roots
+            .get(&root)
+            .map(|imported| ImportStep {
+                own: imported.own.clone().into(),
+                substitutions: imported.substitutions.clone().into(),
+            })
+            .unwrap_or_default()
+    }
+
+    fn import_root(&mut self, root: MachineExprId, inst: InstId) -> RootTerm {
         if let Some(done) = self.roots.get(&root) {
-            return done.clone();
+            return RootTerm {
+                term: done.term,
+                opaque: done.opaque,
+            };
         }
         // Every leaf minted below belongs to this instruction's expression,
         // and the descent is in operand order, so the ordinal plus the graph's
@@ -478,7 +584,7 @@ impl Importer<'_> {
         done
     }
 
-    fn import_root_inner(&mut self, root: MachineExprId, inst: InstId) -> RootImport {
+    fn import_root_inner(&mut self, root: MachineExprId, inst: InstId) -> RootTerm {
         let ty = self
             .projection
             .expr(root)
@@ -486,14 +592,17 @@ impl Importer<'_> {
             .expect("entity root is in the arena");
         let opaque_term = |arena: &mut TermArena| RootImport {
             term: arena.intern(ty, TermKind::Opaque(root)),
-            trace: Vec::new(),
-            substituted: BTreeSet::new(),
+            own: Vec::new(),
+            substitutions: Vec::new(),
             opaque: true,
         };
         if !self.in_progress.insert(root) {
             // A root reached through its own operands: a call's definition
             // reads the location it defines. Not a term.
-            return opaque_term(self.arena);
+            return RootTerm {
+                term: opaque_term(self.arena).term,
+                opaque: true,
+            };
         }
         let output = self
             .artifact
@@ -508,27 +617,26 @@ impl Importer<'_> {
                 .expect("entity root is in the arena");
             let imported = match kind {
                 MachineExprKind::Copy { input } => match self.import_expr(input) {
-                    Some((term, mut trace, substituted)) => {
+                    Some((term, substitutions)) => {
                         let from = self.arena.intern(ty, TermKind::Opaque(root));
-                        trace.push(Rewrite {
-                            rule: COPY_ELIDE,
-                            from,
-                            to: term,
-                        });
                         RootImport {
                             term,
-                            trace,
-                            substituted,
+                            own: vec![Rewrite {
+                                rule: COPY_ELIDE,
+                                from,
+                                to: term,
+                            }],
+                            substitutions,
                             opaque: false,
                         }
                     }
                     None => opaque_term(self.arena),
                 },
                 _ => match self.import_expr(root) {
-                    Some((term, trace, substituted)) => RootImport {
+                    Some((term, substitutions)) => RootImport {
                         term,
-                        trace,
-                        substituted,
+                        own: Vec::new(),
+                        substitutions,
                         opaque: false,
                     },
                     None => opaque_term(self.arena),
@@ -544,16 +652,16 @@ impl Importer<'_> {
                     if let Some(value) = output {
                         self.declare_leaf_facts(term, value);
                     }
-                    let mut trace = imported.trace;
-                    trace.push(Rewrite {
+                    let mut own = imported.own;
+                    own.push(Rewrite {
                         rule: OBJECT_ADDRESS,
                         from: imported.term,
                         to: term,
                     });
                     RootImport {
                         term,
-                        trace,
-                        substituted: imported.substituted,
+                        own,
+                        substitutions: imported.substitutions,
                         opaque: false,
                     }
                 }
@@ -582,16 +690,16 @@ impl Importer<'_> {
                                 right: offset,
                             },
                         );
-                        let mut trace = imported.trace;
-                        trace.push(Rewrite {
+                        let mut own = imported.own;
+                        own.push(Rewrite {
                             rule: OBJECT_ADDRESS,
                             from: imported.term,
                             to: term,
                         });
                         RootImport {
                             term,
-                            trace,
-                            substituted: imported.substituted,
+                            own,
+                            substitutions: imported.substitutions,
                             opaque: false,
                         }
                     }
@@ -602,8 +710,12 @@ impl Importer<'_> {
             opaque_term(self.arena)
         };
         self.in_progress.remove(&root);
-        self.roots.insert(root, done.clone());
-        done
+        let term = RootTerm {
+            term: done.term,
+            opaque: done.opaque,
+        };
+        self.roots.insert(root, done);
+        term
     }
 
     /// Whether the plan could render this instruction at all: its write and
@@ -630,10 +742,7 @@ impl Importer<'_> {
     }
 
     #[allow(clippy::type_complexity)]
-    fn import_expr(
-        &mut self,
-        id: MachineExprId,
-    ) -> Option<(TermId, Vec<Rewrite>, BTreeSet<CanonicalInstructionId>)> {
+    fn import_expr(&mut self, id: MachineExprId) -> Option<(TermId, Vec<Substitution>)> {
         let expr = self.projection.expr(id)?;
         let ty = *expr.ty();
         let width = ty.width_bits();
@@ -647,9 +756,7 @@ impl Importer<'_> {
             inst,
             ordinal: self.reads_so_far,
         });
-        let leaf = |arena: &mut TermArena| {
-            Some((arena.leaf_from(ty, id, origin), Vec::new(), BTreeSet::new()))
-        };
+        let leaf = |arena: &mut TermArena| Some((arena.leaf_from(ty, id, origin), Vec::new()));
         match kind {
             MachineExprKind::Source { binding, .. } => match self
                 .try_substitute(binding.value())
@@ -664,11 +771,11 @@ impl Importer<'_> {
                         let term = self.arena.intern(ty, TermKind::ObjectAddress(object));
                         self.place_object(object);
                         self.declare_leaf_facts(term, binding.value());
-                        return Some((term, Vec::new(), BTreeSet::new()));
+                        return Some((term, Vec::new()));
                     }
                     let leaf = leaf(self.arena);
                     self.reads_so_far += 1;
-                    if let Some((leaf_id, _, _)) = &leaf {
+                    if let Some((leaf_id, _)) = &leaf {
                         if let Some(definition) = self.definition_of(binding.value()) {
                             self.arena.define(*leaf_id, definition);
                         }
@@ -682,7 +789,6 @@ impl Importer<'_> {
                     Some(bits) if value.width_bits() == width => Some((
                         self.arena.intern(ty, TermKind::Literal(bits)),
                         Vec::new(),
-                        BTreeSet::new(),
                     )),
                     _ => {
                         let minted = leaf(self.arena);
@@ -702,16 +808,15 @@ impl Importer<'_> {
                 if width_bits != width {
                     return None;
                 }
-                let (a, trace, substituted) = self.import_expr(address)?;
+                let (a, substituted) = self.import_expr(address)?;
                 self.place_object(object);
                 if let Some(term) =
                     self.certified_bound_stack_array_cell(access, object, a, width_bits, ty)
                 {
-                    return Some((term, trace, substituted));
+                    return Some((term, substituted));
                 }
                 Some((
                     self.arena.intern(ty, TermKind::Load { object, address: a }),
-                    trace,
                     substituted,
                 ))
             }
@@ -738,7 +843,7 @@ impl Importer<'_> {
                 width_bits: lane_bits,
                 ..
             } => {
-                let (r, l, trace, substituted) = self.import_pair(root, lane)?;
+                let (r, l, substituted) = self.import_pair(root, lane)?;
                 let end = lsb_bits.checked_add(lane_bits)?;
                 if self.width_of(r) != width || self.width_of(l) != lane_bits || end > width {
                     return None;
@@ -801,7 +906,7 @@ impl Importer<'_> {
                 if joined != width {
                     return None;
                 }
-                Some((term, trace, substituted))
+                Some((term, substituted))
             }
             MachineExprKind::Arithmetic {
                 op,
@@ -812,7 +917,7 @@ impl Importer<'_> {
                 if mode != MachineArithmeticMode::Wrapping {
                     return None;
                 }
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != width || self.width_of(r) != width {
                     return None;
                 }
@@ -825,7 +930,6 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
@@ -833,18 +937,17 @@ impl Importer<'_> {
                 if mode != MachineArithmeticMode::Wrapping {
                     return None;
                 }
-                let (x, trace, substituted) = self.import_expr(input)?;
+                let (x, substituted) = self.import_expr(input)?;
                 if self.width_of(x) != width {
                     return None;
                 }
                 Some((
                     self.arena.intern(ty, TermKind::Negate(x)),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::ArithmeticFlag { op, left, right } => {
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != self.width_of(r) {
                     return None;
                 }
@@ -857,12 +960,11 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::Bitwise { op, left, right } => {
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != width || self.width_of(r) != width {
                     return None;
                 }
@@ -875,34 +977,31 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::BitwiseNot { input } => {
-                let (x, trace, substituted) = self.import_expr(input)?;
+                let (x, substituted) = self.import_expr(input)?;
                 if self.width_of(x) != width {
                     return None;
                 }
                 Some((
                     self.arena.intern(ty, TermKind::BitwiseNot(x)),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::BooleanNot { input } => {
-                let (x, trace, substituted) = self.import_expr(input)?;
+                let (x, substituted) = self.import_expr(input)?;
                 if self.width_of(x) != width {
                     return None;
                 }
                 Some((
                     self.arena.intern(ty, TermKind::BooleanNot(x)),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::Boolean { op, left, right } => {
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != width || self.width_of(r) != width {
                     return None;
                 }
@@ -915,7 +1014,6 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
@@ -931,7 +1029,7 @@ impl Importer<'_> {
                 ) {
                     return None;
                 }
-                let (v, c, trace, substituted) = self.import_pair(value, count)?;
+                let (v, c, substituted) = self.import_pair(value, count)?;
                 if self.width_of(v) != width {
                     return None;
                 }
@@ -945,7 +1043,6 @@ impl Importer<'_> {
                             count: c,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
@@ -955,7 +1052,7 @@ impl Importer<'_> {
                 left,
                 right,
             } => {
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != self.width_of(r) {
                     return None;
                 }
@@ -969,12 +1066,11 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::Cast { kind, input } => {
-                let (x, trace, substituted) = self.import_expr(input)?;
+                let (x, substituted) = self.import_expr(input)?;
                 let from = self.width_of(x);
                 let floating = matches!(
                     kind,
@@ -997,10 +1093,10 @@ impl Importer<'_> {
                 } else {
                     TermKind::Cast { kind, input: x }
                 };
-                Some((self.arena.intern(ty, kind), trace, substituted))
+                Some((self.arena.intern(ty, kind), substituted))
             }
             MachineExprKind::FloatArithmetic { op, left, right } => {
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != width || self.width_of(r) != width {
                     return None;
                 }
@@ -1013,23 +1109,21 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::FloatUnary { op, input } => {
-                let (x, trace, substituted) = self.import_expr(input)?;
+                let (x, substituted) = self.import_expr(input)?;
                 if op != r2ssa::MachineFloatUnaryOp::IsNan && self.width_of(x) != width {
                     return None;
                 }
                 Some((
                     self.arena.intern(ty, TermKind::FloatUnary { op, input: x }),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::FloatCompare { op, left, right } => {
-                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                let (l, r, substituted) = self.import_pair(left, right)?;
                 if self.width_of(l) != self.width_of(r) {
                     return None;
                 }
@@ -1042,12 +1136,11 @@ impl Importer<'_> {
                             right: r,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::Extract { input, lsb_bits } => {
-                let (x, trace, substituted) = self.import_expr(input)?;
+                let (x, substituted) = self.import_expr(input)?;
                 let from = self.width_of(x);
                 if lsb_bits.checked_add(width).is_none_or(|end| end > from) {
                     return None;
@@ -1055,18 +1148,16 @@ impl Importer<'_> {
                 Some((
                     self.arena
                         .intern(ty, TermKind::Extract { input: x, lsb_bits }),
-                    trace,
                     substituted,
                 ))
             }
             MachineExprKind::Concat { high, low } => {
-                let (h, l, trace, substituted) = self.import_pair(high, low)?;
+                let (h, l, substituted) = self.import_pair(high, low)?;
                 if self.width_of(h).checked_add(self.width_of(l)) != Some(width) {
                     return None;
                 }
                 Some((
                     self.arena.intern(ty, TermKind::Concat { high: h, low: l }),
-                    trace,
                     substituted,
                 ))
             }
@@ -1075,14 +1166,12 @@ impl Importer<'_> {
                 if_true,
                 if_false,
             } => {
-                let (c, mut trace, mut substituted) = self.import_expr(condition)?;
-                let (t, trace_t, substituted_t) = self.import_expr(if_true)?;
-                let (f, trace_f, substituted_f) = self.import_expr(if_false)?;
+                let (c, mut substituted) = self.import_expr(condition)?;
+                let (t, substituted_t) = self.import_expr(if_true)?;
+                let (f, substituted_f) = self.import_expr(if_false)?;
                 if self.width_of(t) != width || self.width_of(f) != width {
                     return None;
                 }
-                trace.extend(trace_t);
-                trace.extend(trace_f);
                 substituted.extend(substituted_t);
                 substituted.extend(substituted_f);
                 Some((
@@ -1094,7 +1183,6 @@ impl Importer<'_> {
                             if_false: f,
                         },
                     ),
-                    trace,
                     substituted,
                 ))
             }
@@ -1106,17 +1194,11 @@ impl Importer<'_> {
         &mut self,
         left: MachineExprId,
         right: MachineExprId,
-    ) -> Option<(
-        TermId,
-        TermId,
-        Vec<Rewrite>,
-        BTreeSet<CanonicalInstructionId>,
-    )> {
-        let (l, mut trace, mut substituted) = self.import_expr(left)?;
-        let (r, trace_r, substituted_r) = self.import_expr(right)?;
-        trace.extend(trace_r);
+    ) -> Option<(TermId, TermId, Vec<Substitution>)> {
+        let (l, mut substituted) = self.import_expr(left)?;
+        let (r, substituted_r) = self.import_expr(right)?;
         substituted.extend(substituted_r);
-        Some((l, r, trace, substituted))
+        Some((l, r, substituted))
     }
 
     fn width_of(&self, id: TermId) -> u32 {
@@ -1144,7 +1226,7 @@ impl Importer<'_> {
         if width_bits == 0 || width_bits > MAX_TERM_WIDTH_BITS {
             return None;
         }
-        let (address, trace, substituted) = self.import_expr(node)?;
+        let (address, substituted) = self.import_expr(node)?;
         self.place_object(fact.object);
         let ty = MachineType::Integer {
             width_bits,
@@ -1164,8 +1246,10 @@ impl Importer<'_> {
         Some(ImportedAccess {
             access,
             term,
-            trace,
-            substituted,
+            step: ImportStep {
+                own: Box::new([]),
+                substitutions: substituted.into(),
+            },
         })
     }
 
@@ -1437,29 +1521,24 @@ impl Importer<'_> {
     #[allow(clippy::type_complexity)]
     fn in_readers_class(
         &mut self,
-        substitution: (TermId, Vec<Rewrite>, BTreeSet<CanonicalInstructionId>),
+        substitution: (TermId, Vec<Substitution>),
         ty: MachineType,
-    ) -> Option<(TermId, Vec<Rewrite>, BTreeSet<CanonicalInstructionId>)> {
-        let (term, trace, substituted) = substitution;
+    ) -> Option<(TermId, Vec<Substitution>)> {
+        let (term, substituted) = substitution;
         let produced = self.arena.term(term);
         if produced.ty.is_float() == ty.is_float() {
-            return Some((term, trace, substituted));
+            return Some((term, substituted));
         }
         match produced.kind {
-            TermKind::Literal(bits) => Some((
-                self.arena.intern(ty, TermKind::Literal(bits)),
-                trace,
-                substituted,
-            )),
+            TermKind::Literal(bits) => {
+                Some((self.arena.intern(ty, TermKind::Literal(bits)), substituted))
+            }
             _ => None,
         }
     }
 
     #[allow(clippy::type_complexity)]
-    fn try_substitute(
-        &mut self,
-        value: ValueId,
-    ) -> Option<(TermId, Vec<Rewrite>, BTreeSet<CanonicalInstructionId>)> {
+    fn try_substitute(&mut self, value: ValueId) -> Option<(TermId, Vec<Substitution>)> {
         let graph = self.artifact.graph();
         let entity = self.projection.entity_for_output(value)?;
         let root = entity.root();
@@ -1489,8 +1568,6 @@ impl Importer<'_> {
         if !(self.policy)(&query) {
             return None;
         }
-        let mut substituted = imported.substituted;
-        substituted.insert(producer);
-        Some((imported.term, imported.trace, substituted))
+        Some((imported.term, vec![Substitution { root, producer }]))
     }
 }

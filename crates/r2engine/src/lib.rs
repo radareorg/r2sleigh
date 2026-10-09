@@ -1689,7 +1689,8 @@ pub struct EngineDecompileResponse {
     pub obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     pub placement_audit: PlacementAudit,
     pub render_refusal: Option<DecompileRenderRefusal>,
-    pub function_facts: FunctionFacts,
+    /// The sealed report, shared with the analysis that holds it.
+    pub function_facts: std::sync::Arc<FunctionFacts>,
     pub input_quality: Option<r2types::FunctionInputQualityFacts>,
     pub metrics: EngineMetrics,
     pub diagnostics: EngineDiagnostics,
@@ -1887,7 +1888,7 @@ impl EngineSession {
         let mut metrics = analyze_response.metrics;
         let analyze_diagnostics = analyze_response.diagnostics;
         let artifact = analyze_response.artifact;
-        let analyzed_function_facts = artifact.function_facts().clone();
+        let analyzed_function_facts = std::sync::Arc::new(artifact.function_facts().clone());
         let Some(render_target) = EngineRenderTarget::for_prepared(artifact.ssa_func()) else {
             metrics.refuse_from(EnginePhase::Normalization);
             return Err(Box::new(
@@ -2060,7 +2061,7 @@ impl EngineSession {
         let started = Instant::now();
         let sealed = request.sealed;
         let input_quality = sealed.input_quality.clone();
-        let response_function_facts = request.function_facts().clone();
+        let response_function_facts = request.sealed.source_owned_facts.shared_report();
         if sealed.trusted_ssa.as_deref().is_some_and(|trusted| {
             !trusted.shares_artifact(&sealed.source_owned_facts.shared_source())
         }) {
@@ -2850,16 +2851,16 @@ fn refused_decompile_response_with_metrics_and_audits(
     input_quality: Option<r2types::FunctionInputQualityFacts>,
     metrics: EngineMetrics,
     mut diagnostics: EngineDiagnostics,
-    existing_function_facts: Option<FunctionFacts>,
+    existing_function_facts: Option<std::sync::Arc<FunctionFacts>>,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
 ) -> EngineDecompileResponse {
-    let function_facts = seal_refused_decompile_function_facts(
-        existing_function_facts.unwrap_or_default(),
+    let function_facts = std::sync::Arc::new(seal_refused_decompile_function_facts(
+        std::sync::Arc::unwrap_or_clone(existing_function_facts.unwrap_or_default()),
         function_name,
         reason,
-    );
+    ));
     let output = EngineRendering::Listing(
         decompile_route_output_from_function_facts(function_name, &function_facts)
             .expect("refused decompile response must stamp a fallback route"),

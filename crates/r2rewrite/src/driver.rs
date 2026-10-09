@@ -55,9 +55,6 @@ pub struct CanonicalValue {
     pub value: ValueId,
     pub base_root: MachineExprId,
     pub canonical: TermId,
-    /// Every rewrite that produced `canonical`, copy elisions included, in
-    /// application order.
-    pub trace: Box<[Rewrite]>,
     /// Instructions other than this value's own that rendering `canonical`
     /// renders: producers expanded into the term whose values the term no
     /// longer reads. The binding plan decides, per instruction, whether that
@@ -80,7 +77,6 @@ pub struct CanonicalValue {
 pub struct CanonicalAccess {
     pub access: StructuredAccessId,
     pub canonical: TermId,
-    pub trace: Box<[Rewrite]>,
     /// Instructions rendering `canonical` at the access renders: the address
     /// producers expanded into the term whose values it no longer reads.
     pub discharges: DischargedInstructions,
@@ -115,6 +111,9 @@ impl std::error::Error for RewriteError {}
 pub struct CanonicalRoots {
     arena: TermArena,
     import: Import,
+    /// The rewrites that fired at each term, in firing order: each value's trace is walked from
+    /// these on demand (`trace`), never stored per value.
+    rewrites_at: HashMap<TermId, Vec<Rewrite>>,
     values: Box<[Option<CanonicalValue>]>,
     accesses: BTreeMap<StructuredAccessId, CanonicalAccess>,
     budget_failures: Vec<BudgetFailure>,
@@ -145,11 +144,40 @@ impl CanonicalRoots {
         &self.budget_failures
     }
 
+    /// Every rewrite that produced a value's canonical term, copy elisions included, in
+    /// application order.
+    pub fn trace(&self, value: ValueId) -> Vec<Rewrite> {
+        let Some(imported) = self.import.value(value) else {
+            return Vec::new();
+        };
+        let mut trace = self.import.trace(value);
+        trace.extend(collect_rewrites(
+            &self.arena,
+            &self.rewrites_at,
+            imported.term,
+        ));
+        trace
+    }
+
+    /// Every rewrite that produced an access's canonical cell, in application order.
+    pub fn access_trace(&self, access: StructuredAccessId) -> Vec<Rewrite> {
+        let Some(imported) = self.import.access(access) else {
+            return Vec::new();
+        };
+        let mut trace = self.import.access_trace(access);
+        trace.extend(collect_rewrites(
+            &self.arena,
+            &self.rewrites_at,
+            imported.term,
+        ));
+        trace
+    }
+
     /// Every rewrite of every value, keyed by rule id, for measurement.
     pub fn rewrite_counts(&self) -> BTreeMap<RuleId, usize> {
         let mut counts = BTreeMap::new();
         for value in self.values() {
-            for rewrite in &value.trace {
+            for rewrite in self.trace(value.value) {
                 *counts.entry(rewrite.rule).or_insert(0) += 1;
             }
         }
@@ -175,10 +203,10 @@ pub fn discharged_origins(
     value: ValueId,
     canonical: TermId,
 ) -> DischargedInstructions {
-    let Some(imported) = import.value(value) else {
+    if import.value(value).is_none() {
         return DischargedInstructions::default();
-    };
-    discharged_from(&imported.substituted, projection, arena, canonical)
+    }
+    discharged_from(&import.substituted(value), projection, arena, canonical)
 }
 
 /// The values a canonical term still reads, sorted and distinct.
@@ -445,10 +473,8 @@ pub fn canonicalize_with(
             .get(&imported.term)
             .copied()
             .unwrap_or(imported.term);
-        let mut trace: Vec<Rewrite> = imported.trace.clone();
-        trace.extend(collect_rewrites(&arena, &rewrites_at, imported.term));
-        let discharges =
-            discharged_origins(&import, projection, &arena, imported.value, canonical_term);
+        let substituted = import.substituted(imported.value);
+        let discharges = discharged_from(&substituted, projection, &arena, canonical_term);
         let multiplicity = if import.is_duplicable(projection, &arena, canonical_term) {
             Multiplicity::Any
         } else {
@@ -459,7 +485,7 @@ pub fn canonicalize_with(
             &value_by_root,
             &arena,
             canonical_term,
-            &imported.substituted,
+            &substituted,
             &discharges,
         );
         if let Some(cell) = values.get_mut(imported.value.0 as usize) {
@@ -467,7 +493,6 @@ pub fn canonicalize_with(
                 value: imported.value,
                 base_root: imported.base_root,
                 canonical: canonical_term,
-                trace: trace.into_boxed_slice(),
                 discharges,
                 reads,
                 multiplicity,
@@ -486,7 +511,6 @@ pub fn canonicalize_with(
             value,
             base_root,
             canonical: canonical_term,
-            trace: Box::new([]),
             discharges: DischargedInstructions::default(),
             reads: Box::new([]),
             multiplicity: Multiplicity::Any,
@@ -498,21 +522,19 @@ pub fn canonicalize_with(
             .get(&imported.term)
             .copied()
             .unwrap_or(imported.term);
-        let mut trace: Vec<Rewrite> = imported.trace.clone();
-        trace.extend(collect_rewrites(&arena, &rewrites_at, imported.term));
-        let discharges = discharged_from(&imported.substituted, projection, &arena, canonical_term);
+        let substituted = import.access_substituted(imported.access);
+        let discharges = discharged_from(&substituted, projection, &arena, canonical_term);
         accesses.insert(
             imported.access,
             CanonicalAccess {
                 access: imported.access,
                 canonical: canonical_term,
-                trace: trace.into_boxed_slice(),
                 reads: values_read(
                     projection,
                     &value_by_root,
                     &arena,
                     canonical_term,
-                    &imported.substituted,
+                    &substituted,
                     &discharges,
                 ),
                 discharges,
@@ -522,6 +544,7 @@ pub fn canonicalize_with(
     Ok(CanonicalRoots {
         arena,
         import,
+        rewrites_at,
         values: values.into_boxed_slice(),
         accesses,
         budget_failures,
