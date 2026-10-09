@@ -667,6 +667,24 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
     }
 }
 
+/// `fill` stores `g_table[i]` at `i * 4 + 0x4040`, the table's exact address plus its index: staged
+/// declares the table at its DWARF type and spells the address off it, as the frame spells a computed
+/// index off its one array.
+#[test]
+fn a_staged_computed_index_off_a_named_global_is_spelled_off_that_global() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fill");
+    for line in [
+        "extern int32_t g_counter;",
+        "extern int32_t g_table[16];",
+        " + (uint64_t)&g_table)",
+        "2 data object types supplied by the source",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+    assert!(!staged.out.contains("0x4040"), "{}", staged.out);
+}
+
 /// A recursive call names the function itself at its own signature: `fact` calls `fact` with
 /// no declaration that could contradict the definition, which C rejects.
 #[test]
