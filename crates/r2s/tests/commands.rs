@@ -625,6 +625,22 @@ fn a_staged_control_residual_states_its_cause() {
     }
 }
 
+/// A staged constant a prototyped parameter holds passes as itself: `main`'s calls in the review
+/// fixture, where only `printf`'s variadic tail keeps its conversions.
+#[test]
+fn a_staged_constant_argument_is_the_constant() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.main");
+    for call in ["bit_count(0xf0f0)", "fact(5)", ", 16);", ", 16, 7);"] {
+        assert!(staged.out.contains(call), "{call}: {}", staged.out);
+    }
+    assert!(
+        staged.out.contains("printf(\"%d %s\\n\", (uint64_t)"),
+        "{}",
+        staged.out
+    );
+}
+
 /// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); its caller's `movsd` of XMM0
 /// says which is the result. Vectorized `crc32_init` writes both, no call reads either: a residual.
 #[test]
