@@ -1123,7 +1123,9 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_stack_buffer": {
-   "status": "equal"
+   "cause": "[legacy, deleted by D] #105 refuses this object's layout (one indexed store has no upper bound), and legacy then declares one-byte scalars and indexes past them (UBSan: store with insufficient space); staged keeps the stores through its one frame array. Legacy's array spelling is deleted with legacy r2dec.",
+   "reason": "ubsan",
+   "status": "ub"
   },
   "tests/corpus/shapes.c::clang-O1::shape_stash": {
    "status": "equal"
@@ -1450,7 +1452,9 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_stack_buffer": {
-   "status": "equal"
+   "cause": "[legacy, deleted by D] #105 refuses this object's layout (one indexed store has no upper bound), and legacy then declares one-byte scalars and indexes past them (UBSan: store with insufficient space); staged keeps the stores through its one frame array. Legacy's array spelling is deleted with legacy r2dec.",
+   "reason": "ubsan",
+   "status": "ub"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_stash": {
    "status": "equal"
@@ -1558,7 +1562,9 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_stack_buffer": {
-   "status": "equal"
+   "cause": "[legacy, deleted by D] #105 refuses this object's layout (one indexed store has no upper bound), and legacy then declares one-byte scalars and indexes past them (UBSan: store with insufficient space); staged keeps the stores through its one frame array. Legacy's array spelling is deleted with legacy r2dec.",
+   "reason": "ubsan",
+   "status": "ub"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_stash": {
    "status": "equal"
