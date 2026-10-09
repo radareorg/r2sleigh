@@ -977,6 +977,28 @@ impl<'a> Values<'a> {
         }
     }
 
+    /// The variable `expr` reads as its word, where the variable is declared `to` already and the
+    /// word is as wide as `to`, so the reading changes no bit.
+    fn declared_variable(&self, expr: &CExpr, to: &CType) -> Option<CExpr> {
+        let CExpr::Cast {
+            ty, expr: inner, ..
+        } = expr
+        else {
+            return None;
+        };
+        let CExpr::Var(id) = &**inner else {
+            return None;
+        };
+        let bits = |ty: &CType| match ty.unaliased() {
+            CType::Int { bits, .. } => Some(*bits),
+            CType::Pointer(_) => Some(self.ptr_bits),
+            _ => None,
+        };
+        let symbols = self.symbols.try_borrow().ok()?;
+        (symbols.get(*id).ty == *to && bits(ty).is_some() && bits(ty) == bits(to))
+            .then(|| (**inner).clone())
+    }
+
     /// What a block's live instructions write, in order, each with the instruction it stands at; a
     /// run that cannot be spelled is one gap.
     pub(super) fn statements(&self, addr: u64) -> Vec<(u64, CStmt)> {
@@ -1226,8 +1248,11 @@ impl<'a> Values<'a> {
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
             for ((argument, ty), to) in arguments.iter_mut().zip(&mut types).zip(&declared.params) {
-                *argument =
-                    calls::to_declared(std::mem::replace(argument, CExpr::IntLit(0)), ty, to);
+                let taken = std::mem::replace(argument, CExpr::IntLit(0));
+                *argument = match self.declared_variable(&taken, to) {
+                    Some(variable) => variable,
+                    None => calls::to_declared(taken, ty, to),
+                };
                 *ty = to.clone();
             }
             ret_type = declared.ret.clone();
@@ -1325,7 +1350,16 @@ impl<'a> Values<'a> {
                 };
                 let call = self.call_expr(inst, plan, Some(class))?;
                 let spelled = fit(calls::read_result(plan, call, class)?, class, &own)?;
-                vec![CStmt::Return(Some(CExpr::cast(ty.clone(), spelled)))]
+                // A call declared to return the function's own type is returned as it is.
+                let returned = match &plan.declared {
+                    Some(declared)
+                        if declared.ret == *ty && matches!(spelled, CExpr::Call { .. }) =>
+                    {
+                        spelled
+                    }
+                    _ => CExpr::cast(ty.clone(), spelled),
+                };
+                vec![CStmt::Return(Some(returned))]
             }
             _ => return None,
         };
