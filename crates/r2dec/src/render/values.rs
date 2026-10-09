@@ -73,6 +73,31 @@ struct Own {
     result: Option<MachineType>,
 }
 
+impl Own {
+    /// The function's own entry, name and result class; its parameters are declared later.
+    fn of(input: &RenderInput<'_>) -> Self {
+        let decided = input
+            .return_type()
+            .and_then(r2types::ReturnTypeFact::decided);
+        let result = match decided {
+            Some(CType::Void) => None,
+            Some(ty) => ty
+                .bits(input.ptr_bits())
+                .and_then(|bits| class_of(ty, bits)),
+            None => Some(MachineType::Integer {
+                width_bits: input.ptr_bits(),
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            }),
+        };
+        Self {
+            entry: input.function().root(),
+            name: crate::rendered_name_of(input.name(), input.function().root()),
+            params: None,
+            result,
+        }
+    }
+}
+
 /// Whether an instruction between a producer and its reader is one a moved read or trap may not cross.
 fn has_effect(inventory: &SemanticObligationInventory, inst: InstId) -> bool {
     match inventory.instruction_for_inst(inst).map(|d| d.state) {
@@ -684,24 +709,7 @@ impl<'a> Values<'a> {
             results,
             externs: RefCell::new(BTreeMap::new()),
             ptr_bits: input.ptr_bits(),
-            own: Own {
-                entry: input.function().root(),
-                name: crate::rendered_name_of(input.name(), input.function().root()),
-                params: None,
-                result: match input
-                    .return_type()
-                    .and_then(r2types::ReturnTypeFact::decided)
-                {
-                    Some(CType::Void) => None,
-                    Some(ty) => ty
-                        .bits(input.ptr_bits())
-                        .and_then(|bits| class_of(ty, bits)),
-                    None => Some(MachineType::Integer {
-                        width_bits: input.ptr_bits(),
-                        signedness: r2ssa::MachineSignedness::Unsigned,
-                    }),
-                },
-            },
+            own: Own::of(input),
             little_endian: matches!(
                 artifact
                     .machine_context()
@@ -949,11 +957,7 @@ impl<'a> Values<'a> {
             let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             match stmt {
                 Ok(Some(stmt)) => {
-                    self.mark(inst.id);
-                    self.residual_in(inst.id, &stmt);
-                    if let Some(output) = inst.output.filter(|value| self.is_named(*value)) {
-                        self.assigns(output);
-                    }
+                    self.wrote(inst, &stmt);
                     out.push((at, stmt));
                 }
                 Ok(None) => {}
@@ -1044,6 +1048,16 @@ impl<'a> Values<'a> {
 
     /// `value` written at the store's cell: its canonical access where import built one, else its
     /// own address operand at the value's width.
+    /// What writing `inst`'s statement records: the instruction rendered, the residuals its text
+    /// evaluates, and the named value it assigns.
+    fn wrote(&self, inst: &r2ssa::GraphInst, stmt: &CStmt) {
+        self.mark(inst.id);
+        self.residual_in(inst.id, stmt);
+        if let Some(output) = inst.output.filter(|value| self.is_named(*value)) {
+            self.assigns(output);
+        }
+    }
+
     fn assigns(&self, value: ValueId) {
         if let Some(slot) = self.assigned.borrow_mut().get_mut(value.0 as usize) {
             *slot = true;
