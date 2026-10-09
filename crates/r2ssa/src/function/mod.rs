@@ -6,6 +6,7 @@
 
 mod blocks;
 mod build;
+mod dead_frame_stores;
 mod edit;
 mod named_edit;
 mod rewrite;
@@ -667,6 +668,7 @@ impl SsaArtifact {
         let mut artifact =
             sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
+        artifact.seal_dead_frame_stores();
         Ok(artifact)
     }
 
@@ -1206,7 +1208,7 @@ impl SsaArtifact {
             &facts.structured.memory_accesses,
             &self.machine_context,
         );
-        Self {
+        let mut assumed = Self {
             authority: SsaArtifactAuthority::new(),
             provenance: SsaArtifactProvenance::Manual,
             sealed: self.sealed.clone(),
@@ -1216,7 +1218,9 @@ impl SsaArtifact {
             machine_context: self.machine_context.clone(),
             aggregate_accesses,
             spellings: self.spellings.clone(),
-        }
+        };
+        assumed.seal_dead_frame_stores();
+        assumed
     }
 
     /// Spellings the source carried for the addresses this function calls.
@@ -1374,14 +1378,11 @@ impl SsaArtifact {
     /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
     pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
         let slot = self.certificates().stack_slots.get(&object)?;
-        if slot.source_slot.is_some()
-            || !self.declarable_stack_object(object)
-            || self.proved_parameter_home(object).is_some()
-        {
+        if slot.source_slot.is_some() {
             return None;
         }
         // An unbounded index may pass any reach, so a reach is the extent only when every index is bounded.
-        match slot.array_layout {
+        let assumption = match slot.array_layout {
             crate::StackArrayLayoutDisposition::Proven(_) => None,
             crate::StackArrayLayoutDisposition::Refused(
                 crate::StackArrayLayoutRefusal::MissingConstantOffset,
@@ -1393,7 +1394,10 @@ impl SsaArtifact {
                 .frame_reach
                 .escaped(object)
                 .then_some(crate::ExtentAssumption::EscapedAddress),
-        }
+        }?;
+        // Asked last: declarability scans the function's accesses.
+        (self.declarable_stack_object(object) && self.proved_parameter_home(object).is_none())
+            .then_some(assumption)
     }
 
     /// Why the frame object a memory obligation reads or writes has an assumed extent, if it does.

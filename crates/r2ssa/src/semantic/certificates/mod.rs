@@ -395,6 +395,9 @@ pub struct PreparedFunctionCertificates {
     pub call_return_address_stores: crate::dense::IdSet<InstId>,
     /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
     pub compiler_inserted: crate::dense::IdSet<InstId>,
+    /// Frame stores no code can read back, filled once the artifact is sealed
+    /// (doc/adr-frame-model.md, "Dead frame stores").
+    pub dead_frame_stores: crate::dense::IdSet<InstId>,
     pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
     pub call_results_by_inst: crate::dense::IdMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
@@ -1315,6 +1318,7 @@ pub(crate) fn collect_prepared_function_certificates(
         callsites,
         call_return_address_stores,
         compiler_inserted,
+        dead_frame_stores: crate::dense::IdSet::default(),
         call_results,
         call_results_by_inst,
         call_results_by_callsite,

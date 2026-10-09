@@ -634,3 +634,159 @@ fn machine_return_control_certificate_owns_exact_stack_reload() {
             })
     );
 }
+
+/// A 32-byte frame around `body`, which addresses it through the stack pointer.
+fn framed_artifact(body: impl FnOnce(&mut R2ILBlock, &Varnode)) -> SsaArtifact {
+    let sp = Varnode::register(32, 8);
+    let mut block = R2ILBlock::new(0x7000, 16);
+    block.push(R2ILOp::IntSub {
+        dst: sp.clone(),
+        a: sp.clone(),
+        b: Varnode::constant(32, 8),
+    });
+    body(&mut block, &sp);
+    block.push(R2ILOp::IntAdd {
+        dst: sp.clone(),
+        a: sp,
+        b: Varnode::constant(32, 8),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    for index in 0..block.ops.len() {
+        block.stamp_instruction(index, 0x7000 + index as u64);
+    }
+    let roles =
+        SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+            .and_then(|roles| {
+                roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
+                    SourceStackGrowth::LowerAddresses,
+                ))
+            })
+            .expect("exact downward stack allocation roles");
+    let preserved = [register_storage(16, 8), register_storage(32, 8)];
+    SsaArtifact::for_decompile_with(
+        &[block],
+        crate::DecompileInputs {
+            arch: Some(&return_boundary_arch()),
+            function_interface: Some(preserved_stack_interface()),
+            machine_roles: roles,
+            call_effect: crate::testing::call_effect([], preserved),
+            ..Default::default()
+        },
+    )
+    .expect("framed artifact")
+}
+
+/// `sp + offset + index`, the index masked to 0..16 when `bounded` and unbounded otherwise.
+fn indexed_address(
+    block: &mut R2ILBlock,
+    sp: &Varnode,
+    (offset, bounded): (u64, bool),
+    unique: u64,
+) -> Varnode {
+    let index = Varnode::unique(unique, 8);
+    block.push(R2ILOp::IntAnd {
+        dst: index.clone(),
+        a: Varnode::register(24, 8),
+        b: Varnode::constant(if bounded { 0xf } else { u64::MAX }, 8),
+    });
+    let base = Varnode::unique(unique + 8, 8);
+    block.push(R2ILOp::IntAdd {
+        dst: base.clone(),
+        a: sp.clone(),
+        b: Varnode::constant(offset, 8),
+    });
+    let address = Varnode::unique(unique + 16, 8);
+    block.push(R2ILOp::IntAdd {
+        dst: address.clone(),
+        a: base,
+        b: index,
+    });
+    address
+}
+
+/// A byte store into the frame at `sp + 8 + index`.
+fn indexed_byte_store(block: &mut R2ILBlock, sp: &Varnode, bounded: bool) {
+    let address = indexed_address(block, sp, (8, bounded), 0x100);
+    block.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: address,
+        val: Varnode::register(40, 1),
+    });
+}
+
+/// Whether the byte store is owned by the function, and whether it is certified dead.
+fn store_ownership(artifact: &SsaArtifact) -> (bool, bool) {
+    let store = (artifact.structured().memory_accesses.values())
+        .find(|access| access.is_write && access.width == 1)
+        .expect("the byte store")
+        .id
+        .inst;
+    let certificates = artifact.certificates();
+    let owned = certificates.stack_slots.values().any(|slot| {
+        slot.callee_allocation.as_ref().is_some_and(|allocation| {
+            allocation
+                .accesses
+                .iter()
+                .any(|access| access.inst == store)
+        })
+    });
+    (owned, certificates.dead_frame_stores.contains(store))
+}
+
+#[test]
+fn a_write_only_owned_private_slot_is_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| indexed_byte_store(block, sp, true));
+    assert_eq!(
+        store_ownership(&artifact),
+        (true, true),
+        "{:?}",
+        artifact.certificates().stack_slots
+    );
+}
+
+#[test]
+fn a_slot_whose_address_escapes_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| {
+        indexed_byte_store(block, sp, true);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: sp.clone(),
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+#[test]
+fn a_slot_a_call_may_reach_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| {
+        indexed_byte_store(block, sp, true);
+        block.push(R2ILOp::Call {
+            target: Varnode::ram(0x8000, 8),
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+#[test]
+fn a_store_at_an_unbounded_index_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| indexed_byte_store(block, sp, false));
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+#[test]
+fn a_frame_read_at_an_unbounded_index_keeps_every_store() {
+    let artifact = framed_artifact(|block, sp| {
+        indexed_byte_store(block, sp, true);
+        // Below the store's object: only the missing bound lets it reach the store.
+        let address = indexed_address(block, sp, (0, false), 0x200);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(48, 1),
+            space: SpaceId::Ram,
+            addr: address,
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}

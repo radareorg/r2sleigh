@@ -420,63 +420,6 @@ pub(crate) fn certified_call_return_address_values(
         .collect()
 }
 
-/// Accesses to a callee-owned frame slot only written: unescaped, unreached by calls, and no
-/// index without a bound writes it or reads the frame (doc/adr-frame-model.md, extent rule).
-pub(crate) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
-    let certificates = source.certificates();
-    let reach = &source.objects().frame_reach;
-    let (mut every_object, mut by_calls) = (false, BTreeSet::new());
-    for (_, call) in reach.calls() {
-        match call {
-            r2ssa::CallFrameReach::Whole => every_object = true,
-            r2ssa::CallFrameReach::Objects(objects) => by_calls.extend(objects.iter().copied()),
-        }
-    }
-    if read_past_any_bound(source) {
-        return BTreeSet::new();
-    }
-    let reached_by_a_call = |object| every_object || by_calls.contains(&object);
-    let mut accesses = BTreeSet::new();
-    for slot in certificates.stack_slots.values() {
-        let Some(allocation) = slot.callee_allocation.as_ref() else {
-            continue;
-        };
-        if reach.escaped(allocation.object)
-            || reached_by_a_call(allocation.object)
-            || source.extent_assumption(allocation.object).is_some()
-        {
-            continue;
-        }
-        let Some(owned) = allocation
-            .accesses
-            .iter()
-            .map(|access| certificates.memory_accesses.get(access))
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
-        if owned.is_empty() || owned.iter().any(|access| !access.is_write) {
-            continue;
-        }
-        accesses.extend(owned.iter().map(|access| access.access.inst));
-    }
-    accesses
-}
-
-/// Whether some frame read lands at an index no range bounds, so it may read any slot.
-fn read_past_any_bound(source: &r2ssa::SsaArtifact) -> bool {
-    let read_objects = source
-        .certificates()
-        .memory_accesses
-        .values()
-        .filter(|access| !access.is_write)
-        .map(|access| access.object)
-        .collect::<BTreeSet<_>>();
-    read_objects.into_iter().any(|object| {
-        source.extent_assumption(object) == Some(r2ssa::ExtentAssumption::UnboundedIndex)
-    })
-}
-
 /// Direct-control target values whose complete use domain is CFG topology.
 pub(crate) fn certified_direct_control_target_values(
     source: &r2ssa::SsaArtifact,
@@ -654,11 +597,8 @@ pub(crate) fn certified_elided_read_instructions(
                 })
                 .map(|access| access.inst),
         )
-        // A store into a frame slot the function owns and never reads. The
-        // effect ledger already answers for the store itself with
-        // `DeadFrameSlotStore`, and the statement is not emitted; a value
-        // folded into it goes with it.
-        .chain(certified_dead_frame_slot_accesses(source))
+        // A dead frame store renders no statement; a value folded into it goes with it.
+        .chain(certificates.dead_frame_stores.iter())
         .collect()
 }
 
@@ -672,7 +612,6 @@ pub(crate) fn certified_stack_geometry_values(
 pub(crate) struct Elisions {
     return_control: BTreeSet<InstId>,
     direct_call_targets: BTreeSet<InstId>,
-    dead_frame_slots: BTreeSet<InstId>,
     round_trips: r2ssa::dense::IdSet<InstId>,
 }
 
@@ -689,7 +628,6 @@ impl Elisions {
         Self {
             return_control: certified_return_control_insts(prepared),
             direct_call_targets: certified_direct_call_target_insts(prepared),
-            dead_frame_slots: certified_dead_frame_slot_accesses(prepared),
             round_trips,
         }
     }
@@ -718,7 +656,7 @@ impl Elisions {
             || self.return_control.contains(&inst)
         {
             Some(ElisionReason::ReturnControl)
-        } else if self.dead_frame_slots.contains(&inst) {
+        } else if certificates.dead_frame_stores.contains(inst) {
             // A store into a slot this function owns and nothing reads.
             Some(ElisionReason::DeadFrameSlotStore)
         } else if self.round_trips.contains(inst) {
