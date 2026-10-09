@@ -1791,6 +1791,31 @@ fn unique_call_site_identity(
     matches.next().is_none().then_some(identity)
 }
 
+/// What the code after the call at `identity` reads of the two result registers `callee` leaves
+/// one of, where it writes both (doc/adr-resolved-bodies.md, "Caller reads").
+fn reads_after(
+    blocks: &[R2ILBlock],
+    identity: SourceCallSiteIdentity,
+    callee: &SourceFunctionInterface,
+) -> Option<r2source::SourceResultReads> {
+    let (integer, float) = callee.result_carriers()?;
+    blocks.iter().find_map(|block| {
+        let index = block.ops.iter().enumerate().position(|(index, op)| {
+            matches!(op, R2ILOp::Call { .. })
+                && block
+                    .op_metadata(index)
+                    .and_then(|metadata| metadata.instruction_addr)
+                    == Some(identity.instruction())
+        })?;
+        Some(crate::caller_reads::reads_after_call(
+            block,
+            index,
+            Some(integer),
+            Some(float),
+        ))
+    })
+}
+
 #[derive(Clone)]
 struct CorrelatedCallSites {
     tail_calls: Vec<SourceCallSiteIdentity>,
@@ -1865,6 +1890,7 @@ fn correlate_call_site_interfaces(
                     callee,
                     identity,
                     source.source_revision_identity(),
+                    reads_after(blocks, identity, callee),
                 )
             {
                 // The gettext family is named, not prototyped, so the rule
@@ -2413,6 +2439,7 @@ impl TrustedSsaArtifact {
                         own,
                         identity,
                         source.source_revision_identity(),
+                        reads_after(&blocks, identity, own),
                     )
                 {
                     call_interfaces.push(interface);

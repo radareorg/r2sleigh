@@ -821,7 +821,7 @@ fn resolved_alone(
             imports.record(*owner, facts);
         }
     }
-    let resolved = native.resolve(address, &walked.root, &walked.tables, &imports);
+    let resolved = native.resolve(address, &walked.root, &walked.tables, &imports, false);
     resolved.map_err(|refusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
@@ -1005,7 +1005,7 @@ fn analyse(
         unread,
     } = read_callees(&native, target, &root, entry, ptr_bits);
 
-    let (artifact, _) = native.resolve(entry, &root, &tables, &callees)?;
+    let (artifact, _) = native.resolve(entry, &root, &tables, &callees, true)?;
     let tables = tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1252,12 +1252,15 @@ struct Native<'a> {
 
 impl Native<'_> {
     /// One body prepared, restated and prepared again against `callees`: one function's whole preparation, whoever asks.
+    /// `caller_reads`: whether an ambiguous result is decided by every call in the program, which
+    /// only the function's own rendering asks; a caller decides it at its call (doc/adr-resolved-bodies.md).
     fn resolve(
         &self,
         entry: u64,
         root: &Walked,
         tables: &[NativePointerTable],
         callees: &Callees,
+        caller_reads: bool,
     ) -> Result<Resolution, NativeRefusal> {
         // What the binary's own debug information says this function takes is a
         // declaration, exactly as an import's is, so it is placed in the
@@ -1288,10 +1291,7 @@ impl Native<'_> {
         let mut first = prepare_first(None)?;
         // A body writing both result registers is prepared once more with what the program's calls
         // read of them (doc/adr-resolved-bodies.md, "Caller reads").
-        let reads = first
-            .shared_artifact()
-            .machine_context()
-            .result_ambiguous()
+        let reads = (caller_reads && first.shared_artifact().machine_context().result_ambiguous())
             .then(|| self.program.result_reads(entry))
             .flatten();
         if reads.is_some() {

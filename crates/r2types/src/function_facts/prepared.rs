@@ -154,6 +154,10 @@ pub(crate) fn function_type_matches_source_interface(
     }
     match (interface.return_kind(), &signature.return_type) {
         (r2ssa::SourceFunctionReturn::Void, CTypeLike::Void) => true,
+        // Typed at each call by the carrier its caller reads (`call_result_type`).
+        (r2ssa::SourceFunctionReturn::Unproven, CTypeLike::Unknown) => {
+            interface.result_carriers().is_some()
+        }
         (r2ssa::SourceFunctionReturn::Register { storage }, ty) => {
             let actual_bits = declaration_type_width_bits(ty, ptr_bits).map(u64::from);
             let expected_bits = interface

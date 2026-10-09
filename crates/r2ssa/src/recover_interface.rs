@@ -161,6 +161,8 @@ pub struct RecoveredInterface {
     result_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers on its way out.
     result_ambiguous: bool,
+    /// Those two registers, integer then float, where nothing said which a caller reads.
+    result_carriers: Option<(CanonicalStorageId, CanonicalStorageId)>,
     /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
 }
@@ -1189,6 +1191,7 @@ fn recover_interface_inner(
     let no_tail_boundary = matches!(tail, TailResult::NoTailBoundary);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
     let mut result_ambiguous = false;
+    let mut result_carriers = None;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
@@ -1218,6 +1221,7 @@ fn recover_interface_inner(
                     candidate_live_out = float_live_out;
                 }
                 None => {
+                    result_carriers = Some((candidate, float));
                     result = RecoveredFunctionResult::Unproven;
                     result_ambiguous = true;
                 }
@@ -1369,6 +1373,7 @@ fn recover_interface_inner(
         return_mechanism,
         result_owners,
         result_ambiguous,
+        result_carriers,
         reads_past_parameters,
     })
 }
@@ -1558,6 +1563,10 @@ pub fn mint_recovered_interface(
                 } else {
                     interface
                 }
+            })
+            .map(|interface| match recovered.result_carriers {
+                Some((integer, float)) => interface.with_result_carriers(integer, float),
+                None => interface,
             });
     if minted.is_none() {
         r2il::refusal_evidence!(
@@ -1873,6 +1882,7 @@ pub fn mint_recovered_call_site_interface(
     callee: &SourceFunctionInterface,
     identity: SourceCallSiteIdentity,
     revision_identity: &[u8],
+    caller_reads: Option<r2source::SourceResultReads>,
 ) -> Option<SourceCallSiteInterface> {
     // A stack parameter is named from the callee's entry stack pointer; the
     // call site names the same slot from its own stack pointer before the
@@ -1911,13 +1921,24 @@ pub fn mint_recovered_call_site_interface(
         // A body nobody read owns the arguments beside the result: an import
         // thunk forwards every one and reads none, so what its own body proves
         // is a floor rather than this call's contract.
-        SourceFunctionReturn::Unproven => {
-            r2il::refusal_evidence!(
-                "call-site-minting",
-                "the callee's result is unproven, so its body describes no call contract"
-            );
-            return None;
-        }
+        // A body writing both result registers returns the one this caller reads, where it reads one.
+        SourceFunctionReturn::Unproven => match callee
+            .result_carriers()
+            .and_then(|(integer, float)| Some((integer, carrier_read(caller_reads, float)?)))
+        {
+            Some((storage, CarrierRead::Integer)) | Some((_, CarrierRead::Float(storage))) => {
+                SourceCallResult::Register { storage }
+            }
+            None => {
+                r2il::refusal_evidence!(
+                    "call-site-minting",
+                    "the callee's result is unproven ({:?}, read {:?}), so its body describes no call contract",
+                    callee.result_carriers(),
+                    caller_reads
+                );
+                return None;
+            }
+        },
     };
     let interface = SourceCallSiteInterface::new(
         revision_identity.to_vec(),
@@ -2278,6 +2299,7 @@ mod tests {
                 },
             ),
             b"narrow-return-revision",
+            None,
         )
         .expect("callsite with recovered callee interface");
         assert_eq!(callsite.exact_callee_interface(), Some(&interface));
@@ -2461,7 +2483,8 @@ mod tests {
         assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
         // Nothing this body proves describes a call to it, arguments included.
         assert!(
-            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision").is_none(),
+            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision", None)
+                .is_none(),
             "an unproven result cannot be a call site's exact contract"
         );
 

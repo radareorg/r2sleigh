@@ -767,6 +767,27 @@ pub struct SourceOwnedCalleeSignature {
     signature: crate::FunctionType,
 }
 
+/// The type a call returns where its callee's result is one of two carriers: the float register's
+/// lane is a float of its width, the integer register a word (doc/adr-resolved-bodies.md).
+fn call_result_type(
+    callee: &r2ssa::SourceFunctionInterface,
+    result: r2ssa::SourceCallResult,
+) -> Option<CTypeLike> {
+    let (integer, float) = callee.result_carriers()?;
+    let r2ssa::SourceCallResult::Register { storage } = result else {
+        return None;
+    };
+    let bits = storage.size.checked_mul(8)?;
+    if storage == integer {
+        return Some(CTypeLike::Int {
+            bits,
+            signedness: crate::Signedness::Unsigned,
+        });
+    }
+    (storage.space == float.space && storage.offset == float.offset && matches!(bits, 32 | 64))
+        .then_some(CTypeLike::Float(bits))
+}
+
 impl SourceOwnedCalleeSignature {
     /// Derive a callee's C signature certificate from the body that owns it.
     ///
@@ -1369,8 +1390,21 @@ impl FunctionFacts {
                 .call_site_interface(arguments.call_site_id)
                 .and_then(r2ssa::SourceCallSiteInterface::exact_callee_interface)
                 .is_some_and(|interface| interface == &signature.interface);
-            if same_interface && signature.address() == target {
+            let site_result = source
+                .call_site_interface(arguments.call_site_id)
+                .map(r2ssa::SourceCallSiteInterface::result);
+            let return_type = match signature.signature.return_type {
+                CTypeLike::Unknown => {
+                    site_result.and_then(|result| call_result_type(&signature.interface, result))
+                }
+                ref declared => Some(declared.clone()),
+            };
+            if same_interface
+                && signature.address() == target
+                && let Some(return_type) = return_type
+            {
                 let mut logical_signature = signature.signature.clone();
+                logical_signature.return_type = return_type;
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
                 arguments.callee_signature_types = Some(signature.interface.types().clone());
@@ -1401,7 +1435,10 @@ impl FunctionFacts {
         // to agree about an interface before the target's own body says what
         // its prototype is.
         for (_, target) in source.machine_context().code_pointer_entries() {
-            let Some(signature) = signatures.get(&target) else {
+            let Some(signature) = signatures
+                .get(&target)
+                .filter(|signature| signature.signature.return_type != CTypeLike::Unknown)
+            else {
                 continue;
             };
             let name = self.display_names.functions().get(&target).cloned();

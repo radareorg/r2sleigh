@@ -779,6 +779,9 @@ pub struct SourceFunctionInterface {
     body_proven_return_address: bool,
     /// Whether the body reads an argument slot past its parameters, so its arity is unproven.
     reads_past_parameters: bool,
+    /// The integer and float result registers, where the body writes both on its way out and so
+    /// proves neither its result: each call takes the one its caller reads.
+    result_carriers: Option<(CanonicalStorageId, CanonicalStorageId)>,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1234,6 +1237,7 @@ impl SourceFunctionInterface {
             variadic: false,
             body_proven_return_address: false,
             reads_past_parameters: false,
+            result_carriers: None,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1285,6 +1289,7 @@ impl SourceFunctionInterface {
             variadic: self.variadic,
             body_proven_return_address: self.body_proven_return_address,
             reads_past_parameters: self.reads_past_parameters,
+            result_carriers: self.result_carriers,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1443,6 +1448,23 @@ impl SourceFunctionInterface {
     /// parameter count as the call's arity.
     pub const fn reads_past_parameters(&self) -> bool {
         self.reads_past_parameters
+    }
+
+    /// Record that the body writes both result registers, `integer` and `float`, on its way out.
+    #[must_use]
+    pub const fn with_result_carriers(
+        mut self,
+        integer: CanonicalStorageId,
+        float: CanonicalStorageId,
+    ) -> Self {
+        self.result_carriers = Some((integer, float));
+        self
+    }
+
+    /// The integer and float result registers an unproven result is one of, where the body writes
+    /// both (doc/adr-resolved-bodies.md, "Caller reads").
+    pub const fn result_carriers(&self) -> Option<(CanonicalStorageId, CanonicalStorageId)> {
+        self.result_carriers
     }
 
     /// Whether the declaration says arguments continue past the fixed ones.
@@ -2173,11 +2195,25 @@ impl SourceCallSiteInterface {
         mut self,
         callee: SourceFunctionInterface,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
-        let expected_result = match callee.return_kind() {
-            SourceFunctionReturn::Void => SourceCallResult::Void,
-            SourceFunctionReturn::Register { storage } => SourceCallResult::Register { storage },
+        let expected_result = match (callee.return_kind(), callee.result_carriers(), self.result) {
+            (SourceFunctionReturn::Void, ..) => SourceCallResult::Void,
+            (SourceFunctionReturn::Register { storage }, ..) => {
+                SourceCallResult::Register { storage }
+            }
+            // One of two carriers: the integer register, or a lane at the float one's low end.
+            (
+                SourceFunctionReturn::Unproven,
+                Some((integer, float)),
+                SourceCallResult::Register { storage },
+            ) if storage == integer
+                || (storage.space == float.space
+                    && storage.offset == float.offset
+                    && storage.size <= float.size) =>
+            {
+                SourceCallResult::Register { storage }
+            }
             // An unproven result is no claim, so no exact contract holds it.
-            SourceFunctionReturn::Unproven => {
+            (SourceFunctionReturn::Unproven, ..) => {
                 return Err(SourceCallSiteInterfaceError::IncompatibleCalleeInterface);
             }
         };

@@ -99,6 +99,18 @@ pub struct SourceResultReads {
     pub float_bytes: u32,
 }
 
+impl SourceResultReads {
+    /// These calls' reads and `other`'s together.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            integer: self.integer.saturating_add(other.integer),
+            float: self.float.saturating_add(other.float),
+            float_bytes: self.float_bytes.max(other.float_bytes),
+        }
+    }
+}
+
 /// A function the loader itself calls, recorded from the binary's dynamic
 /// entries (`DT_INIT`, `DT_FINI`) rather than from any prototype.
 ///

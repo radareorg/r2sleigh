@@ -64,25 +64,27 @@ loop test leaves RAX written) does not say which is its result. r2ssa's
 recovery makes it unproven and says why (`result_ambiguous`), where it
 returned RAX before and miscompiled `avg`.
 
-r2engine then reads the program's calls to it: the walked bodies whose trace
-calls it (`Survey`, inverted once, O(call edges)), each lifted without
-preparation, so no answer waits on the function it is about. After each call,
-the first touch of each result register up to the next transfer is a read (the
-caller takes what the call left there), a write, or nothing. Every reading call
-agreeing on one register decides it, at the widest read's width for a float;
-none, or calls that disagree, leave it unproven. The function is prepared once
-more with that evidence (`SourceResultReads`), only where the first preparation
-was ambiguous.
+Each call decides it for itself. The callee's interface keeps its exact
+parameters and names the two registers (`result_carriers`); r2ssa reads the
+caller's own lifted code after the call (`caller_reads::reads_after_call`):
+the first touch of each result register up to the next transfer is a read
+(the caller takes what the call left there), a write, or nothing. One register
+read decides the call's result, a float at the read's width; r2types types it
+there (`call_result_type`). Both or neither leave the call without a contract.
+The cost is one scan of the call's block, O(ops after the call).
+
+The function's own rendering asks every call in the program: the walked
+bodies whose trace calls it (`Survey`, inverted once, O(call edges)), each
+lifted without preparation. Every reading call agreeing on one register
+decides it; none, or calls that disagree, leave it unproven. Only the
+rendered root is prepared again with that evidence (`SourceResultReads`):
+a callee read for its caller never asks, so a `pdd` pays whole-program
+discovery only for a function whose own body is ambiguous.
 
 The evidence is as strong as the body's own writes: a compiler reads a
 clobbered register after a call only as the callee's result. A caller that
 hands the value straight back without reading it (`return f();`) is no
 evidence, and a void function whose callers read nothing stays unproven.
-Follow-up: a function left unproven this way mints no call contract, so its
-calls take their arguments from what each caller wrote (the statement below)
-where its own parameters are exact. A contract whose parameters are exact and
-whose result is one of two carriers, each call resolving it by what its caller
-reads, would keep them.
 
 ### Budget
 

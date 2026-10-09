@@ -168,3 +168,50 @@ fn an_aarch64_float_merged_in_its_vector_register_returns_its_lane() {
         "{text}"
     );
 }
+
+/// `f` as above, `caller_a`: `call f; mov [rsi], eax; ret`, `caller_b`: `call f; movsd [rsi], xmm0; ret`.
+const READ_TWO_WAYS: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1004 mov eax, 7
+    0xc3, // 1009 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 100a padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x89, 0x06, // 1015 mov [rsi], eax
+    0xc3, // 1017 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1025 movsd [rsi], xmm0
+    0xc3, // 1029 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 102a padding
+];
+
+/// The program's calls disagree, so `f` itself proves no result; each call still takes the register
+/// its own caller reads, decided from that caller's code alone.
+#[test]
+fn each_call_takes_the_register_its_caller_reads() {
+    let program = || {
+        Literal::of_code(
+            READ_TWO_WAYS,
+            &[
+                ("f", BASE, 0x0a),
+                ("caller_a", BASE + 0x10, 0x08),
+                ("caller_b", BASE + 0x20, 0x0a),
+            ],
+        )
+    };
+    for tier in [RenderTier::C, RenderTier::Staged] {
+        let render = |at| {
+            OpenProgram::of(program())
+                .rendered(at, tier)
+                .expect("it renders")
+                .response
+                .output
+                .into_text()
+        };
+        let (a, b, f) = (render(BASE + 0x10), render(BASE + 0x20), render(BASE));
+        assert!(a.contains("uint64_t f(void);"), "{tier:?}: {a}");
+        assert!(b.contains("double f(void);"), "{tier:?}: {b}");
+        assert!(f.contains("return r2sleigh_residual_u64("), "{tier:?}: {f}");
+    }
+}
