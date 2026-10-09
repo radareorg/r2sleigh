@@ -1657,7 +1657,9 @@ const ENTRY_AND_ARGUMENT: &[u8] = &[
 #[test]
 fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
     let text = rendered(ENTRY_AND_ARGUMENT, "entry_and_argument");
-    let proof = text
+    // Each value is named as its register's entry version, in either pipeline's case.
+    let lower = text.to_ascii_lowercase();
+    let proof = lower
         .lines()
         .find(|line| line.contains("r2dec proof:"))
         .unwrap_or_else(|| panic!("no proof line: {text}"));
@@ -1665,18 +1667,18 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
     // what held from entry means, and only that. C has no spelling for such a
     // value, so the read is a residual rather than an indeterminate object.
     assert!(
-        proof.contains("; 1 held from entry, read as residuals (RBX_0)"),
+        proof.contains("; 1 held from entry, read as residuals (rbx_0)"),
         "{text}"
     );
     // rsi is an argument slot with no parameter, so the rendering reads a value
     // its own signature says it was never given. It is not excused as held.
     assert!(
-        proof.contains("; 1 argument slot read with no parameter, read as residuals (RSI_0)"),
+        proof.contains("; 1 argument slot read with no parameter, read as residuals (rsi_0)"),
         "{text}"
     );
     // Neither is declared as an object nothing assigns: each read traps.
-    assert!(!text.contains("uint64_t RSI_0;"), "{text}");
-    assert!(!text.contains("uint64_t RBX_0;"), "{text}");
+    assert!(!lower.contains("uint64_t rsi_0;"), "{text}");
+    assert!(!lower.contains("uint64_t rbx_0;"), "{text}");
     assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 2, "{text}");
 
     // The first stack argument is an argument slot too: above the return

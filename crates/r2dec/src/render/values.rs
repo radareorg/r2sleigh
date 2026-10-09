@@ -53,6 +53,8 @@ pub(super) struct Values<'a> {
     residual: RefCell<Vec<bool>>,
     /// The values read as residuals because C has no value for them, which the proof line names.
     unassigned: RefCell<Vec<crate::UnassignedRead>>,
+    /// Those the text being spelled reads, kept only once a statement or test holding them is.
+    pending_reads: RefCell<Vec<crate::UnassignedRead>>,
     /// The switch dispatch operations r2ssa's certificates own.
     dispatch: r2ssa::dense::IdSet<InstId>,
     elisions: crate::certified::Elisions,
@@ -769,6 +771,7 @@ impl<'a> Values<'a> {
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
             unassigned: RefCell::new(Vec::new()),
+            pending_reads: RefCell::new(Vec::new()),
             dispatch,
             elisions,
             calls: planned,
@@ -915,7 +918,7 @@ impl<'a> Values<'a> {
     fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
         let bound = |value: ValueId, ty: &MachineType| match self.names.get(value.0 as usize)? {
             Some((name, held)) => terms::reclass(self.read_name(value, *name, held)?, held, ty),
-            None if self.graph.def_inst(value).is_none() => self.held_from_entry(value, ty),
+            None if self.graph.def_inst(value).is_none() => self.entry_read(value, ty),
             None => None,
         };
         let object = |object: ObjectId| self.object(object);
@@ -966,7 +969,7 @@ impl<'a> Values<'a> {
             None => match self.names.get(value.0 as usize)?.as_ref() {
                 Some((name, held)) => self.read_name(value, *name, held),
                 None if self.graph.def_inst(value).is_none() => {
-                    self.held_from_entry(value, &self.value_type(value)?)
+                    self.entry_read(value, &self.value_type(value)?)
                 }
                 None => None,
             },
@@ -1019,18 +1022,37 @@ impl<'a> Values<'a> {
             .then(|| (**inner).clone())
     }
 
-    /// What a register held at entry that no parameter admits reads as: C cannot read it.
-    fn held_from_entry(&self, value: ValueId, ty: &MachineType) -> Option<CExpr> {
-        let read = crate::prelude::residual(
-            &terms::c_type(ty)?,
-            crate::prelude::ResidualCause::HeldFromEntry,
-        )?;
-        self.unassigned_read(value, crate::UnassignedCause::Held, ty);
+    /// What a register held at entry that no parameter admits reads as, which C cannot read: an
+    /// argument slot the interface did not admit (the convention's slots, as legacy's
+    /// `unspecified_reads` asks), else a value held from entry.
+    fn entry_read(&self, value: ValueId, ty: &MachineType) -> Option<CExpr> {
+        let storage = (self.graph.formal_projection_storage(value)).or(self
+            .graph
+            .values
+            .get(value.0 as usize)?
+            .canonical_storage);
+        let slots = self.artifact.machine_context().convention_slots();
+        let argument = storage.zip(slots).is_some_and(|(storage, slots)| {
+            (slots.argument_slots().iter())
+                .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+        });
+        let (cause, residual) = match argument {
+            true => (
+                crate::UnassignedCause::UnadmittedArgument,
+                crate::prelude::ResidualCause::UnadmittedArgument,
+            ),
+            false => (
+                crate::UnassignedCause::Held,
+                crate::prelude::ResidualCause::HeldFromEntry,
+            ),
+        };
+        let read = crate::prelude::residual(&terms::c_type(ty)?, residual)?;
+        self.unassigned_read(value, cause, ty);
         Some(read)
     }
 
-    /// Record a read the proof line names; the name is declared, as the value it names, so the
-    /// line keeps it, and no statement spells it.
+    /// Record a read the proof line names once its text is kept; the name is declared, as the value
+    /// it names, so the line keeps it, and no statement spells it.
     fn unassigned_read(&self, value: ValueId, cause: crate::UnassignedCause, ty: &MachineType) {
         let name = self.graph.var(value).display_name();
         if let (Ok(mut symbols), Some(c)) = (self.symbols.try_borrow_mut(), terms::c_type(ty))
@@ -1038,9 +1060,30 @@ impl<'a> Values<'a> {
         {
             symbols.declare(name.clone(), c, SymbolRole::Carrier);
         }
-        self.unassigned
-            .borrow_mut()
-            .push(crate::UnassignedRead { cause, name });
+        (self.pending_reads.borrow_mut()).push(crate::UnassignedRead { cause, name });
+    }
+
+    /// `value` as `reader` reads it, with the residual reads its spelling makes, kept apart.
+    fn operand_alone(
+        &self,
+        value: ValueId,
+        reader: InstId,
+    ) -> Option<(CExpr, Vec<crate::UnassignedRead>)> {
+        self.attempt();
+        let spelled = self.operand(value, reader);
+        let reads = std::mem::take(&mut *self.pending_reads.borrow_mut());
+        Some((spelled?, reads))
+    }
+
+    /// Start spelling a statement or a test: reads an abandoned attempt made are not read.
+    fn attempt(&self) {
+        self.pending_reads.borrow_mut().clear();
+    }
+
+    /// Keep the reads of the text just spelled.
+    fn keep_reads(&self) {
+        let pending = std::mem::take(&mut *self.pending_reads.borrow_mut());
+        self.unassigned.borrow_mut().extend(pending);
     }
 
     /// The values read as residuals for want of a value, each once, by cause and name.
@@ -1066,6 +1109,7 @@ impl<'a> Values<'a> {
             let InstPayload::Op(op) = &inst.payload else {
                 continue;
             };
+            self.attempt();
             let state = self
                 .inventory
                 .instruction_for_inst(inst.id)
@@ -1404,6 +1448,7 @@ impl<'a> Values<'a> {
         ty: &CType,
         decided: Option<&CType>,
     ) -> Option<Vec<CStmt>> {
+        self.attempt();
         let (inst, _) = self.terminator(addr)?;
         let plan = self.calls.get(inst)?;
         let tail = plan.tail.as_ref()?;
@@ -1613,7 +1658,10 @@ impl<'a> Values<'a> {
         let SSAOp::CBranch { cond, .. } = op else {
             return None;
         };
-        self.operand(*cond, inst)
+        self.attempt();
+        let test = self.operand(*cond, inst);
+        self.keep_reads();
+        test
     }
 
     /// The selector a switch ending `addr` reads.
@@ -1625,11 +1673,15 @@ impl<'a> Values<'a> {
             SSAOp::BranchInd { .. } => self.artifact.certificates().switches.get(&addr)?.selector?,
             _ => return None,
         };
-        self.operand(selector, inst)
+        self.attempt();
+        let selector = self.operand(selector, inst);
+        self.keep_reads();
+        selector
     }
 
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.
     pub(super) fn returned(&self, addr: u64, ty: Option<&CType>) -> Option<Option<CExpr>> {
+        self.attempt();
         let (inst, op) = self.terminator(addr)?;
         if !matches!(op, SSAOp::Return { .. }) {
             return None;
@@ -1691,6 +1743,7 @@ impl<'a> Values<'a> {
 
     /// Whether `stmt`, written for `inst`, evaluates a residual, which makes `inst`'s obligations residual.
     pub(super) fn residual_in(&self, inst: InstId, stmt: &CStmt) {
+        self.keep_reads();
         let mut held = false;
         stmt.visit_exprs(&mut |expr| held |= crate::prelude::holds_residual(expr));
         if held && let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
@@ -1773,7 +1826,8 @@ impl<'a> Values<'a> {
                 Some(term) => term_reads(&self.projection, self.roots.arena(), term),
                 None => vec![input],
             };
-            copies.push((inst.id, output, self.operand(input, inst.id), reads));
+            let source = self.operand_alone(input, inst.id);
+            copies.push((inst.id, output, source, reads));
         }
         let mut out = Vec::new();
         let writes = copies
@@ -1788,18 +1842,14 @@ impl<'a> Values<'a> {
         });
         let mut staged = Vec::new();
         for (inst, output, source, _) in copies {
-            let (Some(source), Some((name, ty))) = (source, self.names[output.0 as usize].as_ref())
+            let (Some((source, entry_reads)), Some((name, ty))) =
+                (source, self.names[output.0 as usize].as_ref())
             else {
-                out.push(CStmt::Gap(GapMarker {
-                    kind: "ValuesNotRendered".to_owned(),
-                    origin: "render::values".to_owned(),
-                    block_addr: to,
-                    op_idx: 0,
-                    ops: 0,
-                }));
+                out.push(unrendered_copy(to));
                 continue;
             };
             self.mark(inst);
+            *self.pending_reads.borrow_mut() = entry_reads;
             self.residual_in(inst, &CStmt::Expr(source.clone()));
             self.assigns(output);
             match clobbers {
@@ -2082,6 +2132,17 @@ fn returned_call(spelled: CExpr, ty: &CType) -> Result<CExpr, CExpr> {
 
 fn integer(ty: &CType) -> bool {
     matches!(ty.unaliased(), CType::Int { .. })
+}
+
+/// A merge copy into `to` the values could not spell: a gap on the edge.
+fn unrendered_copy(to: u64) -> CStmt {
+    CStmt::Gap(GapMarker {
+        kind: "ValuesNotRendered".to_owned(),
+        origin: "render::values".to_owned(),
+        block_addr: to,
+        op_idx: 0,
+        ops: 0,
+    })
 }
 
 fn returned_values(inventory: &SemanticObligationInventory, inst: InstId) -> Vec<ValueId> {
