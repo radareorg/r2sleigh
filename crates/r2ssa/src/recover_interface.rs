@@ -1317,18 +1317,19 @@ fn recover_interface_inner(
     };
     let parameters = in_order(slots.argument_slots());
     let integers = parameters.len();
-    let reads_past_parameters = slots.argument_slots()[integers..].iter().any(|slot| {
-        reads
-            .iter()
-            .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-    }) || entry_reaches_unproven_call(
-        func,
-        prep,
-        graph,
-        &facts,
-        machine_context,
-        slots.argument_slots().get(integers),
-    );
+    let reads_past_parameters =
+        slots.argument_slots()[integers..].iter().any(|slot| {
+            reads
+                .iter()
+                .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
+        }) || entry_reaches_unproven_call(
+            func,
+            prep,
+            graph,
+            &facts,
+            machine_context,
+            slots.argument_slots().get(integers),
+        ) || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}",
@@ -1426,6 +1427,55 @@ fn entry_reaches_unproven_call(
                 crate::semantic::ReachingAbiState::Value(value) => !graph.written_by_body(value),
             })
         })
+}
+
+/// Whether the body reads `next`, the first slot past the parameters, at entry and makes a call of
+/// unproven arity: the read may be what that call is handed (gcc -O2's `mov rbp, rsi` kept for
+/// an indirect call), which no obligation observes.
+fn read_for_an_unproven_call(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    next: Option<&CanonicalStorageId>,
+) -> bool {
+    let Some(slot) = next else {
+        return false;
+    };
+    facts
+        .boundaries
+        .calls
+        .values()
+        .any(|boundary| !boundary.arguments_complete)
+        && graph.values.iter().any(|value| {
+            graph.caller_supplied(value.id)
+                && value.canonical_storage.is_some_and(|storage| {
+                    storage.space == slot.space
+                        && storage.offset < slot.offset + u64::from(slot.size)
+                        && slot.offset < storage.offset + u64::from(storage.size)
+                })
+                && read_beyond_merges(graph, value.id)
+        })
+}
+
+/// Whether an operation reads `value`, directly or through the merges it flows into: a merge alone
+/// reads nothing. Each value is taken once, so the walk ends.
+fn read_beyond_merges(graph: &SsaGraph, value: crate::ValueId) -> bool {
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        for site in graph.use_sites(value) {
+            match graph.inst(site.inst) {
+                Some(inst) if matches!(inst.payload, crate::graph::InstPayload::Phi { .. }) => {
+                    pending.extend(inst.output);
+                }
+                Some(_) => return true,
+                None => {}
+            }
+        }
+    }
+    false
 }
 
 /// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.
