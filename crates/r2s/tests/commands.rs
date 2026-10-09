@@ -445,6 +445,25 @@ fn a_staged_call_passes_its_stack_arguments() {
     assert!(!staged.out.contains("CallNotRendered"), "{}", staged.out);
 }
 
+/// `sext` takes `int8_t` in DIL and rebuilds RDI from it: the bytes above are what RDI held at
+/// entry, which no parameter admits, so they read as a residual where the statement was a gap.
+#[test]
+fn a_staged_register_held_from_entry_reads_as_a_residual() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("rv_O0g"),
+        "e dec.pipeline=staged; pdd @ sym.sext",
+    );
+    assert!(
+        staged
+            .out
+            .contains("r2sleigh_residual_u64(1) & (uint64_t)-0x100)"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("TermNotSpelled"), "{}", staged.out);
+}
+
 /// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
 /// range C leaves it undefined, so that arm is a residual.
 #[test]

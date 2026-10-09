@@ -813,9 +813,14 @@ impl<'a> Values<'a> {
     }
 
     fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
-        let bound = |value: ValueId, ty: &MachineType| {
-            let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
-            terms::reclass(CExpr::var(*name), held, ty)
+        let bound = |value: ValueId, ty: &MachineType| match self.names.get(value.0 as usize)? {
+            Some((name, held)) => terms::reclass(CExpr::var(*name), held, ty),
+            // What a register held at entry that no parameter admits: C cannot read it.
+            None if self.graph.def_inst(value).is_none() => crate::prelude::residual(
+                &terms::c_type(ty)?,
+                crate::prelude::ResidualCause::HeldFromEntry,
+            ),
+            None => None,
         };
         let object = |object: ObjectId| self.object(object);
         read(&Spell {
