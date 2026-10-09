@@ -3510,6 +3510,12 @@ fn a_clear_direction_flag_survives_a_call() {
             [ResidualCause::HeldFromEntry; 3],
             "{convention}\n{text}"
         );
+        // The interface proves no result, so the return's residual says so, not that it is a gap.
+        assert_eq!(
+            causes[3],
+            ResidualCause::UnprovenReturn,
+            "{convention}\n{text}"
+        );
         for held in ["to", "from", "count"] {
             assert!(
                 text.contains(&format!(
