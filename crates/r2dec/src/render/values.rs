@@ -1593,6 +1593,12 @@ impl<'a> Values<'a> {
         }
     }
 
+    /// The address of the instruction that ends the block at `addr`.
+    pub(super) fn terminator_address(&self, addr: u64) -> Option<u64> {
+        let (inst, _) = self.terminator(addr)?;
+        self.graph.instruction_for_inst(inst)
+    }
+
     /// Whether `stmt`, written for `inst`, evaluates a residual, which makes `inst`'s obligations residual.
     pub(super) fn residual_in(&self, inst: InstId, stmt: &CStmt) {
         let mut held = false;
