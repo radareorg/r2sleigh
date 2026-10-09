@@ -211,7 +211,8 @@ workspace suite, equivalence on x86-64 and aarch64, the census (each moved
 line read and judged), certification, release `pdd` timing on the large
 0pack and pumasim functions, and `scripts/structure-report.sh`, whose counts
 are then blessed for the item. Equivalence, certification, tests, proofs and
-Dylints are never suspended.
+Dylints are never suspended, except on `rebuild` (ROADMAP D27), where
+equivalence, certification and the census report until it merges.
 
 The exit bar, for any item touching `r2ssa`, `r2source`, `r2rewrite`,
 `r2types`, `r2engine`, `r2dec` or `r2s`:
