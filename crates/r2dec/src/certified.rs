@@ -430,17 +430,27 @@ pub(crate) fn certified_call_return_address_values(
 /// accesses is a write, nothing here or anywhere else can read what was stored,
 /// and the store has no meaning the C has to carry.
 ///
-/// This is what left `stack_m48` and its neighbours declared, assigned and
-/// unused in `murmur3_32` and `xxhash32` at -O0: the slots an argument is
-/// spilled into and then read back out of through the object rather than the
-/// slot.
+/// Ownership is not privacy: an object whose address escapes, or that a call's
+/// argument area reaches, is read outside the body (`r2ssa::FrameReach`).
 pub(crate) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
     let certificates = source.certificates();
+    let reach = &source.objects().frame_reach;
+    let (mut every_object, mut by_calls) = (false, BTreeSet::new());
+    for (_, call) in reach.calls() {
+        match call {
+            r2ssa::CallFrameReach::Whole => every_object = true,
+            r2ssa::CallFrameReach::Objects(objects) => by_calls.extend(objects.iter().copied()),
+        }
+    }
+    let reached_by_a_call = |object| every_object || by_calls.contains(&object);
     let mut accesses = BTreeSet::new();
     for slot in certificates.stack_slots.values() {
         let Some(allocation) = slot.callee_allocation.as_ref() else {
             continue;
         };
+        if reach.escaped(allocation.object) || reached_by_a_call(allocation.object) {
+            continue;
+        }
         let Some(owned) = allocation
             .accesses
             .iter()
