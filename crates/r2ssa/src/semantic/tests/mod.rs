@@ -2374,8 +2374,9 @@ fn indexed_stack_array_geometry_is_certified_or_refused_at_its_owner() {
     );
 }
 
-/// Two byte stores into one stack object: one at a masked index, one at an index no range bounds.
-fn bounded_and_unbounded_stack_artifact() -> SsaArtifact {
+/// Two byte stores into one stack object: one at a masked index, one at an index no range bounds;
+/// with `read_inside`, then a byte read at a constant place the masked index covers.
+fn bounded_and_unbounded_stack_artifact(read_inside: bool) -> SsaArtifact {
     let sp = Varnode::register(32, 8);
     let bounded = Varnode::unique(0x7300, 8);
     let bounded_address = Varnode::unique(0x7308, 8);
@@ -2403,7 +2404,7 @@ fn bounded_and_unbounded_stack_artifact() -> SsaArtifact {
     });
     block.push(R2ILOp::IntAdd {
         dst: unbounded_address.clone(),
-        a: sp,
+        a: sp.clone(),
         b: Varnode::register(24, 8),
     });
     block.push(R2ILOp::Store {
@@ -2411,6 +2412,19 @@ fn bounded_and_unbounded_stack_artifact() -> SsaArtifact {
         addr: unbounded_address,
         val: Varnode::constant(9, 1),
     });
+    if read_inside {
+        let inside = Varnode::unique(0x7318, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: inside.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(3, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(0, 1),
+            space: SpaceId::Ram,
+            addr: inside,
+        });
+    }
     block.push(R2ILOp::Return {
         target: Varnode::register(16, 8),
     });
@@ -2434,7 +2448,7 @@ fn bounded_and_unbounded_stack_artifact() -> SsaArtifact {
 
 #[test]
 fn one_unbounded_index_refuses_the_layout_a_bounded_index_would_prove() {
-    let artifact = bounded_and_unbounded_stack_artifact();
+    let artifact = bounded_and_unbounded_stack_artifact(false);
     let indexed = artifact
         .facts()
         .structured
@@ -2456,6 +2470,34 @@ fn one_unbounded_index_refuses_the_layout_a_bounded_index_would_prove() {
         artifact.extent_assumption(indexed[0]),
         Some(crate::ExtentAssumption::UnboundedIndex)
     );
+}
+
+/// The masked index's span holds the read, so the object has a reach; the unbounded store may
+/// pass it, so the extent is still assumed and the read's obligation relies on it.
+#[test]
+fn a_reach_beside_an_unbounded_index_leaves_the_extent_assumed() {
+    let artifact = bounded_and_unbounded_stack_artifact(true);
+    let objects = artifact
+        .facts()
+        .structured
+        .memory_accesses
+        .values()
+        .map(|access| access.object)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(objects.len(), 1, "the read is a place in the buffer");
+    let object = *objects.first().expect("one object");
+    assert!(artifact.objects().callee_write_reach.contains_key(&object));
+    assert_eq!(
+        artifact.extent_assumption(object),
+        Some(crate::ExtentAssumption::UnboundedIndex)
+    );
+    let assumed = artifact
+        .obligations()
+        .obligations()
+        .keys()
+        .filter(|id| artifact.obligation_extent_assumption(**id).is_some())
+        .count();
+    assert_eq!(assumed, 3, "two stores and the read");
 }
 
 #[test]

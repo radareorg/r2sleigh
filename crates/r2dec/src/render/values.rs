@@ -1906,7 +1906,12 @@ impl<'a> Values<'a> {
                 }
                 (_, Some(reason)) => Outcome::Elided(reason),
                 _ if index.is_some_and(|i| rendered[i] && residual[i]) => Outcome::Gapped,
-                _ if index.is_some_and(|i| rendered[i]) => Outcome::Rendered,
+                _ if index.is_some_and(|i| rendered[i]) => {
+                    match self.artifact.obligation_extent_assumption(obligation.id) {
+                        Some(_) => Outcome::Assumed,
+                        None => Outcome::Rendered,
+                    }
+                }
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)
                 }
