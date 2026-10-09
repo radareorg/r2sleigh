@@ -413,6 +413,19 @@ fn a_staged_indirect_call_goes_through_its_target_value() {
     );
 }
 
+/// siphash24's tail switch dispatches through a table on `len & 7`, a value only the elided
+/// dispatch reads: the `switch` still reads it, so it is computed, never a residual.
+#[test]
+fn a_staged_table_switch_reads_its_selector() {
+    let staged = r2s("e dec.pipeline=staged; pdd @ 0x4018b0");
+    assert!(staged.out.contains("& (uint32_t)7U);"), "{}", staged.out);
+    assert!(
+        !staged.out.contains("switch (r2sleigh_residual"),
+        "{}",
+        staged.out
+    );
+}
+
 /// A tail call returns what its callee leaves in the function's own result register: RAX for
 /// `frame_dummy`, XMM0 for `swap_call`, whose arguments it swaps first.
 #[test]

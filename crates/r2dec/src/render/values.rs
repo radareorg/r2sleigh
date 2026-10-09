@@ -256,6 +256,9 @@ impl Demand<'_> {
             if live(inst.id) {
                 self.statement(input, planned, inst, op);
                 self.drain();
+            } else if let Some(selector) = self.selector(artifact, inst, op) {
+                self.operand(selector, inst.id);
+                self.drain();
             }
         }
         for inst in self.graph.insts.iter().rev() {
@@ -280,6 +283,20 @@ impl Demand<'_> {
             }
         }
         self.bound
+    }
+
+    /// A table dispatch's selector, which the `switch` reads though the dispatch itself is elided.
+    fn selector(
+        &self,
+        artifact: &SsaArtifact,
+        inst: &r2ssa::GraphInst,
+        op: &SSAOp<ValueId>,
+    ) -> Option<ValueId> {
+        matches!(op, SSAOp::BranchInd { .. })
+            .then(|| self.graph.block(inst.block))
+            .flatten()
+            .and_then(|block| artifact.certificates().switches.get(&block.addr))
+            .and_then(|switch| switch.selector)
     }
 
     /// What one live instruction's statement reads.
@@ -318,10 +335,7 @@ impl Demand<'_> {
                 }
             }
             SSAOp::BranchInd { .. } => {
-                let selector = (self.graph.block(inst.block))
-                    .and_then(|block| artifact.certificates().switches.get(&block.addr))
-                    .and_then(|switch| switch.selector);
-                if let Some(selector) = selector {
+                if let Some(selector) = self.selector(artifact, inst, op) {
                     self.operand(selector, inst.id);
                 }
             }
