@@ -684,7 +684,7 @@ mod tests {
         };
         let binary = CType::Function {
             ret: Box::new(int32.clone()),
-            params: vec![int32.clone(), int32.clone()].into_boxed_slice(),
+            params: vec![int32.clone(), int32].into_boxed_slice(),
         };
         let signature = r2types::FunctionType {
             return_type: CType::Void,
