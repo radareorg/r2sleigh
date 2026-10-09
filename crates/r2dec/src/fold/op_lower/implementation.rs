@@ -1154,10 +1154,23 @@ impl<'a> FoldingContext<'a> {
                         // the exact source-owned return type conversion
                         // explicit instead of relying on an implicit
                         // narrowing or signedness change.
-                        let expr = match (
-                            self.value_declaration_type(certified.value),
-                            self.inputs.function_return_type,
-                        ) {
+                        // A wide carrier certified at a narrower width returns its low field: AArch64's
+                        // lift writes d0 as the whole Z register (returns.rs, the low-lane projection).
+                        let (expr, declared) = match self.value_declaration_type(certified.value) {
+                            Some(CType::BitVector(bits)) if certified.width * 8 < bits => {
+                                let extract = crate::bitvector::BitVectorHelper::extract(
+                                    bits,
+                                    certified.width * 8,
+                                )
+                                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
+                                (
+                                    extract.call(vec![expr, CExpr::UIntLit(0)]),
+                                    Some(CType::uint(certified.width * 8)),
+                                )
+                            }
+                            declared => (expr, declared),
+                        };
+                        let expr = match (declared, self.inputs.function_return_type) {
                             (Some(declared), Some(return_type)) => self.convert_from(
                                 expr,
                                 Some(&CValue::Typed(declared)),

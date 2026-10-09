@@ -134,3 +134,37 @@ fn an_aarch64_float_result_is_its_lane() {
     assert!(text.contains("double f("), "{text}");
     assert!(!text.contains("void f("), "{text}");
 }
+
+/// AArch64: `f` is `cbz x0, 1f; fmov d0, #1.0; b 2f; 1: movi d0, #0; 2: mov x0, #7; ret`, and
+/// `caller` is `bl f; str d0, [x1]; ret`. Each write of d0 lifts to a write of the whole Z register.
+const A64_MERGED_DOUBLE: &[u8] = &[
+    0x60, 0x00, 0x00, 0xb4, // 1000 cbz x0, 0x100c
+    0x00, 0x10, 0x6e, 0x1e, // 1004 fmov d0, #1.0
+    0x02, 0x00, 0x00, 0x14, // 1008 b 0x1010
+    0x00, 0xe4, 0x00, 0x2f, // 100c movi d0, #0
+    0xe0, 0x00, 0x80, 0xd2, // 1010 mov x0, #7
+    0xc0, 0x03, 0x5f, 0xd6, // 1014 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1018 padding
+    0xf8, 0xff, 0xff, 0x97, // 1020 bl 0x1000
+    0x20, 0x00, 0x00, 0xfd, // 1024 str d0, [x1]
+    0xc0, 0x03, 0x5f, 0xd6, // 1028 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 102c padding
+];
+
+/// The double `f` returns is the low lane of the Z register both paths write; returned whole, the
+/// struct carrier was no `double`, and the C did not compile.
+#[test]
+fn an_aarch64_float_merged_in_its_vector_register_returns_its_lane() {
+    let program = Literal::of_code(
+        A64_MERGED_DOUBLE,
+        &[("f", BASE, 0x18), ("caller", BASE + 0x20, 0x0c)],
+    )
+    .in_aarch64();
+    let text = rendered(program, RenderTier::C);
+    assert!(text.contains("double f("), "{text}");
+    assert!(
+        text.contains("return r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64("),
+        "{text}"
+    );
+}
