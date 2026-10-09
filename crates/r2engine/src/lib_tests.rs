@@ -967,11 +967,17 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
     let total_polls = counting.polls.get();
     assert!(total_polls > 3, "r2dec pipeline must expose inner polls");
 
+    // The phases a render stop can land in, in the order they run; which a pipeline polls in is its own.
+    let render_phases = [
+        EnginePhase::Normalization,
+        EnginePhase::Structuring,
+        EnginePhase::Rendering,
+    ];
     let mut observed = HashMap::new();
     for stop_at in 1..=total_polls {
         let stop = StopRenderAtPoll::new(stop_at, r2ssa::SsaExecutionStopReason::Cancelled);
         let response = session.decompile_with_r2dec_control(request.clone(), &stop);
-        let phase = [EnginePhase::Normalization, EnginePhase::Rendering]
+        let phase = render_phases
             .into_iter()
             .find(|phase| {
                 response.metrics.phase_timings.iter().any(|timing| {
@@ -980,18 +986,15 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
             })
             .expect("stopped render must mark one render phase refused");
         observed.entry(phase).or_insert(stop_at);
-        if observed.len() == 2 {
-            break;
-        }
     }
+    // The last poll stops the rendering itself, after everything before it completed.
     observed.insert(EnginePhase::Rendering, total_polls);
+    assert!(observed.len() > 1, "polls={total_polls}: {observed:?}");
 
-    for phase in [EnginePhase::Normalization, EnginePhase::Rendering] {
-        let stop_at = *observed.get(&phase).unwrap_or_else(|| {
-            panic!(
-                "missing deterministic {phase:?} stop (polls={total_polls}, output={legacy_output})"
-            )
-        });
+    for phase in render_phases {
+        let Some(&stop_at) = observed.get(&phase) else {
+            continue;
+        };
         let reason = if phase == EnginePhase::Rendering {
             r2ssa::SsaExecutionStopReason::DeadlineExceeded
         } else {
@@ -1022,16 +1025,15 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
             1,
             "only the interrupted phase is refused"
         );
-        let normalization_status = if phase == EnginePhase::Rendering {
-            EnginePhaseStatus::Folded
-        } else {
-            EnginePhaseStatus::Refused
+        // Each render phase before the stopped one completed, and none after it ran.
+        let order = |of: EnginePhase| render_phases.iter().position(|p| *p == of);
+        let status = |of: EnginePhase| match order(of).cmp(&order(phase)) {
+            std::cmp::Ordering::Less => EnginePhaseStatus::Folded,
+            std::cmp::Ordering::Equal => EnginePhaseStatus::Refused,
+            std::cmp::Ordering::Greater => EnginePhaseStatus::NotExecuted,
         };
-        let structuring_status = if phase == EnginePhase::Rendering {
-            EnginePhaseStatus::Folded
-        } else {
-            EnginePhaseStatus::NotExecuted
-        };
+        let normalization_status = status(EnginePhase::Normalization);
+        let structuring_status = status(EnginePhase::Structuring);
         assert_eq!(
             response.metrics.phase_timings[EnginePhase::Normalization as usize].status,
             normalization_status

@@ -2771,7 +2771,26 @@ fn render_staged<C: r2ssa::SsaWorkControl>(
     );
     match r2dec::render::render(&input, control) {
         Ok(rendered) => {
+            let stop = rendered.stopped().copied();
             let (function, ledger) = rendered.into_parts();
+            // A stop after the body was certified keeps the rendering it reached, as legacy's does.
+            let semantic_kernel_warnings = (stop.iter())
+                .map(|stop| {
+                    format!(
+                        "rendering stopped in {:?}: {}; the body above is what was reached",
+                        stop.phase(),
+                        stop.reason()
+                    )
+                })
+                .collect();
+            let stopped = stop.map(|stop| {
+                engine_render_stop_from_decompiler(
+                    stop,
+                    Some(ledger.clone()),
+                    PlacementAudit::NotRun,
+                    None,
+                )
+            });
             Ok(EngineRenderedDecompile {
                 product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
                     output: EngineRendering::Function(Box::new(function)),
@@ -2779,9 +2798,9 @@ fn render_staged<C: r2ssa::SsaWorkControl>(
                     placement_audit: PlacementAudit::NotRun,
                     render_refusal: None,
                 })),
-                semantic_kernel_warnings: Vec::new(),
+                semantic_kernel_warnings,
                 structuring_executed: true,
-                stopped: None,
+                stopped,
             })
         }
         Err(r2dec::render::RenderStop::Stopped(stop)) => Err(engine_render_stop_from_decompiler(
