@@ -61,6 +61,36 @@ impl Prototype {
         let ret = spellable(&signature.return_type)?;
         Some(Self { params, ret })
     }
+
+    /// `signature` at its carriers' widths alone, where it names `fixed` parameters and has a
+    /// result exactly where the call defines one: a sign, a pointee or a name it states is unproven.
+    pub(super) fn of_widths(
+        signature: &r2types::FunctionType,
+        fixed: usize,
+        returns: bool,
+        ptr_bits: u32,
+    ) -> Option<Self> {
+        if signature.params.len() != fixed {
+            return None;
+        }
+        let width = |ty: &CType| match ty.unaliased() {
+            CType::Int { bits, .. } if matches!(bits, 8 | 16 | 32 | 64) => Some(CType::uint(*bits)),
+            CType::Pointer(_) => Some(CType::uint(ptr_bits)),
+            CType::Float(bits @ (32 | 64)) => Some(CType::Float(*bits)),
+            _ => None,
+        };
+        let params = signature
+            .params
+            .iter()
+            .map(width)
+            .collect::<Option<Vec<_>>>()?;
+        let ret = match (&signature.return_type, returns) {
+            (CType::Void, false) => CType::Void,
+            (CType::Void, true) => return None,
+            (ty, _) => width(ty)?,
+        };
+        Some(Self { params, ret })
+    }
 }
 
 /// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.
@@ -508,6 +538,43 @@ mod tests {
         };
         let read = from_declared(call, &int32, &same).expect("an integer class");
         assert_eq!(spelled(&read), "(uint32_t)f()");
+    }
+
+    /// A callee body's prototype is spelled at its carriers' widths alone: the sign and pointee
+    /// r2types read there are no declaration, and a `void` result where the call defines one is
+    /// no prototype.
+    #[test]
+    fn a_prototype_from_a_callee_body_is_its_widths() {
+        let signature = r2types::FunctionType {
+            return_type: CType::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed,
+            },
+            params: vec![
+                CType::Pointer(Box::new(CType::Struct("node".to_string()))),
+                CType::Int {
+                    bits: 16,
+                    signedness: r2types::Signedness::Signed,
+                },
+                CType::Float(64),
+            ],
+            variadic: false,
+        };
+        let widths = Prototype::of_widths(&signature, 3, true, 64).expect("every type has a width");
+        assert_eq!(
+            widths,
+            Prototype {
+                params: vec![CType::uint(64), CType::uint(16), CType::Float(64)],
+                ret: CType::uint(32),
+            }
+        );
+        assert_eq!(Prototype::of_widths(&signature, 2, true, 64), None);
+        let void = r2types::FunctionType {
+            return_type: CType::Void,
+            ..signature
+        };
+        assert_eq!(Prototype::of_widths(&void, 3, true, 64), None);
+        assert!(Prototype::of_widths(&void, 3, false, 64).is_some());
     }
 
     /// A tagged type needs a definition the unit does not hold, so the prototype is not spelled.

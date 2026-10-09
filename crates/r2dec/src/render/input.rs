@@ -106,6 +106,22 @@ impl<'a> RenderInput<'a> {
         graded.or(identity)
     }
 
+    /// The prototype r2types projects for the call at `inst` from a callee body the capture holds,
+    /// whose carriers r2ssa matched to the call site; its types are only those carriers' widths.
+    pub fn callee_carrier_signature(
+        &self,
+        inst: r2ssa::InstId,
+    ) -> Option<&'a r2types::FunctionType> {
+        let key = r2types::CallsiteKey { at: inst };
+        (self.facts.report().callsites())
+            .and_then(|callsites| callsites.by_callsite.get(&key))
+            .filter(|facts| {
+                (facts.callee_signature_types.as_ref())
+                    .is_some_and(|types| types.basis == r2source::Basis::CarrierWidth)
+            })
+            .and_then(|facts| facts.callee_signature.as_ref())
+    }
+
     /// The text at each address the capture proves holds it: static data the program never writes,
     /// as r2engine states it in the snapshot. The one table legacy's literals read.
     pub fn string_literals(&self) -> &'a std::collections::BTreeMap<u64, String> {

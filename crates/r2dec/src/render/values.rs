@@ -517,6 +517,13 @@ fn plan_calls(
             if let (Some(signature), None) = (signature, &plan.declared) {
                 r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
             }
+            // No declaration: the callee body's carriers, which r2ssa matched to this call.
+            if signature.is_none() {
+                plan.declared = (input.callee_carrier_signature(inst.id)).and_then(|carriers| {
+                    let returns = plan.result.is_some();
+                    calls::Prototype::of_widths(carriers, plan.fixed, returns, input.ptr_bits())
+                });
+            }
         }
         if let Some((result, _)) = plan.result {
             results.insert(result);
