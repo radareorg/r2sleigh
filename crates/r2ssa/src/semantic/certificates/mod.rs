@@ -534,16 +534,18 @@ pub(crate) fn stack_array_layout(
     // read, and its elements are as wide as the accesses.
     let stride = stride.unwrap_or(element_width);
 
-    let mut maximum_constant_offset = None;
+    // The extent bounds every indexed access, so one index no range bounds refuses it.
+    let mut maximum_constant_offset = Some(0);
     let mut indexed_elements = Vec::with_capacity(indexed_addresses.len());
     for address in &indexed_addresses {
         let Some(byte_offset) = objects.index_for_address(*address) else {
+            maximum_constant_offset = None;
             continue;
         };
-        if let Some(bound) = values.upper_bound(byte_offset) {
-            maximum_constant_offset =
-                Some(maximum_constant_offset.map_or(bound, |old: u64| old.max(bound)));
-        }
+        let bound = values.upper_bound(byte_offset);
+        maximum_constant_offset = maximum_constant_offset
+            .zip(bound)
+            .map(|(old, b)| old.max(b));
         indexed_elements.push(StackArrayElementCertificate {
             address: *address,
             byte_offset,

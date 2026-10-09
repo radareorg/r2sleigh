@@ -5188,3 +5188,31 @@ fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
     assert!(output.contains("r2sleigh_store_u8("), "{output}");
     assert!(!output.contains("r2sleigh_residual"), "{output}");
 }
+
+/// A masked byte store and a store at an index no range bounds into one stack buffer, then a read
+/// past the 16 bytes the mask admits. The mask alone proved a 16-byte array that nothing reads, so
+/// staged elided both stores. Staged only: legacy refuses the read (missing_definition).
+#[test]
+fn an_unbounded_store_beside_a_bounded_one_keeps_both() {
+    const MIXED: &[u8] = &[
+        0x83, 0xe7, 0x0f, // 0x1000 and edi, 0xf
+        0xc6, 0x44, 0x3c, 0xb8, 0x07, // 0x1003 mov byte [rsp+rdi-0x48], 7
+        0xc6, 0x44, 0x34, 0xb8, 0x09, // 0x1008 mov byte [rsp+rsi-0x48], 9
+        0x0f, 0xb6, 0x44, 0x24, 0xd8, // 0x100d movzx eax, byte [rsp-0x28]
+        0xc3, // 0x1012 ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: MIXED.to_vec(),
+        name: "mixed",
+    };
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    let stores = output
+        .lines()
+        .filter(|line| line.contains("r2sleigh_store_u8("))
+        .count();
+    assert_eq!(stores, 2, "{output}");
+    assert!(!output.contains("r2sleigh_residual"), "{output}");
+}
