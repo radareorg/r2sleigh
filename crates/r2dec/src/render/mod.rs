@@ -6,6 +6,7 @@ mod control;
 mod frame;
 mod globals;
 mod input;
+mod tags;
 mod terms;
 mod values;
 
@@ -67,7 +68,8 @@ pub fn render(
     work.poll()?;
     let name = crate::rendered_name_of(input.name(), input.function().root());
     let mut c = CFunction::new(name, result_type(input));
-    let values = values::Values::new(input, std::rc::Rc::clone(&c.symbols));
+    let tags = tags::Tags::of(input);
+    let values = values::Values::new(input, &tags, std::rc::Rc::clone(&c.symbols));
     let written = control::write(input, values.as_ref(), &work);
     if let Some(stop) = written.stopped {
         return Err(stop.into());
@@ -125,7 +127,7 @@ pub fn render(
         0,
         unassigned.as_deref().unwrap_or_default(),
     );
-    let mut ready = ready_with_carriers(c);
+    let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
     let markers = addresses.len();
     ready.seal_observation_markers(
@@ -145,8 +147,8 @@ pub fn render(
 }
 
 /// `c` ready to emit: a wide carrier is a struct the unit defines, with the helpers that take it
-/// apart.
-fn ready_with_carriers(c: CFunction) -> crate::codegen::EmissionReadyFunction {
+/// apart, and each declared tag it spells is defined after them.
+fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::EmissionReadyFunction {
     let helpers = crate::bitvector::helpers_called(&c);
     let mut carriers = std::collections::BTreeSet::new();
     carriers.extend(helpers.iter().flat_map(|helper| helper.carriers()));
@@ -160,11 +162,12 @@ fn ready_with_carriers(c: CFunction) -> crate::codegen::EmissionReadyFunction {
                 _ => None,
             }),
     );
+    let declared = tags.definitions(&c);
     let mut ready = prepare_function_for_emission(c);
     ready.set_aggregate_definitions(
-        carriers
-            .into_iter()
+        (carriers.into_iter())
             .filter_map(crate::bitvector::carrier_definition)
+            .chain(declared)
             .collect(),
     );
     ready.set_bitvector_helpers(helpers);

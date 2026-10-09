@@ -493,6 +493,7 @@ fn canonical_roots(
 /// Each call's plan, by its instruction, and the values those calls assign their results to.
 fn plan_calls(
     input: &RenderInput<'_>,
+    tags: &super::tags::Tags,
 ) -> (
     r2ssa::dense::IdMap<InstId, CallPlan>,
     r2ssa::dense::IdSet<ValueId>,
@@ -518,8 +519,9 @@ fn plan_calls(
         };
         if matches!(plan.callee, calls::Callee::Named { .. }) {
             let signature = input.declared_callee_signature(inst.id);
-            plan.declared =
-                signature.and_then(|signature| calls::Prototype::of(signature, plan.fixed));
+            let defines = |tag: &str| tags.defines(tag);
+            plan.declared = signature
+                .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &defines));
             if let (Some(signature), None) = (signature, &plan.declared) {
                 r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
             }
@@ -728,14 +730,18 @@ fn store_access(inventory: &SemanticObligationInventory, inst: InstId) -> Struct
 
 impl<'a> Values<'a> {
     /// Canonicalise the function once under D2's expansion policy, then find what is bound.
-    pub(super) fn new(input: &RenderInput<'a>, symbols: Rc<RefCell<SymbolTable>>) -> Option<Self> {
+    pub(super) fn new(
+        input: &RenderInput<'a>,
+        tags: &super::tags::Tags,
+        symbols: Rc<RefCell<SymbolTable>>,
+    ) -> Option<Self> {
         let artifact: &'a SsaArtifact = input.artifact();
         let graph = input.graph();
         let inventory = input.obligations();
         let projection = MachineProjection::from_artifact(artifact).ok()?;
         let readers = Readers::new(graph, inventory);
         let roots = canonical_roots(artifact, &projection, &readers)?;
-        let (planned, results) = plan_calls(input);
+        let (planned, results) = plan_calls(input, tags);
         let elisions = crate::certified::Elisions::of(artifact);
         let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
         for switch in artifact.certificates().switches.values() {
@@ -796,7 +802,7 @@ impl<'a> Values<'a> {
         values.own.params = parameters
             .as_ref()
             .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
-        values.declare(input, parameters);
+        values.declare(input, tags, parameters);
         Some(values)
     }
 
@@ -805,6 +811,7 @@ impl<'a> Values<'a> {
     fn declare(
         &mut self,
         input: &RenderInput<'_>,
+        tags: &super::tags::Tags,
         parameters: Option<Vec<(u32, ValueId, MachineType)>>,
     ) {
         for (index, value, ty) in parameters.into_iter().flatten() {
@@ -814,7 +821,7 @@ impl<'a> Values<'a> {
                 .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)));
             let declared = (input.declared_parameter(index as usize, ty.width_bits()))
                 .or(analysed)
-                .and_then(|declared| calls::spellable(&declared))
+                .and_then(|declared| calls::spellable(&declared, &|tag| tags.defines(tag)))
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
             let c = match declared {
                 Some(declared) => {
@@ -1014,7 +1021,9 @@ impl<'a> Values<'a> {
         };
         let bits = |ty: &CType| match ty.unaliased() {
             CType::Int { bits, .. } => Some(*bits),
-            CType::Pointer(_) => Some(self.ptr_bits),
+            CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+                Some(self.ptr_bits)
+            }
             _ => None,
         };
         let symbols = self.symbols.try_borrow().ok()?;
@@ -1935,6 +1944,8 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
         r2types::CTypeLike::Int { .. }
         | r2types::CTypeLike::Bool
         | r2types::CTypeLike::Pointer(_)
+        | r2types::CTypeLike::Function { .. }
+        | r2types::CTypeLike::UnprototypedFunction(_)
         | r2types::CTypeLike::Enum(_)
             if matches!(width_bits, 8 | 16 | 32 | 64) =>
         {

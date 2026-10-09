@@ -79,53 +79,41 @@ pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64>
     }
 }
 
-/// Whether a rendering can emit a definition for this aggregate.
-///
-/// A rendering that declares a value of a tag it cannot define does not
-/// compile, and a rendering that does not compile scores nothing. The plan
-/// therefore has to ask the same question the emitter will ask later, and this
-/// is that question in one place so the two cannot drift apart -- which is the
-/// shape of defect that `term_renders_inline` and `materialize_term` already
-/// had once.
-///
-/// The requirements are the emitter's: the graph carries a layout, every member
-/// projects to a spellable type, each member's width either matches its size or
-/// divides it exactly so the member can be rebuilt as an array, and the members
-/// together account for the size the capture measured.
+/// Whether a rendering can emit a definition for this aggregate: [`aggregate_members`] lays it out.
 pub fn aggregate_is_definable(graph: &r2ssa::SourceTypeGraph, name: &str) -> bool {
-    let Some(layout) = graph
-        .aggregates()
-        .iter()
-        .find(|aggregate| aggregate.name() == name)
-    else {
-        return false;
-    };
+    aggregate_members(graph, name).is_some()
+}
+
+/// The members a definition of aggregate `name` declares, in layout order, where they cover its
+/// measured size, each at its size or as an array of its element (planner and emitter alike).
+pub fn aggregate_members(
+    graph: &r2ssa::SourceTypeGraph,
+    name: &str,
+) -> Option<Vec<(CTypeLike, String)>> {
+    let layout = (graph.aggregates().iter()).find(|aggregate| aggregate.name() == name)?;
     if layout.members().is_empty() {
-        return false;
+        return None;
     }
+    let mut members = Vec::with_capacity(layout.members().len());
     for member in layout.members() {
         let mut visiting = std::collections::BTreeSet::<u32>::new();
-        let Some(member_ty) =
-            crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)
-        else {
-            return false;
+        let ty = crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)?;
+        // The graph states an element type and an extent apart: `UChar b[8]` is `char[8]`.
+        let width = u64::from(declaration_type_width_bits(&ty, 64)?);
+        let ty = match member.size_bits() {
+            size if size == width => ty,
+            size if width > 0 && size % width == 0 => {
+                CTypeLike::Array(Box::new(ty), Some(usize::try_from(size / width).ok()?))
+            }
+            _ => return None,
         };
-        match declaration_type_width_bits(&member_ty, 64) {
-            Some(width) if u64::from(width) == member.size_bits() => {}
-            Some(width)
-                if width > 0
-                    && member.size_bits() % u64::from(width) == 0
-                    && usize::try_from(member.size_bits() / u64::from(width)).is_ok() => {}
-            _ => return false,
-        }
+        members.push((ty, member.name().to_string()));
     }
-    let covered = layout
-        .members()
-        .iter()
+    let covered = (layout.members().iter())
         .map(|member| member.offset_bits() + member.size_bits())
         .max()
         .unwrap_or(0);
-    covered == layout.size_bits()
+    (covered == layout.size_bits()).then_some(members)
 }
 
 pub(crate) fn function_type_matches_source_interface(
