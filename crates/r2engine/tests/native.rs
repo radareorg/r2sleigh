@@ -5056,12 +5056,32 @@ const REMAINDER_BY_A_DIVIDE: &[u8] = &[
 /// index and the table is its three stored rows, none dropped.
 #[test]
 fn a_remainder_by_a_divide_bounds_a_table_index() {
-    let text = rendered_on(
-        &Machine::new("aarch64", "aarch64", 64),
-        REMAINDER_BY_A_DIVIDE,
-        "remainder",
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let rendered = rendered_on(&machine, REMAINDER_BY_A_DIVIDE, "remainder");
+    let text = &rendered.text;
+    // The table is one stack object of the 24 bytes its three rows fill, whatever array the C
+    // declares it in.
+    let program = Fixture {
+        bytes: REMAINDER_BY_A_DIVIDE.to_vec(),
+        name: "remainder",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let slots = &prepared.artifact().certificates().stack_slots;
+    assert!(
+        slots.values().any(|slot| slot.size == Some(24)),
+        "{slots:?}\n{text}"
     );
-    assert!(text.contains("[3];") || text.contains("[24];"), "{text}");
+    // Each row is stored, x1 to x3, and the indexed read is spelled, not left a residual.
+    let parameters = common::parameters(text);
+    assert_eq!(parameters.len(), 4, "{text}");
+    for (_, row) in &parameters[1..] {
+        let stored = text
+            .lines()
+            .skip(1)
+            .filter(|line| line.contains(row.as_str()));
+        assert_eq!(stored.count(), 1, "{row} is not stored once: {text}");
+    }
+    assert!(!text.contains("residual"), "{text}");
     assert!(!text.contains("assumed (frame extent"), "{text}");
 }
 
