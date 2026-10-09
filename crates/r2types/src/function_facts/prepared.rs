@@ -84,36 +84,93 @@ pub fn aggregate_is_definable(graph: &r2ssa::SourceTypeGraph, name: &str) -> boo
     aggregate_members(graph, name).is_some()
 }
 
-/// The members a definition of aggregate `name` declares, in layout order, where they cover its
-/// measured size, each at its size or as an array of its element (planner and emitter alike).
+/// A definition of one aggregate: its kind and its members in layout order, each at its type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateDefinition {
+    pub is_union: bool,
+    pub members: Vec<(CTypeLike, String)>,
+}
+
+/// The definition of aggregate `name`, where C's natural layout of its members reproduces every
+/// stated offset and the stated size; a bit field, a packed layout or two layouts of one name refuse.
 pub fn aggregate_members(
     graph: &r2ssa::SourceTypeGraph,
     name: &str,
-) -> Option<Vec<(CTypeLike, String)>> {
-    let layout = (graph.aggregates().iter()).find(|aggregate| aggregate.name() == name)?;
-    if layout.members().is_empty() {
-        return None;
-    }
-    let mut members = Vec::with_capacity(layout.members().len());
+) -> Option<AggregateDefinition> {
+    let mut layouts = (graph.aggregates().iter()).filter(|aggregate| aggregate.name() == name);
+    let definition = natural_definition(graph, layouts.next()?)?;
+    layouts
+        .all(|other| natural_definition(graph, other).as_ref() == Some(&definition))
+        .then_some(definition)
+}
+
+/// `layout` as C lays it out, where that is the stated layout: each member at the next offset its
+/// alignment allows (a union's at 0), the whole rounded to the largest alignment.
+fn natural_definition(
+    graph: &r2ssa::SourceTypeGraph,
+    layout: &r2ssa::SourceAggregateLayout,
+) -> Option<AggregateDefinition> {
+    let is_union = match graph
+        .types()
+        .get(usize::try_from(layout.type_id()).ok()?)?
+        .kind()
+    {
+        r2ssa::SourceTypeKind::Struct { .. } => false,
+        r2ssa::SourceTypeKind::Union { .. } => true,
+        _ => return None,
+    };
+    let (mut end, mut align, mut members) = (0u64, 1u64, Vec::new());
     for member in layout.members() {
-        let mut visiting = std::collections::BTreeSet::<u32>::new();
-        let ty = crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)?;
-        // The graph states an element type and an extent apart: `UChar b[8]` is `char[8]`.
-        let width = u64::from(declaration_type_width_bits(&ty, 64)?);
-        let ty = match member.size_bits() {
-            size if size == width => ty,
-            size if width > 0 && size % width == 0 => {
-                CTypeLike::Array(Box::new(ty), Some(usize::try_from(size / width).ok()?))
-            }
-            _ => return None,
+        let (ty, bytes, member_align) = natural_member(graph, member)?;
+        let at = if is_union {
+            0
+        } else {
+            end.next_multiple_of(member_align)
         };
+        if member.is_bit_field() || member.offset_bits() != at * 8 {
+            return None;
+        }
+        end = end.max(at + bytes);
+        align = align.max(member_align);
         members.push((ty, member.name().to_string()));
     }
-    let covered = (layout.members().iter())
-        .map(|member| member.offset_bits() + member.size_bits())
-        .max()
-        .unwrap_or(0);
-    (covered == layout.size_bits()).then_some(members)
+    (!members.is_empty() && end.next_multiple_of(align) * 8 == layout.size_bits())
+        .then_some(AggregateDefinition { is_union, members })
+}
+
+/// A member's type, rebuilt as an array where the graph states its element apart from its extent
+/// (`UChar b[8]`), with its size in bytes and C's natural alignment of its element.
+fn natural_member(
+    graph: &r2ssa::SourceTypeGraph,
+    member: &r2ssa::SourceAggregateMember,
+) -> Option<(CTypeLike, u64, u64)> {
+    let mut visiting = std::collections::BTreeSet::<u32>::new();
+    let ty = crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)?;
+    let width = u64::from(declaration_type_width_bits(&ty, 64)?);
+    let align = natural_alignment(&ty)?;
+    let ty = match member.size_bits() {
+        size if size == width => ty,
+        size if width > 0 && size % width == 0 => {
+            CTypeLike::Array(Box::new(ty), Some(usize::try_from(size / width).ok()?))
+        }
+        _ => return None,
+    };
+    member
+        .size_bits()
+        .is_multiple_of(8)
+        .then(|| (ty, member.size_bits() / 8, align))
+}
+
+/// The alignment in bytes C gives a scalar of a power-of-two byte width, or an array of one.
+fn natural_alignment(ty: &CTypeLike) -> Option<u64> {
+    match ty {
+        CTypeLike::Array(element, _) | CTypeLike::Const(element) => natural_alignment(element),
+        CTypeLike::Typedef { ty, .. } => natural_alignment(ty),
+        CTypeLike::BitVector(_) => None,
+        ty => declaration_type_width_bits(ty, 64)
+            .map(|bits| u64::from(bits) / 8)
+            .filter(|bytes| matches!(bytes, 1 | 2 | 4 | 8 | 16)),
+    }
 }
 
 pub(crate) fn function_type_matches_source_interface(

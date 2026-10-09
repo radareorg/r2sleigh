@@ -82,6 +82,18 @@ impl<'a> RenderInput<'a> {
             .and_then(r2ssa::SourceFunctionInterface::type_graph)
     }
 
+    /// The types the callee of the call at `inst` declares, as its own interface's graph states them.
+    pub fn callee_type_graph(&self, inst: r2ssa::InstId) -> Option<&'a r2ssa::SourceTypeGraph> {
+        let key = r2types::CallsiteKey { at: inst };
+        let site = (self.facts.report().callsites())?
+            .by_callsite
+            .get(&key)?
+            .call_site_id;
+        (self.facts.source().call_site_interface(site))?
+            .exact_callee_interface()?
+            .type_graph()
+    }
+
     /// Who each call site calls, as r2types resolved it.
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
     pub fn declared_call_prototypes(&self) -> usize {

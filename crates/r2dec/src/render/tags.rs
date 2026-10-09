@@ -8,42 +8,63 @@ use crate::ast::{CAggregateDef, CFunction, CType};
 
 /// The tags one function's declared types let the unit define, with each one's members as spelled.
 pub(super) struct Tags {
-    defined: BTreeMap<String, Vec<(CType, String)>>,
+    /// Each definable tag as r2types states it, which a callee's own graph must state alike.
+    stated: BTreeMap<String, r2types::AggregateDefinition>,
+    defined: BTreeMap<String, (bool, Vec<(CType, String)>)>,
 }
 
 impl Tags {
+    pub(super) fn of(input: &RenderInput<'_>) -> Self {
+        Self::of_graph(input.type_graph())
+    }
+
     /// The greatest set of laid-out aggregates whose members C spells naming only tags in the set;
     /// each round drops a tag or ends, so at most one round per aggregate.
-    pub(super) fn of(input: &RenderInput<'_>) -> Self {
-        let Some(graph) = input.type_graph() else {
-            return Self {
-                defined: BTreeMap::new(),
-            };
-        };
-        let stated = (graph.aggregates().iter())
-            .filter_map(|layout| {
-                let members = r2types::aggregate_members(graph, layout.name())?;
-                Some((layout.name().to_owned(), members))
+    fn of_graph(graph: Option<&r2ssa::SourceTypeGraph>) -> Self {
+        let stated = (graph.iter())
+            .flat_map(|graph| graph.aggregates().iter().map(move |layout| (graph, layout)))
+            .filter_map(|(graph, layout)| {
+                let definition = r2types::aggregate_members(graph, layout.name())?;
+                Some((layout.name().to_owned(), definition))
             })
             .collect::<BTreeMap<_, _>>();
-        let mut candidates = stated.keys().cloned().collect::<BTreeSet<_>>();
+        let mut candidates = (stated.iter())
+            .map(|(name, definition)| (name.clone(), definition.is_union))
+            .collect::<BTreeMap<_, _>>();
         loop {
-            let spelled = (stated.iter())
-                .filter(|(name, _)| candidates.contains(*name))
-                .filter_map(|(name, members)| {
-                    Some((name.clone(), spelled_members(members, &candidates)?))
+            let defined = (stated.iter())
+                .filter(|(name, _)| candidates.contains_key(*name))
+                .filter_map(|(name, definition)| {
+                    let members = spelled_members(&definition.members, &candidates)?;
+                    Some((name.clone(), (definition.is_union, members)))
                 })
                 .collect::<BTreeMap<_, _>>();
-            if spelled.len() == candidates.len() {
-                return Self { defined: spelled };
+            if defined.len() == candidates.len() {
+                return Self { stated, defined };
             }
-            candidates = spelled.into_keys().collect();
+            candidates = (defined.iter())
+                .map(|(name, (is_union, _))| (name.clone(), *is_union))
+                .collect();
         }
     }
 
-    /// Whether the unit defines tag `name`, so a declaration may spell it.
-    pub(super) fn defines(&self, name: &str) -> bool {
-        self.defined.contains_key(name)
+    /// Whether the unit defines tag `name` as a union (`is_union`) or a struct.
+    pub(super) fn defines(&self, name: &str, is_union: bool) -> bool {
+        (self.defined.get(name)).is_some_and(|(defined, _)| *defined == is_union)
+    }
+
+    /// Whether `graph`, a callee's own, lays tag `name` out as the unit defines it.
+    pub(super) fn agrees(
+        &self,
+        name: &str,
+        is_union: bool,
+        graph: Option<&r2ssa::SourceTypeGraph>,
+    ) -> bool {
+        self.defines(name, is_union)
+            && graph
+                .and_then(|graph| r2types::aggregate_members(graph, name))
+                .as_ref()
+                == self.stated.get(name)
     }
 
     /// The definitions `c` needs: every tag it spells and every tag those hold, each once; a tag
@@ -61,7 +82,8 @@ impl Tags {
             let Some((name, is_union)) = tag_of(&ty, &mut pending) else {
                 continue;
             };
-            if let Some(members) = self.defined.get(&name)
+            if self.defines(&name, is_union)
+                && let Some((_, members)) = self.defined.get(&name)
                 && spelled.insert(name, is_union).is_none()
             {
                 pending.extend(members.iter().map(|(ty, _)| ty.clone()));
@@ -87,7 +109,7 @@ impl Tags {
         if !placed.insert(name.to_owned()) {
             return;
         }
-        let members = &self.defined[name];
+        let (_, members) = &self.defined[name];
         for (ty, _) in members {
             if let Some(held) = held_by_value(ty) {
                 self.place(held, spelled, placed, ordered);
@@ -104,7 +126,7 @@ impl Tags {
 /// Each of `members` as the definition spells it, where every one is spelled.
 fn spelled_members(
     members: &[(CType, String)],
-    defined: &BTreeSet<String>,
+    defined: &BTreeMap<String, bool>,
 ) -> Option<Vec<(CType, String)>> {
     (members.iter())
         .map(|(ty, member)| Some((spelled_member(ty, defined)?, member.clone())))
@@ -113,14 +135,15 @@ fn spelled_members(
 
 /// A member's type as the definition spells it: an array of a spelled element, a tag held by
 /// value that is itself defined, or a type C spells with tags only behind pointers.
-fn spelled_member(ty: &CType, defined: &BTreeSet<String>) -> Option<CType> {
+fn spelled_member(ty: &CType, defined: &BTreeMap<String, bool>) -> Option<CType> {
     match ty {
         CType::Array(element, Some(length)) => Some(CType::Array(
             Box::new(spelled_member(element, defined)?),
             Some(*length),
         )),
-        CType::Struct(tag) | CType::Union(tag) => defined.contains(tag).then(|| ty.clone()),
-        _ => calls::spellable(ty, &|tag| defined.contains(tag)),
+        CType::Struct(tag) => (defined.get(tag) == Some(&false)).then(|| ty.clone()),
+        CType::Union(tag) => (defined.get(tag) == Some(&true)).then(|| ty.clone()),
+        _ => calls::spellable(ty, &|tag, is_union| defined.get(tag) == Some(&is_union)),
     }
 }
 
@@ -152,5 +175,59 @@ fn held_by_value(ty: &CType) -> Option<&str> {
         CType::Struct(name) | CType::Union(name) => Some(name),
         CType::Array(element, _) => held_by_value(element),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tags;
+
+    /// `struct node` laid out as `{int32_t a; int32_t b;}` and, where `twice`, also as `{int64_t x;}`.
+    fn nodes(twice: bool) -> r2ssa::SourceTypeGraph {
+        let node = |id| r2ssa::SourceTypeKind::Struct { aggregate_id: id };
+        let mut types = vec![
+            r2ssa::SourceType::new(0, node(0), 64, 32),
+            r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
+            r2ssa::SourceType::new(2, r2ssa::SourceTypeKind::SignedInteger, 64, 64),
+        ];
+        let mut layouts = vec![r2ssa::SourceAggregateLayout::new(
+            0,
+            0,
+            64,
+            32,
+            "node",
+            [
+                r2ssa::SourceAggregateMember::new(0, 1, 0, 32, "a"),
+                r2ssa::SourceAggregateMember::new(1, 1, 32, 32, "b"),
+            ],
+        )];
+        if twice {
+            types.push(r2ssa::SourceType::new(3, node(1), 64, 64));
+            layouts.push(r2ssa::SourceAggregateLayout::new(
+                1,
+                3,
+                64,
+                64,
+                "node",
+                [r2ssa::SourceAggregateMember::new(0, 2, 0, 64, "x")],
+            ));
+        }
+        r2ssa::SourceTypeGraph::new(types, layouts).expect("a node graph")
+    }
+
+    /// One spelling naming two layouts names no one layout: the tag is neither defined nor spelled.
+    #[test]
+    fn a_tag_two_layouts_share_is_not_defined() {
+        let once = nodes(false);
+        assert!(Tags::of_graph(Some(&once)).defines("node", false));
+        let twice = nodes(true);
+        let tags = Tags::of_graph(Some(&twice));
+        assert!(!tags.defines("node", false));
+        assert!(!tags.agrees("node", false, Some(&twice)));
+        // A callee's graph agrees only where it lays the tag out alike.
+        let own = Tags::of_graph(Some(&once));
+        assert!(own.agrees("node", false, Some(&once)));
+        assert!(!own.agrees("node", false, Some(&twice)));
+        assert!(!own.agrees("node", false, None));
     }
 }

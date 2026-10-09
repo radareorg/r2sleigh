@@ -54,7 +54,7 @@ impl Prototype {
     pub(super) fn of(
         signature: &r2types::FunctionType,
         fixed: usize,
-        defines: &dyn Fn(&str) -> bool,
+        defines: &dyn Fn(&str, bool) -> bool,
     ) -> Option<Self> {
         if signature.params.len() != fixed {
             return None;
@@ -183,7 +183,7 @@ pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> b
 
 /// `ty` as C spells it: a standard scalar, a pointer to one, `void`, `char` or a tag the unit
 /// `defines`, or a function pointer of such types; a typedef is its target, `char` excepted.
-pub(super) fn spellable(ty: &CType, defines: &dyn Fn(&str) -> bool) -> Option<CType> {
+pub(super) fn spellable(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
     match ty {
         CType::Void | CType::Bool | CType::Float(32 | 64) => Some(ty.clone()),
         CType::Int {
@@ -211,9 +211,10 @@ pub(super) fn spellable(ty: &CType, defines: &dyn Fn(&str) -> bool) -> Option<CT
 
 /// What a pointer points at, as C spells it: a tag the unit `defines`, qualified or not, or any
 /// spellable type.
-fn pointee_spelling(ty: &CType, defines: &dyn Fn(&str) -> bool) -> Option<CType> {
+fn pointee_spelling(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
     match ty {
-        CType::Struct(tag) | CType::Union(tag) => defines(tag).then(|| ty.clone()),
+        CType::Struct(tag) => defines(tag, false).then(|| ty.clone()),
+        CType::Union(tag) => defines(tag, true).then(|| ty.clone()),
         CType::Const(inner) => Some(CType::Const(Box::new(pointee_spelling(inner, defines)?))),
         ty => spellable(ty, defines),
     }
@@ -690,13 +691,13 @@ mod tests {
             params: vec![node.clone(), binary.clone()],
             variadic: false,
         };
-        assert_eq!(Prototype::of(&signature, 2, &|_| false), None);
-        let defined = Prototype::of(&signature, 2, &|tag| tag == "node");
+        assert_eq!(Prototype::of(&signature, 2, &|_, _| false), None);
+        let defined = Prototype::of(&signature, 2, &|tag, union| tag == "node" && !union);
         assert_eq!(defined.map(|p| p.params), Some(vec![node, binary]));
         let by_value = r2types::FunctionType {
             params: vec![CType::Struct("node".to_string())],
             ..signature
         };
-        assert_eq!(Prototype::of(&by_value, 1, &|_| true), None);
+        assert_eq!(Prototype::of(&by_value, 1, &|_, _| true), None);
     }
 }

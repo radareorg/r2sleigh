@@ -112,12 +112,12 @@ impl<'a> Globals<'a> {
 fn declarable(ty: &CType) -> Option<CType> {
     match ty {
         CType::Array(element, Some(length)) => Some(CType::Array(
-            Box::new(calls::spellable(element, &|_| false).filter(|ty| *ty != CType::Void)?),
+            Box::new(calls::spellable(element, &|_, _| false).filter(|ty| *ty != CType::Void)?),
             Some(*length),
         )),
         CType::Const(inner) if matches!(&**inner, CType::Array(..)) => {
             Some(CType::Const(Box::new(declarable(inner)?)))
         }
-        ty => calls::spellable(ty, &|_| false),
+        ty => calls::spellable(ty, &|_, _| false),
     }
 }
