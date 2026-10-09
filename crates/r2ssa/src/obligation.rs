@@ -2777,10 +2777,12 @@ mod tests {
                     crate::semantic::SourceCallArgumentFact {
                         slot,
                         value: crate::semantic::SourceCallArgumentValue::Value(first),
+                        lane_of: None,
                     },
                     crate::semantic::SourceCallArgumentFact {
                         slot,
                         value: crate::semantic::SourceCallArgumentValue::Value(second),
+                        lane_of: None,
                     },
                 ],
                 fixed_argument_count: Some(2),

@@ -203,6 +203,8 @@ impl SSAFunction {
             stack_pointer_restored_by_callee.is_some(),
         );
         func.record_promoted_slots(promoted);
+        // Before preparation, so what reads a folded load folds with it.
+        crate::read_only::fold_loads(&mut func, machine_context);
         // Before preparation, so the comparison a decided check leaves unread folds away.
         crate::stack_protector::decide(&mut func, machine_context);
         // Preparation reads the interface for the return projection only;

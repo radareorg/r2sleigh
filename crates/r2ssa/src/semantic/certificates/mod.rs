@@ -1080,7 +1080,14 @@ pub(crate) fn collect_prepared_function_certificates(
             // The arguments are certified wherever they were proved, whatever became of the results.
             let complete_arguments = boundary.filter(|boundary| boundary.arguments_complete);
             let (mut argument_certificates, declared_stack_arguments) = complete_arguments
-                .map(|boundary| exact_register_call_arguments(boundary, graph, machine_context))
+                .map(|boundary| {
+                    exact_register_call_arguments(
+                        boundary,
+                        graph,
+                        machine_context,
+                        prep.map(|prep| &prep.views),
+                    )
+                })
                 .unwrap_or_default();
             // A stack argument the prototype declared: the boundary proved
             // which value reaches which coordinate, and the outgoing-store
@@ -1362,6 +1369,7 @@ pub(crate) fn exact_register_call_arguments(
     boundary: &SourceCallBoundaryFact,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
+    views: Option<&crate::view::ValueViews<ValueId>>,
 ) -> (Vec<CallArgumentCertificate>, Vec<BoundaryStackArgument>) {
     macro_rules! give_up {
         ($reason:literal $(, $arg:expr)* $(,)?) => {{
@@ -1401,8 +1409,22 @@ pub(crate) fn exact_register_call_arguments(
         let Ok(index) = usize::try_from(index) else {
             give_up!("slot index {} is out of range", index);
         };
-        let Some(graph_value) = graph.value(value) else {
-            give_up!("slot {} value {:?} is not in the graph", index, value);
+        // A lane value stands for the wider root write the slot holds, where the views prove it.
+        let carrier = argument.lane_of.unwrap_or(value);
+        if argument.lane_of.is_some()
+            && views.and_then(|views| {
+                crate::semantic::shared::proven_low_lane(views, graph, carrier, storage)
+            }) != Some(value)
+        {
+            give_up!(
+                "slot {} value {:?} is not the low lane of {:?}",
+                index,
+                value,
+                carrier
+            );
+        }
+        let Some(graph_value) = graph.value(carrier) else {
+            give_up!("slot {} value {:?} is not in the graph", index, carrier);
         };
         if !holds(graph, machine_context, graph_value, storage) {
             give_up!(

@@ -1659,6 +1659,7 @@ impl Native<'_> {
                 literals.dedup_by_key(|(address, _)| *address);
                 literals
             },
+            read_only: self.read_only(&walked.body),
             data_symbols: self.data_symbols(&walked.body),
             code_pointer_tables: tables.iter().map(|table| table.table.clone()).collect(),
             parameter_names: declared_parameter_names(signature.as_ref(), arity),
@@ -1813,6 +1814,27 @@ impl Native<'_> {
         referenced(body)
             .into_iter()
             .filter_map(|address| Some((address, text_at(self.program, address)?)))
+            .collect()
+    }
+
+    /// The bytes at each literal address the body loads from, where the program never writes
+    /// them and the loader does not (`TableBytes::ReadOnly`): what every such load reads (P5).
+    fn read_only(&self, body: &crate::body::Body) -> Vec<(u64, Vec<u8>)> {
+        let (loads, stores) = literal_accesses(body);
+        loads
+            .into_iter()
+            .filter_map(|(address, size)| {
+                let bytes = self.program.read(address, size)?;
+                let range = address..address.checked_add(bytes.len() as u64)?;
+                // A body that stores there says the container's statement is not this run's.
+                let stored = stores
+                    .iter()
+                    .any(|written| written.start < range.end && range.start < written.end);
+                (bytes.len() == size
+                    && !stored
+                    && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
+                    .then_some((address, bytes))
+            })
             .collect()
     }
 
@@ -1983,6 +2005,29 @@ fn referenced(body: &crate::body::Body) -> BTreeSet<u64> {
         }
     }
     addresses
+}
+
+/// Each literal address the body loads from with the widest load there, and the ranges it stores to.
+fn literal_accesses(body: &crate::body::Body) -> (BTreeMap<u64, usize>, Vec<std::ops::Range<u64>>) {
+    let literal = |addr: &r2il::Varnode| {
+        matches!(addr.space, r2il::SpaceId::Ram | r2il::SpaceId::Const) && addr.offset != 0
+    };
+    let mut loads = BTreeMap::new();
+    let mut stores = Vec::new();
+    for op in body.blocks.iter().flat_map(|block| &block.lifted.ops) {
+        match op {
+            r2il::R2ILOp::Load { dst, addr, .. } if literal(addr) => {
+                let size = usize::try_from(dst.size).unwrap_or(usize::MAX);
+                let widest = loads.entry(addr.offset).or_insert(size);
+                *widest = (*widest).max(size);
+            }
+            r2il::R2ILOp::Store { addr, val, .. } if literal(addr) => {
+                stores.push(addr.offset..addr.offset.saturating_add(u64::from(val.size)));
+            }
+            _ => {}
+        }
+    }
+    (loads, stores)
 }
 
 /// State the machine from the convention data and the compiler specification.

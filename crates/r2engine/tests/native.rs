@@ -683,7 +683,7 @@ fn a_released_wide_insert_base_is_rendered_where_it_is_read() {
 
 /// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
 const ARM_DEAD_LOAD: &[u8] = &[
-    0x04, 0x00, 0x9f, 0xe5, // 0x1000 ldr r0, [pc, 4]  -> 0x100c
+    0x00, 0x00, 0x91, 0xe5, // 0x1000 ldr r0, [r1]: an address only the run knows
     0x00, 0x00, 0xa0, 0xe3, // 0x1004 mov r0, 0
     0x1e, 0xff, 0x2f, 0xe1, // 0x1008 bx lr
     0x78, 0x56, 0x34, 0x12, // 0x100c the word it loads
@@ -2754,13 +2754,22 @@ fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp
             _ => None,
         })
         .expect("the instruction stores");
+    let mut last = None;
     loop {
+        // A value read from bytes the program never writes is the literal they hold: its copy, or the literal, is the origin.
+        if graph.value(value).is_some_and(|value| value.var.is_const()) {
+            return last.unwrap_or(SSAOp::Copy {
+                dst: value,
+                src: value,
+            });
+        }
         let inst = graph
             .def_inst(value)
             .and_then(|inst| graph.inst(inst))
             .expect("the stored value has a definition");
         match &inst.payload {
-            InstPayload::Op(SSAOp::Copy { src, .. } | SSAOp::Subpiece { src, .. }) => {
+            InstPayload::Op(op @ (SSAOp::Copy { src, .. } | SSAOp::Subpiece { src, .. })) => {
+                last = Some(op.clone());
                 value = *src;
             }
             InstPayload::Op(op) => return op.clone(),

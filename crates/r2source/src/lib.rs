@@ -370,6 +370,9 @@ pub struct OwnedFunctionImage {
     /// Display data: it tells a renderer what to print where a constant points
     /// at text, and carries no claim about behaviour.
     string_literals: Box<[(u64, String)]>,
+    /// Bytes the container states read-only and the loader leaves alone, at each address the
+    /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
+    read_only: Box<[(u64, Vec<u8>)]>,
     /// Data objects radare2 already knows this function points at.
     ///
     /// The name is display data. An optional type spelling is a source-owned
@@ -494,6 +497,10 @@ impl OwnedFunctionImage {
 
     pub fn string_literals(&self) -> &[(u64, String)] {
         &self.string_literals
+    }
+
+    pub fn read_only(&self) -> &[(u64, Vec<u8>)] {
+        &self.read_only
     }
 
     pub fn code_pointer_tables(&self) -> &[SourceCodePointerTable] {
@@ -1159,6 +1166,7 @@ mod tests {
             },
             OwnedFunctionImage {
                 string_literals: Box::new([]),
+                read_only: Box::new([]),
                 data_symbols: Box::new([]),
                 code_pointer_tables: Box::new([]),
                 frame_saves: Box::new([]),

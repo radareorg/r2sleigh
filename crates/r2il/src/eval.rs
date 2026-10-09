@@ -529,8 +529,12 @@ fn insert(root: Word, value: Word, position: u128, width: u32) -> Result<u128, S
     {
         return Err(Stop::Unmodelled);
     }
-    let field = mask(value.bytes) << position;
-    Ok((root.bits & !field) | (value.bits << position))
+    // A lane at or past bit 128 lies outside the carried word: a 256-bit register's upper half.
+    let field = mask(value.bytes)
+        .checked_shl(position)
+        .ok_or(Stop::Unmodelled)?;
+    let placed = value.bits.checked_shl(position).ok_or(Stop::Unmodelled)?;
+    Ok((root.bits & !field) | placed)
 }
 
 fn unary(operation: Operation, src: Word, width: u32) -> Result<u128, Stop> {
@@ -789,6 +793,18 @@ fn block<M: Mapped>(transfer: &BlockTransfer, state: &mut State<M>) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    /// A lane at bit 128 of a 256-bit register lies outside the carried word: unmodelled, not a panic.
+    #[test]
+    fn an_insert_past_the_carried_bits_is_unmodelled() {
+        let word = |bits, bytes| Word::new(bits, bytes).expect("a width");
+        let high = apply(
+            Operation::Insert,
+            &[word(0, 32), word(0xab, 4), word(128, 4)],
+            32,
+        );
+        assert_eq!(high, Err(Stop::Unmodelled));
+    }
 
     #[test]
     fn an_insert_writes_the_value_over_its_bits_and_keeps_the_rest() {

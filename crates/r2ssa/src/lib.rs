@@ -61,6 +61,7 @@ pub mod origin;
 pub(crate) mod phi;
 pub(crate) mod printf;
 pub(crate) mod reaching_rules;
+pub(crate) mod read_only;
 pub mod recover_interface;
 pub(crate) mod rename;
 pub(crate) mod semantic;

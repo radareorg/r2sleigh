@@ -1899,6 +1899,7 @@ mod tests {
         crate::semantic::SourceCallArgumentFact {
             slot: crate::semantic::CallBoundarySlot::Register { index, storage },
             value,
+            lane_of: None,
         }
     }
 
