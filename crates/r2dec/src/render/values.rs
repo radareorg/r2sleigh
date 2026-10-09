@@ -98,6 +98,14 @@ impl Own {
     }
 }
 
+/// `value`, or the refusal evidence that the staged call at `inst` lacks `what`.
+fn needed<T>(value: Option<T>, inst: InstId, what: &str) -> Option<T> {
+    if value.is_none() {
+        r2il::refusal_evidence!("staged-call", "{inst:?}: {what}");
+    }
+    value
+}
+
 /// Whether an instruction between a producer and its reader is one a moved read or trap may not cross.
 fn has_effect(inventory: &SemanticObligationInventory, inst: InstId) -> bool {
     match inventory.instruction_for_inst(inst).map(|d| d.state) {
@@ -1078,7 +1086,11 @@ impl<'a> Values<'a> {
             return self.recursive_call(inst, plan);
         }
         let call = self.call_expr(inst, plan, plan.result.as_ref().map(|(_, class)| class))?;
-        self.assign_call(inst, plan, call)
+        needed(
+            self.assign_call(inst, plan, call),
+            inst,
+            "result assignment",
+        )
     }
 
     fn calls_itself(&self, plan: &CallPlan) -> bool {
@@ -1091,12 +1103,13 @@ impl<'a> Values<'a> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
         for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
-            let held = self.value_type(*argument)?;
+            let held = needed(self.value_type(*argument), inst, "argument type")?;
             // A float the caller stored as bits would travel in a float register once C declares it.
             if *stacked && matches!(held, MachineType::Float { .. }) {
-                return None;
+                return needed(None, inst, "float on the stack");
             }
-            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
+            let operand = needed(self.operand(*argument, inst), inst, "argument operand")?;
+            arguments.push(needed(fit(operand, &held, class), inst, "argument class")?);
             types.push(terms::c_type(class)?);
         }
         let ret_type = match ret {
@@ -1138,7 +1151,7 @@ impl<'a> Values<'a> {
                 slot.insert(declaration);
             }
             std::collections::btree_map::Entry::Occupied(slot) if *slot.get() != declaration => {
-                return None;
+                return needed(None, inst, "declaration another call disagrees with");
             }
             std::collections::btree_map::Entry::Occupied(_) => {}
         }

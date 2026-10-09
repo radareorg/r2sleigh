@@ -39,6 +39,26 @@ pub(super) struct CallPlan {
     pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
 }
 
+/// Why a call has no plan: the first fact its C would need that the facts do not state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unplanned {
+    /// A jump r2ssa found no call at: no refusal.
+    NotACall,
+    NoCertificate,
+    ArgumentsIncomplete,
+    ResultsIncomplete,
+    /// No convention describes the call, and the function has no interface of its own.
+    Undescribed,
+    NoCallee,
+    /// The obligations name more than the one value the boundary defines after the call.
+    ResultUnclear,
+    VariadicWithoutFixedCount,
+    SignatureArity,
+    ArgumentClass,
+    ResultClass,
+    IndirectVariadic,
+}
+
 /// The plan for the call at `inst`, where the facts state every argument, the result and the callee.
 pub(super) fn plan(
     artifact: &SsaArtifact,
@@ -46,45 +66,70 @@ pub(super) fn plan(
     inventory: &SemanticObligationInventory,
     inst: InstId,
 ) -> Option<CallPlan> {
-    let site = artifact.facts().call_sites.by_inst.get(inst)?;
-    let certificate = artifact.certificates().callsites.get(site)?;
+    planned(artifact, resolution, inventory, inst)
+        .inspect_err(|why| {
+            if *why != Unplanned::NotACall {
+                r2il::refusal_evidence!("staged-call-plan", "{inst:?}: {why:?}");
+            }
+        })
+        .ok()
+}
+
+fn planned(
+    artifact: &SsaArtifact,
+    resolution: Option<&CalleeResolutionFacts>,
+    inventory: &SemanticObligationInventory,
+    inst: InstId,
+) -> Result<CallPlan, Unplanned> {
+    let site = (artifact.facts().call_sites.by_inst.get(inst)).ok_or(Unplanned::NotACall)?;
+    let certificate =
+        (artifact.certificates().callsites.get(site)).ok_or(Unplanned::NoCertificate)?;
     // r2ssa states every argument and result, or refuses where a pass-through or gap leaves one open.
-    let complete = certificate.arguments_complete && certificate.results_complete;
+    check(
+        certificate.arguments_complete,
+        Unplanned::ArgumentsIncomplete,
+    )?;
+    check(certificate.results_complete, Unplanned::ResultsIncomplete)?;
     // Without the function's own interface, an undescribed call's arity drops a parameter it
     // passes through unwritten (boundaries.rs, convention_call_boundary); that count is no proof.
     let own_interface = artifact.machine_context().function_interface().is_some();
-    if !complete || !(certificate.described || own_interface) {
-        return None;
-    }
+    check(
+        certificate.described || own_interface,
+        Unplanned::Undescribed,
+    )?;
     let graph = artifact.graph();
     let identity = resolution
         .and_then(|resolution| resolution.identity_for_callsite(CallsiteKey { at: inst }));
-    let callee = callee(certificate, identity, graph, inst)?;
-    let result = result_value(inventory, graph, inst)?;
+    let callee = callee(certificate, identity, graph, inst).ok_or(Unplanned::NoCallee)?;
+    let result = result_value(inventory, graph, inst).ok_or(Unplanned::ResultUnclear)?;
     // Each argument passes in the class its register says, which a signature, where there is one,
     // must agree with; C passes a float in the variadic tail as a double.
     let signature = identity.and_then(|identity| identity.signature.as_ref());
     let fixed = match (certificate.variadic, certificate.fixed_argument_count) {
         (false, _) => certificate.argument_values.len(),
         (true, Some(fixed)) if fixed <= certificate.argument_values.len() => fixed,
-        (true, _) => return None,
+        (true, _) => return Err(Unplanned::VariadicWithoutFixedCount),
     };
-    if signature.is_some_and(|signature| {
-        signature.variadic != certificate.variadic || signature.params.len() != fixed
-    }) {
-        return None;
-    }
-    let arguments = arguments(artifact, certificate, signature, fixed)?;
+    check(
+        !signature.is_some_and(|signature| {
+            signature.variadic != certificate.variadic || signature.params.len() != fixed
+        }),
+        Unplanned::SignatureArity,
+    )?;
+    let arguments =
+        arguments(artifact, certificate, signature, fixed).ok_or(Unplanned::ArgumentClass)?;
     let result = match result {
         None => None,
         Some(value) => Some((
             value,
-            result_class(artifact, (*site, inst), signature, value)?,
+            result_class(artifact, (*site, inst), signature, value)
+                .ok_or(Unplanned::ResultClass)?,
         )),
     };
-    if matches!(callee, Callee::Through(_)) && certificate.variadic {
-        return None;
-    }
+    check(
+        !(matches!(callee, Callee::Through(_)) && certificate.variadic),
+        Unplanned::IndirectVariadic,
+    )?;
     let tail = (certificate.transfer == CallSiteTransfer::TailCall).then(|| {
         tail_result(
             artifact,
@@ -100,7 +145,7 @@ pub(super) fn plan(
             )
         })
         .collect();
-    Some(CallPlan {
+    Ok(CallPlan {
         callee,
         arguments,
         stacked,
@@ -117,6 +162,10 @@ pub(super) fn plan(
             == Some(true),
         tail,
     })
+}
+
+fn check(holds: bool, otherwise: Unplanned) -> Result<(), Unplanned> {
+    if holds { Ok(()) } else { Err(otherwise) }
 }
 
 /// The register a tail transfer's callee returns in and its class, as the boundary states it and a
