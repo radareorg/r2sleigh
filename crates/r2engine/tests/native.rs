@@ -531,13 +531,24 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
 /// `push rbp; mov rbp, rsp; pop rbp; ret`, an empty `void` function with a frame pointer.
 const EMPTY_FRAME: &[u8] = &[0x55, 0x48, 0x89, 0xe5, 0x5d, 0xc3];
 
+/// `stp x29, x30, [sp, #-16]!; mov x29, sp; ldp x29, x30, [sp], #16; ret`: the same on AArch64.
+const A64_EMPTY_FRAME: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6,
+];
+
 /// The body writes RBP only to restore the caller's, so it is no result: rendered as one, the
 /// function returned the caller's frame pointer, which its source never does.
 #[test]
 fn a_frame_pointer_the_body_restores_is_no_result() {
     for text in rendered_both(EMPTY_FRAME, "empty_frame") {
         assert!(text.contains("void empty_frame(void)"), "{text}");
-        assert!(!text.contains("RBP") && !text.contains("rbp"), "{text}");
+        assert!(!text.to_lowercase().contains("rbp_"), "{text}");
+    }
+    // AArch64's untouched x0 may be an argument handed back, so the result is unproven, not x29.
+    let a64 = Machine::new("aarch64", "aarch64", 64);
+    for text in rendered_both_on(&a64, A64_EMPTY_FRAME, "empty_frame") {
+        assert!(text.contains("return r2sleigh_residual_u64("), "{text}");
+        assert!(!text.to_lowercase().contains("x29_"), "{text}");
     }
 }
 
