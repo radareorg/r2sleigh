@@ -126,7 +126,7 @@ pub fn starts_from(c: &str, value: &str, parameter: &str) -> bool {
         } else {
             return false;
         };
-        value = bare(&next).to_owned();
+        bare(&next).clone_into(&mut value);
     }
     false
 }
