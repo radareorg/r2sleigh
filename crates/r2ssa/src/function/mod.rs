@@ -1374,26 +1374,49 @@ impl SsaArtifact {
     /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
     pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
         let slot = self.certificates().stack_slots.get(&object)?;
-        // A callee's proven reach, or the whole run an escaped address may reach, is its extent.
         if slot.source_slot.is_some()
             || !self.declarable_stack_object(object)
             || self.proved_parameter_home(object).is_some()
-            || self.objects().callee_write_reach.contains_key(&object)
         {
             return None;
         }
+        // An unbounded index may pass any reach, so a reach is the extent only when every index is bounded.
         match slot.array_layout {
             crate::StackArrayLayoutDisposition::Proven(_) => None,
             crate::StackArrayLayoutDisposition::Refused(
                 crate::StackArrayLayoutRefusal::MissingConstantOffset,
             ) => Some(crate::ExtentAssumption::UnboundedIndex),
             _ if self.indexed_past_any_bound(slot) => Some(crate::ExtentAssumption::UnboundedIndex),
+            _ if self.objects().callee_write_reach.contains_key(&object) => None,
             _ => self
                 .objects()
                 .frame_reach
                 .escaped(object)
                 .then_some(crate::ExtentAssumption::EscapedAddress),
         }
+    }
+
+    /// Why the frame object a memory obligation reads or writes has an assumed extent, if it does.
+    pub fn obligation_extent_assumption(
+        &self,
+        id: crate::SemanticObligationId,
+    ) -> Option<crate::ExtentAssumption> {
+        use crate::{SemanticObligationComponent as Component, SemanticObligationKind as Kind};
+        // A private frame read is a value producer; its access is still one the extent may not cover.
+        let is_write = match (id.kind, id.component) {
+            (Kind::ObservableMemoryRead | Kind::LiveValueProducer, Component::MemoryAccess(_)) => {
+                false
+            }
+            (Kind::ObservableMemoryWrite, Component::MemoryAccess(_)) => true,
+            _ => return None,
+        };
+        let crate::SemanticSourceSite::GraphInstruction(inst) =
+            self.obligations().obligations().get(&id)?.source
+        else {
+            return None;
+        };
+        let access = self.memory_certificate_for_inst(inst, is_write)?;
+        self.extent_assumption(access.object)
     }
 
     /// An access at an index no value range bounds, whatever else refused the layout first.

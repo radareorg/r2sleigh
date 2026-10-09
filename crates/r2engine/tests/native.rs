@@ -5228,3 +5228,32 @@ fn an_unbounded_store_beside_a_bounded_one_keeps_both() {
     assert_eq!(stores, 2, "{output}");
     assert!(!output.contains("r2sleigh_residual"), "{output}");
 }
+
+/// A masked byte store, a store at an index no range bounds, and a read inside the buffer. The
+/// unbounded store may land past every access, so the buffer's extent is assumed (extent rule,
+/// "assume and label"), and the proof line counts each access that relies on it.
+#[test]
+fn accesses_relying_on_an_assumed_extent_are_counted_on_the_proof_line() {
+    const IN_BOUNDS: &[u8] = &[
+        0x83, 0xe7, 0x0f, // 0x1000 and edi, 0xf
+        0xc6, 0x44, 0x3c, 0xb8, 0x07, // 0x1003 mov byte [rsp+rdi-0x48], 7
+        0xc6, 0x44, 0x34, 0xb8, 0x09, // 0x1008 mov byte [rsp+rsi-0x48], 9
+        0x0f, 0xb6, 0x44, 0x24, 0xbb, // 0x100d movzx eax, byte [rsp-0x45]
+        0xc3, // 0x1012 ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: IN_BOUNDS.to_vec(),
+        name: "in_bounds",
+    };
+    // The masked store's 16-byte span holds the read, which proved no extent the other store keeps.
+    for render in [staged, decompile] {
+        let response = render(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(
+            output.contains(", 3 assumed (frame extent unproven)"),
+            "{output}"
+        );
+    }
+}
