@@ -249,7 +249,11 @@ impl<'i> Writer<'_, 'i> {
             }
             BlockTerminator::Return => {
                 let stmt = self.return_stmt(Some(addr));
-                vec![self.observe(addr, stmt)]
+                // The line accounts for the return instruction, wherever in the block it sits.
+                let at = (self.values)
+                    .and_then(|values| values.terminator_address(addr))
+                    .unwrap_or(addr);
+                vec![self.observe_at(addr, at, stmt)]
             }
             BlockTerminator::Call {
                 fallthrough: None, ..

@@ -626,6 +626,25 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     );
 }
 
+/// `call 0x100a; ret` is one block: staged's return line names the `ret`, the call's line the call.
+#[test]
+fn a_staged_return_line_names_the_return_instruction() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: CALLER.to_vec(),
+        name: "caller",
+    };
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let emission = emission(&response);
+    let unit = emission.unit();
+    assert_eq!(named_by(emission, "return"), vec![0x1005], "{unit}");
+    assert!(
+        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+        "{unit}"
+    );
+}
+
 /// Staged declares the import as its prototype states and passes the argument at that type.
 #[test]
 fn a_staged_call_passes_a_declared_import_its_declared_types() {
