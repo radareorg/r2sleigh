@@ -1322,12 +1322,12 @@ fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
     }
 }
 
+/// A barrier has no C spelling and Sleigh gives it none either: it arrives as a user operation
+/// with an index, which r2ssa accounts for as an unknown effect. The rendering marks it a gap named
+/// by the specification, and does not call a function of that name, which would claim what the
+/// effect is.
 #[test]
-fn a_machine_operation_the_specification_names_is_called_and_declared() {
-    // A barrier has no C spelling and Sleigh gives it none either: it arrives
-    // as a user operation with an index. The index names an operation in the
-    // specification, and saying that is both more than refusing the function
-    // said and less than claiming an ordering the operand was never read for.
+fn a_machine_operation_the_specification_names_is_a_gap_by_that_name() {
     const BARRIER: &[u8] = &[
         0x10, 0x40, 0x2d, 0xe9, // push {r4, lr}
         0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
@@ -1339,25 +1339,25 @@ fn a_machine_operation_the_specification_names_is_called_and_declared() {
         bytes: BARRIER.to_vec(),
         name: "barrier",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
+    let response = staged(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(
         response.render_refusal.is_none(),
         "{:?}\n{output}",
         response.render_refusal
     );
-    // Called by the name the specification gives it, and declared, so the
-    // rendering still compiles.
-    assert!(output.contains("DataMemoryBarrier("), "{output}");
-    assert!(output.contains("void DataMemoryBarrier("), "{output}");
+    assert!(
+        output.contains("r2dec gap: UserOperation(DataMemoryBarrier) at 0x1000:"),
+        "{output}"
+    );
+    assert!(!output.contains("DataMemoryBarrier("), "{output}");
 }
 
+/// `ldrex`/`strex` are a linked read and a conditional store, and the machine model states both
+/// exactly, so the function reaches the rendering. C has no statement of either: each is a gap,
+/// not a call to a function named after it.
 #[test]
 fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
-    // `ldrex`/`strex` are a linked read and a conditional store, and the
-    // machine model states both exactly. Before it did, the projection could
-    // not describe either and every function using them refused there --
-    // which is every C++ atomic on this architecture.
     const ATOMIC_INCREMENT: &[u8] = &[
         0x10, 0xb5, // push {r4, lr}
         0x51, 0xe8, 0x00, 0x2f, // ldrex r2, [r1, 0]
@@ -1371,24 +1371,23 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
         bytes: ATOMIC_INCREMENT.to_vec(),
         name: "increment",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    assert!(
-        !format!("{:?}", response.render_refusal).contains("MachineProjection"),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
-    assert!(
-        response.output.text().contains("store_conditional")
-            || response.output.text().contains("load_linked"),
-        "{}",
-        response.output
-    );
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.render_refusal.is_none(), "{output}");
+    for site in ["0x1000:7", "0x1000:19"] {
+        assert!(
+            output.contains(&format!("r2dec gap: EffectNotRendered at {site} ")),
+            "{output}"
+        );
+    }
+    assert!(!output.contains("load_linked"), "{output}");
+    assert!(!output.contains("store_conditional"), "{output}");
 }
 
+/// `dmb` is a user operation with no output, and p-code says it writes nothing else: the value
+/// before it is returned, and the barrier itself is a gap by its name.
 #[test]
 fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
-    // `dmb` is a user operation with no output, and p-code says it writes nothing else.
     const BARRIER_LEAF: &[u8] = &[
         0x07, 0x00, 0xa0, 0xe3, // mov r0, 7
         0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
@@ -1400,16 +1399,23 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
         bytes: BARRIER_LEAF.to_vec(),
         name: "order",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
+    let response = staged(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(
         response.render_refusal.is_none(),
         "{:?}\n{output}",
         response.render_refusal
     );
-    assert!(output.contains("DataMemoryBarrier("), "{output}");
-    assert!(output.contains("return 7;"), "{output}");
-    assert!(!output.contains("r2dec gap"), "{output}");
+    assert!(
+        output.contains("r2dec gap: UserOperation(DataMemoryBarrier) at 0x1000:"),
+        "{output}"
+    );
+    let returned = output
+        .lines()
+        .find(|line| line.trim_start().starts_with("return "))
+        .expect("a return");
+    assert!(returned.contains('7'), "{output}");
+    assert!(!returned.contains("r2sleigh_residual"), "{output}");
 }
 
 /// Whether a rendering marks its return as unproven: the header declares the
@@ -1503,9 +1509,11 @@ fn a_result_written_on_one_path_only_is_a_marked_gap() {
     assert!(marks_an_unproven_return(output), "{output}");
 }
 
+/// The kernel writes x0 and no declared contract says so, so the result is neither `void` nor the
+/// value before the call. Nor does anything state what the call reads (x8, x0 to x5), so it is a
+/// gap by its name, not `CallSupervisor(0)` with the syscall number dropped.
 #[test]
 fn a_system_call_leaves_the_return_a_marked_gap_and_the_function_still_renders() {
-    // The kernel writes x0 and no declared contract says so, so the result is neither `void` nor the value before the call.
     const EXIT: &[u8] = &[
         0x00, 0x00, 0x80, 0xd2, // mov x0, 0
         0xa8, 0x0b, 0x80, 0xd2, // mov x8, 93
@@ -1518,14 +1526,18 @@ fn a_system_call_leaves_the_return_a_marked_gap_and_the_function_still_renders()
         bytes: EXIT.to_vec(),
         name: "start",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
+    let response = staged(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(
         response.render_refusal.is_none(),
         "{:?}\n{output}",
         response.render_refusal
     );
-    assert!(output.contains("CallSupervisor("), "{output}");
+    assert!(
+        output.contains("r2dec gap: UserOperation(CallSupervisor) at 0x1000:2 "),
+        "{output}"
+    );
+    assert!(!output.contains("CallSupervisor("), "{output}");
     assert!(marks_an_unproven_return(output), "{output}");
     assert!(!output.contains("return 0;"), "{output}");
 }
@@ -2848,40 +2860,26 @@ const UNMODELLED_SHUFFLE: &[u8] = &[
     0xc3, // 1014 ret
 ];
 
-/// A value no model gives a meaning is refused, and the refusal names the
-/// specification's operation and where it stands, rather than the renderer
-/// predicate that noticed it.
-///
-/// Both are the machine projection's: r2ssa decides the operation has no
-/// projection and says which it is, and the renderer reads that. The site is
-/// the operation's place in the SSA form `pdim` prints -- the third operation
-/// of the block at 0x1000, after the two `movq` zero extensions.
+/// A value no model gives a meaning is a gap that names the specification's operation and where
+/// it stands: the third operation of the block at 0x1000 in the SSA form `pdim` prints, after the
+/// two `movq` zero extensions. The value it would produce is a residual.
 #[test]
-fn an_unmodelled_user_operation_is_refused_by_name() {
+fn an_unmodelled_user_operation_is_a_gap_by_name() {
     let machine = declaring("shuffle", "uint64_t", &["uint64_t", "uint64_t"]);
     let target = machine.target();
     let program = Fixture {
         bytes: UNMODELLED_SHUFFLE.to_vec(),
         name: "shuffle",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
+    let response = staged(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_string();
+    assert!(response.render_refusal.is_none(), "{text}");
     assert!(
-        matches!(
-            response.render_refusal,
-            Some(r2dec::DecompileRenderRefusal::UnmodelledUserOperation {
-                block: BASE,
-                op: 2,
-                ..
-            })
-        ),
-        "{:?}\n{text}",
-        response.render_refusal
+        text.contains("r2dec gap: UserOperation(pshufb) at 0x1000:2 "),
+        "{text}"
     );
     assert!(
-        text.starts_with(
-            "/* r2sleigh refused shuffle: native rendering refused: unmodelled machine operation pshufb at 0x1000:2 */"
-        ),
+        text.contains("return (uint64_t)((__uint128_t)r2sleigh_residual_u128("),
         "{text}"
     );
 }
