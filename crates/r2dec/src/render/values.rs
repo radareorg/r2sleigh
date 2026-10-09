@@ -1022,9 +1022,8 @@ impl<'a> Values<'a> {
             .then(|| (**inner).clone())
     }
 
-    /// What a register held at entry that no parameter admits reads as, which C cannot read: an
-    /// argument slot the interface did not admit (the convention's slots, as legacy's
-    /// `unspecified_reads` asks), else a value held from entry.
+    /// An entry register no parameter admits, which C cannot read: an unadmitted argument slot
+    /// (the convention's, as legacy's `unspecified_reads` asks), else a value held from entry.
     fn entry_read(&self, value: ValueId, ty: &MachineType) -> Option<CExpr> {
         let storage = (self.graph.formal_projection_storage(value)).or(self
             .graph

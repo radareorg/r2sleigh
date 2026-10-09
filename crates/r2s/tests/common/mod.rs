@@ -282,9 +282,8 @@ pub fn read_offset(c: &str, afv: &str, expression: &str) -> Option<i64> {
     afv_locals(afv).get(expression).map(|(offset, _)| *offset)
 }
 
-/// Each write to the stack `c` makes: the entry offset written and the value, whether spelled as
-/// an assignment to a local `afv` places, to an element of an array `c` declares, or through a
-/// store helper.
+/// Each stack write in `c` as (entry offset, value), spelled as an `afv` local's assignment, an
+/// array element's, or a store helper.
 pub fn stack_writes(c: &str, afv: &str) -> Vec<(i64, String)> {
     let mut writes = Vec::new();
     for line in c.lines().map(str::trim) {
