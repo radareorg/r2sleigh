@@ -112,6 +112,21 @@ impl<'a> RenderInput<'a> {
         self.facts.report().display_names().strings()
     }
 
+    /// The container's name for each data address the function refers to: legacy's one table.
+    pub fn data_symbols(&self) -> &'a std::collections::BTreeMap<u64, String> {
+        self.facts.report().display_names().symbols()
+    }
+
+    /// The type the program's debug information declares at each named data address.
+    pub fn data_object_types(&self) -> &'a r2types::ProgramDataObjectTypeFacts {
+        &self.facts.report().type_facts().program_data_objects
+    }
+
+    /// The name of each function the function calls, by entry.
+    pub fn function_names(&self) -> &'a std::collections::BTreeMap<u64, String> {
+        self.facts.report().display_names().functions()
+    }
+
     pub fn callee_resolution(&self) -> Option<&'a r2types::CalleeResolutionFacts> {
         self.facts.report().callee_resolution()
     }
