@@ -27,6 +27,8 @@ pub struct RenderedFunctionJson {
     /// The program's name for the function.
     pub name: String,
     pub addr: u64,
+    /// The function's source language, as the container states it (`c`, `c++`, `rust`, `go`).
+    pub language: &'static str,
     /// The C identifier the unit defines the function under.
     pub definition: String,
     /// The definition's header, or empty where nothing is defined.
@@ -160,6 +162,7 @@ impl RenderedFunctionJson {
         name: &str,
         addr: u64,
         definition: String,
+        language: r2abi::statement::SourceLanguage,
     ) -> Self {
         let proof = RenderProofJson::of(response.obligation_ledger.as_ref());
         // A compiler-inserted elision holds only of a UB-free source, and so does what the analysis
@@ -181,6 +184,7 @@ impl RenderedFunctionJson {
                 return Self {
                     name: name.to_owned(),
                     addr,
+                    language: language.spelled(),
                     definition,
                     signature: String::new(),
                     refused: Some(RenderRefusalJson {
@@ -210,6 +214,7 @@ impl RenderedFunctionJson {
         Self {
             name: name.to_owned(),
             addr,
+            language: language.spelled(),
             definition: function.name.clone(),
             signature: emission.signature().unwrap_or_default().to_owned(),
             refused: refused.map(|reason| RenderRefusalJson { reason }),

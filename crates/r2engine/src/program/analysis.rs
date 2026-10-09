@@ -319,6 +319,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
             response,
             definition,
             unread,
+            // A fact the container states, fixed for the program's life: no read to record.
+            language: db.inputs().source.container().languages.at(entry),
         };
         let stopped = control.stopped();
         Render(Ok(Rc::new(Drawn { rendering, stopped })))

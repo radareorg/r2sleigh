@@ -488,6 +488,8 @@ fn the_image_reports_what_the_container_states() {
     assert!(run.ok, "{}", run.out);
     assert!(run.out.contains("Elf"), "{}", run.out);
     assert!(run.out.contains("x86"), "{}", run.out);
+    // The fixture is C, which its compile units state (LP0), spelled as radare2 does.
+    assert!(run.out.contains("lang     c\n"), "{}", run.out);
 }
 
 /// The three tiers, pinned.

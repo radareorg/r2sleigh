@@ -150,6 +150,8 @@ pub struct Rendering {
     pub definition: String,
     /// The callees the analysis could not read.
     pub unread: Vec<crate::native::Unread>,
+    /// The function's source language, as the container states it (LP0).
+    pub language: r2abi::statement::SourceLanguage,
 }
 
 impl Rendering {
@@ -158,7 +160,7 @@ impl Rendering {
     /// `name` is the program's name for the function at `entry`.
     pub fn answer(&self, name: &str, entry: u64) -> crate::RenderedFunctionJson {
         let definition = self.definition.clone();
-        crate::RenderedFunctionJson::of(&self.response, name, entry, definition)
+        crate::RenderedFunctionJson::of(&self.response, name, entry, definition, self.language)
     }
 }
 

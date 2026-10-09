@@ -110,6 +110,8 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
     });
     let label = format!("{addr:#x} ({})", answer["name"]);
     assert_eq!(answer["addr"].as_u64(), Some(addr), "{label}");
+    // Every fixture here is C, as its compile units or its symbols state (LP0).
+    assert_eq!(answer["language"], "c", "{label}");
     let code = answer["code"].as_str().expect("code is text");
     let text = code.lines().collect::<Vec<_>>();
     check_proof(&label, &answer);
