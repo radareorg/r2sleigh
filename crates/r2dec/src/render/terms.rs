@@ -25,6 +25,8 @@ pub(super) struct Spell<'a> {
     pub(super) global: &'a dyn Fn(u64, &MachineType, bool) -> Option<super::globals::Named>,
     /// Whether memory is little-endian, so a byte copy reads a word as the machine does.
     pub(super) little_endian: bool,
+    /// The slot the caller pushed the return address into, never written here, and the address width.
+    pub(super) return_address: Option<(ObjectId, u32)>,
 }
 
 /// A frame object's address in the frame array and its extent.
@@ -134,6 +136,18 @@ pub(super) fn at_sink(sink: &CType, expr: CExpr) -> CExpr {
         return expr;
     }
     CExpr::observe_all(ids, CExpr::IntLit(value as i64))
+}
+
+/// The address the call into this function returns to, which its caller pushed (r2ssa's
+/// `return_address_stack_object`).
+fn return_address() -> CExpr {
+    CExpr::call(
+        CExpr::External {
+            name: "__builtin_return_address".to_string(),
+            kind: crate::symbol::ExternalKind::Intrinsic,
+        },
+        vec![CExpr::UIntLit(0)],
+    )
 }
 
 /// A constant read as `ty`: a float's bits reinterpreted, since C would convert an integer's value.
@@ -720,6 +734,18 @@ impl Spell<'_> {
         }
     }
 
+    /// A read of `ty` from `object` at `address`; the caller's return-address slot reads as that
+    /// address.
+    fn load_of(&self, ty: &MachineType, object: ObjectId, address: TermId) -> Option<CExpr> {
+        let bits = ty.width_bits();
+        if self.return_address == Some((object, bits))
+            && frame_offset(self.arena, address) == Some((object, 0))
+        {
+            return Some(cast(integer(bits)?, return_address()));
+        }
+        self.load(ty, self.address(address, bits / 8, Some(object))?)
+    }
+
     /// A machine expression a term reads at `ty`: the projection may hold the same bits at the
     /// other class than the term reads them.
     fn leaf(&self, expr: MachineExprId, ty: &MachineType) -> Option<CExpr> {
@@ -742,9 +768,7 @@ impl Spell<'_> {
             TermKind::ObjectAddress(object) => {
                 Some(cast(integer(bits)?, (self.object)(object)?.base))
             }
-            TermKind::Load { object, address } => {
-                self.load(&ty, self.address(address, bits / 8, Some(object))?)
-            }
+            TermKind::Load { object, address } => self.load_of(&ty, object, address),
             TermKind::Subscript { base, index } => {
                 self.load(&ty, self.subscript((base, index), bits / 8, None)?)
             }

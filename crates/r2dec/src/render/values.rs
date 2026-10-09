@@ -68,6 +68,8 @@ pub(super) struct Values<'a> {
     globals: super::globals::Globals<'a>,
     little_endian: bool,
     ptr_bits: u32,
+    /// The slot the caller pushed the return address into, where nothing here writes it.
+    return_address: Option<ObjectId>,
     /// The function itself as a call to its own entry names it: its name, parameters and result.
     own: Own,
 }
@@ -689,6 +691,23 @@ fn leaf_value(projection: &MachineProjection, expr: MachineExprId) -> Option<Val
     }
 }
 
+/// The object the caller pushed the return address into, where the body reads it and never
+/// writes it: what it reads there is that address. One pass over the accesses.
+fn return_address_slot(artifact: &SsaArtifact) -> Option<ObjectId> {
+    let accesses = &artifact.structured().memory_accesses;
+    let mut slot = None;
+    for access in accesses.values() {
+        if !artifact.return_address_stack_object(access.object) {
+            continue;
+        }
+        if access.is_write {
+            return None;
+        }
+        slot = Some(access.object);
+    }
+    slot
+}
+
 /// The access a live store writes, by its write obligation.
 fn store_access(inventory: &SemanticObligationInventory, inst: InstId) -> StructuredAccessId {
     let ordinal = inventory
@@ -758,6 +777,7 @@ impl<'a> Values<'a> {
             strings: input.string_literals(),
             globals: super::globals::Globals::of(input),
             ptr_bits: input.ptr_bits(),
+            return_address: return_address_slot(artifact),
             own: Own::of(input),
             little_endian: matches!(
                 artifact
@@ -907,6 +927,7 @@ impl<'a> Values<'a> {
             object: &object,
             global: &global,
             little_endian: self.little_endian,
+            return_address: self.return_address.map(|object| (object, self.ptr_bits)),
         })
     }
 
