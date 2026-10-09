@@ -4706,3 +4706,42 @@ fn a_remainder_by_a_divide_bounds_a_table_index() {
     assert!(text.contains("[3];") || text.contains("[24];"), "{text}");
     assert!(!text.contains("assumed (frame extent"), "{text}");
 }
+
+/// A slot written once and read only by a callee, through the address the caller hands it.
+///
+/// No access in the body reads the slot, but its address escapes to `g`, so the store is
+/// observable: eliding it as a dead frame slot left staged's `shape_pointer_to_pointer`
+/// (aarch64 clang-O1) passing pointers to slots it never wrote.
+#[test]
+fn a_store_into_a_slot_whose_address_escapes_is_rendered() {
+    const ESCAPED_SLOT: &[u8] = &[
+        0xff, 0x83, 0x00, 0xd1, // 0x1000 sub sp, sp, #0x20
+        0xfd, 0x7b, 0x01, 0xa9, // 0x1004 stp x29, x30, [sp, #16]
+        0xfd, 0x43, 0x00, 0x91, // 0x1008 add x29, sp, #16
+        0x08, 0x00, 0x01, 0xca, // 0x100c eor x8, x0, x1
+        0xe8, 0x07, 0x00, 0xf9, // 0x1010 str x8, [sp, #8]
+        0xe0, 0x23, 0x00, 0x91, // 0x1014 add x0, sp, #8
+        0x04, 0x00, 0x00, 0x94, // 0x1018 bl 0x1028
+        0xfd, 0x7b, 0x41, 0xa9, // 0x101c ldp x29, x30, [sp, #16]
+        0xff, 0x83, 0x00, 0x91, // 0x1020 add sp, sp, #0x20
+        0xc0, 0x03, 0x5f, 0xd6, // 0x1024 ret
+        0x00, 0x00, 0x40, 0xf9, // 0x1028 g: ldr x0, [x0]
+        0xc0, 0x03, 0x5f, 0xd6, // 0x102c ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: ESCAPED_SLOT.to_vec(),
+        name: "escape",
+    };
+    for pipeline in [decompile, staged] {
+        let response = pipeline(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        let stores = output
+            .lines()
+            .filter(|line| line.contains("r2sleigh_store_u64("))
+            .count();
+        assert_eq!(stores, 1, "{output}");
+        assert!(!output.contains("r2sleigh_residual"), "{output}");
+    }
+}
