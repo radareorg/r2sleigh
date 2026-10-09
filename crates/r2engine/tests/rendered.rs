@@ -80,7 +80,16 @@ fn text_in_a_data_section_is_a_string_and_text_in_code_is_not() {
     program.source_mut().write(TEXT, b"hello\0");
     program.source_mut().write(TWO, &putting(TEXT));
     let c = c_of(&mut program, TWO);
-    assert!(c.contains("puts((const char*)\"hello\")"), "{c}");
+    // The one argument is the literal, at whatever conversion to `const char*` the pipeline spells.
+    let arguments = common::call_arguments(&c, "puts").expect("a call to puts");
+    assert_eq!(
+        arguments
+            .iter()
+            .map(|a| common::bare(a))
+            .collect::<Vec<_>>(),
+        ["\"hello\""],
+        "{c}"
+    );
 
     // The same bytes in the padding after `one`, which is code, not data,
     // and just past the data section's end, which is no section at all.

@@ -889,3 +889,26 @@ pub fn call_arguments(c: &str, callee: &str) -> Option<Vec<String>> {
         parenthesized(line, open).map(top_level)
     })
 }
+
+/// `expression` without its leading casts and enclosing parentheses: what it
+/// converts, whichever pipeline spelled the conversion.
+pub fn bare(expression: &str) -> &str {
+    let mut expression = expression.trim();
+    while expression.starts_with('(') {
+        let Some(inner) = parenthesized(expression, 0) else {
+            break;
+        };
+        let rest = expression[inner.len() + 2..].trim_start();
+        let cast = inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ' || c == '*');
+        if rest.is_empty() {
+            expression = inner.trim();
+        } else if cast {
+            expression = rest;
+        } else {
+            break;
+        }
+    }
+    expression
+}
