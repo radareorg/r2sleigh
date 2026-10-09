@@ -38,8 +38,27 @@ pub(super) fn c_type(ty: &MachineType) -> Option<CType> {
             width_bits: 32 | 64,
         } => Some(CType::Float(ty.width_bits())),
         MachineType::Float { .. } => None,
+        _ if wide(ty.width_bits()) => Some(CType::BitVector(ty.width_bits())),
         _ => integer(ty.width_bits()),
     }
+}
+
+/// Whether `bits` is a carrier no C integer holds: a struct `crate::bitvector` defines, which C
+/// only assigns and selects, and its helpers take apart, compose and zero-extend.
+pub(super) fn wide(bits: u32) -> bool {
+    crate::bitvector::is_supported(bits)
+}
+
+/// `field_bits` of the wide `input` at bit `lsb`.
+pub(super) fn wide_extract(carrier: u32, field: u32, input: CExpr, lsb: u32) -> Option<CExpr> {
+    let helper = crate::bitvector::BitVectorHelper::extract(carrier, field)?;
+    Some(helper.call(vec![input, CExpr::UIntLit(u64::from(lsb))]))
+}
+
+/// The integer `field`, `field_bits` wide, zero-extended to the `carrier`.
+pub(super) fn wide_zero_extend(field_bits: u32, carrier: u32, field: CExpr) -> Option<CExpr> {
+    let helper = crate::bitvector::BitVectorHelper::zero_extend(field_bits, carrier)?;
+    Some(helper.call(vec![cast(integer(field_bits)?, field)]))
 }
 
 fn integer(bits: u32) -> Option<CType> {
@@ -77,6 +96,10 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
 
 /// A constant read as `ty`: a float's bits reinterpreted, since C would convert an integer's value.
 fn literal_as(value: MachineBitVector, ty: &MachineType) -> Option<CExpr> {
+    // A wide constant holds at most 64 set bits, its low ones.
+    if wide(value.width_bits()) {
+        return wide_zero_extend(64, value.width_bits(), CExpr::UIntLit(value.bits()));
+    }
     let bits = literal(value)?;
     match ty {
         MachineType::Float { width_bits } if *width_bits == value.width_bits() => {
@@ -85,6 +108,21 @@ fn literal_as(value: MachineBitVector, ty: &MachineType) -> Option<CExpr> {
         MachineType::Float { .. } => None,
         _ => Some(bits),
     }
+}
+
+/// `condition ? if_true : if_false` at `ty`; a wide carrier is a struct, which C selects uncast.
+fn select(ty: &MachineType, condition: CExpr, if_true: CExpr, if_false: CExpr) -> Option<CExpr> {
+    let arm = |expr: CExpr| -> Option<CExpr> {
+        Some(match wide(ty.width_bits()) {
+            true => expr,
+            false => cast(c_type(ty)?, expr),
+        })
+    };
+    Some(CExpr::Ternary {
+        cond: Box::new(condition),
+        then_expr: Box::new(arm(if_true)?),
+        else_expr: Box::new(arm(if_false)?),
+    })
 }
 
 /// `value`'s low `bits` as an unsigned literal of that width; a 128-bit one is spelled from halves.
@@ -110,6 +148,11 @@ fn wide_literal(bits: u32, value: u128) -> Option<CExpr> {
 
 /// `root`, `bits` wide, with `lane` written over its bits `lsb..lsb + width`.
 fn insert_lane(bits: u32, (lsb, width): (u32, u32), root: CExpr, lane: CExpr) -> Option<CExpr> {
+    if wide(bits) {
+        let insert = crate::bitvector::BitVectorHelper::insert(bits, width)?;
+        let lane = cast(integer(width)?, lane);
+        return Some(insert.call(vec![root, lane, CExpr::UIntLit(u64::from(lsb))]));
+    }
     let end = lsb.checked_add(width)?;
     if width == 0 || end > bits || bits > 128 {
         return None;
@@ -178,21 +221,15 @@ fn boolean_not(bits: u32, x: CExpr) -> Option<CExpr> {
 
 /// `bits` of a `wide`-bit `input` from bit `lsb`.
 fn extract((wide, bits): (u32, u32), input: CExpr, lsb: u32) -> Option<CExpr> {
+    if self::wide(wide) {
+        return wide_extract(wide, bits, input, lsb);
+    }
     let shifted = binary(
         BinaryOp::Shr,
         cast(integer(wide)?, input),
         CExpr::UIntLit(u64::from(lsb)),
     );
     Some(cast(integer(bits)?, shifted))
-}
-
-/// `condition ? if_true : if_false`, each arm at `ty`.
-fn select(ty: &MachineType, condition: CExpr, if_true: CExpr, if_false: CExpr) -> Option<CExpr> {
-    Some(CExpr::Ternary {
-        cond: Box::new(condition),
-        then_expr: Box::new(cast(c_type(ty)?, if_true)),
-        else_expr: Box::new(cast(c_type(ty)?, if_false)),
-    })
 }
 
 /// A float comparison, as a byte holding 0 or 1.
@@ -327,6 +364,7 @@ fn convert(
 ) -> Option<CExpr> {
     let (from_bits, to_bits) = (from.width_bits(), to.width_bits());
     match kind {
+        MachineCastKind::ZeroExtend if wide(to_bits) => wide_zero_extend(from_bits, to_bits, input),
         MachineCastKind::ZeroExtend
         | MachineCastKind::IntegerToAddress
         | MachineCastKind::AddressToInteger => {
@@ -415,6 +453,11 @@ fn boolean(op: MachineBooleanOp, bits: u32, left: CExpr, right: CExpr) -> Option
 
 /// `high` above `low`, as one integer of their summed widths.
 fn concat(bits: u32, low_bits: u32, high: CExpr, low: CExpr) -> Option<CExpr> {
+    if wide(bits) {
+        let insert = crate::bitvector::BitVectorHelper::insert(bits, bits.checked_sub(low_bits)?)?;
+        let low = wide_zero_extend(low_bits, bits, low)?;
+        return Some(insert.call(vec![low, high, CExpr::UIntLit(u64::from(low_bits))]));
+    }
     let ty = integer(bits)?;
     let high = binary(
         BinaryOp::Shl,

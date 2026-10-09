@@ -1632,6 +1632,15 @@ fn fit(expr: CExpr, from: &MachineType, to: &MachineType) -> Option<CExpr> {
         return Some(expr);
     }
     let (wide, narrow) = (from.width_bits(), to.width_bits());
+    // A wide carrier's low field is its value at a narrower class, through the bitvector helper.
+    if terms::wide(wide) && narrow < wide {
+        let low = terms::wide_extract(wide, narrow, expr, 0)?;
+        return terms::reclass(low, &lane(narrow), to);
+    }
+    if terms::wide(narrow) && wide < narrow {
+        let bits = terms::reclass(expr, from, &lane(wide))?;
+        return terms::wide_zero_extend(wide, narrow, bits);
+    }
     match (float(from), float(to)) {
         (false, false) => Some(CExpr::cast(
             terms::c_type(to)?,

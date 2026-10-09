@@ -106,7 +106,7 @@ pub fn render(
         0,
         &[],
     );
-    let mut ready = prepare_function_for_emission(c);
+    let mut ready = ready_with_carriers(c);
     // Each marker names the instruction its statement was written for, so each line names its own.
     let markers = addresses.len();
     ready.seal_observation_markers(
@@ -122,6 +122,33 @@ pub fn render(
         function: crate::RenderedFunction::new(emission, ready.into_function()),
         ledger,
     })
+}
+
+/// `c` ready to emit: a wide carrier is a struct the unit defines, with the helpers that take it
+/// apart.
+fn ready_with_carriers(c: CFunction) -> crate::codegen::EmissionReadyFunction {
+    let helpers = crate::bitvector::helpers_called(&c);
+    let mut carriers = std::collections::BTreeSet::new();
+    carriers.extend(helpers.iter().flat_map(|helper| helper.carriers()));
+    carriers.extend(
+        c.locals
+            .iter()
+            .map(|local| &local.ty)
+            .chain(c.params.iter().map(|param| &param.ty))
+            .filter_map(|ty| match ty {
+                CType::BitVector(bits) => Some(*bits),
+                _ => None,
+            }),
+    );
+    let mut ready = prepare_function_for_emission(c);
+    ready.set_aggregate_definitions(
+        carriers
+            .into_iter()
+            .filter_map(crate::bitvector::carrier_definition)
+            .collect(),
+    );
+    ready.set_bitvector_helpers(helpers);
+    ready
 }
 
 /// SD's §3 certificate over the shaped body, or the refusal that names its first violation.

@@ -670,15 +670,19 @@ fn a_released_wide_insert_base_is_rendered_where_it_is_read() {
         bytes: LANE_INSERT.to_vec(),
         name: "lane",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
-    assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
-    assert!(output.contains("return"), "{output}");
+    // Both pipelines: the staged one writes the 256-bit Z registers through the same helpers.
+    for pipeline in [decompile, staged] {
+        let response = pipeline(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(
+            response.render_refusal.is_none(),
+            "{:?}\n{output}",
+            response.render_refusal
+        );
+        assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
+        assert!(output.contains("return"), "{output}");
+        assert!(!output.contains("ValueHasNoCType"), "{output}");
+    }
 }
 
 /// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
