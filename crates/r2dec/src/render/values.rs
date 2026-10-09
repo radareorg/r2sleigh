@@ -58,6 +58,8 @@ pub(super) struct Values<'a> {
     results: r2ssa::dense::IdSet<ValueId>,
     /// One declaration per callee, which every call to it here must agree with.
     externs: RefCell<BTreeMap<String, CExternDecl>>,
+    /// The text the capture proves at each address, which a passed constant address is.
+    strings: &'a BTreeMap<u64, String>,
     little_endian: bool,
     ptr_bits: u32,
     /// The function itself as a call to its own entry names it: its name, parameters and result.
@@ -725,6 +727,7 @@ impl<'a> Values<'a> {
             calls: planned,
             results,
             externs: RefCell::new(BTreeMap::new()),
+            strings: input.string_literals(),
             ptr_bits: input.ptr_bits(),
             own: Own::of(input),
             little_endian: matches!(
@@ -1104,6 +1107,31 @@ impl<'a> Values<'a> {
         )
     }
 
+    /// The text `value` points at where `reader` passes it as a constant address in `class`, and
+    /// the capture proves text there.
+    fn passed_text(&self, value: ValueId, class: &MachineType, reader: InstId) -> Option<&'a str> {
+        if !matches!(class, MachineType::Integer { width_bits, .. } if *width_bits == self.ptr_bits)
+        {
+            return None;
+        }
+        let term = self
+            .readers
+            .absorbed((&self.projection, &self.roots), value, reader)?;
+        let node = self.roots.arena().term(term);
+        let address = match node.kind {
+            _ if node.ty.width_bits() != self.ptr_bits => return None,
+            TermKind::Literal(bits) => bits.bits(),
+            TermKind::Leaf(r2rewrite::LeafRead { expr, .. }) | TermKind::Opaque(expr) => {
+                match self.projection.expr(expr)?.kind() {
+                    MachineExprKind::Constant { value, .. } => value.bits(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        self.strings.get(&address).map(String::as_str)
+    }
+
     fn calls_itself(&self, plan: &CallPlan) -> bool {
         matches!(&plan.callee, calls::Callee::Named { address, .. } if *address == Some(self.own.entry))
     }
@@ -1113,7 +1141,9 @@ impl<'a> Values<'a> {
     fn call_expr(&self, inst: InstId, plan: &CallPlan, ret: Option<&MachineType>) -> Option<CExpr> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
+        let mut texts = Vec::with_capacity(plan.arguments.len());
         for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
+            texts.push(self.passed_text(*argument, class, inst));
             let held = needed(self.value_type(*argument), inst, "argument type")?;
             // A float the caller stored as bits would travel in a float register once C declares it.
             if *stacked && matches!(held, MachineType::Float { .. }) {
@@ -1135,6 +1165,11 @@ impl<'a> Values<'a> {
                 *ty = to.clone();
             }
             ret_type = declared.ret.clone();
+        }
+        for ((argument, ty), text) in arguments.iter_mut().zip(&types).zip(texts) {
+            if let Some(text) = text.filter(|_| crate::string_literal_serves(ty, self.ptr_bits)) {
+                *argument = calls::text_as(text, ty);
+            }
         }
         let (name, kind, address) = match &plan.callee {
             calls::Callee::Named {
