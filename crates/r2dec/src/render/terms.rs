@@ -589,7 +589,46 @@ impl Spell<'_> {
         let wide = integer(self.arena.term(base).ty.width_bits())?;
         let step = CExpr::UIntLit(u64::from(bytes));
         let offset = binary(BinaryOp::Mul, cast(wide.clone(), self.term(index)?), step);
-        Some(binary(BinaryOp::Add, cast(wide, self.term(base)?), offset))
+        let base = match self.named_base(base) {
+            Some(named) => named,
+            None => self.term(base)?,
+        };
+        Some(binary(BinaryOp::Add, cast(wide, base), offset))
+    }
+
+    /// A literal base at the exact address of an object the program names: that object's address,
+    /// so an index off it stays in the object wherever the program's does (ADR "D4's frame").
+    fn named_base(&self, id: TermId) -> Option<CExpr> {
+        let TermKind::Literal(value) = self.arena.term(id).kind else {
+            return None;
+        };
+        let byte = MachineType::Integer {
+            width_bits: 8,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        };
+        let named = (self.global)(value.bits(), &byte, false)?;
+        Some(cast(
+            integer(self.arena.term(id).ty.width_bits())?,
+            named.address,
+        ))
+    }
+
+    /// A computed address one of whose summands is a named object's exact address, spelled off it.
+    fn off_named(&self, id: TermId) -> Option<CExpr> {
+        let TermKind::Arithmetic {
+            op: MachineArithmeticOp::Add,
+            left,
+            right,
+        } = self.arena.term(id).kind
+        else {
+            return None;
+        };
+        let (base, rest) = match self.named_base(right) {
+            Some(base) => (base, left),
+            None => (self.named_base(left)?, right),
+        };
+        let ty = integer(self.arena.term(id).ty.width_bits())?;
+        Some(binary(BinaryOp::Add, cast(ty, self.term(rest)?), base))
     }
 
     /// The address `bytes` are read or written at. A frame address is spelled only inside the
@@ -601,10 +640,10 @@ impl Spell<'_> {
         object: Option<ObjectId>,
     ) -> Option<CExpr> {
         let Some((named, offset)) = frame_offset(self.arena, id) else {
-            return self
-                .computed_into_frame(id, object)
-                .then(|| self.term(id))
-                .flatten();
+            if !self.computed_into_frame(id, object) {
+                return None;
+            }
+            return self.off_named(id).or_else(|| self.term(id));
         };
         let placed = (self.object)(named)?;
         if object.is_some_and(|object| object != named) || !inside(offset, bytes, placed.extent) {

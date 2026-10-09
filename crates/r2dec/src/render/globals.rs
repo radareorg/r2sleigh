@@ -62,7 +62,7 @@ impl<'a> Globals<'a> {
         let fact = self.types.get(address);
         // A stated type C cannot spell without its definition declares nothing, and is no `char[]`.
         let declared = match fact {
-            Some(fact) => Some(calls::spellable(&fact.ty)?),
+            Some(fact) => Some(declarable(&fact.ty)?),
             None => None,
         };
         match self.names.borrow_mut().entry(name.clone()) {
@@ -104,5 +104,20 @@ impl<'a> Globals<'a> {
 
     pub(super) fn objects(&self) -> Vec<CExternObject> {
         self.used.borrow().values().cloned().collect()
+    }
+}
+
+/// `ty` as an object's declaration spells it: a type C spells with no definition, or an array of
+/// stated length of one.
+fn declarable(ty: &CType) -> Option<CType> {
+    match ty {
+        CType::Array(element, Some(length)) => Some(CType::Array(
+            Box::new(calls::spellable(element).filter(|ty| *ty != CType::Void)?),
+            Some(*length),
+        )),
+        CType::Const(inner) if matches!(&**inner, CType::Array(..)) => {
+            Some(CType::Const(Box::new(declarable(inner)?)))
+        }
+        ty => calls::spellable(ty),
     }
 }
