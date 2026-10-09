@@ -420,18 +420,8 @@ pub(crate) fn certified_call_return_address_values(
         .collect()
 }
 
-/// Accesses to a frame slot this function writes and never reads.
-///
-/// A store into memory is an effect, and the ledger holds the rendering to it,
-/// which is why a dead frame slot cannot simply be dropped: the obligation
-/// would go unanswered. But observable means observable from outside, and a
-/// `CalleeStackAllocationCertificate` is the proof that the object lies wholly
-/// inside storage this function owns at every access. Where every one of those
-/// accesses is a write, nothing here or anywhere else can read what was stored,
-/// and the store has no meaning the C has to carry.
-///
-/// Ownership is not privacy: an object whose address escapes, or that a call's
-/// argument area reaches, is read outside the body (`r2ssa::FrameReach`).
+/// Accesses to a callee-owned frame slot only written: unescaped, unreached by calls, and no
+/// index without a bound writes it or reads the frame (doc/adr-frame-model.md, extent rule).
 pub(crate) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
     let certificates = source.certificates();
     let reach = &source.objects().frame_reach;
@@ -442,13 +432,19 @@ pub(crate) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) ->
             r2ssa::CallFrameReach::Objects(objects) => by_calls.extend(objects.iter().copied()),
         }
     }
+    if read_past_any_bound(source) {
+        return BTreeSet::new();
+    }
     let reached_by_a_call = |object| every_object || by_calls.contains(&object);
     let mut accesses = BTreeSet::new();
     for slot in certificates.stack_slots.values() {
         let Some(allocation) = slot.callee_allocation.as_ref() else {
             continue;
         };
-        if reach.escaped(allocation.object) || reached_by_a_call(allocation.object) {
+        if reach.escaped(allocation.object)
+            || reached_by_a_call(allocation.object)
+            || source.extent_assumption(allocation.object).is_some()
+        {
             continue;
         }
         let Some(owned) = allocation
@@ -465,6 +461,20 @@ pub(crate) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) ->
         accesses.extend(owned.iter().map(|access| access.access.inst));
     }
     accesses
+}
+
+/// Whether some frame read lands at an index no range bounds, so it may read any slot.
+fn read_past_any_bound(source: &r2ssa::SsaArtifact) -> bool {
+    let read_objects = source
+        .certificates()
+        .memory_accesses
+        .values()
+        .filter(|access| !access.is_write)
+        .map(|access| access.object)
+        .collect::<BTreeSet<_>>();
+    read_objects.into_iter().any(|object| {
+        source.extent_assumption(object) == Some(r2ssa::ExtentAssumption::UnboundedIndex)
+    })
 }
 
 /// Direct-control target values whose complete use domain is CFG topology.

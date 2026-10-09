@@ -1387,12 +1387,28 @@ impl SsaArtifact {
             crate::StackArrayLayoutDisposition::Refused(
                 crate::StackArrayLayoutRefusal::MissingConstantOffset,
             ) => Some(crate::ExtentAssumption::UnboundedIndex),
+            _ if self.indexed_past_any_bound(slot) => Some(crate::ExtentAssumption::UnboundedIndex),
             _ => self
                 .objects()
                 .frame_reach
                 .escaped(object)
                 .then_some(crate::ExtentAssumption::EscapedAddress),
         }
+    }
+
+    /// An access at an index no value range bounds, whatever else refused the layout first.
+    fn indexed_past_any_bound(&self, slot: &crate::StackSlotCertificate) -> bool {
+        let Some(allocation) = slot.callee_allocation.as_ref() else {
+            return false;
+        };
+        let certificates = self.certificates();
+        allocation.accesses.iter().any(|id| {
+            certificates.memory_accesses.get(id).is_some_and(|access| {
+                self.objects()
+                    .index_for_address(access.address)
+                    .is_some_and(|index| self.values().upper_bound(index).is_none())
+            })
+        })
     }
 
     pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
