@@ -75,12 +75,13 @@ fn accesses_to_an_object_of_unproven_extent_are_counted_as_assumed() {
 fn a_table_indexed_by_a_remainder_is_one_array_of_its_proven_length() {
     let (fixture, function) = ("shapes_gcc_x64_O0", "sym.shape_function_pointer");
     let (out, afv) = (pdd(fixture, function), afv(fixture, function));
-    // The frame lists the table as three words at entry.sp-0x28 (ADR D4: afv states each local).
-    assert!(
-        afv.lines()
-            .any(|line| line == "var uint64_t[3] stack_m40 @ entry.sp-0x28"),
-        "{afv}"
-    );
+    // The frame model holds the table as one 24-byte object at entry.sp-0x28, three rows of
+    // eight (ADR frame-model: afv lists its locals).
+    let table = common::afv_locals(&afv)
+        .into_values()
+        .find(|(offset, _)| *offset == -0x28);
+    let extent = table.as_ref().and_then(|(_, ty)| common::afv_size(ty));
+    assert_eq!(extent, Some(24), "{afv}");
     // Its second and third rows hold the addresses of `op_xor` and `op_mul`, by name or by value.
     let functions = run(fixture, "afl");
     let address = |symbol: &str| {

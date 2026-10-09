@@ -195,7 +195,7 @@ fn frame_pointer_locals_are_placed_by_the_prologue() {
         let at = locals.get(local).map(|(offset, _)| *offset);
         assert!(at.is_some(), "{local} missing:\n{afv}");
         let written = writes.iter().find(|(offset, _)| Some(*offset) == at);
-        let value = written.and_then(|(_, value)| common::literal(value));
+        let value = written.and_then(|(_, value)| common::constant_of(&out, value));
         assert_eq!(value, Some(first), "{local}:\n{afv}\n{out}");
     }
 }

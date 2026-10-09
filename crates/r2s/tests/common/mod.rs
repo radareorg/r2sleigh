@@ -380,3 +380,31 @@ pub fn reads_at(c: &str, address: u64, bits: u32) -> bool {
         through_helper || dereferenced
     })
 }
+
+/// The constant `value` is, directly or through each name's first assignment in `c`: a copy
+/// between two names of one slot is the value it copies.
+pub fn constant_of(c: &str, value: &str) -> Option<u64> {
+    let mut value = bare(value);
+    for _ in 0..c.lines().count() {
+        if let Some(constant) = literal(value) {
+            return Some(constant);
+        }
+        if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        value = bare(first_assignment(c, value)?);
+    }
+    None
+}
+
+/// The bytes a type `afv` prints occupies: `T[N]`, a scalar, or a `struct r2sleigh_bits_K`
+/// carrier of K bits.
+pub fn afv_size(ty: &str) -> Option<i64> {
+    if let Some(bits) = ty.strip_prefix("struct r2sleigh_bits_") {
+        return Some(bits.parse::<i64>().ok()? / 8);
+    }
+    match ty.strip_suffix(']').and_then(|ty| ty.split_once('[')) {
+        Some((element, count)) => Some(size_of(element)? * count.parse::<i64>().ok()?),
+        None => size_of(ty),
+    }
+}
