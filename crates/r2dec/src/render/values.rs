@@ -1145,11 +1145,7 @@ impl<'a> Values<'a> {
                 }
                 let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
                 self.mark_discharged(output);
-                Ok(Some(CStmt::Expr(CExpr::binary(
-                    crate::ast::BinaryOp::Assign,
-                    CExpr::var(name),
-                    value,
-                ))))
+                Ok(Some(self.binding(output, name, canonical.canonical, value)))
             }
             _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(None),
             _ => Err(Gap::Effect),
@@ -1172,6 +1168,27 @@ impl<'a> Values<'a> {
         if let Some(slot) = self.assigned.borrow_mut().get_mut(value.0 as usize) {
             *slot = true;
         }
+    }
+
+    /// The statement binding `output` to `value`, its term's spelling: a read nothing uses still
+    /// reads, so the statement performs it and discards the value.
+    fn binding(&self, output: ValueId, name: SymbolId, term: TermId, value: CExpr) -> CStmt {
+        if self.readers.of(output).is_empty()
+            && effectful(&self.projection, self.roots.arena(), term)
+        {
+            return CStmt::Expr(CExpr::cast(CType::Void, value));
+        }
+        self.assign_value(output, name, value)
+    }
+
+    /// `name = value`, `value` spelled as C converts it to the type `output` is held at.
+    fn assign_value(&self, output: ValueId, name: SymbolId, value: CExpr) -> CStmt {
+        let held = self.names[output.0 as usize].as_ref().map(|(_, held)| held);
+        let value = match held.and_then(terms::c_type) {
+            Some(ty) => terms::at_sink(&ty, value),
+            None => value,
+        };
+        assign(name, value)
     }
 
     fn is_named(&self, value: ValueId) -> bool {
@@ -1586,7 +1603,7 @@ impl<'a> Values<'a> {
             },
         };
         let spelled = fit(self.operand(*value, inst)?, &held, &class)?;
-        Some(Some(CExpr::cast(ty, spelled)))
+        Some(Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), spelled))))
     }
 
     fn terminator(&self, addr: u64) -> Option<(InstId, &'a SSAOp<ValueId>)> {
@@ -1718,7 +1735,7 @@ impl<'a> Values<'a> {
             self.residual_in(inst, &CStmt::Expr(source.clone()));
             self.assigns(output);
             match clobbers {
-                false => out.push(assign(*name, source)),
+                false => out.push(self.assign_value(output, *name, source)),
                 true => {
                     let c = terms::c_type(ty).expect("a named value has a C type");
                     // The name is read before the table is borrowed to declare the temporary.

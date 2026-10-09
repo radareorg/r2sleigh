@@ -96,6 +96,46 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
     Some(cast(ty, CExpr::UIntLit(value.bits())))
 }
 
+/// `expr` where C converts it to `sink` as if by assignment (a `return`, an assigned variable): an
+/// integer literal under unsigned casts that keep it is the plain `int` literal of the same value.
+pub(super) fn at_sink(sink: &CType, expr: CExpr) -> CExpr {
+    let holds = |ty: &CType, value: u64| match ty {
+        CType::Int { bits, signedness } => {
+            let bits = bits - u32::from(*signedness == Signedness::Signed);
+            bits >= 64 || value < 1 << bits
+        }
+        _ => false,
+    };
+    let (mut casts, mut ids) = (Vec::new(), expr.observation_ids().into_owned());
+    let mut inner = expr.unobserved();
+    let value = loop {
+        match inner {
+            CExpr::Cast { ty, expr, .. } => {
+                casts.push(ty);
+                ids.extend(expr.observation_ids().iter().copied());
+                inner = expr.unobserved();
+            }
+            CExpr::UIntLit(value) => break *value,
+            CExpr::IntLit(value) if *value >= 0 => break value.unsigned_abs(),
+            _ => return expr,
+        }
+    };
+    let unsigned = |ty: &CType| {
+        matches!(
+            ty,
+            CType::Int {
+                signedness: Signedness::Unsigned,
+                ..
+            }
+        )
+    };
+    let kept = casts.iter().all(|ty| unsigned(ty) && holds(ty, value));
+    if !kept || !holds(sink, value) || value > i32::MAX as u64 {
+        return expr;
+    }
+    CExpr::observe_all(ids, CExpr::IntLit(value as i64))
+}
+
 /// A constant read as `ty`: a float's bits reinterpreted, since C would convert an integer's value.
 fn literal_as(value: MachineBitVector, ty: &MachineType) -> Option<CExpr> {
     // A wide constant holds at most 64 set bits, its low ones.
