@@ -57,6 +57,21 @@ impl<'a> RenderInput<'a> {
     }
 
     /// Who each call site calls, as r2types resolved it.
+    /// How many call sites take a prototype the source declares (a library table's or the binary's).
+    pub fn declared_call_prototypes(&self) -> usize {
+        self.facts
+            .report()
+            .callsites()
+            .into_iter()
+            .flat_map(|facts| facts.by_callsite.values())
+            .filter(|fact| {
+                fact.callee_signature_types
+                    .as_ref()
+                    .is_some_and(|types| types.grade() <= r2source::Grade::Declared)
+            })
+            .count()
+    }
+
     pub fn callee_resolution(&self) -> Option<&'a r2types::CalleeResolutionFacts> {
         self.facts.report().callee_resolution()
     }
