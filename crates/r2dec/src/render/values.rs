@@ -519,7 +519,8 @@ fn plan_calls(
         };
         if matches!(plan.callee, calls::Callee::Named { .. }) {
             let signature = input.declared_callee_signature(inst.id);
-            let defines = |tag: &str| tags.defines(tag);
+            let callee = input.callee_type_graph(inst.id);
+            let defines = |tag: &str, is_union| tags.agrees(tag, is_union, callee);
             plan.declared = signature
                 .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &defines));
             if let (Some(signature), None) = (signature, &plan.declared) {
@@ -821,7 +822,9 @@ impl<'a> Values<'a> {
                 .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)));
             let declared = (input.declared_parameter(index as usize, ty.width_bits()))
                 .or(analysed)
-                .and_then(|declared| calls::spellable(&declared, &|tag| tags.defines(tag)))
+                .and_then(|declared| {
+                    calls::spellable(&declared, &|tag, union| tags.defines(tag, union))
+                })
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
             let c = match declared {
                 Some(declared) => {

@@ -3542,3 +3542,47 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
         "the signature claims a return r2types refused"
     );
 }
+
+/// One `struct pair { char c; int32_t i; }` stated at `i_at` bits, `size` bits and `align` bits.
+fn pair_graph(i_at: u64, size: u64, align: u64) -> Option<r2ssa::SourceTypeGraph> {
+    let pair = r2ssa::SourceTypeKind::Struct { aggregate_id: 0 };
+    r2ssa::SourceTypeGraph::new(
+        [
+            r2ssa::SourceType::new(0, pair, size, align),
+            r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::Char { signed: true }, 8, 8),
+            r2ssa::SourceType::new(2, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
+        ],
+        [r2ssa::SourceAggregateLayout::new(
+            0,
+            0,
+            size,
+            align,
+            "pair",
+            [
+                r2ssa::SourceAggregateMember::new(0, 1, 0, 8, "c"),
+                r2ssa::SourceAggregateMember::new(1, 2, i_at, 32, "i"),
+            ],
+        )],
+    )
+    .ok()
+}
+
+/// C pads `int32_t i` to offset 4 and the whole to 8: that stated layout is the natural one.
+#[test]
+fn a_naturally_padded_aggregate_is_defined() {
+    let graph = pair_graph(32, 64, 32).expect("a padded pair");
+    let definition = aggregate_members(&graph, "pair").expect("the natural layout");
+    assert!(!definition.is_union);
+    assert_eq!(definition.members.len(), 2);
+    assert_eq!(definition.members[1], (CTypeLike::int(32), "i".to_owned()));
+}
+
+/// A packed pair (`i` at byte 1, 5 bytes) is not what C lays those members out as: refused.
+#[test]
+fn a_packed_aggregate_is_refused() {
+    let graph = pair_graph(8, 40, 8).expect("a packed pair");
+    assert_eq!(aggregate_members(&graph, "pair"), None);
+    assert!(!aggregate_is_definable(&graph, "pair"));
+    let tail = pair_graph(32, 128, 64).expect("a pair padded past its alignment");
+    assert_eq!(aggregate_members(&tail, "pair"), None);
+}
