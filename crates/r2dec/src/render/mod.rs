@@ -88,6 +88,8 @@ pub fn render(
         .map(values::Values::never_returning)
         .unwrap_or_default();
     certify_control(input, &body, &blocks, &labels, &never_return)?;
+    let mut body = body;
+    body.visit_stmts_mut(&mut |stmt| select_one_assignment(&c.symbols.borrow(), stmt));
     work.with_phase(DecompileWorkPhase::Rendering).poll()?;
     match &values {
         Some(values) => {
@@ -102,6 +104,7 @@ pub fn render(
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
     };
+    drop_unmentioned_locals(&mut c);
     let ledger = close_ledger(input, values.as_ref());
     // The proof line every rendering opens with: what became of each obligation the source owes.
     crate::note_unproven_constructs(
@@ -186,6 +189,100 @@ fn certify_control(
         "control certificate: {certificate} {:?}",
         certificate.violations.first()
     )))
+}
+
+/// A local nothing in the text names, every read of it a residual, declares nothing.
+fn drop_unmentioned_locals(c: &mut CFunction) {
+    let mut mentioned = std::collections::BTreeSet::new();
+    c.visit_body_exprs(&mut |node| {
+        if let CExpr::Var(symbol) = node {
+            mentioned.insert(*symbol);
+        }
+    });
+    c.locals.retain(|local| mentioned.contains(&local.name));
+}
+
+/// `if (c) { x = a; } else { x = b; }` is `x = c ? a : b;`: C evaluates `c`, then the one arm it
+/// selects, either way. After the certificate, which reads each arm's block where it stands; the
+/// one statement keeps both arms' markers, and each arm is converted to `x`'s type, as its own
+/// assignment converted it, before the two meet.
+fn select_one_assignment(symbols: &crate::symbol::SymbolTable, stmt: &mut CStmt) {
+    if !matches!(
+        stmt,
+        CStmt::If {
+            else_body: Some(_),
+            ..
+        }
+    ) {
+        return;
+    }
+    let CStmt::If {
+        cond,
+        then_body,
+        else_body: Some(else_body),
+    } = std::mem::replace(stmt, CStmt::Empty)
+    else {
+        unreachable!("an if with an else, matched above");
+    };
+    *stmt = match (sole_assignment(&then_body), sole_assignment(&else_body)) {
+        (Some((then_ids, target, then_value)), Some((else_ids, other, else_value)))
+            if target == other =>
+        {
+            let ty = symbols.ty(target);
+            let converted = |value: CExpr| match value.unobserved() {
+                CExpr::Var(symbol) if symbols.ty(*symbol) == ty => value,
+                _ => terms::at_sink(ty, CExpr::cast(ty.clone(), value)),
+            };
+            let selected = CExpr::Ternary {
+                cond: Box::new(cond),
+                then_expr: Box::new(converted(then_value)),
+                else_expr: Box::new(converted(else_value)),
+            };
+            let assignment = CExpr::assign(CExpr::var(target), selected);
+            CStmt::observe_all([then_ids, else_ids].concat(), CStmt::Expr(assignment))
+        }
+        _ => CStmt::If {
+            cond,
+            then_body,
+            else_body: Some(else_body),
+        },
+    };
+}
+
+/// An arm that is one assignment to a plain variable, with nothing else but empty statements: its
+/// markers, the variable and the value.
+fn sole_assignment(
+    arm: &CStmt,
+) -> Option<(
+    Vec<crate::ast::RenderObservationId>,
+    crate::symbol::SymbolId,
+    CExpr,
+)> {
+    let mut ids = arm.observation_ids().into_owned();
+    let stmts = match arm.unobserved() {
+        CStmt::Block(stmts) => stmts.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+    let mut assignment = None;
+    for stmt in stmts {
+        ids.extend(stmt.observation_ids().iter().copied());
+        match stmt.unobserved() {
+            CStmt::Empty => {}
+            CStmt::Expr(CExpr::Binary {
+                op: crate::ast::BinaryOp::Assign,
+                left,
+                right,
+            }) if assignment.is_none() => match left.unobserved() {
+                CExpr::Var(target) if left.observation_ids().is_empty() => {
+                    assignment = Some((*target, right.as_ref().clone()));
+                }
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    let (target, value) = assignment?;
+    Some((ids, target, value))
 }
 
 /// What became of each obligation: D2's account, or every one a gap where D2 did not run.

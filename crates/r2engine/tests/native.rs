@@ -992,10 +992,20 @@ fn a_load_nothing_reads_still_reads() {
         response.output
     );
     assert!(
-        response.output.text().contains("(void)*"),
+        discards_a_read(response.output.text()),
         "the discarded read is missing:\n{}",
         response.output
     );
+}
+
+/// Whether a statement performs a read and discards its value: `(void)` on the read, however the
+/// pipeline spells the read (`*p` or the load helper).
+fn discards_a_read(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("(void)")
+            .is_some_and(|read| read.starts_with('*') || read.starts_with("r2sleigh_load_"))
+    })
 }
 
 /// The analysis tier can be asked for on its own, without asking for C.
@@ -1044,8 +1054,8 @@ fn the_structured_tier_is_the_tree_the_c_comes_from() {
     assert!(tree.contains("Function: dead_load"), "{tree}");
     // The statements are spelled by the emitter that writes the C, so the two
     // tiers disagree about their shape and about nothing else.
-    assert!(tree.contains("(void)*"), "{tree}");
-    assert!(c.contains("(void)*"), "{c}");
+    assert!(discards_a_read(&tree), "{tree}");
+    assert!(discards_a_read(&c), "{c}");
 }
 
 /// The C tier hands back the tree it rendered, not only the text.

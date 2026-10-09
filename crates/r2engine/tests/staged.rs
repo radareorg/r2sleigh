@@ -13,13 +13,12 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
         .rendered(FORKED, RenderTier::Staged)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
-    // `test edi, edi; je L` is the test on the parameter; the merge is one variable both arms assign.
+    // `test edi, edi; je L` is the test on the parameter; the merge is one variable both arms
+    // assign, so it is one assignment of the value the test selects.
     assert!(
-        text.contains("if ((uint8_t)((uint32_t)arg0 == (uint32_t)0U))"),
+        text.contains("rax_3 = (uint8_t)((uint32_t)arg0 == (uint32_t)0U) ? 0x1000 : 5;"),
         "{text}"
     );
-    assert!(text.contains("rax_3 = (uint64_t)0x1000U;"), "{text}");
-    assert!(text.contains("rax_3 = (uint64_t)5U;"), "{text}");
     assert!(
         text.contains("return (uint64_t)((uint64_t)rax_3 + (uint64_t)8U);"),
         "{text}"
