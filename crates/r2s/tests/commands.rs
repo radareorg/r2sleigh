@@ -623,7 +623,7 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
     for line in [
-        "double from_b(const double* arg0, uint64_t arg1)",
+        "double from_b(const double* arg0, int64_t arg1)",
         "double helper(const double*, int64_t);",
         "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)arg0, (int64_t)arg1));",
         "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
@@ -639,7 +639,7 @@ fn a_staged_recursive_call_agrees_with_its_own_definition() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fact");
     assert!(
-        staged.out.contains("int32_t fact(uint32_t arg0)"),
+        staged.out.contains("int32_t fact(int32_t arg0)"),
         "{}",
         staged.out
     );

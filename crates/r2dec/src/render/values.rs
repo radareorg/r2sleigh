@@ -29,8 +29,9 @@ pub(super) struct Values<'a> {
     roots: CanonicalRoots,
     /// By value index: the parameter or local a value is read through.
     names: Vec<Option<(SymbolId, MachineType)>>,
-    /// The parameters declared at the pointer type the source states, read as their integer class.
-    pointers: Vec<bool>,
+    /// The parameters declared at a type the source states other than their class's C type: a
+    /// read converts it to the class.
+    declared: Vec<bool>,
     /// The named values a statement written so far assigns: a read of any other is a residual.
     assigned: RefCell<Vec<bool>>,
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
@@ -708,7 +709,7 @@ impl<'a> Values<'a> {
             inventory,
             readers,
             names: vec![None; graph.values.len()],
-            pointers: vec![false; graph.values.len()],
+            declared: vec![false; graph.values.len()],
             assigned: RefCell::new(vec![false; graph.values.len()]),
             bound,
             frame: super::frame::Frame::of(artifact),
@@ -752,18 +753,20 @@ impl<'a> Values<'a> {
         parameters: Option<Vec<(u32, ValueId, MachineType)>>,
     ) {
         for (index, value, ty) in parameters.into_iter().flatten() {
-            let pointer = input
-                .parameter_declaration(index as usize, ty.width_bits())
-                .filter(|declared| {
-                    matches!(declared.unaliased(), r2types::CTypeLike::Pointer(_))
-                        && matches!(ty, MachineType::Integer { width_bits, .. } if width_bits == self.ptr_bits)
-                });
-            let c = match pointer {
+            let class = terms::c_type(&ty).expect("a classed parameter has a C type");
+            // A declared type is spelled as stated; an analysed one only where it is a pointer.
+            let analysed = (input.parameter_declaration(index as usize, ty.width_bits()))
+                .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)));
+            let declared = (input.declared_parameter(index as usize, ty.width_bits()))
+                .or(analysed)
+                .and_then(|declared| calls::spellable(&declared))
+                .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
+            let c = match declared {
                 Some(declared) => {
-                    self.pointers[value.0 as usize] = true;
+                    self.declared[value.0 as usize] = declared != class;
                     declared
                 }
-                None => terms::c_type(&ty).expect("a classed parameter has a C type"),
+                None => class,
             };
             let name = self.symbols.borrow_mut().declare(
                 format!("arg{index}"),
@@ -929,7 +932,7 @@ impl<'a> Values<'a> {
             );
         }
         let var = CExpr::var(name);
-        match self.pointers.get(value.0 as usize) {
+        match self.declared.get(value.0 as usize) {
             Some(true) => Some(CExpr::cast(terms::c_type(held)?, var)),
             _ => Some(var),
         }

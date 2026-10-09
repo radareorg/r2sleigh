@@ -100,6 +100,21 @@ pub(super) fn from_declared(call: CExpr, declared: &CType, class: &MachineType) 
     Some(CExpr::cast(target, call))
 }
 
+/// Whether a value of the declared type is exactly what `class` holds: the same kind and width,
+/// so converting between them changes no bit.
+pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> bool {
+    let (float, bits) = match declared {
+        CType::Const(inner) => return held_as(inner, class, ptr_bits),
+        CType::Typedef { ty, .. } => return held_as(ty, class, ptr_bits),
+        CType::Pointer(_) => (false, ptr_bits),
+        CType::Int { bits, .. } => (false, *bits),
+        CType::Bool => (false, 8),
+        CType::Float(bits) => (true, *bits),
+        _ => return false,
+    };
+    matches!(class, MachineType::Float { .. }) == float && class.width_bits() == bits
+}
+
 /// `ty` as C spells it with no definition of its own: a standard scalar, or a pointer to one, to
 /// `void` or to `char`; a typedef is its target, `char` excepted. A tagged or unknown type is not.
 pub(super) fn spellable(ty: &CType) -> Option<CType> {

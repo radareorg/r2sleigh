@@ -56,6 +56,15 @@ impl<'a> RenderInput<'a> {
         self.facts.parameter_declaration(slot, width_bits)
     }
 
+    /// What parameter `slot` is declared, where a declaration states the function's own types: its
+    /// debug information or a library's prototype, never a reading of its body.
+    pub fn declared_parameter(&self, slot: usize, width_bits: u32) -> Option<r2types::CTypeLike> {
+        let interface = self.facts.source().machine_context().function_interface()?;
+        (interface.types().grade() <= r2source::Grade::Declared)
+            .then(|| self.parameter_declaration(slot, width_bits))
+            .flatten()
+    }
+
     /// Who each call site calls, as r2types resolved it.
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
     pub fn declared_call_prototypes(&self) -> usize {
