@@ -2507,6 +2507,7 @@ impl Disassembler {
         let address_size = u32::try_from(self.default_code_space().address_size)
             .map_err(|_| LiftError::Parse("default code space address size".into()))?;
         let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
+        let ops = translate::split_odd_register_zeroes(ops);
 
         // A trap ends the instruction. Sleigh writes `brk` as a user operation
         // that produces `pc` followed by a branch through it, so the branch's
