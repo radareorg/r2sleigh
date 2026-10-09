@@ -272,21 +272,24 @@ fn a_function_is_decompiled_from_bytes_alone() {
         "{}",
         response.output
     );
-    assert!(
-        response.output.text().contains("EDI"),
-        "{}",
-        response.output
-    );
-    assert!(
-        response.output.text().contains("ESI"),
-        "{}",
-        response.output
-    );
-    assert!(
-        response.output.text().contains("return"),
-        "{}",
-        response.output
-    );
+    // EDI and ESI: the first two argument slots, at 32 bits, both read by the return.
+    let text = response.output.text();
+    let parameters = common::parameters(text);
+    let types = parameters
+        .iter()
+        .map(|(ty, _)| ty.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(types, ["uint32_t", "uint32_t"], "{text}");
+    let returned = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("return"))
+        .unwrap_or_else(|| panic!("no return: {text}"));
+    for (_, name) in &parameters {
+        assert!(
+            returned.contains(name.as_str()),
+            "{name} is not returned: {text}"
+        );
+    }
 }
 
 #[test]
@@ -703,13 +706,15 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
         "{}",
         response.output
     );
-    assert!(
-        response
-            .output
-            .text()
-            .contains("strlen((const char*)RDI_0)"),
-        "{}",
-        response.output
+    // `strlen` takes RDI as the prototype's `const char*`: the first parameter, cast.
+    let text = response.output.text();
+    let parameters = common::parameters(text);
+    assert_eq!(parameters.len(), 1, "{text}");
+    let arguments = common::call_arguments(text, "strlen").expect("a call to strlen");
+    assert_eq!(
+        arguments,
+        [format!("(const char*){}", parameters[0].1)],
+        "{text}"
     );
     // The same marker the plugin's route prints when radare2 supplies one.
     assert!(
@@ -857,16 +862,16 @@ fn a_function_is_decompiled_on_aarch64_too() {
         "{}",
         response.output
     );
-    assert!(
-        response.output.text().contains("X0_0"),
-        "{}",
-        response.output
-    );
-    assert!(
-        response.output.text().contains("return"),
-        "{}",
-        response.output
-    );
+    // X0: the first argument slot, at 64 bits, read by the return.
+    let text = response.output.text();
+    let parameters = common::parameters(text);
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert_eq!(parameters[0].0, "uint64_t", "{text}");
+    let returned = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("return"))
+        .unwrap_or_else(|| panic!("no return: {text}"));
+    assert!(returned.contains(parameters[0].1.as_str()), "{text}");
 }
 
 /// A lane written into a vector register whose other bytes nobody reads.
@@ -4382,9 +4387,21 @@ const SAVE_BESIDE_AN_INDEXED_BUFFER: &[u8] = &[
 #[test]
 fn a_register_saved_beside_an_indexed_buffer_is_no_store_of_the_program() {
     let text = rendered(SAVE_BESIDE_AN_INDEXED_BUFFER, "indexed_store");
+    // rbx's entry value would be a residual, or legacy's `RBX_0`; the one store is of `sil`, the second parameter.
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains("RBX_0"), "{text}");
-    assert!(text.contains("= SIL_0;"), "{text}");
+    let parameters = common::parameters(&text);
+    assert_eq!(parameters.len(), 2, "{text}");
+    let stored = &parameters[1].1;
+    let stores = text
+        .lines()
+        .skip(1)
+        .filter(|line| {
+            let line = line.trim_end();
+            line.ends_with(&format!("{stored};")) || line.ends_with(&format!("{stored});"))
+        })
+        .count();
+    assert_eq!(stores, 1, "{text}");
 }
 
 /// gcc -O1 `bool_relay(m, n)`: `setg al` writes one byte of RAX, and the
@@ -4662,14 +4679,14 @@ const SETE_LOW_BYTE: &[u8] = &[
 #[test]
 fn a_lane_written_and_read_back_is_no_parameter() {
     let text = rendered(SETE_LOW_BYTE, "is_null");
-    let signature = text.lines().next().expect("a signature");
-    let parameters = signature
-        .split_once('(')
-        .and_then(|(_, rest)| rest.split_once(')'))
-        .map(|(list, _)| list)
-        .expect("a parameter list");
+    // RDI and RSI are the first two argument slots; RDX, the third, would be a third parameter.
+    let types = common::parameters(&text)
+        .into_iter()
+        .map(|(ty, _)| ty)
+        .collect::<Vec<_>>();
     assert_eq!(
-        parameters, "uint64_t RDI_0, uint64_t RSI_0",
+        types,
+        ["uint64_t", "uint64_t"],
         "the signature names a register the function never reads: {text}"
     );
 }
@@ -4795,11 +4812,12 @@ const SELF_CALL_WITH_A_SCRATCH_REGISTER: &[u8] = &[
 #[test]
 fn a_self_call_takes_the_functions_own_interface() {
     let text = rendered(SELF_CALL_WITH_A_SCRATCH_REGISTER, "recurse");
-    let call = text
-        .lines()
-        .find(|line| line.contains("recurse(RDI_0"))
-        .unwrap_or_else(|| panic!("no self call: {text}"));
-    assert_eq!(call.matches(", ").count(), 1, "{text}");
+    let arguments =
+        common::call_arguments(&text, "recurse").unwrap_or_else(|| panic!("no self call: {text}"));
+    assert_eq!(arguments.len(), 2, "{text}");
+    // The first argument is `a - 1`, computed from the first parameter.
+    let parameters = common::parameters(&text);
+    assert!(arguments[0].contains(parameters[0].1.as_str()), "{text}");
 }
 
 /// `f` calls through memory in a loop with `rsi = b + 1` and `rdi` its own
@@ -4856,15 +4874,32 @@ const NEIGHBOUR_OF_AN_ESCAPED_LOCAL: &[u8] = &[
 #[test]
 fn the_objects_an_escaped_address_reaches_are_one() {
     let text = rendered(NEIGHBOUR_OF_AN_ESCAPED_LOCAL, "neighbour");
+    // The frame's storage is one declared array, and no slot of it a scalar of its own.
     let declarations = text
         .lines()
-        .filter(|line| {
+        .map(|line| {
             let line = line.trim();
-            line.starts_with("uint") && line.contains("stack_") && !line.contains('=')
+            line.strip_prefix("_Alignas(")
+                .and_then(|rest| rest.split_once(") "))
+                .map_or(line, |(_, declared)| declared)
         })
-        .collect::<Vec<_>>();
-    assert_eq!(declarations.len(), 1, "{text}");
-    assert!(declarations[0].contains('['), "{text}");
+        .filter(|line| {
+            line.starts_with("uint")
+                && line.ends_with(';')
+                && !line.contains('=')
+                && !line.contains('(')
+        });
+    let arrays = declarations
+        .clone()
+        .filter(|line| line.contains('['))
+        .count();
+    assert_eq!(arrays, 1, "{text}");
+    assert!(
+        !declarations
+            .into_iter()
+            .any(|line| line.contains("stack_") && !line.contains('[')),
+        "{text}"
+    );
     assert!(!text.contains("assumed (frame extent"), "{text}");
 }
 

@@ -179,10 +179,45 @@ fn a_shift_by_an_immediate_does_not_read_the_flags_it_sets() {
     assert!(run.ok, "{}", run.out);
     assert!(run.out.contains("murmur3_32("), "{}", run.out);
     assert!(!run.out.contains("r2sleigh refused"), "{}", run.out);
-    assert!(run.out.contains("if (RAX_2 != 0)"), "{}", run.out);
-    for flag in ["ZF", "CF_0", "OF_0", "PF_0", "SF_0"] {
-        assert!(!run.out.contains(flag), "{flag} is read by {}", run.out);
-    }
+    // The loop guard tests the shifted length itself, against zero.
+    let shifted = run
+        .out
+        .lines()
+        .find_map(|line| {
+            let (assigned, value) = line.trim().split_once(" = ")?;
+            let assigned = assigned.rsplit(' ').next()?;
+            value.contains(">>").then(|| assigned.to_owned())
+        })
+        .unwrap_or_else(|| panic!("no shift: {}", run.out));
+    assert!(
+        run.out.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("if (")
+                && line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|word| word == shifted)
+                && (line.contains("!= ") || line.contains("== "))
+                && line.contains('0')
+        }),
+        "{shifted} decides no branch: {}",
+        run.out
+    );
+    // No flag is read, however a pipeline spells it (`ZF`, `CF_0`, `cf_2`).
+    let flags = run
+        .out
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| {
+            let word = word.to_ascii_lowercase();
+            let (register, version) = word.split_once('_').unwrap_or((&word, ""));
+            let versioned = !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit());
+            match register {
+                "zf" | "cf" | "pf" | "sf" => version.is_empty() || versioned,
+                "of" => versioned,
+                _ => false,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(flags.is_empty(), "{flags:?} read by {}", run.out);
 }
 
 #[test]
@@ -1174,7 +1209,21 @@ mod dispatch_table {
         // function-pointer call is the proof the target came from the table
         // rather than from a guess.
         assert!(run.out.contains("_table_dispatch("), "{}", run.out);
-        assert!(run.out.contains(")((uint64_t)X0_0,"), "{}", run.out);
+        // The entry loaded from the table is cast to a two-argument function and called with two.
+        let call = run
+            .out
+            .lines()
+            .find(|line| line.contains("(*)(") && line.trim_end().ends_with(");"))
+            .unwrap_or_else(|| panic!("no call through a pointer: {}", run.out));
+        let pointer = call.split_once("(*)(").map_or("", |(_, rest)| rest);
+        let parameters = pointer.split_once(')').map_or("", |(list, _)| list);
+        assert_eq!(parameters.split(", ").count(), 2, "{call}");
+        let arguments = call.rsplit_once(")(").map_or("", |(_, rest)| rest);
+        assert_eq!(
+            arguments.trim_end_matches(';').matches(", ").count(),
+            1,
+            "{call}"
+        );
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
