@@ -426,6 +426,28 @@ fn a_staged_table_switch_reads_its_selector() {
     );
 }
 
+/// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
+/// range C leaves it undefined, so that arm is a residual.
+#[test]
+fn a_staged_float_truncation_is_guarded_by_its_range() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("float_moves_zig_x86_64_O2g"),
+        "e dec.pipeline=staged; pdd @ 0x01001510",
+    );
+    assert!(staged.out.contains("> -2147483649.0 && "), "{}", staged.out);
+    assert!(
+        staged.out.contains(" < 2147483648.0 ? (int32_t)"),
+        "{}",
+        staged.out
+    );
+    assert!(
+        staged.out.contains(" : r2sleigh_residual_i32("),
+        "{}",
+        staged.out
+    );
+}
+
 /// A tail call returns what its callee leaves in the function's own result register: RAX for
 /// `frame_dummy`, XMM0 for `swap_call`, whose arguments it swaps first.
 #[test]

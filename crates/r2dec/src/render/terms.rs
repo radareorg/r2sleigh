@@ -337,8 +337,11 @@ fn convert(
         },
         MachineCastKind::IntegerToFloat => Some(cast(c_type(to)?, cast(signed(from_bits)?, input))),
         MachineCastKind::FloatToFloat => Some(cast(c_type(to)?, input)),
-        // C leaves a float outside the integer's range undefined, and the machine does not.
-        MachineCastKind::FloatToInteger => None,
+        // Out of range C leaves it undefined, so that arm is a residual; a term has no effect.
+        MachineCastKind::FloatToInteger => Some(cast(
+            integer(to_bits)?,
+            crate::prelude::guarded_truncation(input, from_bits, to_bits)?,
+        )),
     }
 }
 
