@@ -978,7 +978,10 @@ impl<'a> Values<'a> {
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
                 }
-                Some(SemanticInstructionState::UnsupportedUnknown) => Err(Gap::Unsupported),
+                Some(SemanticInstructionState::UnsupportedUnknown) => Err(match op {
+                    SSAOp::CallOther { userop, .. } => Gap::UserOperation(*userop),
+                    _ => Gap::Unsupported,
+                }),
                 _ => Ok(None),
             };
             let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
@@ -997,9 +1000,10 @@ impl<'a> Values<'a> {
     /// Extend the gap the block's text ends with, or open one at this instruction.
     fn gap(&self, out: &mut Vec<(u64, CStmt)>, (addr, at): (u64, u64), inst: InstId, gap: Gap) {
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
+        let kind = self.gap_kind(gap);
         if let Some((_, CStmt::Gap(marker))) = out.last_mut()
             && marker.op_idx + marker.ops == op_idx
-            && marker.kind == gap.kind()
+            && marker.kind == kind
         {
             marker.ops += 1;
             return;
@@ -1007,13 +1011,29 @@ impl<'a> Values<'a> {
         out.push((
             at,
             CStmt::Gap(GapMarker {
-                kind: gap.kind().to_owned(),
+                kind,
                 origin: "render::values".to_owned(),
                 block_addr: addr,
                 op_idx,
                 ops: 1,
             }),
         ));
+    }
+
+    /// The marker's kind: a user operation by the name the specification gives it, which is what
+    /// the instruction does; with no name, only that the inventory could not account for it.
+    fn gap_kind(&self, gap: Gap) -> String {
+        match gap {
+            Gap::UserOperation(userop) => self
+                .artifact
+                .user_operations()
+                .get(userop as usize)
+                .map_or_else(
+                    || Gap::Unsupported.kind().to_owned(),
+                    |name| format!("UserOperation({name})"),
+                ),
+            gap => gap.kind().to_owned(),
+        }
     }
 
     /// The statement one live instruction owes: `Ok(None)` where it owes none here, `Err` where
@@ -1744,6 +1764,9 @@ fn parameters(
 enum Gap {
     /// The inventory could not account for the instruction.
     Unsupported,
+    /// A user operation the specification names and no model gives an effect: r2ssa accounts for
+    /// it as an unknown effect, which no C statement states.
+    UserOperation(u32),
     /// A call, until its callsite facts are rendered.
     Call,
     /// An effect with no C statement here: a fence, an atomic, a block transfer, a user operation.
@@ -1760,7 +1783,7 @@ enum Gap {
 impl Gap {
     const fn kind(self) -> &'static str {
         match self {
-            Self::Unsupported => "UnsupportedInstruction",
+            Self::Unsupported | Self::UserOperation(_) => "UnsupportedInstruction",
             Self::Call => "CallNotRendered",
             Self::Effect => "EffectNotRendered",
             Self::Store => "StoreNotSpelled",
