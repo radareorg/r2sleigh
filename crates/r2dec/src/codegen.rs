@@ -430,6 +430,9 @@ pub(crate) struct CodeGenerator<'c> {
     roles: CRoles,
     /// Set while a call's callee is written, so its name is the function.
     callee: bool,
+    /// Set while a literal is written under a cast wider than 64 bits, where a negative spelling
+    /// would sign-extend past the literal's own 64 bits.
+    wide_literal: bool,
 }
 
 impl<'c> CodeGenerator<'c> {
@@ -450,6 +453,7 @@ impl<'c> CodeGenerator<'c> {
             stopped: false,
             roles: Vec::new(),
             callee: false,
+            wide_literal: false,
         }
     }
 
@@ -1163,7 +1167,9 @@ impl<'c> CodeGenerator<'c> {
             }
             CExpr::UIntLit(val) => {
                 // Check if this looks like a negative offset (high bit set, close to max)
-                if *val > LIKELY_NEGATIVE_THRESHOLD {
+                if *val > LIKELY_NEGATIVE_THRESHOLD && std::mem::take(&mut self.wide_literal) {
+                    self.output.push_str(&format!("0x{val:x}ULL"));
+                } else if *val > LIKELY_NEGATIVE_THRESHOLD {
                     // Convert to negative: two's complement
                     let neg = (!*val).wrapping_add(1);
                     self.output.push_str(&format!("-0x{:x}", neg));
@@ -1286,7 +1292,10 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push('(');
                 self.emit_type(ty);
                 self.output.push(')');
+                self.wide_literal = matches!(ty, CType::Int { bits, .. } if *bits > 64)
+                    && matches!(inner.unobserved(), CExpr::UIntLit(_));
                 self.emit_expr(inner, my_prec);
+                self.wide_literal = false;
             }
             CExpr::Call { func, args, .. } => self.emit_call(func, args, my_prec),
             CExpr::Subscript { base, index } => {
@@ -2070,6 +2079,26 @@ mod tests {
             CExpr::uint(0xffffffffffffffb8),
         );
         assert_eq!(codegen.generate_expr(&expr), "rsp + 0x48");
+    }
+
+    /// `(uint64_t)-0x1` is all 64 bits set, but `(__uint128_t)-0x1` is all 128: under a wider cast
+    /// the literal keeps its unsigned spelling, or a 128-bit mask's low half clears nothing.
+    #[test]
+    fn a_literal_under_a_cast_wider_than_64_bits_is_never_spelled_negative() {
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        let under = |bits| CExpr::Cast {
+            ty: CType::Int {
+                bits,
+                signedness: r2types::Signedness::Unsigned,
+            },
+            expr: Box::new(CExpr::uint(u64::MAX)),
+            role: crate::ast::CastRole::Conversion,
+        };
+        assert_eq!(
+            codegen.generate_expr(&under(128)),
+            "(__uint128_t)0xffffffffffffffffULL"
+        );
+        assert_eq!(codegen.generate_expr(&under(64)), "(uint64_t)-0x1");
     }
 
     #[test]
