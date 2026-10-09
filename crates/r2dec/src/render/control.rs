@@ -251,6 +251,17 @@ impl<'i> Writer<'_, 'i> {
                 let stmt = self.return_stmt(Some(addr));
                 vec![self.observe(addr, stmt)]
             }
+            BlockTerminator::Call {
+                fallthrough: None, ..
+            }
+            | BlockTerminator::IndirectCall { fallthrough: None }
+                if self
+                    .values
+                    .is_some_and(|values| values.ends_never_returning(addr)) =>
+            {
+                // The call written above is declared never to return, which C ends control at.
+                Vec::new()
+            }
             // Control never comes back: a void residual traps, so the text ends here as the machine does.
             BlockTerminator::Call {
                 fallthrough: None, ..

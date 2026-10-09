@@ -303,10 +303,40 @@ fn planned(
             .calls
             .get(site)
             .and_then(|boundary| boundary.noreturn)
-            == Some(true),
+            == Some(true)
+            || never_comes_back(artifact, inst),
         tail,
         declared: None,
     })
+}
+
+/// Whether the CFG gives the block the call at `inst` ends no successor: the source's block graph
+/// says its last call never comes back (r2engine's walk, from the callee's declaration).
+fn never_comes_back(artifact: &SsaArtifact, inst: InstId) -> bool {
+    let graph = artifact.graph();
+    let Some(block) = graph.inst(inst).and_then(|at| graph.block(at.block)) else {
+        return false;
+    };
+    let ends = matches!(
+        artifact
+            .function()
+            .cfg()
+            .get_block(block.addr)
+            .map(|cfg| &cfg.terminator),
+        Some(
+            r2ssa::BlockTerminator::Call {
+                fallthrough: None,
+                ..
+            } | r2ssa::BlockTerminator::IndirectCall { fallthrough: None }
+        )
+    );
+    let last_call = block.insts.iter().rev().copied().find(|id| {
+        matches!(
+            graph.inst(*id).map(|at| &at.payload),
+            Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
+        )
+    });
+    ends && last_call == Some(inst)
 }
 
 fn check(holds: bool, otherwise: Unplanned) -> Result<(), Unplanned> {
