@@ -5123,3 +5123,68 @@ fn a_store_into_a_slot_whose_address_escapes_is_rendered() {
         assert!(!output.contains("r2sleigh_residual"), "{output}");
     }
 }
+
+/// Two byte stores from bases one apart, at an index no range bounds, read through the second
+/// base: staged clang-O2 `shape_stack_buffer` elided the first as dead and read unwritten bytes.
+#[test]
+fn a_store_at_an_unbounded_index_is_rendered_though_its_own_slot_is_never_read() {
+    const INTERLEAVED: &[u8] = &[
+        0xba, 0x01, 0x00, 0x00, 0x00, // 0x1000 mov edx, 1
+        0x40, 0x88, 0x7c, 0x14, 0xb7, // 0x1005 mov [rsp+rdx-0x49], dil
+        0x40, 0x88, 0x74, 0x14, 0xb8, // 0x100a mov [rsp+rdx-0x48], sil
+        0x48, 0x83, 0xc2, 0x02, // 0x100f add rdx, 2
+        0x48, 0x83, 0xfa, 0x41, // 0x1013 cmp rdx, 0x41
+        0x75, 0xec, // 0x1017 jne 0x1005
+        0x83, 0xe7, 0x3f, // 0x1019 and edi, 0x3f
+        0x0f, 0xb6, 0x44, 0x3c, 0xb8, // 0x101c movzx eax, byte [rsp+rdi-0x48]
+        0xc3, // 0x1021 ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: INTERLEAVED.to_vec(),
+        name: "interleaved",
+    };
+    for pipeline in [decompile, staged] {
+        let response = pipeline(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        let stores = output
+            .lines()
+            .filter(|line| {
+                line.contains("r2sleigh_store_u8(")
+                    || line
+                        .split_once(" = ")
+                        .is_some_and(|(place, _)| place.trim_end().ends_with(']'))
+            })
+            .count();
+        assert_eq!(stores, 2, "{output}");
+    }
+}
+
+/// A slot only written, above a read at an index no range bounds, which may land on it.
+/// Staged only: legacy binds the slot to the parameter it stores and renders no store.
+#[test]
+fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
+    const REACHED: &[u8] = &[
+        0x40, 0x88, 0x7c, 0x24, 0xb8, // 0x1000 mov [rsp-0x48], dil
+        0xba, 0x08, 0x00, 0x00, 0x00, // 0x1005 mov edx, 8
+        0x31, 0xc9, // 0x100a xor ecx, ecx
+        0x0f, 0xb6, 0x44, 0x14, 0xb0, // 0x100c movzx eax, byte [rsp+rdx-0x50]
+        0x01, 0xc1, // 0x1011 add ecx, eax
+        0x48, 0x83, 0xc2, 0x01, // 0x1013 add rdx, 1
+        0x48, 0x83, 0xfa, 0x09, // 0x1017 cmp rdx, 9
+        0x75, 0xef, // 0x101b jne 0x100c
+        0x89, 0xc8, // 0x101d mov eax, ecx
+        0xc3, // 0x101f ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: REACHED.to_vec(),
+        name: "reached",
+    };
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("r2sleigh_store_u8("), "{output}");
+    assert!(!output.contains("r2sleigh_residual"), "{output}");
+}
