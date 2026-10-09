@@ -98,9 +98,8 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
     Some(cast(ty, CExpr::UIntLit(value.bits())))
 }
 
-/// `expr` where C converts it to `sink` as if by assignment (a `return`, an assigned variable, a
-/// prototyped argument): an integer literal under unsigned casts that keep it is the plain `int`
-/// literal of the same value.
+/// `expr` converted to `sink` as by assignment (return, assignment, prototyped argument): an
+/// integer literal under value-keeping unsigned casts becomes the plain literal.
 pub(super) fn at_sink(sink: &CType, expr: CExpr) -> CExpr {
     let holds = |ty: &CType, value: u64| match ty {
         CType::Int { bits, signedness } => {
