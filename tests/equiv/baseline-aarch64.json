@@ -1145,7 +1145,9 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_stack_buffer": {
-   "status": "equal"
+   "cause": "[legacy, deleted by D] #105 refuses this object's layout (one indexed store has no upper bound), and legacy then declares one-byte scalars and indexes past them (UBSan: store with insufficient space); staged keeps the stores through its one frame array. Legacy's array spelling is deleted with legacy r2dec.",
+   "reason": "ubsan",
+   "status": "ub"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_stash": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
@@ -1255,7 +1257,9 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_stack_buffer": {
-   "status": "equal"
+   "cause": "[legacy, deleted by D] #105 refuses this object's layout (one indexed store has no upper bound), and legacy then declares one-byte scalars and indexes past them (UBSan: store with insufficient space); staged keeps the stores through its one frame array. Legacy's array spelling is deleted with legacy r2dec.",
+   "reason": "ubsan",
+   "status": "ub"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_stash": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
