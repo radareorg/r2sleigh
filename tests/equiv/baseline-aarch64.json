@@ -1,5 +1,5 @@
 {
- "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at c9361ccc on gcc 13.3.0 / clang 18.1.3): 606 equal. A body writing both result registers is unproven unless the code reading it says which, each call deciding for itself; a float result is the lane its readers take; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at gcc-O0, gcc-O1 and clang-O1 (its double, returned as d0's lane), the mains of hashes gcc-O2, shapes clang-O1, clang-O2, gcc-O1 and gcc-O2, review gcc-O0 and gcc-O1, and code_pointer_table clang-O2. Lost to an honest residual: crc32_init and fill (void, unread), shape_function_pointer and table_dispatch at gcc-O0 (an indirect call of unproven arity, where legacy passed an argument nothing proved), and code_pointer_table clang-O0 main (its callee's result unproven).",
+ "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at c9361ccc on gcc 13.3.0 / clang 18.1.3): 606 equal. A body writing both result registers is unproven unless the code reading it says which, each call deciding for itself; a float result is the lane its readers take; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at gcc-O0, gcc-O1 and clang-O1 (its double, returned as d0's lane), the mains of hashes gcc-O2, shapes clang-O1, clang-O2, gcc-O1 and gcc-O2, review gcc-O0 and gcc-O1, and code_pointer_table clang-O2. Lost to an honest residual: crc32_init and fill (void, unread), shape_function_pointer and table_dispatch at gcc-O0 (an indirect call of unproven arity, where legacy passed an argument nothing proved), and code_pointer_table clang-O0 main (its callee's result unproven). Re-blessed at lift-addv (#93): `addv b0` zeroes the vector above byte 0 (the vendored Ghidra AArch64 spec fix), so bit_count at gcc-O1 and gcc-O2 moves differs to equal, 606 to 608; CI run 37936776903 held every other record.",
  "records": {
   "tests/corpus/branchy.c::aarch64-clang-O0::addr_chain": {
    "status": "equal"
@@ -2466,9 +2466,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O1::bit_count": {
-   "cause": "[lift: AArch64 scalar SIMD writes] `addv b0, v0.8b` writes byte 0 and zeroes the rest of the vector register, but the rendering inserts the byte into the carrier and keeps the lanes `cnt` left (8, 8, 8 for 0xffffffff), so `fmov w0, s0` returns 0x08080820 instead of 32.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O1::classify": {
    "status": "equal"
@@ -2521,9 +2519,7 @@
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O2::bit_count": {
-   "cause": "[lift: AArch64 scalar SIMD writes] `addv b0, v0.8b` writes byte 0 and zeroes the rest of the vector register, but the rendering inserts the byte into the carrier and keeps the lanes `cnt` left (8, 8, 8 for 0xffffffff), so `fmov w0, s0` returns 0x08080820 instead of 32.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O2::classify": {
    "status": "equal"
