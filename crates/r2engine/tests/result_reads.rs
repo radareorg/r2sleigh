@@ -161,8 +161,13 @@ fn an_aarch64_float_merged_in_its_vector_register_returns_its_lane() {
     .in_aarch64();
     let text = rendered(program, RenderTier::C);
     assert!(text.contains("double f("), "{text}");
+    let body = &text[text.find("double f(").expect("the definition")..];
+    let returned = body
+        .lines()
+        .find(|line| line.trim_start().starts_with("return "))
+        .expect("a return");
     assert!(
-        text.contains("return r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64("),
+        returned.contains("r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64("),
         "{text}"
     );
 }
