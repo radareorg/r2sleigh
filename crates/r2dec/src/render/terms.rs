@@ -75,6 +75,18 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
     Some(cast(ty, CExpr::UIntLit(value.bits())))
 }
 
+/// A constant read as `ty`: a float's bits reinterpreted, since C would convert an integer's value.
+fn literal_as(value: MachineBitVector, ty: &MachineType) -> Option<CExpr> {
+    let bits = literal(value)?;
+    match ty {
+        MachineType::Float { width_bits } if *width_bits == value.width_bits() => {
+            Some(Helper::float_from_bits(*width_bits)?.call(vec![bits]))
+        }
+        MachineType::Float { .. } => None,
+        _ => Some(bits),
+    }
+}
+
 /// `value`'s low `bits` as an unsigned literal of that width; a 128-bit one is spelled from halves.
 fn wide_literal(bits: u32, value: u128) -> Option<CExpr> {
     let ty = integer(bits)?;
@@ -587,7 +599,7 @@ impl Spell<'_> {
         let child_bits = |id: TermId| self.arena.term(id).ty.width_bits();
         match node.kind {
             TermKind::Leaf(LeafRead { expr, .. }) | TermKind::Opaque(expr) => self.leaf(expr, &ty),
-            TermKind::Literal(value) => literal(value),
+            TermKind::Literal(value) => literal_as(value, &ty),
             TermKind::Variable(_) => None,
             // A frame address may be held or passed: every place it reaches is a byte of the one array.
             TermKind::ObjectAddress(object) => {
@@ -671,7 +683,7 @@ impl Spell<'_> {
         let child_bits = |id: MachineExprId| child_ty(id).map(|ty| ty.width_bits());
         match node.kind() {
             MachineExprKind::Source { binding, .. } => (self.bound)(binding.value(), &ty),
-            MachineExprKind::Constant { value, .. } => literal(*value),
+            MachineExprKind::Constant { value, .. } => literal_as(*value, &ty),
             MachineExprKind::MemoryRead { address, .. } => self.load(&ty, child(*address)?),
             MachineExprKind::Copy { input } => child(*input),
             kind @ (MachineExprKind::Arithmetic { .. }

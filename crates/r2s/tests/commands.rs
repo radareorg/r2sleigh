@@ -372,11 +372,14 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         binary,
         "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
     );
+    // The pointer parameter is declared as DWARF states it, and read as its word; `forward`'s `x + 1.0`
+    // adds the double whose bits the constant is, never the integer those bits spell.
     for line in [
-        "void store(double arg0, uint64_t arg1)",
-        "r2sleigh_store_u64((void*)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
-        "void forward(double arg0, uint64_t arg1)",
-        "store(arg0, arg1);",
+        "void store(double arg0, double* arg1)",
+        "r2sleigh_store_u64((void*)(uint64_t)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
+        "void forward(double arg0, double* arg1)",
+        "store(arg0, (uint64_t)arg1);",
+        "store(arg0 + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (uint64_t)arg1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
@@ -392,7 +395,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .next()
         .unwrap_or(call_store);
     let call = call_store
-        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), arg0);")
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (uint64_t)arg0);")
         .expect("the tail call");
     let returned = call_store.find("return;").expect("its return");
     assert!(call < returned, "{call_store}");
@@ -574,7 +577,8 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
     for line in [
-        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper(arg0, arg1));",
+        "double from_b(const double* arg0, uint64_t arg1)",
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((uint64_t)arg0, arg1));",
         "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);

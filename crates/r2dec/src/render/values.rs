@@ -29,6 +29,8 @@ pub(super) struct Values<'a> {
     roots: CanonicalRoots,
     /// By value index: the parameter or local a value is read through.
     names: Vec<Option<(SymbolId, MachineType)>>,
+    /// The parameters declared at the pointer type the source states, read as their integer class.
+    pointers: Vec<bool>,
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
@@ -671,6 +673,7 @@ impl<'a> Values<'a> {
             inventory,
             readers,
             names: vec![None; graph.values.len()],
+            pointers: vec![false; graph.values.len()],
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
@@ -716,14 +719,31 @@ impl<'a> Values<'a> {
         values.own.params = parameters
             .as_ref()
             .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
-        values.declare(parameters);
+        values.declare(input, parameters);
         Some(values)
     }
 
-    /// Parameters in their ABI order, then a local per bound value.
-    fn declare(&mut self, parameters: Option<Vec<(u32, ValueId, MachineType)>>) {
+    /// Parameters in their ABI order, then a local per bound value. A parameter the source declares
+    /// a pointer is declared so, as the caller passes it, and read as the word its class is.
+    fn declare(
+        &mut self,
+        input: &RenderInput<'_>,
+        parameters: Option<Vec<(u32, ValueId, MachineType)>>,
+    ) {
         for (index, value, ty) in parameters.into_iter().flatten() {
-            let c = terms::c_type(&ty).expect("a classed parameter has a C type");
+            let pointer = input
+                .parameter_declaration(index as usize, ty.width_bits())
+                .filter(|declared| {
+                    matches!(declared.unaliased(), r2types::CTypeLike::Pointer(_))
+                        && matches!(ty, MachineType::Integer { width_bits, .. } if width_bits == self.ptr_bits)
+                });
+            let c = match pointer {
+                Some(declared) => {
+                    self.pointers[value.0 as usize] = true;
+                    declared
+                }
+                None => terms::c_type(&ty).expect("a classed parameter has a C type"),
+            };
             let name = self.symbols.borrow_mut().declare(
                 format!("arg{index}"),
                 c.clone(),
@@ -814,7 +834,7 @@ impl<'a> Values<'a> {
 
     fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
         let bound = |value: ValueId, ty: &MachineType| match self.names.get(value.0 as usize)? {
-            Some((name, held)) => terms::reclass(CExpr::var(*name), held, ty),
+            Some((name, held)) => terms::reclass(self.read_name(value, *name, held)?, held, ty),
             // What a register held at entry that no parameter admits: C cannot read it.
             None if self.graph.def_inst(value).is_none() => crate::prelude::residual(
                 &terms::c_type(ty)?,
@@ -865,9 +885,18 @@ impl<'a> Values<'a> {
                 Some(spelled)
             }
             None => {
-                let (name, _) = self.names.get(value.0 as usize)?.as_ref()?;
-                Some(CExpr::var(*name))
+                let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
+                self.read_name(value, *name, held)
             }
+        }
+    }
+
+    /// A name as its class reads it: a parameter declared a pointer is read as its word.
+    fn read_name(&self, value: ValueId, name: SymbolId, held: &MachineType) -> Option<CExpr> {
+        let var = CExpr::var(name);
+        match self.pointers.get(value.0 as usize) {
+            Some(true) => Some(CExpr::cast(terms::c_type(held)?, var)),
+            _ => Some(var),
         }
     }
 

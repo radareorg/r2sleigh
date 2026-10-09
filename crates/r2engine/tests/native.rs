@@ -1520,18 +1520,27 @@ fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
 /// The function at `BASE` in both pipelines, legacy then staged, each rendered without a refusal.
 fn rendered_both(bytes: &'static [u8], name: &'static str) -> [String; 2] {
-    let machine = Machine::new("x86-64", "x86-64", 64);
+    rendered_both_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
+}
+
+/// Legacy's definition and staged's translation unit, which defines the helpers it calls.
+fn rendered_both_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> [String; 2] {
     let target = machine.target();
     let program = Fixture {
         bytes: bytes.to_vec(),
         name,
     };
-    [decompile, staged].map(|pipeline| {
-        let response = pipeline(&target, &program, BASE).expect("decompile");
-        let text = response.output.text().to_string();
+    let legacy = decompile(&target, &program, BASE).expect("decompile");
+    let staged = staged(&target, &program, BASE).expect("decompile");
+    for response in [&legacy, &staged] {
+        let text = response.output.text();
         assert!(response.render_refusal.is_none(), "{text}");
-        text
-    })
+    }
+    let unit = match &staged.output {
+        r2engine::EngineRendering::Function(rendered) => rendered.emission().unit().to_string(),
+        other => other.text().to_string(),
+    };
+    [legacy.output.text().to_string(), unit]
 }
 
 fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> String {
@@ -2492,13 +2501,17 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         (COPY_16_IN_HALVES, "copy_16_in_halves", 16),
         (COPY_32, "copy_32", 32),
     ] {
-        let text = rendered_on(&declaring(name, "int", &["void *", "void *"]), bytes, name);
-        assert!(!text.contains("byte["), "{text}");
-        run_rendered(
-            name,
-            &text,
-            &format!(
-                r#"int main(void) {{
+        let machine = declaring(name, "int", &["void *", "void *"]);
+        // Staged has no 256-bit carrier yet (ROADMAP D, wide values), so it is graded to 16 bytes.
+        let pipelines = if width > 16 { 1 } else { 2 };
+        let rendered = rendered_both_on(&machine, bytes, name);
+        for (pipeline, text) in ["legacy", "staged"].iter().zip(rendered).take(pipelines) {
+            assert!(!text.contains("byte["), "{text}");
+            run_rendered(
+                &format!("{name}_{pipeline}"),
+                &text,
+                &format!(
+                    r#"int main(void) {{
     _Alignas(32) uint8_t source[48];
     _Alignas(32) uint8_t got[48];
     for (int i = 0; i < 48; i++) {{
@@ -2518,8 +2531,9 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
     }}
     return 0;
 }}"#
-            ),
-        );
+                ),
+            );
+        }
     }
 
     let text = rendered_on(
