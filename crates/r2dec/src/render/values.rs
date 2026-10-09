@@ -44,6 +44,8 @@ pub(super) struct Values<'a> {
     rendered: RefCell<Vec<bool>>,
     /// By instruction index: frame teardown a spelled C `return` performs.
     restored: RefCell<Vec<bool>>,
+    /// The instructions whose rendered text evaluates a residual: their obligations are residual.
+    residual: RefCell<Vec<bool>>,
     /// The switch dispatch operations r2ssa's certificates own.
     dispatch: r2ssa::dense::IdSet<InstId>,
     /// The calls the facts describe, by instruction.
@@ -682,6 +684,7 @@ impl<'a> Values<'a> {
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
+            residual: RefCell::new(vec![false; graph.insts.len()]),
             dispatch,
             calls: planned,
             results,
@@ -933,6 +936,7 @@ impl<'a> Values<'a> {
             match stmt {
                 Ok(Some(stmt)) => {
                     self.mark(inst.id);
+                    self.residual_in(inst.id, &stmt);
                     out.push((at, stmt));
                 }
                 Ok(None) => {}
@@ -1151,6 +1155,9 @@ impl<'a> Values<'a> {
             _ => return None,
         };
         self.mark(inst);
+        for stmt in &stmts {
+            self.residual_in(inst, stmt);
+        }
         Some(stmts)
     }
 
@@ -1314,12 +1321,22 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// Record a terminator the text spelled; a C `return` also restores the frame the machine's did.
-    pub(super) fn spelled_terminator(&self, addr: u64) {
+    /// Whether `stmt`, written for `inst`, evaluates a residual, which makes `inst`'s obligations residual.
+    pub(super) fn residual_in(&self, inst: InstId, stmt: &CStmt) {
+        let mut held = false;
+        stmt.visit_exprs(&mut |expr| held |= crate::prelude::holds_residual(expr));
+        if held && let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
+            *slot = true;
+        }
+    }
+
+    /// Record a terminator the text spelled as `spelled`; a C `return` also restores the frame.
+    pub(super) fn spelled_terminator(&self, addr: u64, spelled: &CStmt) {
         let Some((inst, _)) = self.terminator(addr) else {
             return;
         };
         self.mark(inst);
+        self.residual_in(inst, spelled);
         let mut restored = self.restored.borrow_mut();
         for restore in self.restores(inst) {
             restored[restore.0 as usize] = true;
@@ -1415,6 +1432,7 @@ impl<'a> Values<'a> {
                 continue;
             };
             self.mark(inst);
+            self.residual_in(inst, &CStmt::Expr(source.clone()));
             match clobbers {
                 false => out.push(assign(*name, source)),
                 true => {
@@ -1444,6 +1462,7 @@ impl<'a> Values<'a> {
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
+        let residual = self.residual.borrow();
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation
@@ -1458,6 +1477,7 @@ impl<'a> Values<'a> {
                     Outcome::Elided(ElisionReason::NoNativeSemantics)
                 }
                 (_, Some(reason)) => Outcome::Elided(reason),
+                _ if index.is_some_and(|i| rendered[i] && residual[i]) => Outcome::Gapped,
                 _ if index.is_some_and(|i| rendered[i]) => Outcome::Rendered,
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)

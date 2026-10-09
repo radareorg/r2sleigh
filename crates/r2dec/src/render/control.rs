@@ -275,8 +275,9 @@ impl<'i> Writer<'_, 'i> {
             .zip(addr)
             .and_then(|(values, addr)| Some((values.returned(addr, decided)?, values, addr)));
         if let Some((value, values, addr)) = spelled {
-            values.spelled_terminator(addr);
-            return CStmt::Return(value);
+            let stmt = CStmt::Return(value);
+            values.spelled_terminator(addr, &stmt);
+            return stmt;
         }
         match ty {
             CType::Void => CStmt::Return(None),
@@ -291,7 +292,7 @@ impl<'i> Writer<'_, 'i> {
             .and_then(|values| Some((read(values, addr)?, values)))
         {
             Some((expr, values)) => {
-                values.spelled_terminator(addr);
+                values.spelled_terminator(addr, &CStmt::Expr(expr.clone()));
                 expr
             }
             None => self.residual(ty),

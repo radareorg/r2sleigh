@@ -548,6 +548,15 @@ pub(crate) fn helpers_called(function: &CFunction) -> BTreeSet<Helper> {
     helpers
 }
 
+/// Whether an expression evaluates a residual somewhere inside it.
+pub(crate) fn holds_residual(expr: &CExpr) -> bool {
+    let mut found = false;
+    expr.visit(&mut |inner| {
+        found |= matches!(inner, CExpr::Call { func, .. } if is_residual_callee(func).is_some());
+    });
+    found
+}
+
 /// How many residuals a function holds: one for each residual call and each
 /// marked gap, which is exactly how many sites the emitter numbers.
 pub(crate) fn count_residuals(function: &CFunction) -> usize {

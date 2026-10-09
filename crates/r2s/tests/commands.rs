@@ -487,6 +487,14 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
         "{}",
         staged.out
     );
+    // The return's obligations are residual on the proof line, as its text is.
+    assert!(
+        staged
+            .out
+            .contains("8 rendered, 7 elided, 0 refused, 5 residual"),
+        "{}",
+        staged.out
+    );
 }
 
 /// A tail call returns what its callee leaves in the function's own result register: RAX for
