@@ -12,6 +12,21 @@ use crate::ast::{CExpr, CStmt, CType, GapMarker, SwitchCase};
 use crate::prelude::ResidualCause;
 use crate::structure::place::{EdgeShape, Placement};
 
+/// The transfers the text cannot make, each a gap that traps where control would leave.
+const UNRESOLVED_INDIRECT_BRANCH: &str = "UnresolvedIndirectBranch";
+const TRANSFER_NOT_FOLLOWED: &str = "TransferNotFollowed";
+const TAIL_TRANSFER_NOT_RENDERED: &str = "TailTransferNotRendered";
+
+/// Whether `marker` is one of those: control does not go on past it.
+pub(super) fn ends_control(marker: &GapMarker) -> bool {
+    [
+        UNRESOLVED_INDIRECT_BRANCH,
+        TRANSFER_NOT_FOLLOWED,
+        TAIL_TRANSFER_NOT_RENDERED,
+    ]
+    .contains(&marker.kind.as_str())
+}
+
 /// The written body, its labels, and the block and instruction each marked statement stands for.
 pub(super) struct Written {
     pub(super) body: Vec<CStmt>,
@@ -237,10 +252,7 @@ impl<'i> Writer<'_, 'i> {
                     .collect::<Vec<_>>();
                 match cases.is_empty() {
                     // No stated target: control goes where the facts do not say, so the text traps.
-                    true => {
-                        let trap = CStmt::Expr(self.residual(&CType::Void));
-                        vec![self.observe(addr, trap)]
-                    }
+                    true => vec![self.trap(addr, UNRESOLVED_INDIRECT_BRANCH)],
                     false => {
                         let selector = self.residual(&super::word(self.input));
                         self.switch(addr, selector, &cases, None)
@@ -271,10 +283,7 @@ impl<'i> Writer<'_, 'i> {
                 fallthrough: None, ..
             }
             | BlockTerminator::IndirectCall { fallthrough: None }
-            | BlockTerminator::None => {
-                let trap = CStmt::Expr(self.residual(&CType::Void));
-                vec![self.observe(addr, trap)]
-            }
+            | BlockTerminator::None => vec![self.trap(addr, TRANSFER_NOT_FOLLOWED)],
         }
     }
 
@@ -324,6 +333,18 @@ impl<'i> Writer<'_, 'i> {
     }
 
     /// A residual of `ty`, or of the machine word where C has no residual of `ty`.
+    /// A transfer the text cannot make, as a gap whose marker names it: running it traps.
+    fn trap(&mut self, addr: u64, kind: &'static str) -> CStmt {
+        let gap = CStmt::Gap(GapMarker {
+            kind: kind.to_owned(),
+            origin: "render::control".to_owned(),
+            block_addr: addr,
+            op_idx: 0,
+            ops: 0,
+        });
+        self.observe(addr, gap)
+    }
+
     fn residual(&self, ty: &CType) -> CExpr {
         crate::prelude::residual(ty, ResidualCause::Gap)
             .or_else(|| crate::prelude::residual(&super::word(self.input), ResidualCause::Gap))
@@ -389,13 +410,15 @@ impl<'i> Writer<'_, 'i> {
                     .map(|stmt| self.observe(from, stmt))
                     .collect();
             }
-            let trap = CStmt::Expr(self.residual(&CType::Void));
-            return vec![self.observe(from, trap)];
+            return vec![self.trap(from, TAIL_TRANSFER_NOT_RENDERED)];
         }
         let mut out = self
             .values
             .map(|values| values.copies(from, to))
             .unwrap_or_default();
+        if let Some(values) = self.values {
+            values.transferred(from);
+        }
         match self.placement.edge(from, to) {
             EdgeShape::Inline => out.extend(self.place(to)),
             EdgeShape::Continue => out.push(CStmt::Continue),

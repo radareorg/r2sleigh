@@ -596,6 +596,35 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
     }
 }
 
+/// A staged residual where control goes says why in `pddj`: `deregister_tm_clones` ends in a
+/// `jmp rax` with no stated target, a gap its marker names; `__do_global_dtors_aux` returns where
+/// the interface proves no result. Either way the proof counts no residual the text does not hold.
+#[test]
+fn a_staged_control_residual_states_its_cause() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    for (function, cause, gap) in [
+        (
+            "sym.deregister_tm_clones",
+            "gap",
+            Some("UnresolvedIndirectBranch"),
+        ),
+        ("sym.__do_global_dtors_aux", "unproven-return", None),
+    ] {
+        let staged = on(
+            binary.clone(),
+            &format!("e dec.pipeline=staged; pddj @ {function}"),
+        );
+        let answer: serde_json::Value =
+            serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
+        let residuals = answer["residuals"].as_array().expect("residuals");
+        assert!(!residuals.is_empty(), "{function}: {answer}");
+        for residual in residuals {
+            assert_eq!(residual["cause"], cause, "{function}: {residual}");
+            assert_eq!(residual["gap"].as_str(), gap, "{function}: {residual}");
+        }
+    }
+}
+
 /// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); its caller's `movsd` of XMM0
 /// says which is the result. Vectorized `crc32_init` writes both, no call reads either: a residual.
 #[test]
