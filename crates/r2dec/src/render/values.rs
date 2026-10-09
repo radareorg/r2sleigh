@@ -487,12 +487,20 @@ fn plan_calls(
                     | SSAOp::BranchInd { .. }
             )
         );
-        let Some(plan) = call
+        let Some(mut plan) = call
             .then(|| calls::plan(artifact, input.callee_resolution(), inventory, inst.id))
             .flatten()
         else {
             continue;
         };
+        if matches!(plan.callee, calls::Callee::Named { .. }) {
+            let signature = input.declared_callee_signature(inst.id);
+            plan.declared =
+                signature.and_then(|signature| calls::Prototype::of(signature, plan.fixed));
+            if let (Some(signature), None) = (signature, &plan.declared) {
+                r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
+            }
+        }
         if let Some((result, _)) = plan.result {
             results.insert(result);
         }
@@ -1112,10 +1120,19 @@ impl<'a> Values<'a> {
             arguments.push(needed(fit(operand, &held, class), inst, "argument class")?);
             types.push(terms::c_type(class)?);
         }
-        let ret_type = match ret {
+        let mut ret_type = match ret {
             Some(class) => terms::c_type(class)?,
             None => CType::Void,
         };
+        // A declared prototype passes and returns at the types the source states.
+        if let Some(declared) = &plan.declared {
+            for ((argument, ty), to) in arguments.iter_mut().zip(&mut types).zip(&declared.params) {
+                *argument =
+                    calls::to_declared(std::mem::replace(argument, CExpr::IntLit(0)), ty, to);
+                *ty = to.clone();
+            }
+            ret_type = declared.ret.clone();
+        }
         let (name, kind, address) = match &plan.callee {
             calls::Callee::Named {
                 name,
@@ -1199,7 +1216,7 @@ impl<'a> Values<'a> {
                     },
                 };
                 let call = self.call_expr(inst, plan, Some(class))?;
-                let spelled = fit(call, class, &own)?;
+                let spelled = fit(calls::read_result(plan, call, class)?, class, &own)?;
                 vec![CStmt::Return(Some(CExpr::cast(ty.clone(), spelled)))]
             }
             _ => return None,
@@ -1219,7 +1236,7 @@ impl<'a> Values<'a> {
         let Some((name, held)) = self.names.get(result.0 as usize).and_then(Option::as_ref) else {
             return Some(CStmt::Expr(call));
         };
-        let value = fit(call, class, held)?;
+        let value = fit(calls::read_result(plan, call, class)?, class, held)?;
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }

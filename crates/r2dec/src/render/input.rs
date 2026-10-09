@@ -72,6 +72,31 @@ impl<'a> RenderInput<'a> {
             .count()
     }
 
+    /// The prototype the call at `inst` calls its callee with, where the source states, proves or
+    /// declares its types; a reading nothing proves is no declaration.
+    pub fn declared_callee_signature(
+        &self,
+        inst: r2ssa::InstId,
+    ) -> Option<&'a r2types::FunctionType> {
+        let key = r2types::CallsiteKey { at: inst };
+        let graded = (self.facts.report().callsites())
+            .and_then(|callsites| callsites.by_callsite.get(&key))
+            .filter(|facts| {
+                (facts.callee_signature_types.as_ref())
+                    .is_some_and(|types| types.grade() <= r2source::Grade::Declared)
+            })
+            .and_then(|facts| facts.callee_signature.as_ref());
+        let identity = (self.callee_resolution())
+            .and_then(|resolution| resolution.identity_for_callsite(key))
+            .filter(|identity| {
+                identity
+                    .signature_source
+                    .is_some_and(|s| s.is_declaration())
+            })
+            .and_then(|identity| identity.signature.as_ref());
+        graded.or(identity)
+    }
+
     pub fn callee_resolution(&self) -> Option<&'a r2types::CalleeResolutionFacts> {
         self.facts.report().callee_resolution()
     }

@@ -188,7 +188,7 @@ Agreement means:
 | D0 | `RenderInput` built from the sealed artifact; a Dylint forbids `r2dec::render` from reading anything else |
 | D1 | control alone renders the census with every value residual; the §3 certificate holds on every function |
 | D2 + D3 | values and terms render; the census residual count is at most the old path's |
-| D4 | declarations from the frame model and types; `afv` and `pdd` agree on every local |
+| D4 | declarations from the frame model and types: each local `afv` lists is the range of `frame` at its entry offset that `pdd` reads it through, and every parameter, callee prototype and global the source declares is spelled at its declared type |
 | D5 + proof | the proof walk replaces the ledger; `pddj` proof counts agree with equivalence |
 | switch | the gates above hold; `rebuild` merges to master |
 

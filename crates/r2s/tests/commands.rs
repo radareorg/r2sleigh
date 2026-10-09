@@ -378,8 +378,9 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         "void store(double arg0, double* arg1)",
         "r2sleigh_store_u64((void*)(uint64_t)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
         "void forward(double arg0, double* arg1)",
-        "store(arg0, (uint64_t)arg1);",
-        "store(arg0 + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (uint64_t)arg1);",
+        "void store(double, double*);",
+        "store(arg0, (double*)(uint64_t)arg1);",
+        "store(arg0 + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (double*)(uint64_t)arg1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
@@ -395,7 +396,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .next()
         .unwrap_or(call_store);
     let call = call_store
-        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (uint64_t)arg0);")
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (double*)(uint64_t)arg0);")
         .expect("the tail call");
     let returned = call_store.find("return;").expect("its return");
     assert!(call < returned, "{call_store}");
@@ -623,7 +624,8 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
     for line in [
         "double from_b(const double* arg0, uint64_t arg1)",
-        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((uint64_t)arg0, arg1));",
+        "double helper(const double*, int64_t);",
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)arg0, (int64_t)arg1));",
         "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
@@ -660,8 +662,8 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
     let staged = on(binary, "e dec.pipeline=staged; pdd @ main");
     for line in [
         "_Alignas(16) uint8_t frame[32];",
-        "call_store((uint64_t)(frame + 8U));",
-        "(uint64_t)(frame + 8U));",
+        "call_store((double*)(uint64_t)(frame + 8U));",
+        "(double*)(uint64_t)(frame + 8U));",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }

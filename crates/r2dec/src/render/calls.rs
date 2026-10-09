@@ -7,6 +7,7 @@ use r2ssa::{
 };
 use r2types::{CalleeClass, CalleeResolutionFacts, CallsiteKey};
 
+use crate::ast::{CExpr, CType};
 use crate::symbol::ExternalKind;
 
 /// Who a call reaches: a callee by name, or the function an indirect call's target value holds.
@@ -37,6 +38,83 @@ pub(super) struct CallPlan {
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
     pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
+    /// The callee's declared prototype, where C spells every type in it with no definition.
+    pub(super) declared: Option<Prototype>,
+}
+
+/// A callee's fixed parameters and result at the types its declaration states.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Prototype {
+    pub(super) params: Vec<CType>,
+    pub(super) ret: CType,
+}
+
+impl Prototype {
+    /// `signature` as C spells it, where it names `fixed` parameters and every type is spellable.
+    pub(super) fn of(signature: &r2types::FunctionType, fixed: usize) -> Option<Self> {
+        if signature.params.len() != fixed {
+            return None;
+        }
+        let params = (signature.params.iter())
+            .map(|ty| spellable(ty).filter(|ty| *ty != CType::Void))
+            .collect::<Option<Vec<_>>>()?;
+        let ret = spellable(&signature.return_type)?;
+        Some(Self { params, ret })
+    }
+}
+
+/// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.
+pub(super) fn to_declared(argument: CExpr, from: &CType, to: &CType) -> CExpr {
+    match from == to {
+        true => argument,
+        false => CExpr::cast(to.clone(), argument),
+    }
+}
+
+/// What the call `plan` describes returns, read at `class`.
+pub(super) fn read_result(plan: &CallPlan, call: CExpr, class: &MachineType) -> Option<CExpr> {
+    match &plan.declared {
+        Some(declared) => from_declared(call, &declared.ret, class),
+        None => Some(call),
+    }
+}
+
+/// A result of the declared type read at `class`. A signed result narrower than `class` reads
+/// through its unsigned type, since the register above it holds no sign the machine extended.
+pub(super) fn from_declared(call: CExpr, declared: &CType, class: &MachineType) -> Option<CExpr> {
+    let target = super::terms::c_type(class)?;
+    if *declared == target {
+        return Some(call);
+    }
+    let narrower = match declared.unaliased() {
+        CType::Int {
+            bits,
+            signedness: r2types::Signedness::Signed,
+        } if *bits < class.width_bits() => Some(*bits),
+        _ => None,
+    };
+    let call = match narrower {
+        Some(bits) => CExpr::cast(CType::uint(bits), call),
+        None => call,
+    };
+    Some(CExpr::cast(target, call))
+}
+
+/// `ty` as C spells it with no definition of its own: a standard scalar, or a pointer to one, to
+/// `void` or to `char`; a typedef is its target, `char` excepted. A tagged or unknown type is not.
+pub(super) fn spellable(ty: &CType) -> Option<CType> {
+    match ty {
+        CType::Void | CType::Bool | CType::Float(32 | 64) => Some(ty.clone()),
+        CType::Int {
+            bits: 8 | 16 | 32 | 64,
+            signedness: r2types::Signedness::Signed | r2types::Signedness::Unsigned,
+        } => Some(ty.clone()),
+        CType::Typedef { name, .. } if name == "char" => Some(ty.clone()),
+        CType::Typedef { ty, .. } => spellable(ty),
+        CType::Pointer(pointee) => Some(CType::Pointer(Box::new(spellable(pointee)?))),
+        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner)?))),
+        _ => None,
+    }
 }
 
 /// Why a call has no plan: the first fact its C would need that the facts do not state.
@@ -161,6 +239,7 @@ fn planned(
             .and_then(|boundary| boundary.noreturn)
             == Some(true),
         tail,
+        declared: None,
     })
 }
 
@@ -355,4 +434,57 @@ fn result_class(
         None => None,
     };
     super::values::agreed(declared, carrier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spelled(expr: &CExpr) -> String {
+        crate::codegen::CodeGenerator::new(crate::codegen::CodeGenConfig::default())
+            .generate_expr(expr)
+    }
+
+    /// A declared `int` read through the 64-bit register: the 32-bit write that returned it
+    /// zeroed the half above, so the read widens through `uint32_t`, never by sign.
+    #[test]
+    fn a_signed_declared_result_read_wider_widens_through_its_unsigned_type() {
+        let call = CExpr::call(
+            CExpr::External {
+                name: "f".to_string(),
+                kind: ExternalKind::Import,
+            },
+            Vec::new(),
+        );
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
+        let wide = MachineType::Integer {
+            width_bits: 64,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        };
+        let read = from_declared(call.clone(), &int32, &wide).expect("an integer class");
+        assert_eq!(spelled(&read), "(uint64_t)(uint32_t)f()");
+        let same = MachineType::Integer {
+            width_bits: 32,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        };
+        let read = from_declared(call, &int32, &same).expect("an integer class");
+        assert_eq!(spelled(&read), "(uint32_t)f()");
+    }
+
+    /// A tagged type needs a definition the unit does not hold, so the prototype is not spelled.
+    #[test]
+    fn a_prototype_naming_a_struct_is_not_spelled() {
+        let node = CType::Pointer(Box::new(CType::Const(Box::new(CType::Struct(
+            "node".to_string(),
+        )))));
+        let signature = r2types::FunctionType {
+            return_type: CType::Void,
+            params: vec![node],
+            variadic: false,
+        };
+        assert_eq!(Prototype::of(&signature, 1), None);
+    }
 }

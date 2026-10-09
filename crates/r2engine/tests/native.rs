@@ -594,6 +594,17 @@ impl Program for Importing {
     }
 }
 
+/// Staged declares the import as its prototype states and passes the argument at that type.
+#[test]
+fn a_staged_call_passes_a_declared_import_its_declared_types() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let response = staged(&target, &Importing, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("strlen(const char*);"), "{text}");
+    assert!(text.contains("strlen((const char*)"), "{text}");
+}
+
 #[test]
 fn a_declared_prototype_gives_an_import_its_arguments() {
     let machine = Machine::new("x86-64", "x86-64", 64);
