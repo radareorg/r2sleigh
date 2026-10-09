@@ -1206,9 +1206,11 @@ fn recover_interface_inner(
         {
             match carrier_read(result_reads, float) {
                 Some(CarrierRead::Integer) => {}
+                // The carrier is the lane the reads take, as a declared float's is (`low_lane`):
+                // AArch64's float slot is all of q0, and a double is d0.
                 Some(CarrierRead::Float(observed)) => {
                     result = RecoveredFunctionResult::Register(RecoveredResult {
-                        slot: float,
+                        slot: observed,
                         observed,
                         signed: false,
                         float: true,

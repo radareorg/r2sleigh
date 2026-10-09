@@ -491,6 +491,16 @@ impl Literal {
         program
     }
 
+    /// The same bytes as little-endian AArch64.
+    pub fn in_aarch64(mut self) -> Self {
+        self.container.arch = Arch {
+            name: "aarch64".to_owned(),
+            bits: 64,
+            endian: Endian::Little,
+        };
+        self
+    }
+
     /// The same bytes as little-endian 32-bit ARM.
     pub fn in_arm(mut self) -> Self {
         self.container.arch = Arch {

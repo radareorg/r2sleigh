@@ -101,3 +101,36 @@ fn a_float_result_reloaded_from_the_frame_is_declared_at_its_type() {
     assert!(text.contains("double first("), "{text}");
     assert!(!text.contains("void first("), "{text}");
 }
+
+/// AArch64: `f` is `mov x0, #7; fmov d0, #1.0; ret`, and `caller` is `bl f; str d0, [x1]; ret`.
+const A64_READ_AS_DOUBLE: &[u8] = &[
+    0xe0, 0x00, 0x80, 0xd2, // 1000 mov x0, #7
+    0x00, 0x10, 0x6e, 0x1e, // 1004 fmov d0, #1.0
+    0xc0, 0x03, 0x5f, 0xd6, // 1008 ret
+    0x1f, 0x20, 0x03, 0xd5, // 100c nop
+    0xfc, 0xff, 0xff, 0x97, // 1010 bl 0x1000
+    0x20, 0x00, 0x00, 0xfd, // 1014 str d0, [x1]
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 101c padding
+];
+
+/// AArch64's float result slot is all of q0; the double the caller reads is d0, the lane a
+/// declared double returns in. Typed at q0, the return was never certified, and a caller's
+/// legacy rendering declared `f` `void` beside the result it assigned, which no compiler accepts.
+#[test]
+fn an_aarch64_float_result_is_its_lane() {
+    let program = Literal::of_code(
+        A64_READ_AS_DOUBLE,
+        &[("f", BASE, 0x0c), ("caller", BASE + 0x10, 0x0c)],
+    )
+    .in_aarch64();
+    let text = OpenProgram::of(program)
+        .rendered(BASE + 0x10, RenderTier::C)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("double f("), "{text}");
+    assert!(!text.contains("void f("), "{text}");
+}
