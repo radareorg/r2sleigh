@@ -4235,17 +4235,17 @@ pub(crate) fn literal_value(expr: &CExpr) -> Option<u64> {
         _ => None,
     }
 }
-/// Whether a string literal can stand where a value of `required` is wanted:
-/// anywhere but behind a pointer to something wider than a character, since a
-/// load of a word through a string's address reads an object, not text.
-pub(crate) fn string_literal_serves(required: &CType, ptr_bits: u32) -> bool {
-    match required {
-        CType::Pointer(inner) => {
-            matches!(**inner, CType::Void | CType::Unknown)
-                || r2types::declaration_type_width_bits(inner, ptr_bits) == Some(8)
-        }
-        _ => true,
-    }
+/// Whether a string literal can stand where `required` is wanted: only a pointer to `char`, the
+/// C string convention, since a literal ends at its NUL and other readers may read past it.
+pub(crate) fn string_literal_serves(required: &CType, _ptr_bits: u32) -> bool {
+    let CType::Pointer(inner) = required else {
+        return false;
+    };
+    let pointee = match &**inner {
+        CType::Const(inner) => &**inner,
+        other => other,
+    };
+    matches!(pointee, CType::Typedef { name, .. } if name == "char")
 }
 
 /// The name this constant address is, the type that name has, and the object it declares.

@@ -741,6 +741,85 @@ fn a_staged_call_passes_a_proven_string_as_a_literal() {
     assert!(text.contains("0x2010"), "{text}");
 }
 
+/// `half(0x2000)`, `half` a local body reading the 16-bit word at `[rdi + 2]`; at 0x2000 the
+/// words 9, 8, which also read as the text "\t".
+const HALF_AT_TEXT: &[u8] = &[
+    0xbf, 0x00, 0x20, 0x00, 0x00, // 0x1000 mov edi, 0x2000
+    0xe8, 0x0e, 0x00, 0x00, 0x00, // 0x1005 call 0x1018
+    0xc3, // 0x100a ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // to 0x1018
+    0x0f, 0xb7, 0x47, 0x02, // 0x1018 movzx eax, word [rdi + 2]
+    0xc3, // 0x101c ret
+];
+const HALF_WORDS: [u8; 4] = [0x09, 0x00, 0x08, 0x00];
+
+/// `HALF_AT_TEXT` as code and `HALF_WORDS` as read-only static data at `TEXTS`.
+struct HalfWords;
+
+impl r2engine::body::Program for HalfWords {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => HALF_AT_TEXT,
+            false => &HALF_WORDS,
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = TEXTS + HALF_WORDS.len() as u64;
+        code_region(HALF_AT_TEXT.len(), vaddr).or_else(|| {
+            (TEXTS..end)
+                .contains(&vaddr)
+                .then_some(r2engine::body::Region {
+                    start: TEXTS,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: false,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1018)
+    }
+}
+
+impl Program for HalfWords {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (TEXTS..TEXTS + HALF_WORDS.len() as u64).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == BASE).then(|| "caller".to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+/// Bytes that read as text are no string literal where no declaration says the callee takes
+/// characters: a literal ends at its NUL, and `half` reads past it (branchy `hv`, aarch64 clang).
+#[test]
+fn text_bytes_passed_where_no_declaration_takes_characters_stay_an_address() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    for pipeline in [decompile, staged] {
+        let response = pipeline(&target, &HalfWords, BASE).expect("decompile");
+        let text = response.output.text();
+        assert!(!text.contains("\"\\t\""), "{text}");
+        assert!(text.contains("0x2000"), "{text}");
+    }
+}
+
 #[test]
 fn a_declared_prototype_gives_an_import_its_arguments() {
     let machine = Machine::new("x86-64", "x86-64", 64);
