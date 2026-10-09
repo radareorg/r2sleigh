@@ -2416,7 +2416,7 @@ fn bounded_and_unbounded_stack_artifact(read_inside: bool) -> SsaArtifact {
         let inside = Varnode::unique(0x7318, 8);
         block.push(R2ILOp::IntAdd {
             dst: inside.clone(),
-            a: sp.clone(),
+            a: sp,
             b: Varnode::constant(3, 8),
         });
         block.push(R2ILOp::Load {
