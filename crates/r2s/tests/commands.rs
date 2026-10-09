@@ -485,6 +485,25 @@ fn a_staged_ledger_elides_what_the_certificates_elide() {
     );
 }
 
+/// `mixed_from` returns a two-word struct in RAX and RDX; staged assigns only RAX, so a read of
+/// RDX's variable reads nothing the text assigned, and is a residual rather than garbage.
+#[test]
+fn a_staged_read_of_a_name_nothing_assigned_is_a_residual() {
+    let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
+    let staged = on(
+        pinned.join("shapes_gcc_x64_O0"),
+        "e dec.pipeline=staged; pdd @ sym.shape_struct_value",
+    );
+    assert!(
+        staged
+            .out
+            .contains("mixed_fold(tmp_11f80_3, r2sleigh_residual_u64(1));"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains(", rdx_2)"), "{}", staged.out);
+}
+
 /// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
 /// range C leaves it undefined, so that arm is a residual.
 #[test]

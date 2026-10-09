@@ -31,6 +31,8 @@ pub(super) struct Values<'a> {
     names: Vec<Option<(SymbolId, MachineType)>>,
     /// The parameters declared at the pointer type the source states, read as their integer class.
     pointers: Vec<bool>,
+    /// The named values a statement written so far assigns: a read of any other is a residual.
+    assigned: RefCell<Vec<bool>>,
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
@@ -666,6 +668,7 @@ impl<'a> Values<'a> {
             readers,
             names: vec![None; graph.values.len()],
             pointers: vec![false; graph.values.len()],
+            assigned: RefCell::new(vec![false; graph.values.len()]),
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
@@ -744,6 +747,7 @@ impl<'a> Values<'a> {
                 SymbolRole::Parameter(index),
             );
             self.names[value.0 as usize] = Some((name, ty));
+            self.assigned.get_mut()[value.0 as usize] = true;
             self.params.push(CParam { ty: c, name });
         }
         for inst in &self.graph.insts {
@@ -885,8 +889,21 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// A name as its class reads it: a parameter declared a pointer is read as its word.
+    /// A name as its class reads it: a parameter declared a pointer is read as its word, and a
+    /// name no statement written before assigns (its definition a gap) is never assigned.
     fn read_name(&self, value: ValueId, name: SymbolId, held: &MachineType) -> Option<CExpr> {
+        if !self
+            .assigned
+            .borrow()
+            .get(value.0 as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            return crate::prelude::residual(
+                &terms::c_type(held)?,
+                crate::prelude::ResidualCause::NeverAssigned,
+            );
+        }
         let var = CExpr::var(name);
         match self.pointers.get(value.0 as usize) {
             Some(true) => Some(CExpr::cast(terms::c_type(held)?, var)),
@@ -934,6 +951,9 @@ impl<'a> Values<'a> {
                 Ok(Some(stmt)) => {
                     self.mark(inst.id);
                     self.residual_in(inst.id, &stmt);
+                    if let Some(output) = inst.output.filter(|value| self.is_named(*value)) {
+                        self.assigns(output);
+                    }
                     out.push((at, stmt));
                 }
                 Ok(None) => {}
@@ -1024,6 +1044,12 @@ impl<'a> Values<'a> {
 
     /// `value` written at the store's cell: its canonical access where import built one, else its
     /// own address operand at the value's width.
+    fn assigns(&self, value: ValueId) {
+        if let Some(slot) = self.assigned.borrow_mut().get_mut(value.0 as usize) {
+            *slot = true;
+        }
+    }
+
     fn is_named(&self, value: ValueId) -> bool {
         self.names
             .get(value.0 as usize)
@@ -1170,6 +1196,7 @@ impl<'a> Values<'a> {
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }
+        self.assigns(*result);
         Some(assign(*name, value))
     }
 
@@ -1200,6 +1227,7 @@ impl<'a> Values<'a> {
         if let Some(def) = self.graph.def_inst(result) {
             self.mark(def);
         }
+        self.assigns(result);
         Some(assign(*name, value))
     }
 
@@ -1430,6 +1458,7 @@ impl<'a> Values<'a> {
             };
             self.mark(inst);
             self.residual_in(inst, &CStmt::Expr(source.clone()));
+            self.assigns(output);
             match clobbers {
                 false => out.push(assign(*name, source)),
                 true => {
