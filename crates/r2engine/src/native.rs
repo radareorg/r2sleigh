@@ -1758,15 +1758,8 @@ impl Native<'_> {
     }
 }
 
-/// Every function this body reaches, each once, in address order.
-///
-/// A tail jump reaches another function exactly as a call does; the only
-/// difference is that its result is this function's own. So does a jump
-/// through a slot the loader fills, which is how an import stub reaches its
-/// import: the slot is what the call site names, so it is what the import's
-/// declaration is placed at. One callee reached two ways is still one
-/// callee: declaring it twice makes the type analysis reject the whole
-/// capture as holding a duplicate address.
+/// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once
+/// in address order: one callee declared twice is a duplicate address the type analysis rejects.
 fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
     body.calls
         .iter()
@@ -1775,7 +1768,6 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
         .chain(
             call_sites(body, program)
                 .into_iter()
-                .filter(|site| site.transfer == r2source::AdvisoryCallTransfer::TailSlot)
                 .map(|site| site.target),
         )
         .collect::<std::collections::BTreeSet<_>>()
@@ -1791,8 +1783,18 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
 fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
-        for index in 0..block.lifted.ops.len() {
-            let Some((target, transfer)) = transfer(&block.lifted, index, body) else {
+        let ops = &block.lifted.ops;
+        // One forward read per block that calls through a value, so each such call folds in `O(1)`.
+        let mut origins = (ops
+            .iter()
+            .any(|op| matches!(op, r2il::R2ILOp::CallInd { .. })))
+        .then(r2ssa::origin::BlockOrigins::default);
+        for (index, op) in ops.iter().enumerate() {
+            let site = transfer(&block.lifted, index, body, origins.as_ref());
+            if let Some(origins) = &mut origins {
+                origins.step(op);
+            }
+            let Some((target, transfer)) = site else {
                 continue;
             };
             let Some(instruction) = block
@@ -1836,23 +1838,23 @@ fn library_evidence(
         .collect()
 }
 
-/// How one operation reaches another function, where it reaches one at all.
-///
-/// A call comes back and a tail jump does not, and which this is a fact about
-/// the body rather than about the callee: the walk decided it when it stopped
-/// at the target's entry. A jump through a loaded value names no code address
-/// at all, so its target is the slot the jump reads, which is what the
-/// relocation on that slot licenses. The slot is read by the same pass that
-/// reads it again when the site is correlated, so the two cannot disagree.
+/// How one operation reaches another function, where it does: a call target the walk folded and a
+/// jump's loaded slot are read by the passes r2ssa correlates the site with, so the two agree.
 fn transfer(
     block: &r2il::R2ILBlock,
     index: usize,
     body: &crate::body::Body,
+    origins: Option<&r2ssa::origin::BlockOrigins>,
 ) -> Option<(u64, r2source::AdvisoryCallTransfer)> {
     match block.ops.get(index)? {
         r2il::R2ILOp::Call { target } => {
             Some((target.offset, r2source::AdvisoryCallTransfer::Call))
         }
+        r2il::R2ILOp::CallInd { target } => origins?
+            .of(target)?
+            .constant()
+            .filter(|target| body.calls.contains(target))
+            .map(|target| (target, r2source::AdvisoryCallTransfer::Call)),
         r2il::R2ILOp::Branch { target } if body.tail_calls.contains(&target.offset) => {
             Some((target.offset, r2source::AdvisoryCallTransfer::TailJump))
         }

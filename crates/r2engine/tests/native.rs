@@ -5336,3 +5336,46 @@ fn accesses_relying_on_an_assumed_extent_are_counted_on_the_proof_line() {
         );
     }
 }
+
+/// RISC-V calls as `auipc ra, 0; jalr ra, imm(ra)`: `CALLIND` of a target the block folds. The
+/// first call leaves a stray `a2`, so the callee's body, not each call's writes, says the arity.
+#[cfg(feature = "riscv")]
+const RISCV_AUIPC_CALLS: &[u8] = &[
+    0x13, 0x01, 0x01, 0xff, // 0x1000 addi sp, sp, -16
+    0x23, 0x34, 0x11, 0x00, // 0x1004 sd ra, 8(sp)
+    0x13, 0x06, 0x70, 0x00, // 0x1008 li a2, 7
+    0x97, 0x00, 0x00, 0x00, // 0x100c auipc ra, 0
+    0xe7, 0x80, 0x40, 0x02, // 0x1010 jalr ra, 36(ra) -> 0x1030
+    0x93, 0x05, 0x30, 0x00, // 0x1014 li a1, 3
+    0x97, 0x00, 0x00, 0x00, // 0x1018 auipc ra, 0
+    0xe7, 0x80, 0x80, 0x01, // 0x101c jalr ra, 24(ra) -> 0x1030
+    0x83, 0x30, 0x81, 0x00, // 0x1020 ld ra, 8(sp)
+    0x13, 0x01, 0x01, 0x01, // 0x1024 addi sp, sp, 16
+    0x67, 0x80, 0x00, 0x00, // 0x1028 ret
+    0x13, 0x00, 0x00, 0x00, // 0x102c nop
+    0x33, 0x05, 0xb5, 0x00, // 0x1030 add a0, a0, a1
+    0x67, 0x80, 0x00, 0x00, // 0x1034 ret
+];
+
+/// A call through a target its block folds to a constant reaches that function: its body is
+/// captured and its two parameters are both calls' arity.
+#[cfg(feature = "riscv")]
+#[test]
+fn a_call_through_a_folded_target_takes_the_callees_interface() {
+    let machine = Machine::new("riscv64", "riscv", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: RISCV_AUIPC_CALLS.to_vec(),
+        name: "caller",
+    };
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("r2dec gap"), "{text}");
+    assert!(text.contains("fcn_1030(uint64_t, uint64_t);"), "{text}");
+    let calls = text.matches("fcn_1030(").count();
+    assert_eq!(calls, 3, "{text}");
+    // The survey walk, which keeps no lifts, folds the same call.
+    let trace =
+        r2engine::body::Trace::start(BASE, &machine.embedded.disasm, &program).expect("trace");
+    assert!(trace.calls().contains(&0x1030), "{:?}", trace.calls());
+}

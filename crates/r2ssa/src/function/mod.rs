@@ -1806,28 +1806,45 @@ fn unique_call_site_identity(
             .iter()
             .enumerate()
             .filter_map(move |(op_index, op)| {
-                let target = match (call.transfer(), op) {
+                let instruction = || {
+                    block
+                        .op_metadata(op_index)
+                        .and_then(|metadata| metadata.instruction_addr)
+                        .filter(|instruction| *instruction == call.instruction_address())
+                };
+                let last = op_index + 1 == block.ops.len();
+                let (target, reaches) = match (call.transfer(), op) {
                     (r2source::AdvisoryCallTransfer::Call, R2ILOp::Call { target }) => {
-                        CanonicalStorageId::from_varnode(target)
+                        let target = CanonicalStorageId::from_varnode(target);
+                        (target, target.offset)
+                    }
+                    // The site is the target value; the address is what its block folds it to.
+                    (r2source::AdvisoryCallTransfer::Call, R2ILOp::CallInd { target })
+                        if instruction().is_some() =>
+                    {
+                        (
+                            CanonicalStorageId::from_varnode(target),
+                            crate::origin::folded_call_target(block, op_index)?,
+                        )
                     }
                     (r2source::AdvisoryCallTransfer::TailJump, R2ILOp::Branch { target })
-                        if op_index + 1 == block.ops.len() =>
+                        if last =>
                     {
-                        CanonicalStorageId::from_varnode(target)
+                        let target = CanonicalStorageId::from_varnode(target);
+                        (target, target.offset)
                     }
                     (r2source::AdvisoryCallTransfer::TailSlot, R2ILOp::BranchInd { .. })
-                        if op_index + 1 == block.ops.len() =>
+                        if last =>
                     {
-                        crate::machine_context::terminal_indirect_loaded_slot(block, op_index)?
+                        let slot =
+                            crate::machine_context::terminal_indirect_loaded_slot(block, op_index)?;
+                        (slot, slot.offset)
                     }
                     _ => return None,
                 };
-                let instruction = block
-                    .op_metadata(op_index)
-                    .and_then(|metadata| metadata.instruction_addr)?;
-                (instruction == call.instruction_address()
-                    && target.offset == call.target_address())
-                .then(|| SourceCallSiteIdentity::new(instruction, target))
+                let instruction = instruction()?;
+                (reaches == call.target_address())
+                    .then(|| SourceCallSiteIdentity::new(instruction, target))
             })
     });
     let identity = matches.next()?;
@@ -1844,7 +1861,7 @@ fn reads_after(
     let (integer, float) = callee.result_carriers()?;
     blocks.iter().find_map(|block| {
         let index = block.ops.iter().enumerate().position(|(index, op)| {
-            matches!(op, R2ILOp::Call { .. })
+            matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
                 && block
                     .op_metadata(index)
                     .and_then(|metadata| metadata.instruction_addr)

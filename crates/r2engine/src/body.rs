@@ -357,6 +357,8 @@ struct Walk {
     return_addresses: BTreeMap<u64, Box<[u64]>>,
     /// The lift of each instruction, where the walk keeps it.
     lifted: Option<BTreeMap<u64, Instruction>>,
+    /// The address of the instruction recorded last in this run.
+    last: Option<u64>,
     leaders: BTreeSet<u64>,
     calls: BTreeSet<u64>,
     loads: BTreeSet<u64>,
@@ -391,6 +393,7 @@ impl Walk {
             decoded: BTreeMap::new(),
             return_addresses: BTreeMap::new(),
             lifted: lifting.then(BTreeMap::new),
+            last: None,
             leaders: BTreeSet::from([entry]),
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
@@ -410,8 +413,8 @@ impl Walk {
                 _ => BodyError::EntryUndecodable(entry),
             });
         };
-        let pending = walk.record(first, program);
-        walk.run(pending, disasm, program);
+        let (pending, previous) = walk.record(first, None, program);
+        walk.run(pending, previous, disasm, program);
         Ok(walk)
     }
 
@@ -420,10 +423,17 @@ impl Walk {
         for (_, next) in self.gated.remove(&callee).unwrap_or_default() {
             self.continues(Some(next), &mut pending, program);
         }
-        self.run(pending, disasm, program);
+        self.run(pending, None, disasm, program);
     }
 
-    fn run(&mut self, mut pending: Vec<u64>, disasm: &Disassembler, program: &dyn Program) {
+    /// Walk on from `pending`; `previous` is the lift recorded last where `lifted` keeps none.
+    fn run(
+        &mut self,
+        mut pending: Vec<u64>,
+        mut previous: Option<Instruction>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
         while let Some(addr) = pending.pop() {
             if self.decoded.contains_key(&addr) {
                 continue;
@@ -431,9 +441,13 @@ impl Walk {
             if let Some(instruction) = self.decode(addr, disasm, program) {
                 let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());
                 self.supervisor.extend(enters.then_some(addr));
-                pending.extend(self.record(instruction, program));
+                let (successors, kept) = self.record(instruction, previous.as_ref(), program);
+                pending.extend(successors);
+                previous = kept;
             }
         }
+        // A resumed walk starts after a call, not after the lift this run recorded last.
+        self.last = None;
     }
 
     /// Decode one instruction, or record why control stops here.
@@ -550,12 +564,25 @@ impl Walk {
         successors.push(next);
     }
 
-    /// Keep an instruction, and answer where the walk goes next.
-    fn record(&mut self, instruction: Instruction, program: &dyn Program) -> Vec<u64> {
+    /// Keep an instruction, and answer where the walk goes next and the lift where `lifted` keeps none.
+    fn record(
+        &mut self,
+        mut instruction: Instruction,
+        previous: Option<&Instruction>,
+        program: &dyn Program,
+    ) -> (Vec<u64>, Option<Instruction>) {
         let addr = instruction.lifted.addr;
         let next = instruction.end();
         let mut successors = Vec::new();
         self.loads.extend(constant_loads(&instruction.lifted.ops));
+        if let BlockTerminator::IndirectCall { fallthrough } = instruction.terminator
+            && let Some(target) = self.folded_call(&instruction, previous)
+        {
+            instruction.terminator = BlockTerminator::Call {
+                target,
+                fallthrough,
+            };
+        }
 
         match instruction.terminator {
             BlockTerminator::Fallthrough { next: after } => {
@@ -624,10 +651,52 @@ impl Walk {
             }
         }
         self.decoded.insert(addr, instruction.lifted.size);
-        if let Some(lifted) = &mut self.lifted {
-            lifted.insert(addr, instruction);
+        self.last = Some(addr);
+        match &mut self.lifted {
+            Some(lifted) => {
+                lifted.insert(addr, instruction);
+                (successors, None)
+            }
+            None => (successors, Some(instruction)),
         }
-        successors
+    }
+
+    /// The constant an indirect call's target folds to over this instruction and the one the walk
+    /// recorded just before it, where control reaches it only from that one and neither branches.
+    fn folded_call(
+        &self,
+        instruction: &Instruction,
+        previous: Option<&Instruction>,
+    ) -> Option<u64> {
+        let ops = &instruction.lifted.ops;
+        let at = ops.iter().position(r2il::R2ILOp::is_control_flow)?;
+        let r2il::R2ILOp::CallInd { target } = &ops[at] else {
+            return None;
+        };
+        let previous = match &self.lifted {
+            Some(lifted) => lifted.get(&self.last?),
+            None => previous.filter(|_| self.last.is_some()),
+        }
+        .filter(|previous| {
+            previous.end() == instruction.lifted.addr
+                && !self.leaders.contains(&instruction.lifted.addr)
+                && !previous
+                    .lifted
+                    .ops
+                    .iter()
+                    .any(r2il::R2ILOp::is_control_flow)
+        });
+        let mut origins = r2ssa::origin::BlockOrigins::default();
+        for op in previous
+            .into_iter()
+            .flat_map(|previous| &previous.lifted.ops)
+        {
+            origins.step(op);
+        }
+        for op in &ops[..at] {
+            origins.step(op);
+        }
+        origins.of(target)?.constant()
     }
 
     /// Follow an indirect branch to the arms a previous pass read, or on past it where it is a call; stop where neither.

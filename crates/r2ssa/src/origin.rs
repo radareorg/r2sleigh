@@ -58,6 +58,15 @@ pub fn encoded_target(target: &Varnode) -> Option<u64> {
     matches!(target.space, SpaceId::Const | SpaceId::Ram).then_some(target.offset)
 }
 
+/// The address the indirect call at `index` reaches, where its block folds the target to a
+/// constant: RISC-V's `auipc ra, 0; jalr ra, imm(ra)` is a direct call. `O(index)`.
+pub fn folded_call_target(block: &R2ILBlock, index: usize) -> Option<u64> {
+    let R2ILOp::CallInd { target } = block.ops.get(index)? else {
+        return None;
+    };
+    BlockOrigins::upto(block, index).of(target)?.constant()
+}
+
 /// What every storage holds at one point in a block.
 #[derive(Debug, Default, Clone)]
 pub struct BlockOrigins {
