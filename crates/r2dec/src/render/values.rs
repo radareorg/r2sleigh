@@ -1437,9 +1437,14 @@ impl<'a> Values<'a> {
                 Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
             )
         });
+        // Only a named callee's declaration says so to C: a call through a pointer, or the
+        // function's own entry, declares nothing, so the trap still ends its block.
         last_call.is_some_and(|inst| {
-            self.calls.get(inst).is_some_and(|plan| plan.noreturn)
-                && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
+            self.calls.get(inst).is_some_and(|plan| {
+                plan.noreturn
+                    && matches!(plan.callee, calls::Callee::Named { .. })
+                    && !self.calls_itself(plan)
+            }) && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
         })
     }
 
