@@ -1293,6 +1293,25 @@ impl<'a> Values<'a> {
         matches!(&plan.callee, calls::Callee::Named { address, .. } if *address == Some(self.own.entry))
     }
 
+    /// The literals among `arguments`: a constant a fixed, prototyped parameter holds passes as
+    /// itself (a variadic one is not converted), and proven text as its string.
+    fn literals_passed(
+        &self,
+        arguments: &mut [CExpr],
+        types: &[CType],
+        texts: Vec<Option<&str>>,
+        fixed: usize,
+    ) {
+        for (argument, ty) in arguments.iter_mut().zip(types).take(fixed) {
+            *argument = terms::at_sink(ty, std::mem::replace(argument, CExpr::IntLit(0)));
+        }
+        for ((argument, ty), text) in arguments.iter_mut().zip(types).zip(texts) {
+            if let Some(text) = text.filter(|_| crate::string_literal_serves(ty, self.ptr_bits)) {
+                *argument = calls::text_as(text, ty);
+            }
+        }
+    }
+
     /// The call's expression, returning `ret`: a named callee is declared once, and one reached
     /// through its target value is cast to the function type it is called at.
     fn call_expr(&self, inst: InstId, plan: &CallPlan, ret: Option<&MachineType>) -> Option<CExpr> {
@@ -1326,11 +1345,7 @@ impl<'a> Values<'a> {
             }
             ret_type = declared.ret.clone();
         }
-        for ((argument, ty), text) in arguments.iter_mut().zip(&types).zip(texts) {
-            if let Some(text) = text.filter(|_| crate::string_literal_serves(ty, self.ptr_bits)) {
-                *argument = calls::text_as(text, ty);
-            }
-        }
+        self.literals_passed(&mut arguments, &types, texts, plan.fixed);
         let (name, kind, address) = match &plan.callee {
             calls::Callee::Named {
                 name,
@@ -1419,14 +1434,15 @@ impl<'a> Values<'a> {
                 };
                 let call = self.call_expr(inst, plan, Some(class))?;
                 let spelled = fit(calls::read_result(plan, call, class)?, class, &own)?;
-                // A call declared to return the function's own type is returned as it is.
-                let returned = match &plan.declared {
-                    Some(declared)
-                        if declared.ret == *ty && matches!(spelled, CExpr::Call { .. }) =>
-                    {
-                        spelled
-                    }
-                    _ => CExpr::cast(ty.clone(), spelled),
+                // A call is returned as it is where it is declared the function's own type, or an
+                // integer where the function returns one: `return` converts it as the cast would.
+                let declared = match &plan.declared {
+                    Some(declared) => declared.ret.clone(),
+                    None => terms::c_type(class)?,
+                };
+                let returned = match returned_call(spelled, ty) {
+                    Ok(call) if declared == *ty || integer(&declared) && integer(ty) => call,
+                    Ok(call) | Err(call) => CExpr::cast(ty.clone(), call),
                 };
                 vec![CStmt::Return(Some(returned))]
             }
@@ -2053,6 +2069,21 @@ fn reads_itself(
 }
 
 /// The values a return hands back, by its return-value obligations.
+/// The call `spelled` is, through a cast to the function's own type `ty` at most; else `spelled`.
+fn returned_call(spelled: CExpr, ty: &CType) -> Result<CExpr, CExpr> {
+    match spelled {
+        call @ CExpr::Call { .. } => Ok(call),
+        CExpr::Cast { ty: to, expr, .. } if to == *ty && matches!(*expr, CExpr::Call { .. }) => {
+            Ok(*expr)
+        }
+        other => Err(other),
+    }
+}
+
+fn integer(ty: &CType) -> bool {
+    matches!(ty.unaliased(), CType::Int { .. })
+}
+
 fn returned_values(inventory: &SemanticObligationInventory, inst: InstId) -> Vec<ValueId> {
     inventory
         .obligations_for_inst(inst)
