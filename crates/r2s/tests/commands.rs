@@ -409,7 +409,8 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         binary,
         "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
     );
-    // Each parameter is declared as DWARF states it, by its name, and the pointer read as its word;
+    // Each parameter is declared as DWARF states it, by its name: the pointer is read as its word
+    // where it is stored through, and passed as itself where the callee declares it the same type.
     // `forward`'s `x + 1.0` adds the double whose bits the constant is, never the integer those bits
     // spell.
     for line in [
@@ -417,8 +418,8 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         "r2sleigh_store_u64((void*)(uint64_t)p, (uint64_t)r2sleigh_float_to_bits_64(x + x));",
         "void forward(double x, double* p)",
         "void store(double, double*);",
-        "store(x, (double*)(uint64_t)p);",
-        "store(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (double*)(uint64_t)p);",
+        "store(x, p);",
+        "store(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), p);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
@@ -434,7 +435,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .next()
         .unwrap_or(call_store);
     let call = call_store
-        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (double*)(uint64_t)p);")
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), p);")
         .expect("the tail call");
     let returned = call_store.find("return;").expect("its return");
     assert!(call < returned, "{call_store}");
@@ -579,15 +580,11 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
 fn a_staged_tail_call_returns_its_callee_s_result() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     for (binary, function, line) in [
-        (
-            "rv_O0g",
-            "sym.frame_dummy",
-            "return (uint64_t)register_tm_clones();",
-        ),
+        ("rv_O0g", "sym.frame_dummy", "return register_tm_clones();"),
         (
             "float_moves_zig_x86_64_O2g",
             "sym.swap_call",
-            "return (double)scale(b, a);",
+            "return scale(b, a);",
         ),
     ] {
         let staged = on(
@@ -663,7 +660,7 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
     for line in [
         "double from_b(const double* values, int64_t count)",
         "double helper(const double*, int64_t);",
-        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)values, (int64_t)count));",
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper(values, count));",
         "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
