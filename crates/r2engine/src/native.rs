@@ -573,6 +573,15 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
+/// The staged decompiler's C (ROADMAP D), which replaces `decompile` at D's switch.
+pub fn staged(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<EngineDecompileResponse, NativeRefusal> {
+    render(target, program, entry, crate::RenderTier::Staged)
+}
+
 /// Whether a body that transfers to these callees and reads these import slots calls anything declared to take a function.
 pub(crate) fn hands_a_function(
     target: &NativeTarget<'_>,

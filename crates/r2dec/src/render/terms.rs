@@ -723,6 +723,20 @@ impl Spell<'_> {
                 let lane = reclass(child(*lane)?, &lane_ty, &as_bits)?;
                 insert_lane(bits, (*lsb_bits, *width_bits), child(*root)?, lane)
             }
+            // The builtin counts an `unsigned long long` and returns an `int`.
+            MachineExprKind::PopulationCount { input } if child_bits(*input)? <= 64 => {
+                let counted = CExpr::call(
+                    CExpr::External {
+                        name: "__builtin_popcountll".to_string(),
+                        kind: crate::symbol::ExternalKind::Intrinsic,
+                    },
+                    vec![cast(
+                        integer(64)?,
+                        cast(integer(child_bits(*input)?)?, child(*input)?),
+                    )],
+                );
+                Some(cast(integer(bits)?, counted))
+            }
             // A merge is its variable, which the edges assign; the rest has no single C operator.
             MachineExprKind::Phi { .. }
             | MachineExprKind::PopulationCount { .. }

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::TABLE_SWITCH;
 
 use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
-use r2engine::native::{NativeTarget, Program, call_effect, decompile};
+use r2engine::native::{NativeTarget, Program, call_effect, decompile, staged};
 use r2sleigh_lift::EmbeddedMachine;
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
 use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
@@ -1518,6 +1518,22 @@ fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
 }
 
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
+/// The function at `BASE` in both pipelines, legacy then staged, each rendered without a refusal.
+fn rendered_both(bytes: &'static [u8], name: &'static str) -> [String; 2] {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: bytes.to_vec(),
+        name,
+    };
+    [decompile, staged].map(|pipeline| {
+        let response = pipeline(&target, &program, BASE).expect("decompile");
+        let text = response.output.text().to_string();
+        assert!(response.render_refusal.is_none(), "{text}");
+        text
+    })
+}
+
 fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> String {
     let target = machine.target();
     let program = Fixture {
@@ -2655,12 +2671,16 @@ const LOWEST_SET_BIT: &[u8] = &[
 /// what the machine does at every source, zero included.
 #[test]
 fn a_bit_scan_renders_as_the_count_it_computes() {
-    let trailing = rendered(TRAILING_ZEROS, "trailing");
-    let lowest = rendered(LOWEST_SET_BIT, "lowest");
-    run_rendered(
-        "bit_scan",
-        &format!("{trailing}\n{lowest}"),
-        r#"int main(void) {
+    let trailing = rendered_both(TRAILING_ZEROS, "trailing");
+    let lowest = rendered_both(LOWEST_SET_BIT, "lowest");
+    for (pipeline, (trailing, lowest)) in ["legacy", "staged"]
+        .iter()
+        .zip(trailing.iter().zip(&lowest))
+    {
+        run_rendered(
+            &format!("bit_scan_{pipeline}"),
+            &format!("{trailing}\n{lowest}"),
+            r#"int main(void) {
     const uint64_t cases[] = {0, 1, 2, 0x80, 0x100, 0x8000000000000000ull, 0x0123456789abcde0ull, ~0ull};
     for (int i = 0; i < 8; i++) {
         uint64_t x = cases[i];
@@ -2674,7 +2694,8 @@ fn a_bit_scan_renders_as_the_count_it_computes() {
     }
     return 0;
 }"#,
-    );
+        );
+    }
 }
 
 /// `vpxor` of two 256-bit loads, whose high half is read back:
