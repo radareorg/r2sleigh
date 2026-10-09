@@ -95,9 +95,38 @@ impl Prototype {
 
 /// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.
 pub(super) fn to_declared(argument: CExpr, from: &CType, to: &CType) -> CExpr {
-    match from == to {
-        true => argument,
-        false => CExpr::cast(to.clone(), argument),
+    if from == to {
+        return argument;
+    }
+    // A literal the declared signed type holds is that number: C converts it there unchanged.
+    if let (Some(value), CType::Int { bits, signedness }) =
+        (unsigned_literal(&argument), to.unaliased())
+        && *signedness == r2types::Signedness::Signed
+        && (1..=64).contains(bits)
+        && value < 1u64 << (bits - 1)
+        && let Ok(value) = i64::try_from(value)
+    {
+        return CExpr::IntLit(value);
+    }
+    CExpr::cast(to.clone(), argument)
+}
+
+/// The number an unsigned literal is, through any unsigned cast wide enough to hold it.
+fn unsigned_literal(expr: &CExpr) -> Option<u64> {
+    match expr {
+        CExpr::UIntLit(value) => Some(*value),
+        CExpr::Paren(inner) | CExpr::Observed { expr: inner, .. } => unsigned_literal(inner),
+        CExpr::Cast { ty, expr, .. } => {
+            let value = unsigned_literal(expr)?;
+            match ty.unaliased() {
+                CType::Int {
+                    bits,
+                    signedness: r2types::Signedness::Unsigned,
+                } if *bits >= 64 || value < 1u64 << bits => Some(value),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -568,6 +597,29 @@ mod tests {
         };
         let read = from_declared(call, &int32, &same).expect("an integer class");
         assert_eq!(spelled(&read), "(uint32_t)f()");
+    }
+
+    /// A literal passed at a declared signed type is the number where the type holds it, and a cast
+    /// of its bits where it does not.
+    #[test]
+    fn a_literal_the_declared_signed_type_holds_is_passed_as_the_number() {
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
+        let uint32 = CType::uint(32);
+        let one = to_declared(CExpr::UIntLit(1), &uint32, &int32);
+        assert_eq!(spelled(&one), "1");
+        let high = to_declared(CExpr::UIntLit(0x8000_0000), &uint32, &int32);
+        assert_eq!(spelled(&high), "(int32_t)0x80000000U");
+        let unsigned = to_declared(CExpr::UIntLit(1), &CType::uint(64), &uint32);
+        assert_eq!(spelled(&unsigned), "(uint32_t)1U");
+        // A cast that truncates is no literal of the number it casts.
+        let truncated = CExpr::cast(CType::uint(8), CExpr::UIntLit(0x101));
+        let truncated = to_declared(truncated, &CType::uint(8), &int32);
+        assert_eq!(spelled(&truncated), "(int32_t)(uint8_t)0x101U");
+        let widened = CExpr::cast(CType::uint(32), CExpr::UIntLit(7));
+        assert_eq!(spelled(&to_declared(widened, &uint32, &int32)), "7");
     }
 
     /// A callee body's prototype is spelled at its carriers' widths alone: the sign and pointee

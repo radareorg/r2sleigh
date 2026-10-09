@@ -99,7 +99,8 @@ fn a_call_the_block_graph_never_returns_from_is_declared_noreturn() {
         text.contains("__attribute__((noreturn)) void exit(int32_t);"),
         "{text}"
     );
-    assert!(text.contains("exit("), "{text}");
+    // `1` is an `int` the declaration holds, so it is passed as the number.
+    assert!(text.contains("exit(1);"), "{text}");
     // Nothing follows the call: no trap stands for the edge the block does not have, and no return.
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(
