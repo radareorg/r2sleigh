@@ -106,6 +106,7 @@ pub fn render(
     };
     drop_unmentioned_locals(&mut c);
     let ledger = close_ledger(input, values.as_ref());
+    let unassigned = values.as_ref().map(values::Values::unassigned);
     // The proof line every rendering opens with: what became of each obligation the source owes.
     crate::note_unproven_constructs(
         &mut c,
@@ -113,7 +114,7 @@ pub fn render(
         0,
         input.declared_call_prototypes(),
         0,
-        &[],
+        unassigned.as_deref().unwrap_or_default(),
     );
     let mut ready = ready_with_carriers(c);
     // Each marker names the instruction its statement was written for, so each line names its own.

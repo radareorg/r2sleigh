@@ -51,6 +51,8 @@ pub(super) struct Values<'a> {
     restored: RefCell<Vec<bool>>,
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
+    /// The values read as residuals because C has no value for them, which the proof line names.
+    unassigned: RefCell<Vec<crate::UnassignedRead>>,
     /// The switch dispatch operations r2ssa's certificates own.
     dispatch: r2ssa::dense::IdSet<InstId>,
     elisions: crate::certified::Elisions,
@@ -747,6 +749,7 @@ impl<'a> Values<'a> {
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
+            unassigned: RefCell::new(Vec::new()),
             dispatch,
             elisions,
             calls: planned,
@@ -892,11 +895,7 @@ impl<'a> Values<'a> {
     fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
         let bound = |value: ValueId, ty: &MachineType| match self.names.get(value.0 as usize)? {
             Some((name, held)) => terms::reclass(self.read_name(value, *name, held)?, held, ty),
-            // What a register held at entry that no parameter admits: C cannot read it.
-            None if self.graph.def_inst(value).is_none() => crate::prelude::residual(
-                &terms::c_type(ty)?,
-                crate::prelude::ResidualCause::HeldFromEntry,
-            ),
+            None if self.graph.def_inst(value).is_none() => self.held_from_entry(value, ty),
             None => None,
         };
         let object = |object: ObjectId| self.object(object);
@@ -945,11 +944,9 @@ impl<'a> Values<'a> {
             }
             None => match self.names.get(value.0 as usize)?.as_ref() {
                 Some((name, held)) => self.read_name(value, *name, held),
-                // What a register held at entry that no parameter admits: C cannot read it.
-                None if self.graph.def_inst(value).is_none() => crate::prelude::residual(
-                    &terms::c_type(&self.value_type(value)?)?,
-                    crate::prelude::ResidualCause::HeldFromEntry,
-                ),
+                None if self.graph.def_inst(value).is_none() => {
+                    self.held_from_entry(value, &self.value_type(value)?)
+                }
                 None => None,
             },
         }
@@ -965,10 +962,12 @@ impl<'a> Values<'a> {
             .copied()
             .unwrap_or(false)
         {
-            return crate::prelude::residual(
+            let read = crate::prelude::residual(
                 &terms::c_type(held)?,
                 crate::prelude::ResidualCause::NeverAssigned,
             );
+            self.unassigned_read(value, crate::UnassignedCause::Unassigned, held);
+            return read;
         }
         let var = CExpr::var(name);
         match self.declared.get(value.0 as usize) {
@@ -997,6 +996,38 @@ impl<'a> Values<'a> {
         let symbols = self.symbols.try_borrow().ok()?;
         (symbols.get(*id).ty == *to && bits(ty).is_some() && bits(ty) == bits(to))
             .then(|| (**inner).clone())
+    }
+
+    /// What a register held at entry that no parameter admits reads as: C cannot read it.
+    fn held_from_entry(&self, value: ValueId, ty: &MachineType) -> Option<CExpr> {
+        let read = crate::prelude::residual(
+            &terms::c_type(ty)?,
+            crate::prelude::ResidualCause::HeldFromEntry,
+        )?;
+        self.unassigned_read(value, crate::UnassignedCause::Held, ty);
+        Some(read)
+    }
+
+    /// Record a read the proof line names; the name is declared, as the value it names, so the
+    /// line keeps it, and no statement spells it.
+    fn unassigned_read(&self, value: ValueId, cause: crate::UnassignedCause, ty: &MachineType) {
+        let name = self.graph.var(value).display_name();
+        if let (Ok(mut symbols), Some(c)) = (self.symbols.try_borrow_mut(), terms::c_type(ty))
+            && symbols.by_name(&name).is_none()
+        {
+            symbols.declare(name.clone(), c, SymbolRole::Carrier);
+        }
+        self.unassigned
+            .borrow_mut()
+            .push(crate::UnassignedRead { cause, name });
+    }
+
+    /// The values read as residuals for want of a value, each once, by cause and name.
+    pub(super) fn unassigned(&self) -> Vec<crate::UnassignedRead> {
+        let mut reads = self.unassigned.borrow().clone();
+        reads.sort();
+        reads.dedup();
+        reads
     }
 
     /// What a block's live instructions write, in order, each with the instruction it stands at; a
