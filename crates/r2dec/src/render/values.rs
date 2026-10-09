@@ -1015,8 +1015,12 @@ impl<'a> Values<'a> {
     fn call_expr(&self, inst: InstId, plan: &CallPlan, ret: Option<&MachineType>) -> Option<CExpr> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
-        for (argument, class) in &plan.arguments {
+        for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
             let held = self.value_type(*argument)?;
+            // A float the caller stored as bits would travel in a float register once C declares it.
+            if *stacked && matches!(held, MachineType::Float { .. }) {
+                return None;
+            }
             arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
             types.push(terms::c_type(class)?);
         }

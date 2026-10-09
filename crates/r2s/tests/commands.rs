@@ -426,6 +426,25 @@ fn a_staged_table_switch_reads_its_selector() {
     );
 }
 
+/// `shape_variadic`'s last `snprintf` passes eight arguments, two of them in the outgoing stack
+/// area: the staged call takes them in order, as integer bits, where it was a gap.
+#[test]
+fn a_staged_call_passes_its_stack_arguments() {
+    let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
+    let staged = on(
+        pinned.join("shapes_gcc_x64_O0"),
+        "e dec.pipeline=staged; pdd @ sym.shape_variadic",
+    );
+    assert!(
+        staged
+            .out
+            .contains("tmp_11f80_19, tmp_11f80_18, rax_45, tmp_4a00_1, rax_42);"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("CallNotRendered"), "{}", staged.out);
+}
+
 /// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
 /// range C leaves it undefined, so that arm is a residual.
 #[test]

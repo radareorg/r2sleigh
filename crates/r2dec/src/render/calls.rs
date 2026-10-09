@@ -26,6 +26,8 @@ pub(super) struct CallPlan {
     pub(super) callee: Callee,
     /// Each argument and the class the callee's signature passes it in.
     pub(super) arguments: Vec<(ValueId, MachineType)>,
+    /// Whether each argument is passed in the outgoing stack area, where only integer bits travel.
+    pub(super) stacked: Vec<bool>,
     /// How many leading arguments the prototype names; the rest are its variadic tail.
     pub(super) fixed: usize,
     pub(super) variadic: bool,
@@ -47,9 +49,7 @@ pub(super) fn plan(
     let site = artifact.facts().call_sites.by_inst.get(inst)?;
     let certificate = artifact.certificates().callsites.get(site)?;
     // r2ssa states every argument and result, or refuses where a pass-through or gap leaves one open.
-    let complete = certificate.arguments_complete
-        && certificate.results_complete
-        && certificate.stack_argument_values.is_empty();
+    let complete = certificate.arguments_complete && certificate.results_complete;
     // Without the function's own interface, an undescribed call's arity drops a parameter it
     // passes through unwritten (boundaries.rs, convention_call_boundary); that count is no proof.
     let own_interface = artifact.machine_context().function_interface().is_some();
@@ -92,9 +92,18 @@ pub(super) fn plan(
             signature.map(|signature| signature.return_type.unaliased()),
         )
     });
+    let stacked = (arguments.iter())
+        .map(|(value, _)| {
+            !matches!(
+                location(certificate, *value),
+                Some(r2ssa::CallArgumentLocation::Register { .. })
+            )
+        })
+        .collect();
     Some(CallPlan {
         callee,
         arguments,
+        stacked,
         fixed,
         variadic: certificate.variadic,
         result,
@@ -128,6 +137,16 @@ fn tail_result(
         None => None,
     };
     Some((storage, super::values::agreed(declared, carrier)?))
+}
+
+/// Where the certificate places the argument `value`.
+fn location(
+    certificate: &r2ssa::CallsiteCertificate,
+    value: ValueId,
+) -> Option<&r2ssa::CallArgumentLocation> {
+    (certificate.argument_certificates.iter())
+        .find(|argument| argument.value == value)
+        .map(|argument| &argument.location)
 }
 
 /// Who the call at `inst` reaches: the callee r2types names, or the value an indirect call's
@@ -216,17 +235,17 @@ fn arguments(
     fixed: usize,
 ) -> Option<Vec<(ValueId, MachineType)>> {
     let width = |value: ValueId| artifact.graph().var(value).size * 8;
-    let located = |value: ValueId| {
-        certificate
-            .argument_certificates
-            .iter()
-            .find(|argument| argument.value == value)
-            .and_then(|argument| match argument.location {
-                r2ssa::CallArgumentLocation::Register { storage } => {
-                    super::values::carrier_class(artifact, storage, storage.size * 8)
-                }
-                _ => None,
-            })
+    // A register says its class; an outgoing stack slot carries the value's integer bits.
+    let located = |value: ValueId| match location(certificate, value)? {
+        r2ssa::CallArgumentLocation::Register { storage } => {
+            super::values::carrier_class(artifact, *storage, storage.size * 8)
+        }
+        r2ssa::CallArgumentLocation::Stack { .. }
+        | r2ssa::CallArgumentLocation::Variable { .. } => matches!(width(value), 8 | 16 | 32 | 64)
+            .then(|| MachineType::Integer {
+                width_bits: width(value),
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            }),
     };
     certificate
         .argument_values
