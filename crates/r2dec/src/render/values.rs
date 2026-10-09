@@ -48,6 +48,7 @@ pub(super) struct Values<'a> {
     residual: RefCell<Vec<bool>>,
     /// The switch dispatch operations r2ssa's certificates own.
     dispatch: r2ssa::dense::IdSet<InstId>,
+    elisions: crate::certified::Elisions,
     /// The calls the facts describe, by instruction.
     calls: r2ssa::dense::IdMap<InstId, CallPlan>,
     /// The values a described call's statement assigns.
@@ -90,29 +91,17 @@ fn has_effect(inventory: &SemanticObligationInventory, inst: InstId) -> bool {
     }
 }
 
-/// Why r2ssa certifies an instruction needs no C: a frame save the matching restore undoes, or a
-/// compiler-inserted check.
+/// Why an instruction renders no statement: a switch's dispatch, which the structured `switch`
+/// names, or what a certificate elides (`crate::certified::Elisions`, legacy's rule too).
 fn certified_elision(
     artifact: &SsaArtifact,
-    dispatch: &r2ssa::dense::IdSet<InstId>,
+    (elisions, dispatch): (&crate::certified::Elisions, &r2ssa::dense::IdSet<InstId>),
     inst: InstId,
 ) -> Option<crate::ledger::ElisionReason> {
-    // A switch's dispatch reaches the case the structured `switch` names; its certificate owns it.
     if dispatch.contains(inst) {
         return Some(crate::ledger::ElisionReason::DirectControlTarget);
     }
-    let certificates = artifact.certificates();
-    if certificates.compiler_inserted.contains(inst) {
-        return Some(crate::ledger::ElisionReason::CompilerInserted);
-    }
-    // The push recording where a call comes back to: the C call is that transfer.
-    if certificates.call_return_address_stores.contains(inst) {
-        return Some(crate::ledger::ElisionReason::CallReturnAddress);
-    }
-    certificates
-        .stack_frame_round_trip_by_inst
-        .contains(inst)
-        .then_some(crate::ledger::ElisionReason::StackFrame)
+    elisions.reason(artifact, inst)
 }
 
 /// Whether a machine expression reads memory or can trap, so it must stay where the machine runs it.
@@ -244,14 +233,14 @@ impl Demand<'_> {
         mut self,
         input: &RenderInput<'_>,
         planned: &r2ssa::dense::IdMap<InstId, CallPlan>,
-        dispatch: &r2ssa::dense::IdSet<InstId>,
+        certified: (&crate::certified::Elisions, &r2ssa::dense::IdSet<InstId>),
     ) -> Vec<bool> {
         let (artifact, inventory) = (input.artifact(), input.obligations());
         let live = |inst: InstId| {
             matches!(
                 inventory.instruction_for_inst(inst).map(|d| d.state),
                 Some(SemanticInstructionState::LiveObligation)
-            ) && certified_elision(artifact, dispatch, inst).is_none()
+            ) && certified_elision(artifact, certified, inst).is_none()
         };
         for inst in &self.graph.insts {
             let InstPayload::Op(op) = &inst.payload else {
@@ -653,6 +642,7 @@ impl<'a> Values<'a> {
         let readers = Readers::new(graph, inventory);
         let roots = canonical_roots(artifact, &projection, &readers)?;
         let (planned, results) = plan_calls(input);
+        let elisions = crate::certified::Elisions::of(artifact);
         let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
         for switch in artifact.certificates().switches.values() {
             for inst in &switch.dispatch {
@@ -668,7 +658,7 @@ impl<'a> Values<'a> {
             discharged: vec![false; graph.insts.len()],
             work: Vec::new(),
         }
-        .bind_all(input, &planned, &dispatch);
+        .bind_all(input, &planned, (&elisions, &dispatch));
         let mut values = Self {
             artifact,
             graph,
@@ -686,6 +676,7 @@ impl<'a> Values<'a> {
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
             dispatch,
+            elisions,
             calls: planned,
             results,
             externs: RefCell::new(BTreeMap::new()),
@@ -923,7 +914,13 @@ impl<'a> Values<'a> {
                 .instruction_for_inst(inst.id)
                 .map(|d| d.state);
             let stmt = match state {
-                _ if certified_elision(self.artifact, &self.dispatch, inst.id).is_some() => {
+                _ if certified_elision(
+                    self.artifact,
+                    (&self.elisions, &self.dispatch),
+                    inst.id,
+                )
+                .is_some() =>
+                {
                     Ok(None)
                 }
                 Some(SemanticInstructionState::LiveObligation) => {
@@ -1465,10 +1462,9 @@ impl<'a> Values<'a> {
         let residual = self.residual.borrow();
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
-            let certified = obligation
-                .source
-                .graph_inst()
-                .and_then(|inst| certified_elision(self.artifact, &self.dispatch, inst));
+            let certified = obligation.source.graph_inst().and_then(|inst| {
+                certified_elision(self.artifact, (&self.elisions, &self.dispatch), inst)
+            });
             let outcome = match (obligation.id.kind, certified) {
                 (SemanticObligationKind::CompilerInserted, _) => {
                     Outcome::Elided(ElisionReason::CompilerInserted)

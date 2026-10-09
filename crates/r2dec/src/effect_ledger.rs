@@ -22,10 +22,8 @@ use r2ssa::{
 /// answer is an indexed lookup.
 struct ElisionIndex<'a> {
     origins: &'a NormalizationOrigins,
-    dead_frame_slot_accesses: std::collections::BTreeSet<r2ssa::InstId>,
-    round_trip_insts: r2ssa::dense::IdSet<r2ssa::InstId>,
-    return_control_insts: std::collections::BTreeSet<r2ssa::InstId>,
-    direct_call_target_insts: std::collections::BTreeSet<r2ssa::InstId>,
+    /// What the certificates elide, the one set the staged ledger reads too.
+    certified: crate::certified::Elisions,
     switch_dispatch: r2ssa::dense::IdSet<r2ssa::InstId>,
     /// The first merge normalization removed, by the instruction defining it.
     removed_phi: std::collections::BTreeMap<r2ssa::InstId, usize>,
@@ -42,23 +40,7 @@ impl<'a> ElisionIndex<'a> {
         }
         Self {
             origins,
-            dead_frame_slot_accesses: crate::binding_plan::certified_dead_frame_slot_accesses(
-                prepared,
-            ),
-            round_trip_insts: certificates
-                .memory_round_trips
-                .values()
-                .flat_map(|certificate| {
-                    [certificate.write, certificate.read]
-                        .into_iter()
-                        .chain(certificate.redundant_reads.iter().copied())
-                        .map(|access| access.inst)
-                })
-                .collect(),
-            return_control_insts: crate::binding_plan::certified_return_control_insts(prepared),
-            direct_call_target_insts: crate::binding_plan::certified_direct_call_target_insts(
-                prepared,
-            ),
+            certified: crate::certified::Elisions::of(prepared),
             switch_dispatch: certificates
                 .switches
                 .values()
@@ -115,130 +97,12 @@ fn traced_zero_occurrence_outcome(
     outcome
 }
 
-/// The elisions the object's own observations answer.
-///
-/// A dead frame slot store and a round trip are facts about what the memory
-/// ends up holding, not about the instruction that wrote it, so they are asked
-/// of the effect stream rather than of a certificate.
-fn observed_object_elision(
-    prepared: &SsaArtifact,
-    index: &ElisionIndex<'_>,
-    id: SemanticObligationId,
-) -> Option<ElisionReason> {
-    // A store into a frame slot this function owns and never reads. The
-    // obligation is real -- writing memory is an effect -- and it is answered
-    // by the certificate that nothing can observe the result.
-    if id.kind == SemanticObligationKind::ObservableMemoryWrite
-        && let CanonicalInstructionSite::Op(op) = id.instruction.site
-        && let Some(inst) = prepared.graph().inst_for_op(op)
-        && index.dead_frame_slot_accesses.contains(&inst)
-    {
-        return Some(ElisionReason::DeadFrameSlotStore);
-    }
-    // A store that puts back what it read, and the read it puts back. The
-    // certificate says the object ends holding what it held, so neither is a
-    // statement about a program variable.
-    if matches!(
-        id.kind,
-        SemanticObligationKind::ObservableMemoryWrite
-            | SemanticObligationKind::ObservableMemoryRead
-            | SemanticObligationKind::LiveValueProducer
-    ) && let CanonicalInstructionSite::Op(op) = id.instruction.site
-        && let Some(inst) = prepared.graph().inst_for_op(op)
-        && index.round_trip_insts.contains(inst)
-    {
-        return Some(ElisionReason::MemoryRoundTrip);
-    }
-    None
-}
-
-/// The elisions a certificate about the defining instruction already answers.
-///
-/// Every clause asks the same question of the same instruction -- does a
-/// certificate say this operation owes no statement -- so they belong together
-/// and the caller reads one name instead of seven.
 fn certified_instruction_elision(
     prepared: &SsaArtifact,
     index: &ElisionIndex<'_>,
-    id: SemanticObligationId,
     source_inst: Option<r2ssa::InstId>,
 ) -> Option<ElisionReason> {
-    let graph = prepared.graph();
-    if source_inst.is_some_and(|inst| prepared.certificates().compiler_inserted.contains(inst)) {
-        return Some(ElisionReason::CompilerInserted);
-    }
-    if source_inst.is_some_and(|inst| {
-        prepared
-            .certificates()
-            .stack_frame_round_trip_by_inst
-            .contains(inst)
-    }) {
-        return Some(ElisionReason::StackFrame);
-    }
-    if source_inst.is_some_and(|inst| {
-        prepared
-            .certificates()
-            .machine_return_control_by_inst
-            .contains(inst)
-    }) {
-        return Some(ElisionReason::ReturnControl);
-    }
-    // The copies a return address reaches its return through. AArch64's `ret`
-    // is a copy of the link register into the program counter followed by a
-    // return on that, and the copy carries an obligation of its own that no
-    // statement answers, because the structured form says `return`.
-    if source_inst.is_some_and(|inst| index.return_control_insts.contains(&inst)) {
-        return Some(ElisionReason::ReturnControl);
-    }
-    if let Some(reason) = observed_object_elision(prepared, index, id) {
-        return Some(reason);
-    }
-    // The lane of an entry register a formal was minted from: its definition
-    // is the declaration, so the minting operation owes no statement.
-    if source_inst.is_some_and(|inst| {
-        graph
-            .inst(inst)
-            .and_then(|inst| inst.output)
-            .is_some_and(|value| graph.formal_projection_storage(value).is_some())
-    }) {
-        return Some(ElisionReason::CallerSuppliedEntryValue);
-    }
-    // What a call left in a register no result certificate claims, that no
-    // rendered statement reads. A read of it would have been a residual and
-    // counted with the residuals before this is asked, so reaching here means
-    // nothing reads it: the content the callee left behind is unobserved.
-    if source_inst.is_some_and(|inst| {
-        graph.inst(inst).is_some_and(|inst| {
-            matches!(
-                inst.payload,
-                r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
-            ) && inst
-                .output
-                .is_some_and(|output| !prepared.certificates().call_results.contains(output))
-        })
-    }) {
-        return Some(ElisionReason::UnclaimedCallClobber);
-    }
-    // The push that records a call's return address. The call statement is the
-    // transfer, and no C statement writes the machine's return address.
-    if source_inst.is_some_and(|inst| {
-        prepared
-            .certificates()
-            .call_return_address_stores
-            .contains(inst)
-    }) {
-        return Some(ElisionReason::CallReturnAddress);
-    }
-    // The copies a callee's address reaches its call through. The call spells
-    // the callee's name, so no statement answers for the copy that put the
-    // address in a temporary first.
-    if source_inst.is_some_and(|inst| index.direct_call_target_insts.contains(&inst)) {
-        return Some(ElisionReason::DirectCallTarget);
-    }
-    if source_inst.is_some_and(|inst| prepared.certificates().stack_geometry.insts.contains(inst)) {
-        return Some(ElisionReason::DeadStackBase);
-    }
-    None
+    source_inst.and_then(|inst| index.certified.reason(prepared, inst))
 }
 
 /// The elisions a phi the normalizer removed already answers.
@@ -465,7 +329,7 @@ fn upstream_zero_occurrence_outcome(
         .obligations()
         .get(&id)
         .and_then(|obligation| obligation.source.graph_inst());
-    if let Some(reason) = certified_instruction_elision(prepared, index, id, source_inst) {
+    if let Some(reason) = certified_instruction_elision(prepared, index, source_inst) {
         return Some(Outcome::Elided(reason));
     }
     if let Some(reason) = merge_and_copy_elision(prepared, effects, index, id, source_inst) {

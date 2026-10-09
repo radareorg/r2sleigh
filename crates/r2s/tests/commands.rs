@@ -467,6 +467,24 @@ fn a_staged_register_held_from_entry_reads_as_a_residual() {
     assert!(!staged.out.contains("TermNotSpelled"), "{}", staged.out);
 }
 
+/// `_init`'s stack pointer chain (the frame's `sub`/`add rsp` and the call's push) is return
+/// control, which the certificates elide for both pipelines alike: no obligation goes unanswered.
+#[test]
+fn a_staged_ledger_elides_what_the_certificates_elide() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("rv_O0g"),
+        "e dec.pipeline=staged; pdd @ sym._init",
+    );
+    assert!(
+        staged
+            .out
+            .contains("22 source obligations: 12 rendered, 10 elided, 0 refused;"),
+        "{}",
+        staged.out
+    );
+}
+
 /// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
 /// range C leaves it undefined, so that arm is a residual.
 #[test]
@@ -491,7 +509,7 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
     assert!(
         staged
             .out
-            .contains("8 rendered, 7 elided, 0 refused, 5 residual"),
+            .contains("8 rendered, 10 elided, 0 refused, 2 residual"),
         "{}",
         staged.out
     );

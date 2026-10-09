@@ -31,6 +31,7 @@ pub(crate) mod analysis;
 pub mod ast;
 mod binding_plan;
 pub mod bitvector;
+pub(crate) mod certified;
 pub(crate) mod codegen;
 pub(crate) mod consumer_structured;
 pub mod control;
