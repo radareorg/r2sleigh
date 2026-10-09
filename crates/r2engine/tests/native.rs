@@ -597,6 +597,35 @@ impl Program for Importing {
     }
 }
 
+/// Staged declares a callee the program carries at the widths its body reads and writes: `add_two`
+/// reads EDI and ESI and writes EAX, so each argument passes as 32 bits and the result widens back.
+#[test]
+fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: CALLER.to_vec(),
+        name: "caller",
+    };
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(
+        text.contains("uint32_t fcn_100a(uint32_t, uint32_t);"),
+        "{text}"
+    );
+    assert!(
+        text.contains("= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1);"),
+        "{text}"
+    );
+    // Widths only: the body states no sign, so no `int32_t` is read into the declaration.
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("int32_t fcn_100a")),
+        "{text}"
+    );
+}
+
 /// Staged declares the import as its prototype states and passes the argument at that type.
 #[test]
 fn a_staged_call_passes_a_declared_import_its_declared_types() {
