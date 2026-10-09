@@ -273,28 +273,31 @@ impl BitVectorHelper {
                     set = set_bit("carrier", carrier_bits, "bit"),
                 )
             }
-            Self::Load { carrier_bits } => {
-                let carrier = spelled(carrier_bits);
-                format!(
-                    "static inline {carrier} {name}(const void *at)\n\
-                     {{\n\
-                     \x20   {carrier} carrier;\n\
-                     \x20   __builtin_memcpy(&carrier, at, sizeof carrier);\n\
-                     \x20   return carrier;\n\
-                     }}\n"
-                )
-            }
-            Self::Store { carrier_bits } => {
-                let carrier = spelled(carrier_bits);
-                format!(
-                    "static inline void {name}(void *at, {carrier} carrier)\n\
-                     {{\n\
-                     \x20   __builtin_memcpy(at, &carrier, sizeof carrier);\n\
-                     }}\n"
-                )
-            }
+            Self::Load { carrier_bits } => access_definition(&name, carrier_bits, false),
+            Self::Store { carrier_bits } => access_definition(&name, carrier_bits, true),
         }
     }
+}
+
+/// A whole carrier read from (or, for a store, written to) memory by a byte copy.
+fn access_definition(name: &str, carrier_bits: u32, store: bool) -> String {
+    let carrier = spelled(carrier_bits);
+    if store {
+        return format!(
+            "static inline void {name}(void *at, {carrier} carrier)\n\
+             {{\n\
+             \x20   __builtin_memcpy(at, &carrier, sizeof carrier);\n\
+             }}\n"
+        );
+    }
+    format!(
+        "static inline {carrier} {name}(const void *at)\n\
+         {{\n\
+         \x20   {carrier} carrier;\n\
+         \x20   __builtin_memcpy(&carrier, at, sizeof carrier);\n\
+         \x20   return carrier;\n\
+         }}\n"
+    )
 }
 
 /// How a field or carrier of this width is declared.

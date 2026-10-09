@@ -107,21 +107,7 @@ impl Values<'_> {
             decl(&source, from_var, CExpr::cast(source.clone(), from)),
             decl(&count, limit_var, CExpr::cast(count.clone(), limit)),
         ];
-        let at = |base: SymbolId| {
-            let offset = CExpr::binary(
-                BinaryOp::Mul,
-                CExpr::cast(address.clone(), CExpr::var(cursor)),
-                CExpr::cast(
-                    address.clone(),
-                    CExpr::UIntLit(u64::from(transfer.element_size)),
-                ),
-            );
-            let sum = CExpr::binary(BinaryOp::Add, CExpr::var(base), offset);
-            CExpr::cast(
-                CType::Pointer(Box::new(CType::Void)),
-                CExpr::cast(address.clone(), sum),
-            )
-        };
+        let at = |base: SymbolId| element_at(&address, (base, cursor), transfer.element_size);
         let scalar = ResidualType::of(&element)?;
         let load = |base: SymbolId| Helper::Load(scalar).call(vec![at(base)]);
         // The cursor never passes the count, so the step cannot wrap.
@@ -142,41 +128,74 @@ impl Values<'_> {
                 ]
             }
             Some(stop) => {
-                let held = self.cursor("element", &element);
-                stmts.push(decl(&element, held, CExpr::UIntLit(0)));
-                parts.push((Part::Destination, CExpr::var(held)));
-                let mut body = vec![CStmt::Expr(CExpr::assign(CExpr::var(held), load(to_var)))];
-                let compared = match pointer_source {
-                    true => {
-                        let other = self.cursor("other", &element);
-                        stmts.push(decl(&element, other, CExpr::UIntLit(0)));
-                        parts.push((Part::Source, CExpr::var(other)));
-                        body.push(CStmt::Expr(CExpr::assign(
-                            CExpr::var(other),
-                            load(from_var),
-                        )));
-                        CExpr::var(other)
-                    }
-                    false => CExpr::var(from_var),
+                let walk = Compared {
+                    stop,
+                    element: &element,
+                    to: to_var,
+                    from: from_var,
+                    pointer_source,
                 };
-                let op = match stop {
-                    r2il::BlockStop::Equal => BinaryOp::Eq,
-                    r2il::BlockStop::Unequal => BinaryOp::Ne,
-                };
-                // The cursor counts an element before it is compared, so a stop leaves the count.
-                body.push(step);
-                body.push(CStmt::If {
-                    cond: CExpr::binary(op, compared, CExpr::var(held)),
-                    then_body: Box::new(CStmt::Block(vec![CStmt::Break])),
-                    else_body: None,
-                });
-                body
+                self.compare_walk(&walk, &load, step, (&mut stmts, &mut parts))
             }
         };
         stmts.push(CStmt::While {
             cond: CExpr::binary(BinaryOp::Ne, CExpr::var(cursor), CExpr::var(limit_var)),
             body: Box::new(CStmt::Block(body)),
         });
+        let bits = (self.value_bits(transfer.count)?, element_bits);
+        self.assign_answer(inst, bits, &parts, &mut stmts);
+        Some(CStmt::Block(stmts))
+    }
+
+    /// A scan's or a compare's body: the element held (and the source's, for a compare), the step,
+    /// then the break where the stop holds.
+    fn compare_walk(
+        &self,
+        walk: &Compared<'_>,
+        load: &dyn Fn(SymbolId) -> CExpr,
+        step: CStmt,
+        (stmts, parts): (&mut Vec<CStmt>, &mut Vec<(Part, CExpr)>),
+    ) -> Vec<CStmt> {
+        let element = walk.element;
+        let held = self.cursor("element", element);
+        stmts.push(decl(element, held, CExpr::UIntLit(0)));
+        parts.push((Part::Destination, CExpr::var(held)));
+        let mut body = vec![CStmt::Expr(CExpr::assign(CExpr::var(held), load(walk.to)))];
+        let compared = match walk.pointer_source {
+            true => {
+                let other = self.cursor("other", element);
+                stmts.push(decl(element, other, CExpr::UIntLit(0)));
+                parts.push((Part::Source, CExpr::var(other)));
+                body.push(CStmt::Expr(CExpr::assign(
+                    CExpr::var(other),
+                    load(walk.from),
+                )));
+                CExpr::var(other)
+            }
+            false => CExpr::var(walk.from),
+        };
+        let op = match walk.stop {
+            r2il::BlockStop::Equal => BinaryOp::Eq,
+            r2il::BlockStop::Unequal => BinaryOp::Ne,
+        };
+        // The cursor counts an element before it is compared, so a stop leaves the count.
+        body.push(step);
+        body.push(CStmt::If {
+            cond: CExpr::binary(op, compared, CExpr::var(held)),
+            then_body: Box::new(CStmt::Block(vec![CStmt::Break])),
+            else_body: None,
+        });
+        body
+    }
+
+    /// After the walk, each part of `inst`'s answer a reader reads, assigned to its name.
+    fn assign_answer(
+        &self,
+        inst: InstId,
+        (count_bits, element_bits): (u32, u32),
+        parts: &[(Part, CExpr)],
+        stmts: &mut Vec<CStmt>,
+    ) {
         let mut answered = Vec::new();
         for (read, part, _) in self.answer_reads(inst) {
             let Some(output) = self.graph.inst(read).and_then(|inst| inst.output) else {
@@ -186,7 +205,7 @@ impl Values<'_> {
                 continue;
             };
             let bits = match part {
-                Part::Reached => self.value_bits(transfer.count)?,
+                Part::Reached => count_bits,
                 Part::Destination | Part::Source => element_bits,
             };
             let value = parts.iter().find(|(at, _)| *at == part).map(|(_, v)| v);
@@ -207,7 +226,6 @@ impl Values<'_> {
             self.mark(read);
             self.assigns(output);
         }
-        Some(CStmt::Block(stmts))
     }
 
     /// Each `SUBPIECE` of `inst`'s answer, with the part it reads.
@@ -237,6 +255,30 @@ impl Values<'_> {
             .borrow_mut()
             .declare(name, ty.clone(), SymbolRole::RenderCursor)
     }
+}
+
+/// What a scan's or a compare's body reads: the stop, the element's type, the held operands.
+struct Compared<'t> {
+    stop: r2il::BlockStop,
+    element: &'t CType,
+    to: SymbolId,
+    from: SymbolId,
+    pointer_source: bool,
+}
+
+/// The address of the element at `cursor` from `base`, as the machine computes it at `address`'s
+/// width, as the `void *` a byte copy takes.
+fn element_at(address: &CType, (base, cursor): (SymbolId, SymbolId), size: u32) -> CExpr {
+    let offset = CExpr::binary(
+        BinaryOp::Mul,
+        CExpr::cast(address.clone(), CExpr::var(cursor)),
+        CExpr::cast(address.clone(), CExpr::UIntLit(u64::from(size))),
+    );
+    let sum = CExpr::binary(BinaryOp::Add, CExpr::var(base), offset);
+    CExpr::cast(
+        CType::Pointer(Box::new(CType::Void)),
+        CExpr::cast(address.clone(), sum),
+    )
 }
 
 fn decl(ty: &CType, name: SymbolId, init: CExpr) -> CStmt {
