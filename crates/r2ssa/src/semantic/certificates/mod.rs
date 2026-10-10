@@ -434,6 +434,8 @@ pub struct PreparedFunctionCertificates {
     /// Frame stores no code can read back, filled once the artifact is sealed
     /// (doc/adr-frame-model.md, "Dead frame stores").
     pub dead_frame_stores: crate::dense::IdSet<InstId>,
+    /// The operations whose value only those dead stores write, sealed with them.
+    pub dead_frame_store_values: crate::dense::IdSet<InstId>,
     /// Loads of a private frame object whose value no observation reads: every use is one
     /// `DeadPhis` states unobserved, and the function does not hand it back.
     pub unobserved_private_reads: crate::dense::IdSet<InstId>,
@@ -1365,6 +1367,7 @@ pub(crate) fn collect_prepared_function_certificates(
         call_return_address_stores,
         compiler_inserted,
         dead_frame_stores: crate::dense::IdSet::default(),
+        dead_frame_store_values: crate::dense::IdSet::default(),
         unobserved_private_reads: unobserved_private_reads(
             graph,
             structured,

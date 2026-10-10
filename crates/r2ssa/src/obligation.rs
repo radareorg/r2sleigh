@@ -934,7 +934,7 @@ impl SemanticObligationInventory {
             if boundary.complete {
                 continue;
             }
-            for read in call_boundary_reads(graph, boundary.at) {
+            for read in graph.call_boundary_reads(boundary.at) {
                 let Some(inst) = graph.inst(read) else {
                     continue;
                 };
@@ -1576,29 +1576,6 @@ fn taint_incomplete_boundary_inputs(
 /// The mirror of the `CallDefine` run that follows a call: construction emits
 /// them as one uninterrupted run, so the run ends at the first operation that
 /// is not one.
-fn call_boundary_reads(graph: &SsaGraph, call: InstId) -> Vec<InstId> {
-    let Some(call_inst) = graph.inst(call) else {
-        return Vec::new();
-    };
-    let Some(block) = graph.block(call_inst.block) else {
-        return Vec::new();
-    };
-    block
-        .insts
-        .iter()
-        .copied()
-        .take_while(|inst| *inst != call)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take_while(|inst| {
-            graph
-                .inst(*inst)
-                .is_some_and(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CallUse { .. })))
-        })
-        .collect()
-}
-
 fn block_can_reenter(graph: &SsaGraph, start: crate::graph::BlockId) -> bool {
     let Some(block) = graph.block(start) else {
         return false;

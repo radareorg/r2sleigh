@@ -10,7 +10,9 @@ use crate::graph::InstId;
 impl SsaArtifact {
     /// Fill the certificate once, after the extent facts it reads are sealed.
     pub(super) fn seal_dead_frame_stores(&mut self) {
-        self.facts.certificates.dead_frame_stores = dead_frame_stores(self);
+        let stores = dead_frame_stores(self);
+        self.facts.certificates.dead_frame_store_values = dead_store_values(self, &stores);
+        self.facts.certificates.dead_frame_stores = stores;
     }
 }
 
@@ -60,4 +62,37 @@ fn dead_frame_stores(artifact: &SsaArtifact) -> IdSet<InstId> {
         dead.extend(owned.iter().map(|access| access.access.inst));
     }
     dead
+}
+
+/// The operations whose value only a dead frame store writes: every use is such a store, stack
+/// geometry, a use no observation depends on, or one of these. A worklist up from the stored
+/// values; each operation is taken once, O(V + E).
+fn dead_store_values(artifact: &SsaArtifact, stores: &IdSet<InstId>) -> IdSet<InstId> {
+    let graph = artifact.graph();
+    let geometry = &artifact.certificates().stack_geometry.insts;
+    let unobserved = artifact.unobserved_merges().unobserved_uses();
+    let live_out = artifact.live_out();
+    let stored = |inst: InstId| {
+        graph
+            .inst(inst)
+            .and_then(|inst| inst.inputs.get(1).copied())
+    };
+    let mut work = stores.iter().filter_map(stored).collect::<Vec<_>>();
+    let mut values = IdSet::default();
+    while let Some(value) = work.pop() {
+        let Some(def) = graph.def_inst(value).and_then(|def| graph.inst(def)) else {
+            continue;
+        };
+        let read_only_dead = (graph.use_sites(value).iter()).all(|site| {
+            stores.contains(site.inst)
+                || geometry.contains(site.inst)
+                || values.contains(site.inst)
+                || unobserved.contains(site)
+        });
+        let op = matches!(def.payload, crate::graph::InstPayload::Op(_));
+        if op && read_only_dead && !live_out.contains(value) && values.insert(def.id) {
+            work.extend(def.inputs.iter().copied());
+        }
+    }
+    values
 }

@@ -1847,6 +1847,8 @@ impl<'a> Values<'a> {
             work.push(value);
         }
         let mut seen = std::collections::BTreeSet::new();
+        // A use r2ssa states no observation depends on (a flag `add sp` computes) reads nothing.
+        let unobserved = self.artifact.unobserved_merges().unobserved_uses();
         while let Some(value) = work.pop() {
             let Some(def) = self.graph.def_inst(value) else {
                 continue;
@@ -1856,7 +1858,8 @@ impl<'a> Values<'a> {
             }
             let inputs = self.graph.inst(def).map_or(&[][..], |i| &i.inputs[..]);
             work.extend(inputs.iter().copied().filter(|input| {
-                (self.graph.use_sites(*input).iter()).all(|site| seen.contains(&site.inst))
+                (self.graph.use_sites(*input).iter())
+                    .all(|site| seen.contains(&site.inst) || unobserved.contains(site))
             }));
         }
         seen.into_iter().collect()
@@ -1911,6 +1914,8 @@ impl<'a> Values<'a> {
             let (Some((source, attempt)), Some((name, ty))) =
                 (source, self.names[output.0 as usize].as_ref())
             else {
+                // The edge's gap stands for this merge and the value it could not carry.
+                self.residual.borrow_mut()[inst.0 as usize] = true;
                 out.push(unrendered_copy(to));
                 continue;
             };
@@ -1976,11 +1981,15 @@ impl<'a> Values<'a> {
                     Outcome::Elided(ElisionReason::StackFrame)
                 }
                 // Stack-pointer arithmetic r2ssa states only locates the frame the array names.
-                (SemanticObligationKind::LiveValueProducer, _)
-                    if obligation
-                        .source
-                        .graph_inst()
-                        .is_some_and(|i| frame_setup.contains(i)) =>
+                (
+                    SemanticObligationKind::LiveValueProducer
+                    | SemanticObligationKind::LoopCarriedState
+                    | SemanticObligationKind::LiveStateTransition,
+                    _,
+                ) if obligation
+                    .source
+                    .graph_inst()
+                    .is_some_and(|i| frame_setup.contains(i)) =>
                 {
                     Outcome::Elided(ElisionReason::StackFrame)
                 }
@@ -2004,8 +2013,9 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// By instruction index: a residual site's own instruction, and each unwritten producer of a
-    /// value it reads or owes, which reaches the text only through it. Each is pushed once: O(V + E).
+    /// By instruction index: a residual site's own instruction, the carriers a residual call reads,
+    /// and each unwritten producer (or merge) of a value one of them reads or owes. Each is pushed
+    /// once: O(V + E).
     fn covered_by_residuals(&self) -> Vec<bool> {
         let rendered = self.rendered.borrow();
         let mut covered = self.residual.borrow().clone();
@@ -2020,12 +2030,18 @@ impl<'a> Values<'a> {
             let inputs = inst.inputs.iter().chain(owed.flat_map(|o| o.inputs.iter()));
             let unwritten = |producer: &InstId| {
                 !rendered[producer.0 as usize]
-                    && (self.graph.inst(*producer))
-                        .is_some_and(|p| matches!(p.payload, InstPayload::Op(_)))
                     && certified_elision(self.artifact, (&self.elisions, &self.dispatch), *producer)
                         .is_none()
             };
+            // A call the text could not write also stands for the carriers it reads.
+            let reads = match inst.payload {
+                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {
+                    self.graph.call_boundary_reads(inst.id)
+                }
+                _ => Vec::new(),
+            };
             let producers = (inputs.filter_map(|v| self.graph.def_inst(*v)))
+                .chain(reads)
                 .filter(unwritten)
                 .map(|p| p.0 as usize)
                 .collect::<Vec<_>>();
