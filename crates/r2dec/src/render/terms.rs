@@ -1148,7 +1148,7 @@ mod tests {
             arena: &arena,
             bound: &|_, _| None,
             object: &|object| {
-                (object == ObjectId(3)).then(|| super::Placed {
+                (object == ObjectId(3)).then_some(super::Placed {
                     base: crate::ast::CExpr::UIntLit(0x40),
                     extent: 16,
                 })
