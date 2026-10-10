@@ -5477,6 +5477,40 @@ fn a_store_at_an_unbounded_index_is_rendered_though_its_own_slot_is_never_read()
     }
 }
 
+/// The first stack argument, read and never written, is an argument slot no parameter admits, as
+/// r2ssa's `caller_stack_slots` certifies; written first, it is no such slot.
+#[test]
+fn staged_names_an_unwritten_stack_argument_slot_from_the_certificate() {
+    const WRITTEN_FIRST: &[u8] = &[
+        0x48, 0x89, 0x7c, 0x24, 0x08, // 0x1000 mov [rsp + 8], rdi
+        0x48, 0x8b, 0x44, 0x24, 0x08, // 0x1005 mov rax, [rsp + 8]
+        0xc3, // 0x100a ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let proof_of = |bytes: &[u8], name: &'static str| {
+        let program = Fixture {
+            bytes: bytes.to_vec(),
+            name,
+        };
+        let response = staged(&target, &program, BASE).expect("decompile");
+        let text = response.output.text().to_owned();
+        let proof = (text.lines())
+            .find(|line| line.contains("r2dec proof:"))
+            .unwrap_or_else(|| panic!("no proof line: {text}"))
+            .to_owned();
+        (proof, text)
+    };
+    let (proof, text) = proof_of(STACK_ARGUMENT, "stack_argument");
+    assert!(
+        proof.contains("; 1 argument slot read with no parameter, read as residuals (stack_p8)"),
+        "{text}"
+    );
+    assert!(!proof.contains("held from entry"), "{text}");
+    let (proof, text) = proof_of(WRITTEN_FIRST, "written_first");
+    assert!(!proof.contains("stack_p8"), "{text}");
+}
+
 /// A slot only written, above a read at an index no range bounds, which may land on it.
 /// Staged only: legacy binds the slot to the parameter it stores and renders no store.
 #[test]

@@ -661,6 +661,95 @@ impl ObligationLedger {
     }
 }
 
+/// Whether the final emission tree satisfied the source effect inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectObligationDisposition {
+    Admitted,
+    /// Admitted with marked gaps: every obligation is accounted, and the ones
+    /// a gap covers were not discharged. The body is rendered, not proven.
+    Gapped,
+    Refused,
+    /// The selected route never entered the native Standard renderer.
+    NotRun,
+}
+
+/// Stable source-effect tuple exposed independently of binding quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectObligationAudit {
+    pub disposition: EffectObligationDisposition,
+    pub total: usize,
+    pub rendered: usize,
+    pub justified_elision: usize,
+    pub refused: usize,
+    /// Obligations a marked gap accounts for.
+    pub gapped: usize,
+    pub unaccounted: usize,
+    pub conflicts: usize,
+    /// First refused obligation in the order the spelling reads, for
+    /// diagnostics.
+    pub refused_obligation: Option<r2ssa::SpelledObligation>,
+    /// First obligation with no occurrence or certificate, for diagnostics.
+    pub unaccounted_obligation: Option<r2ssa::SpelledObligation>,
+    /// First obligation with incompatible occurrences, for diagnostics.
+    pub conflicting_obligation: Option<r2ssa::SpelledObligation>,
+}
+
+impl EffectObligationAudit {
+    pub const NOT_RUN: Self = Self {
+        disposition: EffectObligationDisposition::NotRun,
+        total: 0,
+        rendered: 0,
+        justified_elision: 0,
+        refused: 0,
+        gapped: 0,
+        unaccounted: 0,
+        conflicts: 0,
+        refused_obligation: None,
+        unaccounted_obligation: None,
+        conflicting_obligation: None,
+    };
+
+    pub fn from_ledger(ledger: &crate::ledger::ObligationLedger) -> Self {
+        let closure = ledger.close();
+        let admitted = closure.refused == 0
+            && closure.unattributed == 0
+            && closure.conflicts == 0
+            && closure.is_closed();
+        Self {
+            disposition: match (admitted, closure.gapped) {
+                (true, 0) => EffectObligationDisposition::Admitted,
+                (true, _) => EffectObligationDisposition::Gapped,
+                (false, _) => EffectObligationDisposition::Refused,
+            },
+            total: closure.total,
+            rendered: closure.rendered,
+            justified_elision: closure.elided + closure.compiler_inserted,
+            refused: closure.refused,
+            gapped: closure.gapped,
+            unaccounted: closure.unattributed,
+            conflicts: closure.conflicts,
+            refused_obligation: ledger
+                .first_spelled(|_, outcome| matches!(outcome, crate::ledger::Outcome::Refused)),
+            unaccounted_obligation: ledger.first_spelled(|_, outcome| !outcome.is_decided()),
+            conflicting_obligation: ledger.first_conflict_spelled(),
+        }
+    }
+
+    /// Whether the body may be emitted: every obligation is accounted for,
+    /// with the ones a gap covers marked in the output rather than dropped.
+    pub const fn is_admitted(self) -> bool {
+        matches!(
+            self.disposition,
+            EffectObligationDisposition::Admitted | EffectObligationDisposition::Gapped
+        )
+    }
+
+    /// Whether every obligation was discharged or proven unnecessary.
+    pub const fn is_fully_proven(self) -> bool {
+        matches!(self.disposition, EffectObligationDisposition::Admitted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

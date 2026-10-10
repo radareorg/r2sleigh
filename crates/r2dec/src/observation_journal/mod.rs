@@ -46,27 +46,6 @@ pub(crate) use cells::{
 
 pub use crate::ast::RenderObservationId;
 
-/// Capability required to expose a marked emission tree for journal sealing.
-/// Its constructor is private to this module, so no other lowering or codegen
-/// caller can bypass the marked-draft boundary.
-pub(crate) struct ObservationSealAuthority(());
-
-impl ObservationSealAuthority {
-    fn new() -> Self {
-        Self(())
-    }
-
-    /// The staged pipeline's seal: its writer states the instruction each marker was written for.
-    pub(crate) fn staged() -> Self {
-        Self(())
-    }
-}
-
-#[cfg(test)]
-pub(crate) const fn test_render_observation_id(index: u32) -> RenderObservationId {
-    RenderObservationId::from_index(index)
-}
-
 /// What one marker stands for, to a rewrite that moves markers between nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MarkerRole {
@@ -2023,7 +2002,7 @@ impl SealedNativeFunction {
         radare2_variadic_format_counts: usize,
         radare2_prototypes: usize,
         radare2_local_names: usize,
-        unassigned: &[crate::UnassignedRead],
+        unassigned: &[crate::render::proof::UnassignedRead],
     ) {
         self.ledger = Some(ledger.clone());
         let audit = self.effect_obligation_audit();
@@ -2034,11 +2013,11 @@ impl SealedNativeFunction {
                 audit.refused, audit.unaccounted, audit.conflicts,
             );
             self.ready = prepare_function_for_emission(
-                crate::residual_function_for_render_boundary(&function_name, &reason),
+                crate::render::residual_function_for_render_boundary(&function_name, &reason),
             );
         }
         self.ready.rewrite_sealed(|function| {
-            crate::note_unproven_constructs(
+            crate::render::proof::note_unproven_constructs(
                 function,
                 Some(ledger),
                 radare2_variadic_format_counts,
@@ -2049,11 +2028,11 @@ impl SealedNativeFunction {
         });
     }
 
-    pub(crate) fn effect_obligation_audit(&self) -> crate::EffectObligationAudit {
+    pub(crate) fn effect_obligation_audit(&self) -> crate::ledger::EffectObligationAudit {
         self.ledger
             .as_ref()
-            .map_or(crate::EffectObligationAudit::NOT_RUN, |ledger| {
-                crate::EffectObligationAudit::from_ledger(ledger)
+            .map_or(crate::ledger::EffectObligationAudit::NOT_RUN, |ledger| {
+                crate::ledger::EffectObligationAudit::from_ledger(ledger)
             })
     }
 

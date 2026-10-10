@@ -8,6 +8,7 @@ use crate::structured_region::StructuredRegionKind;
 use crate::symbol::SymbolId;
 
 use super::ControlFlowStructurer;
+use super::shape;
 
 /// One arm's assignment, taken apart: the statement's own markers, the markers
 /// around the assignment expression, the markers around the object written, and
@@ -134,12 +135,12 @@ impl ControlFlowStructurer<'_, '_> {
             CStmt::While { body, .. } => {
                 Self::cleanup_recurse(symbols, role, carries_only_to_return, elisions, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
-                **body = Self::strip_trailing_continue(taken);
+                **body = shape::strip_trailing_continue(taken);
             }
             CStmt::DoWhile { body, .. } => {
                 Self::cleanup_recurse(symbols, role, carries_only_to_return, elisions, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
-                **body = Self::strip_trailing_continue(taken);
+                **body = shape::strip_trailing_continue(taken);
             }
             CStmt::For { update, body, .. } => {
                 if let Some(update) = update.as_mut() {
@@ -149,7 +150,7 @@ impl ControlFlowStructurer<'_, '_> {
                 }
                 Self::cleanup_recurse(symbols, role, carries_only_to_return, elisions, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
-                let cleaned = Self::strip_trailing_continue(taken);
+                let cleaned = shape::strip_trailing_continue(taken);
                 // The strip consumes the body and hands one back either way, so
                 // matching moves it. Written as `map(...).unwrap_or(body)` the
                 // closure could not move it and every loop body in the function
@@ -344,7 +345,7 @@ impl ControlFlowStructurer<'_, '_> {
             let rewritten = CStmt::If {
                 cond: CExpr::binary(
                     BinaryOp::Or,
-                    Self::negate_condition(cond),
+                    shape::negate_condition(cond),
                     inner_cond.clone(),
                 ),
                 then_body: inner_then.clone(),
@@ -1041,7 +1042,7 @@ impl ControlFlowStructurer<'_, '_> {
         if matches!(then_body.unobserved(), CStmt::Empty) {
             return match else_body {
                 Some(else_body) => CStmt::If {
-                    cond: Self::negate_condition(cond),
+                    cond: shape::negate_condition(cond),
                     then_body: else_body,
                     else_body: None,
                 },
@@ -1139,7 +1140,7 @@ impl ControlFlowStructurer<'_, '_> {
                 let guard = Self::rewrap(
                     &stmts[i],
                     CStmt::If {
-                        cond: Self::negate_condition(cond.clone()),
+                        cond: shape::negate_condition(cond.clone()),
                         then_body: Box::new(terminator.clone_without_render_observations()),
                         else_body: None,
                     },
@@ -1289,7 +1290,7 @@ impl ControlFlowStructurer<'_, '_> {
 
         let guarded = if then_stmts.is_empty() {
             CStmt::If {
-                cond: Self::negate_condition(cond),
+                cond: shape::negate_condition(cond),
                 then_body: Box::new(Self::stmt_from_vec(else_stmts)),
                 else_body: None,
             }
@@ -1739,100 +1740,6 @@ impl ControlFlowStructurer<'_, '_> {
         }
     }
 
-    pub(super) fn negate_condition(cond: CExpr) -> CExpr {
-        match cond {
-            CExpr::Observed { ids, expr } => CExpr::observe_all(ids, Self::negate_condition(*expr)),
-            CExpr::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } => *operand,
-            CExpr::Binary {
-                op: BinaryOp::Or,
-                left,
-                right,
-            } => {
-                if let Some(rewritten) =
-                    Self::negate_disjunctive_relation_pair(left.as_ref(), right.as_ref())
-                {
-                    return rewritten;
-                }
-                CExpr::unary(
-                    UnaryOp::Not,
-                    CExpr::Binary {
-                        op: BinaryOp::Or,
-                        left,
-                        right,
-                    },
-                )
-            }
-            CExpr::Binary { op, left, right } => {
-                let negated = match op {
-                    BinaryOp::Eq => Some((BinaryOp::Ne, false)),
-                    BinaryOp::Ne => Some((BinaryOp::Eq, false)),
-                    BinaryOp::Lt => Some((BinaryOp::Ge, false)),
-                    BinaryOp::Le => Some((BinaryOp::Lt, true)),
-                    BinaryOp::Gt => Some((BinaryOp::Le, false)),
-                    BinaryOp::Ge => Some((BinaryOp::Lt, false)),
-                    _ => None,
-                };
-
-                if let Some((op, swap)) = negated {
-                    if swap {
-                        CExpr::Binary {
-                            op,
-                            left: right,
-                            right: left,
-                        }
-                    } else {
-                        CExpr::Binary { op, left, right }
-                    }
-                } else {
-                    CExpr::unary(UnaryOp::Not, CExpr::Binary { op, left, right })
-                }
-            }
-            other => CExpr::unary(UnaryOp::Not, other),
-        }
-    }
-
-    fn negate_disjunctive_relation_pair(left: &CExpr, right: &CExpr) -> Option<CExpr> {
-        let (lhs_a, rhs_a, op_a) = Self::relation_signature(left)?;
-        let (lhs_b, rhs_b, op_b) = Self::relation_signature(right)?;
-        if lhs_a != lhs_b || rhs_a != rhs_b {
-            return None;
-        }
-
-        let negated_op = match (op_a, op_b) {
-            (BinaryOp::Eq, BinaryOp::Lt) | (BinaryOp::Lt, BinaryOp::Eq) => BinaryOp::Gt,
-            (BinaryOp::Eq, BinaryOp::Le) | (BinaryOp::Le, BinaryOp::Eq) => BinaryOp::Gt,
-            (BinaryOp::Eq, BinaryOp::Gt) | (BinaryOp::Gt, BinaryOp::Eq) => BinaryOp::Lt,
-            (BinaryOp::Eq, BinaryOp::Ge) | (BinaryOp::Ge, BinaryOp::Eq) => BinaryOp::Lt,
-            _ => return None,
-        };
-
-        Some(CExpr::Binary {
-            op: negated_op,
-            left: Box::new(lhs_a.clone()),
-            right: Box::new(rhs_a.clone()),
-        })
-    }
-
-    fn relation_signature(expr: &CExpr) -> Option<(&CExpr, &CExpr, BinaryOp)> {
-        match expr.unobserved() {
-            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
-                Self::relation_signature(inner)
-            }
-            CExpr::Binary { op, left, right }
-                if matches!(
-                    op,
-                    BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-                ) =>
-            {
-                Some((left.as_ref(), right.as_ref(), *op))
-            }
-            _ => None,
-        }
-    }
-
     fn stmt_is_unconditional_terminator(stmt: &CStmt) -> bool {
         matches!(
             Self::semantic_stmt(stmt),
@@ -1976,122 +1883,5 @@ impl ControlFlowStructurer<'_, '_> {
             CStmt::Block(stmts) if stmts.is_empty() => CStmt::Empty,
             other => observations.reapply(other),
         }
-    }
-
-    /// Fix B: Remove trailing `continue` from a loop body (it's implicit).
-    /// Also remove trailing `break` inside an if-then at the end of a block
-    /// if it's the only exit path.
-    pub(super) fn strip_trailing_continue(stmt: CStmt) -> CStmt {
-        match stmt {
-            CStmt::Observed { ids, stmt } => {
-                let stripped = Self::strip_trailing_continue(*stmt);
-                if matches!(stripped.unobserved(), CStmt::Empty) {
-                    CStmt::Empty
-                } else {
-                    CStmt::observe_all(ids, stripped)
-                }
-            }
-            CStmt::Continue => CStmt::Empty,
-            CStmt::Block(mut stmts) => {
-                // Remove trailing Continue
-                while stmts
-                    .last()
-                    .is_some_and(|stmt| matches!(stmt.unobserved(), CStmt::Continue))
-                {
-                    stmts.pop();
-                }
-                if stmts.is_empty() {
-                    CStmt::Empty
-                } else if stmts.len() == 1 {
-                    stmts.remove(0)
-                } else {
-                    CStmt::Block(stmts)
-                }
-            }
-            other => other,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn relation(op: BinaryOp) -> CExpr {
-        CExpr::binary(op, CExpr::IntLit(1), CExpr::IntLit(2))
-    }
-
-    /// What a relation over two integer literals, or its negation or disjunction, evaluates to.
-    fn holds(expr: &CExpr) -> bool {
-        let int = |expr: &CExpr| match expr {
-            CExpr::IntLit(value) => *value,
-            other => panic!("not a literal: {other:?}"),
-        };
-        match expr {
-            CExpr::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } => !holds(operand),
-            CExpr::Binary {
-                op: BinaryOp::Or,
-                left,
-                right,
-            } => holds(left) || holds(right),
-            CExpr::Binary { op, left, right } => {
-                let (a, b) = (int(left), int(right));
-                match op {
-                    BinaryOp::Eq => a == b,
-                    BinaryOp::Ne => a != b,
-                    BinaryOp::Lt => a < b,
-                    BinaryOp::Le => a <= b,
-                    BinaryOp::Gt => a > b,
-                    BinaryOp::Ge => a >= b,
-                    other => panic!("not an integer relation: {other:?}"),
-                }
-            }
-            other => panic!("not a condition: {other:?}"),
-        }
-    }
-
-    /// Every integer negation `negate_condition` spells is the negation, for every pair of operands in -8..8.
-    #[test]
-    fn every_integer_negation_is_the_negation() {
-        let relations = [
-            BinaryOp::Eq,
-            BinaryOp::Ne,
-            BinaryOp::Lt,
-            BinaryOp::Le,
-            BinaryOp::Gt,
-            BinaryOp::Ge,
-        ];
-        let pairs = (-8..8).flat_map(|a| (-8..8).map(move |b| (a, b)));
-        for ((a, b), op) in pairs.flat_map(|pair| relations.map(|op| (pair, op))) {
-            let rel = |op| CExpr::binary(op, CExpr::IntLit(a), CExpr::IntLit(b));
-            let negated = ControlFlowStructurer::negate_condition(rel(op));
-            assert_eq!(
-                holds(&negated),
-                !holds(&rel(op)),
-                "!({a} {op:?} {b}) as {negated:?}"
-            );
-            for either in relations.map(|other| CExpr::binary(BinaryOp::Or, rel(op), rel(other))) {
-                let negated = ControlFlowStructurer::negate_condition(either.clone());
-                assert_eq!(
-                    holds(&negated),
-                    !holds(&either),
-                    "!({either:?}) as {negated:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn an_ordered_float_comparison_negates_to_its_negation_and_an_integer_one_flips() {
-        // A NaN makes `a < b` and `a >= b` both false, so only the integer relation has an opposite.
-        for op in [BinaryOp::FLt, BinaryOp::FLe, BinaryOp::FGt, BinaryOp::FGe] {
-            let negated = ControlFlowStructurer::negate_condition(relation(op));
-            assert_eq!(negated, CExpr::unary(UnaryOp::Not, relation(op)), "{op:?}");
-        }
-        let flipped = ControlFlowStructurer::negate_condition(relation(BinaryOp::Lt));
-        assert_eq!(flipped, relation(BinaryOp::Ge));
     }
 }

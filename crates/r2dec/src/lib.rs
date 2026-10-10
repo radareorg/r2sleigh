@@ -55,13 +55,20 @@ pub mod typed;
 pub(crate) mod unrendered;
 mod variable;
 
+use crate::ast::literal_value;
+pub use crate::codegen::RenderedFunction;
 pub use crate::codegen::{CRole, CRoles, Emission, ResidualSite, SourceLine};
 use crate::codegen::{CodeGenerator, EmissionReadyFunction, prepare_function_for_emission};
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
+pub use crate::ledger::{EffectObligationAudit, EffectObligationDisposition};
 use crate::observation_journal::{
     LegacyObservationCoverage, LegacyObservationJournal, MarkedNativeDraft, SealedNativeFunction,
 };
+use crate::render::globals::c_identifier_for_data_symbol;
+use crate::render::proof::{UnassignedCause, UnassignedRead};
+pub use crate::render::rendered_name_of;
+use crate::render::{import_stub_declaration, residual_function_for_render_boundary};
 use crate::symbol::SymbolId;
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::CodeGenConfig;
@@ -76,7 +83,6 @@ use r2types::FunctionTypeFacts;
 #[cfg(test)]
 use r2types::{ExternalTypeDb, FunctionType};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt::Write as _;
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Arc;
@@ -99,128 +105,6 @@ pub(crate) fn certified_memory_result_name(access: r2ssa::StructuredAccessId) ->
     format!("memory_value_{}_{}", access.inst.0, access.ordinal)
 }
 
-pub(crate) fn sanitize_comment_text(text: &str) -> String {
-    sanitize_comment_text_keeping(text, |_| false)
-}
-
-/// Sanitize a comment, keeping every token `declared` says the function
-/// declares.
-///
-/// The sanitizer exists to keep machine labels a reader cannot find in the
-/// body out of the prose around it. A name the function declares is one the
-/// reader can find: the body spells it, and a comment that rewrote it to
-/// "register" would disagree with the line below it.
-pub(crate) fn sanitize_comment_text_keeping(text: &str, declared: impl Fn(&str) -> bool) -> String {
-    let flattened = text.replace("*/", "* /").replace(['\r', '\n'], " ");
-    sanitize_comment_raw_tokens(&sanitize_comment_debug_ids(&flattened), declared)
-}
-
-fn sanitize_comment_debug_ids(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut index = 0;
-    while index < text.len() {
-        let rest = &text[index..];
-        let replacement = if rest.starts_with("ValueId(") {
-            Some("value")
-        } else if rest.starts_with("ObjectId(") {
-            Some("object")
-        } else {
-            None
-        };
-        if let Some(replacement) = replacement {
-            out.push_str(replacement);
-            if let Some(end) = rest.find(')') {
-                index += end + 1;
-            } else {
-                break;
-            }
-            continue;
-        }
-        let ch = rest.chars().next().expect("valid char boundary");
-        out.push(ch);
-        index += ch.len_utf8();
-    }
-    out
-}
-
-fn sanitize_comment_raw_tokens(text: &str, declared: impl Fn(&str) -> bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut token = String::new();
-    let flush_token = |out: &mut String, token: &mut String| {
-        if token.is_empty() {
-            return;
-        }
-        if declared(token) {
-            out.push_str(token);
-        } else if let Some(replacement) = sanitized_comment_token(token) {
-            out.push_str(replacement);
-        } else {
-            out.push_str(token);
-        }
-        token.clear();
-    };
-
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
-            token.push(ch);
-        } else {
-            flush_token(&mut out, &mut token);
-            out.push(ch);
-        }
-    }
-    flush_token(&mut out, &mut token);
-    out
-}
-
-fn sanitized_comment_token(token: &str) -> Option<&'static str> {
-    let lower = token.to_ascii_lowercase();
-    if matches!(lower.as_str(), "fake_stack_slot" | "saved_fp") {
-        return Some("stack slot");
-    }
-    if is_ssa_versioned_register_label(token) {
-        return Some("register");
-    }
-    if lower.starts_with("tmp:") || lower.starts_with("ram:") {
-        return Some("temporary");
-    }
-    for prefix in ["stack_", "slot_", "local_", "arg_", "var_"] {
-        if let Some(suffix) = lower.strip_prefix(prefix)
-            && raw_stack_suffix_label(suffix)
-        {
-            return Some("stack slot");
-        }
-    }
-    if let Some(rest) = lower.strip_prefix('t')
-        && rest.len() >= 3
-        && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Some("temporary");
-    }
-    None
-}
-
-fn raw_stack_suffix_label(suffix: &str) -> bool {
-    if suffix.is_empty() {
-        return false;
-    }
-    let suffix = suffix.strip_suffix('h').unwrap_or(suffix);
-    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_ssa_versioned_register_label(name: &str) -> bool {
-    let Some((base, suffix)) = name.rsplit_once('_') else {
-        return false;
-    };
-    // An SSA label: an uppercase register base and a version.
-    !base.is_empty()
-        && !suffix.is_empty()
-        && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        && base.bytes().any(|byte| byte.is_ascii_alphabetic())
-        && base
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-}
-
 #[cfg(test)]
 pub(crate) fn is_autogenerated_function_name(name: &str) -> bool {
     r2source::display_names::is_generated_function_name(name)
@@ -228,244 +112,6 @@ pub(crate) fn is_autogenerated_function_name(name: &str) -> bool {
 
 pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String {
     planner::artifact_guard_fallback_comment(func_name, reason)
-}
-
-/// State what the rendering did and did not show.
-///
-/// "Nothing was marked" and "everything was shown to be right" are different
-/// claims, and only the second earns silence. Nothing here makes the second, so
-/// the note is always emitted: it reports how many constructs carry a residual
-/// marker, and then reports the ledger, which says what became of every effect
-/// the source obliges.
-///
-/// The ledger's columns sum to its total, so an effect that went missing is a
-/// number in the line rather than an absence from it. An unaccounted count is
-/// never zero because nothing went wrong; it is zero only when every obligation
-/// was reached by a rule that named its fate.
-/// The proof line's columns that appear only when they are not zero, in reading order.
-fn proof_columns(
-    closure: &crate::ledger::LedgerClosure,
-    ledger: &crate::ledger::ObligationLedger,
-) -> String {
-    let split = ledger.split_rendered();
-    let mut line = String::new();
-    if closure.compiler_inserted > 0 {
-        let premise = r2source::Premise::UbFreeSource.spelled();
-        let _ = write!(
-            &mut line,
-            ", {} compiler-inserted (assuming {premise})",
-            closure.compiler_inserted
-        );
-    }
-    if closure.assumed > 0 {
-        let _ = write!(
-            &mut line,
-            ", {} assumed (frame extent unproven)",
-            closure.assumed
-        );
-    }
-    // A function with a residual is rendered, not proven: the count is how many obligations residuals stand in for.
-    if closure.gapped > 0 {
-        let _ = write!(&mut line, ", {} residual", closure.gapped);
-    }
-    // A residual with no site in the text is spelled with its cause, never silent.
-    for (reason, count) in ledger.unsited() {
-        let _ = write!(&mut line, " ({count} without a site: {})", reason.spelled());
-    }
-    // Rendered, through a variable split out of a shared one so every read sees its value.
-    if split > 0 {
-        let _ = write!(&mut line, " ({split} through a split variable)");
-    }
-    // Spelled whenever not zero: saying nothing here let a gutted body report as clean.
-    if closure.unattributed > 0 {
-        let _ = write!(&mut line, ", {} unaccounted", closure.unattributed);
-    }
-    if closure.conflicts > 0 {
-        let _ = write!(&mut line, ", {} conflicting", closure.conflicts);
-    }
-    line
-}
-
-fn note_unproven_constructs(
-    func: &mut CFunction,
-    ledger: Option<&crate::ledger::ObligationLedger>,
-    radare2_variadic_format_counts: usize,
-    radare2_prototypes: usize,
-    radare2_local_names: usize,
-    unassigned: &[UnassignedRead],
-) {
-    let rendered_nothing = func.body.is_empty();
-    // Each residual is a construct the rendering says it did not prove, and
-    // it traps where it stands: a residual call, or a marked gap.
-    let residuals = crate::prelude::count_residuals(func);
-    let detail = if rendered_nothing {
-        "rendering produced no statements".to_string()
-    } else {
-        match residuals {
-            0 => "no individual construct is marked".to_string(),
-            1 => "1 construct is marked below".to_string(),
-            n => format!("{n} constructs are marked below"),
-        }
-    };
-    let mut detail = match ledger.map(|ledger| (ledger, ledger.close())) {
-        Some((ledger, closure)) if closure.total > 0 => {
-            let mut line = format!(
-                "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
-                closure.total, closure.rendered, closure.elided, closure.refused
-            );
-            line.push_str(&proof_columns(&closure, ledger));
-            let _ = write!(
-                &mut line,
-                "; {} statements rendered",
-                count_body_statements(&func.body)
-            );
-            line
-        }
-        _ => detail,
-    };
-    note_unassigned_reads(&mut detail, unassigned);
-    let source_typed_objects =
-        func.extern_objects
-            .iter()
-            .filter(|object| {
-                object.type_fact.as_ref().is_some_and(|fact| {
-                    fact.provenance == r2types::DataObjectTypeProvenance::Source
-                })
-            })
-            .count();
-    let refused_object_types = func
-        .extern_objects
-        .iter()
-        .filter(|object| object.type_fact.is_none() && object.type_refusal.is_some())
-        .count();
-    if source_typed_objects > 0 {
-        let noun = if source_typed_objects == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {source_typed_objects} {noun} supplied by the source"
-        );
-    }
-    if refused_object_types > 0 {
-        let noun = if refused_object_types == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(&mut detail, "; {refused_object_types} {noun} refused");
-    }
-    if radare2_variadic_format_counts > 0 {
-        let noun = if radare2_variadic_format_counts == 1 {
-            "variadic callsite argument count"
-        } else {
-            "variadic callsite argument counts"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {radare2_variadic_format_counts} {noun} supplied by the source's format literals"
-        );
-    }
-    if radare2_prototypes > 0 {
-        let noun = if radare2_prototypes == 1 {
-            "callee prototype"
-        } else {
-            "callee prototypes"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {radare2_prototypes} {noun} supplied by the source"
-        );
-    }
-    if radare2_local_names > 0 {
-        let noun = if radare2_local_names == 1 {
-            "local name"
-        } else {
-            "local names"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {radare2_local_names} {noun} supplied by the source"
-        );
-    }
-    // The names are identifiers the body declares, so the sanitizer keeps them.
-    let text = {
-        let symbols = func.symbols.borrow();
-        sanitize_comment_text_keeping(&format!("r2dec proof: {detail}"), |token| {
-            symbols.by_name(token).is_some()
-        })
-    };
-    func.body.insert(0, CStmt::comment(text));
-}
-
-/// Why a read the rendering spells as a residual has no value C can name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum UnassignedCause {
-    /// Held from entry, in storage no convention argument slot delivers.
-    Held,
-    /// Delivered in an argument slot no recovered parameter admits.
-    UnadmittedArgument,
-    /// Declared and never assigned, with no value from entry behind it: a
-    /// result a call left in a register nothing claimed, for one.
-    Unassigned,
-}
-
-impl UnassignedCause {
-    /// The cause each residual standing for such a read carries.
-    const fn residual(self) -> crate::prelude::ResidualCause {
-        match self {
-            Self::Held => crate::prelude::ResidualCause::HeldFromEntry,
-            Self::UnadmittedArgument => crate::prelude::ResidualCause::UnadmittedArgument,
-            Self::Unassigned => crate::prelude::ResidualCause::NeverAssigned,
-        }
-    }
-}
-
-/// One object whose every read is now a residual, and why.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct UnassignedRead {
-    pub(crate) cause: UnassignedCause,
-    pub(crate) name: String,
-}
-
-/// Name the objects whose reads became residuals, by why each had no value.
-///
-/// A count cannot say which reads it excuses, so each is named. An argument
-/// slot no parameter admits is named apart: the signature says the function
-/// was not given that value, so reading it is a gap in the interface, not a
-/// value held from entry.
-fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
-    for (cause, one, many) in [
-        (UnassignedCause::Held, "held from entry", "held from entry"),
-        (
-            UnassignedCause::UnadmittedArgument,
-            "argument slot read with no parameter",
-            "argument slots read with no parameter",
-        ),
-        (
-            UnassignedCause::Unassigned,
-            "never assigned",
-            "never assigned",
-        ),
-    ] {
-        let names = unassigned
-            .iter()
-            .filter(|read| read.cause == cause)
-            .map(|read| read.name.as_str())
-            .collect::<Vec<_>>();
-        if names.is_empty() {
-            continue;
-        }
-        let noun = if names.len() == 1 { one } else { many };
-        let _ = write!(
-            detail,
-            "; {} {noun}, read as residuals ({})",
-            names.len(),
-            names.join(", ")
-        );
-    }
 }
 
 /// What the residual rewrite of the sealed tree did.
@@ -1003,39 +649,6 @@ fn written_object(expr: &CExpr) -> Option<SymbolId> {
     }
 }
 
-/// Statements the body holds, counting the ones nested inside control flow.
-fn count_body_statements(stmts: &[CStmt]) -> usize {
-    fn visit(stmt: &CStmt) -> usize {
-        match stmt.unobserved() {
-            // A gap marks a cell that was not rendered; it is not one of
-            // the statements the proof line counts as body.
-            CStmt::Comment(_) | CStmt::Empty | CStmt::Gap(_) => 0,
-            CStmt::Block(inner) => inner.iter().map(visit).sum(),
-            CStmt::If {
-                then_body,
-                else_body,
-                ..
-            } => 1 + visit(then_body) + else_body.as_deref().map(visit).unwrap_or(0),
-            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => 1 + visit(body),
-            CStmt::For { init, body, .. } => {
-                1 + init.as_deref().map(visit).unwrap_or(0) + visit(body)
-            }
-            CStmt::Switch { cases, default, .. } => {
-                1 + cases
-                    .iter()
-                    .map(|case| case.body.iter().map(visit).sum::<usize>())
-                    .sum::<usize>()
-                    + default
-                        .as_ref()
-                        .map(|body| body.iter().map(visit).sum::<usize>())
-                        .unwrap_or(0)
-            }
-            _ => 1,
-        }
-    }
-    stmts.iter().map(visit).sum()
-}
-
 /// Whether a run was asked to report what the rendering left unaccounted for.
 pub(crate) fn unowned_report_requested() -> bool {
     static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1116,62 +729,9 @@ pub(crate) fn rendered_function_name(func: &SSAFunction) -> String {
     rendered_name_of(func.name.as_deref(), func.entry)
 }
 
-/// The C name a rendering gives a function, from what it is called and where
-/// it starts.
-pub fn rendered_name_of(name: Option<&str>, entry: u64) -> String {
-    name.and_then(r2types::sanitize_c_identifier)
-        .unwrap_or_else(|| r2source::unnamed_identifier(entry))
-}
-
 /// The same name, for operations that were rewritten over a function.
 pub(crate) fn rewritten_function_name(func: &r2ssa::RewrittenFunction<'_>) -> String {
     rendered_name_of(func.name(), func.entry())
-}
-
-/// A function the renderer refused: the reason, and no definition.
-///
-/// A definition with nothing proven in it would still have to claim a return
-/// type and a parameter list, and a comment in place of both is not C. What is
-/// known is why nothing is defined, so that is what is written.
-/// An import stub as C, as r2engine's route decides it: the import's declaration and a comment
-/// naming it, or the comment alone where nothing states its prototype.
-pub(crate) fn import_stub_declaration(stub: &r2types::ImportStub) -> EmissionReadyFunction {
-    let name = crate::ast::c_identifier(&stub.name);
-    let entry = stub.entry;
-    let Some(signature) = stub.signature.as_ref() else {
-        let reason = format!(
-            "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
-             whose prototype nothing states."
-        );
-        return prepare_function_for_emission(residual_function_for_render_boundary(
-            &name, &reason,
-        ));
-    };
-    let reason = format!(
-        "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \
-         has no body of its own."
-    );
-    let mut function = CFunction::new(name.clone(), signature.return_type.clone())
-        .as_declaration_only(sanitize_comment_text(&reason));
-    function.externs = vec![crate::ast::CExternDecl {
-        name,
-        ret_type: signature.return_type.clone(),
-        params: Some(signature.params.clone()),
-        variadic: signature.variadic,
-        noreturn: false,
-        address: Some(entry),
-    }];
-    prepare_function_for_emission(function)
-}
-
-fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunction {
-    CFunction::new(func_name.to_string(), CType::Unknown)
-        .with_unknown_params()
-        .as_declaration_only(format!(
-            "r2dec refused {}: {}",
-            crate::ast::c_identifier(func_name),
-            sanitize_comment_text(reason)
-        ))
 }
 
 /// Decompiler configuration.
@@ -1919,95 +1479,6 @@ fn gap_anchor_for_native_failure(
     }
 }
 
-/// Whether the final emission tree satisfied the source effect inventory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectObligationDisposition {
-    Admitted,
-    /// Admitted with marked gaps: every obligation is accounted, and the ones
-    /// a gap covers were not discharged. The body is rendered, not proven.
-    Gapped,
-    Refused,
-    /// The selected route never entered the native Standard renderer.
-    NotRun,
-}
-
-/// Stable source-effect tuple exposed independently of binding quality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EffectObligationAudit {
-    pub disposition: EffectObligationDisposition,
-    pub total: usize,
-    pub rendered: usize,
-    pub justified_elision: usize,
-    pub refused: usize,
-    /// Obligations a marked gap accounts for.
-    pub gapped: usize,
-    pub unaccounted: usize,
-    pub conflicts: usize,
-    /// First refused obligation in the order the spelling reads, for
-    /// diagnostics.
-    pub refused_obligation: Option<r2ssa::SpelledObligation>,
-    /// First obligation with no occurrence or certificate, for diagnostics.
-    pub unaccounted_obligation: Option<r2ssa::SpelledObligation>,
-    /// First obligation with incompatible occurrences, for diagnostics.
-    pub conflicting_obligation: Option<r2ssa::SpelledObligation>,
-}
-
-impl EffectObligationAudit {
-    pub const NOT_RUN: Self = Self {
-        disposition: EffectObligationDisposition::NotRun,
-        total: 0,
-        rendered: 0,
-        justified_elision: 0,
-        refused: 0,
-        gapped: 0,
-        unaccounted: 0,
-        conflicts: 0,
-        refused_obligation: None,
-        unaccounted_obligation: None,
-        conflicting_obligation: None,
-    };
-
-    pub fn from_ledger(ledger: &crate::ledger::ObligationLedger) -> Self {
-        let closure = ledger.close();
-        let admitted = closure.refused == 0
-            && closure.unattributed == 0
-            && closure.conflicts == 0
-            && closure.is_closed();
-        Self {
-            disposition: match (admitted, closure.gapped) {
-                (true, 0) => EffectObligationDisposition::Admitted,
-                (true, _) => EffectObligationDisposition::Gapped,
-                (false, _) => EffectObligationDisposition::Refused,
-            },
-            total: closure.total,
-            rendered: closure.rendered,
-            justified_elision: closure.elided + closure.compiler_inserted,
-            refused: closure.refused,
-            gapped: closure.gapped,
-            unaccounted: closure.unattributed,
-            conflicts: closure.conflicts,
-            refused_obligation: ledger
-                .first_spelled(|_, outcome| matches!(outcome, crate::ledger::Outcome::Refused)),
-            unaccounted_obligation: ledger.first_spelled(|_, outcome| !outcome.is_decided()),
-            conflicting_obligation: ledger.first_conflict_spelled(),
-        }
-    }
-
-    /// Whether the body may be emitted: every obligation is accounted for,
-    /// with the ones a gap covers marked in the output rather than dropped.
-    pub const fn is_admitted(self) -> bool {
-        matches!(
-            self.disposition,
-            EffectObligationDisposition::Admitted | EffectObligationDisposition::Gapped
-        )
-    }
-
-    /// Whether every obligation was discharged or proven unnecessary.
-    pub const fn is_fully_proven(self) -> bool {
-        matches!(self.disposition, EffectObligationDisposition::Admitted)
-    }
-}
-
 /// Stable reason the final native declaration-placement pass refused C.
 ///
 /// Payloads contain only deterministic dense identities and counts. Private
@@ -2533,43 +2004,6 @@ fn rendered_identity_refusal_category(
         | RenderedIdentityRefusal::MissingStackDisposition { .. } => {
             DecompileRenderRefusal::MissingProgramVariableAuthorization
         }
-    }
-}
-
-/// A rendering and the tree it was rendered from.
-///
-/// The emitter accepts no raw `CFunction`, so the only way to hold both is to
-/// take them from the one run that produced them. A consumer that wants to
-/// walk the C and a consumer that wants to read it are then looking at the
-/// same function, and the two cannot drift apart.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderedFunction {
-    emission: Emission,
-    function: CFunction,
-}
-
-impl RenderedFunction {
-    pub(crate) const fn new(emission: Emission, function: CFunction) -> Self {
-        Self { emission, function }
-    }
-
-    /// The C, as the certified emitter wrote it.
-    pub fn text(&self) -> &str {
-        self.emission.definition()
-    }
-
-    pub fn into_text(self) -> String {
-        self.emission.into_definition()
-    }
-
-    /// The same C as its own translation unit, with where each line came from.
-    pub const fn emission(&self) -> &Emission {
-        &self.emission
-    }
-
-    /// The tree that C was written from, for a consumer that walks rather than parses.
-    pub const fn function(&self) -> &CFunction {
-        &self.function
     }
 }
 
@@ -4233,29 +3667,6 @@ fn simplify_data_object_loads_in_stmt(
     }
 }
 
-/// The unsigned value of an integer literal, ignoring any cast around it.
-pub(crate) fn literal_value(expr: &CExpr) -> Option<u64> {
-    match expr {
-        CExpr::Observed { expr, .. } => literal_value(expr),
-        CExpr::UIntLit(value) => Some(*value),
-        CExpr::IntLit(value) => u64::try_from(*value).ok(),
-        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => literal_value(inner),
-        _ => None,
-    }
-}
-/// Whether a string literal can stand where `required` is wanted: only a pointer to `char`, the
-/// C string convention, since a literal ends at its NUL and other readers may read past it.
-pub(crate) fn string_literal_serves(required: &CType, _ptr_bits: u32) -> bool {
-    let CType::Pointer(inner) = required else {
-        return false;
-    };
-    let pointee = match &**inner {
-        CType::Const(inner) => &**inner,
-        other => other,
-    };
-    matches!(pointee, CType::Typedef { name, .. } if name == "char")
-}
-
 /// The name this constant address is, the type that name has, and the object it declares.
 pub(crate) fn name_of_constant_address(
     expr: &CExpr,
@@ -4306,40 +3717,6 @@ pub(crate) fn name_of_constant_address(
         ),
         CType::ptr(object_type),
     ))
-}
-
-/// The C name for a radare2 data flag.
-///
-/// The fact is kept as radare2 stated it -- `obj.progName`, `reloc.stderr` --
-/// because that is what the analysis said and what the proof line answers for.
-/// What C can take is the name without the flag space that qualifies it, and
-/// with anything left that is not an identifier character replaced, so the
-/// rendered program declares `progName` rather than a dotted spelling no
-/// compiler accepts.
-pub(crate) fn c_identifier_for_data_symbol(flag: &str) -> String {
-    const SPACES: [&str; 6] = ["obj.", "reloc.", "segment.", "section.", "str.", "sym."];
-    let mut name = flag;
-    loop {
-        let Some(stripped) = SPACES.iter().find_map(|space| name.strip_prefix(space)) else {
-            break;
-        };
-        name = stripped;
-    }
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() || cleaned.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("g_{cleaned}")
-    } else {
-        cleaned
-    }
 }
 
 fn typed_integer_literal_expr(value: u64, is_signed: bool, bits: u32) -> CExpr {

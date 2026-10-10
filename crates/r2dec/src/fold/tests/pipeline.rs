@@ -3215,7 +3215,7 @@ mod tests {
         assert!((0..journal.borrow().placement_target_count()).any(|index| {
             matches!(
                 journal.borrow().placement_target(
-                    crate::observation_journal::test_render_observation_id(index as u32)
+                    crate::ast::test_render_observation_id(index as u32)
                 ),
                 Some(crate::placement::PlacementObservationTarget::ObjectAddress {
                     binding: observed,

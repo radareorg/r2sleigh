@@ -27,6 +27,8 @@ pub(super) struct Spell<'a> {
     pub(super) little_endian: bool,
     /// The slot the caller pushed the return address into, never written here, and the address width.
     pub(super) return_address: Option<(ObjectId, u32)>,
+    /// A read at the start of a caller's stack slot nothing here writes, which C cannot read.
+    pub(super) caller: &'a dyn Fn(ObjectId, &MachineType) -> Option<CExpr>,
 }
 
 /// A frame object's address in the frame array and its extent.
@@ -751,7 +753,7 @@ impl Spell<'_> {
 
     /// A read of `ty` at the integer `address`, by a byte copy so C reads it as the machine does.
     fn load(&self, ty: &MachineType, address: CExpr) -> Option<CExpr> {
-        let named = crate::literal_value(&address).and_then(|at| (self.global)(at, ty, false));
+        let named = crate::ast::literal_value(&address).and_then(|at| (self.global)(at, ty, false));
         let address = match named {
             Some(super::globals::Named {
                 object: Some((object, declared)),
@@ -773,15 +775,18 @@ impl Spell<'_> {
     }
 
     /// A read of `ty` from `object` at `address`; the caller's return-address slot reads as that
-    /// address.
+    /// address, and another caller slot outside the frame as a residual.
     fn load_of(&self, ty: &MachineType, object: ObjectId, address: TermId) -> Option<CExpr> {
         let bits = ty.width_bits();
-        if self.return_address == Some((object, bits))
-            && frame_offset(self.arena, address) == Some((object, 0))
-        {
+        let at_start = frame_offset(self.arena, address) == Some((object, 0));
+        if self.return_address == Some((object, bits)) && at_start {
             return Some(cast(integer(bits)?, return_address()));
         }
-        self.load(ty, self.address(address, bits / 8, Some(object))?)
+        match self.address(address, bits / 8, Some(object)) {
+            Some(at) => self.load(ty, at),
+            None if at_start => (self.caller)(object, ty),
+            None => None,
+        }
     }
 
     /// A machine expression a term reads at `ty`: the projection may hold the same bits at the
@@ -1160,6 +1165,7 @@ mod tests {
             global: &|_, _, _| None,
             little_endian: true,
             return_address: None,
+            caller: &|_, _| None,
         };
         assert!(
             spell

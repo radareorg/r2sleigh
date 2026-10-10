@@ -1,6 +1,7 @@
 //! What closes the journal, and what the closure accounts for.
 
 use super::*;
+use crate::codegen::ObservationSealAuthority;
 
 impl LegacyObservationJournal {
     pub(crate) fn placement_target_count(&self) -> usize {

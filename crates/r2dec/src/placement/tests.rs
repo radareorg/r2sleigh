@@ -6,7 +6,7 @@ use crate::structured_region::{
 use crate::symbol::{SymbolRole, SymbolTable};
 
 fn observation(index: u32) -> RenderObservationId {
-    crate::observation_journal::test_render_observation_id(index)
+    crate::ast::test_render_observation_id(index)
 }
 
 #[test]

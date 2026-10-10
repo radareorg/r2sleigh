@@ -4,8 +4,9 @@
 mod calls;
 mod control;
 mod frame;
-mod globals;
+pub(crate) mod globals;
 mod input;
+pub(crate) mod proof;
 mod tags;
 mod terms;
 mod values;
@@ -15,21 +16,24 @@ use std::collections::BTreeMap;
 pub use input::RenderInput;
 
 use crate::ast::{CExpr, CFunction, CStmt, CType, RenderObservationId};
-use crate::codegen::{CodeGenConfig, CodeGenerator, prepare_function_for_emission};
+use crate::codegen::{
+    CodeGenConfig, CodeGenerator, EmissionReadyFunction, prepare_function_for_emission,
+    sanitize_comment_text,
+};
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
 use crate::structure::certify::StatementRole;
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
-    function: crate::RenderedFunction,
+    function: crate::codegen::RenderedFunction,
     ledger: ObligationLedger,
     /// A stop that came once the control was written and certified: the body is what was reached.
     stopped: Option<DecompileExecutionStop>,
 }
 
 impl Rendered {
-    pub fn into_parts(self) -> (crate::RenderedFunction, ObligationLedger) {
+    pub fn into_parts(self) -> (crate::codegen::RenderedFunction, ObligationLedger) {
         (self.function, self.ledger)
     }
 
@@ -40,10 +44,10 @@ impl Rendered {
 }
 
 /// An import stub's C, as r2engine's route decides it; it has no body, so no obligation is owed.
-pub fn import_stub(stub: &r2types::ImportStub, ptr_bits: u32) -> crate::RenderedFunction {
-    let ready = crate::import_stub_declaration(stub);
+pub fn import_stub(stub: &r2types::ImportStub, ptr_bits: u32) -> crate::codegen::RenderedFunction {
+    let ready = import_stub_declaration(stub);
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, ptr_bits);
-    crate::RenderedFunction::new(emission, ready.into_function())
+    crate::codegen::RenderedFunction::new(emission, ready.into_function())
 }
 
 /// Why the staged pipeline wrote no function.
@@ -67,7 +71,7 @@ pub fn render(
 ) -> Result<Rendered, RenderStop> {
     let work = DecompileWorkControl::new(control, DecompileWorkPhase::Structuring);
     work.poll()?;
-    let name = crate::rendered_name_of(input.name(), input.function().root());
+    let name = rendered_name_of(input.name(), input.function().root());
     let mut c = CFunction::new(name, result_type(input));
     let tags = tags::Tags::of(input);
     let values = values::Values::new(input, &tags, std::rc::Rc::clone(&c.symbols));
@@ -92,7 +96,7 @@ pub fn render(
             copy
         })
     };
-    let mut body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
+    let mut body = crate::structure::shape::shape(&mut fresh, CStmt::Block(body));
     let selections = select(&c, &mut body, &|id| {
         blocks.get(id.index() as usize).copied()
     });
@@ -122,7 +126,7 @@ pub fn render(
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
     // The proof line every rendering opens with: what became of each obligation the source owes.
-    crate::note_unproven_constructs(
+    proof::note_unproven_constructs(
         &mut c,
         Some(&ledger),
         0,
@@ -134,7 +138,7 @@ pub fn render(
     // Each marker names the instruction its statement was written for, so each line names its own.
     let markers = addresses.len();
     ready.seal_observation_markers(
-        &mut crate::observation_journal::ObservationSealAuthority::staged(),
+        &mut crate::codegen::ObservationSealAuthority::staged(),
         crate::codegen::ObservationLocations::new(
             addresses.into_iter().map(Some).collect(),
             vec![None; markers],
@@ -143,7 +147,7 @@ pub fn render(
     );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
     Ok(Rendered {
-        function: crate::RenderedFunction::new(emission, ready.into_function()),
+        function: crate::codegen::RenderedFunction::new(emission, ready.into_function()),
         ledger,
         stopped,
     })
@@ -223,7 +227,7 @@ fn select(
         }
     };
     let mut selections = std::collections::BTreeSet::new();
-    crate::structure::ControlFlowStructurer::select(body, &convert, block_of, &mut selections);
+    crate::structure::shape::select(body, &convert, block_of, &mut selections);
     selections
 }
 
@@ -299,4 +303,57 @@ fn word_type(bits: u32) -> CType {
         bits,
         signedness: r2types::Signedness::Unsigned,
     }
+}
+
+/// The C name a rendering gives a function, from what it is called and where
+/// it starts.
+pub fn rendered_name_of(name: Option<&str>, entry: u64) -> String {
+    name.and_then(r2types::sanitize_c_identifier)
+        .unwrap_or_else(|| r2source::unnamed_identifier(entry))
+}
+
+/// A function the renderer refused: the reason, and no definition.
+///
+/// A definition with nothing proven in it would still have to claim a return
+/// type and a parameter list, and a comment in place of both is not C. What is
+/// known is why nothing is defined, so that is what is written.
+/// An import stub as C, as r2engine's route decides it: the import's declaration and a comment
+/// naming it, or the comment alone where nothing states its prototype.
+pub(crate) fn import_stub_declaration(stub: &r2types::ImportStub) -> EmissionReadyFunction {
+    let name = crate::ast::c_identifier(&stub.name);
+    let entry = stub.entry;
+    let Some(signature) = stub.signature.as_ref() else {
+        let reason = format!(
+            "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
+             whose prototype nothing states."
+        );
+        return prepare_function_for_emission(residual_function_for_render_boundary(
+            &name, &reason,
+        ));
+    };
+    let reason = format!(
+        "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \
+         has no body of its own."
+    );
+    let mut function = CFunction::new(name.clone(), signature.return_type.clone())
+        .as_declaration_only(sanitize_comment_text(&reason));
+    function.externs = vec![crate::ast::CExternDecl {
+        name,
+        ret_type: signature.return_type.clone(),
+        params: Some(signature.params.clone()),
+        variadic: signature.variadic,
+        noreturn: false,
+        address: Some(entry),
+    }];
+    prepare_function_for_emission(function)
+}
+
+pub(crate) fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunction {
+    CFunction::new(func_name.to_string(), CType::Unknown)
+        .with_unknown_params()
+        .as_declaration_only(format!(
+            "r2dec refused {}: {}",
+            crate::ast::c_identifier(func_name),
+            sanitize_comment_text(reason)
+        ))
 }
