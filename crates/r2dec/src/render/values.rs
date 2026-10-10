@@ -53,8 +53,8 @@ pub(super) struct Values<'a> {
     residual: RefCell<Vec<bool>>,
     /// The values read as residuals because C has no value for them, which the proof line names.
     unassigned: RefCell<Vec<crate::UnassignedRead>>,
-    /// Those the text being spelled reads, kept only once a statement or test holding them is.
-    pending_reads: RefCell<Vec<crate::UnassignedRead>>,
+    /// What the text being spelled reads and absorbs, kept only once a statement or test holding it is.
+    pending: RefCell<Attempt>,
     /// The switch dispatch operations r2ssa's certificates own.
     dispatch: r2ssa::dense::IdSet<InstId>,
     elisions: crate::certified::Elisions,
@@ -77,6 +77,13 @@ pub(super) struct Values<'a> {
 }
 
 /// What a recursive call needs of the function it is in.
+/// One statement attempt: the residual reads and absorbed producers its text holds.
+#[derive(Default)]
+struct Attempt {
+    reads: Vec<crate::UnassignedRead>,
+    marks: Vec<InstId>,
+}
+
 struct Own {
     entry: u64,
     name: String,
@@ -778,7 +785,7 @@ impl<'a> Values<'a> {
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
             unassigned: RefCell::new(Vec::new()),
-            pending_reads: RefCell::new(Vec::new()),
+            pending: RefCell::new(Attempt::default()),
             dispatch,
             elisions,
             calls: planned,
@@ -948,7 +955,13 @@ impl<'a> Values<'a> {
         self.spelling(|spell| spell.term(term))
     }
 
+    /// Record `inst` discharged by the text being spelled, once that text is kept.
     fn mark(&self, inst: InstId) {
+        self.pending.borrow_mut().marks.push(inst);
+    }
+
+    /// Record `inst` discharged by text already written.
+    fn commit(&self, inst: InstId) {
         if let Some(slot) = self.rendered.borrow_mut().get_mut(inst.0 as usize) {
             *slot = true;
         }
@@ -1071,30 +1084,29 @@ impl<'a> Values<'a> {
         {
             symbols.declare(name.clone(), c, SymbolRole::Carrier);
         }
-        (self.pending_reads.borrow_mut()).push(crate::UnassignedRead { cause, name });
+        (self.pending.borrow_mut().reads).push(crate::UnassignedRead { cause, name });
     }
 
-    /// `value` as `reader` reads it, with the residual reads its spelling makes, kept apart.
-    fn operand_alone(
-        &self,
-        value: ValueId,
-        reader: InstId,
-    ) -> Option<(CExpr, Vec<crate::UnassignedRead>)> {
+    /// `value` as `reader` reads it, with what its spelling reads and absorbs, kept apart.
+    fn operand_alone(&self, value: ValueId, reader: InstId) -> Option<(CExpr, Attempt)> {
         self.attempt();
         let spelled = self.operand(value, reader);
-        let reads = std::mem::take(&mut *self.pending_reads.borrow_mut());
-        Some((spelled?, reads))
+        let attempt = std::mem::take(&mut *self.pending.borrow_mut());
+        Some((spelled?, attempt))
     }
 
-    /// Start spelling a statement or a test: reads an abandoned attempt made are not read.
+    /// Start spelling a statement or a test: what an abandoned attempt read or absorbed is not.
     fn attempt(&self) {
-        self.pending_reads.borrow_mut().clear();
+        *self.pending.borrow_mut() = Attempt::default();
     }
 
-    /// Keep the reads of the text just spelled.
-    fn keep_reads(&self) {
-        let pending = std::mem::take(&mut *self.pending_reads.borrow_mut());
-        self.unassigned.borrow_mut().extend(pending);
+    /// Keep what the text just written reads and absorbs.
+    fn keep(&self) {
+        let Attempt { reads, marks } = std::mem::take(&mut *self.pending.borrow_mut());
+        self.unassigned.borrow_mut().extend(reads);
+        for inst in marks {
+            self.commit(inst);
+        }
     }
 
     /// The values read as residuals for want of a value, each once, by cause and name.
@@ -1677,9 +1689,7 @@ impl<'a> Values<'a> {
             return None;
         };
         self.attempt();
-        let test = self.operand(*cond, inst);
-        self.keep_reads();
-        test
+        self.operand(*cond, inst)
     }
 
     /// The selector a switch ending `addr` reads.
@@ -1692,21 +1702,19 @@ impl<'a> Values<'a> {
             _ => return None,
         };
         self.attempt();
-        let selector = self.operand(selector, inst);
-        self.keep_reads();
-        selector
+        self.operand(selector, inst)
     }
 
     /// Record the jump ending `addr` written: the certified control states its one edge.
     pub(super) fn transferred(&self, addr: u64) {
         match self.terminator(addr) {
-            Some((inst, SSAOp::Branch { .. })) => self.mark(inst),
+            Some((inst, SSAOp::Branch { .. })) => self.commit(inst),
             // A conditional branch r2ssa owes no predicate goes to one block, as a branch does.
             Some((inst, SSAOp::CBranch { .. }))
                 if !(self.inventory.obligations_for_inst(inst))
                     .any(|o| o.id.kind == SemanticObligationKind::ControlPredicate) =>
             {
-                self.mark(inst);
+                self.commit(inst);
             }
             _ => {}
         }
@@ -1776,7 +1784,7 @@ impl<'a> Values<'a> {
 
     /// Whether `stmt`, written for `inst`, evaluates a residual, which makes `inst`'s obligations residual.
     pub(super) fn residual_in(&self, inst: InstId, stmt: &CStmt) {
-        self.keep_reads();
+        self.keep();
         let mut held = false;
         stmt.visit_exprs(&mut |expr| held |= crate::prelude::holds_residual(expr));
         if held && let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
@@ -1886,14 +1894,14 @@ impl<'a> Values<'a> {
         });
         let mut staged = Vec::new();
         for (inst, output, source, _) in copies {
-            let (Some((source, entry_reads)), Some((name, ty))) =
+            let (Some((source, attempt)), Some((name, ty))) =
                 (source, self.names[output.0 as usize].as_ref())
             else {
                 out.push(unrendered_copy(to));
                 continue;
             };
+            *self.pending.borrow_mut() = attempt;
             self.mark(inst);
-            *self.pending_reads.borrow_mut() = entry_reads;
             self.residual_in(inst, &CStmt::Expr(source.clone()));
             self.assigns(output);
             match clobbers {
