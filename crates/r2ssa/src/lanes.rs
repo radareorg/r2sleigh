@@ -357,7 +357,12 @@ pub(crate) fn transfer<V>(
             }
             bytes
         }
-        Rule::Lanewise { .. } | Rule::LowClosed | Rule::Whole => Vec::new(),
+        // A shift moves bytes, but this relation keeps it data, as it was before shifts had rules.
+        Rule::Lanewise { .. }
+        | Rule::LowClosed
+        | Rule::ShiftUp { .. }
+        | Rule::ShiftDown { .. }
+        | Rule::Whole => Vec::new(),
     };
     out.resize(size, Byte::Data);
     out

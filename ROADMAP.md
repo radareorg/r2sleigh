@@ -27,18 +27,19 @@ hand before a quality claim.
 | Differential (`scripts/diff_r2.py`) | Where discovery, naming, decoding disagree with radare2, and who is right. |
 | Structure (`scripts/structure-report.sh`) | Did nesting, length, arguments or clones rise? |
 
-Where this stands (2026-10-09, `rebuild` stack #80 to #88, gated at c9361ccc on contabo)
----------------------------------------------------------------------------------------
+Where this stands (2026-10-11, the D switch: #122 to #124 on `rebuild`, follow-ups #126 and #127)
+------------------------------------------------------------------------------------------------
 
 | Measure | Value |
 |---------|-------|
-| Equivalence, legacy | x86-64 638/756 equal (was 629); aarch64 606/756 (was 600); both blessed with a cause per moved record |
-| Equivalence, staged | x86-64 644/756 at the D4 top, no failure legacy's baseline lacks; gating nothing until D's switch |
-| Census | legacy 282 clean, 51 residual, 28 refused of 361; staged 256 clean, 61 gapped, 44 residual |
-| Coverage | `crc32_init` x64 O2 gaps its unproven return, blessed with its cause |
-| Tests | touched-crate suites 1775 passed, 0 failed; workspace clippy clean |
-| Cost (release, instructions retired) | 0pack `pdd @ 0x62ecf0` 22.8 G, `0x58e3d0` 29.2 G; pumasim `0x23fdf0` 38.0 G, `0x4baf30` 24.0 G (34.6 G before #87) |
-| Structure | CI at #88 read too_many_arguments 145 and too_many_lines 390 against 141 and 383 blessed; #86's share (3 and 1) is paid back; the rest is suspended inside D and paid or blessed at its exit |
+| Pipeline | `pdd` renders through the staged decompiler only (#122); the legacy decompiler is deleted (#123); r2dec 17.5k lines against the 20k exit |
+| Equivalence | x86-64 659/756 equal (legacy 635), aarch64 631/756 (legacy 606); no differs, ub, uninit or compile error on either; both baselines blessed at #122 with a cause per moved record |
+| Losses at the switch | 8 records equal to residual-trap, each with its owner: `shape_call_chain` aarch64 gcc-O1/O2 (fixed in #126), `combined` aarch64 clang-O1/O2 (fixed in #127), `shape_byte_indexed_buffer` x86 clang-O2 and aarch64 clang-O2/gcc-O1 (a load through `p = a & 1 ? buf : &total`, a select of two frame addresses no offset places, so slot promotion refuses the whole frame: P4; the byte loop's counter is unbounded too, since the value ranges do not read a counted loop's trips, but bounding it moved no census line, so it waits for a consumer), `shape_function_pointer` x86 clang-O0 (an unproven table-call arity, refused by decision) |
+| Coverage | rendered 561 of 562 (was 549); gated gaps rise in Mach-O `_main`, `_start`, `shape_function_pointer`, `vfold`, `shape_signed_divmod`, each named in the bless |
+| Tests | r2ssa, r2types, r2dec, r2engine, r2s 1550 passed at #127 |
+| Cost (release `pdd`, Mac, median of 3) | 0pack `0x58e3d0` 1.96 s and 474 MB (legacy 2.73 s, 560 MB); pumasim `0x23fdf0` 2.83 s (legacy 3.54 s) |
+| Structure | at baseline after the deletion (long_comments 2646, too_many_lines 274) |
+| Exit left | D27 merges `rebuild` at the switch with LX's and SM's exits met, and neither is met or measured yet (no exponent fit exists; callee reads were 35 to 42% of sort 0x3f50 `pdd`). Amending D27 to merge at the switch, or running LX and SM on `rebuild` first, is the maintainer's decision |
 
 The 2026-10-04 review rated the code 4/10: sound ideas and discipline (~7),
 weak algorithms and structure (~3) — hand-rolled iteration, recomputation,
@@ -92,7 +93,7 @@ The program
 | Item | ADR | Done | Left |
 |------|-----|------|------|
 | **G0** Gates real | [testing](doc/testing.md) | the census and release timing (budget 1.3x on the large functions) and the x86-64 equivalence ratchet are CI jobs; the aarch64 equivalence ratchet is a CI job (cross gcc 13, clang 18, qemu-user, the blessed toolchain); the clang-21 failures are fixed | — |
-| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure; B3 call results, returns and reaching values match the program root; argument lanes, entry-lane projections and certificates match by lane, and a declared float slot narrows to its value's low lane; float merges and root writes answer the lane | B3 rest: a recovered interface's float slots (with P7); B4 measured, no instance yet (see the ADR); liveness over locations (B2, r2dec's dead values, moved into D2: the inventory must own liveness first) |
+| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure; B3 call results, returns and reaching values match the program root; argument lanes, entry-lane projections and certificates match by lane, and a declared float slot narrows to its value's low lane; float merges and root writes answer the lane; a shift by a constant whole number of bytes moves bytes in the backward relation (#127) | B3 rest: the forward lane relation (`lanes.rs`) still reads that shift as data; a recovered interface's float slots (with P7); B4 measured, no instance yet (see the ADR); liveness over locations (B2, r2dec's dead values, moved into D2: the inventory must own liveness first) |
 | **L** Layering | — | L2 C typing at render boundaries (`typed`) moved from r2rewrite to r2dec, so r2rewrite no longer depends on r2types; L4 r2sleigh-export merged into r2sleigh-cli (13 crates); L1 the body walk moved to r2engine and `block::to_ssa` takes a spelling, so r2ssa reads the lifter only for the trusted-lift authority types; L3a only a stated import takes its library model by name; L3b the library models are the engine's (`r2engine::library`), handed to preparation as `CalleeEvidence` beside the callees' interfaces, preserved registers and reach |   L5 r2ssa's IR and facts layers as modules with a Dylint boundary |
 | **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
 | **K** One fixpoint driver | [fixpoint](doc/adr-fixpoint.md) | r2ssa | r2types' loops (with T); r2dec's are deleted by D; r2ssa's five silent caps (`promote.rs:144`, `predicates.rs:374`, `expressions.rs:548`, `optimize.rs:974`, `forward.rs:198`) become stated budgets in LX |
