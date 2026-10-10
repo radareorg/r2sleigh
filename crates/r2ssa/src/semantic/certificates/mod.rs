@@ -295,6 +295,23 @@ pub struct MemoryAccessCertificate {
     pub object_offset: Option<i64>,
 }
 
+/// What a caller's stack slot holds at entry, for one this body reads and never writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerSlotSupply {
+    /// The convention's argument area, at no parameter the interface admits.
+    UnadmittedArgument,
+    /// Caller storage outside a placed argument area: the return address, or any slot while the
+    /// return address's place, and so the area's, is unproven.
+    HeldFromEntry,
+}
+
+/// A caller's stack slot this body reads and never writes (doc/adr-frame-model.md, "Caller slots").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallerStackSlotCertificate {
+    pub entry_offset: i64,
+    pub supply: CallerSlotSupply,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackSlotCertificate {
     pub object: ObjectId,
@@ -439,6 +456,8 @@ pub struct PreparedFunctionCertificates {
     /// Loads of a private frame object whose value no observation reads: every use is one
     /// `DeadPhis` states unobserved, and the function does not hand it back.
     pub unobserved_private_reads: crate::dense::IdSet<InstId>,
+    /// The caller's stack slots read and never written, filled once the artifact is sealed.
+    pub caller_stack_slots: BTreeMap<ObjectId, CallerStackSlotCertificate>,
     pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
     pub call_results_by_inst: crate::dense::IdMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
@@ -1375,6 +1394,7 @@ pub(crate) fn collect_prepared_function_certificates(
             unobserved,
             live_out,
         ),
+        caller_stack_slots: BTreeMap::new(),
         call_results,
         call_results_by_inst,
         call_results_by_callsite,

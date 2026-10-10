@@ -49,6 +49,15 @@ declarations.
   an unbounded index: since objects partition the frame, only such a read can
   land on another object. Filled once per sealed artifact (and per
   `with_assumptions`), O(objects + accesses + calls); r2dec reads it.
+- **Caller slots.** `PreparedFunctionCertificates::caller_stack_slots` holds
+  each object at or above the entry stack pointer that the body reads and no
+  access writes, outside every stack parameter the interface admits, with its
+  entry offset and what it holds: the convention's argument area
+  (`UnadmittedArgument`) once the argument area's place is proven (the
+  convention states stack arguments, and the return address's place is
+  known or a call leaves the stack pointer alone), else `HeldFromEntry`, which
+  the return-address slot always is. Filled once per sealed artifact,
+  O(accesses + parameters); the staged renderer reads it.
 - **No feedback.** A declaration belongs to the debug information and a proof
   to the frame model, and neither is restated as the other (C).
 - **Consumers read it:** the certificates, memory SSA (its locations become
