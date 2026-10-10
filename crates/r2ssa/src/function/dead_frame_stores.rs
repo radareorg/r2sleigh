@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use super::SsaArtifact;
+use crate::CallFrameReach;
 use crate::dense::IdSet;
 use crate::graph::InstId;
-use crate::{CallFrameReach, ExtentAssumption};
 
 impl SsaArtifact {
     /// Fill the certificate once, after the extent facts it reads are sealed.
@@ -15,12 +15,12 @@ impl SsaArtifact {
 }
 
 /// The accesses of every callee-owned, write-only, unescaped, uncalled, bounded frame object, or
-/// none while a frame read has an unbounded index. Cost: doc/adr-frame-model.md, "Dead frame stores".
+/// none while any frame read has an unbounded index. Cost: doc/adr-frame-model.md, "Dead frame stores".
 fn dead_frame_stores(artifact: &SsaArtifact) -> IdSet<InstId> {
     let certificates = artifact.certificates();
     let unbounded =
-        |object| artifact.extent_assumption(object) == Some(ExtentAssumption::UnboundedIndex);
-    let read_objects = (certificates.memory_accesses.values())
+        |object| (certificates.stack_slots.get(&object)).is_some_and(|slot| slot.unbounded_index);
+    let read_objects = (artifact.structured().memory_accesses.values())
         .filter(|access| !access.is_write)
         .map(|access| access.object)
         .collect::<BTreeSet<_>>();
@@ -44,7 +44,7 @@ fn dead_frame_stores(artifact: &SsaArtifact) -> IdSet<InstId> {
         if reach.escaped(object)
             || every_object
             || by_calls.contains(&object)
-            || artifact.extent_assumption(object).is_some()
+            || slot.unbounded_index
         {
             continue;
         }
