@@ -637,6 +637,14 @@ fn machine_return_control_certificate_owns_exact_stack_reload() {
 
 /// A 32-byte frame around `body`, which addresses it through the stack pointer.
 fn framed_artifact(body: impl FnOnce(&mut R2ILBlock, &Varnode)) -> SsaArtifact {
+    framed_artifact_growing(SourceStackGrowth::LowerAddresses, body)
+}
+
+/// `framed_artifact`, under a stack the source states grows toward `growth`.
+fn framed_artifact_growing(
+    growth: SourceStackGrowth,
+    body: impl FnOnce(&mut R2ILBlock, &Varnode),
+) -> SsaArtifact {
     let sp = Varnode::register(32, 8);
     let mut block = R2ILBlock::new(0x7000, 16);
     block.push(R2ILOp::IntSub {
@@ -659,11 +667,9 @@ fn framed_artifact(body: impl FnOnce(&mut R2ILBlock, &Varnode)) -> SsaArtifact {
     let roles =
         SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
             .and_then(|roles| {
-                roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
-                    SourceStackGrowth::LowerAddresses,
-                ))
+                roles.with_stack_allocation_contract(SourceStackAllocationContract::new(growth))
             })
-            .expect("exact downward stack allocation roles");
+            .expect("exact stack allocation roles");
     let preserved = [register_storage(16, 8), register_storage(32, 8)];
     SsaArtifact::for_decompile_with(
         &[block],
@@ -793,7 +799,11 @@ fn a_frame_read_at_an_unbounded_index_keeps_every_store() {
 
 /// The frame with a stored slot at `sp + 8` and the address `sp + escaped` written to a global.
 fn escaped_frame_address(escaped: u64) -> (SsaArtifact, InstId) {
-    let artifact = framed_artifact(|block, sp| {
+    escaped_frame_address_growing(SourceStackGrowth::LowerAddresses, escaped)
+}
+
+fn escaped_frame_address_growing(growth: SourceStackGrowth, escaped: u64) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact_growing(growth, |block, sp| {
         let slot = Varnode::unique(0x200, 8);
         block.push(R2ILOp::IntAdd {
             dst: slot.clone(),
@@ -845,6 +855,15 @@ fn an_adjustment_read_to_name_a_caller_slot_is_not_frame_setup() {
             .frame_setup
             .contains(adjust)
     );
+}
+
+/// On a stack that grows to higher addresses, the bytes below the entry stack pointer are the
+/// caller's: an address there names no object of this frame, so reading `sp` for it is no setup.
+#[test]
+fn an_upward_stack_never_takes_the_downward_frame_rule() {
+    let (artifact, adjust) = escaped_frame_address_growing(SourceStackGrowth::HigherAddresses, 8);
+    let geometry = &artifact.certificates().stack_geometry;
+    assert!(!geometry.frame_setup.contains(adjust), "{geometry:?}");
 }
 
 /// A frame slot written whole and read back narrower, so the read stays a memory access; `observe`

@@ -976,21 +976,24 @@ pub(crate) fn collect_stack_geometry_certificate(
             prep.entry_stack_address_roots.len(),
         );
     });
-    // Frame setup also admits a read that forms the address of an object starting below the entry
-    // stack pointer: C names that object, so the stack pointer is read only to locate the frame.
+    // Frame setup also admits a read naming an object below the entry stack pointer, where the
+    // source states the stack grows down: C names it. Another growth admits nothing.
     let names_own_object = |site: &UseSite| {
-        geometry_outputs.get(site.inst).is_some_and(|output| {
-            objects
-                .object_for_value(*output, SpaceId::Ram)
-                .filter(|object| {
-                    matches!(
-                        objects.object(*object).map(|fact| &fact.kind),
-                        Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
-                    )
-                })
-                .and_then(|object| objects.entry_stack_roots.get(&object))
-                .is_some_and(|root| root.base == StackAddressBase::StackPointer && root.offset < 0)
-        })
+        grows_down(*machine_context)
+            && geometry_outputs.get(site.inst).is_some_and(|output| {
+                objects
+                    .object_for_value(*output, SpaceId::Ram)
+                    .filter(|object| {
+                        matches!(
+                            objects.object(*object).map(|fact| &fact.kind),
+                            Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
+                        )
+                    })
+                    .and_then(|object| objects.entry_stack_roots.get(&object))
+                    .is_some_and(|root| {
+                        root.base == StackAddressBase::StackPointer && root.offset < 0
+                    })
+            })
     };
     let setup = greatest_closed(
         graph,
@@ -1023,6 +1026,13 @@ pub(crate) fn collect_stack_geometry_certificate(
         uses,
         frame_setup,
     }
+}
+
+/// Whether the source states the stack grows to lower addresses.
+fn grows_down(machine_context: Option<&SourceMachineContext>) -> bool {
+    (machine_context.map(SourceMachineContext::machine_roles))
+        .and_then(|roles| roles.stack_allocation_contract())
+        .is_some_and(|contract| contract.growth() == r2source::SourceStackGrowth::LowerAddresses)
 }
 
 /// The greatest subset of `values` whose every use is `inside` or an operand of a member's own
