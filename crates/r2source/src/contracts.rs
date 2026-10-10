@@ -2221,6 +2221,10 @@ impl SourceCallSiteInterface {
                 Some(carriers),
                 SourceCallResult::Register { storage },
             ) if carriers.holds(storage) => SourceCallResult::Register { storage },
+            // A call that reads no result of an unproven one is a statement.
+            (SourceFunctionReturn::Unproven, Some(_), SourceCallResult::Void) => {
+                SourceCallResult::Void
+            }
             // An unproven result is no claim, so no exact contract holds it.
             (SourceFunctionReturn::Unproven, ..) => {
                 return Err(SourceCallSiteInterfaceError::IncompatibleCalleeInterface);

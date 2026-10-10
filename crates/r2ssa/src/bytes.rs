@@ -143,10 +143,14 @@ pub(crate) enum Rule {
     Whole,
 }
 
-/// A constant shift count, in whole bytes, where it is one.
-fn whole_bytes(bits: Option<u64>) -> Option<u32> {
-    bits.filter(|bits| bits % 8 == 0 && bits / 8 < 64)
-        .map(|bits| (bits / 8) as u32)
+/// A constant shift count of `size` bytes, read at that width as the machine does, in whole bytes.
+fn whole_bytes((size, bits): (u32, Option<u64>)) -> Option<u32> {
+    let bits = match size {
+        0 => return None,
+        1..8 => bits? & ((1u64 << (8 * size)) - 1),
+        _ => bits?,
+    };
+    (bits % 8 == 0 && bits / 8 < 64).then_some((bits / 8) as u32)
 }
 
 /// The bytes of a constant at most eight bytes wide that are zero; a wider
@@ -192,12 +196,12 @@ pub(crate) fn rule<V>(op: &SSAOp<V>, facts: impl Fn(&V) -> (u32, Option<u64>)) -
         }
         SSAOp::IntOr { .. } | SSAOp::IntXor { .. } => Rule::Lanewise { cleared: [0; 2] },
         SSAOp::IntAdd { .. } | SSAOp::IntSub { .. } | SSAOp::IntMult { .. } => Rule::LowClosed,
-        SSAOp::IntLeft { b, .. } => match whole_bytes(facts(b).1) {
+        SSAOp::IntLeft { b, .. } => match whole_bytes(facts(b)) {
             Some(bytes) => Rule::ShiftUp { bytes },
             None => Rule::Whole,
         },
         SSAOp::IntRight { a, b, .. } | SSAOp::IntSRight { a, b, .. } => {
-            match whole_bytes(facts(b).1) {
+            match whole_bytes(facts(b)) {
                 Some(bytes) => Rule::ShiftDown {
                     bytes,
                     sign: matches!(op, SSAOp::IntSRight { .. }),
@@ -520,6 +524,23 @@ mod tests {
                 holds(rule, operation, &[2, 1], 2, &shifted);
             }
         }
+    }
+
+    /// A count is read at its own width, as the machine reads it: a one-byte `0x108` shifts by one
+    /// byte, and a one-byte `0x10c` by twelve bits, which no byte rule describes.
+    #[test]
+    fn a_shift_count_is_read_at_its_width() {
+        let shift = |count: u64, size: u32| {
+            let op = SSAOp::IntLeft {
+                dst: (8, None),
+                a: (8, None),
+                b: (size, Some(count)),
+            };
+            rule(&op, |&fact| fact)
+        };
+        assert_eq!(shift(0x108, 1), Rule::ShiftUp { bytes: 1 });
+        assert_eq!(shift(0x10c, 1), Rule::Whole);
+        assert_eq!(shift(0x100, 1), Rule::ShiftUp { bytes: 0 });
     }
 
     /// An add read in its low byte reads only the inputs' low bytes; read in byte 1, bytes 0 and 1.
