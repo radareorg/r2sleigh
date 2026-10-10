@@ -725,6 +725,26 @@ impl SourceRoleRegisterNames {
     }
 }
 
+/// The registers an unproven result may be in: the integer result register, and the float one
+/// where the body writes both on its way out. A call takes the one its caller reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceResultCarriers {
+    pub integer: CanonicalStorageId,
+    pub float: Option<CanonicalStorageId>,
+}
+
+impl SourceResultCarriers {
+    /// Whether `storage` is one of them: the integer register, or a lane at the float one's low end.
+    pub fn holds(&self, storage: CanonicalStorageId) -> bool {
+        storage == self.integer
+            || self.float.is_some_and(|float| {
+                storage.space == float.space
+                    && storage.offset == float.offset
+                    && storage.size <= float.size
+            })
+    }
+}
+
 /// Coherent, revision-bound function interface injected by the source owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceFunctionInterface {
@@ -779,9 +799,9 @@ pub struct SourceFunctionInterface {
     body_proven_return_address: bool,
     /// Whether the body reads an argument slot past its parameters, so its arity is unproven.
     reads_past_parameters: bool,
-    /// The integer and float result registers, where the body writes both on its way out and so
-    /// proves neither its result: each call takes the one its caller reads.
-    result_carriers: Option<(CanonicalStorageId, CanonicalStorageId)>,
+    /// Where the result is unproven, the registers it may be in: each call takes the one its
+    /// caller reads.
+    result_carriers: Option<SourceResultCarriers>,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1450,20 +1470,15 @@ impl SourceFunctionInterface {
         self.reads_past_parameters
     }
 
-    /// Record that the body writes both result registers, `integer` and `float`, on its way out.
+    /// Record the registers the unproven result may be in.
     #[must_use]
-    pub const fn with_result_carriers(
-        mut self,
-        integer: CanonicalStorageId,
-        float: CanonicalStorageId,
-    ) -> Self {
-        self.result_carriers = Some((integer, float));
+    pub const fn with_result_carriers(mut self, carriers: SourceResultCarriers) -> Self {
+        self.result_carriers = Some(carriers);
         self
     }
 
-    /// The integer and float result registers an unproven result is one of, where the body writes
-    /// both (doc/adr-resolved-bodies.md, "Caller reads").
-    pub const fn result_carriers(&self) -> Option<(CanonicalStorageId, CanonicalStorageId)> {
+    /// The registers an unproven result may be in (doc/adr-resolved-bodies.md, "Caller reads").
+    pub const fn result_carriers(&self) -> Option<SourceResultCarriers> {
         self.result_carriers
     }
 
@@ -2200,17 +2215,15 @@ impl SourceCallSiteInterface {
             (SourceFunctionReturn::Register { storage }, ..) => {
                 SourceCallResult::Register { storage }
             }
-            // One of two carriers: the integer register, or a lane at the float one's low end.
+            // A carrier the unproven result may be in: its parameters are still the call's.
             (
                 SourceFunctionReturn::Unproven,
-                Some((integer, float)),
+                Some(carriers),
                 SourceCallResult::Register { storage },
-            ) if storage == integer
-                || (storage.space == float.space
-                    && storage.offset == float.offset
-                    && storage.size <= float.size) =>
-            {
-                SourceCallResult::Register { storage }
+            ) if carriers.holds(storage) => SourceCallResult::Register { storage },
+            // A call that reads no result of an unproven one is a statement.
+            (SourceFunctionReturn::Unproven, Some(_), SourceCallResult::Void) => {
+                SourceCallResult::Void
             }
             // An unproven result is no claim, so no exact contract holds it.
             (SourceFunctionReturn::Unproven, ..) => {

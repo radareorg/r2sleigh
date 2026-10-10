@@ -775,19 +775,18 @@ fn call_result_type(
     callee: &r2ssa::SourceFunctionInterface,
     result: r2ssa::SourceCallResult,
 ) -> Option<CTypeLike> {
-    let (integer, float) = callee.result_carriers()?;
+    let carriers = callee.result_carriers()?;
     let r2ssa::SourceCallResult::Register { storage } = result else {
         return None;
     };
     let bits = storage.size.checked_mul(8)?;
-    if storage == integer {
+    if storage == carriers.integer {
         return Some(CTypeLike::Int {
             bits,
             signedness: crate::Signedness::Unsigned,
         });
     }
-    (storage.space == float.space && storage.offset == float.offset && matches!(bits, 32 | 64))
-        .then_some(CTypeLike::Float(bits))
+    (carriers.holds(storage) && matches!(bits, 32 | 64)).then_some(CTypeLike::Float(bits))
 }
 
 impl SourceOwnedCalleeSignature {

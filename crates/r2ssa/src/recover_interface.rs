@@ -161,8 +161,8 @@ pub struct RecoveredInterface {
     result_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers on its way out.
     result_ambiguous: bool,
-    /// Those two registers, integer then float, where nothing said which a caller reads.
-    result_carriers: Option<(CanonicalStorageId, CanonicalStorageId)>,
+    /// The registers an unproven result may be in, where a caller's read can say which.
+    result_carriers: Option<r2source::SourceResultCarriers>,
     /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
 }
@@ -773,9 +773,9 @@ fn returned_result(
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slots: &SourceConventionSlots,
-) -> RecoveredFunctionResult {
+) -> (RecoveredFunctionResult, bool) {
     let Some(slot) = slots.result_slot() else {
-        return RecoveredFunctionResult::Unproven;
+        return (RecoveredFunctionResult::Unproven, false);
     };
     let entry_is_an_argument = slots
         .argument_slots()
@@ -811,7 +811,13 @@ fn returned_result(
         live_out.unresolved_blocks().count(),
         live_out.clobbered_blocks().count()
     );
-    result
+    // Unproven only because the carrier may still hold what the caller left: no unstated call
+    // touches it, so the register is the result's and the parameters are the body's own.
+    let handed_back = result == RecoveredFunctionResult::Unproven
+        && live_out.has_returns()
+        && live_out.clobbered_blocks().next().is_none()
+        && untouched;
+    (result, handed_back)
 }
 
 /// Whether some return hands back the carrier's entry value, directly or as an
@@ -898,6 +904,27 @@ enum CarrierRead {
     Integer,
     /// The float register, at the one width every read that states one takes.
     Float(CanonicalStorageId),
+}
+
+/// What a call reads of an unproven result: nothing, proven, or one carrier.
+enum ResultRead {
+    None,
+    Carrier(CarrierRead),
+}
+
+/// The reads after a call to a callee whose result carriers are the integer one and `float`.
+fn read_of(
+    reads: r2source::SourceResultReads,
+    float: Option<CanonicalStorageId>,
+) -> Option<ResultRead> {
+    match (reads.integer, reads.float, float) {
+        (0, 0, _) if reads.calls > 0 && reads.overwritten == reads.calls => Some(ResultRead::None),
+        // A read past the call's block (the next call's argument, under IPA-RA) is still the
+        // integer register the call leaves.
+        (_, 0, None) => Some(ResultRead::Carrier(CarrierRead::Integer)),
+        (_, _, Some(float)) => carrier_read(Some(reads), float).map(ResultRead::Carrier),
+        _ => None,
+    }
 }
 
 fn carrier_read(
@@ -1254,7 +1281,14 @@ fn recover_interface_inner(
     {
         let mut candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
-        result = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        let handed_back;
+        (result, handed_back) = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        if handed_back {
+            result_carriers = Some(r2source::SourceResultCarriers {
+                integer: candidate,
+                float: None,
+            });
+        }
         // A body that writes both result registers on its way out hands back one of them: the
         // callers' reads say which, where they agree (doc/adr-resolved-bodies.md, "Caller reads").
         if result.register().is_some()
@@ -1274,7 +1308,10 @@ fn recover_interface_inner(
                     candidate_live_out = float_live_out;
                 }
                 None => {
-                    result_carriers = Some((candidate, float));
+                    result_carriers = Some(r2source::SourceResultCarriers {
+                        integer: candidate,
+                        float: Some(float),
+                    });
                     result = RecoveredFunctionResult::Unproven;
                     result_ambiguous = true;
                 }
@@ -1671,7 +1708,7 @@ pub fn mint_recovered_interface(
                 }
             })
             .map(|interface| match recovered.result_carriers {
-                Some((integer, float)) => interface.with_result_carriers(integer, float),
+                Some(carriers) => interface.with_result_carriers(carriers),
                 None => interface,
             });
     if minted.is_none() {
@@ -2037,12 +2074,23 @@ pub fn mint_recovered_call_site_interface(
         // A body nobody read owns the arguments beside the result: an import
         // thunk forwards every one and reads none, so what its own body proves
         // is a floor rather than this call's contract.
-        // A body writing both result registers returns the one this caller reads, where it reads one.
-        SourceFunctionReturn::Unproven => match callee
-            .result_carriers()
-            .and_then(|(integer, float)| Some((integer, carrier_read(caller_reads, float)?)))
-        {
-            Some((storage, CarrierRead::Integer)) | Some((_, CarrierRead::Float(storage))) => {
+        // An unproven result is the register the call leaves, and none where the caller writes
+        // each result register before reading it: the call is then a statement.
+        SourceFunctionReturn::Unproven => match callee.result_carriers().and_then(|carriers| {
+            let read = match caller_reads {
+                Some(reads) => read_of(reads, carriers.float)?,
+                None if carriers.float.is_none() => ResultRead::Carrier(CarrierRead::Integer),
+                None => return None,
+            };
+            Some((carriers, read))
+        }) {
+            Some((_, ResultRead::None)) => SourceCallResult::Void,
+            Some((carriers, ResultRead::Carrier(CarrierRead::Integer))) => {
+                SourceCallResult::Register {
+                    storage: carriers.integer,
+                }
+            }
+            Some((_, ResultRead::Carrier(CarrierRead::Float(storage)))) => {
                 SourceCallResult::Register { storage }
             }
             None => {
