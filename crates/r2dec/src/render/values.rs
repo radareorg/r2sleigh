@@ -940,6 +940,7 @@ impl<'a> Values<'a> {
         };
         let object = |object: ObjectId| self.object(object);
         let global = |at: u64, class: &MachineType, store: bool| self.global(at, class, store);
+        let caller = |object: ObjectId, ty: &MachineType| self.caller_read(object, ty);
         read(&Spell {
             projection: &self.projection,
             arena: self.roots.arena(),
@@ -948,6 +949,7 @@ impl<'a> Values<'a> {
             global: &global,
             little_endian: self.little_endian,
             return_address: self.return_address.map(|object| (object, self.ptr_bits)),
+            caller: &caller,
         })
     }
 
@@ -1075,6 +1077,29 @@ impl<'a> Values<'a> {
         Some(read)
     }
 
+    /// A read of a caller's stack slot r2ssa certifies only read (`caller_stack_slots`), which C
+    /// cannot read: named by its entry offset, with what r2ssa says it holds.
+    fn caller_read(&self, object: ObjectId, ty: &MachineType) -> Option<CExpr> {
+        let slot = self
+            .artifact
+            .certificates()
+            .caller_stack_slots
+            .get(&object)?;
+        let (cause, residual) = match slot.supply {
+            r2ssa::CallerSlotSupply::UnadmittedArgument => (
+                super::proof::UnassignedCause::UnadmittedArgument,
+                crate::prelude::ResidualCause::UnadmittedArgument,
+            ),
+            r2ssa::CallerSlotSupply::HeldFromEntry => (
+                super::proof::UnassignedCause::Held,
+                crate::prelude::ResidualCause::HeldFromEntry,
+            ),
+        };
+        let read = crate::prelude::residual(&terms::c_type(ty)?, residual)?;
+        self.unassigned_named(r2ssa::frame_object_name(slot.entry_offset), cause, ty);
+        Some(read)
+    }
+
     /// Record a read the proof line names once its text is kept; the name is declared, as the value
     /// it names, so the line keeps it, and no statement spells it.
     fn unassigned_read(
@@ -1083,7 +1108,15 @@ impl<'a> Values<'a> {
         cause: super::proof::UnassignedCause,
         ty: &MachineType,
     ) {
-        let name = self.graph.var(value).display_name();
+        self.unassigned_named(self.graph.var(value).display_name(), cause, ty);
+    }
+
+    fn unassigned_named(
+        &self,
+        name: String,
+        cause: super::proof::UnassignedCause,
+        ty: &MachineType,
+    ) {
         if let (Ok(mut symbols), Some(c)) = (self.symbols.try_borrow_mut(), terms::c_type(ty))
             && symbols.by_name(&name).is_none()
         {

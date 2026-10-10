@@ -6,6 +6,7 @@
 
 mod blocks;
 mod build;
+mod caller_stack_slots;
 mod dead_frame_stores;
 mod edit;
 mod named_edit;
@@ -669,6 +670,7 @@ impl SsaArtifact {
             sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
         artifact.seal_dead_frame_stores();
+        artifact.seal_caller_stack_slots();
         Ok(artifact)
     }
 
@@ -1220,6 +1222,7 @@ impl SsaArtifact {
             spellings: self.spellings.clone(),
         };
         assumed.seal_dead_frame_stores();
+        assumed.seal_caller_stack_slots();
         assumed
     }
 
@@ -1467,7 +1470,7 @@ impl SsaArtifact {
     }
 
     /// The entry-relative offset of a stack object addressed from the entry stack pointer.
-    fn entry_stack_offset(&self, object: crate::ObjectId) -> Option<i64> {
+    pub(crate) fn entry_stack_offset(&self, object: crate::ObjectId) -> Option<i64> {
         match self.objects().object(object).map(|found| &found.kind) {
             Some(crate::ObjectKind::StackSlot {
                 base: crate::StackAddressBase::StackPointer,

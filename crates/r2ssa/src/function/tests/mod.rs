@@ -1,3 +1,4 @@
+mod caller_slots;
 mod control;
 mod interface;
 mod lift;
