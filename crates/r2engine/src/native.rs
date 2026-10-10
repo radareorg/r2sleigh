@@ -1983,16 +1983,18 @@ impl Native<'_> {
                 else {
                     continue;
                 };
-                let Some(prototype) = self.target.prototypes.get(&callee) else {
+                let Some(declared) = Declared::import(self.target, &callee) else {
                     continue;
                 };
-                for (index, parameter) in prototype.parameters.iter().enumerate() {
+                let prototype = declared.prototype;
+                // The convention places each parameter: by class, or by position where shared.
+                let placed = Placement::new(self.target, &self.machine).placed_prefix(declared);
+                for (index, (parameter, storage)) in
+                    prototype.parameters.iter().zip(&placed).enumerate()
+                {
                     if !parameter.is_function() {
                         continue;
                     }
-                    let Some(storage) = self.machine.slots.argument_slots().get(index) else {
-                        continue;
-                    };
                     let Some(address) = r2ssa::value_reaching(prepared.as_ref(), id, *storage)
                         .and_then(|value| prepared.folded_value(value))
                     else {
@@ -2200,6 +2202,7 @@ pub(crate) fn convention_slots(
         SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
             .and_then(|slots| slots.with_float_slots(float_slots, float_result))
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
+            .with_shared_positions(prototype.shares_positions())
             .with_stack_arguments(stack_arguments)
             .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack)
             .with_entry_stack(target.convention.entry_stack.map(|stack| {
