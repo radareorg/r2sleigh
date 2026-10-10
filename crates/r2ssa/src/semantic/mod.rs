@@ -426,7 +426,7 @@ fn demanded(
 
 /// The bytes of its result register a function's caller reads: the low bytes the declared type
 /// occupies where the interface places one there (an `int` in RAX), else the whole register.
-fn returned_bytes(interface: &r2source::SourceFunctionInterface) -> Option<CanonicalStorageId> {
+pub fn returned_bytes(interface: &r2source::SourceFunctionInterface) -> Option<CanonicalStorageId> {
     let r2source::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
         return None;
     };
