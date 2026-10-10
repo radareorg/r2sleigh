@@ -64,7 +64,9 @@ pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64>
         CTypeLike::Int { bits, .. } | CTypeLike::Float(bits) => {
             Some((u64::from(*bits).saturating_add(7) / 8).max(1))
         }
-        CTypeLike::Pointer(_) => Some((ptr_bits / 8).max(1) as u64),
+        CTypeLike::Pointer(_) | CTypeLike::UnprototypedFunction(_) => {
+            Some((ptr_bits / 8).max(1) as u64)
+        }
         CTypeLike::Array(inner, Some(count)) => {
             type_like_size_bytes(inner, ptr_bits).map(|size| size.saturating_mul(*count as u64))
         }
@@ -154,6 +156,10 @@ pub(crate) fn function_type_matches_source_interface(
     }
     match (interface.return_kind(), &signature.return_type) {
         (r2ssa::SourceFunctionReturn::Void, CTypeLike::Void) => true,
+        // Typed at each call by the carrier its caller reads (`call_result_type`).
+        (r2ssa::SourceFunctionReturn::Unproven, CTypeLike::Unknown) => {
+            interface.result_carriers().is_some()
+        }
         (r2ssa::SourceFunctionReturn::Register { storage }, ty) => {
             let actual_bits = declaration_type_width_bits(ty, ptr_bits).map(u64::from);
             let expected_bits = interface

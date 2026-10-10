@@ -37,17 +37,22 @@ demand is for results only:
   and only where some owner then states its result.
 - `Demand(f)` is the cycle of result demands `f` is in, by Tarjan over the
   owners; members of one cycle read each other resolved alone.
-- A callee whose interface still has an unproven result mints no call
-  contract; a call to it reads the registers the caller wrote, and at least
-  as many as the callee's own body proves it reads (`CalleeStatement`).
+- A callee whose interface mints no call contract, its result unproven or
+  its parameters a floor, is stated instead (`CalleeStatement`): a call to it
+  reads the registers the caller provably wrote, at least as many as the
+  callee's own body proves it reads, and takes the result the body proves.
 
-The limit: parameters stay what each body proves alone. A thunk whose
-target forwards an argument to a body nothing describes reports only the
-arguments it reads itself, so a caller can pass fewer than the source does
-(`QString::operator=(const char*)` renders with its `this` alone). Marking
-such parameter lists a floor and reading more at the call site was measured
-and rejected: the extra arguments were registers written for other reasons
-(`murmur3_32`'s rotate count), which AGENTS forbids as invented arguments.
+Parameters a body proves alone are a floor wherever an argument register
+reaches a call of unproven arity untouched or unseen: recovery, with no
+interface yet, counts any untouched slot as one it may hand on. A caller then
+passes what it wrote; past the floor, a slot the count cannot see (a merge)
+refuses the call where the caller writes that register on some path, and
+ends the count where only arrivals and call clobbers merge there. Before,
+recovery stopped silently at the untouched slot and minted an exact
+zero-argument contract: gcc -O2 hashes `main` called `combined()` without the
+buffer it reads, and crashed. A caller that hands its own untouched slot on to
+a floor callee is still counted as ending there; closing that costs C++
+methods their calls and waits on prototypes for mangled imports (LP).
 
 The first preparation recovers the interface; a restated one is handed it,
 so the owners are taken from the first.
@@ -55,6 +60,36 @@ so the owners are taken from the first.
 Known refusals this brings to the 300-function samples (pumasim refusals
 27 -> 27, 0pack 36 -> 37): one observation-journal `ConflictingValue` on a
 merge carrier in 0pack, which R deletes the journal for.
+
+### Caller reads
+
+A body that writes both convention result registers on a path to a return
+(RAX and XMM0 on x86-64: vectorized integer code, or a double function whose
+loop test leaves RAX written) does not say which is its result. r2ssa's
+recovery makes it unproven and says why (`result_ambiguous`), where it
+returned RAX before and miscompiled `avg`.
+
+Each call decides it for itself. The callee's interface keeps its exact
+parameters and names the two registers (`result_carriers`); r2ssa reads the
+caller's own lifted code after the call (`caller_reads::reads_after_call`):
+the first touch of each result register up to the next transfer is a read
+(the caller takes what the call left there), a write, or nothing. One register
+read decides the call's result, a float at the read's width; r2types types it
+there (`call_result_type`). Both or neither leave the call without a contract.
+The cost is one scan of the call's block, O(ops after the call).
+
+The function's own rendering asks every call in the program: the walked
+bodies whose trace calls it (`Survey`, inverted once, O(call edges)), each
+lifted without preparation. Every reading call agreeing on one register
+decides it; none, or calls that disagree, leave it unproven. Only the
+rendered root is prepared again with that evidence (`SourceResultReads`):
+a callee read for its caller never asks, so a `pdd` pays whole-program
+discovery only for a function whose own body is ambiguous.
+
+The evidence is as strong as the body's own writes: a compiler reads a
+clobbered register after a call only as the callee's result. A caller that
+hands the value straight back without reading it (`return f();`) is no
+evidence, and a void function whose callers read nothing stays unproven.
 
 ### Budget
 

@@ -95,17 +95,37 @@ impl TypeAnalysis {
         &self.function_facts
     }
 
+    /// The render-authorized signature, or where the result is one of two carriers, the body's
+    /// arity, exact in its interface.
+    fn signature_for_callers(&self) -> Option<std::borrow::Cow<'_, crate::FunctionSignatureSpec>> {
+        let type_facts = self.function_facts.type_facts();
+        if let Some(signature) = type_facts.render_authorized_signature() {
+            return Some(std::borrow::Cow::Borrowed(signature));
+        }
+        let interface = self.source.machine_context().function_interface()?;
+        interface.result_carriers()?;
+        let parameters = interface.parameters().len();
+        match type_facts.merged_signature.as_ref() {
+            Some(signature) => (signature.params.len() == parameters)
+                .then_some(std::borrow::Cow::Borrowed(signature)),
+            None => (parameters == 0).then(|| {
+                std::borrow::Cow::Owned(crate::FunctionSignatureSpec {
+                    ret_type: None,
+                    params: Vec::new(),
+                })
+            }),
+        }
+    }
+
     /// Export the signature this exact retained body proves for its callers.
     ///
     /// The opaque result keeps the SSA and physical interface that authorize
     /// the logical C types, so it cannot be reattached to an unrelated call.
     pub fn source_owned_callee_signature(&self) -> Option<crate::SourceOwnedCalleeSignature> {
         let entry = self.source.function().entry;
-        let Some(signature) = self
-            .function_facts
-            .type_facts()
-            .render_authorized_signature()
-        else {
+        let interface = self.source.machine_context().function_interface();
+        let carriers = interface.and_then(r2ssa::SourceFunctionInterface::result_carriers);
+        let Some(signature) = self.signature_for_callers() else {
             r2il::refusal_evidence!(
                 "callee-signature",
                 "{entry:#x}: no render-authorized signature; certificate={:?}",
@@ -117,7 +137,12 @@ impl TypeAnalysis {
             );
             return None;
         };
-        let Some(return_type) = signature.ret_type.clone() else {
+        // A result one of two carriers is typed at each call by the carrier its caller reads.
+        let Some(return_type) = signature
+            .ret_type
+            .clone()
+            .or(carriers.map(|_| CTypeLike::Unknown))
+        else {
             r2il::refusal_evidence!(
                 "callee-signature",
                 "{entry:#x}: the signature has no return type"
@@ -135,7 +160,6 @@ impl TypeAnalysis {
             .default_address_bits();
         // An import's prototype is radare2's: its parameters are what the
         // interface declares, and no body reads them for an entity to certify.
-        let interface = self.source.machine_context().function_interface();
         let prototype = interface.is_some_and(r2ssa::SourceFunctionInterface::types_are_declared);
         let params = signature
             .params

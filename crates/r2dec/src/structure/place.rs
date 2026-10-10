@@ -41,10 +41,13 @@ pub(crate) struct Placement<'f> {
 }
 
 impl<'f> Placement<'f> {
-    pub(crate) fn compute(func: &'f r2ssa::RewrittenFunction<'_>) -> Self {
-        let cfg = func.cfg();
-        let entry = func.root();
-        let dom = func.domtree();
+    /// The placement of a function's blocks, from its CFG, dominator tree and loops alone.
+    pub(crate) fn compute(
+        cfg: &'f r2ssa::cfg::CFG,
+        dom: &'f DomTree,
+        natural_loops: &'f r2ssa::natural_loops::NaturalLoops,
+        entry: u64,
+    ) -> Self {
         let rpo: HashMap<u64, usize> = cfg
             .reverse_postorder()
             .into_iter()
@@ -60,7 +63,7 @@ impl<'f> Placement<'f> {
         let placed = |addr: u64| placed_set.contains(&addr);
         let is_back_edge = |from: u64, to: u64| dom.dominates(to, from);
 
-        let loops = func.natural_loops().outermost_first();
+        let loops = natural_loops.outermost_first();
         let header_of: HashMap<u64, usize> = loops
             .iter()
             .enumerate()
@@ -140,6 +143,35 @@ impl<'f> Placement<'f> {
 
     pub(crate) fn loops(&self) -> &[&'f NaturalLoop] {
         &self.loops
+    }
+
+    pub(crate) const fn entry(&self) -> u64 {
+        self.entry
+    }
+
+    /// Blocks some edge reaches by `goto`, in address order.
+    pub(crate) fn labelled(&self) -> &BTreeSet<u64> {
+        &self.labelled
+    }
+
+    /// The loop `addr` heads, by its index in [`Self::loops`].
+    pub(crate) fn loop_headed_by(&self, addr: u64) -> Option<usize> {
+        self.header_of.get(&addr).copied()
+    }
+
+    /// The blocks written after one loop, in reverse postorder.
+    pub(crate) fn exits_of(&self, index: usize) -> &[u64] {
+        self.exits.get(&index).map_or(&[], Vec::as_slice)
+    }
+
+    /// The merges written in one block's region, in reverse postorder.
+    pub(crate) fn merges_in(&self, addr: u64) -> &[u64] {
+        self.merge_children.get(&addr).map_or(&[], Vec::as_slice)
+    }
+
+    /// The block's position in reverse postorder.
+    pub(crate) fn rpo_of(&self, addr: u64) -> Option<usize> {
+        self.rpo.get(&addr).copied()
     }
 
     /// The outermost loop containing `from` and not `to`, if any.

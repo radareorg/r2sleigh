@@ -39,4 +39,4 @@ expression: run.out
             0x1000004a8      e00740f9       ldr x0, [sp, 0x8]
             0x1000004ac      fd7b44a9       ldp x29, x30, [sp, 0x40]
             0x1000004b0      ff430191       add sp, sp, 0x50
-            0x1000004b4      c0035fd6       ret ; returns x0 (certified)
+            0x1000004b4      c0035fd6       ret

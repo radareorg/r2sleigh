@@ -683,6 +683,7 @@ fn a_refused_placement_leaves_the_emitted_function_exactly_as_it_was() {
         },
         name: symbol,
         stack_offset: None,
+        align: None,
     });
     function.body = vec![CStmt::Return(Some(CExpr::Var(symbol)))];
 
@@ -1374,6 +1375,7 @@ fn declare_legacy_local(
             .clone(),
         name: symbol,
         stack_offset: None,
+        align: None,
     });
     symbol
 }

@@ -59,7 +59,9 @@ pub(crate) fn visible_binding_type_specificity(ty: &CTypeLike) -> u8 {
         CTypeLike::Const(inner) => visible_binding_type_specificity(inner),
         CTypeLike::Unknown => 0,
         CTypeLike::Void => 1,
-        CTypeLike::Function { .. } | CTypeLike::BitVector(_) => 2,
+        CTypeLike::Function { .. }
+        | CTypeLike::UnprototypedFunction(_)
+        | CTypeLike::BitVector(_) => 2,
         CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => 4,
         CTypeLike::Typedef { .. } | CTypeLike::Enum(_) => 5,
         CTypeLike::Struct(_) | CTypeLike::Union(_) => 6,

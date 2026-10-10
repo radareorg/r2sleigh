@@ -1444,7 +1444,24 @@ fn transparent_expr_slices_eq(left: &[CExpr], right: &[CExpr]) -> bool {
             .all(|(left, right)| left.transparently_eq(right))
 }
 
-pub use crate::observation_journal::RenderObservationId;
+/// Opaque dense identity of one marked AST occurrence: the staged writer's per-statement marker and
+/// the legacy journal's alike. Neither serializable nor deserializable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RenderObservationId(u32);
+
+impl RenderObservationId {
+    pub(crate) const fn index(self) -> u32 {
+        self.0
+    }
+
+    pub(crate) fn from_dense_index(index: usize) -> Self {
+        Self(u32::try_from(index).expect("validated observation domain fits u32"))
+    }
+
+    pub(crate) const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+}
 
 /// Test-only marker allocator. Production IDs are owned by the sealed journal.
 #[cfg(test)]
@@ -2304,6 +2321,9 @@ pub struct CLocal {
     pub name: crate::symbol::SymbolId,
     /// Stack offset (if known).
     pub stack_offset: Option<i64>,
+    /// The alignment the declaration states (`_Alignas`), where the object keeps the machine's.
+    #[serde(default)]
+    pub align: Option<u32>,
 }
 
 impl CFunction {
@@ -3201,7 +3221,7 @@ pub(crate) fn carry_all_stmt_observations(source: &[CStmt], replacement: CStmt) 
     CStmt::observe_all(statement_ids, replacement)
 }
 
-fn strip_stmt_observations(stmt: &mut CStmt) {
+pub(crate) fn strip_stmt_observations(stmt: &mut CStmt) {
     // A loop rather than one step: this also strips an audit that failed,
     // whose tree is not known to be canonical.
     while let CStmt::Observed { stmt: inner, .. } = stmt {

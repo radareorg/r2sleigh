@@ -44,6 +44,26 @@ pub(crate) const KEYS: &[Key] = &[
             Ok(())
         },
     },
+    Key {
+        name: "dec.pipeline",
+        summary: "which decompiler writes pdd (legacy, staged)",
+        get: |session| match session.tier {
+            r2engine::RenderTier::Staged => "staged".to_owned(),
+            _ => "legacy".to_owned(),
+        },
+        set: |session, value| {
+            session.tier = match value {
+                "legacy" => r2engine::RenderTier::C,
+                "staged" => r2engine::RenderTier::Staged,
+                _ => {
+                    return Err(format!(
+                        "dec.pipeline takes legacy or staged, not '{value}'"
+                    ));
+                }
+            };
+            Ok(())
+        },
+    },
 ];
 
 /// The key spelled `name`.

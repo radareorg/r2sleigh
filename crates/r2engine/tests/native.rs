@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::TABLE_SWITCH;
 
 use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
-use r2engine::native::{NativeTarget, Program, call_effect, decompile};
+use r2engine::native::{NativeTarget, Program, call_effect, decompile, staged};
 use r2sleigh_lift::EmbeddedMachine;
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
 use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
@@ -103,7 +103,7 @@ impl Machine {
         let default = under(platform, embedded.compiler_spec);
         let name = default.convention.name;
         let mut conventions = BTreeMap::from([(name, default)]);
-        if let Some(windows) = embedded.windows_compiler_spec {
+        if let Some(windows) = embedded.compiler_spec_of("windows") {
             let ms = under(Platform::Windows, windows);
             if ms.convention.name != name {
                 conventions.insert(ms.convention.name, ms);
@@ -528,6 +528,30 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
     );
 }
 
+/// `push rbp; mov rbp, rsp; pop rbp; ret`, an empty `void` function with a frame pointer.
+const EMPTY_FRAME: &[u8] = &[0x55, 0x48, 0x89, 0xe5, 0x5d, 0xc3];
+
+/// `stp x29, x30, [sp, #-16]!; mov x29, sp; ldp x29, x30, [sp], #16; ret`: the same on AArch64.
+const A64_EMPTY_FRAME: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6,
+];
+
+/// The body writes RBP only to restore the caller's, so it is no result: rendered as one, the
+/// function returned the caller's frame pointer, which its source never does.
+#[test]
+fn a_frame_pointer_the_body_restores_is_no_result() {
+    for text in rendered_both(EMPTY_FRAME, "empty_frame") {
+        assert!(text.contains("void empty_frame(void)"), "{text}");
+        assert!(!text.to_lowercase().contains("rbp_"), "{text}");
+    }
+    // AArch64's untouched x0 may be an argument handed back, so the result is unproven, not x29.
+    let a64 = Machine::new("aarch64", "aarch64", 64);
+    for text in rendered_both_on(&a64, A64_EMPTY_FRAME, "empty_frame") {
+        assert!(text.contains("return r2sleigh_residual_u64("), "{text}");
+        assert!(!text.to_lowercase().contains("x29_"), "{text}");
+    }
+}
+
 /// A program where the called address is a library function by name, as an
 /// import stub is: no body worth reading, and a declared prototype instead.
 struct Importing;
@@ -568,6 +592,17 @@ impl Program for Importing {
     fn import_at(&self, vaddr: u64) -> Option<String> {
         (vaddr == 0x100a).then(|| "strlen".to_owned())
     }
+}
+
+/// Staged declares the import as its prototype states and passes the argument at that type.
+#[test]
+fn a_staged_call_passes_a_declared_import_its_declared_types() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let response = staged(&target, &Importing, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("strlen(const char*);"), "{text}");
+    assert!(text.contains("strlen((const char*)"), "{text}");
 }
 
 #[test]
@@ -670,15 +705,19 @@ fn a_released_wide_insert_base_is_rendered_where_it_is_read() {
         bytes: LANE_INSERT.to_vec(),
         name: "lane",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
-    assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
-    assert!(output.contains("return"), "{output}");
+    // Both pipelines: the staged one writes the 256-bit Z registers through the same helpers.
+    for pipeline in [decompile, staged] {
+        let response = pipeline(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(
+            response.render_refusal.is_none(),
+            "{:?}\n{output}",
+            response.render_refusal
+        );
+        assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
+        assert!(output.contains("return"), "{output}");
+        assert!(!output.contains("ValueHasNoCType"), "{output}");
+    }
 }
 
 /// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
@@ -1472,7 +1511,77 @@ fn rendered(bytes: &'static [u8], name: &'static str) -> String {
     rendered_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
 }
 
+/// x86-64 with a header's prototype for the body at `BASE`, spelled `int`, `uint32_t`, `uint64_t`
+/// or `void *`: a body writing both RAX and XMM0 does not say which one its caller reads.
+fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let mut node = |spelled: &str| {
+        let scalar = |kind, bits| {
+            Type::Scalar(Scalar {
+                kind,
+                width: Width::Bits(bits),
+                name: Some(spelled.to_owned()),
+            })
+        };
+        match spelled {
+            "int" => graph.add(scalar(ScalarKind::Signed, 32)),
+            "uint32_t" => graph.add(scalar(ScalarKind::Unsigned, 32)),
+            "uint64_t" => graph.add(scalar(ScalarKind::Unsigned, 64)),
+            "void *" => {
+                let target = graph.add(Type::Void);
+                graph.add(Type::Pointer { target })
+            }
+            other => panic!("no type spelled {other}"),
+        }
+    };
+    let parameters = parameters
+        .iter()
+        .map(|spelled| Parameter::new(node(spelled), *spelled, None::<String>))
+        .collect();
+    let return_type = node(returns);
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(
+        BASE,
+        Prototype {
+            name: name.to_owned(),
+            parameters,
+            returns: returns.into(),
+            return_type,
+            ..Prototype::default()
+        },
+    );
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    machine.declarations = declarations;
+    machine
+}
+
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
+/// The function at `BASE` in both pipelines, legacy then staged, each rendered without a refusal.
+fn rendered_both(bytes: &'static [u8], name: &'static str) -> [String; 2] {
+    rendered_both_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
+}
+
+/// Legacy's definition and staged's translation unit, which defines the helpers it calls.
+fn rendered_both_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> [String; 2] {
+    let target = machine.target();
+    let program = Fixture {
+        bytes: bytes.to_vec(),
+        name,
+    };
+    let legacy = decompile(&target, &program, BASE).expect("decompile");
+    let staged = staged(&target, &program, BASE).expect("decompile");
+    for response in [&legacy, &staged] {
+        let text = response.output.text();
+        assert!(response.render_refusal.is_none(), "{text}");
+    }
+    let unit = match &staged.output {
+        r2engine::EngineRendering::Function(rendered) => rendered.emission().unit().to_string(),
+        other => other.text().to_string(),
+    };
+    [legacy.output.text().to_string(), unit]
+}
+
 fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> String {
     let target = machine.target();
     let program = Fixture {
@@ -2130,7 +2239,11 @@ const HIGH_QWORD: &[u8] = &[
 /// the argument is a parameter rather than a local nothing assigns.
 #[test]
 fn an_argument_read_back_from_the_high_half_of_a_vector_is_a_parameter() {
-    let text = rendered(HIGH_QWORD, "high_qword");
+    let text = rendered_on(
+        &declaring("high_qword", "uint64_t", &["uint64_t"]),
+        HIGH_QWORD,
+        "high_qword",
+    );
     assert!(text.starts_with("uint64_t high_qword(uint64_t "), "{text}");
     run_rendered(
         "high_qword",
@@ -2223,7 +2336,7 @@ fn a_packed_extension_from_memory_renders_every_lane() {
             "0x00000001u, 0x00000080u, 0x0000007fu, 0x000000feu",
         ),
     ] {
-        let text = rendered(bytes, name);
+        let text = rendered_on(&declaring(name, "int", &["void *", "void *"]), bytes, name);
         assert_packed_extension_rendered(&text);
         run_rendered(
             name,
@@ -2268,7 +2381,11 @@ fn a_packed_extension_of_an_argument_takes_the_argument() {
 }"#,
     );
 
-    let text = rendered(PACKED_SIGN_EXTEND_HIGH_LANE, "sign_extend_high_lane");
+    let text = rendered_on(
+        &declaring("sign_extend_high_lane", "uint64_t", &["uint32_t"]),
+        PACKED_SIGN_EXTEND_HIGH_LANE,
+        "sign_extend_high_lane",
+    );
     assert_packed_extension_rendered(&text);
     assert!(
         text.starts_with("uint64_t sign_extend_high_lane(uint32_t "),
@@ -2344,7 +2461,7 @@ fn a_256_bit_packed_extension_compiles_on_its_own() {
             "(uint32_t)(int32_t)(int8_t)source[i]",
         ),
     ] {
-        let text = rendered(bytes, name);
+        let text = rendered_on(&declaring(name, "int", &["void *", "void *"]), bytes, name);
         assert_packed_extension_rendered(&text);
         assert!(
             text.starts_with("struct r2sleigh_bits_256 {\n    uint8_t bytes[32];\n};\n"),
@@ -2423,13 +2540,17 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         (COPY_16_IN_HALVES, "copy_16_in_halves", 16),
         (COPY_32, "copy_32", 32),
     ] {
-        let text = rendered(bytes, name);
-        assert!(!text.contains("byte["), "{text}");
-        run_rendered(
-            name,
-            &text,
-            &format!(
-                r#"int main(void) {{
+        let machine = declaring(name, "int", &["void *", "void *"]);
+        // Staged has no 256-bit carrier yet (ROADMAP D, wide values), so it is graded to 16 bytes.
+        let pipelines = if width > 16 { 1 } else { 2 };
+        let rendered = rendered_both_on(&machine, bytes, name);
+        for (pipeline, text) in ["legacy", "staged"].iter().zip(rendered).take(pipelines) {
+            assert!(!text.contains("byte["), "{text}");
+            run_rendered(
+                &format!("{name}_{pipeline}"),
+                &text,
+                &format!(
+                    r#"int main(void) {{
     _Alignas(32) uint8_t source[48];
     _Alignas(32) uint8_t got[48];
     for (int i = 0; i < 48; i++) {{
@@ -2449,11 +2570,16 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
     }}
     return 0;
 }}"#
-            ),
-        );
+                ),
+            );
+        }
     }
 
-    let text = rendered(SIGN_EXTEND_STORED_WHOLE, "sign_extend_stored_whole");
+    let text = rendered_on(
+        &declaring("sign_extend_stored_whole", "int", &["void *", "void *"]),
+        SIGN_EXTEND_STORED_WHOLE,
+        "sign_extend_stored_whole",
+    );
     assert_packed_extension_rendered(&text);
     assert!(!text.contains("byte["), "{text}");
     run_rendered(
@@ -2497,7 +2623,7 @@ const UNMODELLED_SHUFFLE: &[u8] = &[
 /// of the block at 0x1000, after the two `movq` zero extensions.
 #[test]
 fn an_unmodelled_user_operation_is_refused_by_name() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
+    let machine = declaring("shuffle", "uint64_t", &["uint64_t", "uint64_t"]);
     let target = machine.target();
     let program = Fixture {
         bytes: UNMODELLED_SHUFFLE.to_vec(),
@@ -2554,8 +2680,9 @@ const REVERSED_WORDS: &[u8] = &[
 /// times, and the four words in reverse order.
 #[test]
 fn a_word_shuffle_renders_what_the_machine_computes() {
-    let widen = rendered(WIDENED_BYTE, "widen");
-    let reverse = rendered(REVERSED_WORDS, "reverse");
+    let declared = |name| declaring(name, "uint64_t", &["uint64_t"]);
+    let widen = rendered_on(&declared("widen"), WIDENED_BYTE, "widen");
+    let reverse = rendered_on(&declared("reverse"), REVERSED_WORDS, "reverse");
     run_rendered(
         "word_shuffle",
         &format!("{widen}\n{reverse}"),
@@ -2597,12 +2724,16 @@ const LOWEST_SET_BIT: &[u8] = &[
 /// what the machine does at every source, zero included.
 #[test]
 fn a_bit_scan_renders_as_the_count_it_computes() {
-    let trailing = rendered(TRAILING_ZEROS, "trailing");
-    let lowest = rendered(LOWEST_SET_BIT, "lowest");
-    run_rendered(
-        "bit_scan",
-        &format!("{trailing}\n{lowest}"),
-        r#"int main(void) {
+    let trailing = rendered_both(TRAILING_ZEROS, "trailing");
+    let lowest = rendered_both(LOWEST_SET_BIT, "lowest");
+    for (pipeline, (trailing, lowest)) in ["legacy", "staged"]
+        .iter()
+        .zip(trailing.iter().zip(&lowest))
+    {
+        run_rendered(
+            &format!("bit_scan_{pipeline}"),
+            &format!("{trailing}\n{lowest}"),
+            r#"int main(void) {
     const uint64_t cases[] = {0, 1, 2, 0x80, 0x100, 0x8000000000000000ull, 0x0123456789abcde0ull, ~0ull};
     for (int i = 0; i < 8; i++) {
         uint64_t x = cases[i];
@@ -2616,7 +2747,8 @@ fn a_bit_scan_renders_as_the_count_it_computes() {
     }
     return 0;
 }"#,
-    );
+        );
+    }
 }
 
 /// `vpxor` of two 256-bit loads, whose high half is read back:
@@ -2649,7 +2781,7 @@ const WIDE_EXCLUSIVE_OR: &[u8] = &[
 /// no C compiler accepts.
 #[test]
 fn an_operator_on_a_wide_carrier_is_refused() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
+    let machine = declaring("wide_xor", "uint64_t", &["void *", "void *"]);
     let target = machine.target();
     let program = Fixture {
         bytes: WIDE_EXCLUSIVE_OR.to_vec(),
@@ -4401,11 +4533,10 @@ const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0xc3, // 0x101f ret
 ];
 
-/// A callee that reads an argument slot past its parameters states no arity a
-/// caller may take, and no count read off the caller's registers stands: the
-/// call is a residual.
+/// A callee whose parameters are a floor mints no contract; a call to it takes what the caller
+/// provably wrote, at least the floor: `past(3, 5)` (doc/adr-resolved-bodies.md, "Demand").
 #[test]
-fn a_callee_reading_past_its_parameters_states_no_call_arity() {
+fn a_callee_whose_parameters_are_a_floor_takes_what_its_caller_wrote() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
@@ -4414,8 +4545,45 @@ fn a_callee_reading_past_its_parameters_states_no_call_arity() {
     };
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
-    assert!(!text.contains("past("), "{text}");
-    assert!(text.contains("r2sleigh_residual"), "{text}");
+    assert!(text.contains("past(3, 5)"), "{text}");
+}
+
+/// `f` hands every argument register on unread to a call through memory; the caller writes `edi`
+/// and, on one of two paths each, `esi`.
+const AN_ARGUMENT_MERGED_FROM_TWO_WRITES: &[u8] = &[
+    0xff, 0x14, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1000 call [0x2000]
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 0x1007 mov eax, 7
+    0xc3, // 0x100c ret
+    0xcc, 0xcc, 0xcc, // 0x100d padding
+    0x85, 0xff, // 0x1010 test edi, edi
+    0x74, 0x07, // 0x1012 je 0x101b
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1014 mov esi, 5
+    0xeb, 0x05, // 0x1019 jmp 0x1020
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 0x101b mov esi, 7
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 0x1020 mov edi, 3
+    0xe8, 0xd6, 0xff, 0xff, 0xff, // 0x1025 call 0x1000
+    0xc3, // 0x102a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 0x102b padding
+];
+
+/// Past the callee's floor, a slot the count cannot see but the caller writes on some path may be
+/// an argument: the call is a residual, never `merged(3)` without the `esi` it was handed.
+#[test]
+fn an_argument_merged_from_two_writes_past_the_floor_refuses_the_count() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: AN_ARGUMENT_MERGED_FROM_TWO_WRITES.to_vec(),
+        name: "merged",
+    };
+    let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("merged(3)"), "{text}");
+    assert!(
+        response.render_refusal.is_some() || text.contains("r2sleigh_residual"),
+        "{text}"
+    );
 }
 
 /// `f(a, b)` calls itself with `(a - 1, b + 1)`, passing `b + 1` through `rdx`

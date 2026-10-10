@@ -362,6 +362,340 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// The staged pipeline passes each value in the class its register says: `store(double x,
+/// double *p)` takes `x` in a float register and writes its bits, and a tail call is no return.
+#[test]
+fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/float_calls_zig_x86_64_O2g");
+    let staged = on(
+        binary,
+        "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
+    );
+    // The pointer parameter is declared as DWARF states it, and read as its word; `forward`'s `x + 1.0`
+    // adds the double whose bits the constant is, never the integer those bits spell.
+    for line in [
+        "void store(double arg0, double* arg1)",
+        "r2sleigh_store_u64((void*)(uint64_t)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
+        "void forward(double arg0, double* arg1)",
+        "void store(double, double*);",
+        "store(arg0, (double*)(uint64_t)arg1);",
+        "store(arg0 + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (double*)(uint64_t)arg1);",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+    // `call_store` ends in `jmp store`: the tail call is written, then the `return` it makes, never
+    // a bare `return` that would drop it.
+    let call_store = staged
+        .out
+        .split("void call_store")
+        .nth(1)
+        .expect("call_store renders");
+    let call_store = call_store
+        .split("void forward")
+        .next()
+        .unwrap_or(call_store);
+    let call = call_store
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (double*)(uint64_t)arg0);")
+        .expect("the tail call");
+    let returned = call_store.find("return;").expect("its return");
+    assert!(call < returned, "{call_store}");
+    assert!(!call_store.contains("r2sleigh_residual"), "{call_store}");
+}
+
+/// An indirect call goes through its target value, cast to the function type its classes state:
+/// `_init` calls `__gmon_start__` through the pointer it loads, where one is linked.
+#[test]
+fn a_staged_indirect_call_goes_through_its_target_value() {
+    let staged = r2s("e dec.pipeline=staged; pdd @ 0x401000");
+    assert!(
+        staged
+            .out
+            .contains("((uint64_t(*)(void))(uint64_t)rax_1)();"),
+        "{}",
+        staged.out
+    );
+}
+
+/// siphash24's tail switch dispatches through a table on `len & 7`, a value only the elided
+/// dispatch reads: the `switch` still reads it, so it is computed, never a residual.
+#[test]
+fn a_staged_table_switch_reads_its_selector() {
+    let staged = r2s("e dec.pipeline=staged; pdd @ 0x4018b0");
+    assert!(staged.out.contains("& (uint32_t)7U);"), "{}", staged.out);
+    assert!(
+        !staged.out.contains("switch (r2sleigh_residual"),
+        "{}",
+        staged.out
+    );
+}
+
+/// `shape_variadic`'s last `snprintf` passes eight arguments, two of them in the outgoing stack
+/// area: the staged call takes them in order, as integer bits, where it was a gap.
+#[test]
+fn a_staged_call_passes_its_stack_arguments() {
+    let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
+    let staged = on(
+        pinned.join("shapes_gcc_x64_O0"),
+        "e dec.pipeline=staged; pdd @ sym.shape_variadic",
+    );
+    assert!(
+        staged
+            .out
+            .contains("tmp_11f80_19, tmp_11f80_18, rax_45, tmp_4a00_1, rax_42);"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("CallNotRendered"), "{}", staged.out);
+}
+
+/// `sext` takes `int8_t` in DIL and rebuilds RDI from it: the bytes above are what RDI held at
+/// entry, which no parameter admits, so they read as a residual where the statement was a gap.
+#[test]
+fn a_staged_register_held_from_entry_reads_as_a_residual() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("rv_O0g"),
+        "e dec.pipeline=staged; pdd @ sym.sext",
+    );
+    assert!(
+        staged
+            .out
+            .contains("r2sleigh_residual_u64(1) & (uint64_t)-0x100)"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("TermNotSpelled"), "{}", staged.out);
+}
+
+/// `_init`'s stack pointer chain (the frame's `sub`/`add rsp` and the call's push) is return
+/// control, which the certificates elide for both pipelines alike: no obligation goes unanswered.
+#[test]
+fn a_staged_ledger_elides_what_the_certificates_elide() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("rv_O0g"),
+        "e dec.pipeline=staged; pdd @ sym._init",
+    );
+    assert!(
+        staged
+            .out
+            .contains("22 source obligations: 12 rendered, 10 elided, 0 refused;"),
+        "{}",
+        staged.out
+    );
+}
+
+/// `mixed_from` returns a two-word struct in RAX and RDX; staged assigns only RAX, so a read of
+/// RDX's variable reads nothing the text assigned, and is a residual rather than garbage.
+#[test]
+fn a_staged_read_of_a_name_nothing_assigned_is_a_residual() {
+    let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
+    let staged = on(
+        pinned.join("shapes_gcc_x64_O0"),
+        "e dec.pipeline=staged; pdd @ sym.shape_struct_value",
+    );
+    assert!(
+        staged
+            .out
+            .contains("mixed_fold(tmp_11f80_3, r2sleigh_residual_u64(1));"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains(", rdx_2)"), "{}", staged.out);
+}
+
+/// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
+/// range C leaves it undefined, so that arm is a residual.
+#[test]
+fn a_staged_float_truncation_is_guarded_by_its_range() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("float_moves_zig_x86_64_O2g"),
+        "e dec.pipeline=staged; pdd @ 0x01001510",
+    );
+    assert!(staged.out.contains("> -2147483649.0 && "), "{}", staged.out);
+    assert!(
+        staged.out.contains(" < 2147483648.0 ? (int32_t)"),
+        "{}",
+        staged.out
+    );
+    assert!(
+        staged.out.contains(" : r2sleigh_residual_i32("),
+        "{}",
+        staged.out
+    );
+    // The return's obligations are residual on the proof line, as its text is.
+    assert!(
+        staged
+            .out
+            .contains("8 rendered, 10 elided, 0 refused, 2 residual"),
+        "{}",
+        staged.out
+    );
+}
+
+/// A tail call returns what its callee leaves in the function's own result register: RAX for
+/// `frame_dummy`, XMM0 for `swap_call`, whose arguments it swaps first.
+#[test]
+fn a_staged_tail_call_returns_its_callee_s_result() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    for (binary, function, line) in [
+        (
+            "rv_O0g",
+            "sym.frame_dummy",
+            "return (uint64_t)register_tm_clones();",
+        ),
+        (
+            "float_moves_zig_x86_64_O2g",
+            "sym.swap_call",
+            "return (double)scale(arg1, arg0);",
+        ),
+    ] {
+        let staged = on(
+            fixtures.join(binary),
+            &format!("e dec.pipeline=staged; pdd @ {function}"),
+        );
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+        assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
+    }
+}
+
+/// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); its caller's `movsd` of XMM0
+/// says which is the result. Vectorized `crc32_init` writes both, no call reads either: a residual.
+#[test]
+fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for pipeline in ["legacy", "staged"] {
+        let avg = on(
+            root.join("tests/fixtures/rv_O0g_stripped"),
+            &format!("e dec.pipeline={pipeline}; pdd @ 0x12ef"),
+        );
+        assert!(
+            avg.out.starts_with("double fcn_12ef("),
+            "{pipeline}: {}",
+            avg.out
+        );
+        assert!(
+            !avg.out.contains("r2sleigh_residual"),
+            "{pipeline}: {}",
+            avg.out
+        );
+        let unread = on(
+            root.join("tests/coverage/pinned/hashes_gcc_x64_O2"),
+            &format!("e dec.pipeline={pipeline}; pdd @ sym.crc32_init"),
+        );
+        assert!(
+            unread.out.contains("return r2sleigh_residual_u64("),
+            "{pipeline}: {}",
+            unread.out
+        );
+    }
+}
+
+/// The library table says `__libc_start_main` takes functions (`func`) it gives no parameters for:
+/// each is spelled `void(*)()`, a type C accepts, where it was `/* unknown */*`, which none does.
+#[test]
+fn an_import_stub_spells_a_function_its_declaration_gives_no_parameters() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/float_calls_zig_aarch64_O2g");
+    for pipeline in ["legacy", "staged"] {
+        let run = on(
+            binary.clone(),
+            &format!("e dec.pipeline={pipeline}; pdd @ 0x01010640"),
+        );
+        assert!(
+            run.out.contains(
+                "extern int32_t __libc_start_main(void(*)(), int32_t, char**, void(*)(), void(*)(), void(*)(), void*);"
+            ),
+            "{pipeline}: {}",
+            run.out
+        );
+        assert!(!run.out.contains("unknown"), "{pipeline}: {}", run.out);
+    }
+}
+
+/// A double comes back in XMM0's low lane: the call's result is its bits, the rest of the register
+/// zero, and the return reads the lane back.
+#[test]
+fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
+    let binary =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
+    for line in [
+        "double from_b(const double* arg0, int64_t arg1)",
+        "double helper(const double*, int64_t);",
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)arg0, (int64_t)arg1));",
+        "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+}
+
+/// A recursive call names the function itself at its own signature: `fact` calls `fact` with
+/// no declaration that could contradict the definition, which C rejects.
+#[test]
+fn a_staged_recursive_call_agrees_with_its_own_definition() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fact");
+    assert!(
+        staged.out.contains("int32_t fact(int32_t arg0)"),
+        "{}",
+        staged.out
+    );
+    assert!(
+        staged
+            .out
+            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)arg0 - (uint32_t)1U));"),
+        "{}",
+        staged.out
+    );
+    assert!(!staged.out.contains("fact(uint64_t)"), "{}", staged.out);
+}
+
+/// The staged pipeline's frame is one array aligned as the machine's (D4): `main` passes `&d`,
+/// `sp + 8` on AArch64, where SP is 16-aligned at entry, to two calls and reads it after each.
+#[test]
+fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/float_calls_zig_aarch64_O2g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ main");
+    for line in [
+        "_Alignas(16) uint8_t frame[32];",
+        "call_store((double*)(uint64_t)(frame + 8U));",
+        "(double*)(uint64_t)(frame + 8U));",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+}
+
+/// `dec.pipeline=staged` hands `pdd` to the staged decompiler (ROADMAP D): its control is
+/// certified, and the hash loop's values render from the sealed facts with no gap.
+#[test]
+fn the_staged_pipeline_writes_pdd_from_the_sealed_facts() {
+    let staged = r2s(&format!(
+        "e dec.pipeline=staged; pdd @ {FNV1A32}; e dec.pipeline"
+    ));
+    for line in [
+        "return (uint64_t)0x811c9dc5U;",
+        "r2sleigh_load_u8((void*)rdi_1)",
+        "* (uint64_t)0x1000193U",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+    assert!(!staged.out.contains("r2dec gap"), "{}", staged.out);
+    assert!(!staged.out.contains("r2sleigh refused"), "{}", staged.out);
+    assert!(staged.out.ends_with("staged\n"), "{}", staged.out);
+    let refused = r2s("e dec.pipeline=fast");
+    assert!(
+        refused
+            .out
+            .contains("dec.pipeline takes legacy or staged, not 'fast'"),
+        "{}",
+        refused.out
+    );
+}
+
 /// `e` reads and sets the keys the shell acts on, by radare2's names: a key
 /// it lacks and a value it cannot read are refused, and the value stays.
 #[test]
@@ -371,6 +705,7 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
         run.out,
         "asm.bytes = true\n\
          scr.color = 0\n\
+         dec.pipeline = legacy\n\
          \x20           0x00401330      endbr64\n\
          false\n\
          r2s: asm.bytes takes true or false, not 'maybe'\n",
@@ -839,7 +1174,7 @@ mod dispatch_table {
         // function-pointer call is the proof the target came from the table
         // rather than from a guess.
         assert!(run.out.contains("_table_dispatch("), "{}", run.out);
-        assert!(run.out.contains(")(X0_0,"), "{}", run.out);
+        assert!(run.out.contains(")((uint64_t)X0_0,"), "{}", run.out);
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
@@ -869,8 +1204,10 @@ mod dispatch_table {
         let frame = frame.collect::<Vec<_>>().join("\n");
         assert_eq!(
             frame,
-            "arg uint64_t arg1 @ x0\n\
-             arg uint64_t arg2 @ x1\n\
+            // The loaded table leaves q0 written on the path that skips the loop, so the body does
+            // not say whether x0 or v0 is the result, and no returned use makes the arguments unsigned.
+            "arg int64_t arg1 @ x0\n\
+             arg int64_t arg2 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
              var uint8_t[24] stack_m64 @ entry.sp-0x40"
         );

@@ -1002,6 +1002,25 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// The returned `value` at its declared type: a wide carrier certified at `width` bytes returns
+    /// its low field, as AArch64's lift writes d0 as the whole Z register (returns.rs).
+    fn declared_return(
+        &self,
+        value: r2ssa::ValueId,
+        width: u32,
+        expr: CExpr,
+    ) -> OpLoweringResult<(CExpr, Option<CType>)> {
+        match self.value_declaration_type(value) {
+            Some(CType::BitVector(bits)) if width * 8 < bits => {
+                let extract = crate::bitvector::BitVectorHelper::extract(bits, width * 8)
+                    .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
+                let field = extract.call(vec![expr, CExpr::UIntLit(0)]);
+                Ok((field, Some(CType::uint(width * 8))))
+            }
+            declared => Ok((expr, declared)),
+        }
+    }
+
     pub(crate) fn fold_block_with_sites(
         &self,
         block: &SSABlock,
@@ -1154,10 +1173,9 @@ impl<'a> FoldingContext<'a> {
                         // the exact source-owned return type conversion
                         // explicit instead of relying on an implicit
                         // narrowing or signedness change.
-                        let expr = match (
-                            self.value_declaration_type(certified.value),
-                            self.inputs.function_return_type,
-                        ) {
+                        let (expr, declared) =
+                            self.declared_return(certified.value, certified.width, expr)?;
+                        let expr = match (declared, self.inputs.function_return_type) {
                             (Some(declared), Some(return_type)) => self.convert_from(
                                 expr,
                                 Some(&CValue::Typed(declared)),

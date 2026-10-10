@@ -5,7 +5,6 @@
 //! row its command prints. The visual mode only lays them out.
 
 use crate::session::Session;
-use r2engine::RenderTier;
 use r2engine::program::EdgeKind as Edge;
 use r2engine::query::{AnnotationKind, Listing, Stop};
 use r2s_tui::{
@@ -205,7 +204,7 @@ impl Host for Visual<'_> {
         // The function the address is in, so a cursor inside a body renders
         // that body rather than one starting where the cursor is.
         let entry = containing_entry(self.session, address)?;
-        let rendering = self.session.program.rendered(entry, RenderTier::C)?;
+        let rendering = self.session.program.rendered(entry, self.session.tier)?;
         let name = self.session.program.names().of(entry).map_or_else(
             || format!("fcn.{entry:08x}"),
             r2engine::names::Name::spelled,

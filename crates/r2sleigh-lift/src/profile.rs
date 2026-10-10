@@ -70,6 +70,9 @@ pub struct Prototype {
     pub killed_by_call: Vec<SpecStorage>,
     /// Storage a call leaves as it found it.
     pub unaffected: Vec<SpecStorage>,
+    /// Where its first stack argument sits, from the stack pointer entering the call, and the
+    /// step to the next.
+    pub stack_arguments: Option<(i64, u32)>,
 }
 
 /// The machine facts one compiler specification declares.
@@ -85,9 +88,6 @@ pub struct LanguageProfile {
     /// Where a machine that pushes the return address leaves it: the offset
     /// from the stack pointer entering the function, and its size.
     pub return_address_slot: Option<(i64, u32)>,
-    /// Where the default prototype puts its first stack argument, from the
-    /// stack pointer entering the call, and the step to the next.
-    pub stack_arguments: Option<(i64, u32)>,
     /// `data_organization`'s pointer size in bytes, where stated.
     pub pointer_size: Option<u32>,
     /// The default prototype first, then the others in document order.
@@ -157,7 +157,6 @@ impl LanguageProfile {
                         node.attribute("size")?.parse().ok()?,
                     ))
                 }),
-            stack_arguments: default.and_then(stack_arguments),
             pointer_size: first("pointer_size")
                 .and_then(|node| node.attribute("value"))
                 .and_then(|value| value.parse().ok()),
@@ -169,6 +168,21 @@ impl LanguageProfile {
     /// The default prototype, where the specification states one.
     pub fn default_prototype(&self) -> Option<&Prototype> {
         self.prototypes.first()
+    }
+
+    /// Where the default prototype puts its first stack argument, and the step to the next.
+    pub fn stack_arguments(&self) -> Option<(i64, u32)> {
+        self.default_prototype()?.stack_arguments
+    }
+
+    /// The same specification with the named prototype as its default: a program whose
+    /// functions use one of its other models, as Go's ABI0 is beside its ABIInternal.
+    pub fn under(&self, prototype: &str) -> Option<Self> {
+        let at = self.prototypes.iter().position(|p| p.name == prototype)?;
+        let mut profile = self.clone();
+        let chosen = profile.prototypes.remove(at);
+        profile.prototypes.insert(0, chosen);
+        Some(profile)
     }
 }
 
@@ -346,6 +360,7 @@ fn prototype(node: roxmltree::Node<'_, '_>) -> Prototype {
         outputs: entries("output"),
         killed_by_call: storages("killedbycall"),
         unaffected: storages("unaffected"),
+        stack_arguments: stack_arguments(node),
     }
 }
 
@@ -466,7 +481,7 @@ mod tests {
     </prototype>
   </default_proto>"#,
         );
-        assert_eq!(spec.stack_arguments, Some((0, 4)));
+        assert_eq!(spec.stack_arguments(), Some((0, 4)));
     }
 
     #[test]
@@ -483,7 +498,7 @@ mod tests {
     </prototype>
   </default_proto>"#,
         );
-        assert_eq!(spec.stack_arguments, Some((0, 8)));
+        assert_eq!(spec.stack_arguments(), Some((0, 8)));
     }
 
     /// Every compiler specification the trusted languages use parses, states

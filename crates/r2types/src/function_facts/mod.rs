@@ -594,7 +594,9 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         }
         // `Function` is this model's spelling for a pointer to function, so it
         // occupies exactly what a pointer does.
-        CTypeLike::Pointer(_) | CTypeLike::Function { .. } => Some(ptr_bits),
+        CTypeLike::Pointer(_) | CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_) => {
+            Some(ptr_bits)
+        }
         CTypeLike::Array(element, Some(count)) => {
             declaration_type_width_bits(element, ptr_bits)?.checked_mul(u32::try_from(*count).ok()?)
         }
@@ -668,6 +670,15 @@ pub struct DecompileRouteFacts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_comment: Option<String>,
     pub use_prepared_semantic_view: bool,
+}
+
+/// An import stub as r2engine's route decides it: one tail transfer to the import `name` and
+/// nothing else, rendered as the import's `signature`, or a comment where nothing states one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportStub {
+    pub entry: u64,
+    pub name: String,
+    pub signature: Option<crate::FunctionType>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -756,6 +767,27 @@ pub struct SourceOwnedCalleeSignature {
     address: u64,
     interface: r2ssa::SourceFunctionInterface,
     signature: crate::FunctionType,
+}
+
+/// The type a call returns where its callee's result is one of two carriers: the float register's
+/// lane is a float of its width, the integer register a word (doc/adr-resolved-bodies.md).
+fn call_result_type(
+    callee: &r2ssa::SourceFunctionInterface,
+    result: r2ssa::SourceCallResult,
+) -> Option<CTypeLike> {
+    let (integer, float) = callee.result_carriers()?;
+    let r2ssa::SourceCallResult::Register { storage } = result else {
+        return None;
+    };
+    let bits = storage.size.checked_mul(8)?;
+    if storage == integer {
+        return Some(CTypeLike::Int {
+            bits,
+            signedness: crate::Signedness::Unsigned,
+        });
+    }
+    (storage.space == float.space && storage.offset == float.offset && matches!(bits, 32 | 64))
+        .then_some(CTypeLike::Float(bits))
 }
 
 impl SourceOwnedCalleeSignature {
@@ -1360,8 +1392,21 @@ impl FunctionFacts {
                 .call_site_interface(arguments.call_site_id)
                 .and_then(r2ssa::SourceCallSiteInterface::exact_callee_interface)
                 .is_some_and(|interface| interface == &signature.interface);
-            if same_interface && signature.address() == target {
+            let site_result = source
+                .call_site_interface(arguments.call_site_id)
+                .map(r2ssa::SourceCallSiteInterface::result);
+            let return_type = match signature.signature.return_type {
+                CTypeLike::Unknown => {
+                    site_result.and_then(|result| call_result_type(&signature.interface, result))
+                }
+                ref declared => Some(declared.clone()),
+            };
+            if same_interface
+                && signature.address() == target
+                && let Some(return_type) = return_type
+            {
                 let mut logical_signature = signature.signature.clone();
+                logical_signature.return_type = return_type;
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
                 arguments.callee_signature_types = Some(signature.interface.types().clone());
@@ -1392,7 +1437,10 @@ impl FunctionFacts {
         // to agree about an interface before the target's own body says what
         // its prototype is.
         for (_, target) in source.machine_context().code_pointer_entries() {
-            let Some(signature) = signatures.get(&target) else {
+            let Some(signature) = signatures
+                .get(&target)
+                .filter(|signature| signature.signature.return_type != CTypeLike::Unknown)
+            else {
                 continue;
             };
             let name = self.display_names.functions().get(&target).cloned();

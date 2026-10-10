@@ -408,8 +408,8 @@ impl LegacyObservationJournal {
         self.targets.push(first);
         self.targets.push(second);
         Ok((
-            RenderObservationId(first_index),
-            RenderObservationId(second_index),
+            RenderObservationId::from_index(first_index),
+            RenderObservationId::from_index(second_index),
         ))
     }
 
@@ -428,7 +428,7 @@ impl LegacyObservationJournal {
                 .ok_or(LegacyObservationJournalError::TooManyObservations)?;
         }
         let ids = (0..count)
-            .map(|offset| RenderObservationId(first + offset))
+            .map(|offset| RenderObservationId::from_index(first + offset))
             .collect();
         if r2il::refusal_evidence::tracing() {
             let origin = std::panic::Location::caller();

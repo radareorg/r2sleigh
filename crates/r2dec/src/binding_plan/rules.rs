@@ -1373,6 +1373,7 @@ fn declared_pointer_for_value(ty: &r2types::CTypeLike) -> Option<bool> {
         | r2types::CTypeLike::Struct(_)
         | r2types::CTypeLike::Union(_)
         | r2types::CTypeLike::Function { .. }
+        | r2types::CTypeLike::UnprototypedFunction(_)
         | r2types::CTypeLike::Unknown => None,
     }
 }

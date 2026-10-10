@@ -393,11 +393,8 @@ pub(crate) fn exact_logical_return_projection(
         return None;
     }
     match projection.kind() {
-        // The value the walk reached is the carrier's own, or the operand a
-        // lane insert wrote into it, which has no register of its own: a
-        // temporary or a literal names no machine location, so it cannot
-        // contradict the slot. `movq xmm0, [rsp-16]` returns a `double` in
-        // `XMM0_Qa` as the loaded temporary.
+        // The value the walk reached is the carrier's own, or one with no register of its own: a
+        // temporary, a literal or a promoted frame slot (clang -O0's `movsd xmm0, [rbp-24]`).
         SourceCarrierKind::Full
             if projection.size_bits() == physical_bits
                 && physical_value.var.size == storage.size
@@ -407,6 +404,10 @@ pub(crate) fn exact_logical_return_projection(
                             reached.space,
                             CanonicalStorageSpace::Unique | CanonicalStorageSpace::Constant
                         )
+                        || reached.space
+                            == CanonicalStorageSpace::Custom(
+                                crate::slot_promotion::PROMOTED_SLOT_SPACE,
+                            )
                 }) =>
         {
             Some((boundary.value, storage.size, Some(logical)))

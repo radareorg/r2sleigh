@@ -69,6 +69,88 @@ access has one spelling from facts, every effect survives exactly once with one
 typed owner. The three ADRs that state them (partition-first, access-syntax,
 semantic-preservation-kernel) fold into this one when D lands.
 
+## D2 and D3, as they are built
+
+The obligation inventory says what must be rendered, so no stage re-derives it.
+
+- **Demand.** An instruction with live obligations owes its statement: a store
+  writes its cell, a return hands back its boundary value, a branch test is
+  D1's condition, a call is written from the callsite facts (increment 2;
+  until then a call is a gap). A value is rendered when a rendered term reads
+  it, or when its producer owes more than its value (a non-private load).
+  Every other value is dead as the inventory classifies it. r2ssa's
+  certificates elide what needs no C: a frame save its restore undoes
+  (`stack_frame_round_trip_by_inst`), a compiler-inserted check, the push of
+  a call's return address; a spelled C `return` discharges the return
+  address and exit stack pointer it consumes.
+- **Inline or bind.** One rule, used by r2rewrite's import as its expansion
+  policy and by D2 at each statement operand: a producer is absorbed into
+  its reader when the reader is its only live reader, later in the same
+  block, and, where the term reads memory or can trap, no instruction with an
+  effect lies between. A phi reads at the end of the predecessor its edge
+  leaves; a return's boundary read counts as a reader with no graph use. A
+  literal or a term over entry values never redefined (`Multiplicity::Any`)
+  is absorbed anywhere. A merge is never absorbed. A rendered value no reader
+  absorbs is bound to its own local, assigned where it is defined, so a term
+  is valid wherever its producer dominates.
+- **Merges.** A phi is bound to its own variable, assigned on each incoming
+  edge by one parallel copy, sequentialised with temporaries when one copy
+  reads what another writes. Coalescing a phi web into one variable is the
+  partition, r2ssa's to state from `ValueLiveness` and `StorageSpans` (D2.1).
+- **Frame.** A stack object is a C byte array only where r2ssa proves the
+  storage is the callee's (`callee_allocation`, or a source slot that is a
+  local or a parameter home); a slot at or above the entry stack pointer
+  holds what the caller put there, which a fresh array does not. A frame
+  address is spelled only as the address of an access inside its own
+  object's certified extent; anywhere else, held in a value or passed on, it
+  is refused until D4 states one frame and its escapes.
+- **Spelling (D3).** A term is spelled by its kind as unsigned C at its
+  width, computed at least `int` wide so promotion cannot overflow, with a
+  shift tested against the width before C shifts, memory read and written by
+  byte copy, and a helper where C has no operator. A term with no exact
+  spelling refuses, and its statement is a gap whose kind names the missing
+  fact (`CallNotRendered`, `TermNotSpelled`, `StoreNotSpelled`,
+  `ValueHasNoCType`, `EffectNotRendered`, `UnsupportedInstruction`).
+
+Cost: one canonicalisation, `O(terms × rules applied)`, then one pass over
+the operations and their uses.
+
+## D4's frame, as it is designed
+
+The machine stack below the entry stack pointer is one region; C must see one
+object there, or a pointer formed from one slot and moved to another leaves
+its array.
+
+- **One array.** The function's own frame is `uint8_t frame[size]`, spanning
+  `[low, 0)` in entry-SP coordinates: `low` the least entry offset of any
+  object whose coordinates r2ssa states (`callee_allocation.entry_offset`, or
+  `objects().entry_stack_roots`). Every byte below the entry stack pointer is
+  the running function's by the ABI; an object with any byte at or above
+  offset 0 is the caller's (the return address, stack arguments) and is never
+  in it. An access at a literal offset or index is spelled only inside its
+  object's extent. One at a computed index is spelled from the one object its
+  address names, as the machine computes it, so the C stays inside `frame`
+  wherever the program's index stays inside the object: the assumption r2ssa's
+  array layout proof makes too, whose index range is MAY evidence clamped to
+  the frame. That proof's geometry (stride, element) types an array; byte
+  arithmetic on `frame` needs none of it.
+- **Addresses.** An object's address is `frame + (offset - low) + pad`. A frame
+  address may be held in a value, stored or passed to a call as such a
+  pointer, because every place it can reach in the machine's frame is a byte
+  of the array. Escapes stay r2ssa's (`FrameReach`); the array changes only
+  how they are spelled.
+- **Alignment.** A callee may use an escaped address for an aligned access
+  (`movaps`), so the array keeps the machine's alignment: `_Alignas(16)`, and
+  `pad` chosen so `frame + pad` is congruent to `entry_sp + low` modulo 16.
+  The entry stack pointer's residue is the convention's to state
+  (`r2abi::CallingConvention`): SysV AMD64 makes `%rsp + 8` a multiple of 16
+  at entry (psABI §3.2.2), AAPCS64 makes SP a multiple of 16 at any public
+  interface. A convention that states none declares no frame array.
+- **Contents at entry.** The array starts indeterminate, as the machine's frame
+  does; a read before any write is the program's own, and the gate sees it.
+
+Cost: one pass over the frame objects, `O(objects)`.
+
 ## What survives
 
 - The dominator-tree structurer and its certificate (SD, done): ported as D1.
@@ -106,7 +188,7 @@ Agreement means:
 | D0 | `RenderInput` built from the sealed artifact; a Dylint forbids `r2dec::render` from reading anything else |
 | D1 | control alone renders the census with every value residual; the §3 certificate holds on every function |
 | D2 + D3 | values and terms render; the census residual count is at most the old path's |
-| D4 | declarations from the frame model and types; `afv` and `pdd` agree on every local |
+| D4 | declarations from the frame model and types: each local `afv` lists is the range of `frame` at its entry offset that `pdd` reads it through, and every parameter, callee prototype and global the source declares is spelled at its declared type |
 | D5 + proof | the proof walk replaces the ledger; `pddj` proof counts agree with equivalence |
 | switch | the gates above hold; `rebuild` merges to master |
 

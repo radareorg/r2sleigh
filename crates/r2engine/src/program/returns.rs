@@ -28,6 +28,11 @@ impl BodyWalk {
         self.trace.supervisor_calls()
     }
 
+    /// Every direct call target the walk reached.
+    pub(super) fn calls(&self) -> &std::collections::BTreeSet<u64> {
+        self.trace.calls()
+    }
+
     /// The bytes the walk decoded as this body's instructions.
     pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
         self.trace.spans()
@@ -82,7 +87,7 @@ impl crate::body::Program for Knowing<'_> {
 impl<'p, S: Source + 'static> Walking<'p, S> {
     /// A walker over both instruction sets, entering each body in the set `entered` chooses.
     pub(super) fn new(program: View<'p, S>, entered: bool) -> Result<Self, String> {
-        let decoder = |machine: Option<&'p EmbeddedMachine>| machine.map(|m| program.target_of(m));
+        let decoder = |machine: Option<&'p EmbeddedMachine>| machine.map(|m| program.decoder_of(m));
         let primary = decoder(program.machine_in(false)).ok_or("no machine")??;
         let thumb = decoder(program.machine_in(true)).transpose()?;
         Ok(Self {

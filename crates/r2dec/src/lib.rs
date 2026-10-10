@@ -31,6 +31,7 @@ pub(crate) mod analysis;
 pub mod ast;
 mod binding_plan;
 pub mod bitvector;
+pub(crate) mod certified;
 pub(crate) mod codegen;
 pub(crate) mod consumer_structured;
 pub mod control;
@@ -43,6 +44,7 @@ mod observation_journal;
 mod placement;
 pub(crate) mod planner;
 pub mod prelude;
+pub mod render;
 pub mod report;
 pub(crate) mod single_evaluation;
 pub(crate) mod stage_timing;
@@ -1124,6 +1126,37 @@ pub(crate) fn rewritten_function_name(func: &r2ssa::RewrittenFunction<'_>) -> St
 /// A definition with nothing proven in it would still have to claim a return
 /// type and a parameter list, and a comment in place of both is not C. What is
 /// known is why nothing is defined, so that is what is written.
+/// An import stub as C, as r2engine's route decides it: the import's declaration and a comment
+/// naming it, or the comment alone where nothing states its prototype.
+pub(crate) fn import_stub_declaration(stub: &r2types::ImportStub) -> EmissionReadyFunction {
+    let name = crate::ast::c_identifier(&stub.name);
+    let entry = stub.entry;
+    let Some(signature) = stub.signature.as_ref() else {
+        let reason = format!(
+            "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
+             whose prototype nothing states."
+        );
+        return prepare_function_for_emission(residual_function_for_render_boundary(
+            &name, &reason,
+        ));
+    };
+    let reason = format!(
+        "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \
+         has no body of its own."
+    );
+    let mut function = CFunction::new(name.clone(), signature.return_type.clone())
+        .as_declaration_only(sanitize_comment_text(&reason));
+    function.externs = vec![crate::ast::CExternDecl {
+        name,
+        ret_type: signature.return_type.clone(),
+        params: Some(signature.params.clone()),
+        variadic: signature.variadic,
+        noreturn: false,
+        address: Some(entry),
+    }];
+    prepare_function_for_emission(function)
+}
+
 fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunction {
     CFunction::new(func_name.to_string(), CType::Unknown)
         .with_unknown_params()
@@ -1191,11 +1224,26 @@ impl DecompilerContext {
 #[derive(Debug, Clone)]
 pub struct DecompilerInput {
     source_owned_facts: r2types::function_facts::SourceOwnedFunctionFacts,
+    import_stub: Option<r2types::ImportStub>,
 }
 
 impl DecompilerInput {
     pub fn new(source_owned_facts: r2types::function_facts::SourceOwnedFunctionFacts) -> Self {
-        Self { source_owned_facts }
+        Self {
+            source_owned_facts,
+            import_stub: None,
+        }
+    }
+
+    /// The import this function is a stub of, as r2engine's route decides.
+    #[must_use]
+    pub fn with_import_stub(mut self, stub: Option<r2types::ImportStub>) -> Self {
+        self.import_stub = stub;
+        self
+    }
+
+    pub fn import_stub(&self) -> Option<&r2types::ImportStub> {
+        self.import_stub.as_ref()
     }
 
     pub fn source_owned_facts(&self) -> &r2types::function_facts::SourceOwnedFunctionFacts {
@@ -3012,8 +3060,10 @@ impl Decompiler {
         work.poll()?;
         let prepared = input.prepared_ssa();
         let func = prepared.function();
-        if let Some(declaration) = self.import_stub_declaration(prepared) {
-            return Ok(InternalBuildProduct::Residual(declaration));
+        if let Some(stub) = input.import_stub() {
+            return Ok(InternalBuildProduct::Residual(import_stub_declaration(
+                stub,
+            )));
         }
         if crate::debug::debug_merges() {
             let graph = prepared.graph();
@@ -3855,185 +3905,6 @@ impl Decompiler {
         Ok(InternalBuildProduct::Native(native))
     }
 
-    /// The declaration an import stub renders as.
-    ///
-    /// A stub is one tail transfer to an import and nothing else: no store, no
-    /// other call, no register written that the transfer does not carry. It has
-    /// no body of its own, so it renders as the import's declaration and a
-    /// comment naming the import, and it is counted as a declaration. A stub
-    /// whose import has no prototype renders as the comment alone: nothing is
-    /// invented for it.
-    fn import_stub_declaration(
-        &self,
-        prepared: &r2ssa::SsaArtifact,
-    ) -> Option<EmissionReadyFunction> {
-        let certificates = prepared.certificates();
-        let [callsite] = certificates.callsites.values().collect::<Vec<_>>()[..] else {
-            r2il::refusal_evidence!(
-                "import-stub-declaration",
-                "{:#x}: {} call sites, not one",
-                prepared.function().entry,
-                certificates.callsites.len()
-            );
-            return None;
-        };
-        if callsite.transfer != r2ssa::CallSiteTransfer::TailCall
-            || !certificates.returns.is_empty()
-        {
-            r2il::refusal_evidence!(
-                "import-stub-declaration",
-                "{:#x}: transfer {:?}, {} return certificates",
-                prepared.function().entry,
-                callsite.transfer,
-                certificates.returns.len()
-            );
-            return None;
-        }
-        let graph = prepared.graph();
-        let machine = prepared.machine_context();
-        let clobbered = machine
-            .call_clobbered_carriers()
-            .iter()
-            .map(|storage| storage.location())
-            .collect::<std::collections::BTreeSet<_>>();
-        let arguments = machine
-            .abi_model()
-            .argument_registers()
-            .iter()
-            .map(|slot| slot.storage().location())
-            .collect::<std::collections::BTreeSet<_>>();
-        let transfer_inputs = graph
-            .inst(callsite.at)
-            .map(|inst| inst.inputs.to_vec())
-            .unwrap_or_default();
-        let observable = graph.insts.iter().find(|inst| {
-            if matches!(
-                inst.payload,
-                r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { .. } | r2ssa::SSAOp::Call { .. })
-            ) {
-                return true;
-            }
-            let Some(output) = inst.output else {
-                return false;
-            };
-            if transfer_inputs.contains(&output) {
-                return false;
-            }
-            // A write nothing reads and nothing carries out is the transfer's
-            // own bookkeeping, such as the program counter it sets.
-            if graph.use_sites(output).is_empty() && !prepared.live_out().contains(output) {
-                return false;
-            }
-            graph
-                .value(output)
-                .and_then(|value| value.canonical_storage)
-                .is_some_and(|storage| match storage.space {
-                    r2ssa::CanonicalStorageSpace::Ram => true,
-                    r2ssa::CanonicalStorageSpace::Register => {
-                        let location = storage.location();
-                        arguments.contains(&location) || !clobbered.contains(&location)
-                    }
-                    _ => false,
-                })
-        });
-        if let Some(inst) = observable {
-            r2il::refusal_evidence!(
-                "import-stub-declaration",
-                "{:#x}: the body defines observable state beside the transfer: {:?} -> {:?} caller_supplied={}",
-                prepared.function().entry,
-                inst.payload,
-                inst.output
-                    .and_then(|output| graph.value(output))
-                    .map(|value| (value.var.display_name(), value.canonical_storage)),
-                inst.output
-                    .is_some_and(|output| graph.caller_supplied(output))
-            );
-            return None;
-        }
-        let Some(identity) =
-            self.context
-                .function_facts
-                .callee_resolution()
-                .and_then(|resolution| {
-                    resolution.identity_for_callsite(r2types::CallsiteKey { at: callsite.at })
-                })
-        else {
-            r2il::refusal_evidence!(
-                "import-stub-declaration",
-                "{:#x}: the transfer resolves to no callee identity",
-                prepared.function().entry
-            );
-            return None;
-        };
-        // An external symbol reached through a relocation slot is an import
-        // by another name; an internal or unknown callee is not a stub's.
-        if !matches!(
-            identity.class,
-            r2types::CalleeClass::Imported | r2types::CalleeClass::ExternalSymbol
-        ) {
-            r2il::refusal_evidence!(
-                "import-stub-declaration",
-                "{:#x}: the callee is {:?}, not an import: {:?}",
-                prepared.function().entry,
-                identity.class,
-                identity
-            );
-            return None;
-        }
-        let name = identity
-            .display_name
-            .as_deref()
-            .or(identity.normalized_name.as_deref())
-            .or(identity.raw_name.as_deref())?;
-        let name = crate::ast::c_identifier(name);
-        let entry = prepared.function().entry;
-        // The signature certified for this call site is the one a caller's
-        // call renders with: the import's declaration, placed at the slot
-        // the stub jumps through. The identity's own is a by-name lookup,
-        // which a capture that states no names has nothing in.
-        let key = r2types::CallsiteKey { at: callsite.at };
-        let certified = self
-            .context
-            .function_facts
-            .callsites()
-            .and_then(|facts| facts.by_callsite.get(&key))
-            .and_then(|fact| fact.callee_signature.as_ref());
-        let Some(signature) = certified.or(identity.signature.as_ref()) else {
-            r2il::refusal_evidence!(
-                "import-stub-declaration",
-                "tail transfer at {:?} resolves to {name}, which has no prototype",
-                callsite.at
-            );
-            let reason = format!(
-                "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
-                 whose prototype nothing states."
-            );
-            return Some(prepare_function_for_emission(
-                crate::residual_function_for_render_boundary(&name, &reason),
-            ));
-        };
-        r2il::refusal_evidence!(
-            "import-stub-declaration",
-            "tail transfer at {:?} resolves to {name}, declared rather than defined",
-            callsite.at
-        );
-        let reason = format!(
-            "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \
-             has no body of its own."
-        );
-        let mut function = CFunction::new(name.clone(), signature.return_type.clone())
-            .as_declaration_only(sanitize_comment_text(&reason));
-        function.externs = vec![crate::ast::CExternDecl {
-            name,
-            ret_type: signature.return_type.clone(),
-            params: Some(signature.params.clone()),
-            variadic: signature.variadic,
-            noreturn: false,
-            address: Some(entry),
-        }];
-        Some(prepare_function_for_emission(function))
-    }
-
     fn stmt_to_vec(&self, stmt: CStmt) -> Vec<CStmt> {
         let (semantic, observations) = stmt.into_semantic_with_observations();
         match semantic {
@@ -4260,7 +4131,9 @@ fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
     match ty.unaliased() {
         CType::Bool => Some(8),
         CType::Int { bits, .. } | CType::Float(bits) | CType::BitVector(bits) => Some(*bits),
-        CType::Pointer(_) | CType::Function { .. } => Some(pointer_bits),
+        CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+            Some(pointer_bits)
+        }
         CType::Array(element, Some(len)) => {
             c_object_storage_bits(element, pointer_bits)?.checked_mul(u32::try_from(*len).ok()?)
         }

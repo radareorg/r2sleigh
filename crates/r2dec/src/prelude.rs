@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{CExpr, CFunction, CStmt, CType};
+use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType};
 
 /// One P-code flag computed from two operands of one width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -430,6 +430,8 @@ pub enum ResidualCause {
     NeverAssigned,
     /// A conversion to or from a float C has no type for.
     UnrepresentableFloat,
+    /// A float converted to an integer that does not hold it, which C leaves undefined.
+    UndefinedConversion,
     /// A marked gap: an operation, or a branch or dispatch test, the renderer
     /// could not lower. The gap's own marker says which.
     Gap,
@@ -444,6 +446,7 @@ impl ResidualCause {
             Self::UnadmittedArgument => "unadmitted-argument",
             Self::NeverAssigned => "never-assigned",
             Self::UnrepresentableFloat => "unrepresentable-float",
+            Self::UndefinedConversion => "undefined-conversion",
             Self::Gap => "gap",
         }
     }
@@ -470,6 +473,36 @@ pub(crate) fn residual(ty: &CType, cause: ResidualCause) -> Option<CExpr> {
         CExpr::cast(ty.clone(), call)
     } else {
         call
+    })
+}
+
+/// `x`, a float with no effect, toward zero into a signed `int_bits` integer where C defines it, and
+/// a residual elsewhere (C17 6.3.1.4; doc/adr-floating-point.md, decision 5).
+pub(crate) fn guarded_truncation(x: CExpr, float_bits: u32, int_bits: u32) -> Option<CExpr> {
+    let significand = match float_bits {
+        32 => 24,
+        64 => 53,
+        _ => return None,
+    };
+    if !matches!(int_bits, 8 | 16 | 32 | 64) {
+        return None;
+    }
+    let ty = CType::int(int_bits);
+    let limit = 2f64.powi(i32::try_from(int_bits).ok()? - 1);
+    // The tests read the value again: one occurrence carries its observations, as a read once.
+    let tested = x.clone_without_render_observations();
+    // The bound below the range is exact where the format holds `-limit - 1`, else `-limit` is.
+    let (op, bound) = if int_bits < significand {
+        (BinaryOp::Gt, -limit - 1.0)
+    } else {
+        (BinaryOp::Ge, -limit)
+    };
+    let low = CExpr::binary(op, tested.clone(), CExpr::FloatLit(bound, float_bits));
+    let high = CExpr::binary(BinaryOp::Lt, tested, CExpr::FloatLit(limit, float_bits));
+    Some(CExpr::Ternary {
+        cond: Box::new(CExpr::binary(BinaryOp::And, low, high)),
+        then_expr: Box::new(CExpr::cast(ty.clone(), x)),
+        else_expr: Box::new(residual(&ty, ResidualCause::UndefinedConversion)?),
     })
 }
 
@@ -513,6 +546,15 @@ pub(crate) fn helpers_called(function: &CFunction) -> BTreeSet<Helper> {
         helpers.insert(Helper::Residual(ResidualType::Void));
     }
     helpers
+}
+
+/// Whether an expression evaluates a residual somewhere inside it.
+pub(crate) fn holds_residual(expr: &CExpr) -> bool {
+    let mut found = false;
+    expr.visit(&mut |inner| {
+        found |= matches!(inner, CExpr::Call { func, .. } if is_residual_callee(func).is_some());
+    });
+    found
 }
 
 /// How many residuals a function holds: one for each residual call and each
@@ -685,6 +727,61 @@ pub(crate) const INCLUDES: &[&str] = &["#include <stdint.h>"];
 pub(crate) mod tests {
     use super::*;
     use crate::ast::RenderObservationId;
+
+    /// The range a truncation is defined on: the bound below is `-2^(n-1) - 1` exclusive where the
+    /// float format holds it, else `-2^(n-1)` inclusive; above, `2^(n-1)` exclusive.
+    #[test]
+    fn a_truncation_is_guarded_by_the_range_c_defines() {
+        let symbols = std::cell::RefCell::new(crate::symbol::SymbolTable::new());
+        let x = || CExpr::var(crate::symbol::declare(&symbols, "x"));
+        let bounds = |float_bits, int_bits| match guarded_truncation(x(), float_bits, int_bits) {
+            Some(CExpr::Ternary {
+                cond, else_expr, ..
+            }) => {
+                let CExpr::Binary { left, right, .. } = *cond else {
+                    panic!("a conjunction")
+                };
+                let bound = |side: &CExpr| match side {
+                    CExpr::Binary {
+                        op, right: limit, ..
+                    } => match limit.as_ref() {
+                        CExpr::FloatLit(value, _) => (*op, *value),
+                        other => panic!("a float literal: {other:?}"),
+                    },
+                    other => panic!("a comparison: {other:?}"),
+                };
+                assert!(
+                    is_residual_callee(match *else_expr {
+                        CExpr::Call { ref func, .. } => func,
+                        ref other => panic!("a residual: {other:?}"),
+                    })
+                    .is_some()
+                );
+                (bound(&left), bound(&right))
+            }
+            other => panic!("a guarded cast: {other:?}"),
+        };
+        assert_eq!(
+            bounds(64, 32),
+            (
+                (BinaryOp::Gt, -2_147_483_649.0),
+                (BinaryOp::Lt, 2_147_483_648.0)
+            )
+        );
+        assert_eq!(
+            bounds(32, 32),
+            (
+                (BinaryOp::Ge, -2_147_483_648.0),
+                (BinaryOp::Lt, 2_147_483_648.0)
+            )
+        );
+        assert_eq!(
+            bounds(64, 64).0,
+            (BinaryOp::Ge, -9_223_372_036_854_775_808.0)
+        );
+        assert_eq!(bounds(32, 16).0, (BinaryOp::Gt, -32_769.0));
+        assert!(guarded_truncation(x(), 80, 32).is_none());
+    }
 
     /// A marker covers the residuals its own occurrence evaluates -- inside
     /// its expression, in its statement's test, in a gap it stands on -- and

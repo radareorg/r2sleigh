@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal. Re-blessed after 63e6300e and fec919f7 (run at fec919f7 on contabo, 604 equal): classify clang-O1/O2 and gcc-O2 equal (a number an operation computes with is no string literal), shape_call_chain clang-O1/O2 equal (a frame base survives every call and ends at its block's rewrite); no other record moved. shape_stack_buffer gcc-O0's residual reads as r2sleigh_residual_u64 since f9111a28 (bisected: i64 at f9111a28^): a merge no storage keeps live is no longer placed, and the residual takes the canary load's unsigned type instead of the merge's; still the SSP canary trap. Re-blessed at P4's exit (9da018ab; one frame model, the canary decided under UbFreeSource, promotion as an SSA rewrite, the merged-reach extent rule): 629 equal. The canary's residual trap had hidden defects; each record that left it names its owner, and the calls whose arity the registers leave unproven refuse (decided 2026-10-07).",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal. Re-blessed after 63e6300e and fec919f7 (run at fec919f7 on contabo, 604 equal): classify clang-O1/O2 and gcc-O2 equal (a number an operation computes with is no string literal), shape_call_chain clang-O1/O2 equal (a frame base survives every call and ends at its block's rewrite); no other record moved. shape_stack_buffer gcc-O0's residual reads as r2sleigh_residual_u64 since f9111a28 (bisected: i64 at f9111a28^): a merge no storage keeps live is no longer placed, and the residual takes the canary load's unsigned type instead of the merge's; still the SSP canary trap. Re-blessed at P4's exit (9da018ab; one frame model, the canary decided under UbFreeSource, promotion as an SSA rewrite, the merged-reach extent rule): 629 equal. The canary's residual trap had hidden defects; each record that left it names its owner, and the calls whose arity the registers leave unproven refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at 610286e8 on gcc 13.3.0 / clang 18.1.3): 638 equal. A body writing both result registers is unproven unless the program's calls read one; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at clang-O0 and gcc-O0 (it returned the loop counter from rax), hashes gcc-O2 main (it called combined() without the buffer), shapes main at clang-O1, clang-O2, gcc-O1 and gcc-O2, and five mains whose calls now take what the caller wrote. Lost to an honest residual: crc32_init twice and fill (void, unread), manual_limits gcc-O2 main (no caller in the program).",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -744,7 +744,9 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::clang-O2::crc32_init": {
-   "status": "equal"
+   "cause": "The source returns void; the vectorized body leaves both RAX and XMM0 written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/hashes.c::clang-O2::crc32_table": {
    "status": "equal"
@@ -901,7 +903,9 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O2::crc32_init": {
-   "status": "equal"
+   "cause": "The source returns void; the vectorized body leaves both RAX and XMM0 written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O2::crc32_table": {
    "status": "equal"
@@ -919,9 +923,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O2::main": {
-   "cause": "[P6 body (callee facts from the one resolved body, bottom-up, including its callees' contracts and preserved sets) + P7 calls (Exact/AtLeast arity)] main calls `combined(p, n)` (0x401b70), but the rendering declares `uint64_t fcn_401b70(void);` and calls it with no arguments. The original combined then runs with garbage RDI and faults in fnv1a64 at 0x4013b0 (`movzx edx,BYTE PTR [rdi]`). The reason is that combined, when it is prepared as a callee, gets no facts for its own callees: prepare_callee calls declare_imports only. Two things follow. (1) Its first call, fnv1a64(p,n), falls back to caller writes. RDI and RSI there are entry values, not written_by_body, so the arity is 0 and is marked complete. (2) gcc -fipa-ra keeps p and n in R...",
-   "reason": "exit",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O2::murmur3_32": {
    "status": "equal"
@@ -1057,9 +1059,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::main": {
-   "cause": "[P7 calls] The printf variadic tail is dropped: 15 calls of printf((const int8_t*)\"%016llx\\n\") with no value argument, under int32_t printf(const int8_t*). printf prints whatever RSI holds.",
-   "reason": "-O0 and -O2 builds disagree stdout",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value (struct mixed in RDI:RSI). VERIFIED: pdd renders `return RSI_0 ^ ((RDI_0 >> 24 & (uint64_t)-0x100) | (RDI_0 << 56 | (uint64_t)((uint32_t)RDI_0 & 0xffff0000) << 24));`. RDI<<56 is byte<<56. (RDI&0xffff0000)<<24 is half<<40. (RDI>>24)&~0xff is word<<8. The bit ranges 56-63, 40-55 and 8-39 are disjoint, so OR equals XOR, and the result is bit-exact to the source. The gate should lift this once it has a SysV aggregate classifier (spec.py has none yet) and can pass the two eightbytes.",
@@ -1167,9 +1167,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::main": {
-   "cause": "[P7 calls] The printf variadic tail is dropped: 15 calls of printf(\"%016llx\\n\") with no argument, under int32_t printf(const int8_t*).",
-   "reason": "-O0 and -O2 builds disagree stdout",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value (struct mixed in RDI:RSI). The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`, which is register-equivalent. The gate should lift this by passing the two eightbytes, which first needs a SysV aggregate classifier in spec.py.",
@@ -1384,9 +1382,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::main": {
-   "cause": "[P7 calls] The __printf_chk variadic tail is dropped: 15 calls of __printf_chk(2, (const int8_t*)\"%016llx\\n\") under int32_t __printf_chk(int32_t, const int8_t*).",
-   "reason": "-O0 and -O2 builds disagree stdout",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value in RDI:RSI. The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`. The gate should lift this, which needs a SysV aggregate classifier plus an eightbyte thunk.",
@@ -1498,9 +1494,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::main": {
-   "cause": "[P7 calls] The __printf_chk variadic tail is dropped: 15 calls of __printf_chk(2, \"%016llx\\n\") with no value argument.",
-   "reason": "-O0 and -O2 builds disagree stdout",
-   "status": "ub"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value in RDI:RSI. The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`. The gate should lift this, which needs a SysV aggregate classifier plus an eightbyte thunk.",
@@ -1872,9 +1866,7 @@
    "status": "equal"
   },
   "tests/gold/code_pointer_table.c::clang-O0::main": {
-   "cause": "[P7] table_dispatch reads an argument slot its call of unproven arity cannot see, so it states no call contract and main's call to it is a residual (decision: a callee whose arity is unproven gets no contract, 2026-10-07).",
-   "reason": "r2sleigh_residual_void",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/code_pointer_table.c::clang-O0::table_dispatch": {
    "cause": "[P7] An indirect call nothing declares stops its argument count at a slot the body did not write while a later one is written, so the count is unproven and the call refuses where it rendered without its arguments (P4 exit, 2026-10-07; decision: refuse an unproven arity).",
@@ -1940,9 +1932,7 @@
    "status": "equal"
   },
   "tests/gold/code_pointer_table.c::gcc-O1::main": {
-   "cause": "[P7] table_dispatch states no call contract (its own indirect calls have unproven arity), so main's call to it is a residual; it rendered table_dispatch() without its arguments (differs).",
-   "reason": "r2sleigh_residual_void",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/code_pointer_table.c::gcc-O1::table_dispatch": {
    "cause": "[P7] An indirect call nothing declares stops its argument count at a slot the body did not write while a later one is written, so the count is unproven and the call refuses where it rendered without its arguments (P4 exit, 2026-10-07; decision: refuse an unproven arity).",
@@ -1959,9 +1949,7 @@
    "status": "equal"
   },
   "tests/gold/code_pointer_table.c::gcc-O2::main": {
-   "cause": "[P7] table_dispatch states no call contract (its own indirect calls have unproven arity), so main's call to it is a residual; it rendered table_dispatch() without its arguments (differs).",
-   "reason": "r2sleigh_residual_void",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/code_pointer_table.c::gcc-O2::table_dispatch": {
    "cause": "[P7] An indirect call nothing declares stops its argument count at a slot the body did not write while a later one is written, so the count is unproven and the call refuses where it rendered without its arguments (P4 exit, 2026-10-07; decision: refuse an unproven arity).",
@@ -2077,9 +2065,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::main": {
-   "cause": "[P7] fcn_4012a0 reads entry rcx past its two parameters (a stale register on a path that does not use it), so its arity is unproven and main's call to it is a residual; the register-count fallback had dropped its string argument and crashed (decision 2026-10-07).",
-   "reason": "r2sleigh_residual_void",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::mem_scan2": {
    "status": "equal"
@@ -2179,7 +2165,9 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::gcc-O2::main": {
-   "status": "equal"
+   "cause": "main returns `manual_sink == 0` in eax and zeroes its structs through xmm0, so both result registers are written on its way out (#85); its only caller is __libc_start_main, through a pointer and outside the program, so no call read decides the carrier (#86): the return is a residual. Owner: r2abi, __libc_start_main's main stated as int (*)(int, char**, char**), spelled `func` today.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::gcc-O2::mem_scan2": {
    "status": "equal"
@@ -2203,9 +2191,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O0::avg": {
-   "cause": "[P7 calls (float result class, and the result proof: defined on every path and demanded by a caller)] avg returns a double in XMM0, but the recovered interface has no floating-point result class. All the addsd/divsd work is dropped as unobserved, and the result is claimed as RAX, which nothing demands. At -O0, RAX holds whatever was last loaded into EAX, which is the loop index i. The rendering is `uint32_t fcn_4012e0(...)` with `return (uint32_t)stack_m36;`, so XMM0 is never written.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::clang-O0::bit_count": {
    "status": "equal"
@@ -2234,9 +2220,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O0::main": {
-   "cause": "[P7 float result] The run reaches the counted residual for avg's double result (XMM0 read as r2sleigh_residual_u64); the frame and the printf tail are right since P4.1 and the variadic contract. Was ub.",
-   "reason": "r2sleigh_residual_u64",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/review.c::clang-O0::mul_div": {
    "status": "equal"
@@ -2364,9 +2348,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::avg": {
-   "cause": "[P7 calls] The XMM0 double result is dropped because there is no float result class. The interface claims RAX, whose last load is the loop index, so the rendering returns `(uint32_t)stack_m20` (i). The accumulation into s is elided as unobserved.",
-   "reason": "return",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::bit_count": {
    "status": "equal"
@@ -2395,9 +2377,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::main": {
-   "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision. Also residual(2) `r2sleigh_float_from_bits_64(r2sleigh_residual_u64(2))` = XMM0_8, avg's double result read after `call avg` w...",
-   "reason": "r2sleigh_residual_u64",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/review.c::gcc-O0::mul_div": {
    "status": "equal"
@@ -2494,7 +2474,9 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O2::fill": {
-   "status": "equal"
+   "cause": "The source returns void; the vectorized body leaves both RAX and XMM0 written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
+   "reason": "r2sleigh_residual_u64",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::find": {
    "status": "equal"

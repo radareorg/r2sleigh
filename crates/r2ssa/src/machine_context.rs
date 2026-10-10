@@ -475,6 +475,8 @@ pub struct SourceMachineContext {
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
     result_owners: BTreeSet<u64>,
+    /// Whether the result is unproven because the body writes both result registers.
+    result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
     callee_statements: BTreeMap<u64, CalleeStatement>,
     /// Exact source-owned register geometry; no write policy is stored here.
@@ -488,8 +490,6 @@ pub struct SourceMachineContext {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
-    /// Sites whose callee's body leaves its arity unproven: no count read off the registers stands.
-    arity_unproven_sites: BTreeSet<SourceCallSiteIdentity>,
     /// How far each callee is proven to touch through each pointer argument,
     /// by the callee's own entry address. What a callee reaches through one
     /// address is one object in this frame, and the object model is built
@@ -971,6 +971,7 @@ impl SourceMachineContext {
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
             result_owners: BTreeSet::new(),
+            result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
             register_geometry_state,
@@ -979,7 +980,6 @@ impl SourceMachineContext {
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
-            arity_unproven_sites: BTreeSet::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
             frame_saves: Vec::new(),
@@ -1163,6 +1163,16 @@ impl SourceMachineContext {
         self.result_owners = owners;
     }
 
+    /// Whether recovery left the result unproven because the body writes both result registers,
+    /// which what the program's calls read can decide (doc/adr-resolved-bodies.md, "Caller reads").
+    pub const fn result_ambiguous(&self) -> bool {
+        self.result_ambiguous
+    }
+
+    pub(crate) const fn set_result_ambiguous(&mut self, ambiguous: bool) {
+        self.result_ambiguous = ambiguous;
+    }
+
     /// What the callee at `target` states, where its unproven result mints no call contract.
     pub(crate) fn callee_statement(&self, target: u64) -> Option<&CalleeStatement> {
         self.callee_statements.get(&target)
@@ -1270,15 +1280,6 @@ impl SourceMachineContext {
         callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     ) {
         self.callee_linkages = callee_linkages;
-    }
-
-    pub(crate) fn set_arity_unproven_sites(&mut self, sites: BTreeSet<SourceCallSiteIdentity>) {
-        self.arity_unproven_sites = sites;
-    }
-
-    /// Whether the callee at this site leaves its arity unproven.
-    pub(crate) fn call_arity_unproven(&self, site: SourceCallSiteIdentity) -> bool {
-        self.arity_unproven_sites.contains(&site)
     }
 
     pub(crate) fn set_callee_names(
@@ -3080,20 +3081,24 @@ mod tests {
     }
 }
 
-/// What a callee's body states when its unproven result mints no call contract (doc/adr-resolved-bodies.md).
+/// What a callee's body states when it mints no call contract (doc/adr-resolved-bodies.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct CalleeStatement {
     /// The register parameters its body itself proves it reads.
     pub(crate) at_least: usize,
+    /// Its result, where the body proves it and only the parameters are a floor.
+    pub(crate) result: Option<crate::SourceCallResult>,
 }
 
 impl CalleeStatement {
-    /// Each callee interface whose result is unproven, which mints no call contract, as a statement.
+    /// Each callee interface that mints no call contract (an unproven result, or parameters that are
+    /// a floor), as a statement.
     pub(crate) fn of(
         interfaces: &BTreeMap<u64, crate::SourceFunctionInterface>,
     ) -> BTreeMap<u64, Self> {
         let unproven = interfaces.iter().filter(|(_, interface)| {
             interface.return_kind() == crate::SourceFunctionReturn::Unproven
+                || interface.reads_past_parameters()
         });
         let registers = |interface: &crate::SourceFunctionInterface| {
             let parameters = interface.parameters().iter();
@@ -3106,6 +3111,13 @@ impl CalleeStatement {
                 *address,
                 Self {
                     at_least: registers(interface),
+                    result: match interface.return_kind() {
+                        crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
+                        crate::SourceFunctionReturn::Register { storage } => {
+                            Some(crate::SourceCallResult::Register { storage })
+                        }
+                        crate::SourceFunctionReturn::Unproven => None,
+                    },
                 },
             )
         });

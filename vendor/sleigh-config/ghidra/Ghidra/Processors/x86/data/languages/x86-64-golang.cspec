@@ -63,6 +63,27 @@
 				<pentry minsize="4" maxsize="8" metatype="float">
 					<register name="XMM7_Qa"/>
 				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM8_Qa"/>
+				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM9_Qa"/>
+				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM10_Qa"/>
+				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM11_Qa"/>
+				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM12_Qa"/>
+				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM13_Qa"/>
+				</pentry>
+				<pentry minsize="4" maxsize="8" metatype="float">
+					<register name="XMM14_Qa"/>
+				</pentry>
 				
 				<pentry minsize="1" maxsize="8">
 					<register name="RAX"/>
@@ -146,7 +167,6 @@
 				<register name="RSP"/>
 				<register name="RBP"/>
 				<register name="R14"/>        
-				<register name="RDX"/>        
 			</unaffected>
 		</prototype>
 	</default_proto>
@@ -176,7 +196,6 @@
 			<register name="RSP"/>
 			<register name="RBP"/>
 			<register name="R14"/>        
-			<register name="RDX"/>        
 		</unaffected>
 	</prototype>
     

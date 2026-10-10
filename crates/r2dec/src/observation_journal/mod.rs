@@ -44,27 +44,7 @@ pub(crate) use cells::{
     LegacyWriteObservation,
 };
 
-/// Opaque dense identity of one exact marked AST occurrence.
-///
-/// It is deliberately neither serializable nor deserializable. Production
-/// construction is private to [`LegacyObservationJournal`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RenderObservationId(u32);
-
-impl RenderObservationId {
-    pub(crate) const fn index(self) -> u32 {
-        self.0
-    }
-
-    pub(crate) fn from_dense_index(index: usize) -> Self {
-        Self(u32::try_from(index).expect("validated observation domain fits u32"))
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn from_index(index: u32) -> Self {
-        Self(index)
-    }
-}
+pub use crate::ast::RenderObservationId;
 
 /// Capability required to expose a marked emission tree for journal sealing.
 /// Its constructor is private to this module, so no other lowering or codegen
@@ -73,6 +53,11 @@ pub(crate) struct ObservationSealAuthority(());
 
 impl ObservationSealAuthority {
     fn new() -> Self {
+        Self(())
+    }
+
+    /// The staged pipeline's seal: its writer states the instruction each marker was written for.
+    pub(crate) fn staged() -> Self {
         Self(())
     }
 }

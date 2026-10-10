@@ -146,6 +146,38 @@ pub fn translate_ptradd<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     })
 }
 
+/// A zero written to a register range no integer is as wide as (AArch64's `zext_zb` writes
+/// `reg[8,56] = 0`) as the aligned power-of-two pieces it covers: the same bytes, the same zeros.
+pub fn split_odd_register_zeroes(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        let R2ILOp::Copy { dst, src } = &op else {
+            out.push(op);
+            continue;
+        };
+        if dst.space != SpaceId::Register
+            || src.space != SpaceId::Const
+            || src.offset != 0
+            || dst.size.is_power_of_two()
+        {
+            out.push(op);
+            continue;
+        }
+        let (mut at, end) = (dst.offset, dst.offset.saturating_add(u64::from(dst.size)));
+        while at < end {
+            let aligned = 1u64 << at.trailing_zeros().min(3);
+            let piece = aligned.min(1u64 << (end - at).ilog2());
+            let size = u32::try_from(piece).expect("at most eight bytes");
+            out.push(R2ILOp::Copy {
+                dst: Varnode::register(at, size),
+                src: Varnode::constant(0, size),
+            });
+            at += piece;
+        }
+    }
+    out
+}
+
 /// Rewrite every direct-address memory operand into an explicit access.
 ///
 /// Sleigh spells a memory operand with a constant address as a varnode in the
@@ -227,6 +259,31 @@ pub fn canonicalize_memory_operands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `addv b0` zeroes Z0's bytes 1 to 31; the 7 bytes above B0 become one, two and four.
+    #[test]
+    fn a_zero_over_an_odd_register_range_is_aligned_pieces() {
+        let split = split_odd_register_zeroes(vec![R2ILOp::Copy {
+            dst: Varnode::register(0x5001, 7),
+            src: Varnode::constant(0, 7),
+        }]);
+        let pieces = split
+            .iter()
+            .map(|op| match op {
+                R2ILOp::Copy { dst, src } => (dst.offset, dst.size, src.offset, src.size),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pieces,
+            [(0x5001, 1, 0, 1), (0x5002, 2, 0, 2), (0x5004, 4, 0, 4)]
+        );
+        let wide = R2ILOp::Copy {
+            dst: Varnode::register(0x5008, 8),
+            src: Varnode::constant(0, 8),
+        };
+        assert_eq!(split_odd_register_zeroes(vec![wide]).len(), 1);
+    }
 
     // Mock implementation for testing
     struct MockPcodeSource {

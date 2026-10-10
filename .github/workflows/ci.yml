@@ -378,13 +378,16 @@ jobs:
   # baseline names the compilers it was blessed on (Ubuntu 24.04's gcc 13 and
   # clang 18, which this image carries); another toolchain is refused.
   equivalence-shard:
-    name: Equivalence ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
+    name: Equivalence ${{ matrix.pipeline }} ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
     runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 10
+    # The staged decompiler (ROADMAP D) is graded beside the legacy one and gates nothing yet.
+    continue-on-error: ${{ matrix.pipeline == 'staged' }}
     strategy:
       fail-fast: false
       matrix:
+        pipeline: [legacy, staged]
         compiler: [gcc, clang]
         opt: [O0, O1, O2]
         # Split by measured time, not record count (run 37137792784's
@@ -411,8 +414,14 @@ jobs:
           clang --version | head -n 1
       - name: Grade the shard
         run: |
+          r2s=target/ci/r2s
+          if [ "${{ matrix.pipeline }}" = staged ]; then
+            printf '#!/bin/sh\nexec "%s" -e dec.pipeline=staged "$@"\n' "$PWD/target/ci/r2s" > target/ci/r2s-staged
+            chmod +x target/ci/r2s-staged
+            r2s=target/ci/r2s-staged
+          fi
           timeout -s ABRT 8m python3 tests/equiv/run_equiv.py \
-            --r2s target/ci/r2s \
+            --r2s "$r2s" \
             --sources ${{ matrix.part.sources }} \
             --compilers ${{ matrix.compiler }} \
             --opts ${{ matrix.opt }} \
@@ -421,7 +430,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
+          name: equiv-${{ matrix.pipeline == 'staged' && 'staged-' || '' }}shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
           # The stripped binaries graded, so a moved record can be read locally.
           path: |
             ${{ runner.temp }}/equiv/records.json
@@ -455,6 +464,32 @@ jobs:
           path: |
             ${{ runner.temp }}/equiv/records.json
             ${{ runner.temp }}/equiv/baseline.proposed.json
+          if-no-files-found: warn
+
+  equivalence-staged:
+    name: Equivalence Staged (informative)
+    runs-on: ubuntu-24.04
+    needs: equivalence-shard
+    if: ${{ !cancelled() }}
+    continue-on-error: true
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-staged-shard-*
+          path: ${{ runner.temp }}/shards
+      - name: Compare the staged pipeline with the legacy baseline
+        run: |
+          python3 tests/equiv/merge_shards.py \
+            --baseline tests/equiv/baseline.json \
+            --out "$RUNNER_TEMP/equiv" \
+            "$RUNNER_TEMP"/shards/*/records.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equivalence-staged-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/equiv/records.json
           if-no-files-found: warn
 
   # The same ratchet for AArch64 (D6): built with Ubuntu 24.04's cross gcc 13 and

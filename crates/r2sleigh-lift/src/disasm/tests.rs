@@ -1348,9 +1348,22 @@ fn fixed_value_pcode_uses_the_typed_sleigh_translation() {
 fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
     let windows = embedded_windows_machine("aarch64").expect("v8A");
     assert_eq!(
-        windows.windows_compiler_spec,
+        windows.compiler_spec_of("windows"),
         Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN)
     );
     let usual = embedded_machine("aarch64").expect("AppleSilicon");
-    assert_eq!(usual.windows_compiler_spec, None);
+    assert_eq!(usual.compiler_spec_of("windows"), None);
+    // Both languages name Go's toolchain.
+    assert!(usual.compiler_spec_of("golang").is_some());
+    assert!(windows.compiler_spec_of("golang").is_some());
+}
+
+/// The walk's machine and the trusted lift read one parse of the specification on a thread.
+#[cfg(feature = "x86")]
+#[test]
+fn an_embedded_machine_shares_the_trusted_profile_s_parse() {
+    let machine = embedded_machine("x86-64").expect("x86-64");
+    let trusted =
+        Disassembler::shared_trusted_profile(TrustedSleighProfile::X86_64).expect("trusted");
+    assert!(machine.disasm.shares_loaded_specification(&trusted));
 }

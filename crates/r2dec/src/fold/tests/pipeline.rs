@@ -1022,6 +1022,7 @@ mod tests {
                     .symbol_for_binding(binding)
                     .expect("dense observed binding name"),
                 stack_offset: None,
+                align: None,
             })
             .collect();
         function.body = body;
@@ -2037,7 +2038,14 @@ mod tests {
                 1,
                 returns_value,
             );
-            let input = crate::DecompilerInput::new(prepared.facts.clone());
+            // r2engine's route decides the stub (r2engine::stub); r2dec renders the one it is given.
+            let stub = r2types::ImportStub {
+                entry: 0x1340,
+                name: callee.to_owned(),
+                signature: None,
+            };
+            let input =
+                crate::DecompilerInput::new(prepared.facts.clone()).with_import_stub(Some(stub));
             let audit = audited(crate::DecompilerConfig::default(), &input);
             assert_eq!(audit.render_refusal(), None, "{}", audit.output());
             let output = audit.output();

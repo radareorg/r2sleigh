@@ -430,6 +430,9 @@ pub(crate) struct CodeGenerator<'c> {
     roles: CRoles,
     /// Set while a call's callee is written, so its name is the function.
     callee: bool,
+    /// Set while a literal is written under a cast wider than 64 bits, where a negative spelling
+    /// would sign-extend past the literal's own 64 bits.
+    wide_literal: bool,
 }
 
 impl<'c> CodeGenerator<'c> {
@@ -450,6 +453,7 @@ impl<'c> CodeGenerator<'c> {
             stopped: false,
             roles: Vec::new(),
             callee: false,
+            wide_literal: false,
         }
     }
 
@@ -718,6 +722,9 @@ impl<'c> CodeGenerator<'c> {
         // Local variable declarations
         for local in &func.locals {
             self.emit_indent();
+            if let Some(align) = local.align {
+                self.output.push_str(&format!("_Alignas({align}) "));
+            }
             let name = self.symbols.name(local.name).to_owned();
             self.emit_object_declaration(&local.ty, &name);
             self.output.push_str(";\n");
@@ -1134,6 +1141,32 @@ impl<'c> CodeGenerator<'c> {
         }
     }
 
+    /// An unsigned literal: one near the top of its 64 bits reads as the negative offset it is,
+    /// except under a cast wider than 64 bits, where a negative spelling would sign-extend.
+    fn emit_unsigned(&mut self, val: u64) {
+        let wide = std::mem::take(&mut self.wide_literal);
+        if val > LIKELY_NEGATIVE_THRESHOLD && wide {
+            self.output.push_str(&format!("0x{val:x}ULL"));
+        } else if val > LIKELY_NEGATIVE_THRESHOLD {
+            let neg = (!val).wrapping_add(1);
+            self.output.push_str(&format!("-0x{:x}", neg));
+        } else {
+            self.output
+                .push_str(&format!("{}U", format_unsigned_literal(val)));
+        }
+    }
+
+    /// `(ty)inner`; a literal under a cast wider than 64 bits keeps its unsigned spelling.
+    fn emit_cast(&mut self, ty: &CType, inner: &CExpr, my_prec: u8) {
+        self.output.push('(');
+        self.emit_type(ty);
+        self.output.push(')');
+        self.wide_literal = matches!(ty, CType::Int { bits, .. } if *bits > 64)
+            && matches!(inner.unobserved(), CExpr::UIntLit(_));
+        self.emit_expr(inner, my_prec);
+        self.wide_literal = false;
+    }
+
     /// Emit an expression with parent precedence for parenthesization.
     fn emit_expr(&mut self, expr: &CExpr, parent_prec: u8) {
         if !self.charge() {
@@ -1158,17 +1191,7 @@ impl<'c> CodeGenerator<'c> {
                 };
                 self.output.push_str(&rendered);
             }
-            CExpr::UIntLit(val) => {
-                // Check if this looks like a negative offset (high bit set, close to max)
-                if *val > LIKELY_NEGATIVE_THRESHOLD {
-                    // Convert to negative: two's complement
-                    let neg = (!*val).wrapping_add(1);
-                    self.output.push_str(&format!("-0x{:x}", neg));
-                } else {
-                    self.output
-                        .push_str(&format!("{}U", format_unsigned_literal(*val)));
-                }
-            }
+            CExpr::UIntLit(val) => self.emit_unsigned(*val),
             // The shortest spelling that reads back to the same value; a
             // `float` literal carries its suffix so it is not a double.
             CExpr::FloatLit(val, 32) => {
@@ -1279,12 +1302,7 @@ impl<'c> CodeGenerator<'c> {
             }
             CExpr::Cast {
                 ty, expr: inner, ..
-            } => {
-                self.output.push('(');
-                self.emit_type(ty);
-                self.output.push(')');
-                self.emit_expr(inner, my_prec);
-            }
+            } => self.emit_cast(ty, inner, my_prec),
             CExpr::Call { func, args, .. } => self.emit_call(func, args, my_prec),
             CExpr::Subscript { base, index } => {
                 self.emit_expr(base, my_prec);
@@ -2069,6 +2087,26 @@ mod tests {
         assert_eq!(codegen.generate_expr(&expr), "rsp + 0x48");
     }
 
+    /// `(uint64_t)-0x1` is all 64 bits set, but `(__uint128_t)-0x1` is all 128: under a wider cast
+    /// the literal keeps its unsigned spelling, or a 128-bit mask's low half clears nothing.
+    #[test]
+    fn a_literal_under_a_cast_wider_than_64_bits_is_never_spelled_negative() {
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        let under = |bits| CExpr::Cast {
+            ty: CType::Int {
+                bits,
+                signedness: r2types::Signedness::Unsigned,
+            },
+            expr: Box::new(CExpr::uint(u64::MAX)),
+            role: crate::ast::CastRole::Conversion,
+        };
+        assert_eq!(
+            codegen.generate_expr(&under(128)),
+            "(__uint128_t)0xffffffffffffffffULL"
+        );
+        assert_eq!(codegen.generate_expr(&under(64)), "(uint64_t)-0x1");
+    }
+
     #[test]
     fn test_additive_negative_linear_terms_render_as_subtraction() {
         let symbols = test_table();
@@ -2129,11 +2167,13 @@ mod tests {
                     ty: CType::i32(),
                     name: x,
                     stack_offset: Some(-8),
+                    align: None,
                 },
                 CLocal {
                     ty: CType::ptr(CType::i8()),
                     name: crate::symbol::declare(&symbols, "p"),
                     stack_offset: Some(-16),
+                    align: None,
                 },
             ],
             body: vec![

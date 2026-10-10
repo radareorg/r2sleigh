@@ -27,6 +27,7 @@ pub mod arena;
 pub(crate) mod assumption;
 pub mod block;
 pub(crate) mod bytes;
+pub mod caller_reads;
 pub mod cfg;
 pub(crate) mod constant;
 pub(crate) mod control;

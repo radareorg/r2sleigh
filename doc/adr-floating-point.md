@@ -40,6 +40,13 @@ Status: done (placement moves to the compiler specification at M1d)
      integer boundary, or the reverse, is a reinterpretation through
      `r2sleigh_float_from_bits_{32,64}` / `r2sleigh_float_to_bits_{32,64}`,
      never `(double)x`.
+   - A float truncated to an integer (`TRUNC`) is that cast only inside the
+     range C defines it on (C17 6.3.1.4): `x > -2^(n-1) - 1 && x < 2^(n-1)`,
+     the lower bound `x >= -2^(n-1)` where the format cannot hold the exact
+     one. Outside it, NaN included, C is undefined and p-code states no
+     result (x86 returns its indefinite integer, AArch64 saturates), so that
+     arm is a residual (`undefined-conversion`), never a plain cast that
+     UBSan grades `ub` (2026-10-09; the staged pipeline).
 6. **Declared type.** A binding with no stated type is declared `double` or
    `float` when its definition is floating, or when every read of every member
    is floating. Otherwise it is the machine word, and floating reads
@@ -57,3 +64,8 @@ Status: done (placement moves to the compiler specification at M1d)
   r2abi's `fparg`/`fpret` reads are deleted.
 - x87 80-bit values still refuse. Exit: an 80-bit `MachineType::Float` with
   an exact evaluator, or a stated permanent refusal.
+- The legacy r2dec still writes `TRUNC` as a plain cast: its journal refuses
+  an operand read twice. D deletes it rather than this patching it.
+- Conditional: if a corpus needs the machine's out-of-range result, the
+  language profile states it per instruction set and the residual arm
+  becomes that value.

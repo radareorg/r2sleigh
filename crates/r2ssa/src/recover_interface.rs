@@ -63,6 +63,8 @@ pub struct RecoveredResult {
     /// Every return path sign-extends the observed bytes into the byte above
     /// them: the function computed a signed value of the observed width.
     signed: bool,
+    /// The carrier is the float result register, read by callers as a float of the observed width.
+    float: bool,
 }
 
 impl RecoveredResult {
@@ -79,6 +81,11 @@ impl RecoveredResult {
     /// Whether every return path sign-extends the result above its width.
     pub const fn signed(self) -> bool {
         self.signed
+    }
+
+    /// Whether the result is a float in the float result register.
+    pub const fn float(self) -> bool {
+        self.float
     }
 }
 
@@ -152,6 +159,10 @@ pub struct RecoveredInterface {
     return_mechanism: Option<RecoveredReturnMechanism>,
     /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
     result_owners: BTreeSet<u64>,
+    /// Whether the result is unproven because the body writes both result registers on its way out.
+    result_ambiguous: bool,
+    /// Those two registers, integer then float, where nothing said which a caller reads.
+    result_carriers: Option<(CanonicalStorageId, CanonicalStorageId)>,
     /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
 }
@@ -160,6 +171,11 @@ impl RecoveredInterface {
     /// The direct callees whose stated result could prove this one's.
     pub const fn result_owners(&self) -> &BTreeSet<u64> {
         &self.result_owners
+    }
+
+    /// Whether the body writes both result registers and nothing said which a caller reads.
+    pub const fn result_ambiguous(&self) -> bool {
+        self.result_ambiguous
     }
 
     /// Parameter slots in convention order, contiguous from index zero, each
@@ -697,8 +713,10 @@ fn body_proven_result(
         .into_iter()
         .filter_map(|candidate| {
             let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
-            (!live_out.is_empty() && live_out.unresolved_blocks().next().is_none())
-                .then_some((candidate, live_out))
+            (!live_out.is_empty()
+                && live_out.unresolved_blocks().next().is_none()
+                && !restored_from_its_save(graph, facts, &live_out, candidate))
+            .then_some((candidate, live_out))
         });
     let first = candidates.next()?;
     candidates
@@ -710,6 +728,40 @@ fn body_proven_result(
                 .register()
                 .is_some()
         })
+}
+
+/// Whether every value `live_out` hands back in `storage` is the caller's own, reloaded from the
+/// frame slot the body saved it to (`push rbp` ... `pop rbp`): a preserved register is no result.
+fn restored_from_its_save(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
+    storage: CanonicalStorageId,
+) -> bool {
+    let accesses = &facts.structured.memory_accesses;
+    let saves_storage = |write: &crate::semantic::StructuredMemoryAccessFact| {
+        let saved = write.value.and_then(|value| {
+            crate::semantic::exact_copy_chain_to_entry_storage(graph, value, write.width)
+        });
+        saved.is_some_and(|(saved, ..)| saved == storage)
+    };
+    live_out.iter().all(|value| {
+        let value = crate::constant::root_of(graph, value);
+        let Some(read) =
+            (accesses.values()).find(|access| !access.is_write && access.value == Some(value))
+        else {
+            return false;
+        };
+        let mut writes = (accesses.values())
+            .filter(|access| access.object == read.object && access.is_write)
+            .peekable();
+        writes.peek().is_some()
+            && writes.all(|write| {
+                write.provenance_complete
+                    && (write.width, write.object_offset) == (read.width, read.object_offset)
+                    && saves_storage(write)
+            })
+    })
 }
 
 /// The result the returns prove; a walk that reaches no return proves void only where non-returning calls close the body.
@@ -812,6 +864,62 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
 /// The carrier the answered returns fill, void where none does, unproven where one is stated nowhere.
 ///
 /// Its width is the widest any return path wrote (doc/adr-written-lanes.md):
+/// The float result register and its live-out, where an operation of the body reaches a return
+/// there through any merge: a call's clobber and the caller's own value are not the body's.
+fn float_result_written(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    slots: &SourceConventionSlots,
+) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
+    let float = slots.float_result_slot()?;
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[float]);
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = live_out.iter().collect::<Vec<_>>();
+    // Each value is taken once, so the walk ends after at most every value reaching a return.
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) || !graph.written_by_body(value) {
+            continue;
+        }
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            continue;
+        };
+        match &inst.payload {
+            crate::graph::InstPayload::Phi { .. } => pending.extend(inst.inputs.iter().copied()),
+            crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {}
+            crate::graph::InstPayload::Op(_) => return Some((float, live_out)),
+        }
+    }
+    None
+}
+
+/// Which result register the program's calls read, where every reading call agrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarrierRead {
+    Integer,
+    /// The float register, at the width the widest read takes.
+    Float(CanonicalStorageId),
+}
+
+fn carrier_read(
+    reads: Option<r2source::SourceResultReads>,
+    float: CanonicalStorageId,
+) -> Option<CarrierRead> {
+    let reads = reads?;
+    match (reads.integer, reads.float) {
+        (1.., 0) => Some(CarrierRead::Integer),
+        (0, 1..) => {
+            let bytes = u16::try_from(reads.float_bytes).ok()?;
+            (matches!(bytes, 4 | 8) && u32::from(bytes) <= float.size).then_some(
+                CarrierRead::Float(CanonicalStorageId {
+                    size: u32::from(bytes),
+                    ..float
+                }),
+            )
+        }
+        _ => None,
+    }
+}
+
 /// one past the highest byte some path computed or moved there, as lifted,
 /// and the carrier's own where a path wrote none of it.
 fn recovered_result(
@@ -858,6 +966,7 @@ fn recovered_result(
             slot,
             observed,
             signed,
+            float: false,
         })
     })
 }
@@ -959,7 +1068,27 @@ pub fn recover_interface(
     slots: &SourceConventionSlots,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, None, slots, None, loader_role)
+    let stated = Stated {
+        loader_role,
+        result_reads: None,
+    };
+    recover_interface_inner(func, None, slots, None, stated)
+}
+
+/// What the program states about a function beside its body: the loader's hook, its callers' reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Stated {
+    loader_role: Option<r2source::SourceLoaderRole>,
+    result_reads: Option<r2source::SourceResultReads>,
+}
+
+impl Stated {
+    pub(crate) const fn of(function: &r2source::FunctionIdentity) -> Self {
+        Self {
+            loader_role: function.loader_role(),
+            result_reads: function.result_reads(),
+        }
+    }
 }
 
 /// Recover an interface while retaining exact source-owned call boundaries.
@@ -974,9 +1103,9 @@ pub(crate) fn recover_interface_with_context(
     prep: &crate::function::Provisional,
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
-    loader_role: Option<r2source::SourceLoaderRole>,
+    stated: Stated,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, Some(prep), slots, Some(machine_context), loader_role)
+    recover_interface_inner(func, Some(prep), slots, Some(machine_context), stated)
 }
 
 /// `loader_role` is the source's record that the program loader calls this
@@ -988,7 +1117,10 @@ fn recover_interface_inner(
     provisional: Option<&crate::function::Provisional>,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
-    loader_role: Option<r2source::SourceLoaderRole>,
+    Stated {
+        loader_role,
+        result_reads,
+    }: Stated,
 ) -> Option<RecoveredInterface> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
@@ -1101,12 +1233,15 @@ fn recover_interface_inner(
                 slot,
                 observed: slot,
                 signed: false,
+                float: false,
             })
         }
         TailResult::NoTailBoundary | TailResult::Exact(_) => RecoveredFunctionResult::Void,
     };
     let no_tail_boundary = matches!(tail, TailResult::NoTailBoundary);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
+    let mut result_ambiguous = false;
+    let mut result_carriers = None;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
@@ -1114,9 +1249,34 @@ fn recover_interface_inner(
         && loader_role.is_none()
         && let Some(candidate) = slots.result_slot()
     {
-        let candidate_live_out =
+        let mut candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
         result = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        // A body that writes both result registers on its way out hands back one of them: the
+        // callers' reads say which, where they agree (doc/adr-resolved-bodies.md, "Caller reads").
+        if result.register().is_some()
+            && let Some((float, float_live_out)) = float_result_written(func, graph, slots)
+        {
+            match carrier_read(result_reads, float) {
+                Some(CarrierRead::Integer) => {}
+                // The carrier is the lane the reads take, as a declared float's is (`low_lane`):
+                // AArch64's float slot is all of q0, and a double is d0.
+                Some(CarrierRead::Float(observed)) => {
+                    result = RecoveredFunctionResult::Register(RecoveredResult {
+                        slot: observed,
+                        observed,
+                        signed: false,
+                        float: true,
+                    });
+                    candidate_live_out = float_live_out;
+                }
+                None => {
+                    result_carriers = Some((candidate, float));
+                    result = RecoveredFunctionResult::Unproven;
+                    result_ambiguous = true;
+                }
+            }
+        }
         if !candidate_live_out.is_empty()
             && (candidate_live_out.unresolved_blocks().next().is_none()
                 || result.register().is_some())
@@ -1193,18 +1353,19 @@ fn recover_interface_inner(
     };
     let parameters = in_order(slots.argument_slots());
     let integers = parameters.len();
-    let reads_past_parameters = slots.argument_slots()[integers..].iter().any(|slot| {
-        reads
-            .iter()
-            .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-    }) || entry_reaches_unproven_call(
-        func,
-        prep,
-        graph,
-        &facts,
-        machine_context,
-        slots.argument_slots().get(integers),
-    );
+    let reads_past_parameters =
+        slots.argument_slots()[integers..].iter().any(|slot| {
+            reads
+                .iter()
+                .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
+        }) || entry_reaches_unproven_call(
+            func,
+            prep,
+            graph,
+            &facts,
+            machine_context,
+            slots.argument_slots().get(integers),
+        ) || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}",
@@ -1255,6 +1416,7 @@ fn recover_interface_inner(
         (RecoveredFunctionResult::Unproven, Some(slot)) => result_owners(func, graph, &facts, slot),
         _ => BTreeSet::new(),
     };
+
     Some(RecoveredInterface {
         parameters: parameters.into_boxed_slice(),
         stack_parameters: stack_parameters.into_boxed_slice(),
@@ -1262,13 +1424,14 @@ fn recover_interface_inner(
         result_is_return_address,
         return_mechanism,
         result_owners,
+        result_ambiguous,
+        result_carriers,
         reads_past_parameters,
     })
 }
 
-/// Whether a call whose arguments are unproven cannot tell what `next` holds, the first slot past
-/// the parameters: parameters are a prefix, so only that slot can extend them. An untouched slot
-/// ends a count, as the call boundary reads it; an unseen one may carry the caller's value.
+/// Whether a call of unproven arity may be handed `next`, the first slot past the parameters
+/// (parameters are a prefix, so only it can extend them): unseen there, or the arrival untouched.
 fn entry_reaches_unproven_call(
     func: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -1295,8 +1458,60 @@ fn entry_reaches_unproven_call(
                 *slot,
                 false,
             )
-            .is_none()
+            .is_none_or(|state| match state {
+                crate::semantic::ReachingAbiState::PreservedEntry => true,
+                crate::semantic::ReachingAbiState::Value(value) => !graph.written_by_body(value),
+            })
         })
+}
+
+/// Whether the body reads `next`, the first slot past the parameters, at entry and makes a call of
+/// unproven arity: the read may be what that call is handed (gcc -O2's `mov rbp, rsi` kept for
+/// an indirect call), which no obligation observes.
+fn read_for_an_unproven_call(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    next: Option<&CanonicalStorageId>,
+) -> bool {
+    let Some(slot) = next else {
+        return false;
+    };
+    facts
+        .boundaries
+        .calls
+        .values()
+        .any(|boundary| !boundary.arguments_complete)
+        && graph.values.iter().any(|value| {
+            graph.caller_supplied(value.id)
+                && value.canonical_storage.is_some_and(|storage| {
+                    storage.space == slot.space
+                        && storage.offset < slot.offset + u64::from(slot.size)
+                        && slot.offset < storage.offset + u64::from(storage.size)
+                })
+                && read_beyond_merges(graph, value.id)
+        })
+}
+
+/// Whether an operation reads `value`, directly or through the merges it flows into: a merge alone
+/// reads nothing. Each value is taken once, so the walk ends.
+fn read_beyond_merges(graph: &SsaGraph, value: crate::ValueId) -> bool {
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        for site in graph.use_sites(value) {
+            match graph.inst(site.inst) {
+                Some(inst) if matches!(inst.payload, crate::graph::InstPayload::Phi { .. }) => {
+                    pending.extend(inst.output);
+                }
+                Some(_) => return true,
+                None => {}
+            }
+        }
+    }
+    false
 }
 
 /// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.
@@ -1451,6 +1666,10 @@ pub fn mint_recovered_interface(
                 } else {
                     interface
                 }
+            })
+            .map(|interface| match recovered.result_carriers {
+                Some((integer, float)) => interface.with_result_carriers(integer, float),
+                None => interface,
             });
     if minted.is_none() {
         r2il::refusal_evidence!(
@@ -1473,6 +1692,41 @@ pub fn mint_recovered_interface(
         );
     }
     minted
+}
+
+/// A float result's own type node, after the integers in `types`: its id and width.
+fn float_type(
+    recovered: &RecoveredInterface,
+    types: &mut Vec<SourceType>,
+) -> Option<Option<(u32, u32)>> {
+    let Some(result) = recovered
+        .result()
+        .register()
+        .filter(|result| result.float())
+    else {
+        return Some(None);
+    };
+    let bits = storage_bits(result.observed())?;
+    let id = u32::try_from(types.len()).ok()?;
+    let (size, align) = (u64::from(bits), u64::from(bits));
+    types.push(SourceType::new(id, SourceTypeKind::Float, size, align));
+    Some(Some((id, bits)))
+}
+
+/// A float result's return: its own type node `id`, read at the low `bits` of its slot.
+fn float_return(
+    result: RecoveredResult,
+    (id, bits): (u32, u32),
+) -> Option<(SourceFunctionReturn, Option<SourceLogicalValue>)> {
+    let kind = if bits < result.slot().size.checked_mul(8)? {
+        SourceCarrierKind::LowBits
+    } else {
+        SourceCarrierKind::Full
+    };
+    let logical =
+        SourceLogicalValue::new(id, SourceCarrierProjection::new(kind, 0, u64::from(bits)));
+    let storage = result.slot();
+    Some((SourceFunctionReturn::Register { storage }, Some(logical)))
 }
 
 fn mint_recovered_interface_inner(
@@ -1543,16 +1797,16 @@ fn mint_recovered_interface_inner(
         )
         .collect::<Option<Vec<_>>>()?;
     let result_width = match recovered.result().register() {
-        Some(result) => {
+        Some(result) if !result.float() => {
             let bits = storage_bits(result.observed())?;
             note_type(&mut widths, bits, result.signed());
             Some((bits, result.signed()))
         }
-        None => None,
+        _ => None,
     };
     widths.sort_unstable();
 
-    let types = widths
+    let mut types = widths
         .iter()
         .enumerate()
         .map(|(index, (bits, signed))| {
@@ -1568,6 +1822,7 @@ fn mint_recovered_interface_inner(
             .into()
         })
         .collect::<Option<Vec<SourceType>>>()?;
+    let float_type = float_type(recovered, &mut types)?;
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
     let type_id = |bits: u32, signed: bool| -> Option<u32> {
         widths
@@ -1650,6 +1905,9 @@ fn mint_recovered_interface_inner(
             },
             Some(logical(bits, signed, result.slot().size.checked_mul(8)?)?),
         ),
+        (RecoveredFunctionResult::Register(result), None) if result.float() => {
+            float_return(result, float_type?)?
+        }
         // A body nobody read owns this result, so nothing is claimed for it.
         (RecoveredFunctionResult::Unproven, _) => (SourceFunctionReturn::Unproven, None),
         _ => (SourceFunctionReturn::Void, None),
@@ -1687,9 +1945,15 @@ fn mint_recovered_interface_inner(
     } else {
         interface
     };
-    // A stacked return names the slot the call spent, which is what places
-    // the argument area at a call site; a stack parameter without it would
-    // be looked for at the wrong offset, so the interface is not minted.
+    with_stacked_return(recovered, interface)
+}
+
+/// A stacked return names the slot the call spent, which places the argument area at a call site;
+/// a stack parameter without it would be read at the wrong offset, so no interface is minted.
+fn with_stacked_return(
+    recovered: &RecoveredInterface,
+    interface: SourceFunctionInterface,
+) -> Option<SourceFunctionInterface> {
     let Some(RecoveredReturnMechanism::Stacked { slot_bytes }) = recovered.return_mechanism()
     else {
         return Some(interface);
@@ -1731,6 +1995,7 @@ pub fn mint_recovered_call_site_interface(
     callee: &SourceFunctionInterface,
     identity: SourceCallSiteIdentity,
     revision_identity: &[u8],
+    caller_reads: Option<r2source::SourceResultReads>,
 ) -> Option<SourceCallSiteInterface> {
     // A stack parameter is named from the callee's entry stack pointer; the
     // call site names the same slot from its own stack pointer before the
@@ -1769,13 +2034,24 @@ pub fn mint_recovered_call_site_interface(
         // A body nobody read owns the arguments beside the result: an import
         // thunk forwards every one and reads none, so what its own body proves
         // is a floor rather than this call's contract.
-        SourceFunctionReturn::Unproven => {
-            r2il::refusal_evidence!(
-                "call-site-minting",
-                "the callee's result is unproven, so its body describes no call contract"
-            );
-            return None;
-        }
+        // A body writing both result registers returns the one this caller reads, where it reads one.
+        SourceFunctionReturn::Unproven => match callee
+            .result_carriers()
+            .and_then(|(integer, float)| Some((integer, carrier_read(caller_reads, float)?)))
+        {
+            Some((storage, CarrierRead::Integer)) | Some((_, CarrierRead::Float(storage))) => {
+                SourceCallResult::Register { storage }
+            }
+            None => {
+                r2il::refusal_evidence!(
+                    "call-site-minting",
+                    "the callee's result is unproven ({:?}, read {:?}), so its body describes no call contract",
+                    callee.result_carriers(),
+                    caller_reads
+                );
+                return None;
+            }
+        },
     };
     let interface = SourceCallSiteInterface::new(
         revision_identity.to_vec(),
@@ -1833,7 +2109,7 @@ mod tests {
             &function.prep_facts_for_test(),
             &candidates(),
             context,
-            None,
+            Stated::default(),
         )
     }
 
@@ -2074,6 +2350,7 @@ mod tests {
                 slot: register(0, 8),
                 observed: register(0, 8),
                 signed: false,
+                float: false,
             })
         );
     }
@@ -2134,6 +2411,7 @@ mod tests {
                 },
             ),
             b"narrow-return-revision",
+            None,
         )
         .expect("callsite with recovered callee interface");
         assert_eq!(callsite.exact_callee_interface(), Some(&interface));
@@ -2317,7 +2595,8 @@ mod tests {
         assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
         // Nothing this body proves describes a call to it, arguments included.
         assert!(
-            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision").is_none(),
+            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision", None)
+                .is_none(),
             "an unproven result cannot be a call site's exact contract"
         );
 

@@ -3,7 +3,7 @@
 //! text against the CFG, and the rewrites that shape it afterwards.
 
 pub(crate) mod certify;
-mod place;
+pub(crate) mod place;
 pub(crate) mod print;
 mod rewrite;
 pub(crate) mod self_update;
@@ -162,7 +162,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .prepared_ssa
             .map(r2ssa::SsaArtifact::authority)
             .ok_or(StructuredRegionBuildError::MissingSourceAuthority)?;
-        let placement = place::Placement::compute(self.func);
+        let placement = place::Placement::compute(
+            self.func.cfg(),
+            self.func.domtree(),
+            self.func.natural_loops(),
+            self.func.root(),
+        );
         crate::stage_timing::mark("structure_analyze");
         self.prepare_certified_for_loops(&placement)?;
         crate::stage_timing::mark("structure_prepare");
@@ -179,7 +184,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let elisions =
             std::cell::RefCell::new(crate::observation_journal::RewriteElisions::default());
         let shaped = self.rewrite_stage("shape", &placed, &elisions, stmt, |tree| {
-            Self::shape(fold_ctx, tree)
+            let mut fresh = |stmt: &CStmt| {
+                fold_ctx
+                    .clone_cached_render_occurrence(std::slice::from_ref(stmt))
+                    .into_iter()
+                    .next()
+                    .unwrap_or(CStmt::Empty)
+            };
+            Self::shape(&mut fresh, tree)
         })?;
         crate::stage_timing::mark("structure_shape");
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);

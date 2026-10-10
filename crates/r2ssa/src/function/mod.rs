@@ -1791,6 +1791,31 @@ fn unique_call_site_identity(
     matches.next().is_none().then_some(identity)
 }
 
+/// What the code after the call at `identity` reads of the two result registers `callee` leaves
+/// one of, where it writes both (doc/adr-resolved-bodies.md, "Caller reads").
+fn reads_after(
+    blocks: &[R2ILBlock],
+    identity: SourceCallSiteIdentity,
+    callee: &SourceFunctionInterface,
+) -> Option<r2source::SourceResultReads> {
+    let (integer, float) = callee.result_carriers()?;
+    blocks.iter().find_map(|block| {
+        let index = block.ops.iter().enumerate().position(|(index, op)| {
+            matches!(op, R2ILOp::Call { .. })
+                && block
+                    .op_metadata(index)
+                    .and_then(|metadata| metadata.instruction_addr)
+                    == Some(identity.instruction())
+        })?;
+        Some(crate::caller_reads::reads_after_call(
+            block,
+            index,
+            Some(integer),
+            Some(float),
+        ))
+    })
+}
+
 #[derive(Clone)]
 struct CorrelatedCallSites {
     tail_calls: Vec<SourceCallSiteIdentity>,
@@ -1799,8 +1824,6 @@ struct CorrelatedCallSites {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each correlated site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
-    /// The sites whose callee's body leaves its arity unproven.
-    arity_unproven: BTreeSet<SourceCallSiteIdentity>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1812,7 +1835,6 @@ fn correlate_call_site_interfaces(
     let mut interfaces = Vec::new();
     let mut callee_linkages = BTreeMap::new();
     let mut callee_names = BTreeMap::new();
-    let mut arity_unproven = BTreeSet::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, call) else {
             // The source named a call the lift does not have exactly one
@@ -1857,14 +1879,12 @@ fn correlate_call_site_interfaces(
             let Some(callee) = recovered else {
                 continue;
             };
-            if callee.reads_past_parameters() {
-                arity_unproven.insert(identity);
-            }
             if let Some(mut interface) =
                 crate::recover_interface::mint_recovered_call_site_interface(
                     callee,
                     identity,
                     source.source_revision_identity(),
+                    reads_after(blocks, identity, callee),
                 )
             {
                 // The gettext family is named, not prototyped, so the rule
@@ -1964,7 +1984,6 @@ fn correlate_call_site_interfaces(
         interfaces,
         callee_linkages,
         callee_names,
-        arity_unproven,
     }
 }
 
@@ -2285,6 +2304,7 @@ impl TrustedSsaArtifact {
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
         let mut result_owners = BTreeSet::new();
+        let mut result_ambiguous = false;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None => 'recovered: {
@@ -2360,12 +2380,13 @@ impl TrustedSsaArtifact {
                     &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
-                    source.function().loader_role(),
+                    crate::recover_interface::Stated::of(source.function()),
                 );
                 let Some(recovered) = recovered else {
                     break 'recovered None;
                 };
                 result_owners.clone_from(recovered.result_owners());
+                result_ambiguous = recovered.result_ambiguous();
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
@@ -2387,7 +2408,6 @@ impl TrustedSsaArtifact {
         };
         // A call to this function itself has its contract in the interface just settled.
         let mut call_interfaces = correlated_call_sites.interfaces;
-        let mut arity_unproven = correlated_call_sites.arity_unproven;
         if let Some(own) = function_interface.as_ref() {
             for call in source.advisory_calls() {
                 if call.target_address() != source.image().entry_address() {
@@ -2402,14 +2422,12 @@ impl TrustedSsaArtifact {
                 {
                     continue;
                 }
-                if own.reads_past_parameters() {
-                    arity_unproven.insert(identity);
-                }
                 if let Some(interface) =
                     crate::recover_interface::mint_recovered_call_site_interface(
                         own,
                         identity,
                         source.source_revision_identity(),
+                        reads_after(&blocks, identity, own),
                     )
                 {
                     call_interfaces.push(interface);
@@ -2430,11 +2448,11 @@ impl TrustedSsaArtifact {
             );
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
-        machine_context.set_arity_unproven_sites(arity_unproven);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_result_owners(result_owners);
+        machine_context.set_result_ambiguous(result_ambiguous);
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());

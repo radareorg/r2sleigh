@@ -491,6 +491,16 @@ impl Literal {
         program
     }
 
+    /// The same bytes as little-endian AArch64.
+    pub fn in_aarch64(mut self) -> Self {
+        self.container.arch = Arch {
+            name: "aarch64".to_owned(),
+            bits: 64,
+            endian: Endian::Little,
+        };
+        self
+    }
+
     /// The same bytes as little-endian 32-bit ARM.
     pub fn in_arm(mut self) -> Self {
         self.container.arch = Arch {
@@ -554,6 +564,18 @@ impl Literal {
             import_write(PLT_SLOT, 8, import),
         ];
         program
+    }
+
+    /// The same program, stated as Go built by the toolchain of `version`, where one is stated,
+    /// its pclntab marking the functions at `assembly` as written in assembly.
+    pub fn in_go(mut self, version: Option<(u32, u32)>, assembly: Option<&[u64]>) -> Self {
+        self.container.languages = r2engine::program::Languages {
+            program: r2engine::program::SourceLanguage::Go,
+            ranges: Vec::new(),
+            go_version: version,
+            go_assembly: assembly.map(|entries| entries.iter().copied().collect()),
+        };
+        self
     }
 
     /// The same program, its container stating this of the platform it runs on.

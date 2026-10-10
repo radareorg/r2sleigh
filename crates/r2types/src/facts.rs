@@ -229,6 +229,12 @@ impl SignatureCertificateSource {
         }
     }
 
+    /// Whether a declaration states the signature: a library's prototype for the name, or the
+    /// source's own interface. Every other source infers it.
+    pub fn is_declaration(self) -> bool {
+        matches!(self, Self::ExternalContext | Self::SourceInterface)
+    }
+
     pub fn certifies_signature(self) -> bool {
         matches!(
             self,
