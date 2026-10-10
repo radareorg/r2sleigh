@@ -647,7 +647,7 @@ fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
 fn an_import_stub_spells_a_function_its_declaration_gives_no_parameters() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/float_calls_zig_aarch64_O2g");
-    let run = on(binary.clone(), "pdd @ 0x01010640");
+    let run = on(binary, "pdd @ 0x01010640");
     assert!(
         run.out.contains(
             "extern int32_t __libc_start_main(void(*)(), int32_t, char**, void(*)(), void(*)(), void(*)(), void*);"
