@@ -46,10 +46,10 @@ pub(crate) const KEYS: &[Key] = &[
     },
     Key {
         name: "dec.pipeline",
-        summary: "which decompiler writes pdd (staged, legacy)",
+        summary: "which decompiler writes pdd (legacy, staged)",
         get: |session| match session.tier {
-            r2engine::RenderTier::C => "legacy".to_owned(),
-            _ => "staged".to_owned(),
+            r2engine::RenderTier::Staged => "staged".to_owned(),
+            _ => "legacy".to_owned(),
         },
         set: |session, value| {
             session.tier = match value {

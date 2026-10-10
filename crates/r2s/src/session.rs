@@ -33,7 +33,7 @@ impl Session {
             color: false,
             grepped: false,
             bytes: true,
-            tier: r2engine::RenderTier::default(),
+            tier: r2engine::RenderTier::Staged,
             addr: program.start().unwrap_or(0),
             program,
             path: path.to_owned(),

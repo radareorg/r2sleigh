@@ -565,7 +565,6 @@ pub fn structured(
     render(target, program, entry, crate::RenderTier::Structured)
 }
 
-/// The legacy decompiler's C, `dec.pipeline=legacy`, deleted with it (ROADMAP D).
 pub fn decompile(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -574,7 +573,7 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
-/// The staged decompiler's C (ROADMAP D), the one `pdd` prints.
+/// The staged decompiler's C (ROADMAP D), which replaces `decompile` at D's switch.
 pub fn staged(
     target: &NativeTarget<'_>,
     program: &dyn Program,

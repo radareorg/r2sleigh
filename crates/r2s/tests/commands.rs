@@ -802,7 +802,7 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
         run.out,
         "asm.bytes = true\n\
          scr.color = 0\n\
-         dec.pipeline = legacy\n\
+         dec.pipeline = staged\n\
          \x20           0x00401330      endbr64\n\
          false\n\
          r2s: asm.bytes takes true or false, not 'maybe'\n",
