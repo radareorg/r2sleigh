@@ -130,6 +130,9 @@ pub(crate) enum Rule {
     /// Byte `i` reads byte `i` of each input, except the bytes a constant
     /// operand of an `and` clears in the other (`cleared[j]` for input `j`).
     Lanewise { cleared: [u64; 2] },
+    /// Output byte `i` reads bytes `0..=i` of each input: an add, subtract or multiply modulo
+    /// 2^(8(i+1)), whose carries, borrows and partial products move only upward.
+    LowClosed,
     /// Every output byte reads every input whole.
     Whole,
 }
@@ -176,6 +179,7 @@ pub(crate) fn rule<V>(op: &SSAOp<V>, facts: impl Fn(&V) -> (u32, Option<u64>)) -
             }
         }
         SSAOp::IntOr { .. } | SSAOp::IntXor { .. } => Rule::Lanewise { cleared: [0; 2] },
+        SSAOp::IntAdd { .. } | SSAOp::IntSub { .. } | SSAOp::IntMult { .. } => Rule::LowClosed,
         _ => Rule::Whole,
     }
 }
@@ -206,6 +210,11 @@ impl Rule {
                 .shifted_down(first),
             (Self::Insert { .. }, 2) => ByteMask::All,
             (Self::Lanewise { cleared }, 0 | 1) => out.without(ByteMask::Bytes(cleared[index])),
+            (Self::LowClosed, 0 | 1) => match out {
+                ByteMask::Bytes(0) => ByteMask::NONE,
+                ByteMask::Bytes(_) => ByteMask::whole(out.extent_bytes().unwrap_or(64)),
+                ByteMask::All => ByteMask::All,
+            },
             (Self::Whole, _) => ByteMask::All,
             _ => return None,
         })
@@ -437,6 +446,9 @@ mod tests {
             2,
             &pairs,
         );
+        for operation in [Operation::Add, Operation::Sub, Operation::Mult] {
+            holds(Rule::LowClosed, operation, &[2, 2], 2, &pairs);
+        }
         // `x & 0x00ff`: the constant clears x's high byte.
         let masked = pairs.iter().map(|[v, _]| [*v, 0x00ff]).collect::<Vec<_>>();
         holds(
@@ -445,6 +457,23 @@ mod tests {
             &[2, 2],
             2,
             &masked,
+        );
+    }
+
+    /// An add read in its low byte reads only the inputs' low bytes; read in byte 1, bytes 0 and 1.
+    #[test]
+    fn a_low_closed_operation_reads_no_byte_above_the_highest_read() {
+        assert_eq!(
+            Rule::LowClosed.backward(0, ByteMask::Bytes(0b1)),
+            Some(ByteMask::Bytes(0b1))
+        );
+        assert_eq!(
+            Rule::LowClosed.backward(1, ByteMask::Bytes(0b10)),
+            Some(ByteMask::Bytes(0b11))
+        );
+        assert_eq!(
+            Rule::LowClosed.backward(0, ByteMask::All),
+            Some(ByteMask::All)
         );
     }
 }

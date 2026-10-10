@@ -357,7 +357,7 @@ pub(crate) fn transfer<V>(
             }
             bytes
         }
-        Rule::Lanewise { .. } | Rule::Whole => Vec::new(),
+        Rule::Lanewise { .. } | Rule::LowClosed | Rule::Whole => Vec::new(),
     };
     out.resize(size, Byte::Data);
     out
