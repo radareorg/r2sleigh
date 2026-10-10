@@ -218,8 +218,6 @@ pub struct ObligationLedger {
     /// Obligations of definitions whose values were split out of a shared
     /// variable, so that every rendered read sees the value it stands for.
     split: BTreeSet<SemanticObligationId>,
-    /// Residual obligations with no site in the text, each with its named cause.
-    #[serde(default)]
     /// Every obligation as it is spelled, in the order the spelling reads:
     /// by block, then by an operation's place in it. An obligation names its
     /// operation by identity, so this order is taken from the sealed
@@ -630,6 +628,16 @@ mod tests {
         let artifact =
             r2ssa::SsaArtifact::raw(&[block], None).expect("an artifact to spell against");
         ObligationLedger::over(ids.iter().copied(), artifact.graph())
+    }
+
+    /// A ledger read back without its reading order is rejected: defaulted to empty, its
+    /// entries would list no obligation while its outcomes hold some.
+    #[test]
+    fn a_serialized_ledger_without_its_reading_order_is_rejected() {
+        let without = r#"{"outcomes":{},"conflicts":{},"split":[]}"#;
+        assert!(serde_json::from_str::<ObligationLedger>(without).is_err());
+        let with = r#"{"outcomes":{},"conflicts":{},"split":[],"reading_order":[]}"#;
+        assert!(serde_json::from_str::<ObligationLedger>(with).is_ok());
     }
 
     #[test]
