@@ -256,3 +256,56 @@ fn float_reads_at_two_widths_prove_no_result() {
         assert!(f.contains("return r2sleigh_residual_"), "{tier:?}: {f}");
     }
 }
+
+/// `f(x)` is `pxor xmm0, xmm0; mov rax, rdi; ret`; `caller_a`: `call f; mov [rsi], eax; ret`,
+/// `caller_b`: `call f; movsd [rsi], xmm0; ret`.
+const TAKES_ONE_READ_TWO_WAYS: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0x48, 0x89, 0xf8, // 1004 mov rax, rdi
+    0xc3, // 1007 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1008 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x89, 0x06, // 1015 mov [rsi], eax
+    0xc3, // 1017 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1025 movsd [rsi], xmm0
+    0xc3, // 1029 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 102a padding
+];
+
+/// `f` proves no result, so its callers declare it with the parameter type its own header states
+/// and no other: an unauthorized merged signature is never what they are handed.
+#[test]
+fn callers_declare_a_two_carrier_body_as_its_header_does() {
+    let program = || {
+        Literal::of_code(
+            TAKES_ONE_READ_TWO_WAYS,
+            &[
+                ("f", BASE, 0x08),
+                ("caller_a", BASE + 0x10, 0x08),
+                ("caller_b", BASE + 0x20, 0x0a),
+            ],
+        )
+    };
+    for tier in [RenderTier::C, RenderTier::Staged] {
+        let f = rendered(program(), tier);
+        assert!(f.contains("return r2sleigh_residual_u64("), "{tier:?}: {f}");
+        let header = f.lines().next().expect("a header");
+        let (_, parameter) = header.split_once("f(").expect("f's header");
+        let (ty, _) = parameter.rsplit_once(' ').expect("one named parameter");
+        for at in [BASE + 0x10, BASE + 0x20] {
+            let caller = OpenProgram::of(program())
+                .rendered(at, tier)
+                .expect("it renders")
+                .response
+                .output
+                .into_text();
+            assert!(
+                caller.contains(&format!(" f({ty});")),
+                "{tier:?}: {f}\n{caller}"
+            );
+        }
+    }
+}
