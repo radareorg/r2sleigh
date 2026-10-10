@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use super::SsaArtifact;
 use crate::CallFrameReach;
-use crate::dense::IdSet;
-use crate::graph::InstId;
+use crate::dense::{IdMap, IdSet};
+use crate::graph::{InstId, InstPayload, ValueId};
 
 impl SsaArtifact {
     /// Fill the certificate once, after the extent facts it reads are sealed.
@@ -64,34 +64,59 @@ fn dead_frame_stores(artifact: &SsaArtifact) -> IdSet<InstId> {
     dead
 }
 
-/// The operations whose value only a dead frame store writes: every use is such a store, stack
-/// geometry, a use no observation depends on, or one of these. A worklist up from the stored
-/// values; each operation is taken once, O(V + E).
+/// The pure operations (`demand::has_effect` false: no memory, trap, atomic or control effect)
+/// whose value only a dead frame store writes: every use is such a store, stack geometry, a use no
+/// observation depends on, or one of these. Each value keeps a count of its other uses, and each
+/// edge lowers one count once: O(V + E).
 fn dead_store_values(artifact: &SsaArtifact, stores: &IdSet<InstId>) -> IdSet<InstId> {
     let graph = artifact.graph();
     let geometry = &artifact.certificates().stack_geometry.insts;
     let unobserved = artifact.unobserved_merges().unobserved_uses();
     let live_out = artifact.live_out();
+    let others = |value: ValueId| {
+        (graph.use_sites(value).iter())
+            .filter(|site| {
+                !(stores.contains(site.inst)
+                    || geometry.contains(site.inst)
+                    || unobserved.contains(*site))
+            })
+            .count()
+    };
+    let mut remaining = IdMap::<ValueId, usize>::new(graph.values.len());
+    let mut ready = Vec::new();
     let stored = |inst: InstId| {
         graph
             .inst(inst)
             .and_then(|inst| inst.inputs.get(1).copied())
     };
-    let mut work = stores.iter().filter_map(stored).collect::<Vec<_>>();
+    for value in stores.iter().filter_map(stored) {
+        if remaining.get(value).is_none() {
+            let left = others(value);
+            remaining.insert(value, left);
+            if left == 0 {
+                ready.push(value);
+            }
+        }
+    }
     let mut values = IdSet::default();
-    while let Some(value) = work.pop() {
+    while let Some(value) = ready.pop() {
         let Some(def) = graph.def_inst(value).and_then(|def| graph.inst(def)) else {
             continue;
         };
-        let read_only_dead = (graph.use_sites(value).iter()).all(|site| {
-            stores.contains(site.inst)
-                || geometry.contains(site.inst)
-                || values.contains(site.inst)
-                || unobserved.contains(site)
-        });
-        let op = matches!(def.payload, crate::graph::InstPayload::Op(_));
-        if op && read_only_dead && !live_out.contains(value) && values.insert(def.id) {
-            work.extend(def.inputs.iter().copied());
+        let pure = matches!(def.payload, InstPayload::Op(_)) && !crate::demand::has_effect(def);
+        if !pure || live_out.contains(value) || !values.insert(def.id) {
+            continue;
+        }
+        for input in &def.inputs {
+            let left = remaining
+                .get(*input)
+                .copied()
+                .unwrap_or_else(|| others(*input));
+            let left = left.saturating_sub(1);
+            remaining.insert(*input, left);
+            if left == 0 {
+                ready.push(*input);
+            }
         }
     }
     values

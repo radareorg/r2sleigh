@@ -34,7 +34,7 @@ fn inserted_lane(value: &SSAVar, position: &SSAVar) -> Option<(u32, u64)> {
 
 /// Whether an operation reads its inputs whatever becomes of its result
 /// (memory, control, a call, a trap, a user operation), unlike a pure one.
-fn has_effect(inst: &GraphInst) -> bool {
+pub(crate) fn has_effect(inst: &GraphInst) -> bool {
     let op = match &inst.payload {
         InstPayload::Phi { .. } => return false,
         InstPayload::Op(op) => op,
