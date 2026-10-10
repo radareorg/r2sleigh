@@ -14,10 +14,11 @@ use std::collections::BTreeMap;
 
 pub use input::RenderInput;
 
-use crate::ast::{CExpr, CFunction, CStmt, CType};
+use crate::ast::{CExpr, CFunction, CStmt, CType, RenderObservationId};
 use crate::codegen::{CodeGenConfig, CodeGenerator, prepare_function_for_emission};
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
+use crate::structure::certify::StatementRole;
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
@@ -91,14 +92,14 @@ pub fn render(
             copy
         })
     };
-    let body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
+    let mut body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
+    let selections = select(&c, &mut body);
     let never_return = values
         .as_ref()
         .map(values::Values::never_returning)
         .unwrap_or_default();
-    certify_control(input, &body, &blocks, &labels, &never_return)?;
-    let mut body = body;
-    body.visit_stmts_mut(&mut |stmt| select_one_assignment(&c.symbols.borrow(), stmt));
+    let role = |stmt: &CStmt| statement_role(stmt, &never_return, &selections);
+    certify_control(input, &body, &blocks, &labels, &role)?;
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
     let stopped = work.with_phase(DecompileWorkPhase::Rendering).poll().err();
     match &values {
@@ -180,7 +181,7 @@ fn certify_control(
     body: &CStmt,
     blocks: &[u64],
     labels: &BTreeMap<u64, String>,
-    never_return: &std::collections::BTreeSet<String>,
+    role: &dyn Fn(&CStmt) -> StatementRole,
 ) -> Result<(), RenderStop> {
     let function = input.function();
     let label_block = labels
@@ -194,7 +195,7 @@ fn certify_control(
         function.root(),
         &|id| blocks.get(id.index() as usize).copied(),
         &|name| label_block.get(name).copied(),
-        &|stmt| traps(stmt) || calls_never_returning(stmt, never_return),
+        role,
     );
     if certificate.ok() {
         return Ok(());
@@ -203,6 +204,37 @@ fn certify_control(
         "control certificate: {certificate} {:?}",
         certificate.violations.first()
     )))
+}
+
+/// D1.1's selections, each arm converted to `x`'s type as its own assignment converted it.
+fn select(c: &CFunction, body: &mut CStmt) -> std::collections::BTreeSet<RenderObservationId> {
+    let convert = |target: crate::symbol::SymbolId, value: CExpr| {
+        let symbols = c.symbols.borrow();
+        let ty = symbols.ty(target);
+        match value.unobserved() {
+            CExpr::Var(symbol) if symbols.ty(*symbol) == ty => value,
+            _ => terms::at_sink(ty, CExpr::cast(ty.clone(), value)),
+        }
+    };
+    let mut selections = std::collections::BTreeSet::new();
+    crate::structure::ControlFlowStructurer::select(body, &convert, &mut selections);
+    selections
+}
+
+/// What the certificate reads a statement as: a selection the stage recorded, or one ending control.
+fn statement_role(
+    stmt: &CStmt,
+    never_return: &std::collections::BTreeSet<String>,
+    selections: &std::collections::BTreeSet<RenderObservationId>,
+) -> StatementRole {
+    match stmt
+        .observation_ids()
+        .iter()
+        .any(|id| selections.contains(id))
+    {
+        true => StatementRole::Selects,
+        false => (traps(stmt) || calls_never_returning(stmt, never_return)).into(),
+    }
 }
 
 /// A local nothing in the text names, every read of it a residual, declares nothing.
@@ -214,89 +246,6 @@ fn drop_unmentioned_locals(c: &mut CFunction) {
         }
     });
     c.locals.retain(|local| mentioned.contains(&local.name));
-}
-
-/// `if (c) { x = a; } else { x = b; }` is `x = c ? a : b;`: C evaluates `c`, then the one arm it
-/// selects, either way. After the certificate, which reads each arm's block where it stands; the
-/// one statement keeps both arms' markers, and each arm is converted to `x`'s type, as its own
-/// assignment converted it, before the two meet.
-fn select_one_assignment(symbols: &crate::symbol::SymbolTable, stmt: &mut CStmt) {
-    if !matches!(
-        stmt,
-        CStmt::If {
-            else_body: Some(_),
-            ..
-        }
-    ) {
-        return;
-    }
-    let CStmt::If {
-        cond,
-        then_body,
-        else_body: Some(else_body),
-    } = std::mem::replace(stmt, CStmt::Empty)
-    else {
-        unreachable!("an if with an else, matched above");
-    };
-    *stmt = match (sole_assignment(&then_body), sole_assignment(&else_body)) {
-        (Some((then_ids, target, then_value)), Some((else_ids, other, else_value)))
-            if target == other =>
-        {
-            let ty = symbols.ty(target);
-            let converted = |value: CExpr| match value.unobserved() {
-                CExpr::Var(symbol) if symbols.ty(*symbol) == ty => value,
-                _ => terms::at_sink(ty, CExpr::cast(ty.clone(), value)),
-            };
-            let selected = CExpr::Ternary {
-                cond: Box::new(cond),
-                then_expr: Box::new(converted(then_value)),
-                else_expr: Box::new(converted(else_value)),
-            };
-            let assignment = CExpr::assign(CExpr::var(target), selected);
-            CStmt::observe_all([then_ids, else_ids].concat(), CStmt::Expr(assignment))
-        }
-        _ => CStmt::If {
-            cond,
-            then_body,
-            else_body: Some(else_body),
-        },
-    };
-}
-
-/// An arm that is one assignment to a plain variable, with nothing else but empty statements: its
-/// markers, the variable and the value.
-fn sole_assignment(
-    arm: &CStmt,
-) -> Option<(
-    Vec<crate::ast::RenderObservationId>,
-    crate::symbol::SymbolId,
-    CExpr,
-)> {
-    let mut ids = arm.observation_ids().into_owned();
-    let stmts = match arm.unobserved() {
-        CStmt::Block(stmts) => stmts.as_slice(),
-        single => std::slice::from_ref(single),
-    };
-    let mut assignment = None;
-    for stmt in stmts {
-        ids.extend(stmt.observation_ids().iter().copied());
-        match stmt.unobserved() {
-            CStmt::Empty => {}
-            CStmt::Expr(CExpr::Binary {
-                op: crate::ast::BinaryOp::Assign,
-                left,
-                right,
-            }) if assignment.is_none() => match left.unobserved() {
-                CExpr::Var(target) if left.observation_ids().is_empty() => {
-                    assignment = Some((*target, right.as_ref().clone()));
-                }
-                _ => return None,
-            },
-            _ => return None,
-        }
-    }
-    let (target, value) = assignment?;
-    Some((ids, target, value))
 }
 
 /// What became of each obligation: D2's account, or every one a gap where D2 did not run.

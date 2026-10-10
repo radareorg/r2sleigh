@@ -8,8 +8,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{CExpr, CStmt};
+use crate::ast::{BinaryOp, CExpr, CStmt, RenderObservationId};
 use crate::structured_region::StructuredRegionKind;
+use crate::symbol::SymbolId;
 
 use super::ControlFlowStructurer;
 
@@ -59,6 +60,110 @@ impl ControlFlowStructurer<'_, '_> {
         Self::rotate_loops(&mut stmt);
         Self::drop_unreferenced_labels(&mut stmt);
         stmt
+    }
+
+    /// `if (c) { x = a; } else { x = b; }` is `x = c ? a : b;`, the test's markers on the statement
+    /// and each arm's on its value (ADR §3); after `shape`, whose copies do not remint a value.
+    pub(crate) fn select(
+        stmt: &mut CStmt,
+        convert: &dyn Fn(SymbolId, CExpr) -> CExpr,
+        selections: &mut BTreeSet<RenderObservationId>,
+    ) {
+        if let CStmt::Observed { ids, stmt: inner } = stmt
+            && let Some(selection) = Self::selection(inner, convert)
+        {
+            selections.extend(ids.iter());
+            **inner = selection;
+            return;
+        }
+        let mut each = |stmt: &mut CStmt| Self::select(stmt, convert, selections);
+        match stmt {
+            CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => each(stmt),
+            CStmt::Block(stmts) => stmts.iter_mut().for_each(each),
+            CStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                each(then_body);
+                if let Some(else_body) = else_body {
+                    each(else_body);
+                }
+            }
+            CStmt::For { init, body, .. } => {
+                if let Some(init) = init {
+                    each(init);
+                }
+                each(body);
+            }
+            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => each(body),
+            CStmt::Switch { cases, default, .. } => (cases.iter_mut())
+                .flat_map(|case| case.body.iter_mut())
+                .chain(default.iter_mut().flatten())
+                .for_each(each),
+            _ => {}
+        }
+    }
+
+    /// The selection an `if` with an else is, when each arm is one assignment to the same variable
+    /// of a value that writes nothing; each value converted to the variable's type before they meet.
+    fn selection(stmt: &CStmt, convert: &dyn Fn(SymbolId, CExpr) -> CExpr) -> Option<CStmt> {
+        let CStmt::If {
+            cond,
+            then_body,
+            else_body: Some(else_body),
+        } = stmt
+        else {
+            return None;
+        };
+        let (then_ids, target, then_value) = Self::sole_arm_assignment(then_body)?;
+        let (else_ids, other, else_value) = Self::sole_arm_assignment(else_body)?;
+        if target != other {
+            return None;
+        }
+        let arm = |ids, value| CExpr::observe_all(ids, convert(target, value));
+        let selected = CExpr::Ternary {
+            cond: Box::new(cond.clone()),
+            then_expr: Box::new(arm(then_ids, then_value)),
+            else_expr: Box::new(arm(else_ids, else_value)),
+        };
+        Some(CStmt::Expr(CExpr::assign(CExpr::var(target), selected)))
+    }
+
+    /// An arm that is one assignment to a plain variable, with nothing else but empty statements:
+    /// its markers, the variable and the value.
+    fn sole_arm_assignment(arm: &CStmt) -> Option<(Vec<RenderObservationId>, SymbolId, CExpr)> {
+        let mut ids = arm.observation_ids().into_owned();
+        let stmts = match arm.unobserved() {
+            CStmt::Block(stmts) => stmts.as_slice(),
+            single => std::slice::from_ref(single),
+        };
+        let mut live = stmts
+            .iter()
+            .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty));
+        let (Some(only), None) = (live.next(), live.next()) else {
+            return None;
+        };
+        let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        }) = only.unobserved()
+        else {
+            return None;
+        };
+        let CExpr::Var(target) = left.unobserved() else {
+            return None;
+        };
+        if !left.observation_ids().is_empty() || super::certify::writes(right) {
+            return None;
+        }
+        ids.extend(
+            stmts
+                .iter()
+                .flat_map(|stmt| stmt.observation_ids().into_owned()),
+        );
+        Some((ids, *target, right.as_ref().clone()))
     }
 
     /// A case arm that is one `goto` to a block placed after the switch takes

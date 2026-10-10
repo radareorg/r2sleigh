@@ -44,6 +44,14 @@ entered at its head whose non-head blocks render nothing, checked as one unit
 by requiring its exit function to equal the test's by BDD identity. The
 checker never infers a chain.
 
+A selection `x = c ? a : b;`, written by the readability stage for an `if`
+whose arms each assign `x` once, is read as that `if`. The statement carries
+the test block's markers and each value its arm block's (one block, or none for
+an arm that is the edge itself); that block's occurrence is entered on the
+arm's edge. The rewrite records the statement as a selection. The checker
+refuses one whose test is not a conditional branch, whose target is not a plain
+variable, or whose value writes: that write is a second effect of the arm.
+
 ### §4 Placement
 
 Every block except the entry is placed by its immediate dominator `x`. With

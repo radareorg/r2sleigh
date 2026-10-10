@@ -97,6 +97,11 @@ pub(crate) enum Violation {
     ReturnWhereMachineContinues {
         block: u64,
     },
+    /// A selection that is not one assignment of a test's value to a plain variable, each arm
+    /// writing nothing and naming at most one block.
+    Selection {
+        block: u64,
+    },
     /// The occurrence's edges are not the block's edges.
     EdgeMismatch {
         block: u64,
@@ -121,6 +126,7 @@ impl Violation {
             Self::UnresolvedIndirect { .. } => "unresolved-indirect",
             Self::FallsOffEnd { .. } => "falls-off-end",
             Self::ReturnWhereMachineContinues { .. } => "return-where-machine-continues",
+            Self::Selection { .. } => "selection",
             Self::EdgeMismatch { .. } => "edge-mismatch",
         }
     }
@@ -152,7 +158,7 @@ impl fmt::Display for Violation {
             Self::UnknownLabel(name) => write!(f, " {name}"),
             Self::UnownedControl { kind, open } => write!(f, " {kind} open-ends={open}"),
             Self::StrayBreak | Self::StrayContinue | Self::EmptyLoopBody => Ok(()),
-            Self::SwitchValue { block } => write!(f, " at {block:#x}"),
+            Self::SwitchValue { block } | Self::Selection { block } => write!(f, " at {block:#x}"),
             Self::TerminalFallthrough { block, to } | Self::UnresolvedIndirect { block, to } => {
                 write!(f, " {block:#x} -> {to}")
             }
@@ -221,6 +227,26 @@ impl fmt::Display for ControlCertificate {
     }
 }
 
+/// What the caller says a statement is, which the walk then checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatementRole {
+    Plain,
+    /// A trap or a call that never returns: control ends here.
+    Ends,
+    /// `x = c ? a : b;` written for its test block's `if` with one assignment in each arm.
+    Selects,
+}
+
+impl From<bool> for StatementRole {
+    /// Whether a statement ends control, where a caller says nothing of selections.
+    fn from(ends: bool) -> Self {
+        match ends {
+            true => Self::Ends,
+            false => Self::Plain,
+        }
+    }
+}
+
 /// One rendered copy of one block's text.
 struct Occurrence {
     block: u64,
@@ -258,7 +284,7 @@ struct Walker<'a> {
     dom: &'a DomTree,
     block_of: &'a dyn Fn(RenderObservationId) -> Option<u64>,
     label_block: &'a dyn Fn(&str) -> Option<u64>,
-    terminal_call: &'a dyn Fn(&CStmt) -> bool,
+    role: &'a dyn Fn(&CStmt) -> StatementRole,
     occurrences: Vec<Occurrence>,
     frames: Vec<Frame>,
     violations: Vec<Violation>,
@@ -480,7 +506,7 @@ impl Walker<'_> {
                 self.walk_switch(open, cases, default.as_deref())
             }
             // A call the prototype declares `noreturn`, or a transfer the caller says traps, ends the text here.
-            CStmt::Expr(_) | CStmt::Gap(_) if (self.terminal_call)(stmt) => {
+            CStmt::Expr(_) | CStmt::Gap(_) if (self.role)(stmt) == StatementRole::Ends => {
                 for (id, _) in open {
                     self.occurrences[id].returned = true;
                 }
@@ -567,6 +593,9 @@ impl Walker<'_> {
         }
         let inner = stmt.unobserved();
         match inner {
+            CStmt::Expr(selection) if (self.role)(stmt) == StatementRole::Selects => {
+                self.walk_selection(&blocks, selection, open)
+            }
             CStmt::DoWhile { body, .. } => self.walk_do_while(&blocks, body, open),
             CStmt::For {
                 cond: None, body, ..
@@ -607,6 +636,53 @@ impl Walker<'_> {
                 self.walk(inner, open)
             }
         }
+    }
+
+    /// A selection is its test block's `if`: each arm's value is the occurrence of the block its
+    /// markers name, entered on the arm's edge, or that edge itself where they name none.
+    fn walk_selection(
+        &mut self,
+        candidates: &[u64],
+        selection: &CExpr,
+        open: Vec<OpenEnd>,
+    ) -> Vec<OpenEnd> {
+        let tests = |addr: &u64| {
+            self.cfg.get_block(*addr).is_some_and(|block| {
+                matches!(block.terminator, BlockTerminator::ConditionalBranch { .. })
+            })
+        };
+        let open = match candidates.iter().copied().find(tests) {
+            Some(block) => self.enter_block(open, block),
+            None => open,
+        };
+        let Some(owner) = self.single_owner(&open, "selection") else {
+            return Vec::new();
+        };
+        let block = self.occurrences[owner].block;
+        let arms = selected_arms(selection).filter(|_| tests(&block));
+        let Some(arms) = arms else {
+            self.violations.push(Violation::Selection { block });
+            return Vec::new();
+        };
+        let mut ends = Vec::new();
+        for (arm, label) in arms.into_iter().zip([EdgeLabel::True, EdgeLabel::False]) {
+            let mut named = arm
+                .observation_ids()
+                .iter()
+                .filter_map(|id| (self.block_of)(*id))
+                .collect::<Vec<_>>();
+            named.sort_unstable();
+            named.dedup();
+            match named.as_slice() {
+                [] => ends.push((owner, label)),
+                [at] => ends.extend(self.enter_block(vec![(owner, label)], *at)),
+                _ => {
+                    self.violations.push(Violation::Selection { block });
+                    return Vec::new();
+                }
+            }
+        }
+        ends
     }
 
     /// Whether a plain statement of `block` is the text moving on to that
@@ -801,6 +877,48 @@ impl Walker<'_> {
         carry.extend(breaks);
         carry
     }
+}
+
+/// A selection's two values, then and else, when it assigns a plain variable and neither writes.
+fn selected_arms(selection: &CExpr) -> Option<[&CExpr; 2]> {
+    let CExpr::Binary {
+        op: crate::ast::BinaryOp::Assign,
+        left,
+        right,
+    } = selection.unobserved()
+    else {
+        return None;
+    };
+    let CExpr::Ternary {
+        then_expr,
+        else_expr,
+        ..
+    } = right.unobserved()
+    else {
+        return None;
+    };
+    let plain = left.observation_ids().is_empty() && matches!(left.unobserved(), CExpr::Var(_));
+    (plain && right.observation_ids().is_empty() && !writes(then_expr) && !writes(else_expr))
+        .then_some([then_expr.as_ref(), else_expr.as_ref()])
+}
+
+/// Whether evaluating `expr` writes: one write in a selected value is a second effect the arm made.
+pub(crate) fn writes(expr: &CExpr) -> bool {
+    let mut writes = false;
+    expr.visit(&mut |node| {
+        writes |= match node {
+            CExpr::Binary { op, .. } => op.writes_left_operand(),
+            CExpr::Unary { op, .. } => matches!(
+                op,
+                crate::ast::UnaryOp::PreInc
+                    | crate::ast::UnaryOp::PreDec
+                    | crate::ast::UnaryOp::PostInc
+                    | crate::ast::UnaryOp::PostDec
+            ),
+            _ => false,
+        };
+    });
+    writes
 }
 
 /// The external callee a statement calls, when the statement is a call or
@@ -1002,21 +1120,21 @@ fn switch_edges_agree(rendered: &[(Target, EdgeLabel)], expected: &[(Target, Edg
 ///
 /// `block_of` says which block an observed statement was emitted for, and
 /// `label_block` which block a label names; neither is derived here.
-pub(crate) fn certify(
+pub(crate) fn certify<R: Into<StatementRole>>(
     body: &CStmt,
     cfg: &CFG,
     dom: &DomTree,
     entry: u64,
     block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
     label_block: &dyn Fn(&str) -> Option<u64>,
-    terminal_call: &dyn Fn(&CStmt) -> bool,
+    role: &dyn Fn(&CStmt) -> R,
 ) -> ControlCertificate {
     let mut walker = Walker {
         cfg,
         dom,
         block_of,
         label_block,
-        terminal_call,
+        role: &|stmt| role(stmt).into(),
         occurrences: Vec::new(),
         frames: Vec::new(),
         violations: Vec::new(),
@@ -1235,6 +1353,17 @@ mod tests {
     }
 
     fn run(body: CStmt, cfg: &CFG, entry: u64, labels: &[(&str, u64)]) -> ControlCertificate {
+        run_selecting(body, cfg, entry, labels, &[])
+    }
+
+    /// The certificate where the statements observed under `selects` are selections.
+    fn run_selecting(
+        body: CStmt,
+        cfg: &CFG,
+        entry: u64,
+        labels: &[(&str, u64)],
+        selects: &[RenderObservationId],
+    ) -> ControlCertificate {
         let block_of = |id: RenderObservationId| Some(u64::from(id.index()));
         let label_block = |name: &str| {
             labels
@@ -1249,7 +1378,10 @@ mod tests {
             entry,
             &block_of,
             &label_block,
-            &|_| false,
+            &|stmt| match stmt.observation_ids().iter().any(|id| selects.contains(id)) {
+                true => StatementRole::Selects,
+                false => StatementRole::Plain,
+            },
         )
     }
 
@@ -1558,5 +1690,139 @@ mod tests {
             certificate.violations,
             vec![Violation::ReturnWhereMachineContinues { block: 0x10 }]
         );
+    }
+
+    /// `x = c ? a : b` for the test at 0x10, each value observed under its arm's block, if any.
+    fn selection(
+        x: CExpr,
+        then_arm: (Option<u64>, CExpr),
+        else_arm: (Option<u64>, CExpr),
+    ) -> CStmt {
+        let arm = |(block, value): (Option<u64>, CExpr)| match block {
+            Some(block) => CExpr::observe_one(
+                test_render_observation_id(u32::try_from(block).expect("small address")),
+                value,
+            ),
+            None => value,
+        };
+        let ternary = CExpr::Ternary {
+            cond: Box::new(cond()),
+            then_expr: Box::new(arm(then_arm)),
+            else_expr: Box::new(arm(else_arm)),
+        };
+        at(0x10, CStmt::Expr(CExpr::assign(x, ternary)))
+    }
+
+    fn selects() -> Vec<RenderObservationId> {
+        vec![test_render_observation_id(0x10)]
+    }
+
+    fn diamond() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, branch(0x40)),
+                (0x30, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_selection_is_its_test_s_if_with_each_arm_s_block_entered_on_its_edge() {
+        // The triangle `test; je join; mov eax, 5; join:`: the taken arm is the edge itself.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x40, 0x20)),
+                (0x20, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let mut symbols = crate::symbol::SymbolTable::new();
+        let x = symbols.declare_or_reuse("x");
+        let assign = |value| CStmt::Expr(CExpr::assign(CExpr::var(x), CExpr::IntLit(value)));
+        let arms = CStmt::if_stmt(
+            cond(),
+            CStmt::Block(vec![assign(0x1000)]),
+            Some(CStmt::Block(vec![at(0x20, CStmt::Empty), assign(5)])),
+        );
+        let mut body = CStmt::Block(vec![at(0x10, arms), at(0x40, CStmt::Return(None))]);
+        let mut selections = BTreeSet::new();
+        crate::structure::ControlFlowStructurer::select(
+            &mut body,
+            &|_, value| value,
+            &mut selections,
+        );
+        assert_eq!(selections.into_iter().collect::<Vec<_>>(), selects());
+        let CStmt::Block(stmts) = &body else {
+            panic!("a block");
+        };
+        assert!(matches!(stmts[0].unobserved(), CStmt::Expr(_)), "{body:?}");
+        let certificate = run_selecting(body, &cfg, 0x10, &[], &selects());
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!(certificate.occurrences, 3);
+        assert_eq!(certificate.contracted, 0);
+    }
+
+    #[test]
+    fn a_selection_whose_arms_assign_two_variables_or_make_two_statements_is_refused() {
+        let mut symbols = crate::symbol::SymbolTable::new();
+        let x = CExpr::var(symbols.declare_or_reuse("x"));
+        let y = CExpr::var(symbols.declare_or_reuse("y"));
+        let join = at(0x40, CStmt::Return(None));
+        // The then arm assigns `y`, which the selection could only spell as a write inside its value.
+        let two_variables = CStmt::Block(vec![
+            selection(
+                x.clone(),
+                (Some(0x20), CExpr::assign(y.clone(), CExpr::IntLit(1))),
+                (Some(0x30), CExpr::IntLit(2)),
+            ),
+            join.clone(),
+        ]);
+        let certificate = run_selecting(two_variables, &diamond(), 0x10, &[], &selects());
+        assert_eq!(
+            certificate.violations.first(),
+            Some(&Violation::Selection { block: 0x10 }),
+            "{certificate}"
+        );
+        // The then arm's block has a second statement, so its text occurs twice.
+        let two_statements = CStmt::Block(vec![
+            selection(
+                x.clone(),
+                (Some(0x20), CExpr::IntLit(1)),
+                (Some(0x30), CExpr::IntLit(2)),
+            ),
+            at(
+                0x20,
+                CStmt::Expr(CExpr::assign(y.clone(), CExpr::IntLit(3))),
+            ),
+            join,
+        ]);
+        let certificate = run_selecting(two_statements, &diamond(), 0x10, &[], &selects());
+        assert!(!certificate.ok(), "{certificate}");
+        assert_eq!(certificate.duplicated, vec![0x20]);
+        // Neither shape is one the stage writes: it leaves both as `if`s.
+        let assign = |target: &CExpr, value| {
+            CStmt::Expr(CExpr::assign(target.clone(), CExpr::IntLit(value)))
+        };
+        for (then_arm, else_arm) in [
+            (vec![assign(&y, 1)], vec![assign(&x, 2)]),
+            (vec![assign(&x, 1), assign(&y, 3)], vec![assign(&x, 2)]),
+        ] {
+            let mut stmt = at(
+                0x10,
+                CStmt::if_stmt(cond(), CStmt::Block(then_arm), Some(CStmt::Block(else_arm))),
+            );
+            let mut selections = BTreeSet::new();
+            crate::structure::ControlFlowStructurer::select(
+                &mut stmt,
+                &|_, value| value,
+                &mut selections,
+            );
+            assert!(selections.is_empty());
+            assert!(matches!(stmt.unobserved(), CStmt::If { .. }), "{stmt:?}");
+        }
     }
 }
