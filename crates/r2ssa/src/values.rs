@@ -44,6 +44,41 @@ impl ValueRanges {
         }
     }
 
+    /// Each counted induction's merge narrowed to the iterates its header runs see (doc/ssa.md,
+    /// "Loop trip counts"), carried forward to what reads it: `O(inductions + E)`.
+    pub(crate) fn narrow_by_trips(
+        &mut self,
+        graph: &SsaGraph,
+        loops: &BTreeMap<crate::semantic::LoopId, crate::semantic::StructuredLoopFact>,
+        inductions: &crate::dense::IdMap<ValueId, crate::semantic::InductionFact>,
+    ) {
+        let mut queued = crate::dense::IdSet::default();
+        for induction in inductions.values() {
+            let runs = match loops.get(&induction.loop_id).map(|fact| &fact.trips) {
+                Some(Ok(trips)) => match trips.count {
+                    crate::semantic::TripCount::Exact(runs) => runs,
+                    crate::semantic::TripCount::Symbolic { .. } => continue,
+                },
+                _ => continue,
+            };
+            let (Some(merge), Some(init)) = (self.get(induction.phi), self.get(induction.init))
+            else {
+                continue;
+            };
+            let Some(seen) = iterates(init, induction.step, runs)
+                .filter(|seen| seen.width_bits() == merge.width_bits())
+            else {
+                continue;
+            };
+            let narrowed = merge.meet(&seen);
+            if narrowed != merge {
+                self.by_value[induction.phi.0 as usize] = narrowed;
+                queued.extend(non_phi_readers(graph, induction.phi));
+            }
+        }
+        carry_forward(graph, &mut self.by_value, queued, &|_, _, range| range);
+    }
+
     /// The smallest value this can take, where that is bounded.
     pub fn lower_bound(&self, value: ValueId) -> Option<u64> {
         let range = self.get(value)?;
@@ -822,7 +857,7 @@ fn narrow_where_defined(
     // One under no assumption recomputes to exactly what the ascent already
     // gave it, and if an input of it narrows elsewhere the carry forward
     // brings it back.
-    let mut queued = graph
+    let queued = graph
         .blocks
         .iter()
         .filter(|block| assumed.contains_key(&block.addr))
@@ -833,6 +868,23 @@ fn narrow_where_defined(
                 .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
         })
         .collect::<crate::dense::IdSet<_>>();
+    carry_forward(graph, state, queued, &|inst, value, range| {
+        let held = block_addr(graph, inst).and_then(|addr| assumed.get(&addr));
+        match held.and_then(|held| held.get(&class_of(class, value))) {
+            Some(narrowed) => range.meet(narrowed),
+            None => range,
+        }
+    });
+}
+
+/// Recompute each queued instruction, its inputs read through `input`, meet it in, and queue the
+/// non-phi readers of what narrowed; stopping at phis leaves a DAG, so the walk ends.
+fn carry_forward(
+    graph: &SsaGraph,
+    state: &mut [StridedInterval],
+    mut queued: crate::dense::IdSet<InstId>,
+    input: &dyn Fn(&GraphInst, ValueId, StridedInterval) -> StridedInterval,
+) {
     let mut ready = queued.iter().collect::<VecDeque<_>>();
     while let Some(inst_id) = ready.pop_front() {
         queued.remove(inst_id);
@@ -845,33 +897,63 @@ fn narrow_where_defined(
         let Some(was) = state.get(output.0 as usize).copied() else {
             continue;
         };
-        let held = block_addr(graph, inst).and_then(|addr| assumed.get(&addr));
         let now = was.meet(&transfer(graph, inst, &|value: ValueId| {
             let range = state
                 .get(value.0 as usize)
                 .copied()
                 .unwrap_or_else(|| StridedInterval::top(64));
-            match held.and_then(|held| held.get(&class_of(class, value))) {
-                Some(narrowed) => range.meet(narrowed),
-                None => range,
-            }
+            input(inst, value, range)
         }));
         if now == was {
             continue;
         }
         state[output.0 as usize] = now;
-        for reader in readers(graph, output) {
-            let Some(user) = graph.inst(reader) else {
-                continue;
-            };
-            if matches!(user.payload, InstPayload::Phi { .. }) {
-                continue;
-            }
+        for reader in non_phi_readers(graph, output) {
             if queued.insert(reader) {
                 ready.push_back(reader);
             }
         }
     }
+}
+
+/// The instructions that read `value`, less the phis, where a carry forward stops.
+fn non_phi_readers(graph: &SsaGraph, value: ValueId) -> impl Iterator<Item = InstId> + '_ {
+    readers(graph, value).filter(|reader| {
+        graph
+            .inst(*reader)
+            .is_some_and(|user| !matches!(user.payload, InstPayload::Phi { .. }))
+    })
+}
+
+/// `init + k·step` for every `k` below `runs`, read in the ring of the width; `None` where the
+/// progression itself leaves the width.
+fn iterates(
+    init: StridedInterval,
+    step: crate::semantic::InductionStep,
+    runs: u64,
+) -> Option<StridedInterval> {
+    use crate::semantic::InductionStep;
+    let width = init.width_bits();
+    let modulus = 1u128 << width.min(64);
+    let (forward, magnitude) = match step {
+        InductionStep::AddConst(addend) => (true, u128::from(addend)),
+        InductionStep::SubConst(subtrahend) => (false, u128::from(subtrahend)),
+        InductionStep::Affine { .. } => return None,
+    };
+    // A step past half the ring is the other direction's: `x + (2^w - 2)` is `x - 2`.
+    let (forward, magnitude) = match magnitude > modulus / 2 {
+        true => (!forward, modulus - magnitude),
+        false => (forward, magnitude),
+    };
+    let reach = u128::from(runs.checked_sub(1)?).checked_mul(magnitude)?;
+    let reach = u64::try_from(reach)
+        .ok()
+        .filter(|reach| u128::from(*reach) < modulus)?;
+    let steps = StridedInterval::strided(width, u64::try_from(magnitude).ok()?, 0, reach);
+    Some(match forward {
+        true => init.add(&steps),
+        false => init.sub(&steps),
+    })
 }
 
 #[cfg(test)]

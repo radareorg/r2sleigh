@@ -235,7 +235,7 @@ impl PreparedFunctionFacts {
             call_sites,
             declared_slots,
             predicates,
-            values,
+            mut values,
             objects,
             memory,
             memory_accesses,
@@ -311,6 +311,7 @@ impl PreparedFunctionFacts {
             &live_out,
             &storage_spans,
         );
+        values.narrow_by_trips(graph, &loops, &inductions);
         phase!("loops", loops.len());
         let structured = StructuredDataflowFacts {
             unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
