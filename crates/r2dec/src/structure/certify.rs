@@ -1753,6 +1753,7 @@ mod tests {
         crate::structure::ControlFlowStructurer::select(
             &mut body,
             &|_, value| value,
+            &|id| Some(u64::from(id.index())),
             &mut selections,
         );
         assert_eq!(selections.into_iter().collect::<Vec<_>>(), selects());
@@ -1810,6 +1811,15 @@ mod tests {
         for (then_arm, else_arm) in [
             (vec![assign(&y, 1)], vec![assign(&x, 2)]),
             (vec![assign(&x, 1), assign(&y, 3)], vec![assign(&x, 2)]),
+            // Empty markers of two blocks: the certificate enters one block per arm.
+            (
+                vec![assign(&x, 1)],
+                vec![
+                    at(0x20, CStmt::Empty),
+                    at(0x30, CStmt::Empty),
+                    assign(&x, 2),
+                ],
+            ),
         ] {
             let mut stmt = at(
                 0x10,
@@ -1819,6 +1829,7 @@ mod tests {
             crate::structure::ControlFlowStructurer::select(
                 &mut stmt,
                 &|_, value| value,
+                &|id| Some(u64::from(id.index())),
                 &mut selections,
             );
             assert!(selections.is_empty());
