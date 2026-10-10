@@ -5379,3 +5379,98 @@ fn a_call_through_a_folded_target_takes_the_callees_interface() {
         r2engine::body::Trace::start(BASE, &machine.embedded.disasm, &program).expect("trace");
     assert!(trace.calls().contains(&0x1030), "{:?}", trace.calls());
 }
+
+/// Microsoft x64 states its argument registers as positional pairs: integers in RCX, RDX,
+/// R8, R9 and floats in the low lanes of XMM0 to XMM3, the nth of each sharing position n.
+#[test]
+fn microsoft_x64_states_four_positional_register_pairs() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: HELD_ACROSS_A_CALL,
+        stub: 0x1026,
+    };
+    let place = |name: &str| {
+        let register = (machine.embedded.arch.registers.iter())
+            .find(|register| register.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("{name} is a register"));
+        CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: register.offset,
+            size: register.size,
+        }
+    };
+    let prepared =
+        r2engine::native::prepared(&machine.under("ms"), &program, BASE).expect("prepared");
+    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+    let integers = ["RCX", "RDX", "R8", "R9"].map(place);
+    let floats = ["XMM0_Qa", "XMM1_Qa", "XMM2_Qa", "XMM3_Qa"].map(place);
+    assert_eq!(slots.argument_slots(), integers);
+    assert_eq!(slots.float_argument_slots(), floats);
+    assert!(slots.shared_positions());
+    // System V counts its two classes apart.
+    let prepared =
+        r2engine::native::prepared(&machine.under("amd64"), &program, BASE).expect("prepared");
+    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+    assert!(!slots.shared_positions());
+}
+
+/// `ldexpf(0.0f, 3)` under Microsoft x64, the stub at 0x1010.
+const LDEXPF_THREE: &[u8] = &[
+    0x0f, 0x57, 0xc0, // 0x1000 xorps xmm0, xmm0
+    0xba, 0x03, 0x00, 0x00, 0x00, // 0x1003 mov edx, 3
+    0xe8, 0x03, 0x00, 0x00, 0x00, // 0x1008 call 0x1010
+    0xc3, // 0x100d ret
+    0x00, 0x00, // to 0x1010
+    0xc3, // 0x1010 the stub
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `LDEXPF_THREE`, its stub the import `ldexpf(float, int)`.
+struct Ldexpf;
+
+impl r2engine::body::Program for Ldexpf {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = LDEXPF_THREE.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(LDEXPF_THREE.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1010)
+    }
+}
+
+impl Program for Ldexpf {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1010).then(|| "ldexpf".to_owned())
+    }
+}
+
+/// The int after a float takes the second position's RDX under Microsoft x64, never RCX.
+#[test]
+fn a_microsoft_x64_int_after_a_float_takes_the_second_position() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let response = staged(&machine.under("ms"), &Ldexpf, BASE).expect("decompile");
+    let text = response.output.text();
+    let arguments = common::call_arguments(text, "ldexpf").expect("a call to ldexpf");
+    assert_eq!(arguments.len(), 2, "{text}");
+    assert_eq!(common::bare(&arguments[1]), "3", "{text}");
+}

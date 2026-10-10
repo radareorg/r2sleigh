@@ -144,26 +144,27 @@ impl<'a> Placement<'a> {
     /// Where the declared parameters arrive, up to the first that does not
     /// arrive in a register this can name.
     ///
-    /// A parameter arrives in the registers its own class uses, and the two
-    /// classes are counted separately: the third integer argument takes the
-    /// third integer register however many floating-point arguments came
-    /// before it. Every parameter before one that cannot be placed is placed
-    /// whatever follows it: a seventh argument on the stack does not move the
-    /// first six out of their registers.
+    /// A parameter takes the next register of its own class, counted per class or, where the
+    /// convention shares positions, by its position. A placed prefix stays placed.
     pub(crate) fn placed_prefix(&self, declared: Declared<'_>) -> Vec<CanonicalStorageId> {
-        let integer_slots = self.machine.slots.argument_slots();
+        let slots = &self.machine.slots;
+        let shared = slots.shared_positions();
+        let index = |position: usize, count: usize| if shared { position } else { count - 1 };
         let (mut integers, mut floats) = (0usize, 0usize);
         let mut placed = Vec::with_capacity(declared.prototype.parameters.len());
-        for parameter in &declared.prototype.parameters {
+        for (position, parameter) in declared.prototype.parameters.iter().enumerate() {
             let slot = match self.class(declared.graph, parameter.ty) {
                 Ok(Class::Float(bytes)) => {
                     floats += 1;
-                    let slot = self.machine.slots.float_argument_slots().get(floats - 1);
+                    let slot = slots.float_argument_slots().get(index(position, floats));
                     slot.map(|slot| self.low_lane(*slot, bytes))
                 }
                 Ok(Class::Integer) => {
                     integers += 1;
-                    integer_slots.get(integers - 1).copied()
+                    slots
+                        .argument_slots()
+                        .get(index(position, integers))
+                        .copied()
                 }
                 Err(reason) => {
                     r2il::refusal_evidence!(
