@@ -790,3 +790,59 @@ fn a_frame_read_at_an_unbounded_index_keeps_every_store() {
     });
     assert_eq!(store_ownership(&artifact), (true, false));
 }
+
+/// The frame with a stored slot at `sp + 8` and the address `sp + escaped` written to a global.
+fn escaped_frame_address(escaped: u64) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact(|block, sp| {
+        let slot = Varnode::unique(0x200, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: slot.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: slot,
+            val: Varnode::constant(7, 8),
+        });
+        let address = Varnode::unique(0x208, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(escaped, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: address,
+        });
+    });
+    let adjust = artifact
+        .graph()
+        .inst_spelled_at(0x7000, 0)
+        .expect("the frame allocation");
+    (artifact, adjust)
+}
+
+#[test]
+fn an_adjustment_read_only_to_name_a_frame_object_is_frame_setup() {
+    let (artifact, adjust) = escaped_frame_address(8);
+    let geometry = &artifact.certificates().stack_geometry;
+    assert!(
+        !geometry.insts.contains(adjust),
+        "the address escapes the geometry"
+    );
+    assert!(geometry.frame_setup.contains(adjust), "{geometry:?}");
+}
+
+#[test]
+fn an_adjustment_read_to_name_a_caller_slot_is_not_frame_setup() {
+    let (artifact, adjust) = escaped_frame_address(40);
+    assert!(
+        !artifact
+            .certificates()
+            .stack_geometry
+            .frame_setup
+            .contains(adjust)
+    );
+}

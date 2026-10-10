@@ -243,6 +243,7 @@ phase "Certification gate contracts"
 # names it as held from entry. These pin that reading on renderings the
 # engine printed; they run no binary.
 run python3 scripts/test_certify_render.py
+run python3 scripts/test_census.py
 
 phase "Equivalence gate"
 # Replaces the plugin-driven 54-cell cutover corpus, which could no longer run:

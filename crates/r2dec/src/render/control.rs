@@ -254,6 +254,7 @@ impl<'i> Writer<'_, 'i> {
                     // No stated target: control goes where the facts do not say, so the text traps.
                     true => vec![self.trap(addr, UNRESOLVED_INDIRECT_BRANCH)],
                     false => {
+                        self.residual_terminator(addr);
                         let selector = self.residual(&super::word(self.input));
                         self.switch(addr, selector, &cases, None)
                     }
@@ -308,6 +309,11 @@ impl<'i> Writer<'_, 'i> {
             .input
             .return_type()
             .is_some_and(r2types::ReturnTypeFact::is_unproven);
+        if ty != CType::Void
+            && let Some(addr) = addr
+        {
+            self.residual_terminator(addr);
+        }
         match ty {
             CType::Void => CStmt::Return(None),
             ty if unproven => CStmt::Return(Some(
@@ -328,13 +334,24 @@ impl<'i> Writer<'_, 'i> {
                 values.spelled_terminator(addr, &CStmt::Expr(expr.clone()));
                 expr
             }
-            None => self.residual(ty),
+            None => {
+                self.residual_terminator(addr);
+                self.residual(ty)
+            }
+        }
+    }
+
+    /// The terminator of the block at `addr` is a residual the text spells, which the ledger reads.
+    fn residual_terminator(&self, addr: u64) {
+        if let Some(values) = self.values {
+            values.residual_terminator(addr);
         }
     }
 
     /// A residual of `ty`, or of the machine word where C has no residual of `ty`.
     /// A transfer the text cannot make, as a gap whose marker names it: running it traps.
     fn trap(&mut self, addr: u64, kind: &'static str) -> CStmt {
+        self.residual_terminator(addr);
         let gap = CStmt::Gap(GapMarker {
             kind: kind.to_owned(),
             origin: "render::control".to_owned(),
