@@ -432,6 +432,8 @@ pub enum ResidualCause {
     UnrepresentableFloat,
     /// A float converted to an integer that does not hold it, which C leaves undefined.
     UndefinedConversion,
+    /// The most negative value divided by -1, which neither p-code nor C gives a quotient.
+    UndefinedQuotient,
     /// A marked gap: an operation, or a branch or dispatch test, the renderer
     /// could not lower. The gap's own marker says which.
     Gap,
@@ -447,6 +449,7 @@ impl ResidualCause {
             Self::NeverAssigned => "never-assigned",
             Self::UnrepresentableFloat => "unrepresentable-float",
             Self::UndefinedConversion => "undefined-conversion",
+            Self::UndefinedQuotient => "undefined-quotient",
             Self::Gap => "gap",
         }
     }
