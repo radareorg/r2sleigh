@@ -82,9 +82,12 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         [],
     )
     .expect("exact indexed-access interface");
-    let prepared =
-        r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-            .expect("prepared indexed load");
+    let prepared = r2ssa::SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&r2ssa::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("prepared indexed load");
     let load_index = prepared
         .function()
         .get_block(0x401000)

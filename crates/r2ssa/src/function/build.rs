@@ -58,7 +58,7 @@ impl SSAFunction {
     }
 
     /// Build an SSA function from blocks with constructor-time SCCP enabled.
-    pub fn from_blocks_with_arch(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn from_blocks_with_arch(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         let func = Self::from_blocks_raw(blocks, arch)?;
         // Constructor path applies SCCP by default while keeping legacy SSA consumers stable.
         let cfg = crate::optimize::OptimizationConfig {
@@ -79,7 +79,7 @@ impl SSAFunction {
     /// configured decompiler-safe cleanup.
     pub fn from_blocks_for_decompile(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
     ) -> Option<Self> {
         Self::from_blocks_for_decompile_with_control(blocks, arch, &UncheckedSsaWorkControl).ok()
     }
@@ -90,7 +90,7 @@ impl SSAFunction {
     /// preparation and canonicalization phase completes.
     pub fn from_blocks_for_decompile_with_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         Self::from_blocks_for_decompile_with_interface_and_control(
@@ -109,7 +109,7 @@ impl SSAFunction {
     #[cfg(test)]
     pub(crate) fn for_decompile_under(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         machine_context: &SourceMachineContext,
     ) -> Option<Self> {
         Self::from_blocks_for_decompile_with_interface_and_control(
@@ -130,7 +130,7 @@ impl SSAFunction {
         C: SsaWorkControl + ?Sized,
     >(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         questions: InterfaceQuestions<'_>,
         machine_context: &SourceMachineContext,
         callees: &CalleeBoundaries,
@@ -225,14 +225,17 @@ impl SSAFunction {
     /// This keeps memory reads and address arithmetic intact while still
     /// applying limited whole-function SCCP so layout-sensitive patterns
     /// collapse to a canonical indexed+offset form for downstream consumers.
-    pub fn from_blocks_for_patterns(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn from_blocks_for_patterns(
+        blocks: &[R2ILBlock],
+        arch: Option<&crate::Arch>,
+    ) -> Option<Self> {
         Self::from_blocks_for_patterns_with_control(blocks, arch, &UncheckedSsaWorkControl).ok()
     }
 
     /// Build pattern/type-inference SSA while polling expensive worklists.
     pub fn from_blocks_for_patterns_with_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -260,7 +263,7 @@ impl SSAFunction {
     /// 2. Compute dominator tree
     /// 3. Place phi nodes
     /// 4. Rename variables
-    pub fn from_blocks_raw(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn from_blocks_raw(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         Self::from_blocks_raw_with_control(blocks, arch, &UncheckedSsaWorkControl).ok()
     }
 
@@ -272,7 +275,7 @@ impl SSAFunction {
     /// deadline the request has already missed.
     pub fn from_blocks_raw_with_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         Self::from_blocks_raw_with_policy_and_control(
@@ -287,7 +290,7 @@ impl SSAFunction {
     /// Build raw SSA prepared with decompiler-safe call boundaries.
     pub fn from_blocks_raw_for_decompile(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
     ) -> Option<Self> {
         Self::from_blocks_raw_for_decompile_with_control(blocks, arch, &UncheckedSsaWorkControl)
             .ok()
@@ -296,7 +299,7 @@ impl SSAFunction {
     /// Build raw decompiler SSA while polling construction worklists.
     pub fn from_blocks_raw_for_decompile_with_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         Self::from_blocks_raw_for_decompile_with_carriers_and_control(
@@ -316,7 +319,7 @@ impl SSAFunction {
     fn from_blocks_raw_for_decompile_with_carriers_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         cfg: CFG,
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         machine_context: &SourceMachineContext,
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
         callees: &CalleeBoundaries,
@@ -349,7 +352,7 @@ impl SSAFunction {
     )]
     fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
         cfg: CFG,
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         call_boundaries: Option<&CallBoundaryConfig>,
         abi_carriers: &[CanonicalStorageId],
         control: &C,
@@ -362,13 +365,12 @@ impl SSAFunction {
         // Compute dominator tree
         let domtree = DomTree::compute_with_control(&cfg, control)?;
 
-        let reg_names = arch.map(cached_register_name_map);
-        let reg_names_ref = reg_names.as_deref();
+        let reg_names_ref = arch.map(crate::Arch::register_names);
         // One identity per register family: a lane is renamed as a projection
         // of its root (doc/adr-register-identity.md).
         // One identity per register family, rooted at what this function
         // touches of it rather than at the widest name the architecture has.
-        let families = arch.map(cached_register_family_info).map(|families| {
+        let families = arch.map(crate::Arch::register_families).map(|families| {
             let mut used = Vec::new();
             for block in cfg.blocks() {
                 for op in &block.ops {

@@ -898,7 +898,11 @@ mod tests {
         Varnode::new(SpaceId::Register, offset, size)
     }
 
-    fn arch() -> ArchSpec {
+    fn arch() -> crate::Arch {
+        crate::Arch::new(arch_spec())
+    }
+
+    fn arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("RAX", 0, 8));
@@ -1341,7 +1345,9 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x100, 8),
         });
-        let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
+        let func =
+            SSAFunction::from_blocks_with_arch(&[block], Some(&crate::Arch::from(arch.clone())))
+                .expect("ssa");
         let graph = SsaGraph::from_function(&func);
         let content = ValueContent::of(&graph, None);
         let whole = value_named(&graph, "r0", 0);
@@ -1423,7 +1429,8 @@ mod tests {
             lane(RegisterStorage { offset: 0, size: 8 }, 0, 64),
             lane(RegisterStorage { offset: 4, size: 4 }, 0, 32),
         ];
-        let context = crate::SourceMachineContext::from_blocks(&[], Some(&arch));
+        let context =
+            crate::SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch.clone())));
         let content = ValueContent::of(&graph, Some(&context));
         let [whole, high, low] = ["r0", "hw0", "w0"].map(|name| value_named(&graph, name, 0));
         assert!(content.same_content(whole, low), "w0 is r0's low word");

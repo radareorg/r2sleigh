@@ -544,6 +544,11 @@ impl GenuineLiftAuthority {
         &self.0.arch
     }
 
+    /// The same architecture, as the allocation the loaded specification shares.
+    pub fn shared_arch_spec(&self) -> &Arc<r2il::ArchSpec> {
+        &self.0.arch
+    }
+
     pub fn arch_name(&self) -> &str {
         &self.0.arch_name
     }
@@ -888,6 +893,11 @@ impl GenuineLiftedFunction {
 
     pub fn arch_spec(&self) -> &r2il::ArchSpec {
         self.authority.lift_authority().arch_spec()
+    }
+
+    /// The same architecture, as the allocation the loaded specification shares.
+    pub fn shared_arch_spec(&self) -> &Arc<r2il::ArchSpec> {
+        self.authority.lift_authority().shared_arch_spec()
     }
 
     pub fn blocks(&self) -> &[GenuineLiftedBlock] {
@@ -1551,6 +1561,7 @@ impl LoadedSpecification {
             .collect();
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
         extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
+        extracted.arch.program_counter = crate::sleigh::processor_spec_program_counter(pspec);
         let arch = Arc::new(extracted.arch);
         let modelled_user_ops = user_operation::resolve_modelled_user_operations(&arch.user_ops);
         let authority = certifying.then(|| {
@@ -1609,10 +1620,9 @@ pub fn embedded_arch_and_disassembler(
     sla_bytes: &'static [u8],
     pspec: &'static str,
     arch_name: &'static str,
-) -> Result<(r2il::ArchSpec, Disassembler)> {
+) -> Result<(Arc<r2il::ArchSpec>, Disassembler)> {
     let spec = load_embedded_specification(sla_bytes, pspec, arch_name)?;
-    let mut arch = (*spec.arch).clone();
-    arch.program_counter = crate::sleigh::processor_spec_program_counter(pspec);
+    let arch = Arc::clone(&spec.arch);
     Ok((arch, Disassembler::wrap(spec, arch_name, None)))
 }
 
@@ -1623,7 +1633,8 @@ pub fn embedded_arch_and_disassembler(
 /// one table here, and it is also the only place that knows which compiler
 /// specification goes with which processor.
 pub struct EmbeddedMachine {
-    pub arch: r2il::ArchSpec,
+    /// The architecture the disassembler and the trusted lift were loaded with, shared.
+    pub arch: Arc<r2il::ArchSpec>,
     pub disasm: Disassembler,
     /// The compiler specification of the platform's usual toolchain: the
     /// stack pointer, the return address and the prototype models.
@@ -1928,11 +1939,9 @@ impl Disassembler {
     /// and a non-certifying disassembler view beside it.
     pub fn shared_arch_and_disassembler(
         profile: TrustedSleighProfile,
-    ) -> Result<(r2il::ArchSpec, Self)> {
-        let (_, pspec, _) = profile.specification();
+    ) -> Result<(Arc<r2il::ArchSpec>, Self)> {
         let disassembler = Self::shared_profile_for_analysis(profile)?;
-        let mut arch = disassembler.arch_spec().clone();
-        arch.program_counter = crate::sleigh::processor_spec_program_counter(pspec);
+        let arch = Arc::clone(&disassembler.spec.arch);
         Ok((arch, disassembler))
     }
 

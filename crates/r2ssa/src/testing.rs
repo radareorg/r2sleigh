@@ -1,6 +1,6 @@
 //! What a call does, which production reads off the program's convention.
 
-use r2il::{ArchSpec, R2ILBlock};
+use r2il::R2ILBlock;
 
 use crate::{
     CanonicalStorageId, DecompileInputs, SourceCallEffect, SourceCallSiteInterface,
@@ -28,7 +28,7 @@ pub(crate) fn call_effect_reading(
 /// Decompile-prepared SSA with these interfaces, under this call effect.
 pub(crate) fn prepared_under(
     blocks: &[R2ILBlock],
-    arch: &ArchSpec,
+    arch: &crate::Arch,
     function_interface: Option<SourceFunctionInterface>,
     call_site_interfaces: Vec<SourceCallSiteInterface>,
     call_effect: Option<SourceCallEffect>,
@@ -48,7 +48,7 @@ pub(crate) fn prepared_under(
 /// Decompile-prepared SSA with these interfaces, under a call effect preserving these registers.
 pub(crate) fn prepared(
     blocks: &[R2ILBlock],
-    arch: &ArchSpec,
+    arch: &crate::Arch,
     function_interface: Option<SourceFunctionInterface>,
     call_site_interfaces: Vec<SourceCallSiteInterface>,
     preserved: impl IntoIterator<Item = CanonicalStorageId>,

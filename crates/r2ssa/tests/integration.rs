@@ -51,7 +51,7 @@ mod tests {
         r2ssa::SsaArtifact::for_decompile_with(
             blocks,
             r2ssa::DecompileInputs {
-                arch: Some(&arch),
+                arch: Some(&r2ssa::Arch::from(arch.clone())),
                 call_effect: Some(system_v(&arch)),
                 ..Default::default()
             },
@@ -296,7 +296,7 @@ mod tests {
                 .expect("lifted body");
             r2ssa::SsaArtifact::for_decompile_with_interfaces_and_control(
                 &[block],
-                Some(&arch),
+                Some(&r2ssa::Arch::from(arch.clone())),
                 None,
                 r2ssa::SourceMachineRoles::default(),
                 Vec::new(),

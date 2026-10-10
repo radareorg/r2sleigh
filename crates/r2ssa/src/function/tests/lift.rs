@@ -216,7 +216,7 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
     // lane is exact evidence for the result width even when the full
     // convention carrier itself has no reader. This is how an unknown
     // prototype returning in EAX is observed under an RAX result slot.
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::sub("eax", 0, 4, "rax"));
     let widened = make_unique(0x40, 8);
     let blocks = [R2ILBlock {
@@ -253,7 +253,7 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
     let prepared = SsaArtifact::for_decompile_with(
         &blocks,
         DecompileInputs {
-            arch: Some(&arch),
+            arch: Some(&crate::Arch::from(arch.clone())),
             convention_slots: Some(convention),
             call_effect: clobbering([full_result], callee_saved),
             ..Default::default()
@@ -335,7 +335,8 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
         switch_info: None,
         op_metadata: Default::default(),
     }];
-    let prepared = SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA");
+    let prepared = SsaArtifact::for_decompile(&blocks, Some(&crate::Arch::from(arch.clone())))
+        .expect("prepared SSA");
     let return_value = prepared
         .graph()
         .inst_spelled_at(0x1740, 2)
@@ -463,7 +464,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
 
 #[test]
 fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
-    let mut arch = call_preservation_arch();
+    let mut arch = call_preservation_arch_spec();
     // Preserved by the convention, so only the callee's own interface can say it is written.
     arch.add_register(RegisterDef::new("rbx", 32, 8));
     // call 0x2000; *rsi = rbx; return -- rbx holds what the call returned.
@@ -493,15 +494,18 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     let with = SsaArtifact::for_decompile_with(
         std::slice::from_ref(&block),
         DecompileInputs {
-            arch: Some(&arch),
+            arch: Some(&crate::Arch::from(arch.clone())),
             call_effect: call_preservation_effect(),
             callee_interfaces: BTreeMap::from([(0x2000u64, returns_rbx)]),
             ..Default::default()
         },
     )
     .expect("artifact with a callee that returns rbx");
-    let without = call_preservation_artifact(std::slice::from_ref(&block), &arch)
-        .expect("artifact without callee facts");
+    let without = call_preservation_artifact(
+        std::slice::from_ref(&block),
+        &crate::Arch::from(arch.clone()),
+    )
+    .expect("artifact without callee facts");
     let call_defines = |artifact: &SsaArtifact| {
         artifact
             .function()

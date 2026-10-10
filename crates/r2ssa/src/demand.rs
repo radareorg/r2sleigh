@@ -256,7 +256,11 @@ mod tests {
         Varnode::new(SpaceId::Register, offset, size)
     }
 
-    fn x86_64_arch() -> ArchSpec {
+    fn x86_64_arch() -> crate::Arch {
+        crate::Arch::new(x86_64_arch_spec())
+    }
+
+    fn x86_64_arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("RAX", 0, 8));

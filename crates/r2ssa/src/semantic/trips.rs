@@ -717,7 +717,8 @@ mod tests {
             at += u64::from(block.size);
             blocks.push(block);
         }
-        SsaArtifact::for_decompile(&blocks, Some(&machine.arch)).expect("an artifact")
+        SsaArtifact::for_decompile(&blocks, Some(&crate::Arch::new(machine.arch)))
+            .expect("an artifact")
     }
 
     /// The trip counts of 32-bit x86 code mapped at `0x1000`.
@@ -766,7 +767,10 @@ mod tests {
         exit.push(R2ILOp::Return {
             target: Varnode::register(16, 8),
         });
-        let artifact = SsaArtifact::for_decompile(&[entry, header, exit], Some(&arch));
+        let artifact = SsaArtifact::for_decompile(
+            &[entry, header, exit],
+            Some(&crate::Arch::from(arch.clone())),
+        );
         trips_of(&artifact.expect("an artifact"))
     }
 

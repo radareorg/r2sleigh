@@ -7,11 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::{
-    ArchSpec, Endianness, R2ILBlock, R2ILOp, RegisterProjection, RegisterProjectionQuery,
-    RegisterStorage, SpaceId, effective_arch_address_size,
+    ArchSpec, Endianness, R2ILBlock, R2ILOp, RegisterProjection, RegisterStorage, SpaceId,
+    effective_arch_address_size,
 };
 use serde::Serialize;
 
+use crate::arch::Arch;
 use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
@@ -235,7 +236,7 @@ impl MachineMemoryModel {
         }
     }
 
-    fn from_arch(arch: Option<&ArchSpec>) -> Self {
+    pub(crate) fn from_arch(arch: Option<&ArchSpec>) -> Self {
         let Some(arch) = arch else {
             return Self::unavailable();
         };
@@ -325,7 +326,7 @@ impl MachineMemoryModel {
 }
 
 fn is_exact_top_level_address_register(
-    arch: &ArchSpec,
+    arch: &crate::Arch,
     storage: CanonicalStorageId,
     address_size: u32,
 ) -> bool {
@@ -363,7 +364,7 @@ fn register_storages_are_disjoint(first: CanonicalStorageId, second: CanonicalSt
 fn frame_pointer_storage_matches_machine(
     interface: &SourceFunctionInterface,
     frame_pointer_storage: Option<CanonicalStorageId>,
-    arch: Option<&ArchSpec>,
+    arch: Option<&Arch>,
 ) -> bool {
     let Some(frame_pointer) = frame_pointer_storage else {
         return true;
@@ -391,7 +392,7 @@ fn frame_pointer_storage_matches_machine(
 
 fn return_mechanism_matches_machine(
     interface: &SourceFunctionInterface,
-    arch: Option<&ArchSpec>,
+    arch: Option<&Arch>,
     memory_model: &MachineMemoryModel,
 ) -> bool {
     let Some(mechanism) = interface.return_mechanism() else {
@@ -447,11 +448,11 @@ pub enum MachineRegisterGeometryState {
     Malformed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceMachineContext {
     schema_version: u32,
-    /// The lifted machine's identity: the architecture name the lift was made under.
-    architecture: Box<str>,
+    /// The architecture the lift was made under, with its tables.
+    arch: Option<Arch>,
     memory_model: MachineMemoryModel,
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
@@ -459,10 +460,7 @@ pub struct SourceMachineContext {
     /// slot is what makes "is this the return register" answerable without a
     /// list of register spellings.
     convention_slots: Option<SourceConventionSlots>,
-    /// Where this architecture returns a value, when it says.
-    architecture_result_slot: Option<CanonicalStorageId>,
     abi_model: MachineAbiModel,
-    register_storages_by_name: BTreeMap<String, CanonicalStorageId>,
     /// What the convention says a call does to the registers, where it says.
     call_effect: Option<SourceCallEffect>,
     /// What a call in this body may leave changed: the set construction defines after every call.
@@ -479,9 +477,8 @@ pub struct SourceMachineContext {
     result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
     callee_statements: BTreeMap<u64, CalleeStatement>,
-    /// Exact source-owned register geometry; no write policy is stored here.
-    register_geometry_state: MachineRegisterGeometryState,
-    register_projections: Box<[RegisterProjection]>,
+    /// The projections of what this body writes that the register file does not declare, sorted.
+    observed_projections: Box<[RegisterProjection]>,
     /// Every call site the raw lifted input has, by the instruction it was
     /// lifted from.
     raw_call_sites: BTreeMap<u64, SourceCallSiteIdentity>,
@@ -514,8 +511,6 @@ pub struct SourceMachineContext {
     source_string_literals: BTreeMap<u64, String>,
     /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
-    /// What the processor specification says registers hold on entry to every function.
-    tracked_entry_values: Box<[(CanonicalStorageId, u64)]>,
 }
 
 /// Unique register-space ranges the lifted body actually reads or writes.
@@ -542,35 +537,14 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
 /// The effect is exhaustive -- every register it neither preserves nor
 /// reserves may come back changed -- so this is the set a callee's summary
 /// has to answer for, whatever list of clobbers the convention spells.
-/// `O(r log r)` in the register file.
-fn call_universe(effect: &SourceCallEffect, arch: &ArchSpec) -> Box<[CanonicalStorageId]> {
-    let mut registers = arch
-        .registers
+/// `O(r)` over the file's outermost registers.
+fn call_universe(effect: &SourceCallEffect, machine: &Arch) -> Box<[CanonicalStorageId]> {
+    machine
+        .outermost_registers()
         .iter()
-        .filter(|register| register.size != 0)
-        .map(|register| (register.offset, register.size))
-        .collect::<Vec<_>>();
-    // Widest first at each offset, so a register is kept only when nothing
-    // kept before it already reaches past its end.
-    registers.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
-    let mut universe = Vec::new();
-    let mut covered_to = 0u64;
-    for (offset, size) in registers {
-        let end = offset.saturating_add(u64::from(size));
-        if end <= covered_to {
-            continue;
-        }
-        covered_to = covered_to.max(end);
-        let storage = CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset,
-            size,
-        };
-        if effect.clobbers(storage) {
-            universe.push(storage);
-        }
-    }
-    universe.into_boxed_slice()
+        .copied()
+        .filter(|storage| effect.clobbers(*storage))
+        .collect()
 }
 
 /// What a call in this body may leave changed: the clobber list, and every
@@ -603,7 +577,7 @@ fn clobbered_by_a_call(
 }
 
 impl SourceMachineContext {
-    pub(crate) fn from_blocks(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Self {
+    pub(crate) fn from_blocks(blocks: &[R2ILBlock], arch: Option<&Arch>) -> Self {
         Self::from_blocks_with_interfaces(
             blocks,
             arch,
@@ -617,7 +591,7 @@ impl SourceMachineContext {
 
     pub(crate) fn from_blocks_with_interfaces(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: Option<SourceConventionSlots>,
@@ -638,7 +612,7 @@ impl SourceMachineContext {
 
     pub(crate) fn from_blocks_with_interfaces_and_tail_calls(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: Option<SourceConventionSlots>,
@@ -666,7 +640,7 @@ impl SourceMachineContext {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_blocks_with_interfaces_tail_calls_and_terminals(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: Option<SourceConventionSlots>,
@@ -677,82 +651,23 @@ impl SourceMachineContext {
     ) -> Self {
         // One walk over the body names every register it touches, for the projections and the clobbers alike.
         let observed = observed_register_storages(blocks);
-        // The architecture says where it returns a value, for a function whose
-        // ABI was never recovered.
-        let architecture_result_slot = arch.and_then(|arch| {
-            arch.return_registers.first().map(|reg| CanonicalStorageId {
-                space: CanonicalStorageSpace::Register,
-                offset: reg.offset,
-                size: reg.size,
+        let observed_projections = arch
+            .filter(|machine| machine.geometry() == MachineRegisterGeometryState::Available)
+            .map(|machine| {
+                observed
+                    .iter()
+                    .filter(|storage| machine.declared_projection(**storage).is_none())
+                    .filter_map(|storage| machine.project(*storage))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
             })
-        });
-        let architecture = arch.map_or_else(Box::default, |arch| arch.name.as_str().into());
-        let mut register_declarations_by_name = BTreeMap::<String, Vec<CanonicalStorageId>>::new();
-        for register in arch.into_iter().flat_map(|arch| &arch.registers) {
-            let storage = CanonicalStorageId {
-                space: CanonicalStorageSpace::Register,
-                offset: register.offset,
-                size: register.size,
-            };
-            if register.size != 0
-                && register
-                    .offset
-                    .checked_add(u64::from(register.size))
-                    .is_some()
-            {
-                register_declarations_by_name
-                    .entry(register.name.trim().to_ascii_lowercase())
-                    .or_default()
-                    .push(storage);
-            }
-        }
-        let register_storages_by_name: BTreeMap<String, CanonicalStorageId> =
-            register_declarations_by_name
-                .into_iter()
-                .filter_map(|(name, storages)| {
-                    let [storage] = storages.as_slice() else {
-                        return None;
-                    };
-                    Some((name, *storage))
-                })
-                .collect();
-        // A tracked register the architecture cannot place states nothing.
-        let tracked_entry_values = arch
-            .into_iter()
-            .flat_map(|arch| &arch.tracked_entry_values)
-            .filter_map(|tracked| {
-                let storage =
-                    register_storages_by_name.get(&tracked.register.trim().to_ascii_lowercase())?;
-                Some((*storage, tracked.value))
-            })
-            .collect();
-        let (register_geometry_state, register_projections) = match arch {
-            None => (MachineRegisterGeometryState::Unavailable, Box::default()),
-            Some(arch) => match RegisterProjectionQuery::from_arch(arch) {
-                Err(_) => (MachineRegisterGeometryState::Malformed, Box::default()),
-                Ok(None) => (MachineRegisterGeometryState::Unavailable, Box::default()),
-                Ok(Some(query)) => {
-                    let mut projections = arch
-                        .register_projections
-                        .iter()
-                        .map(|projection| (projection.written, *projection))
-                        .collect::<BTreeMap<_, _>>();
-                    for storage in &observed {
-                        projections
-                            .entry(*storage)
-                            .or_insert_with(|| query.project(*storage));
-                    }
-                    (
-                        MachineRegisterGeometryState::Available,
-                        projections
-                            .into_values()
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    )
-                }
-            },
+            .unwrap_or_default();
+        let storage_exists = |storage: CanonicalStorageId| {
+            arch.is_some_and(|machine| machine.names_register(storage))
         };
-        let memory_model = MachineMemoryModel::from_arch(arch);
+        let memory_model = arch.map_or_else(MachineMemoryModel::unavailable, |machine| {
+            machine.memory_model().clone()
+        });
         let frame_pointer_storage = function_interface
             .as_ref()
             .and_then(SourceFunctionInterface::exact_frame_pointer_storage);
@@ -783,11 +698,6 @@ impl SourceMachineContext {
                     .is_none_or(|storage| interface.frame_pointer_storage_is_valid(storage));
             // Asked per role rather than over the whole chain: a slot base the
             // architecture does not have says nothing about the return register.
-            let storage_exists = |storage: CanonicalStorageId| {
-                register_storages_by_name
-                    .values()
-                    .any(|actual| *actual == storage)
-            };
             let parameter_storages_exist = interface
                 .parameters()
                 .iter()
@@ -911,11 +821,7 @@ impl SourceMachineContext {
                     SourceCallResult::Void => None,
                     SourceCallResult::Register { storage } => Some(storage),
                 })
-                .all(|storage| {
-                    register_storages_by_name
-                        .values()
-                        .any(|actual| *actual == storage)
-                });
+                .all(storage_exists);
             // A call site the source described badly says nothing about the
             // other call sites in this function. Drop the one that does not
             // hold up and keep the rest, rather than withholding every
@@ -952,14 +858,12 @@ impl SourceMachineContext {
         }
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
-            architecture,
+            arch: arch.cloned(),
             memory_model,
             function_interface,
             machine_roles,
             convention_slots,
-            architecture_result_slot,
             abi_model,
-            register_storages_by_name,
             call_clobbered_carriers: call_effect
                 .as_ref()
                 .map(|effect| clobbered_by_a_call(effect, &observed))
@@ -974,8 +878,7 @@ impl SourceMachineContext {
             result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
-            register_geometry_state,
-            register_projections,
+            observed_projections,
             raw_call_sites,
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
@@ -988,7 +891,6 @@ impl SourceMachineContext {
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
-            tracked_entry_values,
         }
     }
 
@@ -998,7 +900,14 @@ impl SourceMachineContext {
 
     /// The lifted machine's identity; empty when no architecture was given.
     pub fn architecture(&self) -> &str {
-        &self.architecture
+        self.arch
+            .as_ref()
+            .map_or("", |machine| machine.name.as_str())
+    }
+
+    /// The architecture the lift was made under, with its tables.
+    pub const fn arch(&self) -> Option<&Arch> {
+        self.arch.as_ref()
     }
 
     pub const fn memory_model(&self) -> &MachineMemoryModel {
@@ -1040,7 +949,7 @@ impl SourceMachineContext {
         self.convention_slots
             .as_ref()
             .and_then(|slots| slots.result_slot())
-            .or(self.architecture_result_slot)
+            .or_else(|| self.arch.as_ref().and_then(Arch::result_slot))
     }
 
     /// The location this function returns a value in, and whether it returns
@@ -1102,7 +1011,7 @@ impl SourceMachineContext {
     }
 
     pub fn register_storage(&self, name: &str) -> Option<CanonicalStorageId> {
-        self.register_storages_by_name
+        self.register_storages_by_name()
             .get(&name.trim().to_ascii_lowercase())
             .copied()
     }
@@ -1125,10 +1034,10 @@ impl SourceMachineContext {
 
     /// The name the architecture gives this storage, when it names it exactly.
     pub fn register_name(&self, storage: CanonicalStorageId) -> Option<String> {
-        self.register_storages_by_name
-            .iter()
-            .find(|(_, candidate)| **candidate == storage)
-            .map(|(name, _)| name.clone())
+        self.arch
+            .as_ref()?
+            .register_name(storage)
+            .map(str::to_owned)
     }
 
     /// The registers a call in this body may leave changed; empty without a call effect.
@@ -1201,28 +1110,24 @@ impl SourceMachineContext {
         ))
     }
 
-    pub const fn register_storages_by_name(&self) -> &BTreeMap<String, CanonicalStorageId> {
-        &self.register_storages_by_name
+    pub fn register_storages_by_name(&self) -> &BTreeMap<String, CanonicalStorageId> {
+        static NONE: BTreeMap<String, CanonicalStorageId> = BTreeMap::new();
+        self.arch
+            .as_ref()
+            .map_or(&NONE, |machine| machine.registers_by_name())
     }
 
     /// The registers the processor specification says hold a value on entry, with that value.
-    pub const fn tracked_entry_values(&self) -> &[(CanonicalStorageId, u64)] {
-        &self.tracked_entry_values
+    pub fn tracked_entry_values(&self) -> &[(CanonicalStorageId, u64)] {
+        self.arch
+            .as_ref()
+            .map_or(&[], |machine| machine.tracked_entry_values())
     }
 
-    pub const fn register_geometry_state(&self) -> MachineRegisterGeometryState {
-        self.register_geometry_state
-    }
-
-    /// Exact source-owned register carrier geometry for declared and observed
-    /// register-space ranges.
-    ///
-    /// A non-empty slice is the validated, sorted `r2il` contract without any
-    /// downstream reconstruction or architecture-specific write policy. When
-    /// it is empty, [`Self::register_geometry_state`] distinguishes unavailable
-    /// source facts from a malformed non-empty source contract.
-    pub const fn register_projections(&self) -> &[RegisterProjection] {
-        &self.register_projections
+    pub fn register_geometry_state(&self) -> MachineRegisterGeometryState {
+        self.arch
+            .as_ref()
+            .map_or(MachineRegisterGeometryState::Unavailable, Arch::geometry)
     }
 
     /// Resolve one exact written storage without consulting register spellings.
@@ -1237,10 +1142,13 @@ impl SourceMachineContext {
             offset: written_storage.offset,
             size: written_storage.size,
         };
-        self.register_projections
-            .binary_search_by_key(&written, |projection| projection.written)
-            .ok()
-            .and_then(|index| self.register_projections.get(index))
+        let machine = self.arch.as_ref()?;
+        machine.declared_projection(written).or_else(|| {
+            self.observed_projections
+                .binary_search_by_key(&written, |projection| projection.written)
+                .ok()
+                .map(|index| &self.observed_projections[index])
+        })
     }
 
     /// Whether `lane` is the least significant bytes of `root` by the register
@@ -1625,6 +1533,11 @@ mod tests {
         }
     }
 
+    /// The context of an empty body under `arch`.
+    fn context_of(arch: &ArchSpec) -> SourceMachineContext {
+        SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch.clone())))
+    }
+
     #[test]
     fn source_register_geometry_is_copied_without_downstream_reconstruction() {
         let eax = RegisterStorage { offset: 0, size: 4 };
@@ -1633,8 +1546,8 @@ mod tests {
         arch.add_register(RegisterDef::sub(" EAX ", 0, 4, "RAX"));
         arch.add_register(RegisterDef::new("RAX", 0, 8));
 
-        let absent = SourceMachineContext::from_blocks(&[], Some(&arch));
-        assert!(absent.register_projections().is_empty());
+        let absent = context_of(&arch);
+        assert!(absent.register_projection(register_storage(0, 4)).is_none());
         assert_eq!(
             absent.register_geometry_state(),
             MachineRegisterGeometryState::Unavailable
@@ -1646,7 +1559,7 @@ mod tests {
 
         let mut invalid_empty = ArchSpec::new("invalid-empty-geometry");
         invalid_empty.add_register(RegisterDef::new("broken", 0, 0));
-        let invalid_empty = SourceMachineContext::from_blocks(&[], Some(&invalid_empty));
+        let invalid_empty = context_of(&invalid_empty);
         assert_eq!(
             invalid_empty.register_geometry_state(),
             MachineRegisterGeometryState::Malformed
@@ -1674,23 +1587,22 @@ mod tests {
                 },
             },
         ];
-        let bound = SourceMachineContext::from_blocks(&[], Some(&arch));
+        let bound = context_of(&arch);
         assert_eq!(
             bound.register_geometry_state(),
             MachineRegisterGeometryState::Available
         );
-        assert_eq!(bound.register_projections(), arch.register_projections);
-        assert_eq!(
-            bound.register_projection(register_storage(0, 4)),
-            arch.register_projections.first()
-        );
+        for projection in &arch.register_projections {
+            let written = register_storage(projection.written.offset, projection.written.size);
+            assert_eq!(bound.register_projection(written), Some(projection));
+        }
 
         for projection in &mut arch.register_projections {
             projection.disposition = RegisterProjectionDisposition::Refused {
                 reason: RegisterProjectionRefusal::MissingRegisterEndianness,
             };
         }
-        let refused = SourceMachineContext::from_blocks(&[], Some(&arch));
+        let refused = context_of(&arch);
         assert_eq!(
             refused.register_geometry_state(),
             MachineRegisterGeometryState::Available
@@ -1703,12 +1615,12 @@ mod tests {
                 size_bits: 64,
             },
         };
-        let malformed = SourceMachineContext::from_blocks(&[], Some(&arch));
+        let malformed = context_of(&arch);
         assert_eq!(
             malformed.register_geometry_state(),
             MachineRegisterGeometryState::Malformed
         );
-        assert!(malformed.register_projections().is_empty());
+        assert_eq!(malformed.register_projection(register_storage(0, 4)), None);
     }
 
     #[test]
@@ -1785,7 +1697,8 @@ mod tests {
             src: Varnode::constant(1, 1),
         });
 
-        let context = SourceMachineContext::from_blocks(&[block], Some(&arch));
+        let context =
+            SourceMachineContext::from_blocks(&[block], Some(&crate::Arch::from(arch.clone())));
         assert_eq!(
             context
                 .register_projection(register_storage(0x5004, 4))
@@ -1833,7 +1746,7 @@ mod tests {
 
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             None,
             SourceMachineRoles::default(),
             Some(slots),
@@ -1851,7 +1764,7 @@ mod tests {
     #[test]
     fn argument_registers_are_absent_when_no_convention_was_supplied() {
         let arch = ArchSpec::new("AARCH64:LE:64:v8A");
-        let context = SourceMachineContext::from_blocks(&[], Some(&arch));
+        let context = SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch)));
         assert!(context.argument_register_names().is_empty());
     }
 
@@ -2067,7 +1980,7 @@ mod tests {
 
         let without_roles = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(make()),
             SourceMachineRoles::default(),
             None,
@@ -2078,7 +1991,7 @@ mod tests {
 
         let return_only = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(
                 make()
                     .with_return_address_storage(return_address)
@@ -2093,7 +2006,7 @@ mod tests {
 
         let complete = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(
                 make()
                     .with_return_address_storage(return_address)
@@ -2109,7 +2022,7 @@ mod tests {
 
         let compatibility = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(
                 SourceFunctionInterface::new(
                     b"compatibility-machine-roles".to_vec(),
@@ -2136,7 +2049,7 @@ mod tests {
         arch.add_register(RegisterDef::new("narrow_sp", 96, 4));
         let narrow = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(
                 make()
                     .with_return_address_storage(return_address)
@@ -2156,7 +2069,7 @@ mod tests {
         arch.add_register(RegisterDef::sub("sp_alias", 104, 8, "missing_sp_parent"));
         let subregister_sp = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(
                 make()
                     .with_return_address_storage(return_address)
@@ -2176,7 +2089,7 @@ mod tests {
         arch.add_register(RegisterDef::sub("lr_alias", 112, 8, "missing_lr_parent"));
         let subregister_ra = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(
                 make()
                     .with_return_address_storage(subregister_return_address)
@@ -2218,7 +2131,7 @@ mod tests {
 
         let coherent = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
@@ -2230,7 +2143,7 @@ mod tests {
 
         let absent = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(make()),
             SourceMachineRoles::default(),
             None,
@@ -2251,7 +2164,7 @@ mod tests {
         subregister.add_register(RegisterDef::new("source-sp", stack_pointer.offset, 8));
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&subregister),
+            Some(&crate::Arch::from(subregister.clone())),
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
@@ -2266,7 +2179,7 @@ mod tests {
         wrong_machine_width.add_space(AddressSpace::ram(4));
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&wrong_machine_width),
+            Some(&crate::Arch::from(wrong_machine_width.clone())),
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
@@ -2279,7 +2192,7 @@ mod tests {
         word_addressed.spaces[0].word_size = 2;
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&word_addressed),
+            Some(&crate::Arch::from(word_addressed.clone())),
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
@@ -2292,7 +2205,7 @@ mod tests {
         wrong_ram_width.spaces[0].addr_size = 4;
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&wrong_ram_width),
+            Some(&crate::Arch::from(wrong_ram_width.clone())),
             Some(exact),
             SourceMachineRoles::default(),
             None,
@@ -2345,7 +2258,7 @@ mod tests {
 
         let coherent = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(make_explicit(frame_pointer)),
             SourceMachineRoles::default(),
             None,
@@ -2360,7 +2273,7 @@ mod tests {
 
         let slot_derived = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(make_slot_derived(
                 frame_pointer,
                 stack_pointer,
@@ -2389,7 +2302,7 @@ mod tests {
         .expect("frame-pointer absence remains representable");
         let absent = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(absent),
             SourceMachineRoles::default(),
             None,
@@ -2434,7 +2347,7 @@ mod tests {
         .expect("source-width-coherent narrow carriers remain representable");
         let narrow = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(narrow_interface),
             SourceMachineRoles::default(),
             None,
@@ -2453,7 +2366,7 @@ mod tests {
         ));
         let subregister = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(make_slot_derived(
                 subregister_frame_pointer,
                 stack_pointer,
@@ -2468,7 +2381,7 @@ mod tests {
         assert!(!subregister.abi_model().frame_geometry_is_coherent());
 
         assert!(!is_exact_top_level_address_register(
-            &arch,
+            &crate::Arch::from(arch.clone()),
             CanonicalStorageId {
                 space: CanonicalStorageSpace::Ram,
                 offset: frame_pointer.offset,
@@ -2494,7 +2407,7 @@ mod tests {
         .expect("representable overlapping source carrier");
         let overlapping = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(overlapping),
             SourceMachineRoles::default(),
             None,
@@ -3000,7 +2913,7 @@ mod tests {
         arch.add_register(RegisterDef::new("r0", 0, 4));
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(interface),
             SourceMachineRoles::default(),
             None,
@@ -3036,7 +2949,7 @@ mod tests {
         custom.word_size = 2;
         custom.endianness = Some(Endianness::Little);
         arch.add_space(custom);
-        let context = SourceMachineContext::from_blocks(&[], Some(&arch));
+        let context = context_of(&arch);
         let model = context.memory_model();
 
         assert!(model.is_available());
@@ -3062,7 +2975,7 @@ mod tests {
         arch.add_register(RegisterDef::new("pc", 0, 8));
         arch.add_space(AddressSpace::new(SpaceId::Custom(9), "fallback", 1));
         arch.add_space(AddressSpace::ram(8));
-        let context = SourceMachineContext::from_blocks(&[], Some(&arch));
+        let context = context_of(&arch);
         let model = context.memory_model();
 
         assert_eq!(model.default_address_bits(), 64);

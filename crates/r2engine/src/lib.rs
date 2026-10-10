@@ -15,6 +15,7 @@ pub mod body;
 mod declared;
 pub mod discovery;
 pub mod isolation;
+pub mod machine;
 pub mod names;
 pub mod native;
 pub mod program;
@@ -251,8 +252,8 @@ fn empty_engine_phase_timings() -> Vec<EnginePhaseTimingJson> {
 }
 
 /// The pointer width of the lifted machine, 64 when none was given.
-pub fn engine_ptr_bits(arch: Option<&r2il::ArchSpec>) -> u32 {
-    arch.map(engine_effective_ptr_bits).unwrap_or(64)
+pub fn engine_ptr_bits(arch: Option<&r2ssa::Arch>) -> u32 {
+    arch.map_or(64, |arch| engine_effective_ptr_bits(arch))
 }
 
 pub fn engine_effective_ptr_bits(arch: &r2il::ArchSpec) -> u32 {
@@ -268,7 +269,7 @@ pub struct EngineRenderTarget {
 
 impl EngineRenderTarget {
     /// The target a request names: its architecture's identity at this width.
-    pub fn for_arch(arch: Option<&r2il::ArchSpec>, ptr_bits: u32) -> Self {
+    pub fn for_arch(arch: Option<&r2ssa::Arch>, ptr_bits: u32) -> Self {
         Self {
             architecture: arch.map(|arch| arch.name.clone()).unwrap_or_default(),
             ptr_bits,
@@ -603,7 +604,7 @@ pub struct EngineAnalyzeRequest {
     /// from, so this is empty on that path and `source_blocks` reads through
     /// the artifact: one lift, one owner.
     blocks: Vec<R2ILBlock>,
-    pub arch: Option<r2il::ArchSpec>,
+    pub arch: Option<r2ssa::Arch>,
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
     /// Bodies of the functions the root calls, captured in the same transaction.
@@ -626,7 +627,7 @@ pub struct EngineAnalyzeRequestParts {
     pub function_name: String,
     pub function_addr: u64,
     pub blocks: Vec<R2ILBlock>,
-    pub arch: Option<r2il::ArchSpec>,
+    pub arch: Option<r2ssa::Arch>,
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
@@ -640,7 +641,7 @@ pub struct EngineFunctionInput {
     pub function_name: String,
     pub function_addr: u64,
     pub blocks: Vec<R2ILBlock>,
-    pub arch: Option<r2il::ArchSpec>,
+    pub arch: Option<r2ssa::Arch>,
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub semantic_metadata_enabled: bool,
 }
@@ -744,7 +745,7 @@ pub struct EngineAnalyzeRequestInput {
     pub function_name: String,
     pub function_addr: u64,
     pub blocks: Vec<R2ILBlock>,
-    pub arch: Option<r2il::ArchSpec>,
+    pub arch: Option<r2ssa::Arch>,
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: Option<u32>,
     pub semantic_metadata_enabled: bool,
@@ -1313,7 +1314,7 @@ impl EngineAnalyzeRequest {
         };
         self.function_addr = function_addr;
         self.blocks = Vec::new();
-        self.arch = Some(trusted.arch_spec().clone());
+        self.arch = Some(trusted.arch().clone());
         self.ptr_bits = engine_ptr_bits(self.arch.as_ref());
         self.source_snapshot = None;
         self.semantic_metadata_enabled = true;
@@ -2568,7 +2569,7 @@ fn decompile_route_output_from_function_facts(
 fn build_engine_analysis_from_parts(
     function_name: &str,
     blocks: &[R2ILBlock],
-    arch: Option<&r2il::ArchSpec>,
+    arch: Option<&r2ssa::Arch>,
     source_snapshot: &EngineSourceSnapshot,
 ) -> Option<EngineAnalysis> {
     build_engine_analysis_from_parts_with_control(
@@ -2584,7 +2585,7 @@ fn build_engine_analysis_from_parts(
 fn build_engine_analysis_from_parts_with_control<C: r2ssa::SsaWorkControl + ?Sized>(
     function_name: &str,
     blocks: &[R2ILBlock],
-    arch: Option<&r2il::ArchSpec>,
+    arch: Option<&r2ssa::Arch>,
     source_snapshot: &EngineSourceSnapshot,
     control: &C,
 ) -> Result<EngineAnalysis, r2ssa::SsaPrepareError> {

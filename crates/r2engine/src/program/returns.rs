@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::body::{Body, BodyError, Trace};
-use r2sleigh_lift::EmbeddedMachine;
+use crate::machine::Machine;
 
 use super::{ProgramInputs, Source, View};
 use crate::discovery::{Transfers, Walker};
@@ -87,7 +87,7 @@ impl crate::body::Program for Knowing<'_> {
 impl<'p, S: Source + 'static> Walking<'p, S> {
     /// A walker over both instruction sets, entering each body in the set `entered` chooses.
     pub(super) fn new(program: View<'p, S>, entered: bool) -> Result<Self, String> {
-        let decoder = |machine: Option<&'p EmbeddedMachine>| machine.map(|m| program.decoder_of(m));
+        let decoder = |machine: Option<&'p Machine>| machine.map(|m| program.decoder_of(m));
         let primary = decoder(program.machine_in(false)).ok_or("no machine")??;
         let thumb = decoder(program.machine_in(true)).transpose()?;
         Ok(Self {
@@ -106,7 +106,7 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
         }
     }
 
-    pub(super) fn machine(&self, thumb: bool) -> Option<&'p EmbeddedMachine> {
+    pub(super) fn machine(&self, thumb: bool) -> Option<&'p Machine> {
         self.program.machine_in(thumb && self.thumb.is_some())
     }
 

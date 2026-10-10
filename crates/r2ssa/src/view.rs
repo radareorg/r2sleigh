@@ -1121,7 +1121,11 @@ mod tests {
         Varnode::new(SpaceId::Register, offset, size)
     }
 
-    fn arch() -> ArchSpec {
+    fn arch() -> crate::Arch {
+        crate::Arch::new(arch_spec())
+    }
+
+    fn arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("views");
         arch.add_register(RegisterDef::new("rax", 0, 8));
         arch.add_register(RegisterDef::new("rbx", 8, 8));
@@ -1157,7 +1161,7 @@ mod tests {
     #[test]
     fn lanes_copied_in_order_into_a_register_are_the_bits_they_came_from() {
         // rax's low and high words written from rbx's, in place: rax is rbx (movaps).
-        let mut arch = arch();
+        let mut arch = arch_spec();
         arch.add_register(RegisterDef::new("eax", 0, 4));
         arch.add_register(RegisterDef::new("raxh", 4, 4));
         let mut block = R2ILBlock::new(0x1000, 4);
@@ -1172,7 +1176,9 @@ mod tests {
             offset: 4,
         });
         block.push(R2ILOp::Return { target: reg(0, 8) });
-        let function = SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("raw SSA builds");
+        let function =
+            SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+                .expect("raw SSA builds");
         let views = ValueViews::compute(&function);
         let table = function.values();
         let id = |var: &SSAVar| table.id_of(var).expect("interned");
@@ -1204,7 +1210,7 @@ mod tests {
     #[test]
     fn a_lane_written_above_keeps_the_bits_below_it() {
         // rax's low word from rbx, then its high word a constant: rax's low word is still rbx's.
-        let mut arch = arch();
+        let mut arch = arch_spec();
         arch.add_register(RegisterDef::new("eax", 0, 4));
         arch.add_register(RegisterDef::new("raxh", 4, 4));
         let mut block = R2ILBlock::new(0x1000, 4);
@@ -1218,7 +1224,9 @@ mod tests {
             src: Varnode::constant(7, 4),
         });
         block.push(R2ILOp::Return { target: reg(0, 8) });
-        let function = SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("raw SSA builds");
+        let function =
+            SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+                .expect("raw SSA builds");
         let views = ValueViews::compute(&function);
         let table = function.values();
         let rax = function

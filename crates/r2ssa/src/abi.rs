@@ -142,7 +142,7 @@ mod tests {
         .expect("exact interface");
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             Some(interface),
             SourceMachineRoles::default(),
             None,

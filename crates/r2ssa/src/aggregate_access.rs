@@ -308,7 +308,11 @@ mod tests {
         }
     }
 
-    fn aarch64_arch() -> ArchSpec {
+    fn aarch64_arch() -> crate::Arch {
+        crate::Arch::new(aarch64_arch_spec())
+    }
+
+    fn aarch64_arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("aarch64");
         arch.addr_size = 8;
         arch.alignment = 4;

@@ -1676,9 +1676,12 @@ fn a_source_member_name_reaches_only_its_own_parameter_s_fields() {
         switch_info: None,
         op_metadata: Default::default(),
     };
-    let prepared =
-        r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-            .expect("prepared two-parameter function");
+    let prepared = r2ssa::SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&r2ssa::Arch::from(arch)),
+        interface,
+    )
+    .expect("prepared two-parameter function");
     let analysis = build_source_owned_type_analysis(
         TypeAnalysisRequest::new(Arc::new(prepared), ParsedExternalContext::default())
             .expect("coherent request"),

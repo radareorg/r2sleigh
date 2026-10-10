@@ -206,10 +206,10 @@ pub struct Syscall {
 }
 
 /// The one decoder a body was walked with, whatever the address.
-struct Walked<'m>(&'m r2sleigh_lift::EmbeddedMachine);
+struct Walked<'m>(&'m crate::machine::Machine);
 
 impl Decoders for Walked<'_> {
-    fn at(&self, _vaddr: u64) -> Option<&r2sleigh_lift::EmbeddedMachine> {
+    fn at(&self, _vaddr: u64) -> Option<&crate::machine::Machine> {
         Some(self.0)
     }
 }
@@ -672,10 +672,7 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
 /// One body listed as the reference index reads it, or why it is unread.
 fn claimed_by<S: Source + 'static>(
     view: &View<'_, S>,
-    (target, machine): (
-        &crate::native::NativeTarget<'_>,
-        &r2sleigh_lift::EmbeddedMachine,
-    ),
+    (target, machine): (&crate::native::NativeTarget<'_>, &crate::machine::Machine),
     blocks: Vec<crate::body::BodyBlock>,
 ) -> Result<Vec<Line>, Unread> {
     let lifted = blocks

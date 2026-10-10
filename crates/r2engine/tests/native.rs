@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::TABLE_SWITCH;
 
 use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
+use r2engine::machine::Machine as Embedded;
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
-use r2sleigh_lift::EmbeddedMachine;
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
 use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
 use r2ssa::{InstPayload, SSAOp};
@@ -59,7 +59,7 @@ const SPILLED_SWITCH: &[u8] = &[
 
 /// One embedded machine with what the engine reads beside it.
 struct Machine {
-    embedded: EmbeddedMachine,
+    embedded: Embedded,
     /// The name of the convention the platform defaults to.
     default: &'static str,
     /// Each convention the machine is tried under, by radare2's name for it:
@@ -84,7 +84,8 @@ impl Machine {
 
     /// The machine as a platform's ABI describes it, beyond its conventions.
     fn on(sleigh: &str, family: &str, bits: u32, platform: Platform) -> Self {
-        let embedded = r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine");
+        let embedded =
+            Embedded::new(r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine"));
         let under = |platform: Platform, specification: &str| {
             let compiler = LanguageProfile::parse(specification).expect("parses");
             let convention = calling_convention(family, bits, platform).expect("a convention");
@@ -127,7 +128,7 @@ impl Machine {
     fn under(&self, name: &str) -> NativeTarget<'_> {
         let under = &self.conventions[name];
         NativeTarget {
-            arch: &self.embedded.arch,
+            arch: self.embedded.tables(),
             disasm: &self.embedded.disasm,
             cpu: self.embedded.cpu,
             convention: under.convention,

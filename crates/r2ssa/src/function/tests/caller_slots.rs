@@ -100,7 +100,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
-            arch: Some(&arch),
+            arch: Some(&crate::Arch::from(arch.clone())),
             function_interface: Some(interface),
             machine_roles: SourceMachineRoles::new(Some(storage(RA)), Some(storage(SP)))
                 .expect("machine roles"),

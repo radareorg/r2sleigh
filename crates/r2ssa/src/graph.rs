@@ -67,8 +67,11 @@ mod tests {
         merge.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[entry, left, right, merge], Some(&arch))
-            .expect("two phi merge SSA")
+        SSAFunction::from_blocks_raw(
+            &[entry, left, right, merge],
+            Some(&crate::Arch::from(arch.clone())),
+        )
+        .expect("two phi merge SSA")
     }
 
     /// A merge's storage belongs to the merge, not to its position in the block.

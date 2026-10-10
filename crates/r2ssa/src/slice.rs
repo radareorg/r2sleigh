@@ -435,7 +435,7 @@ mod tests {
             dst: Varnode::register(16, 8),
             src: Varnode::register(8, 8),
         });
-        SsaArtifact::raw(&[block], Some(&arch))
+        SsaArtifact::raw(&[block], Some(&crate::Arch::from(arch.clone())))
             .ok_or_else(|| "copy artifact preparation failed".into())
     }
 

@@ -327,7 +327,8 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("widened counter SSA")
+        SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("widened counter SSA")
     }
 
     /// The table folded once is each value's own fold: the graph alone, and

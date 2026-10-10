@@ -16,7 +16,7 @@ mod stage;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::Arc;
 
 use r2il::{ArchSpec, R2ILBlock, R2ILOp};
 use r2sleigh_lift::{GenuineLiftedFunction, TrustedLiftedFunction};
@@ -44,7 +44,6 @@ use crate::machine_context::{
     SourceCallSiteIdentity, SourceCallSiteInterface, SourceConventionSlots,
     SourceFunctionInterface, SourceMachineContext, SourceMachineRoles,
 };
-use crate::naming::{ARCH_DERIVED_CACHE_MAX_ENTRIES, ArchCacheTag, cached_register_name_map};
 use crate::op::SSAOp;
 use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names_storage_and_control};
 use crate::rename::{CallBoundaryConfig, CallBoundaryDef, rename_function};
@@ -502,7 +501,7 @@ enum SsaArtifactProvenance {
 pub struct TrustedSsaArtifact {
     artifact: Arc<SsaArtifact>,
     source_block_count: usize,
-    arch: ArchSpec,
+    arch: crate::Arch,
 }
 
 /// See [`SsaArtifact::register_identity_census`].
@@ -519,7 +518,7 @@ pub struct RegisterIdentityCensus {
 /// thing once, and lets the call site name the fields it actually sets.
 #[derive(Default)]
 pub struct DecompileInputs<'a> {
-    pub arch: Option<&'a ArchSpec>,
+    pub arch: Option<&'a crate::Arch>,
     pub function_interface: Option<SourceFunctionInterface>,
     pub machine_roles: SourceMachineRoles,
     /// Where the calling convention places arguments. A variadic call needs
@@ -585,7 +584,7 @@ fn release_undemanded_bytes(
 ///
 /// Which listed number is a step towards another is read off this, so the listing and the
 /// reference index answer it from the same graph.
-pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<SsaGraph> {
+pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<SsaGraph> {
     let function = SSAFunction::from_blocks_raw(blocks, arch)?;
     let machine_context = SourceMachineContext::from_blocks(blocks, arch);
     let sealed = Lifted::new(function)
@@ -702,14 +701,14 @@ impl SsaArtifact {
         }
     }
 
-    pub fn from_blocks(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn from_blocks(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         Some(Self::new_with_context(
             SSAFunction::from_blocks_with_arch(blocks, arch)?,
             SourceMachineContext::from_blocks(blocks, arch),
         ))
     }
 
-    pub fn raw(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn raw(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         Some(Self::new_with_context(
             SSAFunction::from_blocks_raw(blocks, arch)?,
             SourceMachineContext::from_blocks(blocks, arch),
@@ -719,7 +718,7 @@ impl SsaArtifact {
     /// Build raw SSA with an explicit, revision-bound function interface.
     pub fn raw_with_interface(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: SourceFunctionInterface,
     ) -> Option<Self> {
         Self::raw_with_interfaces(blocks, arch, Some(function_interface), Vec::new())
@@ -730,7 +729,7 @@ impl SsaArtifact {
     /// revision and carrier checks.
     pub fn raw_with_interfaces(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: Option<SourceFunctionInterface>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
@@ -748,7 +747,7 @@ impl SsaArtifact {
         ))
     }
 
-    pub fn for_decompile(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn for_decompile(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         Self::for_decompile_with_control(blocks, arch, &UncheckedSsaWorkControl).ok()
     }
 
@@ -758,7 +757,7 @@ impl SsaArtifact {
     /// drops all intermediate state rather than exposing a partial artifact.
     pub fn for_decompile_with_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let machine_context = SourceMachineContext::from_blocks(blocks, arch);
@@ -778,7 +777,7 @@ impl SsaArtifact {
     /// Build decompiler-prepared SSA with an explicit function interface.
     pub fn for_decompile_with_interface(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: SourceFunctionInterface,
     ) -> Option<Self> {
         Self::for_decompile_with_interfaces(blocks, arch, Some(function_interface), Vec::new())
@@ -788,7 +787,7 @@ impl SsaArtifact {
     /// callsite interfaces.
     pub fn for_decompile_with_interfaces(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: Option<SourceFunctionInterface>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
@@ -805,7 +804,7 @@ impl SsaArtifact {
     /// roles. Machine geometry is not contingent on an exact prototype.
     pub fn for_decompile_with_interfaces_and_machine_roles(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
@@ -873,7 +872,7 @@ impl SsaArtifact {
     /// Build controlled decompiler SSA from explicit source interfaces, machine roles and call effect.
     pub fn for_decompile_with_interfaces_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
@@ -902,21 +901,21 @@ impl SsaArtifact {
         Self::seal_finished(function, machine_context, Finish::manual(), control)
     }
 
-    pub fn for_patterns(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn for_patterns(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         Some(Self::new_with_context(
             SSAFunction::from_blocks_for_patterns(blocks, arch)?,
             SourceMachineContext::from_blocks(blocks, arch),
         ))
     }
 
-    pub fn for_symbolic(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+    pub fn for_symbolic(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<Self> {
         Self::for_symbolic_with_interfaces(blocks, arch, None, Vec::new())
     }
 
     /// Build symbolic SSA with an explicit, revision-bound function interface.
     pub fn for_symbolic_with_interface(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: SourceFunctionInterface,
     ) -> Option<Self> {
         Self::for_symbolic_with_interfaces(blocks, arch, Some(function_interface), Vec::new())
@@ -925,7 +924,7 @@ impl SsaArtifact {
     /// Build symbolic SSA with exact function and callsite interfaces.
     pub fn for_symbolic_with_interfaces(
         blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         function_interface: Option<SourceFunctionInterface>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
@@ -2240,14 +2239,15 @@ fn forwarded_parameter_index(
 
 impl TrustedSsaArtifact {
     /// Prepare one certifiable SSA artifact from a source-retaining canonical
-    /// lift. No detached interface, architecture, layout, or raw block input is
-    /// accepted at this boundary.
+    /// lift. No detached interface, layout, or raw block input is accepted at
+    /// this boundary, and an architecture only as tables over the lift's own.
     pub fn prepare_with_control<C: SsaWorkControl + ?Sized>(
         lifted: TrustedLiftedFunction,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         Self::prepare_with_callee_interfaces(
             lifted,
+            None,
             control,
             &CalleeEvidence::default(),
             &BTreeSet::new(),
@@ -2260,6 +2260,7 @@ impl TrustedSsaArtifact {
     /// where the source itself recovered no prototype for the call.
     pub fn prepare_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
         lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
         control: &C,
         evidence: &CalleeEvidence,
         premises: &BTreeSet<r2source::Premise>,
@@ -2273,7 +2274,19 @@ impl TrustedSsaArtifact {
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
-        let arch = genuine.arch_spec().clone();
+        // The session's tables, where they are built over the lift's own architecture.
+        let arch = match arch.filter(|arch| arch.shares(genuine.arch_spec())) {
+            Some(arch) => arch.clone(),
+            None => {
+                r2il::refusal_evidence!(
+                    "arch-tables",
+                    "{:#x}: the lift's architecture is not the one supplied ({}), so its tables are built again",
+                    source.image().entry_address(),
+                    arch.is_some()
+                );
+                crate::Arch::new(Arc::clone(genuine.shared_arch_spec()))
+            }
+        };
         let blocks = genuine
             .blocks()
             .iter()
@@ -2615,7 +2628,12 @@ impl TrustedSsaArtifact {
     }
 
     /// Architecture extracted from the same embedded trusted Sleigh profile.
-    pub const fn arch_spec(&self) -> &ArchSpec {
+    pub fn arch_spec(&self) -> &ArchSpec {
+        self.arch.spec()
+    }
+
+    /// That architecture with its tables.
+    pub const fn arch(&self) -> &crate::Arch {
         &self.arch
     }
 
@@ -3442,11 +3460,11 @@ pub(crate) struct CalleeBoundaries {
 impl CalleeBoundaries {
     /// Read both facts off the interfaces the callees' own bodies proved.
     pub(crate) fn from_interfaces(
-        arch: Option<&ArchSpec>,
+        arch: Option<&crate::Arch>,
         preserved: &CalleePreservedCarriers,
         interfaces: &BTreeMap<u64, SourceFunctionInterface>,
     ) -> Self {
-        let names = arch.map(cached_register_name_map);
+        let names = arch.map(crate::Arch::register_names);
         let mut preserved = preserved.clone();
         let mut results = BTreeMap::new();
         let mut return_addresses = BTreeMap::new();
@@ -3506,7 +3524,7 @@ impl CalleeBoundaries {
 /// A body that calls under no stated call effect is refused rather than read as if a register survived.
 fn decompile_call_boundary_config(
     blocks: &[R2ILBlock],
-    arch: Option<&ArchSpec>,
+    arch: Option<&crate::Arch>,
     machine_context: &SourceMachineContext,
     stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
     callees: CalleeBoundaries,
@@ -3872,38 +3890,6 @@ pub struct RegisterFamilyInfo {
     program_roots: HashMap<usize, RegisterFamilySlot>,
     /// Whether a register's lowest address holds its most significant byte.
     big_endian: bool,
-}
-
-fn register_family_info_cache() -> &'static RwLock<HashMap<ArchCacheTag, Arc<RegisterFamilyInfo>>> {
-    static CACHE: OnceLock<RwLock<HashMap<ArchCacheTag, Arc<RegisterFamilyInfo>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-pub(crate) fn cached_register_family_info(arch: &ArchSpec) -> Arc<RegisterFamilyInfo> {
-    let cache_tag = ArchCacheTag::from_arch(arch);
-
-    if let Some(cached) = register_family_info_cache()
-        .read()
-        .expect("register family cache read lock poisoned")
-        .get(&cache_tag)
-        .cloned()
-    {
-        return cached;
-    }
-
-    let info = Arc::new(RegisterFamilyInfo::from_arch(arch));
-    let mut cache = register_family_info_cache()
-        .write()
-        .expect("register family cache write lock poisoned");
-    if let Some(cached) = cache.get(&cache_tag) {
-        return Arc::clone(cached);
-    }
-    if cache.len() >= ARCH_DERIVED_CACHE_MAX_ENTRIES {
-        cache.clear();
-    }
-    cache.insert(cache_tag, info.clone());
-    info
 }
 
 impl RegisterFamilyInfo {

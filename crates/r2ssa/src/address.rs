@@ -845,7 +845,11 @@ mod tests {
         SourceStackSlotSpec, SsaArtifact, StackAddressBase,
     };
 
-    fn aarch64_two_arg_arch() -> ArchSpec {
+    fn aarch64_two_arg_arch() -> crate::Arch {
+        crate::Arch::new(aarch64_two_arg_arch_spec())
+    }
+
+    fn aarch64_two_arg_arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("aarch64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("x0", 0, 8));
@@ -1032,7 +1036,7 @@ mod tests {
 
     #[test]
     fn parameter_spill_reload_provenance_is_bound_to_exact_memory_space() {
-        let mut arch = aarch64_two_arg_arch();
+        let mut arch = aarch64_two_arg_arch_spec();
         arch.add_register(RegisterDef::new("lr", 24, 8));
         let register_storage = |offset| CanonicalStorageId {
             space: CanonicalStorageSpace::Register,
@@ -1088,8 +1092,12 @@ mod tests {
             target: Varnode::register(24, 8),
         });
 
-        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-            .expect("decompile artifact");
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&crate::Arch::from(arch.clone())),
+            interface,
+        )
+        .expect("decompile artifact");
         let loaded_values = artifact
             .named_block(0x1100)
             .expect("entry block")

@@ -37,7 +37,7 @@ fn test_const(value: u64) -> Varnode {
 fn dual_space_artifact(
     mut prefix: Vec<R2ILOp>,
     addr: Varnode,
-    arch: Option<&ArchSpec>,
+    arch: Option<&crate::Arch>,
 ) -> SsaArtifact {
     prefix.push(R2ILOp::Load {
         dst: Varnode::unique(0x100, 8),
@@ -62,7 +62,7 @@ fn dual_space_artifact(
     .expect("dual-space artifact")
 }
 
-fn dual_space_exact_parameter_artifact(arch: &ArchSpec) -> SsaArtifact {
+fn dual_space_exact_parameter_artifact(arch: &crate::Arch) -> SsaArtifact {
     let mut block = R2ILBlock::new(0x1000, 4);
     block.push(R2ILOp::Load {
         dst: Varnode::unique(0x100, 8),
@@ -626,7 +626,7 @@ fn register_assumption(name: impl Into<String>) -> AnalysisAssumption {
     }
 }
 
-fn entry_register_artifact(arch: Option<&ArchSpec>) -> SsaArtifact {
+fn entry_register_artifact(arch: Option<&crate::Arch>) -> SsaArtifact {
     let mut block = R2ILBlock::new(0x8f00, 4);
     block.push(R2ILOp::Copy {
         dst: Varnode::unique(0x80, 8),
@@ -660,7 +660,7 @@ fn register_assumption_certificate_is_bound_to_source_storage_and_value() {
     let mut arch = ArchSpec::new("assumption-storage-test");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("argument_carrier", 0, 8));
-    let base = entry_register_artifact(Some(&arch));
+    let base = entry_register_artifact(Some(&crate::Arch::from(arch.clone())));
     let assumption = register_assumption("ARGUMENT_CARRIER");
     let conditioned = base.with_assumptions(&AssumptionSet::new(vec![assumption.clone()]));
 
@@ -725,8 +725,12 @@ fn stack_assumption_certificate_uses_the_typed_stack_base() {
     .and_then(|interface| interface.with_return_address_storage(register_storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(register_storage(0, 8)))
     .expect("exact stack roles");
-    let base = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("stack-role artifact");
+    let base = SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("stack-role artifact");
     let assumption = AnalysisAssumption {
         id: Some("typed-stack-assumption-test".to_string()),
         subject: AssumptionSubject::StackSlot {
@@ -788,7 +792,11 @@ fn assert_predicate_assumption_preserves_source_semantics(
     assert_eq!(conditioned.obligations(), base.obligations());
 }
 
-fn return_boundary_arch() -> ArchSpec {
+fn return_boundary_arch() -> crate::Arch {
+    crate::Arch::new(return_boundary_arch_spec())
+}
+
+fn return_boundary_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("return-boundary-test");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -974,8 +982,12 @@ fn exact_signed_low_return_artifact(write_logical_carrier: bool) -> SsaArtifact 
     .and_then(|interface| interface.with_return_address_storage(register_storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
     .expect("exact signed low return interface");
-    SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("exact signed low return artifact")
+    SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("exact signed low return artifact")
 }
 
 /// `return Z_STREAM_ERROR;` from an `int` function: the compiler emits
@@ -1090,11 +1102,19 @@ fn constant_return_artifact(constant: u64, result_typed: bool) -> SsaArtifact {
     .and_then(|interface| interface.with_return_address_storage(register_storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
     .expect("constant low return interface");
-    SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("constant low return artifact")
+    SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("constant low return artifact")
 }
 
-fn composed_return_arch(whole_name: &str, slice_name: &str, pc_name: &str) -> ArchSpec {
+fn composed_return_arch(whole_name: &str, slice_name: &str, pc_name: &str) -> crate::Arch {
+    crate::Arch::new(composed_return_arch_spec(whole_name, slice_name, pc_name))
+}
+
+fn composed_return_arch_spec(whole_name: &str, slice_name: &str, pc_name: &str) -> ArchSpec {
     let mut arch = ArchSpec::new("return-composition-test");
     arch.add_register(RegisterDef::new(whole_name, 0, 4));
     arch.add_register(RegisterDef::sub(slice_name, 0, 1, whole_name));
@@ -2684,8 +2704,14 @@ fn a_convention_result_read_only_by_the_return_is_the_call_result() {
         [0, 4, 8].map(|offset| register_storage(offset, 4)),
         [register_storage(12, 4)],
     );
-    let artifact = crate::testing::prepared_under(&[block], &arch, None, Vec::new(), effect)
-        .expect("artifact");
+    let artifact = crate::testing::prepared_under(
+        &[block],
+        &crate::Arch::from(arch.clone()),
+        None,
+        Vec::new(),
+        effect,
+    )
+    .expect("artifact");
     let eax = CanonicalStorageId {
         space: CanonicalStorageSpace::Register,
         offset: 0,

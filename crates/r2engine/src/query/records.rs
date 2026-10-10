@@ -6,8 +6,9 @@
 //! happened to equal an address it knew; these are the answers it needs
 //! instead, and what is left for it is column layout.
 
+use crate::machine::Machine;
 use r2il::Endianness;
-use r2sleigh_lift::{EmbeddedMachine, NumberSpan, Syntax};
+use r2sleigh_lift::{NumberSpan, Syntax};
 use r2ssa::fate::{Fate, Fates};
 
 use super::Support;
@@ -21,7 +22,7 @@ use crate::native::Program;
 /// boundary decodes the rest of itself wrongly unless it asks again at every
 /// line.
 pub trait Decoders {
-    fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine>;
+    fn at(&self, vaddr: u64) -> Option<&Machine>;
 }
 
 /// A call's callee, as the call names it.
@@ -109,11 +110,11 @@ pub struct WalkedBody<'a> {
     #[cfg_attr(dylint_lib = "r2sleigh_lints", allow(cache_outside_query_database))]
     built: std::cell::OnceCell<Option<(r2ssa::SsaGraph, Fates)>>,
     blocks: &'a [r2il::R2ILBlock],
-    arch: &'a r2il::ArchSpec,
+    arch: &'a r2ssa::Arch,
 }
 
 impl<'a> WalkedBody<'a> {
-    pub fn new(blocks: &'a [r2il::R2ILBlock], arch: &'a r2il::ArchSpec) -> Self {
+    pub fn new(blocks: &'a [r2il::R2ILBlock], arch: &'a r2ssa::Arch) -> Self {
         debug_assert!(
             blocks.is_sorted_by_key(|block| block.addr),
             "a walk leaves its blocks in address order"

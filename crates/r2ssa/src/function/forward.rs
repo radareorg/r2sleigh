@@ -226,7 +226,11 @@ mod tests {
         Varnode::new(SpaceId::Register, offset, size)
     }
 
-    fn arch() -> ArchSpec {
+    fn arch() -> crate::Arch {
+        crate::Arch::new(arch_spec())
+    }
+
+    fn arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("RAX", 0, 8));
@@ -388,7 +392,7 @@ mod tests {
 
     #[test]
     fn a_call_argument_reads_the_value_the_argument_register_was_loaded_from() {
-        let mut arch = arch();
+        let mut arch = arch_spec();
         arch.add_register(RegisterDef::new("RSP", 0x20, 8));
         let mut block = R2ILBlock::new(0x1000, 4);
         block.push(R2ILOp::Copy {
@@ -401,7 +405,9 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x288, 8),
         });
-        let mut func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
+        let mut func =
+            SSAFunction::from_blocks_with_arch(&[block], Some(&crate::Arch::from(arch.clone())))
+                .expect("ssa");
         let source = match op_at(&func, 0x1000, 0) {
             SSAOp::Copy { src, .. } => src,
             other => panic!("{other:?}"),

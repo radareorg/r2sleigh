@@ -330,7 +330,8 @@ impl r2engine::body::Program for Mapped {
 fn walked(code: Mapped, entry: u64) -> r2ssa::SsaArtifact {
     let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 is embedded");
     let body = lift_body(entry, &machine.disasm, &code, &BTreeMap::new()).expect("the body lifts");
-    r2ssa::SsaArtifact::for_decompile(&lifted(&body), Some(&machine.arch)).expect("an artifact")
+    r2ssa::SsaArtifact::for_decompile(&lifted(&body), Some(&r2ssa::Arch::new(machine.arch)))
+        .expect("an artifact")
 }
 
 /// Each loop's trip count, once its stated trips recount the same from the graph.

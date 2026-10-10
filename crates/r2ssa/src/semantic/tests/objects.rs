@@ -34,7 +34,7 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
     arch.add_register(RegisterDef::new("x0", 0, 8));
     arch.add_register(RegisterDef::new("sp", 16, 8));
 
-    let parameter = dual_space_exact_parameter_artifact(&arch);
+    let parameter = dual_space_exact_parameter_artifact(&crate::Arch::from(arch.clone()));
     assert_dual_space_objects_are_distinct(&parameter);
     let (ram_parameter, custom_parameter) = dual_space_locations(&parameter);
     assert!(matches!(
@@ -58,7 +58,11 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
     ));
     assert_eq!(custom_parameter.address, RelativeMemoryAddress::Unknown);
 
-    let stack = dual_space_artifact(Vec::new(), Varnode::unique(0x80, 8), Some(&arch));
+    let stack = dual_space_artifact(
+        Vec::new(),
+        Varnode::unique(0x80, 8),
+        Some(&crate::Arch::from(arch.clone())),
+    );
     let stack_addr = stack
         .named_block(0x1000)
         .and_then(|block| {
@@ -244,8 +248,12 @@ fn a_member_of_a_declared_aggregate_is_the_aggregate_at_an_offset() {
     .and_then(|interface| interface.with_return_address_storage(storage(16)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
     .expect("exact aggregate interface");
-    let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("aggregate artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("aggregate artifact");
 
     let [base_store] = artifact
         .inst_at(0x3700, 4)
@@ -362,9 +370,12 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     .and_then(|interface| interface.with_return_address_storage(storage(16)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
     .expect("exact dual-coordinate interface");
-    let artifact =
-        SsaArtifact::for_decompile_with_interface(&[block.clone()], Some(&arch), interface.clone())
-            .expect("dual-coordinate artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &[block.clone()],
+        Some(&crate::Arch::from(arch.clone())),
+        interface.clone(),
+    )
+    .expect("dual-coordinate artifact");
 
     let [save] = artifact
         .inst_at(0x3600, 1)
@@ -496,7 +507,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         .expect("exact downward allocation contract");
     let allocated = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
         &[block.clone()],
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         Some(interface.clone()),
         allocated_roles,
         Vec::new(),
@@ -613,7 +624,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         .expect("exact upward allocation contract");
     let wrong_direction = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
         &[block],
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         Some(interface),
         wrong_direction_roles,
         Vec::new(),
@@ -698,8 +709,12 @@ fn a_stack_position_nothing_accesses_or_passes_on_has_no_extent() {
         .and_then(|interface| interface.with_return_address_storage(storage(16)))
         .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
         .expect("stack-position interface");
-        SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-            .expect("stack-position artifact")
+        SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&crate::Arch::from(arch.clone())),
+            interface,
+        )
+        .expect("stack-position artifact")
     };
     let passed_through = |artifact: &SsaArtifact| {
         let object = artifact
@@ -813,8 +828,12 @@ fn unknown_pointer_versions(escape: bool) -> (MemoryVersion, Vec<MemoryVersion>)
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
     .expect("exact interface");
     let block = unknown_pointer_block(escape);
-    let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("artifact");
     let [store] = artifact
         .inst_at(0x3800, 1)
         .and_then(|inst| artifact.memory_defs_for_inst(inst))

@@ -122,7 +122,7 @@ fn preserving(preserved: impl IntoIterator<Item = CanonicalStorageId>) -> Option
 /// Decompile-prepared SSA under a call effect preserving the named registers.
 fn prepared_preserving(
     blocks: &[R2ILBlock],
-    arch: &ArchSpec,
+    arch: &crate::Arch,
     preserved: &[&str],
 ) -> Option<SsaArtifact> {
     let preserved = preserved.iter().map(|name| {
@@ -178,7 +178,11 @@ fn make_unique(offset: u64, size: u32) -> Varnode {
     }
 }
 
-fn make_arm64_alias_arch() -> ArchSpec {
+fn make_arm64_alias_arch() -> crate::Arch {
+    crate::Arch::new(make_arm64_alias_arch_spec())
+}
+
+fn make_arm64_alias_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("aarch64");
     arch.add_register(RegisterDef::new("x0", 0x00, 8));
     arch.add_register(RegisterDef::new("w0", 0x00, 4));
@@ -189,7 +193,11 @@ fn make_arm64_alias_arch() -> ArchSpec {
     arch
 }
 
-fn make_x86_64_prep_arch() -> ArchSpec {
+fn make_x86_64_prep_arch() -> crate::Arch {
+    crate::Arch::new(make_x86_64_prep_arch_spec())
+}
+
+fn make_x86_64_prep_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -199,7 +207,11 @@ fn make_x86_64_prep_arch() -> ArchSpec {
     arch
 }
 
-fn vector_loop_alias_arch(prefix: &str) -> ArchSpec {
+fn vector_loop_alias_arch(prefix: &str) -> crate::Arch {
+    crate::Arch::new(vector_loop_alias_arch_spec(prefix))
+}
+
+fn vector_loop_alias_arch_spec(prefix: &str) -> ArchSpec {
     let mut arch = ArchSpec::new("range-alias-test");
     let acc = format!("{prefix}_acc");
     let loaded = format!("{prefix}_loaded");
@@ -298,7 +310,11 @@ fn vector_loop_alias_blocks(base: u64) -> Vec<R2ILBlock> {
 
 #[test]
 fn graph_value_storage_is_retained_from_varnodes_across_cosmetic_names() {
-    fn arch(prefix: &str) -> ArchSpec {
+    fn arch(prefix: &str) -> crate::Arch {
+        crate::Arch::new(arch_spec(prefix))
+    }
+
+    fn arch_spec(prefix: &str) -> ArchSpec {
         let mut arch = ArchSpec::new("storage-provenance-test");
         arch.add_register(RegisterDef::new(format!("{prefix}_out"), 0x10, 8));
         arch.add_register(RegisterDef::new(format!("{prefix}_input"), 0x20, 8));
@@ -1090,7 +1106,7 @@ fn variadic_format_call_artifact_formed(
             .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         None,
         SourceMachineRoles::default(),
         Some(convention),
@@ -1102,7 +1118,7 @@ fn variadic_format_call_artifact_formed(
     }
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         InterfaceQuestions::new(&machine_context),
         &machine_context,
         &CalleeBoundaries::default(),
@@ -1222,7 +1238,7 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
             .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         None,
         SourceMachineRoles::default(),
         Some(convention),
@@ -1234,7 +1250,7 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
         .bind_source_string_literals(&[(0x3000, first.to_string()), (0x3010, second.to_string())]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         InterfaceQuestions::new(&machine_context),
         &machine_context,
         &CalleeBoundaries::default(),
@@ -1388,7 +1404,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
             .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         None,
         SourceMachineRoles::default(),
         Some(convention),
@@ -1401,7 +1417,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
     ]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         InterfaceQuestions::new(&machine_context),
         &machine_context,
         &CalleeBoundaries::default(),
@@ -1842,7 +1858,8 @@ fn projected_peer_loop_artifact(
             src: make_reg(0, 2),
         },
     ];
-    let machine_context = SourceMachineContext::from_blocks(&geometry_blocks, Some(&arch));
+    let machine_context =
+        SourceMachineContext::from_blocks(&geometry_blocks, Some(&crate::Arch::from(arch.clone())));
     assert_eq!(
         machine_context.register_geometry_state(),
         crate::MachineRegisterGeometryState::Available,
@@ -2164,8 +2181,9 @@ fn a_lane_write_inserts_into_the_entry_root() {
         val: make_reg(0, 8),
     });
 
-    let function = SSAFunction::from_blocks_with_arch(&[block], Some(&arch))
-        .expect("partial-register fixture");
+    let function =
+        SSAFunction::from_blocks_with_arch(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("partial-register fixture");
     let ops = function
         .named_block(0x1000)
         .expect("entry block")
@@ -2231,7 +2249,8 @@ fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
     // The lane write inserts into `RAX`; reading the byte back through
     // the insert and the constant is the optimizer's fold, so the fact is
     // stated of the optimized function.
-    let mut func = SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("raw SSA");
+    let mut func = SSAFunction::from_blocks_raw(&blocks, Some(&crate::Arch::from(arch.clone())))
+        .expect("raw SSA");
     crate::optimize::optimize_function(&mut func, &crate::optimize::OptimizationConfig::default());
     // The byte read back is the constant, so the comparison folds to true.
     let block = func.named_block(0x1000).expect("entry block");
@@ -2333,7 +2352,11 @@ fn prepared_ssa_refuses_implicit_copy_and_comparison_width_changes() {
     }
 }
 
-fn call_preservation_arch() -> ArchSpec {
+fn call_preservation_arch() -> crate::Arch {
+    crate::Arch::new(call_preservation_arch_spec())
+}
+
+fn call_preservation_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -2351,7 +2374,7 @@ fn call_preservation_effect() -> Option<SourceCallEffect> {
 }
 
 /// The fixture prepared for decompilation under its convention.
-fn call_preservation_artifact(blocks: &[R2ILBlock], arch: &ArchSpec) -> Option<SsaArtifact> {
+fn call_preservation_artifact(blocks: &[R2ILBlock], arch: &crate::Arch) -> Option<SsaArtifact> {
     SsaArtifact::for_decompile_with(
         blocks,
         DecompileInputs {
@@ -2408,7 +2431,7 @@ fn prepared_keeping_xmm8(
     blocks: Vec<(u64, Vec<R2ILOp>)>,
     callee_preserved_carriers: CalleePreservedCarriers,
 ) -> SsaArtifact {
-    let mut arch = call_preservation_arch();
+    let mut arch = call_preservation_arch_spec();
     arch.add_register(RegisterDef::new("ymm8", 0x100, 32));
     arch.add_register(RegisterDef::new("xmm8", 0x100, 16));
     let blocks = blocks
@@ -2422,7 +2445,7 @@ fn prepared_keeping_xmm8(
     SsaArtifact::for_decompile_with(
         &blocks,
         DecompileInputs {
-            arch: Some(&arch),
+            arch: Some(&crate::Arch::from(arch.clone())),
             call_effect: clobbering(clobbered, [call_preservation_storage(0x100, 16)]),
             callee_preserved_carriers,
             ..Default::default()
@@ -2571,8 +2594,12 @@ fn promotion_fixture(ops: Vec<R2ILOp>) -> BTreeSet<(u64, usize)> {
     for op in ops {
         block.push(op);
     }
-    let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("artifact");
     promoted_sites(artifact.function())
 }
 
@@ -2606,8 +2633,12 @@ fn promotion_fixture_with_argument(
     for op in ops {
         block.push(op);
     }
-    let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("artifact");
     promoted_sites(artifact.function())
 }
 
@@ -2784,7 +2815,7 @@ fn a_sealed_function_s_prep_facts_describe_its_own_blocks() {
 /// prove it kept loses it, though nothing in that body mentions it.
 #[test]
 fn a_callee_answers_for_every_register_a_call_may_change_not_a_list() {
-    let mut arch = call_preservation_arch();
+    let mut arch = call_preservation_arch_spec();
     arch.add_register(RegisterDef::new("r10", 40, 8));
     let r10 = call_preservation_storage(40, 8);
     let ret = R2ILOp::Return {
@@ -2794,7 +2825,7 @@ fn a_callee_answers_for_every_register_a_call_may_change_not_a_list() {
         SsaArtifact::for_decompile_with(
             &[call_preservation_block(ops)],
             DecompileInputs {
-                arch: Some(&arch),
+                arch: Some(&crate::Arch::from(arch.clone())),
                 call_effect: call_preservation_effect(),
                 callee_preserved_carriers: callees,
                 ..Default::default()

@@ -123,7 +123,7 @@ fn artifact_with_ops(ops: impl IntoIterator<Item = R2ILOp>) -> SsaArtifact {
     SsaArtifact::raw(&[block], None).expect("test SSA artifact")
 }
 
-fn artifact_with_arch(ops: impl IntoIterator<Item = R2ILOp>, arch: &ArchSpec) -> SsaArtifact {
+fn artifact_with_arch(ops: impl IntoIterator<Item = R2ILOp>, arch: &crate::Arch) -> SsaArtifact {
     let mut block = R2ILBlock::new(0x1000, 4);
     for op in ops {
         block.push(op);
@@ -131,7 +131,11 @@ fn artifact_with_arch(ops: impl IntoIterator<Item = R2ILOp>, arch: &ArchSpec) ->
     SsaArtifact::raw(&[block], Some(arch)).expect("test SSA artifact")
 }
 
-fn register_geometry_arch() -> ArchSpec {
+fn register_geometry_arch() -> crate::Arch {
+    crate::Arch::new(register_geometry_arch_spec())
+}
+
+fn register_geometry_arch_spec() -> ArchSpec {
     let eax = RegisterStorage { offset: 0, size: 4 };
     let rax = RegisterStorage { offset: 0, size: 8 };
     let ah = RegisterStorage { offset: 1, size: 1 };
@@ -201,7 +205,11 @@ fn value_geometry_for_storage(
     first
 }
 
-fn big_endian_register_geometry_arch() -> ArchSpec {
+fn big_endian_register_geometry_arch() -> crate::Arch {
+    crate::Arch::new(big_endian_register_geometry_arch_spec())
+}
+
+fn big_endian_register_geometry_arch_spec() -> ArchSpec {
     let carrier = RegisterStorage { offset: 0, size: 8 };
     let high_byte = RegisterStorage { offset: 6, size: 1 };
     let mut arch = ArchSpec::new("geometry-test-be");
@@ -1285,7 +1293,8 @@ fn plain_load_requires_and_retains_an_explicit_memory_model() {
     let mut arch = ArchSpec::new("big-endian-test");
     arch.addr_size = 8;
     arch.set_memory_endianness(Endianness::Big);
-    let artifact = SsaArtifact::raw(&[block], Some(&arch)).expect("typed load artifact");
+    let artifact = SsaArtifact::raw(&[block], Some(&crate::Arch::from(arch.clone())))
+        .expect("typed load artifact");
     let machine = MachineFunction::from_artifact(&artifact).expect("machine load");
     let entity = machine.entities().first().expect("load entity");
     let root = machine.expr(entity.root()).expect("load root");
@@ -1364,7 +1373,8 @@ fn corrupted_plain_load_memory_policy_is_rejected() {
         addr: Varnode::register(0, 8),
     });
     let arch = ArchSpec::new("little-endian-test");
-    let artifact = SsaArtifact::raw(&[block], Some(&arch)).expect("typed load artifact");
+    let artifact =
+        SsaArtifact::raw(&[block], Some(&crate::Arch::from(arch))).expect("typed load artifact");
     let mut machine = MachineFunction::from_artifact(&artifact).expect("machine load");
     let root = machine.entities()[0].root();
     let MachineExprKind::MemoryRead { endianness, .. } =
@@ -1786,7 +1796,7 @@ fn register_use_slices_compose_nested_offsets_and_refuse_overflow() {
 
 #[test]
 fn register_use_projection_refuses_unavailable_and_invalid_geometry() {
-    let read = |arch: &ArchSpec, source: Varnode| {
+    let read = |arch: &crate::Arch, source: Varnode| {
         let artifact = artifact_with_arch(
             [R2ILOp::Copy {
                 dst: Varnode::unique(0x10, source.size),
@@ -1804,21 +1814,21 @@ fn register_use_projection_refuses_unavailable_and_invalid_geometry() {
             .expect("dense use disposition")
     };
 
-    let mut missing = register_geometry_arch();
+    let mut missing = register_geometry_arch_spec();
     missing.register_projections.clear();
     assert_eq!(
-        read(&missing, Varnode::register(1, 1)),
+        read(&crate::Arch::from(missing.clone()), Varnode::register(1, 1)),
         MachineUseDisposition::Refused(MachineUseRefusal::MissingRegisterGeometry)
     );
 
-    let mut refused = register_geometry_arch();
+    let mut refused = register_geometry_arch_spec();
     for projection in &mut refused.register_projections {
         projection.disposition = RegisterProjectionDisposition::Refused {
             reason: RegisterProjectionRefusal::MissingRegisterEndianness,
         };
     }
     assert_eq!(
-        read(&refused, Varnode::register(1, 1)),
+        read(&crate::Arch::from(refused.clone()), Varnode::register(1, 1)),
         MachineUseDisposition::Refused(MachineUseRefusal::RegisterGeometry(
             RegisterProjectionRefusal::MissingRegisterEndianness
         ))
@@ -1833,7 +1843,10 @@ fn register_use_projection_refuses_unavailable_and_invalid_geometry() {
         },
     };
     assert_eq!(
-        read(&malformed, Varnode::register(1, 1)),
+        read(
+            &crate::Arch::from(malformed.clone()),
+            Varnode::register(1, 1)
+        ),
         MachineUseDisposition::Refused(MachineUseRefusal::MalformedRegisterGeometry)
     );
 
@@ -2196,7 +2209,7 @@ fn value_geometry_is_dense_and_every_register_value_is_its_root() {
 #[test]
 fn value_geometry_ignores_register_names_and_definition_order() {
     let original = register_geometry_arch();
-    let mut renamed = register_geometry_arch();
+    let mut renamed = register_geometry_arch_spec();
     for register in &mut renamed.registers {
         register.name = match (register.offset, register.size) {
             (0, 4) => "narrow_accumulator".to_string(),
@@ -2226,7 +2239,7 @@ fn value_geometry_ignores_register_names_and_definition_order() {
             ]
         };
         let original_artifact = artifact_with_arch(ops(), &original);
-        let renamed_artifact = artifact_with_arch(ops(), &renamed);
+        let renamed_artifact = artifact_with_arch(ops(), &crate::Arch::from(renamed.clone()));
         let original_projection =
             MachineProjection::from_artifact(&original_artifact).expect("original projection");
         let renamed_projection =
@@ -2257,7 +2270,7 @@ fn value_geometry_preserves_register_geometry_refusals() {
         offset: 0,
         size: 8,
     };
-    let read = |arch: &ArchSpec| {
+    let read = |arch: &crate::Arch| {
         let artifact = artifact_with_arch(
             [
                 R2ILOp::Copy {
@@ -2275,23 +2288,23 @@ fn value_geometry_preserves_register_geometry_refusals() {
         value_geometry_for_storage(&projection, &artifact, root)
     };
 
-    let mut missing = register_geometry_arch();
+    let mut missing = register_geometry_arch_spec();
     missing.register_projections.clear();
     assert_eq!(
-        read(&missing),
+        read(&crate::Arch::from(missing.clone())),
         MachineValueGeometryDisposition::Refused(
             MachineValueGeometryRefusal::MissingRegisterGeometry
         )
     );
 
-    let mut refused = register_geometry_arch();
+    let mut refused = register_geometry_arch_spec();
     for projection in &mut refused.register_projections {
         projection.disposition = RegisterProjectionDisposition::Refused {
             reason: RegisterProjectionRefusal::MissingRegisterEndianness,
         };
     }
     assert_eq!(
-        read(&refused),
+        read(&crate::Arch::from(refused.clone())),
         MachineValueGeometryDisposition::Refused(MachineValueGeometryRefusal::RegisterGeometry(
             RegisterProjectionRefusal::MissingRegisterEndianness
         ))
@@ -2591,9 +2604,9 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
             src: Varnode::constant(1, 8),
         }]
     };
-    let mut missing = register_geometry_arch();
+    let mut missing = register_geometry_arch_spec();
     missing.register_projections.clear();
-    let missing_artifact = artifact_with_arch(write(), &missing);
+    let missing_artifact = artifact_with_arch(write(), &crate::Arch::from(missing.clone()));
     let missing_projection =
         MachineProjection::from_artifact(&missing_artifact).expect("typed refusal");
     let missing_inst = missing_artifact
@@ -2607,13 +2620,13 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
         ))
     );
 
-    let mut refused = register_geometry_arch();
+    let mut refused = register_geometry_arch_spec();
     for projection in &mut refused.register_projections {
         projection.disposition = RegisterProjectionDisposition::Refused {
             reason: RegisterProjectionRefusal::MissingRegisterEndianness,
         };
     }
-    let refused_artifact = artifact_with_arch(write(), &refused);
+    let refused_artifact = artifact_with_arch(write(), &crate::Arch::from(refused.clone()));
     let refused_projection =
         MachineProjection::from_artifact(&refused_artifact).expect("upstream refusal");
     let refused_inst = refused_artifact
@@ -2637,7 +2650,7 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
             size_bits: 32,
         },
     };
-    let malformed_artifact = artifact_with_arch(write(), &malformed);
+    let malformed_artifact = artifact_with_arch(write(), &crate::Arch::from(malformed.clone()));
     let malformed_projection =
         MachineProjection::from_artifact(&malformed_artifact).expect("malformed refusal");
     let malformed_inst = malformed_artifact
@@ -2702,7 +2715,7 @@ fn unnamed_vector_lanes_insert_into_their_root() {
                 b: Varnode::unique(0x19, 1),
             },
         ],
-        &arch,
+        &crate::Arch::from(arch.clone()),
     );
     let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
     let ops = artifact

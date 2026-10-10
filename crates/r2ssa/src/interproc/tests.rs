@@ -2,7 +2,11 @@ use super::*;
 use crate::SsaArtifact;
 use r2il::{ArchSpec, MemoryOrdering, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
 
-fn x86_64_arch() -> ArchSpec {
+fn x86_64_arch() -> crate::Arch {
+    crate::Arch::new(x86_64_arch_spec())
+}
+
+fn x86_64_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -12,7 +16,11 @@ fn x86_64_arch() -> ArchSpec {
     arch
 }
 
-fn windows_x64_arch() -> ArchSpec {
+fn windows_x64_arch() -> crate::Arch {
+    crate::Arch::new(windows_x64_arch_spec())
+}
+
+fn windows_x64_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -25,7 +33,11 @@ fn windows_x64_arch() -> ArchSpec {
     arch
 }
 
-fn x86_64_sysv_arg_arch() -> ArchSpec {
+fn x86_64_sysv_arg_arch() -> crate::Arch {
+    crate::Arch::new(x86_64_sysv_arg_arch_spec())
+}
+
+fn x86_64_sysv_arg_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -103,7 +115,7 @@ fn summary_sccs_handle_deep_chains_and_cycles_deterministically() {
 
 #[test]
 fn exact_return_boundary_ignores_misleading_carrier_names() {
-    let mut arch = x86_64_arch();
+    let mut arch = x86_64_arch_spec();
     for register in &mut arch.registers {
         let renamed = match register.offset {
             0 => Some("rdi"),
@@ -144,7 +156,7 @@ fn exact_return_boundary_ignores_misleading_carrier_names() {
                 R2ILOp::Return { target: reg(16, 8) },
             ],
         )],
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         interface,
     )
     .expect("exact return artifact");
@@ -217,7 +229,7 @@ fn register_storage(offset: u64) -> crate::CanonicalStorageId {
 /// those facts from register or calling-convention names.
 fn exact_untyped_artifact(
     blocks: &[R2ILBlock],
-    arch: &ArchSpec,
+    arch: &crate::Arch,
     revision: &[u8],
     calling_convention: &str,
     parameter_offsets: &[u64],
@@ -301,7 +313,7 @@ fn exact_untyped_artifact(
     .expect("exact untyped SSA artifact")
 }
 
-fn prepared_owner(addr: u64, arch: &ArchSpec) -> Arc<SsaArtifact> {
+fn prepared_owner(addr: u64, arch: &crate::Arch) -> Arc<SsaArtifact> {
     let storage = |offset| crate::CanonicalStorageId {
         space: crate::CanonicalStorageSpace::Register,
         offset,
@@ -882,10 +894,10 @@ fn prepared_summary_set_does_not_promote_report_only_seeds() {
 #[test]
 fn prepared_summary_set_refuses_cross_family_helper() {
     let root_arch = x86_64_arch();
-    let mut helper_arch = x86_64_arch();
+    let mut helper_arch = x86_64_arch_spec();
     helper_arch.name = "aarch64".to_string();
     let root = prepared_owner(0x4000, &root_arch);
-    let helper = prepared_owner(0x5000, &helper_arch);
+    let helper = prepared_owner(0x5000, &crate::Arch::from(helper_arch));
     let error = solve_prepared_interproc_summary_set(
         Arc::clone(&root),
         &[
@@ -925,7 +937,7 @@ fn prepared_summary_set_refuses_nonconverged_report() {
 
 #[test]
 fn prepared_summary_uses_exact_abi_carrier_not_callconv_label() {
-    let mut arch = x86_64_arch();
+    let mut arch = x86_64_arch_spec();
     arch.add_register(RegisterDef::new("rcx", 32, 8));
     let storage = |offset| crate::CanonicalStorageId {
         space: crate::CanonicalStorageSpace::Register,
@@ -962,7 +974,7 @@ fn prepared_summary_uses_exact_abi_carrier_not_callconv_label() {
                     },
                 ],
             )],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
             interface,
         )
         .expect("prepared exact ABI root"),
@@ -1161,7 +1173,8 @@ fn opaque_single_call_wrapper_does_not_promote_unbound_return() {
             R2ILOp::Return { target: reg(0, 8) },
         ],
     );
-    let wrapper = SsaArtifact::for_symbolic(&[wrapper_block], Some(&arch)).expect("wrapper ssa");
+    let wrapper = SsaArtifact::for_symbolic(&[wrapper_block], Some(&crate::Arch::from(arch)))
+        .expect("wrapper ssa");
     let mut seeds = BTreeMap::new();
     seeds.insert(
         InterprocFunctionId(0x2000),
@@ -2146,7 +2159,7 @@ fn call_arg_observer_preserves_ambiguous_join_as_unknown() {
 
 #[test]
 fn source_owned_call_observer_requires_exact_complete_call_carriers() {
-    let mut arch = x86_64_arch();
+    let mut arch = x86_64_arch_spec();
     arch.add_register(RegisterDef::new("rcx", 32, 8));
     let storage = |offset| crate::CanonicalStorageId {
         space: crate::CanonicalStorageSpace::Register,
@@ -2198,7 +2211,7 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
     };
     let complete = crate::testing::prepared(
         &blocks,
-        &arch,
+        &crate::Arch::from(arch.clone()),
         Some(function_interface()),
         vec![call_interface(true)],
         [register_storage(16), register_storage(24)],
@@ -2206,7 +2219,7 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
     .expect("complete call carrier artifact");
     let incomplete = crate::testing::prepared(
         &blocks,
-        &arch,
+        &crate::Arch::from(arch.clone()),
         Some(function_interface()),
         vec![call_interface(false)],
         [register_storage(16), register_storage(24)],
@@ -2229,9 +2242,13 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
     assert_eq!(incomplete_args.first(), Some(&CallArgObservation::Unknown));
 }
 
+fn two_argument_arch() -> crate::Arch {
+    crate::Arch::new(two_argument_arch_spec())
+}
+
 /// x86-64 with two argument registers: rdi at 8 and rsi at 32.
-fn two_argument_arch() -> ArchSpec {
-    let mut arch = x86_64_arch();
+fn two_argument_arch_spec() -> ArchSpec {
+    let mut arch = x86_64_arch_spec();
     arch.add_register(RegisterDef::new("rsi", 32, 8));
     arch
 }
