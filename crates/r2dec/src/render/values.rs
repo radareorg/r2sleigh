@@ -1503,9 +1503,10 @@ impl<'a> Values<'a> {
                     },
                 };
                 let call = self.call_expr(inst, plan, Some(class))?;
-                // The function's caller reads the bytes its own result class holds, and no more.
-                let demanded = 1u64
-                    .checked_shl(own.width_bits() / 8)
+                // The function's caller reads the bytes r2ssa says its declared result occupies.
+                let demanded = (self.artifact.machine_context().function_interface())
+                    .and_then(r2ssa::returned_bytes)
+                    .and_then(|result| 1u64.checked_shl(result.size))
                     .map_or(u64::MAX, |n| n - 1);
                 let spelled = fit(
                     calls::read_result(plan, call, class, demanded)?,

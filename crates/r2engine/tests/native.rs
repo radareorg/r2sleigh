@@ -2002,6 +2002,69 @@ const STORES_A_DECLARED_INT_WHOLE: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// `int wrapper(void) { g = 1; return rand(); }`, the call a tail transfer to an import's stub.
+const TAIL_RETURNS_RAND: &[u8] = &[
+    0xc7, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, // 0x1000 mov dword [0x3000], 1
+    0xe9, 0x00, 0x00, 0x00, 0x00, // 0x100b jmp 0x1010
+    0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 0x1010 rand's stub
+];
+
+/// `TAIL_RETURNS_RAND`, with `rand` an import's stub at 0x1010.
+struct TailToRand;
+
+impl r2engine::body::Program for TailToRand {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = TAIL_RETURNS_RAND.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(TAIL_RETURNS_RAND.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1010)
+    }
+}
+
+impl Program for TailToRand {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "wrapper".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1010).then(|| "rand".to_owned())
+    }
+}
+
+/// A tail transfer returns `int rand(void)` as the wrapper's own `int`: the wrapper's caller reads
+/// its declared four bytes, so the bits above them hold no residual.
+#[test]
+fn a_tail_transfer_returning_a_declared_int_reads_no_bits_above_it() {
+    let machine = declaring_at(BASE, "wrapper", "int", &[]);
+    let target = machine.target();
+    let text = staged(&target, &TailToRand, BASE)
+        .expect("decompile")
+        .output
+        .text()
+        .to_owned();
+    assert!(text.contains("rand()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
 /// `STORES_A_DECLARED_INT_WHOLE` with the store `mov [rbx], eax`: the caller reads only EAX.
 const STORES_A_DECLARED_INT: &[u8] = &[
     0x53, // 0x1000 push rbx
