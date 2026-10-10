@@ -154,21 +154,13 @@ fn check_proof(label: &str, answer: &Value) {
     .sum::<u64>();
     assert_eq!(Some(columns), proof["total"].as_u64(), "{label}: {proof}");
     let residuals = answer["residuals"].as_array().expect("residuals");
-    let residual = proof["residual"].as_u64().unwrap_or_default();
-    // A residual the proof line names a cause for has no site (#114 `UnsitedReason`, as `census.py sites`).
-    let sited = residual.saturating_sub(unsited(answer["code"].as_str().unwrap_or_default()));
-    assert!(
-        (residual != 0 || residuals.is_empty()) && (sited == 0 || !residuals.is_empty()),
+    // Every residual the proof line counts has a site: r2ssa owes no obligation it cannot site.
+    assert_eq!(
+        proof["residual"].as_u64() == Some(0),
+        residuals.is_empty(),
         "{label}: {proof} beside {} residual sites",
         residuals.len()
     );
-}
-
-/// The residuals the proof line states have no site: each `(N without a site: cause)`.
-fn unsited(code: &str) -> u64 {
-    code.split(" without a site: ")
-        .filter_map(|before| before.rsplit('(').next()?.trim().parse::<u64>().ok())
-        .sum()
 }
 
 /// Every line is a line of the code, and every address it names is an
