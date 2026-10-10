@@ -251,6 +251,14 @@ fn observed_input_bytes(
 /// value is queued again only when it gains a byte or saturates -- at most 65
 /// times -- and the walk stays linear in the graph's edges.
 pub(crate) fn closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
+    closure_of(graph, roots.into_iter().map(|value| (value, ByteMask::All)))
+}
+
+/// `closure`, from only the given bytes of each root.
+pub(crate) fn closure_of(
+    graph: &SsaGraph,
+    roots: impl IntoIterator<Item = (ValueId, ByteMask)>,
+) -> Closure {
     let width = |value: ValueId| {
         graph
             .value(value)
@@ -259,9 +267,15 @@ pub(crate) fn closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
     let mut bytes: crate::dense::IdMap<ValueId, ByteMask> = crate::dense::IdMap::default();
     let mut parents = crate::dense::IdMap::default();
     let mut pending = VecDeque::new();
-    for value in roots {
-        let mask = width(value);
-        if !mask.is_empty() && bytes.insert(value, mask).is_none() {
+    for (value, mask) in roots {
+        let mask = mask.intersection(width(value));
+        if mask.is_empty() {
+            continue;
+        }
+        let entry = bytes.get_or_insert_with(value, || ByteMask::NONE);
+        let before = *entry;
+        *entry = before.union(mask);
+        if *entry != before {
             pending.push_back(value);
         }
     }

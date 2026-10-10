@@ -434,6 +434,8 @@ pub enum ResidualCause {
     UndefinedConversion,
     /// The most negative value divided by -1, which neither p-code nor C gives a quotient.
     UndefinedQuotient,
+    /// The bits of a result register above the declared result, which the ABI leaves undefined.
+    UnspecifiedAbove,
     /// A marked gap: an operation, or a branch or dispatch test, the renderer
     /// could not lower. The gap's own marker says which.
     Gap,
@@ -450,6 +452,7 @@ impl ResidualCause {
             Self::UnrepresentableFloat => "unrepresentable-float",
             Self::UndefinedConversion => "undefined-conversion",
             Self::UndefinedQuotient => "undefined-quotient",
+            Self::UnspecifiedAbove => "unspecified-above",
             Self::Gap => "gap",
         }
     }

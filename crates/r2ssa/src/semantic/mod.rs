@@ -82,6 +82,9 @@ pub struct PreparedFunctionFacts {
     /// could not place. Nothing outside the function can read or write them.
     pub private_stack_objects: BTreeSet<ObjectId>,
     pub certificates: PreparedFunctionCertificates,
+    /// The bytes of each value the function's meaning reads; `None` where an exit hands registers
+    /// to code outside the graph.
+    pub demanded: Option<crate::demand::DemandedBytes>,
     pub obligations: SemanticObligationInventory,
     pub assumptions: AssumptionSet,
     pub applied_assumption_bindings: Vec<PreparedAssumptionBinding>,
@@ -390,6 +393,7 @@ impl PreparedFunctionFacts {
             control_domains,
             private_stack_objects,
             certificates,
+            demanded: demanded(body, &live_out, &ignored_reads),
             obligations,
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
@@ -405,6 +409,36 @@ impl PreparedFunctionFacts {
             },
         ))
     }
+}
+
+/// What `DemandedBytes` says of `body`, where every exit is named.
+fn demanded(
+    body: Body<'_>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    ignored: &BTreeSet<crate::graph::UseSite>,
+) -> Option<crate::demand::DemandedBytes> {
+    let result = (body.machine_context)
+        .and_then(SourceMachineContext::function_interface)
+        .and_then(returned_bytes);
+    crate::demand::exits_are_named(body.function, live_out)
+        .then(|| crate::demand::DemandedBytes::of_returning(body.graph, live_out, result, ignored))
+}
+
+/// The bytes of its result register a function's caller reads: the low bytes the declared type
+/// occupies where the interface places one there (an `int` in RAX), else the whole register.
+fn returned_bytes(interface: &r2source::SourceFunctionInterface) -> Option<CanonicalStorageId> {
+    let r2source::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
+        return None;
+    };
+    let declared = (interface.return_logical_value())
+        .map(|value| value.carrier())
+        .filter(|carrier| carrier.offset_bits() == 0 && carrier.size_bits() % 8 == 0)
+        .and_then(|carrier| u32::try_from(carrier.size_bits() / 8).ok())
+        .filter(|bytes| *bytes > 0);
+    Some(CanonicalStorageId {
+        size: declared.map_or(storage.size, |bytes| bytes.min(storage.size)),
+        ..storage
+    })
 }
 
 /// The liveness a collection computed and read: one model, which the sealed

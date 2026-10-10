@@ -185,7 +185,7 @@ fn check_lines(label: &str, answer: &Value, text: &[&str], listed: &BTreeSet<u64
 }
 
 /// The causes a residual site may state.
-const CAUSES: [&str; 8] = [
+const CAUSES: [&str; 9] = [
     "unproven-return",
     "held-from-entry",
     "unadmitted-argument",
@@ -193,6 +193,7 @@ const CAUSES: [&str; 8] = [
     "unrepresentable-float",
     "undefined-conversion",
     "undefined-quotient",
+    "unspecified-above",
     "gap",
 ];
 

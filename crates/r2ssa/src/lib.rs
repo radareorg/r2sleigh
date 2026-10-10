@@ -99,6 +99,7 @@ pub use control::{
     SsaWorkControl, SsaWorkMeter,
 };
 pub use defuse::{DefUseInfo, def_use};
+pub use demand::DemandedBytes;
 pub use function::{
     CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts,
     DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared,

@@ -598,7 +598,7 @@ impl Program for Importing {
 }
 
 /// Staged declares a callee the program carries at the widths its body reads and writes: `add_two`
-/// reads EDI and ESI and writes EAX, so each argument passes as 32 bits and the result widens back.
+/// reads EDI and ESI and writes EAX. The interface states no zero above EAX, so RAX's upper half is a residual.
 #[test]
 fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -614,7 +614,9 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
         "{text}"
     );
     assert!(
-        text.contains("= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1);"),
+        text.contains(
+            "= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1) | r2sleigh_residual_u64(1) << 32;"
+        ),
         "{text}"
     );
     // Widths only: the body states no sign, so no `int32_t` is read into the declaration.
@@ -1908,6 +1910,16 @@ impl std::fmt::Display for Rendered {
 /// x86-64 with a header's prototype for the body at `BASE`, spelled `int`, `uint32_t`, `uint64_t`
 /// or `void *`: a body writing both RAX and XMM0 does not say which one its caller reads.
 fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
+    declaring_at(BASE, name, returns, parameters)
+}
+
+/// `declaring`, for the body at `entry`.
+fn declaring_at(entry: u64, name: &str, returns: &str, parameters: &[&str]) -> Machine {
+    declaring_each(&[(entry, name, returns, parameters)])
+}
+
+/// `declaring_at`, for each body.
+fn declaring_each(prototypes: &[(u64, &str, &str, &[&str])]) -> Machine {
     use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
     let mut graph = TypeGraph::new();
     let mut node = |spelled: &str| {
@@ -1929,25 +1941,104 @@ fn declaring(name: &str, returns: &str, parameters: &[&str]) -> Machine {
             other => panic!("no type spelled {other}"),
         }
     };
-    let parameters = parameters
-        .iter()
-        .map(|spelled| Parameter::new(node(spelled), *spelled, None::<String>))
-        .collect();
-    let return_type = node(returns);
+    let declared = (prototypes.iter())
+        .map(|&(entry, name, returns, parameters)| {
+            let parameters = parameters
+                .iter()
+                .map(|spelled| Parameter::new(node(spelled), *spelled, None::<String>))
+                .collect();
+            let prototype = Prototype {
+                name: name.to_owned(),
+                parameters,
+                returns: returns.into(),
+                return_type: node(returns),
+                ..Prototype::default()
+            };
+            (entry, prototype)
+        })
+        .collect::<Vec<_>>();
     let mut declarations = r2abi::Declarations::new(graph);
-    declarations.declare_function(
-        BASE,
-        Prototype {
-            name: name.to_owned(),
-            parameters,
-            returns: returns.into(),
-            return_type,
-            ..Prototype::default()
-        },
-    );
+    for (entry, prototype) in declared {
+        declarations.declare_function(entry, prototype);
+    }
     let mut machine = Machine::new("x86-64", "x86-64", 64);
     machine.declarations = declarations;
     machine
+}
+
+/// `int caller(void)` is `call f; ret` over `int f(void)`, as clang -O0's `main` returns `counter()`.
+const RETURNS_A_DECLARED_INT: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 0x1000 call 0x1010
+    0xc3, // 0x1005 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1006 padding
+    0x6a, 0xff, // 0x1010 push -1
+    0x58, // 0x1012 pop rax
+    0xc3, // 0x1013 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// A function declared `int` returns the low four bytes of RAX, so its caller reads no byte of a
+/// call's `int` result above them: the call is returned as that `int`, with no residual.
+#[test]
+fn a_declared_int_returned_reads_no_bits_above_it() {
+    let machine = declaring_each(&[(BASE, "caller", "int", &[]), (0x1010, "f", "int", &[])]);
+    let [_, text] = rendered_both_on(&machine, RETURNS_A_DECLARED_INT, "caller");
+    assert!(text.contains("(uint32_t)fcn_1010()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// `int f(void)` is `push -1; pop rax; ret`, and its caller stores all of RAX: `*arg0 = rax`.
+const STORES_A_DECLARED_INT_WHOLE: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xfb, // 0x1001 mov rbx, rdi
+    0xe8, 0x07, 0x00, 0x00, 0x00, // 0x1004 call 0x1010
+    0x48, 0x89, 0x03, // 0x1009 mov [rbx], rax
+    0x5b, // 0x100c pop rbx
+    0xc3, // 0x100d ret
+    0x90, 0x90, // 0x100e padding
+    0x6a, 0xff, // 0x1010 push -1
+    0x58, // 0x1012 pop rax
+    0xc3, // 0x1013 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `STORES_A_DECLARED_INT_WHOLE` with the store `mov [rbx], eax`: the caller reads only EAX.
+const STORES_A_DECLARED_INT: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xfb, // 0x1001 mov rbx, rdi
+    0xe8, 0x08, 0x00, 0x00, 0x00, // 0x1004 call 0x1011
+    0x89, 0x03, // 0x1009 mov [rbx], eax
+    0x31, 0xc0, // 0x100b xor eax, eax
+    0x5b, // 0x100d pop rbx
+    0xc3, // 0x100e ret
+    0x90, 0x90, // 0x100f padding
+    0x6a, 0xff, // 0x1011 push -1
+    0x58, // 0x1013 pop rax
+    0xc3, // 0x1014 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Bits above a declared `int` that r2ssa proves no reader takes hold no residual: the store
+/// reads EAX alone, so the call is the `int` itself.
+#[test]
+fn bits_above_a_declared_narrower_result_nothing_reads_are_no_residual() {
+    let machine = declaring_at(0x1011, "f", "int", &[]);
+    let [_, text] = rendered_both_on(&machine, STORES_A_DECLARED_INT, "stores");
+    assert!(text.contains("= (uint64_t)(uint32_t)fcn_1011();"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// The ABI leaves RAX above a declared `int` result undefined: a 64-bit read of it is no
+/// zero-extension of the `int` (the machine stores 0xffffffffffffffff here, not 0xffffffff).
+#[test]
+fn bits_above_a_declared_narrower_result_are_never_zero() {
+    let machine = declaring_at(0x1010, "f", "int", &[]);
+    let [_, text] = rendered_both_on(&machine, STORES_A_DECLARED_INT_WHOLE, "stores");
+    assert!(text.contains("int32_t fcn_1010(void);"), "{text}");
+    assert!(
+        text.contains("rax_1 = (uint64_t)(uint32_t)fcn_1010() | r2sleigh_residual_u64(1) << 32;"),
+        "{text}"
+    );
 }
 
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.

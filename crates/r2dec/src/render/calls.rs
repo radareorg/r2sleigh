@@ -7,7 +7,8 @@ use r2ssa::{
 };
 use r2types::{CalleeClass, CalleeResolutionFacts, CallsiteKey};
 
-use crate::ast::{CExpr, CType};
+use crate::ast::{BinaryOp, CExpr, CType};
+use crate::prelude::ResidualCause;
 use crate::symbol::ExternalKind;
 
 /// Who a call reaches: a callee by name, or the function an indirect call's target value holds.
@@ -135,33 +136,54 @@ pub(super) fn text_as(text: &str, to: &CType) -> CExpr {
     }
 }
 
-/// What the call `plan` describes returns, read at `class`.
-pub(super) fn read_result(plan: &CallPlan, call: CExpr, class: &MachineType) -> Option<CExpr> {
+/// What the call `plan` describes returns, read at `class`, of which the program reads the bytes
+/// in `demanded`.
+pub(super) fn read_result(
+    plan: &CallPlan,
+    call: CExpr,
+    class: &MachineType,
+    demanded: u64,
+) -> Option<CExpr> {
     match &plan.declared {
-        Some(declared) => from_declared(call, &declared.ret, class),
+        Some(declared) => from_declared(call, &declared.ret, class, demanded),
         None => Some(call),
     }
 }
 
-/// A result of the declared type read at `class`. A signed result narrower than `class` reads
-/// through its unsigned type, since the register above it holds no sign the machine extended.
-pub(super) fn from_declared(call: CExpr, declared: &CType, class: &MachineType) -> Option<CExpr> {
+/// A result of the declared type read at `class`. The ABI leaves the bits above a narrower declared
+/// integer undefined: unread (r2ssa's `demanded`), any extension is unobservable; read, a residual.
+pub(super) fn from_declared(
+    call: CExpr,
+    declared: &CType,
+    class: &MachineType,
+    demanded: u64,
+) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
     if *declared == target {
         return Some(call);
     }
-    let narrower = match declared.unaliased() {
-        CType::Int {
-            bits,
-            signedness: r2types::Signedness::Signed,
-        } if *bits < class.width_bits() => Some(*bits),
-        _ => None,
+    let (bits, signed) = match declared.unaliased() {
+        CType::Int { bits, signedness } => (*bits, *signedness == r2types::Signedness::Signed),
+        CType::Bool => (8, false),
+        _ => return Some(CExpr::cast(target, call)),
     };
-    let call = match narrower {
-        Some(bits) => CExpr::cast(CType::uint(bits), call),
-        None => call,
+    if bits >= class.width_bits() {
+        return Some(CExpr::cast(target, call));
+    }
+    // C widens a signed result by its sign: through its unsigned type, the low bits alone.
+    let low = match signed {
+        true => CExpr::cast(target.clone(), CExpr::cast(CType::uint(bits), call)),
+        false => CExpr::cast(target.clone(), call),
     };
-    Some(CExpr::cast(target, call))
+    if demanded >> (bits / 8) == 0 {
+        return Some(low);
+    }
+    if super::terms::wide(class.width_bits()) {
+        return None;
+    }
+    let above = crate::prelude::residual(&target, ResidualCause::UnspecifiedAbove)?;
+    let above = CExpr::binary(BinaryOp::Shl, above, CExpr::IntLit(i64::from(bits)));
+    Some(CExpr::binary(BinaryOp::BitOr, low, above))
 }
 
 /// Whether a value of the declared type is exactly what `class` holds: the same kind and width,
@@ -578,10 +600,10 @@ mod tests {
             .generate_expr(expr)
     }
 
-    /// A declared `int` read through the 64-bit register: the 32-bit write that returned it
-    /// zeroed the half above, so the read widens through `uint32_t`, never by sign.
+    /// A declared `int` read through the 64-bit register: the ABI leaves the half above undefined.
+    /// Unread, it is unobservable; read, a residual, neither a zero nor a sign extension.
     #[test]
-    fn a_signed_declared_result_read_wider_widens_through_its_unsigned_type() {
+    fn a_declared_result_read_wider_holds_a_residual_above_it() {
         let call = CExpr::call(
             CExpr::External {
                 name: "f".to_string(),
@@ -597,13 +619,18 @@ mod tests {
             width_bits: 64,
             signedness: r2ssa::MachineSignedness::Unsigned,
         };
-        let read = from_declared(call.clone(), &int32, &wide).expect("an integer class");
+        let read = from_declared(call.clone(), &int32, &wide, 0x0f).expect("an integer class");
         assert_eq!(spelled(&read), "(uint64_t)(uint32_t)f()");
+        let read = from_declared(call.clone(), &int32, &wide, 0xff).expect("an integer class");
+        assert_eq!(
+            spelled(&read),
+            "(uint64_t)(uint32_t)f() | r2sleigh_residual_u64(1) << 32"
+        );
         let same = MachineType::Integer {
             width_bits: 32,
             signedness: r2ssa::MachineSignedness::Unsigned,
         };
-        let read = from_declared(call, &int32, &same).expect("an integer class");
+        let read = from_declared(call, &int32, &same, 0xff).expect("an integer class");
         assert_eq!(spelled(&read), "(uint32_t)f()");
     }
 
