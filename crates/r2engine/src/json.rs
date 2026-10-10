@@ -122,9 +122,7 @@ pub struct RenderedResidualJson {
     /// The residual helper's type tag: `void`, `u64`, `ptr`, ...
     #[serde(rename = "type")]
     pub ty: String,
-    /// Why the construct is unproven: `unproven-return`, `held-from-entry`,
-    /// `unadmitted-argument`, `never-assigned`, `unrepresentable-float` or
-    /// `gap`.
+    /// Why the construct is unproven: a `ResidualCause` tag, such as `never-assigned` or `gap`.
     pub cause: &'static str,
     /// For a gap, the kind its marker names.
     pub gap: Option<String>,
@@ -238,7 +236,7 @@ impl RenderedFunctionJson {
                     site: residual.site,
                     ty: residual.ty.tag(),
                     cause: residual.cause.tag(),
-                    gap: residual.gap.clone(),
+                    gap: residual.gap.as_ref().map(ToString::to_string),
                     line: residual.line,
                 })
                 .collect(),

@@ -634,3 +634,463 @@ fn machine_return_control_certificate_owns_exact_stack_reload() {
             })
     );
 }
+
+/// A 32-byte frame around `body`, which addresses it through the stack pointer.
+fn framed_artifact(body: impl FnOnce(&mut R2ILBlock, &Varnode)) -> SsaArtifact {
+    framed_artifact_growing(SourceStackGrowth::LowerAddresses, body)
+}
+
+/// `framed_artifact`, under a stack the source states grows toward `growth`.
+fn framed_artifact_growing(
+    growth: SourceStackGrowth,
+    body: impl FnOnce(&mut R2ILBlock, &Varnode),
+) -> SsaArtifact {
+    let sp = Varnode::register(32, 8);
+    let mut block = R2ILBlock::new(0x7000, 16);
+    block.push(R2ILOp::IntSub {
+        dst: sp.clone(),
+        a: sp.clone(),
+        b: Varnode::constant(32, 8),
+    });
+    body(&mut block, &sp);
+    block.push(R2ILOp::IntAdd {
+        dst: sp.clone(),
+        a: sp,
+        b: Varnode::constant(32, 8),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    for index in 0..block.ops.len() {
+        block.stamp_instruction(index, 0x7000 + index as u64);
+    }
+    let roles =
+        SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+            .and_then(|roles| {
+                roles.with_stack_allocation_contract(SourceStackAllocationContract::new(growth))
+            })
+            .expect("exact stack allocation roles");
+    let preserved = [register_storage(16, 8), register_storage(32, 8)];
+    SsaArtifact::for_decompile_with(
+        &[block],
+        crate::DecompileInputs {
+            arch: Some(&return_boundary_arch()),
+            function_interface: Some(preserved_stack_interface()),
+            machine_roles: roles,
+            call_effect: crate::testing::call_effect([], preserved),
+            ..Default::default()
+        },
+    )
+    .expect("framed artifact")
+}
+
+/// `sp + offset + index`, the index masked to 0..16 when `bounded` and unbounded otherwise.
+fn indexed_address(
+    block: &mut R2ILBlock,
+    sp: &Varnode,
+    (offset, bounded): (u64, bool),
+    unique: u64,
+) -> Varnode {
+    let index = Varnode::unique(unique, 8);
+    block.push(R2ILOp::IntAnd {
+        dst: index.clone(),
+        a: Varnode::register(24, 8),
+        b: Varnode::constant(if bounded { 0xf } else { u64::MAX }, 8),
+    });
+    let base = Varnode::unique(unique + 8, 8);
+    block.push(R2ILOp::IntAdd {
+        dst: base.clone(),
+        a: sp.clone(),
+        b: Varnode::constant(offset, 8),
+    });
+    let address = Varnode::unique(unique + 16, 8);
+    block.push(R2ILOp::IntAdd {
+        dst: address.clone(),
+        a: base,
+        b: index,
+    });
+    address
+}
+
+/// A byte store into the frame at `sp + 8 + index`.
+fn indexed_byte_store(block: &mut R2ILBlock, sp: &Varnode, bounded: bool) {
+    let address = indexed_address(block, sp, (8, bounded), 0x100);
+    block.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: address,
+        val: Varnode::register(40, 1),
+    });
+}
+
+/// Whether the byte store is owned by the function, and whether it is certified dead.
+fn store_ownership(artifact: &SsaArtifact) -> (bool, bool) {
+    let store = (artifact.structured().memory_accesses.values())
+        .find(|access| access.is_write && access.width == 1)
+        .expect("the byte store")
+        .id
+        .inst;
+    let certificates = artifact.certificates();
+    let owned = certificates.stack_slots.values().any(|slot| {
+        slot.callee_allocation.as_ref().is_some_and(|allocation| {
+            allocation
+                .accesses
+                .iter()
+                .any(|access| access.inst == store)
+        })
+    });
+    (owned, certificates.dead_frame_stores.contains(store))
+}
+
+#[test]
+fn a_write_only_owned_private_slot_is_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| indexed_byte_store(block, sp, true));
+    assert_eq!(
+        store_ownership(&artifact),
+        (true, true),
+        "{:?}",
+        artifact.certificates().stack_slots
+    );
+}
+
+#[test]
+fn a_slot_whose_address_escapes_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| {
+        indexed_byte_store(block, sp, true);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: sp.clone(),
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+#[test]
+fn a_slot_a_call_may_reach_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| {
+        indexed_byte_store(block, sp, true);
+        block.push(R2ILOp::Call {
+            target: Varnode::ram(0x8000, 8),
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+#[test]
+fn a_store_at_an_unbounded_index_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| indexed_byte_store(block, sp, false));
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+#[test]
+fn a_frame_read_at_an_unbounded_index_keeps_every_store() {
+    let artifact = framed_artifact(|block, sp| {
+        indexed_byte_store(block, sp, true);
+        // Below the store's object: only the missing bound lets it reach the store.
+        let address = indexed_address(block, sp, (0, false), 0x200);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(48, 1),
+            space: SpaceId::Ram,
+            addr: address,
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+/// The frame with a stored slot at `sp + 8` and the address `sp + escaped` written to a global.
+fn escaped_frame_address(escaped: u64) -> (SsaArtifact, InstId) {
+    escaped_frame_address_growing(SourceStackGrowth::LowerAddresses, escaped)
+}
+
+fn escaped_frame_address_growing(growth: SourceStackGrowth, escaped: u64) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact_growing(growth, |block, sp| {
+        let slot = Varnode::unique(0x200, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: slot.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: slot,
+            val: Varnode::constant(7, 8),
+        });
+        let address = Varnode::unique(0x208, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(escaped, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: address,
+        });
+    });
+    let adjust = artifact
+        .graph()
+        .inst_spelled_at(0x7000, 0)
+        .expect("the frame allocation");
+    (artifact, adjust)
+}
+
+#[test]
+fn an_adjustment_read_only_to_name_a_frame_object_is_frame_setup() {
+    let (artifact, adjust) = escaped_frame_address(8);
+    let geometry = &artifact.certificates().stack_geometry;
+    assert!(
+        !geometry.insts.contains(adjust),
+        "the address escapes the geometry"
+    );
+    assert!(geometry.frame_setup.contains(adjust), "{geometry:?}");
+}
+
+#[test]
+fn an_adjustment_read_to_name_a_caller_slot_is_not_frame_setup() {
+    let (artifact, adjust) = escaped_frame_address(40);
+    assert!(
+        !artifact
+            .certificates()
+            .stack_geometry
+            .frame_setup
+            .contains(adjust)
+    );
+}
+
+/// On a stack that grows to higher addresses, the bytes below the entry stack pointer are the
+/// caller's: an address there names no object of this frame, so reading `sp` for it is no setup.
+#[test]
+fn an_upward_stack_never_takes_the_downward_frame_rule() {
+    let (artifact, adjust) = escaped_frame_address_growing(SourceStackGrowth::HigherAddresses, 8);
+    let geometry = &artifact.certificates().stack_geometry;
+    assert!(!geometry.frame_setup.contains(adjust), "{geometry:?}");
+}
+
+/// A frame slot written whole and read back narrower, so the read stays a memory access; `observe`
+/// stores what was read to a global, else the register is overwritten unread.
+fn narrow_reread(observe: bool) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact(|block, sp| {
+        let slot = Varnode::unique(0x300, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: slot.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: slot.clone(),
+            val: Varnode::register(24, 8),
+        });
+        let read = Varnode::register(48, 4);
+        block.push(R2ILOp::Load {
+            dst: read.clone(),
+            space: SpaceId::Ram,
+            addr: slot,
+        });
+        let val = match observe {
+            true => read,
+            false => Varnode::constant(0, 4),
+        };
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val,
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(48, 4),
+            src: Varnode::constant(0, 4),
+        });
+    });
+    let load = (artifact.structured().memory_accesses.values())
+        .find(|access| !access.is_write)
+        .unwrap_or_else(|| panic!("the read: {:?}", artifact.structured().memory_accesses))
+        .id
+        .inst;
+    // The shape the renderer's pending-seeding exception asks about: a seeded private read.
+    let seeded = (artifact.facts().obligations.obligations_for_inst(load))
+        .any(|o| o.id.kind == crate::SemanticObligationKind::LiveValueProducer);
+    assert!(seeded, "{load:?}");
+    (artifact, load)
+}
+
+#[test]
+fn a_private_read_nothing_observes_is_certified_unobserved() {
+    let (artifact, load) = narrow_reread(false);
+    assert!(
+        artifact
+            .certificates()
+            .unobserved_private_reads
+            .contains(load)
+    );
+}
+
+/// Staged excuses only a certified read, so a dropped observed read stays unaccounted and refuses.
+#[test]
+fn a_private_read_whose_value_is_stored_is_not_certified_unobserved() {
+    let (artifact, load) = narrow_reread(true);
+    assert!(
+        !artifact
+            .certificates()
+            .unobserved_private_reads
+            .contains(load)
+    );
+}
+
+/// The objects of the frame's indexed accesses, in access order.
+fn indexed_objects(artifact: &SsaArtifact) -> Vec<crate::ObjectId> {
+    (artifact.structured().memory_accesses.values())
+        .filter(|access| artifact.objects().address_is_indexed(access.address))
+        .map(|access| access.object)
+        .collect()
+}
+
+#[test]
+fn a_bounded_store_beside_an_unbounded_one_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| {
+        for (bounded, unique) in [(true, 0x100), (false, 0x200)] {
+            let address = indexed_address(block, sp, (8, bounded), unique);
+            block.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: address,
+                val: Varnode::register(40, 1),
+            });
+        }
+    });
+    let objects = indexed_objects(&artifact);
+    assert_eq!(objects.len(), 2);
+    assert_eq!(objects[0], objects[1], "both stores reach one object");
+    let certificates = artifact.certificates();
+    assert!(
+        certificates.stack_slots[&objects[0]]
+            .callee_allocation
+            .is_some()
+    );
+    assert!(certificates.dead_frame_stores.is_empty());
+}
+
+/// An unbounded byte read at `sp + index` beside a halfword read at `sp`: two widths, so the
+/// object has no callee allocation; with `owned_store`, a bounded write-only store at `sp + 8`.
+fn unowned_unbounded_read_artifact(owned_store: bool) -> SsaArtifact {
+    framed_artifact(|block, sp| {
+        if owned_store {
+            indexed_byte_store(block, sp, true);
+        }
+        let address = indexed_address(block, sp, (0, false), 0x200);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(48, 1),
+            space: SpaceId::Ram,
+            addr: address,
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(56, 2),
+            space: SpaceId::Ram,
+            addr: sp.clone(),
+        });
+    })
+}
+
+#[test]
+fn an_unbounded_index_into_an_unowned_object_leaves_its_extent_assumed() {
+    let artifact = unowned_unbounded_read_artifact(false);
+    let object = indexed_objects(&artifact)[0];
+    let slot = &artifact.certificates().stack_slots[&object];
+    assert!(slot.callee_allocation.is_none(), "{slot:?}");
+    assert!(!matches!(
+        slot.array_layout,
+        crate::StackArrayLayoutDisposition::Proven(_)
+    ));
+    assert_eq!(
+        artifact.extent_assumption(object),
+        Some(crate::ExtentAssumption::UnboundedIndex)
+    );
+}
+
+#[test]
+fn an_unbounded_read_of_an_unowned_object_keeps_every_store() {
+    let artifact = unowned_unbounded_read_artifact(true);
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+/// A dead byte store of `r40 + 1` (or `r40 / r41` when `divide`); `observe` also writes it to a
+/// global.
+fn dead_store_of_a_sum(observe: bool) -> (SsaArtifact, InstId) {
+    dead_store_of(observe, false)
+}
+
+fn dead_store_of(observe: bool, divide: bool) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact(|block, sp| {
+        let sum = Varnode::unique(0x400, 1);
+        block.push(match divide {
+            false => R2ILOp::IntAdd {
+                dst: sum.clone(),
+                a: Varnode::register(40, 1),
+                b: Varnode::constant(1, 1),
+            },
+            true => R2ILOp::IntDiv {
+                dst: sum.clone(),
+                a: Varnode::register(40, 1),
+                b: Varnode::register(41, 1),
+            },
+        });
+        let address = indexed_address(block, sp, (8, true), 0x100);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: address,
+            val: sum.clone(),
+        });
+        if observe {
+            block.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x9000, 8),
+                val: sum,
+            });
+        }
+    });
+    let sum = (artifact.graph().insts.iter())
+        .find(|inst| {
+            matches!(
+                inst.payload,
+                InstPayload::Op(SSAOp::IntAdd { .. } | SSAOp::IntDiv { .. })
+            ) && inst
+                .inputs
+                .iter()
+                .all(|v| artifact.graph().var(*v).size == 1)
+        })
+        .expect("the sum")
+        .id;
+    (artifact, sum)
+}
+
+#[test]
+fn a_value_only_a_dead_frame_store_writes_is_dead_with_it() {
+    let (artifact, sum) = dead_store_of_a_sum(false);
+    let certificates = artifact.certificates();
+    assert!(
+        !certificates.dead_frame_stores.is_empty(),
+        "the byte store is dead"
+    );
+    assert!(certificates.dead_frame_store_values.contains(sum));
+}
+
+#[test]
+fn a_value_a_live_store_also_writes_is_not_dead() {
+    let (artifact, sum) = dead_store_of_a_sum(true);
+    assert!(
+        !artifact
+            .certificates()
+            .dead_frame_store_values
+            .contains(sum)
+    );
+}
+
+/// A division can trap, so the dead store it feeds does not make it dead.
+#[test]
+fn a_division_a_dead_frame_store_writes_is_not_dead() {
+    let (artifact, quotient) = dead_store_of(false, true);
+    let certificates = artifact.certificates();
+    assert!(
+        !certificates.dead_frame_stores.is_empty(),
+        "the byte store is dead"
+    );
+    assert!(!certificates.dead_frame_store_values.contains(quotient));
+}

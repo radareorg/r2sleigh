@@ -874,8 +874,15 @@ fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
 
 /// Its C, asked under a fresh control.
 fn render_request(sealed: &SealedFunctionAnalysis) -> EngineDecompileRequest<'_> {
+    render_request_at(sealed, RenderTier::C)
+}
+
+fn render_request_at(
+    sealed: &SealedFunctionAnalysis,
+    tier: RenderTier,
+) -> EngineDecompileRequest<'_> {
     EngineDecompileRequest {
-        tier: RenderTier::C,
+        tier,
         sealed,
         execution: EngineExecutionControl::default(),
     }
@@ -935,11 +942,57 @@ fn engine_decompiler_input_retains_exact_source_owned_facts() {
     );
 }
 
+/// Legacy polls while it normalizes, structures and renders.
 #[test]
 fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
+    inner_stops_keep_exact_audits(
+        RenderTier::C,
+        &[
+            EnginePhase::Normalization,
+            EnginePhase::Structuring,
+            EnginePhase::Rendering,
+        ],
+    );
+}
+
+/// Staged polls while it writes the control and once more to render the certified body.
+#[test]
+fn staged_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
+    inner_stops_keep_exact_audits(
+        RenderTier::Staged,
+        &[EnginePhase::Structuring, EnginePhase::Rendering],
+    );
+}
+
+/// The first poll whose stop refuses each phase, stopping at every poll in turn.
+fn first_stop_in_each_phase(
+    session: &EngineSession,
+    request: &EngineDecompileRequest<'_>,
+    total_polls: usize,
+    phases: &[EnginePhase],
+) -> HashMap<EnginePhase, usize> {
+    let mut observed = HashMap::new();
+    for stop_at in 1..=total_polls {
+        let stop = StopRenderAtPoll::new(stop_at, r2ssa::SsaExecutionStopReason::Cancelled);
+        let response = session.decompile_with_r2dec_control(request.clone(), &stop);
+        let phase = (phases.iter().copied())
+            .find(|phase| {
+                response.metrics.phase_timings.iter().any(|timing| {
+                    timing.phase == *phase && timing.status == EnginePhaseStatus::Refused
+                })
+            })
+            .expect("stopped render must mark one render phase refused");
+        observed.entry(phase).or_insert(stop_at);
+    }
+    observed
+}
+
+/// A stop at each poll refuses the phase the pipeline polled in, and only that one: each phase in
+/// `polled` is reached by some poll, and no other is.
+fn inner_stops_keep_exact_audits(tier: RenderTier, polled: &[EnginePhase]) {
     let session = EngineSession::new();
     let sealed = controlled_r2dec_sealed();
-    let request = render_request(&sealed);
+    let request = render_request_at(&sealed, tier);
     let decompiler_input = decompiler_input_for_engine_request(&request);
     let legacy_output = r2dec::Decompiler::new(request.sealed.render_target.to_decompiler_config())
         .decompile_input(&decompiler_input);
@@ -967,31 +1020,23 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
     let total_polls = counting.polls.get();
     assert!(total_polls > 3, "r2dec pipeline must expose inner polls");
 
-    let mut observed = HashMap::new();
-    for stop_at in 1..=total_polls {
-        let stop = StopRenderAtPoll::new(stop_at, r2ssa::SsaExecutionStopReason::Cancelled);
-        let response = session.decompile_with_r2dec_control(request.clone(), &stop);
-        let phase = [EnginePhase::Normalization, EnginePhase::Rendering]
-            .into_iter()
-            .find(|phase| {
-                response.metrics.phase_timings.iter().any(|timing| {
-                    timing.phase == *phase && timing.status == EnginePhaseStatus::Refused
-                })
-            })
-            .expect("stopped render must mark one render phase refused");
-        observed.entry(phase).or_insert(stop_at);
-        if observed.len() == 2 {
-            break;
-        }
-    }
+    // The phases a render stop can land in, in the order they run; which a pipeline polls in is its own.
+    let render_phases = [
+        EnginePhase::Normalization,
+        EnginePhase::Structuring,
+        EnginePhase::Rendering,
+    ];
+    let mut observed = first_stop_in_each_phase(&session, &request, total_polls, &render_phases);
+    // The last poll stops the rendering itself, after everything before it completed.
     observed.insert(EnginePhase::Rendering, total_polls);
+    let reached = render_phases
+        .into_iter()
+        .filter(|phase| observed.contains_key(phase))
+        .collect::<Vec<_>>();
+    assert_eq!(reached, polled, "polls={total_polls}: {observed:?}");
 
-    for phase in [EnginePhase::Normalization, EnginePhase::Rendering] {
-        let stop_at = *observed.get(&phase).unwrap_or_else(|| {
-            panic!(
-                "missing deterministic {phase:?} stop (polls={total_polls}, output={legacy_output})"
-            )
-        });
+    for &phase in polled {
+        let stop_at = observed[&phase];
         let reason = if phase == EnginePhase::Rendering {
             r2ssa::SsaExecutionStopReason::DeadlineExceeded
         } else {
@@ -1022,16 +1067,15 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
             1,
             "only the interrupted phase is refused"
         );
-        let normalization_status = if phase == EnginePhase::Rendering {
-            EnginePhaseStatus::Folded
-        } else {
-            EnginePhaseStatus::Refused
+        // Each render phase before the stopped one completed, and none after it ran.
+        let order = |of: EnginePhase| render_phases.iter().position(|p| *p == of);
+        let status = |of: EnginePhase| match order(of).cmp(&order(phase)) {
+            std::cmp::Ordering::Less => EnginePhaseStatus::Folded,
+            std::cmp::Ordering::Equal => EnginePhaseStatus::Refused,
+            std::cmp::Ordering::Greater => EnginePhaseStatus::NotExecuted,
         };
-        let structuring_status = if phase == EnginePhase::Rendering {
-            EnginePhaseStatus::Folded
-        } else {
-            EnginePhaseStatus::NotExecuted
-        };
+        let normalization_status = status(EnginePhase::Normalization);
+        let structuring_status = status(EnginePhase::Structuring);
         assert_eq!(
             response.metrics.phase_timings[EnginePhase::Normalization as usize].status,
             normalization_status

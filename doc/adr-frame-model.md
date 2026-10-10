@@ -39,6 +39,16 @@ declarations.
 - **Promotion is an SSA rewrite.** A private, non-escaping object whose every
   access is a full-width load or store of one value becomes that value. The
   rewrite reads the frame model, replacing pre-SSA `promote.rs`.
+- **Dead frame stores.** `PreparedFunctionCertificates::dead_frame_stores`
+  holds every access of a frame object the function allocates at each of its
+  accesses (`CalleeStackAllocationCertificate`) when every access is a write,
+  the object does not escape, no call reaches it (`FrameReach`: an unbounded
+  call reaches every object, a bounded one its argument area), and no access
+  reaches it at an unbounded index (`StackSlotCertificate::unbounded_index`,
+  any frame object, owned or not). The set is empty while any frame read has
+  an unbounded index: since objects partition the frame, only such a read can
+  land on another object. Filled once per sealed artifact (and per
+  `with_assumptions`), O(objects + accesses + calls); r2dec reads it.
 - **No feedback.** A declaration belongs to the debug information and a proof
   to the frame model, and neither is restated as the other (C).
 - **Consumers read it:** the certificates, memory SSA (its locations become
@@ -75,6 +85,10 @@ declarations.
   offsets agree over rendered functions (90 refused). Coverage: three
   `_start`s gap 13 to 14, because the read of the caller's `[sp]` now stays
   before the pushes through the realigned stack pointer, in program order.
+  Amended 2026-10-09 (D switch): `afv` reads the frame model for both
+  pipelines, since staged declares one `frame` array; a promoted copy of the
+  return address a return reads is frame management. `frame_agree` moves
+  back toward afv-only offsets until P4's exit makes the two agree.
 - P4.4, canary half (amended 2026-10-06): the check is decided in r2ssa
   before preparation (`stack_protector.rs`), not as a frame role: gcc at
   -O0 keeps the canary in a slot, but promotion often takes it out of

@@ -7,7 +7,8 @@ use r2ssa::{
 };
 use r2types::{CalleeClass, CalleeResolutionFacts, CallsiteKey};
 
-use crate::ast::{CExpr, CType};
+use crate::ast::{BinaryOp, CExpr, CType};
+use crate::prelude::ResidualCause;
 use crate::symbol::ExternalKind;
 
 /// Who a call reaches: a callee by name, or the function an indirect call's target value holds.
@@ -51,53 +52,138 @@ pub(super) struct Prototype {
 
 impl Prototype {
     /// `signature` as C spells it, where it names `fixed` parameters and every type is spellable.
-    pub(super) fn of(signature: &r2types::FunctionType, fixed: usize) -> Option<Self> {
+    pub(super) fn of(
+        signature: &r2types::FunctionType,
+        fixed: usize,
+        defines: &dyn Fn(&str, bool) -> bool,
+    ) -> Option<Self> {
         if signature.params.len() != fixed {
             return None;
         }
         let params = (signature.params.iter())
-            .map(|ty| spellable(ty).filter(|ty| *ty != CType::Void))
+            .map(|ty| spellable(ty, defines).filter(|ty| *ty != CType::Void))
             .collect::<Option<Vec<_>>>()?;
-        let ret = spellable(&signature.return_type)?;
+        let ret = spellable(&signature.return_type, defines)?;
+        Some(Self { params, ret })
+    }
+
+    /// `signature` at its carriers' widths alone, where it names `fixed` parameters and has a
+    /// result exactly where the call defines one: a sign, a pointee or a name it states is unproven.
+    pub(super) fn of_widths(
+        signature: &r2types::FunctionType,
+        fixed: usize,
+        returns: bool,
+        ptr_bits: u32,
+    ) -> Option<Self> {
+        if signature.params.len() != fixed {
+            return None;
+        }
+        let width = |ty: &CType| match ty.unaliased() {
+            CType::Int { bits, .. } if matches!(bits, 8 | 16 | 32 | 64) => Some(CType::uint(*bits)),
+            CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+                Some(CType::uint(ptr_bits))
+            }
+            CType::Float(bits @ (32 | 64)) => Some(CType::Float(*bits)),
+            _ => None,
+        };
+        let params = signature
+            .params
+            .iter()
+            .map(width)
+            .collect::<Option<Vec<_>>>()?;
+        let ret = match (&signature.return_type, returns) {
+            (CType::Void, false) => CType::Void,
+            (CType::Void, true) => return None,
+            (ty, _) => width(ty)?,
+        };
         Some(Self { params, ret })
     }
 }
 
 /// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.
 pub(super) fn to_declared(argument: CExpr, from: &CType, to: &CType) -> CExpr {
-    match from == to {
-        true => argument,
-        false => CExpr::cast(to.clone(), argument),
+    if from == to {
+        return argument;
+    }
+    // A literal the declared type holds is that number: C converts it there unchanged.
+    match super::terms::at_sink(to, argument) {
+        literal @ CExpr::IntLit(_) => literal,
+        CExpr::Observed { ids, expr } if matches!(*expr, CExpr::IntLit(_)) => {
+            CExpr::Observed { ids, expr }
+        }
+        other => CExpr::cast(to.clone(), other),
     }
 }
 
-/// What the call `plan` describes returns, read at `class`.
-pub(super) fn read_result(plan: &CallPlan, call: CExpr, class: &MachineType) -> Option<CExpr> {
+/// The literal `text` passed as `to`: C converts a `char*` to a pointer to `const char` or to
+/// `void` with no cast, and any other type takes one.
+pub(super) fn text_as(text: &str, to: &CType) -> CExpr {
+    let literal = CExpr::StringLit(text.to_owned());
+    let implicit = match to {
+        CType::Pointer(pointee) => {
+            let pointee = match &**pointee {
+                CType::Const(inner) => &**inner,
+                other => other,
+            };
+            matches!(pointee, CType::Void)
+                || matches!(pointee, CType::Typedef { name, .. } if name == "char")
+        }
+        _ => false,
+    };
+    match implicit {
+        true => literal,
+        false => CExpr::cast(to.clone(), literal),
+    }
+}
+
+/// What the call `plan` describes returns, read at `class`, of which the program reads the bytes
+/// in `demanded`.
+pub(super) fn read_result(
+    plan: &CallPlan,
+    call: CExpr,
+    class: &MachineType,
+    demanded: u64,
+) -> Option<CExpr> {
     match &plan.declared {
-        Some(declared) => from_declared(call, &declared.ret, class),
+        Some(declared) => from_declared(call, &declared.ret, class, demanded),
         None => Some(call),
     }
 }
 
-/// A result of the declared type read at `class`. A signed result narrower than `class` reads
-/// through its unsigned type, since the register above it holds no sign the machine extended.
-pub(super) fn from_declared(call: CExpr, declared: &CType, class: &MachineType) -> Option<CExpr> {
+/// A result of the declared type read at `class`. The ABI leaves the bits above a narrower declared
+/// integer undefined: unread (r2ssa's `demanded`), any extension is unobservable; read, a residual.
+pub(super) fn from_declared(
+    call: CExpr,
+    declared: &CType,
+    class: &MachineType,
+    demanded: u64,
+) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
     if *declared == target {
         return Some(call);
     }
-    let narrower = match declared.unaliased() {
-        CType::Int {
-            bits,
-            signedness: r2types::Signedness::Signed,
-        } if *bits < class.width_bits() => Some(*bits),
-        _ => None,
+    let (bits, signed) = match declared.unaliased() {
+        CType::Int { bits, signedness } => (*bits, *signedness == r2types::Signedness::Signed),
+        CType::Bool => (8, false),
+        _ => return Some(CExpr::cast(target, call)),
     };
-    let call = match narrower {
-        Some(bits) => CExpr::cast(CType::uint(bits), call),
-        None => call,
+    if bits >= class.width_bits() {
+        return Some(CExpr::cast(target, call));
+    }
+    // C widens a signed result by its sign: through its unsigned type, the low bits alone.
+    let low = match signed {
+        true => CExpr::cast(target.clone(), CExpr::cast(CType::uint(bits), call)),
+        false => CExpr::cast(target.clone(), call),
     };
-    Some(CExpr::cast(target, call))
+    if demanded >> (bits / 8) == 0 {
+        return Some(low);
+    }
+    if super::terms::wide(class.width_bits()) {
+        return None;
+    }
+    let above = crate::prelude::residual(&target, ResidualCause::UnspecifiedAbove)?;
+    let above = CExpr::binary(BinaryOp::Shl, above, CExpr::IntLit(i64::from(bits)));
+    Some(CExpr::binary(BinaryOp::BitOr, low, above))
 }
 
 /// Whether a value of the declared type is exactly what `class` holds: the same kind and width,
@@ -106,7 +192,9 @@ pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> b
     let (float, bits) = match declared {
         CType::Const(inner) => return held_as(inner, class, ptr_bits),
         CType::Typedef { ty, .. } => return held_as(ty, class, ptr_bits),
-        CType::Pointer(_) => (false, ptr_bits),
+        CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+            (false, ptr_bits)
+        }
         CType::Int { bits, .. } => (false, *bits),
         CType::Bool => (false, 8),
         CType::Float(bits) => (true, *bits),
@@ -115,9 +203,9 @@ pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> b
     matches!(class, MachineType::Float { .. }) == float && class.width_bits() == bits
 }
 
-/// `ty` as C spells it with no definition of its own: a standard scalar, or a pointer to one, to
-/// `void` or to `char`; a typedef is its target, `char` excepted. A tagged or unknown type is not.
-pub(super) fn spellable(ty: &CType) -> Option<CType> {
+/// `ty` as C spells it: a standard scalar, a pointer to one, `void`, `char` or a tag the unit
+/// `defines`, or a function pointer of such types; a typedef is its target, `char` excepted.
+pub(super) fn spellable(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
     match ty {
         CType::Void | CType::Bool | CType::Float(32 | 64) => Some(ty.clone()),
         CType::Int {
@@ -125,10 +213,32 @@ pub(super) fn spellable(ty: &CType) -> Option<CType> {
             signedness: r2types::Signedness::Signed | r2types::Signedness::Unsigned,
         } => Some(ty.clone()),
         CType::Typedef { name, .. } if name == "char" => Some(ty.clone()),
-        CType::Typedef { ty, .. } => spellable(ty),
-        CType::Pointer(pointee) => Some(CType::Pointer(Box::new(spellable(pointee)?))),
-        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner)?))),
+        CType::Typedef { ty, .. } => spellable(ty, defines),
+        CType::Pointer(pointee) => Some(CType::Pointer(Box::new(pointee_spelling(
+            pointee, defines,
+        )?))),
+        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner, defines)?))),
+        CType::Function { ret, params } => Some(CType::Function {
+            ret: Box::new(spellable(ret, defines)?),
+            params: (params.iter())
+                .map(|ty| spellable(ty, defines).filter(|ty| *ty != CType::Void))
+                .collect::<Option<_>>()?,
+        }),
+        CType::UnprototypedFunction(ret) => Some(CType::UnprototypedFunction(Box::new(spellable(
+            ret, defines,
+        )?))),
         _ => None,
+    }
+}
+
+/// What a pointer points at, as C spells it: a tag the unit `defines`, qualified or not, or any
+/// spellable type.
+fn pointee_spelling(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
+    match ty {
+        CType::Struct(tag) => defines(tag, false).then(|| ty.clone()),
+        CType::Union(tag) => defines(tag, true).then(|| ty.clone()),
+        CType::Const(inner) => Some(CType::Const(Box::new(pointee_spelling(inner, defines)?))),
+        ty => spellable(ty, defines),
     }
 }
 
@@ -252,10 +362,40 @@ fn planned(
             .calls
             .get(site)
             .and_then(|boundary| boundary.noreturn)
-            == Some(true),
+            == Some(true)
+            || never_comes_back(artifact, inst),
         tail,
         declared: None,
     })
+}
+
+/// Whether the CFG gives the block the call at `inst` ends no successor: the source's block graph
+/// says its last call never comes back (r2engine's walk, from the callee's declaration).
+fn never_comes_back(artifact: &SsaArtifact, inst: InstId) -> bool {
+    let graph = artifact.graph();
+    let Some(block) = graph.inst(inst).and_then(|at| graph.block(at.block)) else {
+        return false;
+    };
+    let ends = matches!(
+        artifact
+            .function()
+            .cfg()
+            .get_block(block.addr)
+            .map(|cfg| &cfg.terminator),
+        Some(
+            r2ssa::BlockTerminator::Call {
+                fallthrough: None,
+                ..
+            } | r2ssa::BlockTerminator::IndirectCall { fallthrough: None }
+        )
+    );
+    let last_call = block.insts.iter().rev().copied().find(|id| {
+        matches!(
+            graph.inst(*id).map(|at| &at.payload),
+            Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
+        )
+    });
+    ends && last_call == Some(inst)
 }
 
 fn check(holds: bool, otherwise: Unplanned) -> Result<(), Unplanned> {
@@ -460,10 +600,10 @@ mod tests {
             .generate_expr(expr)
     }
 
-    /// A declared `int` read through the 64-bit register: the 32-bit write that returned it
-    /// zeroed the half above, so the read widens through `uint32_t`, never by sign.
+    /// A declared `int` read through the 64-bit register: the ABI leaves the half above undefined.
+    /// Unread, it is unobservable; read, a residual, neither a zero nor a sign extension.
     #[test]
-    fn a_signed_declared_result_read_wider_widens_through_its_unsigned_type() {
+    fn a_declared_result_read_wider_holds_a_residual_above_it() {
         let call = CExpr::call(
             CExpr::External {
                 name: "f".to_string(),
@@ -479,27 +619,112 @@ mod tests {
             width_bits: 64,
             signedness: r2ssa::MachineSignedness::Unsigned,
         };
-        let read = from_declared(call.clone(), &int32, &wide).expect("an integer class");
+        let read = from_declared(call.clone(), &int32, &wide, 0x0f).expect("an integer class");
         assert_eq!(spelled(&read), "(uint64_t)(uint32_t)f()");
+        let read = from_declared(call.clone(), &int32, &wide, 0xff).expect("an integer class");
+        assert_eq!(
+            spelled(&read),
+            "(uint64_t)(uint32_t)f() | r2sleigh_residual_u64(1) << 32"
+        );
         let same = MachineType::Integer {
             width_bits: 32,
             signedness: r2ssa::MachineSignedness::Unsigned,
         };
-        let read = from_declared(call, &int32, &same).expect("an integer class");
+        let read = from_declared(call, &int32, &same, 0xff).expect("an integer class");
         assert_eq!(spelled(&read), "(uint32_t)f()");
     }
 
-    /// A tagged type needs a definition the unit does not hold, so the prototype is not spelled.
+    /// A literal passed at a declared signed type is the number where the type holds it, and a cast
+    /// of its bits where it does not.
     #[test]
-    fn a_prototype_naming_a_struct_is_not_spelled() {
+    fn a_literal_the_declared_type_holds_is_passed_as_the_number() {
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
+        let uint32 = CType::uint(32);
+        let one = to_declared(CExpr::UIntLit(1), &uint32, &int32);
+        assert_eq!(spelled(&one), "1");
+        let high = to_declared(CExpr::UIntLit(0x8000_0000), &uint32, &int32);
+        assert_eq!(spelled(&high), "(int32_t)0x80000000U");
+        // C converts the `int` constant 1 to any integer type that holds it unchanged.
+        let unsigned = to_declared(CExpr::UIntLit(1), &CType::uint(64), &uint32);
+        assert_eq!(spelled(&unsigned), "1");
+        // Past `INT_MAX` the constant is no `int`, so the conversion stays written.
+        let wide = to_declared(CExpr::UIntLit(0x8000_0000), &uint32, &CType::uint(64));
+        assert_eq!(spelled(&wide), "(uint64_t)0x80000000U");
+        // A cast that truncates is no literal of the number it casts.
+        let truncated = CExpr::cast(CType::uint(8), CExpr::UIntLit(0x101));
+        let truncated = to_declared(truncated, &CType::uint(8), &int32);
+        assert_eq!(spelled(&truncated), "(int32_t)(uint8_t)0x101U");
+        let widened = CExpr::cast(CType::uint(32), CExpr::UIntLit(7));
+        assert_eq!(spelled(&to_declared(widened, &uint32, &int32)), "7");
+    }
+
+    /// A callee body's prototype is spelled at its carriers' widths alone: the sign and pointee
+    /// r2types read there are no declaration, and a `void` result where the call defines one is
+    /// no prototype.
+    #[test]
+    fn a_prototype_from_a_callee_body_is_its_widths() {
+        let signature = r2types::FunctionType {
+            return_type: CType::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed,
+            },
+            params: vec![
+                CType::Pointer(Box::new(CType::Struct("node".to_string()))),
+                CType::Int {
+                    bits: 16,
+                    signedness: r2types::Signedness::Signed,
+                },
+                CType::Float(64),
+            ],
+            variadic: false,
+        };
+        let widths = Prototype::of_widths(&signature, 3, true, 64).expect("every type has a width");
+        assert_eq!(
+            widths,
+            Prototype {
+                params: vec![CType::uint(64), CType::uint(16), CType::Float(64)],
+                ret: CType::uint(32),
+            }
+        );
+        assert_eq!(Prototype::of_widths(&signature, 2, true, 64), None);
+        let void = r2types::FunctionType {
+            return_type: CType::Void,
+            ..signature
+        };
+        assert_eq!(Prototype::of_widths(&void, 3, true, 64), None);
+        assert!(Prototype::of_widths(&void, 3, false, 64).is_some());
+    }
+
+    /// A tag is spelled behind a pointer only where the unit defines it, and a function pointer
+    /// only where each of its types is spelled.
+    #[test]
+    fn a_prototype_names_a_struct_only_where_the_unit_defines_it() {
         let node = CType::Pointer(Box::new(CType::Const(Box::new(CType::Struct(
             "node".to_string(),
         )))));
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
+        let binary = CType::Function {
+            ret: Box::new(int32.clone()),
+            params: vec![int32.clone(), int32].into_boxed_slice(),
+        };
         let signature = r2types::FunctionType {
             return_type: CType::Void,
-            params: vec![node],
+            params: vec![node.clone(), binary.clone()],
             variadic: false,
         };
-        assert_eq!(Prototype::of(&signature, 1), None);
+        assert_eq!(Prototype::of(&signature, 2, &|_, _| false), None);
+        let defined = Prototype::of(&signature, 2, &|tag, union| tag == "node" && !union);
+        assert_eq!(defined.map(|p| p.params), Some(vec![node, binary]));
+        let by_value = r2types::FunctionType {
+            params: vec![CType::Struct("node".to_string())],
+            ..signature
+        };
+        assert_eq!(Prototype::of(&by_value, 1, &|_, _| true), None);
     }
 }

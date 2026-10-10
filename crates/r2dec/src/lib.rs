@@ -243,7 +243,11 @@ pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String 
 /// never zero because nothing went wrong; it is zero only when every obligation
 /// was reached by a rule that named its fate.
 /// The proof line's columns that appear only when they are not zero, in reading order.
-fn proof_columns(closure: &crate::ledger::LedgerClosure, split: usize) -> String {
+fn proof_columns(
+    closure: &crate::ledger::LedgerClosure,
+    ledger: &crate::ledger::ObligationLedger,
+) -> String {
+    let split = ledger.split_rendered();
     let mut line = String::new();
     if closure.compiler_inserted > 0 {
         let premise = r2source::Premise::UbFreeSource.spelled();
@@ -263,6 +267,10 @@ fn proof_columns(closure: &crate::ledger::LedgerClosure, split: usize) -> String
     // A function with a residual is rendered, not proven: the count is how many obligations residuals stand in for.
     if closure.gapped > 0 {
         let _ = write!(&mut line, ", {} residual", closure.gapped);
+    }
+    // A residual with no site in the text is spelled with its cause, never silent.
+    for (reason, count) in ledger.unsited() {
+        let _ = write!(&mut line, " ({count} without a site: {})", reason.spelled());
     }
     // Rendered, through a variable split out of a shared one so every read sees its value.
     if split > 0 {
@@ -299,14 +307,13 @@ fn note_unproven_constructs(
             n => format!("{n} constructs are marked below"),
         }
     };
-    let mut detail = match ledger.map(crate::ledger::ObligationLedger::close) {
-        Some(closure) if closure.total > 0 => {
+    let mut detail = match ledger.map(|ledger| (ledger, ledger.close())) {
+        Some((ledger, closure)) if closure.total > 0 => {
             let mut line = format!(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
                 closure.total, closure.rendered, closure.elided, closure.refused
             );
-            let split = ledger.map_or(0, crate::ledger::ObligationLedger::split_rendered);
-            line.push_str(&proof_columns(&closure, split));
+            line.push_str(&proof_columns(&closure, ledger));
             let _ = write!(
                 &mut line,
                 "; {} statements rendered",
@@ -1844,7 +1851,7 @@ pub enum BindingShadowAuditFailure {
 fn replan_stale_reads(
     repair: &binding_plan::ReachingRepair,
     splits: &mut binding_plan::BindingSplits,
-    seed_gaps: &mut std::collections::BTreeMap<r2ssa::InstId, String>,
+    seed_gaps: &mut std::collections::BTreeMap<r2ssa::InstId, ast::GapKind>,
 ) -> bool {
     if let Some(partition) = repair.partition.clone()
         && splits.split(partition, &repair.evict)
@@ -1869,7 +1876,7 @@ fn replan_stale_reads(
         "a read at {anchor:?} sees another value and cannot be split; \
          planning a gap and rendering again"
     );
-    seed_gaps.insert(anchor, "stale_read".to_string());
+    seed_gaps.insert(anchor, ast::GapKind::StaleRead);
     true
 }
 
@@ -3010,7 +3017,8 @@ impl Decompiler {
                 && let Some(anchor) = gap_anchor_for_native_failure(&failure, input.prepared_ssa())
                 && !seed_gaps.contains_key(&anchor)
             {
-                let kind = DecompileRenderRefusal::from(failure).kind().to_string();
+                let kind =
+                    ast::GapKind::Refused(DecompileRenderRefusal::from(failure).kind().to_owned());
                 r2il::refusal_evidence!(
                     "gap",
                     "the proof named {anchor:?} ({:?}) as {kind}; planning a gap and rendering again",
@@ -3048,7 +3056,7 @@ impl Decompiler {
         &self,
         input: &'a DecompilerInput,
         work: DecompileWorkControl<'a>,
-        seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, String>,
+        seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, ast::GapKind>,
         splits: &binding_plan::BindingSplits,
     ) -> Result<InternalBuildProduct, DecompileExecutionStop> {
         crate::stage_timing::begin(input.prepared_ssa().graph().insts.len());
@@ -4235,17 +4243,17 @@ pub(crate) fn literal_value(expr: &CExpr) -> Option<u64> {
         _ => None,
     }
 }
-/// Whether a string literal can stand where a value of `required` is wanted:
-/// anywhere but behind a pointer to something wider than a character, since a
-/// load of a word through a string's address reads an object, not text.
-pub(crate) fn string_literal_serves(required: &CType, ptr_bits: u32) -> bool {
-    match required {
-        CType::Pointer(inner) => {
-            matches!(**inner, CType::Void | CType::Unknown)
-                || r2types::declaration_type_width_bits(inner, ptr_bits) == Some(8)
-        }
-        _ => true,
-    }
+/// Whether a string literal can stand where `required` is wanted: only a pointer to `char`, the
+/// C string convention, since a literal ends at its NUL and other readers may read past it.
+pub(crate) fn string_literal_serves(required: &CType, _ptr_bits: u32) -> bool {
+    let CType::Pointer(inner) = required else {
+        return false;
+    };
+    let pointee = match &**inner {
+        CType::Const(inner) => &**inner,
+        other => other,
+    };
+    matches!(pointee, CType::Typedef { name, .. } if name == "char")
 }
 
 /// The name this constant address is, the type that name has, and the object it declares.
@@ -4308,7 +4316,7 @@ pub(crate) fn name_of_constant_address(
 /// with anything left that is not an identifier character replaced, so the
 /// rendered program declares `progName` rather than a dotted spelling no
 /// compiler accepts.
-fn c_identifier_for_data_symbol(flag: &str) -> String {
+pub(crate) fn c_identifier_for_data_symbol(flag: &str) -> String {
     const SPACES: [&str; 6] = ["obj.", "reloc.", "segment.", "section.", "str.", "sym."];
     let mut name = flag;
     loop {

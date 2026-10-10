@@ -2,15 +2,18 @@
 
 #![cfg(feature = "sleigh")]
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
-fn pdd(fixture: &str, function: &str) -> String {
+/// What `script` prints for one pinned fixture.
+fn run(fixture: &str, script: &str) -> String {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/coverage/pinned")
         .join(fixture);
     let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
-        .args(["-q", "-c", &format!("pdd @ {function}")])
+        .args(["-q", "-c", script])
         .arg(binary)
         .output()
         .expect("the shell runs");
@@ -22,6 +25,14 @@ fn pdd(fixture: &str, function: &str) -> String {
     String::from_utf8_lossy(&done.stdout).into_owned()
 }
 
+fn pdd(fixture: &str, function: &str) -> String {
+    run(fixture, &format!("pdd @ {function}"))
+}
+
+fn afv(fixture: &str, function: &str) -> String {
+    run(fixture, &format!("afv @ {function}"))
+}
+
 /// `shape_pointer_to_pointer` fills `uint64_t *rows[4]` with the addresses of four locals and
 /// hands `rows` to a callee that indexes it. An escaped address may reach every object from it up
 /// to a slot the compiler owns, so the locals, `rows` and `cursor` are one object: each row is a
@@ -29,13 +40,22 @@ fn pdd(fixture: &str, function: &str) -> String {
 /// Splitting `rows` into scalars rendered `&rows[0]` indexed past its object, and differed.
 #[test]
 fn every_row_of_an_array_whose_first_address_escapes_is_stored() {
-    let out = pdd("shapes_gcc_x64_O0", "sym.shape_pointer_to_pointer");
-    assert!(out.contains("uint8_t stack_m120[88];"), "{out}");
-    for (row, local) in [(6, ""), (7, " + 8"), (8, " + 16"), (9, " + 24")] {
-        let store = format!(
-            "r2sleigh_store_u64((uint8_t*)stack_m120 + {row} * sizeof(uint64_t), (uint64_t)stack_m120{local});"
-        );
-        assert!(out.contains(&store), "{store}:\n{out}");
+    let function = "sym.shape_pointer_to_pointer";
+    let (out, afv) = (
+        pdd("shapes_gcc_x64_O0", function),
+        afv("shapes_gcc_x64_O0", function),
+    );
+    // The 88 bytes from entry.sp-0x78 lie in one declared array, whatever the pipeline names it.
+    let rows = -0x78;
+    let object = common::array_spanning(&out, &afv, rows, rows + 88);
+    assert!(object.is_some(), "{afv}\n{out}");
+    // Rows 6 to 9 hold the addresses of the four words the object begins with.
+    let writes = common::stack_writes(&out, &afv);
+    for (row, local) in [(6, 0), (7, 8), (8, 16), (9, 24)] {
+        let stored = writes.iter().any(|(at, value)| {
+            *at == rows + row * 8 && common::entry_offset(&out, &afv, value) == Some(rows + local)
+        });
+        assert!(stored, "row {row}:\n{afv}\n{out}");
     }
 }
 
@@ -53,8 +73,33 @@ fn accesses_to_an_object_of_unproven_extent_are_counted_as_assumed() {
 /// index is in `[0, 2]`, the layout is proven, and `table` is one array of three.
 #[test]
 fn a_table_indexed_by_a_remainder_is_one_array_of_its_proven_length() {
-    let out = pdd("shapes_gcc_x64_O0", "sym.shape_function_pointer");
-    assert!(out.contains("uint64_t stack_m40[3];"), "{out}");
-    assert!(out.contains("stack_m40[1] = (uint64_t)&op_xor;"), "{out}");
-    assert!(out.contains("stack_m40[2] = (uint64_t)&op_mul;"), "{out}");
+    let (fixture, function) = ("shapes_gcc_x64_O0", "sym.shape_function_pointer");
+    let (out, afv) = (pdd(fixture, function), afv(fixture, function));
+    // The frame model holds the table as one 24-byte object at entry.sp-0x28, three rows of
+    // eight (ADR frame-model: afv lists its locals).
+    let table = common::afv_locals(&afv)
+        .into_values()
+        .find(|(offset, _)| *offset == -0x28);
+    let extent = table.as_ref().and_then(|(_, ty)| common::afv_size(ty));
+    assert_eq!(extent, Some(24), "{afv}");
+    // Its second and third rows hold the addresses of `op_xor` and `op_mul`, by name or by value.
+    let functions = run(fixture, "afl");
+    let address = |symbol: &str| {
+        functions
+            .lines()
+            .find(|line| line.ends_with(&format!(" sym.{symbol}")))
+            .and_then(|line| common::literal(line.split_whitespace().next()?))
+            .unwrap_or_else(|| panic!("{symbol}: {functions}"))
+    };
+    let writes = common::stack_writes(&out, &afv);
+    for (row, symbol) in [(1, "op_xor"), (2, "op_mul")] {
+        let holds = |value: &str| {
+            common::bare(value) == format!("&{symbol}")
+                || common::literal(value) == Some(address(symbol))
+        };
+        let stored = writes
+            .iter()
+            .any(|(at, value)| *at == -0x28 + row * 8 && holds(value));
+        assert!(stored, "{symbol}:\n{afv}\n{out}");
+    }
 }

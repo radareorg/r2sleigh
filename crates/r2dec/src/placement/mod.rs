@@ -454,7 +454,7 @@ pub(crate) fn collect_final_placement_occurrences(
     }
 
     let graph = source.graph();
-    let answered_effect_sites = crate::binding_plan::certified_dead_frame_slot_accesses(source);
+    let answered_effect_sites = &source.certificates().dead_frame_stores;
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut escaped_stack_bindings = BTreeSet::new();
@@ -599,7 +599,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         effectful: removing_statement_would_lose_an_effect(
                             source,
                             inst_id,
-                            &answered_effect_sites,
+                            answered_effect_sites,
                         ),
                     });
                 }
@@ -659,7 +659,7 @@ pub(crate) fn collect_final_placement_occurrences(
                             || removing_statement_would_lose_an_effect(
                                 source,
                                 access.inst,
-                                &answered_effect_sites,
+                                answered_effect_sites,
                             ),
                     });
                 } else {
@@ -1045,10 +1045,10 @@ fn stored_value(graph: &r2ssa::SsaGraph, inst: InstId) -> Option<r2ssa::ValueId>
 fn removing_statement_would_lose_an_effect(
     source: &r2ssa::SsaArtifact,
     inst: InstId,
-    answered: &BTreeSet<InstId>,
+    answered: &r2ssa::dense::IdSet<InstId>,
 ) -> bool {
     use r2ssa::SemanticObligationKind as Kind;
-    if answered.contains(&inst) {
+    if answered.contains(inst) {
         return false;
     }
     // A `CallDefine` is judged by the call it names.

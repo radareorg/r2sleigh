@@ -10,6 +10,8 @@
 
 #![cfg(feature = "sleigh")]
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -179,10 +181,45 @@ fn a_shift_by_an_immediate_does_not_read_the_flags_it_sets() {
     assert!(run.ok, "{}", run.out);
     assert!(run.out.contains("murmur3_32("), "{}", run.out);
     assert!(!run.out.contains("r2sleigh refused"), "{}", run.out);
-    assert!(run.out.contains("if (RAX_2 != 0)"), "{}", run.out);
-    for flag in ["ZF", "CF_0", "OF_0", "PF_0", "SF_0"] {
-        assert!(!run.out.contains(flag), "{flag} is read by {}", run.out);
-    }
+    // The loop guard tests the shifted length itself, against zero.
+    let shifted = run
+        .out
+        .lines()
+        .find_map(|line| {
+            let (assigned, value) = line.trim().split_once(" = ")?;
+            let assigned = assigned.rsplit(' ').next()?;
+            value.contains(">>").then(|| assigned.to_owned())
+        })
+        .unwrap_or_else(|| panic!("no shift: {}", run.out));
+    assert!(
+        run.out.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("if (")
+                && line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|word| word == shifted)
+                && (line.contains("!= ") || line.contains("== "))
+                && line.contains('0')
+        }),
+        "{shifted} decides no branch: {}",
+        run.out
+    );
+    // No flag is read, however a pipeline spells it (`ZF`, `CF_0`, `cf_2`).
+    let flags = run
+        .out
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| {
+            let word = word.to_ascii_lowercase();
+            let (register, version) = word.split_once('_').unwrap_or((&word, ""));
+            let versioned = !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit());
+            match register {
+                "zf" | "cf" | "pf" | "sf" => version.is_empty() || versioned,
+                "of" => versioned,
+                _ => false,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(flags.is_empty(), "{flags:?} read by {}", run.out);
 }
 
 #[test]
@@ -372,15 +409,17 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         binary,
         "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
     );
-    // The pointer parameter is declared as DWARF states it, and read as its word; `forward`'s `x + 1.0`
-    // adds the double whose bits the constant is, never the integer those bits spell.
+    // Each parameter is declared as DWARF states it, by its name: the pointer is read as its word
+    // where it is stored through, and passed as itself where the callee declares it the same type.
+    // `forward`'s `x + 1.0` adds the double whose bits the constant is, never the integer those bits
+    // spell.
     for line in [
-        "void store(double arg0, double* arg1)",
-        "r2sleigh_store_u64((void*)(uint64_t)arg1, (uint64_t)r2sleigh_float_to_bits_64(arg0 + arg0));",
-        "void forward(double arg0, double* arg1)",
+        "void store(double x, double* p)",
+        "r2sleigh_store_u64((void*)(uint64_t)p, (uint64_t)r2sleigh_float_to_bits_64(x + x));",
+        "void forward(double x, double* p)",
         "void store(double, double*);",
-        "store(arg0, (double*)(uint64_t)arg1);",
-        "store(arg0 + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), (double*)(uint64_t)arg1);",
+        "store(x, p);",
+        "store(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), p);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
@@ -396,7 +435,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .next()
         .unwrap_or(call_store);
     let call = call_store
-        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), (double*)(uint64_t)arg0);")
+        .find("store(r2sleigh_float_from_bits_64((uint64_t)0x3ff4000000000000U), p);")
         .expect("the tail call");
     let returned = call_store.find("return;").expect("its return");
     assert!(call < returned, "{call_store}");
@@ -541,15 +580,11 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
 fn a_staged_tail_call_returns_its_callee_s_result() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     for (binary, function, line) in [
-        (
-            "rv_O0g",
-            "sym.frame_dummy",
-            "return (uint64_t)register_tm_clones();",
-        ),
+        ("rv_O0g", "sym.frame_dummy", "return register_tm_clones();"),
         (
             "float_moves_zig_x86_64_O2g",
             "sym.swap_call",
-            "return (double)scale(arg1, arg0);",
+            "return scale(b, a);",
         ),
     ] {
         let staged = on(
@@ -559,6 +594,50 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
         assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
     }
+}
+
+/// A staged control residual says why in `pddj` (an untargeted `jmp rax`, an unproven return),
+/// and the proof counts no residual the text does not hold.
+#[test]
+fn a_staged_control_residual_states_its_cause() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    for (function, cause, gap) in [
+        (
+            "sym.deregister_tm_clones",
+            "gap",
+            Some("UnresolvedIndirectBranch"),
+        ),
+        ("sym.__do_global_dtors_aux", "unproven-return", None),
+    ] {
+        let staged = on(
+            binary.clone(),
+            &format!("e dec.pipeline=staged; pddj @ {function}"),
+        );
+        let answer: serde_json::Value =
+            serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
+        let residuals = answer["residuals"].as_array().expect("residuals");
+        assert!(!residuals.is_empty(), "{function}: {answer}");
+        for residual in residuals {
+            assert_eq!(residual["cause"], cause, "{function}: {residual}");
+            assert_eq!(residual["gap"].as_str(), gap, "{function}: {residual}");
+        }
+    }
+}
+
+/// A staged constant a prototyped parameter holds passes as itself: `main`'s calls in the review
+/// fixture, where only `printf`'s variadic tail keeps its conversions.
+#[test]
+fn a_staged_constant_argument_is_the_constant() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.main");
+    for call in ["bit_count(0xf0f0)", "fact(5)", ", 16);", ", 16, 7);"] {
+        assert!(staged.out.contains(call), "{call}: {}", staged.out);
+    }
+    assert!(
+        staged.out.contains("printf(\"%d %s\\n\", (uint64_t)"),
+        "{}",
+        staged.out
+    );
 }
 
 /// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); its caller's `movsd` of XMM0
@@ -623,13 +702,31 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
     for line in [
-        "double from_b(const double* arg0, int64_t arg1)",
+        "double from_b(const double* values, int64_t count)",
         "double helper(const double*, int64_t);",
-        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper((const double*)(uint64_t)arg0, (int64_t)arg1));",
+        "xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(helper(values, count));",
         "return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_1);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }
+}
+
+/// `fill` stores `g_table[i]` at `i * 4 + 0x4040`, the table's exact address plus its index: staged
+/// declares the table at its DWARF type and spells the address off it, as the frame spells a computed
+/// index off its one array.
+#[test]
+fn a_staged_computed_index_off_a_named_global_is_spelled_off_that_global() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fill");
+    for line in [
+        "extern int32_t g_counter;",
+        "extern int32_t g_table[16];",
+        " + (uint64_t)&g_table)",
+        "2 data object types supplied by the source",
+    ] {
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+    }
+    assert!(!staged.out.contains("0x4040"), "{}", staged.out);
 }
 
 /// A recursive call names the function itself at its own signature: `fact` calls `fact` with
@@ -639,14 +736,14 @@ fn a_staged_recursive_call_agrees_with_its_own_definition() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
     let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fact");
     assert!(
-        staged.out.contains("int32_t fact(int32_t arg0)"),
+        staged.out.contains("int32_t fact(int32_t n)"),
         "{}",
         staged.out
     );
     assert!(
         staged
             .out
-            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)arg0 - (uint32_t)1U));"),
+            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)n - (uint32_t)1U));"),
         "{}",
         staged.out
     );
@@ -1145,7 +1242,7 @@ mod listing {
 /// An aarch64 Mach-O whose dispatcher calls through a table of function
 /// pointers, which is the shape the engine has to derive for itself.
 mod dispatch_table {
-    use super::{Run, on};
+    use super::{Run, common, on};
     use std::path::PathBuf;
 
     fn fixture() -> PathBuf {
@@ -1174,12 +1271,38 @@ mod dispatch_table {
         // function-pointer call is the proof the target came from the table
         // rather than from a guess.
         assert!(run.out.contains("_table_dispatch("), "{}", run.out);
-        assert!(run.out.contains(")((uint64_t)X0_0,"), "{}", run.out);
+        // The entry loaded from the table is cast to a two-argument function and called with two.
+        let call = run
+            .out
+            .lines()
+            .find(|line| line.contains("(*)(") && line.trim_end().ends_with(");"))
+            .unwrap_or_else(|| panic!("no call through a pointer: {}", run.out));
+        let pointer = call.split_once("(*)(").map_or("", |(_, rest)| rest);
+        let parameters = pointer.split_once(')').map_or("", |(list, _)| list);
+        assert_eq!(parameters.split(", ").count(), 2, "{call}");
+        let open = call.rfind(")(").map_or(0, |at| at + 1);
+        let arguments = common::arguments_at(call, open);
+        assert_eq!(arguments.len(), 2, "{call}");
+        // The first argument is x0 on entry: the first parameter, through its spill and the loop.
+        let parameters = common::parameter_names(&run.out);
+        assert_eq!(parameters.len(), 2, "{}", run.out);
+        assert!(
+            common::starts_from(&run.out, &arguments[0], &parameters[0]),
+            "{} does not start from {}: {}",
+            arguments[0],
+            parameters[0],
+            run.out
+        );
+        assert!(
+            !common::starts_from(&run.out, &arguments[1], &parameters[0]),
+            "{call}"
+        );
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
-    /// The block counts are the prepared analysis's; the frame is the locals the rendering declares
-    /// (doc/adr-frame-model.md): the table and the promoted loop counter, where the spills of `x0`/`x1` read as values.
+    /// The block counts and the frame are the prepared analysis's, whichever pipeline renders
+    /// (doc/adr-frame-model.md): the saved `x29`/`x30` pair is frame management; the loop counter,
+    /// the accumulator, the table and the homes of `x0`/`x1` are the body's own.
     #[test]
     fn a_function_reports_its_shape_and_its_frame() {
         let run = r2s("afi @ sym._table_dispatch; afv @ sym._table_dispatch");
@@ -1191,7 +1314,7 @@ mod dispatch_table {
             "num-instrs: 38",
             "cyclomatic-complexity: 2",
             "is-lineal: true",
-            "locals: 2",
+            "locals: 5",
             "args: 2",
         ] {
             assert!(
@@ -1209,7 +1332,10 @@ mod dispatch_table {
             "arg int64_t arg1 @ x0\n\
              arg int64_t arg2 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
-             var uint8_t[24] stack_m64 @ entry.sp-0x40"
+             var uint64_t stack_m72 @ entry.sp-0x48\n\
+             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40\n\
+             var uint64_t stack_m32 @ entry.sp-0x20\n\
+             var uint64_t stack_m24 @ entry.sp-0x18"
         );
     }
 

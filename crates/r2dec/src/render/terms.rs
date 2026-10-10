@@ -21,8 +21,12 @@ pub(super) struct Spell<'a> {
     pub(super) bound: &'a dyn Fn(ValueId, &MachineType) -> Option<CExpr>,
     /// Where a frame object lies in the frame array.
     pub(super) object: &'a dyn Fn(ObjectId) -> Option<Placed>,
+    /// The object the program names at a literal address, read (`false`) or written as a class.
+    pub(super) global: &'a dyn Fn(u64, &MachineType, bool) -> Option<super::globals::Named>,
     /// Whether memory is little-endian, so a byte copy reads a word as the machine does.
     pub(super) little_endian: bool,
+    /// The slot the caller pushed the return address into, never written here, and the address width.
+    pub(super) return_address: Option<(ObjectId, u32)>,
 }
 
 /// A frame object's address in the frame array and its extent.
@@ -92,6 +96,58 @@ fn binary(op: BinaryOp, left: CExpr, right: CExpr) -> CExpr {
 pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
     let ty = integer(value.width_bits())?;
     Some(cast(ty, CExpr::UIntLit(value.bits())))
+}
+
+/// `expr` converted to `sink` as by assignment (return, assignment, prototyped argument): an
+/// integer literal under value-keeping unsigned casts becomes the plain literal.
+pub(super) fn at_sink(sink: &CType, expr: CExpr) -> CExpr {
+    let holds = |ty: &CType, value: u64| match ty {
+        CType::Int { bits, signedness } => {
+            let bits = bits - u32::from(*signedness == Signedness::Signed);
+            bits >= 64 || value < 1 << bits
+        }
+        _ => false,
+    };
+    let (mut casts, mut ids) = (Vec::new(), expr.observation_ids().into_owned());
+    let mut inner = expr.unobserved();
+    let value = loop {
+        match inner {
+            CExpr::Cast { ty, expr, .. } => {
+                casts.push(ty);
+                ids.extend(expr.observation_ids().iter().copied());
+                inner = expr.unobserved();
+            }
+            CExpr::UIntLit(value) => break *value,
+            CExpr::IntLit(value) if *value >= 0 => break value.unsigned_abs(),
+            _ => return expr,
+        }
+    };
+    let unsigned = |ty: &CType| {
+        matches!(
+            ty,
+            CType::Int {
+                signedness: Signedness::Unsigned,
+                ..
+            }
+        )
+    };
+    let kept = casts.iter().all(|ty| unsigned(ty) && holds(ty, value));
+    if !kept || !holds(sink, value) || value > i32::MAX as u64 {
+        return expr;
+    }
+    CExpr::observe_all(ids, CExpr::IntLit(value as i64))
+}
+
+/// The address the call into this function returns to, which its caller pushed (r2ssa's
+/// `return_address_stack_object`).
+fn return_address() -> CExpr {
+    CExpr::call(
+        CExpr::External {
+            name: "__builtin_return_address".to_string(),
+            kind: crate::symbol::ExternalKind::Intrinsic,
+        },
+        vec![CExpr::UIntLit(0)],
+    )
 }
 
 /// A constant read as `ty`: a float's bits reinterpreted, since C would convert an integer's value.
@@ -238,19 +294,55 @@ fn float_compare(op: MachineComparisonOp, bits: u32, left: CExpr, right: CExpr) 
     Some(cast(integer(bits)?, test))
 }
 
-/// A quotient or remainder at `bits` under `interpretation`.
+/// A quotient or remainder at `bits` under `interpretation`, each operand with its literal value.
 fn divide(
     (op, interpretation): (BinaryOp, MachineSignedness),
     bits: u32,
-    dividend: CExpr,
-    divisor: CExpr,
+    (dividend, dividend_literal): (CExpr, Option<u128>),
+    (divisor, divisor_literal): (CExpr, Option<u128>),
 ) -> Option<CExpr> {
+    let ty = integer(bits)?;
     let operand = match interpretation {
         MachineSignedness::Signed => signed(bits)?,
-        MachineSignedness::Unsigned => integer(bits)?,
+        MachineSignedness::Unsigned => ty.clone(),
     };
+    let (minimum, all) = (1u128 << (bits - 1), u128::MAX >> (128 - bits));
+    let guarded = interpretation == MachineSignedness::Signed
+        && dividend_literal.is_none_or(|value| value == minimum)
+        && divisor_literal.is_none_or(|value| value == all);
+    let tested = (
+        dividend.clone_without_render_observations(),
+        divisor.clone_without_render_observations(),
+    );
     let quotient = binary(op, cast(operand.clone(), dividend), cast(operand, divisor));
-    Some(cast(integer(bits)?, quotient))
+    let quotient = cast(ty.clone(), quotient);
+    if !guarded {
+        return Some(quotient);
+    }
+    // r2il::eval gives MIN / -1 no value and MIN % -1 the value 0; C leaves both undefined.
+    let (dividend, divisor) = tested;
+    let minimum = binary(
+        BinaryOp::Eq,
+        cast(ty.clone(), dividend),
+        wide_literal(bits, minimum)?,
+    );
+    let minus_one = binary(
+        BinaryOp::Eq,
+        cast(ty.clone(), divisor),
+        wide_literal(bits, all)?,
+    );
+    let (test, arm) = match op {
+        BinaryOp::Div => (
+            binary(BinaryOp::And, minimum, minus_one),
+            crate::prelude::residual(&ty, crate::prelude::ResidualCause::UndefinedQuotient)?,
+        ),
+        _ => (minus_one, wide_literal(bits, 0)?),
+    };
+    Some(CExpr::Ternary {
+        cond: Box::new(test),
+        then_expr: Box::new(arm),
+        else_expr: Box::new(quotient),
+    })
 }
 
 /// A comparison of two `bits`-wide operands under `interpretation`, as a byte holding 0 or 1.
@@ -487,15 +579,20 @@ pub(super) fn reclass(expr: CExpr, from: &MachineType, to: &MachineType) -> Opti
     }
 }
 
-/// A frame object's address plus a literal offset, as `(object, offset)`.
-fn frame_offset(arena: &TermArena, id: TermId) -> Option<(ObjectId, i64)> {
-    let signed = |id: TermId| match arena.term(id).kind {
+/// A literal read as signed at its own width: a frame offset or index below its base is negative.
+fn signed_literal(arena: &TermArena, id: TermId) -> Option<i64> {
+    match arena.term(id).kind {
         TermKind::Literal(value) => {
             let shift = 64u32.checked_sub(value.width_bits())?;
             Some(((value.bits() << shift) as i64) >> shift)
         }
         _ => None,
-    };
+    }
+}
+
+/// A frame object's address plus a literal offset, as `(object, offset)`.
+fn frame_offset(arena: &TermArena, id: TermId) -> Option<(ObjectId, i64)> {
+    let signed = |id: TermId| signed_literal(arena, id);
     let object = |id: TermId| match arena.term(id).kind {
         TermKind::ObjectAddress(object) => Some(object),
         _ => None,
@@ -562,10 +659,7 @@ impl Spell<'_> {
         bytes: u32,
         object: Option<ObjectId>,
     ) -> Option<CExpr> {
-        let literal_index = match self.arena.term(index).kind {
-            TermKind::Literal(value) => i64::try_from(value.bits()).ok(),
-            _ => None,
-        };
+        let literal_index = signed_literal(self.arena, index);
         if let (Some((named, offset)), Some(element)) =
             (frame_offset(self.arena, base), literal_index)
         {
@@ -587,7 +681,46 @@ impl Spell<'_> {
         let wide = integer(self.arena.term(base).ty.width_bits())?;
         let step = CExpr::UIntLit(u64::from(bytes));
         let offset = binary(BinaryOp::Mul, cast(wide.clone(), self.term(index)?), step);
-        Some(binary(BinaryOp::Add, cast(wide, self.term(base)?), offset))
+        let base = match self.named_base(base) {
+            Some(named) => named,
+            None => self.term(base)?,
+        };
+        Some(binary(BinaryOp::Add, cast(wide, base), offset))
+    }
+
+    /// A literal base at the exact address of an object the program names: that object's address,
+    /// so an index off it stays in the object wherever the program's does (ADR "D4's frame").
+    fn named_base(&self, id: TermId) -> Option<CExpr> {
+        let TermKind::Literal(value) = self.arena.term(id).kind else {
+            return None;
+        };
+        let byte = MachineType::Integer {
+            width_bits: 8,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        };
+        let named = (self.global)(value.bits(), &byte, false)?;
+        Some(cast(
+            integer(self.arena.term(id).ty.width_bits())?,
+            named.address,
+        ))
+    }
+
+    /// A computed address one of whose summands is a named object's exact address, spelled off it.
+    fn off_named(&self, id: TermId) -> Option<CExpr> {
+        let TermKind::Arithmetic {
+            op: MachineArithmeticOp::Add,
+            left,
+            right,
+        } = self.arena.term(id).kind
+        else {
+            return None;
+        };
+        let (base, rest) = match self.named_base(right) {
+            Some(base) => (base, left),
+            None => (self.named_base(left)?, right),
+        };
+        let ty = integer(self.arena.term(id).ty.width_bits())?;
+        Some(binary(BinaryOp::Add, cast(ty, self.term(rest)?), base))
     }
 
     /// The address `bytes` are read or written at. A frame address is spelled only inside the
@@ -599,10 +732,10 @@ impl Spell<'_> {
         object: Option<ObjectId>,
     ) -> Option<CExpr> {
         let Some((named, offset)) = frame_offset(self.arena, id) else {
-            return self
-                .computed_into_frame(id, object)
-                .then(|| self.term(id))
-                .flatten();
+            if !self.computed_into_frame(id, object) {
+                return None;
+            }
+            return self.off_named(id).or_else(|| self.term(id));
         };
         let placed = (self.object)(named)?;
         if object.is_some_and(|object| object != named) || !inside(offset, bytes, placed.extent) {
@@ -618,12 +751,37 @@ impl Spell<'_> {
 
     /// A read of `ty` at the integer `address`, by a byte copy so C reads it as the machine does.
     fn load(&self, ty: &MachineType, address: CExpr) -> Option<CExpr> {
+        let named = crate::literal_value(&address).and_then(|at| (self.global)(at, ty, false));
+        let address = match named {
+            Some(super::globals::Named {
+                object: Some((object, declared)),
+                ..
+            }) => return super::calls::from_declared(object, &declared, ty, u64::MAX),
+            Some(named) => named.address,
+            None => address,
+        };
         if !self.little_endian {
             return None;
         }
-        let residual = ResidualType::of(&c_type(ty)?)?;
         let pointer = cast(CType::Pointer(Box::new(CType::Void)), address);
-        Some(Helper::Load(residual).call(vec![pointer]))
+        match c_type(ty)? {
+            CType::BitVector(bits) => {
+                Some(crate::bitvector::BitVectorHelper::load(bits)?.call(vec![pointer]))
+            }
+            ty => Some(Helper::Load(ResidualType::of(&ty)?).call(vec![pointer])),
+        }
+    }
+
+    /// A read of `ty` from `object` at `address`; the caller's return-address slot reads as that
+    /// address.
+    fn load_of(&self, ty: &MachineType, object: ObjectId, address: TermId) -> Option<CExpr> {
+        let bits = ty.width_bits();
+        if self.return_address == Some((object, bits))
+            && frame_offset(self.arena, address) == Some((object, 0))
+        {
+            return Some(cast(integer(bits)?, return_address()));
+        }
+        self.load(ty, self.address(address, bits / 8, Some(object))?)
     }
 
     /// A machine expression a term reads at `ty`: the projection may hold the same bits at the
@@ -648,9 +806,7 @@ impl Spell<'_> {
             TermKind::ObjectAddress(object) => {
                 Some(cast(integer(bits)?, (self.object)(object)?.base))
             }
-            TermKind::Load { object, address } => {
-                self.load(&ty, self.address(address, bits / 8, Some(object))?)
-            }
+            TermKind::Load { object, address } => self.load_of(&ty, object, address),
             TermKind::Subscript { base, index } => {
                 self.load(&ty, self.subscript((base, index), bits / 8, None)?)
             }
@@ -717,6 +873,14 @@ impl Spell<'_> {
     }
 
     /// A machine expression as C: what an opaque term or a leaf stands for.
+    /// The bits a machine expression holds where it is a constant.
+    fn constant(&self, id: MachineExprId) -> Option<u128> {
+        match self.projection.expr(id)?.kind() {
+            MachineExprKind::Constant { value, .. } => Some(u128::from(value.bits())),
+            _ => None,
+        }
+    }
+
     pub(super) fn machine(&self, id: MachineExprId) -> Option<CExpr> {
         let node = self.projection.expr(id)?;
         let ty = *node.ty();
@@ -844,8 +1008,8 @@ impl Spell<'_> {
                 divide(
                     (op, *interpretation),
                     bits,
-                    child(*dividend)?,
-                    child(*divisor)?,
+                    (child(*dividend)?, self.constant(*dividend)),
+                    (child(*divisor)?, self.constant(*divisor)),
                 )
             }
             MachineExprKind::Negate { input, .. } => negate(bits, child(*input)?),
@@ -947,5 +1111,65 @@ mod tests {
         // Below the object, or past its end, is another object's memory or none at all.
         assert!(!inside(-8, 8, 16));
         assert!(!inside(12, 8, 16));
+    }
+
+    /// A literal divisor other than -1 rules out MIN / -1, so that quotient is the C division alone.
+    #[test]
+    fn a_signed_divide_by_a_literal_other_than_minus_one_is_unguarded() {
+        use crate::ast::{BinaryOp, CExpr};
+        let x = || CExpr::UIntLit(9);
+        let signed = (BinaryOp::Div, r2ssa::MachineSignedness::Signed);
+        let by_seven = super::divide(signed, 32, (x(), None), (x(), Some(7))).expect("spelled");
+        assert!(!matches!(by_seven, CExpr::Ternary { .. }), "{by_seven:?}");
+        let by_minus_one =
+            super::divide(signed, 32, (x(), None), (x(), Some(0xffff_ffff))).expect("spelled");
+        assert!(
+            matches!(by_minus_one, CExpr::Ternary { .. }),
+            "{by_minus_one:?}"
+        );
+    }
+
+    /// `object[-1]` with the index a 64-bit literal of all ones: element -1 lies below the object,
+    /// so the literal path refuses it and no computed address reaches the bytes before it.
+    #[test]
+    fn a_negative_literal_index_into_a_frame_object_is_refused() {
+        let mut block = r2il::R2ILBlock::new(0x1000, 4);
+        block.push(r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::unique(0x100, 8),
+            src: r2il::Varnode::constant(0, 8),
+        });
+        let artifact = r2ssa::SsaArtifact::from_blocks(&[block], None).expect("an artifact");
+        let projection = r2ssa::MachineProjection::from_artifact(&artifact).expect("a projection");
+        let mut arena = TermArena::new();
+        let base = arena.intern(ADDRESS, TermKind::ObjectAddress(ObjectId(3)));
+        let index = |arena: &mut TermArena, bits: u64| {
+            let bits = MachineBitVector::new(64, bits).expect("a 64-bit literal");
+            arena.intern(ADDRESS, TermKind::Literal(bits))
+        };
+        let (below, first) = (index(&mut arena, u64::MAX), index(&mut arena, 1));
+        let spell = super::Spell {
+            projection: &projection,
+            arena: &arena,
+            bound: &|_, _| None,
+            object: &|object| {
+                (object == ObjectId(3)).then_some(super::Placed {
+                    base: crate::ast::CExpr::UIntLit(0x40),
+                    extent: 16,
+                })
+            },
+            global: &|_, _, _| None,
+            little_endian: true,
+            return_address: None,
+        };
+        assert!(
+            spell
+                .subscript((base, first), 8, Some(ObjectId(3)))
+                .is_some()
+        );
+        assert!(
+            spell
+                .subscript((base, below), 8, Some(ObjectId(3)))
+                .is_none()
+        );
     }
 }

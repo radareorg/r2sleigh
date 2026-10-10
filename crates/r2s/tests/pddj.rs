@@ -185,13 +185,15 @@ fn check_lines(label: &str, answer: &Value, text: &[&str], listed: &BTreeSet<u64
 }
 
 /// The causes a residual site may state.
-const CAUSES: [&str; 7] = [
+const CAUSES: [&str; 9] = [
     "unproven-return",
     "held-from-entry",
     "unadmitted-argument",
     "never-assigned",
     "unrepresentable-float",
     "undefined-conversion",
+    "undefined-quotient",
+    "unspecified-above",
     "gap",
 ];
 
@@ -388,17 +390,24 @@ fn causes(answer: &Value) -> Vec<&str> {
 /// redefines it.
 fn unassigned_reads_at_o2(definition: &str, answer: &Value) -> Option<String> {
     let code = answer["code"].as_str().unwrap_or_default();
-    let causes = causes(answer);
+    // Each read is named as its register's version, in either pipeline's case.
+    let named = code.to_ascii_lowercase();
+    // Only the residuals that stand for a read with no assignment.
+    let unassigned = ["held-from-entry", "unadmitted-argument", "never-assigned"];
+    let causes = causes(answer)
+        .into_iter()
+        .filter(|cause| unassigned.contains(cause))
+        .collect::<Vec<_>>();
     let (expected, said) = if definition == "sext" {
         (
             vec!["held-from-entry"],
-            code.contains("1 held from entry, read as residuals (RAX_0)"),
+            named.contains("1 held from entry, read as residuals (rax_0)"),
         )
     } else {
         (
             // The stack-protector check is compiler-inserted, so the canary's reads are gone.
             vec!["never-assigned"],
-            code.contains("1 never assigned, read as residuals (XMM0_4)")
+            named.contains("1 never assigned, read as residuals (xmm0_4)")
                 && !code.contains("FS_OFFSET"),
         )
     };

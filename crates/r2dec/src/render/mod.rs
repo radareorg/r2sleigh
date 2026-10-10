@@ -4,7 +4,9 @@
 mod calls;
 mod control;
 mod frame;
+mod globals;
 mod input;
+mod tags;
 mod terms;
 mod values;
 
@@ -12,20 +14,28 @@ use std::collections::BTreeMap;
 
 pub use input::RenderInput;
 
-use crate::ast::{CExpr, CFunction, CStmt, CType};
+use crate::ast::{CExpr, CFunction, CStmt, CType, RenderObservationId};
 use crate::codegen::{CodeGenConfig, CodeGenerator, prepare_function_for_emission};
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
+use crate::structure::certify::StatementRole;
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
     function: crate::RenderedFunction,
     ledger: ObligationLedger,
+    /// A stop that came once the control was written and certified: the body is what was reached.
+    stopped: Option<DecompileExecutionStop>,
 }
 
 impl Rendered {
     pub fn into_parts(self) -> (crate::RenderedFunction, ObligationLedger) {
         (self.function, self.ledger)
+    }
+
+    /// The stop the rendering was asked for after its body was certified, if any.
+    pub const fn stopped(&self) -> Option<&DecompileExecutionStop> {
+        self.stopped.as_ref()
     }
 }
 
@@ -59,7 +69,8 @@ pub fn render(
     work.poll()?;
     let name = crate::rendered_name_of(input.name(), input.function().root());
     let mut c = CFunction::new(name, result_type(input));
-    let values = values::Values::new(input, std::rc::Rc::clone(&c.symbols));
+    let tags = tags::Tags::of(input);
+    let values = values::Values::new(input, &tags, std::rc::Rc::clone(&c.symbols));
     let written = control::write(input, values.as_ref(), &work);
     if let Some(stop) = written.stopped {
         return Err(stop.into());
@@ -81,14 +92,24 @@ pub fn render(
             copy
         })
     };
-    let body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
-    certify_control(input, &body, &blocks, &labels)?;
-    work.with_phase(DecompileWorkPhase::Rendering).poll()?;
+    let mut body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
+    let selections = select(&c, &mut body, &|id| {
+        blocks.get(id.index() as usize).copied()
+    });
+    let never_return = values
+        .as_ref()
+        .map(values::Values::never_returning)
+        .unwrap_or_default();
+    let role = |stmt: &CStmt| statement_role(stmt, &never_return, &selections);
+    certify_control(input, &body, &blocks, &labels, &role)?;
+    // What remains is linear emission of a certified body, so a stop here keeps what was reached.
+    let stopped = work.with_phase(DecompileWorkPhase::Rendering).poll().err();
     match &values {
         Some(values) => {
             c.params = values.params();
             c.locals = values.locals();
             c.externs = values.externs();
+            c.extern_objects = values.extern_objects();
         }
         None => c.params_known = false,
     }
@@ -96,7 +117,10 @@ pub fn render(
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
     };
+    drop_unmentioned_locals(&mut c);
+    crate::ast::respell_nonconforming_main(&mut c, input.function().entry);
     let ledger = close_ledger(input, values.as_ref());
+    let unassigned = values.as_ref().map(values::Values::unassigned);
     // The proof line every rendering opens with: what became of each obligation the source owes.
     crate::note_unproven_constructs(
         &mut c,
@@ -104,9 +128,9 @@ pub fn render(
         0,
         input.declared_call_prototypes(),
         0,
-        &[],
+        unassigned.as_deref().unwrap_or_default(),
     );
-    let mut ready = ready_with_carriers(c);
+    let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
     let markers = addresses.len();
     ready.seal_observation_markers(
@@ -121,12 +145,13 @@ pub fn render(
     Ok(Rendered {
         function: crate::RenderedFunction::new(emission, ready.into_function()),
         ledger,
+        stopped,
     })
 }
 
 /// `c` ready to emit: a wide carrier is a struct the unit defines, with the helpers that take it
-/// apart.
-fn ready_with_carriers(c: CFunction) -> crate::codegen::EmissionReadyFunction {
+/// apart, and each declared tag it spells is defined after them.
+fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::EmissionReadyFunction {
     let helpers = crate::bitvector::helpers_called(&c);
     let mut carriers = std::collections::BTreeSet::new();
     carriers.extend(helpers.iter().flat_map(|helper| helper.carriers()));
@@ -140,11 +165,12 @@ fn ready_with_carriers(c: CFunction) -> crate::codegen::EmissionReadyFunction {
                 _ => None,
             }),
     );
+    let declared = tags.definitions(&c);
     let mut ready = prepare_function_for_emission(c);
     ready.set_aggregate_definitions(
-        carriers
-            .into_iter()
+        (carriers.into_iter())
             .filter_map(crate::bitvector::carrier_definition)
+            .chain(declared)
             .collect(),
     );
     ready.set_bitvector_helpers(helpers);
@@ -157,6 +183,7 @@ fn certify_control(
     body: &CStmt,
     blocks: &[u64],
     labels: &BTreeMap<u64, String>,
+    role: &dyn Fn(&CStmt) -> StatementRole,
 ) -> Result<(), RenderStop> {
     let function = input.function();
     let label_block = labels
@@ -170,7 +197,7 @@ fn certify_control(
         function.root(),
         &|id| blocks.get(id.index() as usize).copied(),
         &|name| label_block.get(name).copied(),
-        &traps,
+        role,
     );
     if certificate.ok() {
         return Ok(());
@@ -179,6 +206,52 @@ fn certify_control(
         "control certificate: {certificate} {:?}",
         certificate.violations.first()
     )))
+}
+
+/// D1.1's selections, each arm converted to `x`'s type as its own assignment converted it.
+fn select(
+    c: &CFunction,
+    body: &mut CStmt,
+    block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
+) -> std::collections::BTreeSet<RenderObservationId> {
+    let convert = |target: crate::symbol::SymbolId, value: CExpr| {
+        let symbols = c.symbols.borrow();
+        let ty = symbols.ty(target);
+        match value.unobserved() {
+            CExpr::Var(symbol) if symbols.ty(*symbol) == ty => value,
+            _ => terms::at_sink(ty, CExpr::cast(ty.clone(), value)),
+        }
+    };
+    let mut selections = std::collections::BTreeSet::new();
+    crate::structure::ControlFlowStructurer::select(body, &convert, block_of, &mut selections);
+    selections
+}
+
+/// What the certificate reads a statement as: a selection the stage recorded, or one ending control.
+fn statement_role(
+    stmt: &CStmt,
+    never_return: &std::collections::BTreeSet<String>,
+    selections: &std::collections::BTreeSet<RenderObservationId>,
+) -> StatementRole {
+    match stmt
+        .observation_ids()
+        .iter()
+        .any(|id| selections.contains(id))
+    {
+        true => StatementRole::Selects,
+        false => (traps(stmt) || calls_never_returning(stmt, never_return)).into(),
+    }
+}
+
+/// A local nothing in the text names, every read of it a residual, declares nothing.
+fn drop_unmentioned_locals(c: &mut CFunction) {
+    let mut mentioned = std::collections::BTreeSet::new();
+    c.visit_body_exprs(&mut |node| {
+        if let CExpr::Var(symbol) = node {
+            mentioned.insert(*symbol);
+        }
+    });
+    c.locals.retain(|local| mentioned.contains(&local.name));
 }
 
 /// What became of each obligation: D2's account, or every one a gap where D2 did not run.
@@ -195,9 +268,16 @@ fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) ->
     ledger
 }
 
-/// Whether a statement ends control: a residual traps where it is evaluated.
+/// Whether a statement ends control: a residual or a marked gap traps where it is evaluated.
 fn traps(stmt: &CStmt) -> bool {
-    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
+    matches!(stmt, CStmt::Gap(marker) if marker.kind.ends_control())
+        || matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
+}
+
+/// Whether a statement is a call to a callee declared never to return, which ends control there.
+fn calls_never_returning(stmt: &CStmt, never_return: &std::collections::BTreeSet<String>) -> bool {
+    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
+        if matches!(&**func, CExpr::External { name, .. } if never_return.contains(name)))
 }
 
 /// The function's result type: what the analysis decided, else the machine word.

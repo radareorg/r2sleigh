@@ -19,18 +19,23 @@ fn rendered(program: Literal) -> Result<String, String> {
 fn a_go_function_takes_its_arguments_where_go_passes_them() {
     let adds = || Literal::of_code(ADDS, &[("main.adds", BASE, 5)]);
     let go = rendered(adds().in_go(Some((1, 18)), Some(&[]))).expect("Go 1.18 renders");
-    let signature = go.lines().next().unwrap_or_default();
-    assert!(
-        signature.contains("RAX_0") && signature.contains("RBX_0"),
-        "{go}"
-    );
+    // RAX and RBX are Go's first two integer slots: two parameters, both summed into the result.
+    let parameters = common::parameters(&go);
+    assert_eq!(parameters.len(), 2, "{go}");
+    let returned = go
+        .lines()
+        .find(|line| line.trim_start().starts_with("return"))
+        .unwrap_or_else(|| panic!("no return: {go}"));
+    for (_, name) in &parameters {
+        assert!(
+            returned.contains(name.as_str()),
+            "{name} is not summed: {go}"
+        );
+    }
     assert!(!go.contains("residual"), "{go}");
     // The same bytes as C: RAX and RBX are no System V argument, so they are read from entry.
     let c = rendered(adds()).expect("C renders");
-    assert!(
-        !c.lines().next().unwrap_or_default().contains("RBX_0"),
-        "{c}"
-    );
+    assert!(common::parameters(&c).is_empty(), "{c}");
     assert!(c.contains("residual"), "{c}");
 }
 

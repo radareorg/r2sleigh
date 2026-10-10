@@ -813,3 +813,102 @@ impl Source for Literal {
 pub fn opened() -> OpenProgram<Literal> {
     OpenProgram::of(Literal::new())
 }
+
+/// `text` split at its commas outside parentheses, each piece trimmed.
+fn top_level(text: &str) -> Vec<String> {
+    let mut pieces = vec![String::new()];
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                pieces.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        pieces.last_mut().expect("one piece").push(c);
+    }
+    pieces
+        .into_iter()
+        .map(|piece| piece.trim().to_owned())
+        .filter(|piece| !piece.is_empty() && piece != "void")
+        .collect()
+}
+
+/// The text between `open`'s parenthesis and the one that closes it.
+fn parenthesized(text: &str, open: usize) -> Option<&str> {
+    let mut depth = 0usize;
+    for (at, c) in text[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 1 => return Some(&text[open + 1..open + at]),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The rendered function's parameters, as `(type, name)`, read off its signature line.
+///
+/// Each pipeline spells a parameter its own way, so a test compares the
+/// parameters' count, types and uses, never one pipeline's spelling of a name.
+pub fn parameters(c: &str) -> Vec<(String, String)> {
+    let signature = c.lines().next().unwrap_or_default();
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    top_level(parenthesized(signature, open).unwrap_or_default())
+        .into_iter()
+        .map(|parameter| {
+            let split = parameter.rfind([' ', '*']).map_or(0, |at| at + 1);
+            let (ty, name) = parameter.split_at(split);
+            (ty.trim().to_owned(), name.to_owned())
+        })
+        .collect()
+}
+
+/// The arguments of the first call to `callee` in the body (past the signature
+/// and any declaration of it), split at their top-level commas.
+pub fn call_arguments(c: &str, callee: &str) -> Option<Vec<String>> {
+    let call = format!("{callee}(");
+    c.lines().skip(1).find_map(|line| {
+        let at = line.find(&call)?;
+        let before = line[..at].trim_end();
+        // `T callee(T, T);` declares it: a type, never `return` or an assignment, before the name.
+        let declares = !before.is_empty()
+            && !before.contains('=')
+            && !before.ends_with("return")
+            && before.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '*');
+        if declares {
+            return None;
+        }
+        let open = at + callee.len();
+        parenthesized(line, open).map(top_level)
+    })
+}
+
+/// `expression` without its leading casts and enclosing parentheses: what it
+/// converts, whichever pipeline spelled the conversion.
+pub fn bare(expression: &str) -> &str {
+    let mut expression = expression.trim();
+    while expression.starts_with('(') {
+        let Some(inner) = parenthesized(expression, 0) else {
+            break;
+        };
+        let rest = expression[inner.len() + 2..].trim_start();
+        let cast = inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ' || c == '*');
+        if rest.is_empty() {
+            expression = inner.trim();
+        } else if cast {
+            expression = rest;
+        } else {
+            break;
+        }
+    }
+    expression
+}

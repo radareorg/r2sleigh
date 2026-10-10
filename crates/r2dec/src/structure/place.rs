@@ -497,7 +497,8 @@ impl ControlFlowStructurer<'_, '_> {
             // would go and the certificate says the block's edges are unowned.
             // Running both arms in a row is not what the machine does, so the
             // text traps before them.
-            let mut stmts = vec![self.unresolved_control("UnresolvedBranchCondition", addr)];
+            let mut stmts =
+                vec![self.unresolved_control(crate::ast::GapKind::UnresolvedBranchCondition, addr)];
             stmts.extend(else_body);
             stmts.extend(then_body);
             return Ok(stmts);
@@ -542,7 +543,8 @@ impl ControlFlowStructurer<'_, '_> {
         }
         order.sort_by_key(|target| placement.rpo.get(target).copied());
         let Some(selector) = selector else {
-            let mut stmts = vec![self.unresolved_control("UnresolvedSwitchSelector", addr)];
+            let mut stmts =
+                vec![self.unresolved_control(crate::ast::GapKind::UnresolvedSwitchSelector, addr)];
             for target in order {
                 stmts.extend(self.edge(placement, addr, target)?);
             }
@@ -657,11 +659,11 @@ impl ControlFlowStructurer<'_, '_> {
     /// block's control obligations -- the test and the transfer the `if` or
     /// `switch` would have discharged -- so it claims them, and the ledger
     /// counts them as residual rather than finding them nowhere.
-    fn unresolved_control(&self, kind: &str, addr: u64) -> CStmt {
+    fn unresolved_control(&self, kind: crate::ast::GapKind, addr: u64) -> CStmt {
         let obligations = self.exact_control_obligations(std::iter::once(addr));
         self.fold_ctx.residual_control(
             crate::ast::GapMarker {
-                kind: kind.to_owned(),
+                kind,
                 origin: "structure".to_owned(),
                 block_addr: addr,
                 op_idx: 0,

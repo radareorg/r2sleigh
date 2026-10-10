@@ -573,17 +573,78 @@ impl SemanticObligationInventory {
     }
 }
 
+/// What obligation seeding reads beside the graph and boundaries: the private stack objects, the
+/// certified round trips, and the blocks whose conditional branch sends both arms to one block.
+pub(crate) struct SeedingFacts<'a> {
+    pub(crate) private_stack_objects: &'a BTreeSet<crate::ObjectId>,
+    pub(crate) memory_round_trips: &'a BTreeMap<
+        crate::semantic::StructuredAccessId,
+        crate::semantic::MemoryRoundTripCertificate,
+    >,
+    pub(crate) meeting_arms: &'a BTreeSet<u64>,
+}
+
+impl<'a> SeedingFacts<'a> {
+    pub(crate) const fn new(
+        private_stack_objects: &'a BTreeSet<crate::ObjectId>,
+        memory_round_trips: &'a BTreeMap<
+            crate::semantic::StructuredAccessId,
+            crate::semantic::MemoryRoundTripCertificate,
+        >,
+        meeting_arms: &'a BTreeSet<u64>,
+    ) -> Self {
+        Self {
+            private_stack_objects,
+            memory_round_trips,
+            meeting_arms,
+        }
+    }
+
+    /// Seed each conditional branch ending a block whose arms meet as the direct transfer it is,
+    /// with no inputs: its condition is unread. The branches seeded.
+    fn seed_direct_branches(
+        &self,
+        graph: &SsaGraph,
+        required: &mut ObligationSeeds,
+        explicit_inputs: &mut BTreeMap<
+            (InstId, SemanticObligationKind, SemanticObligationComponent),
+            Vec<ValueId>,
+        >,
+    ) -> crate::dense::IdSet<InstId> {
+        let direct = self.direct_branches(graph);
+        for inst in direct.iter() {
+            let identity = (
+                inst,
+                SemanticObligationKind::ControlTransfer,
+                SemanticObligationComponent::Whole,
+            );
+            seed_instruction(identity.0, identity.1, identity.2, required);
+            explicit_inputs.insert(identity, Vec::new());
+        }
+        direct
+    }
+
+    fn direct_branches(&self, graph: &SsaGraph) -> crate::dense::IdSet<InstId> {
+        (self.meeting_arms.iter())
+            .filter_map(|addr| graph.block(*graph.block_by_addr.get(addr)?)?.insts.last())
+            .filter(|inst| {
+                matches!(
+                    graph.inst(**inst).map(|inst| &inst.payload),
+                    Some(InstPayload::Op(SSAOp::CBranch { .. }))
+                )
+            })
+            .copied()
+            .collect()
+    }
+}
+
 impl SemanticObligationInventory {
     pub(crate) fn collect(
         graph: &SsaGraph,
         structured: &StructuredDataflowFacts,
         boundaries: &SourceBoundaryFacts,
         machine_context: Option<&crate::SourceMachineContext>,
-        private_stack_objects: &BTreeSet<crate::ObjectId>,
-        memory_round_trips: &BTreeMap<
-            crate::semantic::StructuredAccessId,
-            crate::semantic::MemoryRoundTripCertificate,
-        >,
+        seeding: &SeedingFacts<'_>,
     ) -> Self {
         let (canonical_ids, mut construction_failures) = collect_canonical_instruction_ids(graph);
         let mut required = ObligationSeeds::default();
@@ -599,7 +660,8 @@ impl SemanticObligationInventory {
         let mut duplicate_seeds =
             BTreeSet::<(InstId, SemanticObligationKind, SemanticObligationComponent)>::new();
 
-        for inst in &graph.insts {
+        let direct = seeding.seed_direct_branches(graph, &mut required, &mut explicit_inputs);
+        for inst in graph.insts.iter().filter(|inst| !direct.contains(inst.id)) {
             match &inst.payload {
                 InstPayload::Op(op) => {
                     seed_direct_obligations(
@@ -662,7 +724,7 @@ impl SemanticObligationInventory {
             // and dropping it would lose what the variable holds.
             let private_read = !access.is_write
                 && access.provenance_complete
-                && private_stack_objects.contains(&access.object);
+                && seeding.private_stack_objects.contains(&access.object);
             // A round trip leaves the object holding what it held, so neither
             // the write nor the reads it answers for owes anything of its own.
             // Seeding a dependency annotation instead would be wrong twice: it
@@ -670,7 +732,7 @@ impl SemanticObligationInventory {
             // its instruction live whether or not anything reads the value. If
             // something does read the value, that walk reaches the load and
             // annotates it then, which is the whole of what it owes.
-            let round_trip = memory_round_trips.values().any(|certificate| {
+            let round_trip = seeding.memory_round_trips.values().any(|certificate| {
                 certificate.write == access.id
                     || certificate.read == access.id
                     || certificate.redundant_reads.contains(&access.id)
@@ -872,7 +934,7 @@ impl SemanticObligationInventory {
             if boundary.complete {
                 continue;
             }
-            for read in call_boundary_reads(graph, boundary.at) {
+            for read in graph.call_boundary_reads(boundary.at) {
                 let Some(inst) = graph.inst(read) else {
                     continue;
                 };
@@ -890,7 +952,7 @@ impl SemanticObligationInventory {
         // First close dependencies from observable effects and exact ABI boundaries. A loop
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
-        propagate_live_dependencies(graph, &mut required);
+        propagate_live_dependencies(graph, &direct, &mut required);
         let live_before_loop_annotation = required.keys().collect::<crate::dense::IdSet<_>>();
         for fact in structured.loops.values() {
             for carrier in &fact.carriers {
@@ -944,7 +1006,7 @@ impl SemanticObligationInventory {
                 }
             }
         }
-        propagate_live_dependencies(graph, &mut required);
+        propagate_live_dependencies(graph, &direct, &mut required);
         for (inst, _, _) in duplicate_seeds {
             let block_addr = graph
                 .inst(inst)
@@ -1514,29 +1576,6 @@ fn taint_incomplete_boundary_inputs(
 /// The mirror of the `CallDefine` run that follows a call: construction emits
 /// them as one uninterrupted run, so the run ends at the first operation that
 /// is not one.
-fn call_boundary_reads(graph: &SsaGraph, call: InstId) -> Vec<InstId> {
-    let Some(call_inst) = graph.inst(call) else {
-        return Vec::new();
-    };
-    let Some(block) = graph.block(call_inst.block) else {
-        return Vec::new();
-    };
-    block
-        .insts
-        .iter()
-        .copied()
-        .take_while(|inst| *inst != call)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take_while(|inst| {
-            graph
-                .inst(*inst)
-                .is_some_and(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CallUse { .. })))
-        })
-        .collect()
-}
-
 fn block_can_reenter(graph: &SsaGraph, start: crate::graph::BlockId) -> bool {
     let Some(block) = graph.block(start) else {
         return false;
@@ -1816,14 +1855,18 @@ fn seed_value_definition(
     }
 }
 
-fn propagate_live_dependencies(graph: &SsaGraph, required: &mut ObligationSeeds) {
+fn propagate_live_dependencies(
+    graph: &SsaGraph,
+    direct: &crate::dense::IdSet<InstId>,
+    required: &mut ObligationSeeds,
+) {
     let mut ready = required.keys().collect::<VecDeque<_>>();
     let mut visited = crate::dense::IdSet::default();
     while let Some(inst_id) = ready.pop_front() {
         if !visited.insert(inst_id) {
             continue;
         }
-        let Some(inst) = graph.inst(inst_id) else {
+        let Some(inst) = graph.inst(inst_id).filter(|_| !direct.contains(inst_id)) else {
             continue;
         };
         for input in &inst.inputs {
@@ -1915,6 +1958,51 @@ mod tests {
     };
     use proptest::prelude::*;
     use r2il::{ArchSpec, MemoryOrdering, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+
+    /// `jle next` where `next` is the fallthrough: a direct transfer owing no predicate, so the
+    /// comparison feeding it is not live.
+    #[test]
+    fn a_branch_whose_arms_meet_owes_its_transfer_and_not_its_predicate() {
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        let test = Varnode::unique(0x10, 1);
+        entry.push(R2ILOp::IntSLessEqual {
+            dst: test.clone(),
+            a: Varnode::register(0, 4),
+            b: Varnode::constant(5, 4),
+        });
+        entry.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x1004, 8),
+            cond: test,
+        });
+        let mut next = R2ILBlock::new(0x1004, 4);
+        next.push(R2ILOp::Return {
+            target: Varnode::register(8, 8),
+        });
+        let artifact = SsaArtifact::raw(&[entry, next], None).expect("SSA artifact");
+        let graph = artifact.graph();
+        let inventory = &artifact.facts().obligations;
+        let kinds = |ordinal| {
+            let inst = graph
+                .inst_spelled_at(0x1000, ordinal)
+                .expect("an operation");
+            (inventory.obligations_for_inst(inst))
+                .map(|o| o.id.kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(1), [SemanticObligationKind::ControlTransfer]);
+        let producer = kinds(0);
+        assert!(
+            !producer.contains(&SemanticObligationKind::LiveValueProducer),
+            "{producer:?}"
+        );
+        // The transfer reads nothing: no root reaches the condition (native.rs checks DeadPhis).
+        let branch = graph.inst_spelled_at(0x1000, 1).expect("the branch");
+        let transfer = inventory
+            .obligations_for_inst(branch)
+            .next()
+            .expect("its transfer");
+        assert!(transfer.inputs.is_empty(), "{transfer:?}");
+    }
 
     #[test]
     fn only_independent_semantic_obligations_are_positive_observation_roots() {
@@ -2919,8 +3007,7 @@ mod tests {
             artifact.structured(),
             &boundaries,
             None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
+            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
         );
 
         assert!(!inventory.is_complete());
@@ -3028,8 +3115,7 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
+            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
         );
         assert!(!inventory.is_complete());
         assert!(inventory.construction_failures.iter().any(|failure| {
@@ -3067,8 +3153,7 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
+            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
         );
         assert_eq!(inventory.source_instruction_count(), 0);
         assert!(!inventory.unstructured_cycle_blocks().is_empty());
@@ -3152,8 +3237,7 @@ mod tests {
             &structured,
             &artifact.facts().boundaries,
             None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
+            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
         );
         assert!(
             inventory

@@ -12,10 +12,12 @@ use r2ssa::{
     SemanticObligationKind, SsaArtifact, SsaGraph, StructuredAccessId, ValueId,
 };
 
+mod transfer;
+
 use super::RenderInput;
 use super::calls::{self, CallPlan};
 use super::terms::{self, Spell};
-use crate::ast::{CExpr, CExternDecl, CLocal, CParam, CStmt, CType, GapMarker};
+use crate::ast::{CExpr, CExternDecl, CLocal, CParam, CStmt, CType, GapKind, GapMarker};
 use crate::prelude::{Helper, ResidualType};
 use crate::symbol::{SymbolId, SymbolRole, SymbolTable};
 
@@ -49,6 +51,10 @@ pub(super) struct Values<'a> {
     restored: RefCell<Vec<bool>>,
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
+    /// The values read as residuals because C has no value for them, which the proof line names.
+    unassigned: RefCell<Vec<crate::UnassignedRead>>,
+    /// What the text being spelled reads and absorbs, kept only once a statement or test holding it is.
+    pending: RefCell<Attempt>,
     /// The switch dispatch operations r2ssa's certificates own.
     dispatch: r2ssa::dense::IdSet<InstId>,
     elisions: crate::certified::Elisions,
@@ -58,13 +64,26 @@ pub(super) struct Values<'a> {
     results: r2ssa::dense::IdSet<ValueId>,
     /// One declaration per callee, which every call to it here must agree with.
     externs: RefCell<BTreeMap<String, CExternDecl>>,
+    /// The text the capture proves at each address, which a passed constant address is.
+    strings: &'a BTreeMap<u64, String>,
+    /// The objects the program names that an access here reaches, each declared once.
+    globals: super::globals::Globals<'a>,
     little_endian: bool,
     ptr_bits: u32,
+    /// The slot the caller pushed the return address into, where nothing here writes it.
+    return_address: Option<ObjectId>,
     /// The function itself as a call to its own entry names it: its name, parameters and result.
     own: Own,
 }
 
 /// What a recursive call needs of the function it is in.
+/// One statement attempt: the residual reads and absorbed producers its text holds.
+#[derive(Default)]
+struct Attempt {
+    reads: Vec<crate::UnassignedRead>,
+    marks: Vec<InstId>,
+}
+
 struct Own {
     entry: u64,
     name: String,
@@ -353,6 +372,11 @@ impl Demand<'_> {
             }
             SSAOp::CBranch { cond, .. } => self.operand(*cond, inst.id),
             SSAOp::Switch { selector } => self.operand(*selector, inst.id),
+            SSAOp::BlockTransfer(transfer) => {
+                for value in [transfer.destination, transfer.source, transfer.count] {
+                    self.operand(value, inst.id);
+                }
+            }
             // A tail transfer reads its arguments, and its target where it goes through one.
             SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
                 let plan = planned.get(inst.id).expect("planned above");
@@ -405,6 +429,8 @@ impl Demand<'_> {
             for input in inputs {
                 self.operand(input, def);
             }
+        } else if transfer::reads_answer(self.graph, value) {
+            // The walk assigns it from its own variables; its term reads nothing by name.
         } else if let Some(canonical) = self.roots.value(value) {
             self.discharge(value);
             self.read(canonical.canonical);
@@ -446,6 +472,9 @@ fn canonical_roots(
 ) -> Option<CanonicalRoots> {
     let graph = artifact.graph();
     let policy = |query: &ExpansionQuery<'_>| {
+        if transfer::reads_answer(graph, query.value) {
+            return false;
+        }
         if r2rewrite::term_is_duplicable(
             query.projection,
             query.arena,
@@ -471,6 +500,7 @@ fn canonical_roots(
 /// Each call's plan, by its instruction, and the values those calls assign their results to.
 fn plan_calls(
     input: &RenderInput<'_>,
+    tags: &super::tags::Tags,
 ) -> (
     r2ssa::dense::IdMap<InstId, CallPlan>,
     r2ssa::dense::IdSet<ValueId>,
@@ -496,10 +526,19 @@ fn plan_calls(
         };
         if matches!(plan.callee, calls::Callee::Named { .. }) {
             let signature = input.declared_callee_signature(inst.id);
-            plan.declared =
-                signature.and_then(|signature| calls::Prototype::of(signature, plan.fixed));
+            let callee = input.callee_type_graph(inst.id);
+            let defines = |tag: &str, is_union| tags.agrees(tag, is_union, callee);
+            plan.declared = signature
+                .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &defines));
             if let (Some(signature), None) = (signature, &plan.declared) {
                 r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
+            }
+            // No declaration: the callee body's carriers, which r2ssa matched to this call.
+            if signature.is_none() {
+                let (fixed, returns, bits) = (plan.fixed, plan.result.is_some(), input.ptr_bits());
+                let carriers = input.callee_carrier_signature(inst.id);
+                plan.declared =
+                    carriers.and_then(|c| calls::Prototype::of_widths(c, fixed, returns, bits));
             }
         }
         if let Some((result, _)) = plan.result {
@@ -627,6 +666,10 @@ impl<'a> Readers<'a> {
         value: ValueId,
         reader: InstId,
     ) -> Option<TermId> {
+        // A part of a block operation's answer is the walk's to assign: it is read by name.
+        if transfer::reads_answer(self.graph, value) {
+            return None;
+        }
         let canonical = roots.value(value)?;
         let term = canonical.canonical;
         // A leaf of the value itself is a value no producer computes: it is read by name.
@@ -660,6 +703,23 @@ fn leaf_value(projection: &MachineProjection, expr: MachineExprId) -> Option<Val
     }
 }
 
+/// The object the caller pushed the return address into, where the body reads it and never
+/// writes it: what it reads there is that address. One pass over the accesses.
+fn return_address_slot(artifact: &SsaArtifact) -> Option<ObjectId> {
+    let accesses = &artifact.structured().memory_accesses;
+    let mut slot = None;
+    for access in accesses.values() {
+        if !artifact.return_address_stack_object(access.object) {
+            continue;
+        }
+        if access.is_write {
+            return None;
+        }
+        slot = Some(access.object);
+    }
+    slot
+}
+
 /// The access a live store writes, by its write obligation.
 fn store_access(inventory: &SemanticObligationInventory, inst: InstId) -> StructuredAccessId {
     let ordinal = inventory
@@ -678,14 +738,18 @@ fn store_access(inventory: &SemanticObligationInventory, inst: InstId) -> Struct
 
 impl<'a> Values<'a> {
     /// Canonicalise the function once under D2's expansion policy, then find what is bound.
-    pub(super) fn new(input: &RenderInput<'a>, symbols: Rc<RefCell<SymbolTable>>) -> Option<Self> {
+    pub(super) fn new(
+        input: &RenderInput<'a>,
+        tags: &super::tags::Tags,
+        symbols: Rc<RefCell<SymbolTable>>,
+    ) -> Option<Self> {
         let artifact: &'a SsaArtifact = input.artifact();
         let graph = input.graph();
         let inventory = input.obligations();
         let projection = MachineProjection::from_artifact(artifact).ok()?;
         let readers = Readers::new(graph, inventory);
         let roots = canonical_roots(artifact, &projection, &readers)?;
-        let (planned, results) = plan_calls(input);
+        let (planned, results) = plan_calls(input, tags);
         let elisions = crate::certified::Elisions::of(artifact);
         let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
         for switch in artifact.certificates().switches.values() {
@@ -720,12 +784,17 @@ impl<'a> Values<'a> {
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
+            unassigned: RefCell::new(Vec::new()),
+            pending: RefCell::new(Attempt::default()),
             dispatch,
             elisions,
             calls: planned,
             results,
             externs: RefCell::new(BTreeMap::new()),
+            strings: input.string_literals(),
+            globals: super::globals::Globals::of(input),
             ptr_bits: input.ptr_bits(),
+            return_address: return_address_slot(artifact),
             own: Own::of(input),
             little_endian: matches!(
                 artifact
@@ -741,7 +810,7 @@ impl<'a> Values<'a> {
         values.own.params = parameters
             .as_ref()
             .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
-        values.declare(input, parameters);
+        values.declare(input, tags, parameters);
         Some(values)
     }
 
@@ -750,6 +819,7 @@ impl<'a> Values<'a> {
     fn declare(
         &mut self,
         input: &RenderInput<'_>,
+        tags: &super::tags::Tags,
         parameters: Option<Vec<(u32, ValueId, MachineType)>>,
     ) {
         for (index, value, ty) in parameters.into_iter().flatten() {
@@ -759,7 +829,9 @@ impl<'a> Values<'a> {
                 .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)));
             let declared = (input.declared_parameter(index as usize, ty.width_bits()))
                 .or(analysed)
-                .and_then(|declared| calls::spellable(&declared))
+                .and_then(|declared| {
+                    calls::spellable(&declared, &|tag, union| tags.defines(tag, union))
+                })
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
             let c = match declared {
                 Some(declared) => {
@@ -768,8 +840,11 @@ impl<'a> Values<'a> {
                 }
                 None => class,
             };
+            let declared_name = (input.declared_parameter_name(index as usize))
+                .map(crate::ast::c_identifier)
+                .filter(|name| spells_an_identifier(name));
             let name = self.symbols.borrow_mut().declare(
-                format!("arg{index}"),
+                declared_name.unwrap_or_else(|| format!("arg{index}")),
                 c.clone(),
                 SymbolRole::Parameter(index),
             );
@@ -860,20 +935,19 @@ impl<'a> Values<'a> {
     fn spelling<R>(&self, read: impl FnOnce(&Spell<'_>) -> R) -> R {
         let bound = |value: ValueId, ty: &MachineType| match self.names.get(value.0 as usize)? {
             Some((name, held)) => terms::reclass(self.read_name(value, *name, held)?, held, ty),
-            // What a register held at entry that no parameter admits: C cannot read it.
-            None if self.graph.def_inst(value).is_none() => crate::prelude::residual(
-                &terms::c_type(ty)?,
-                crate::prelude::ResidualCause::HeldFromEntry,
-            ),
+            None if self.graph.def_inst(value).is_none() => self.entry_read(value, ty),
             None => None,
         };
         let object = |object: ObjectId| self.object(object);
+        let global = |at: u64, class: &MachineType, store: bool| self.global(at, class, store);
         read(&Spell {
             projection: &self.projection,
             arena: self.roots.arena(),
             bound: &bound,
             object: &object,
+            global: &global,
             little_endian: self.little_endian,
+            return_address: self.return_address.map(|object| (object, self.ptr_bits)),
         })
     }
 
@@ -881,7 +955,13 @@ impl<'a> Values<'a> {
         self.spelling(|spell| spell.term(term))
     }
 
+    /// Record `inst` discharged by the text being spelled, once that text is kept.
     fn mark(&self, inst: InstId) {
+        self.pending.borrow_mut().marks.push(inst);
+    }
+
+    /// Record `inst` discharged by text already written.
+    fn commit(&self, inst: InstId) {
         if let Some(slot) = self.rendered.borrow_mut().get_mut(inst.0 as usize) {
             *slot = true;
         }
@@ -909,10 +989,13 @@ impl<'a> Values<'a> {
                 self.mark_discharged(value);
                 Some(spelled)
             }
-            None => {
-                let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
-                self.read_name(value, *name, held)
-            }
+            None => match self.names.get(value.0 as usize)?.as_ref() {
+                Some((name, held)) => self.read_name(value, *name, held),
+                None if self.graph.def_inst(value).is_none() => {
+                    self.entry_read(value, &self.value_type(value)?)
+                }
+                None => None,
+            },
         }
     }
 
@@ -926,16 +1009,112 @@ impl<'a> Values<'a> {
             .copied()
             .unwrap_or(false)
         {
-            return crate::prelude::residual(
+            let read = crate::prelude::residual(
                 &terms::c_type(held)?,
                 crate::prelude::ResidualCause::NeverAssigned,
             );
+            self.unassigned_read(value, crate::UnassignedCause::Unassigned, held);
+            return read;
         }
         let var = CExpr::var(name);
         match self.declared.get(value.0 as usize) {
             Some(true) => Some(CExpr::cast(terms::c_type(held)?, var)),
             _ => Some(var),
         }
+    }
+
+    /// The variable `expr` reads as its word, where the variable is declared `to` already and the
+    /// word is as wide as `to`, so the reading changes no bit.
+    fn declared_variable(&self, expr: &CExpr, to: &CType) -> Option<CExpr> {
+        let CExpr::Cast {
+            ty, expr: inner, ..
+        } = expr
+        else {
+            return None;
+        };
+        let CExpr::Var(id) = &**inner else {
+            return None;
+        };
+        let bits = |ty: &CType| match ty.unaliased() {
+            CType::Int { bits, .. } => Some(*bits),
+            CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
+                Some(self.ptr_bits)
+            }
+            _ => None,
+        };
+        let symbols = self.symbols.try_borrow().ok()?;
+        (symbols.get(*id).ty == *to && bits(ty).is_some() && bits(ty) == bits(to))
+            .then(|| (**inner).clone())
+    }
+
+    /// An entry register no parameter admits, which C cannot read: an unadmitted argument slot
+    /// (the convention's, as legacy's `unspecified_reads` asks), else a value held from entry.
+    fn entry_read(&self, value: ValueId, ty: &MachineType) -> Option<CExpr> {
+        let storage = (self.graph.formal_projection_storage(value)).or(self
+            .graph
+            .values
+            .get(value.0 as usize)?
+            .canonical_storage);
+        let slots = self.artifact.machine_context().convention_slots();
+        let argument = storage.zip(slots).is_some_and(|(storage, slots)| {
+            (slots.argument_slots().iter())
+                .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+        });
+        let (cause, residual) = match argument {
+            true => (
+                crate::UnassignedCause::UnadmittedArgument,
+                crate::prelude::ResidualCause::UnadmittedArgument,
+            ),
+            false => (
+                crate::UnassignedCause::Held,
+                crate::prelude::ResidualCause::HeldFromEntry,
+            ),
+        };
+        let read = crate::prelude::residual(&terms::c_type(ty)?, residual)?;
+        self.unassigned_read(value, cause, ty);
+        Some(read)
+    }
+
+    /// Record a read the proof line names once its text is kept; the name is declared, as the value
+    /// it names, so the line keeps it, and no statement spells it.
+    fn unassigned_read(&self, value: ValueId, cause: crate::UnassignedCause, ty: &MachineType) {
+        let name = self.graph.var(value).display_name();
+        if let (Ok(mut symbols), Some(c)) = (self.symbols.try_borrow_mut(), terms::c_type(ty))
+            && symbols.by_name(&name).is_none()
+        {
+            symbols.declare(name.clone(), c, SymbolRole::Carrier);
+        }
+        (self.pending.borrow_mut().reads).push(crate::UnassignedRead { cause, name });
+    }
+
+    /// `value` as `reader` reads it, with what its spelling reads and absorbs, kept apart.
+    fn operand_alone(&self, value: ValueId, reader: InstId) -> Option<(CExpr, Attempt)> {
+        self.attempt();
+        let spelled = self.operand(value, reader);
+        let attempt = std::mem::take(&mut *self.pending.borrow_mut());
+        Some((spelled?, attempt))
+    }
+
+    /// Start spelling a statement or a test: what an abandoned attempt read or absorbed is not.
+    fn attempt(&self) {
+        *self.pending.borrow_mut() = Attempt::default();
+    }
+
+    /// Keep what the text just written reads and absorbs.
+    fn keep(&self) {
+        let Attempt { reads, marks } = std::mem::take(&mut *self.pending.borrow_mut());
+        self.unassigned.borrow_mut().extend(reads);
+        for inst in marks {
+            self.commit(inst);
+        }
+    }
+
+    /// The values read as residuals for want of a value, each once, by cause and name.
+    pub(super) fn unassigned(&self) -> Vec<crate::UnassignedRead> {
+        let mut reads = self.unassigned.borrow().clone();
+        reads.sort();
+        reads.dedup();
+        reads
     }
 
     /// What a block's live instructions write, in order, each with the instruction it stands at; a
@@ -953,6 +1132,7 @@ impl<'a> Values<'a> {
             let InstPayload::Op(op) = &inst.payload else {
                 continue;
             };
+            self.attempt();
             let state = self
                 .inventory
                 .instruction_for_inst(inst.id)
@@ -970,7 +1150,10 @@ impl<'a> Values<'a> {
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
                 }
-                Some(SemanticInstructionState::UnsupportedUnknown) => Err(Gap::Unsupported),
+                Some(SemanticInstructionState::UnsupportedUnknown) => Err(match op {
+                    SSAOp::CallOther { userop, .. } => Gap::UserOperation(*userop),
+                    _ => Gap::Unsupported,
+                }),
                 _ => Ok(None),
             };
             let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
@@ -988,10 +1171,14 @@ impl<'a> Values<'a> {
 
     /// Extend the gap the block's text ends with, or open one at this instruction.
     fn gap(&self, out: &mut Vec<(u64, CStmt)>, (addr, at): (u64, u64), inst: InstId, gap: Gap) {
+        if let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
+            *slot = true;
+        }
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
+        let kind = self.gap_kind(gap);
         if let Some((_, CStmt::Gap(marker))) = out.last_mut()
             && marker.op_idx + marker.ops == op_idx
-            && marker.kind == gap.kind()
+            && marker.kind == kind
         {
             marker.ops += 1;
             return;
@@ -999,13 +1186,28 @@ impl<'a> Values<'a> {
         out.push((
             at,
             CStmt::Gap(GapMarker {
-                kind: gap.kind().to_owned(),
+                kind,
                 origin: "render::values".to_owned(),
                 block_addr: addr,
                 op_idx,
                 ops: 1,
             }),
         ));
+    }
+
+    /// The marker's kind: a user operation by the name the specification gives it, which is what
+    /// the instruction does; with no name, only that the inventory could not account for it.
+    fn gap_kind(&self, gap: Gap) -> GapKind {
+        match gap {
+            Gap::UserOperation(userop) => self
+                .artifact
+                .user_operations()
+                .get(userop as usize)
+                .map_or(GapKind::UnsupportedInstruction, |name| {
+                    GapKind::UserOperation(name.clone())
+                }),
+            gap => gap.kind(),
+        }
     }
 
     /// The statement one live instruction owes: `Ok(None)` where it owes none here, `Err` where
@@ -1027,6 +1229,16 @@ impl<'a> Values<'a> {
             }
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 self.call(inst).map(Some).ok_or(Gap::Call)
+            }
+            SSAOp::BlockTransfer(transfer) => self
+                .block_transfer(inst, transfer)
+                .map(Some)
+                .ok_or(Gap::Effect),
+            // The block operation's statement assigns the part of its answer this reads.
+            SSAOp::Subpiece { .. }
+                if output.is_some_and(|o| transfer::reads_answer(self.graph, o)) =>
+            {
+                Ok(None)
             }
             // The described call's statement assigns its result.
             SSAOp::CallDefine { .. } if output.is_some_and(|o| self.results.contains(o)) => {
@@ -1054,11 +1266,7 @@ impl<'a> Values<'a> {
                 }
                 let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
                 self.mark_discharged(output);
-                Ok(Some(CStmt::Expr(CExpr::binary(
-                    crate::ast::BinaryOp::Assign,
-                    CExpr::var(name),
-                    value,
-                ))))
+                Ok(Some(self.binding(output, name, canonical.canonical, value)))
             }
             _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(None),
             _ => Err(Gap::Effect),
@@ -1083,6 +1291,27 @@ impl<'a> Values<'a> {
         }
     }
 
+    /// The statement binding `output` to `value`, its term's spelling: a read nothing uses still
+    /// reads, so the statement performs it and discards the value.
+    fn binding(&self, output: ValueId, name: SymbolId, term: TermId, value: CExpr) -> CStmt {
+        if self.readers.of(output).is_empty()
+            && effectful(&self.projection, self.roots.arena(), term)
+        {
+            return CStmt::Expr(CExpr::cast(CType::Void, value));
+        }
+        self.assign_value(output, name, value)
+    }
+
+    /// `name = value`, `value` spelled as C converts it to the type `output` is held at.
+    fn assign_value(&self, output: ValueId, name: SymbolId, value: CExpr) -> CStmt {
+        let held = self.names[output.0 as usize].as_ref().map(|(_, held)| held);
+        let value = match held.and_then(terms::c_type) {
+            Some(ty) => terms::at_sink(&ty, value),
+            None => value,
+        };
+        assign(name, value)
+    }
+
     fn is_named(&self, value: ValueId) -> bool {
         self.names
             .get(value.0 as usize)
@@ -1104,8 +1333,52 @@ impl<'a> Values<'a> {
         )
     }
 
+    /// The text `value` points at where `reader` passes it as a constant address in `class`, and
+    /// the capture proves text there.
+    fn passed_text(&self, value: ValueId, class: &MachineType, reader: InstId) -> Option<&'a str> {
+        if !matches!(class, MachineType::Integer { width_bits, .. } if *width_bits == self.ptr_bits)
+        {
+            return None;
+        }
+        let term = self
+            .readers
+            .absorbed((&self.projection, &self.roots), value, reader)?;
+        let node = self.roots.arena().term(term);
+        let address = match node.kind {
+            _ if node.ty.width_bits() != self.ptr_bits => return None,
+            TermKind::Literal(bits) => bits.bits(),
+            TermKind::Leaf(r2rewrite::LeafRead { expr, .. }) | TermKind::Opaque(expr) => {
+                match self.projection.expr(expr)?.kind() {
+                    MachineExprKind::Constant { value, .. } => value.bits(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        self.strings.get(&address).map(String::as_str)
+    }
+
     fn calls_itself(&self, plan: &CallPlan) -> bool {
         matches!(&plan.callee, calls::Callee::Named { address, .. } if *address == Some(self.own.entry))
+    }
+
+    /// The literals among `arguments`: a constant a fixed, prototyped parameter holds passes as
+    /// itself (a variadic one is not converted), and proven text as its string.
+    fn literals_passed(
+        &self,
+        arguments: &mut [CExpr],
+        types: &[CType],
+        texts: Vec<Option<&str>>,
+        fixed: usize,
+    ) {
+        for (argument, ty) in arguments.iter_mut().zip(types).take(fixed) {
+            *argument = terms::at_sink(ty, std::mem::replace(argument, CExpr::IntLit(0)));
+        }
+        for ((argument, ty), text) in arguments.iter_mut().zip(types).zip(texts) {
+            if let Some(text) = text.filter(|_| crate::string_literal_serves(ty, self.ptr_bits)) {
+                *argument = calls::text_as(text, ty);
+            }
+        }
     }
 
     /// The call's expression, returning `ret`: a named callee is declared once, and one reached
@@ -1113,7 +1386,9 @@ impl<'a> Values<'a> {
     fn call_expr(&self, inst: InstId, plan: &CallPlan, ret: Option<&MachineType>) -> Option<CExpr> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
+        let mut texts = Vec::with_capacity(plan.arguments.len());
         for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
+            texts.push(self.passed_text(*argument, class, inst));
             let held = needed(self.value_type(*argument), inst, "argument type")?;
             // A float the caller stored as bits would travel in a float register once C declares it.
             if *stacked && matches!(held, MachineType::Float { .. }) {
@@ -1130,12 +1405,16 @@ impl<'a> Values<'a> {
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
             for ((argument, ty), to) in arguments.iter_mut().zip(&mut types).zip(&declared.params) {
-                *argument =
-                    calls::to_declared(std::mem::replace(argument, CExpr::IntLit(0)), ty, to);
+                let taken = std::mem::replace(argument, CExpr::IntLit(0));
+                *argument = match self.declared_variable(&taken, to) {
+                    Some(variable) => variable,
+                    None => calls::to_declared(taken, ty, to),
+                };
                 *ty = to.clone();
             }
             ret_type = declared.ret.clone();
         }
+        self.literals_passed(&mut arguments, &types, texts, plan.fixed);
         let (name, kind, address) = match &plan.callee {
             calls::Callee::Named {
                 name,
@@ -1156,6 +1435,10 @@ impl<'a> Values<'a> {
                 ));
             }
         };
+        // A parameter or local of the callee's name would shadow the function it calls.
+        if (self.symbols.try_borrow()).map_or(true, |symbols| symbols.by_name(name).is_some()) {
+            return needed(None, inst, "callee name a declared variable holds");
+        }
         types.truncate(plan.fixed);
         let declaration = CExternDecl {
             name: name.clone(),
@@ -1190,6 +1473,7 @@ impl<'a> Values<'a> {
         ty: &CType,
         decided: Option<&CType>,
     ) -> Option<Vec<CStmt>> {
+        self.attempt();
         let (inst, _) = self.terminator(addr)?;
         let plan = self.calls.get(inst)?;
         let tail = plan.tail.as_ref()?;
@@ -1219,8 +1503,27 @@ impl<'a> Values<'a> {
                     },
                 };
                 let call = self.call_expr(inst, plan, Some(class))?;
-                let spelled = fit(calls::read_result(plan, call, class)?, class, &own)?;
-                vec![CStmt::Return(Some(CExpr::cast(ty.clone(), spelled)))]
+                // The function's caller reads the bytes r2ssa says its declared result occupies.
+                let demanded = (self.artifact.machine_context().function_interface())
+                    .and_then(r2ssa::returned_bytes)
+                    .and_then(|result| 1u64.checked_shl(result.size))
+                    .map_or(u64::MAX, |n| n - 1);
+                let spelled = fit(
+                    calls::read_result(plan, call, class, demanded)?,
+                    class,
+                    &own,
+                )?;
+                // A call is returned as it is where it is declared the function's own type, or an
+                // integer where the function returns one: `return` converts it as the cast would.
+                let declared = match &plan.declared {
+                    Some(declared) => declared.ret.clone(),
+                    None => terms::c_type(class)?,
+                };
+                let returned = match returned_call(spelled, ty) {
+                    Ok(call) if declared == *ty || integer(&declared) && integer(ty) => call,
+                    Ok(call) | Err(call) => CExpr::cast(ty.clone(), call),
+                };
+                vec![CStmt::Return(Some(returned))]
             }
             _ => return None,
         };
@@ -1237,9 +1540,19 @@ impl<'a> Values<'a> {
             return Some(CStmt::Expr(call));
         };
         let Some((name, held)) = self.names.get(result.0 as usize).and_then(Option::as_ref) else {
+            // No rendered text reads the result, so the call written for its effect discards it.
+            if let Some(def) = self.graph.def_inst(*result) {
+                self.mark(def);
+            }
             return Some(CStmt::Expr(call));
         };
-        let value = fit(calls::read_result(plan, call, class)?, class, held)?;
+        let demanded = (self.artifact.facts().demanded.as_ref())
+            .map_or(u64::MAX, |demanded| demanded.bytes(*result));
+        let value = fit(
+            calls::read_result(plan, call, class, demanded)?,
+            class,
+            held,
+        )?;
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }
@@ -1278,8 +1591,56 @@ impl<'a> Values<'a> {
         Some(assign(*name, value))
     }
 
+    /// The callees a written call declares never to return.
+    pub(super) fn never_returning(&self) -> std::collections::BTreeSet<String> {
+        (self.externs.borrow().values())
+            .filter(|declaration| declaration.noreturn)
+            .map(|declaration| declaration.name.clone())
+            .collect()
+    }
+
+    /// Whether the block at `addr` ends in a written call its callee is declared never to return from.
+    pub(super) fn ends_never_returning(&self, addr: u64) -> bool {
+        let Some(block) = (self.graph.block_id_for_addr(addr)).and_then(|id| self.graph.block(id))
+        else {
+            return false;
+        };
+        let last_call = block.insts.iter().rev().copied().find(|id| {
+            matches!(
+                self.graph.inst(*id).map(|at| &at.payload),
+                Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
+            )
+        });
+        // Only a named callee's declaration says so to C: a call through a pointer, or the
+        // function's own entry, declares nothing, so the trap still ends its block.
+        last_call.is_some_and(|inst| {
+            self.calls.get(inst).is_some_and(|plan| {
+                plan.noreturn
+                    && matches!(plan.callee, calls::Callee::Named { .. })
+                    && !self.calls_itself(plan)
+            }) && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
+        })
+    }
+
     pub(super) fn externs(&self) -> Vec<CExternDecl> {
         self.externs.borrow().values().cloned().collect()
+    }
+
+    pub(super) fn extern_objects(&self) -> Vec<crate::ast::CExternObject> {
+        self.globals.objects()
+    }
+
+    /// The object the program names at `at`, unless its identifier names something else here.
+    fn global(&self, at: u64, class: &MachineType, store: bool) -> Option<super::globals::Named> {
+        self.globals.at(at, class, store, |name| {
+            name == self.own.name
+                || self
+                    .externs
+                    .try_borrow()
+                    .map_or(true, |externs| externs.contains_key(name))
+                || (self.symbols.try_borrow())
+                    .map_or(true, |symbols| symbols.by_name(name).is_some())
+        })
     }
 
     fn store(&self, inst: InstId, address: ValueId, value: ValueId) -> Option<CStmt> {
@@ -1308,13 +1669,31 @@ impl<'a> Values<'a> {
             None => (self.operand(address, inst)?, self.value_type(value)?),
         };
         let ty = terms::c_type(&cell)?;
-        let residual = ResidualType::of(&ty)?;
         let written = terms::reclass(self.operand(value, inst)?, &self.value_type(value)?, &cell)?;
-        let written = CExpr::cast(ty, written);
+        // C casts only to a scalar (C17 6.5.4): a carrier is already its own type.
+        let written = match ty {
+            CType::BitVector(_) => written,
+            _ => CExpr::cast(ty.clone(), written),
+        };
+        let named = crate::literal_value(&address).and_then(|at| self.global(at, &cell, true));
+        let address = match named {
+            Some(super::globals::Named {
+                object: Some((object, declared)),
+                ..
+            }) => {
+                let written = calls::to_declared(written, &ty, &declared);
+                return Some(CStmt::Expr(CExpr::assign(object, written)));
+            }
+            Some(named) => named.address,
+            None => address,
+        };
         let pointer = CExpr::cast(CType::Pointer(Box::new(CType::Void)), address);
-        Some(CStmt::Expr(
-            Helper::Store(residual).call(vec![pointer, written]),
-        ))
+        Some(CStmt::Expr(match ty {
+            CType::BitVector(bits) => {
+                crate::bitvector::BitVectorHelper::store(bits)?.call(vec![pointer, written])
+            }
+            ty => Helper::Store(ResidualType::of(&ty)?).call(vec![pointer, written]),
+        }))
     }
 
     /// The test a conditional branch ending `addr` takes its true edge on.
@@ -1323,6 +1702,7 @@ impl<'a> Values<'a> {
         let SSAOp::CBranch { cond, .. } = op else {
             return None;
         };
+        self.attempt();
         self.operand(*cond, inst)
     }
 
@@ -1335,11 +1715,28 @@ impl<'a> Values<'a> {
             SSAOp::BranchInd { .. } => self.artifact.certificates().switches.get(&addr)?.selector?,
             _ => return None,
         };
+        self.attempt();
         self.operand(selector, inst)
+    }
+
+    /// Record the jump ending `addr` written: the certified control states its one edge.
+    pub(super) fn transferred(&self, addr: u64) {
+        match self.terminator(addr) {
+            Some((inst, SSAOp::Branch { .. })) => self.commit(inst),
+            // A conditional branch r2ssa owes no predicate goes to one block, as a branch does.
+            Some((inst, SSAOp::CBranch { .. }))
+                if !(self.inventory.obligations_for_inst(inst))
+                    .any(|o| o.id.kind == SemanticObligationKind::ControlPredicate) =>
+            {
+                self.commit(inst);
+            }
+            _ => {}
+        }
     }
 
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.
     pub(super) fn returned(&self, addr: u64, ty: Option<&CType>) -> Option<Option<CExpr>> {
+        self.attempt();
         let (inst, op) = self.terminator(addr)?;
         if !matches!(op, SSAOp::Return { .. }) {
             return None;
@@ -1381,7 +1778,7 @@ impl<'a> Values<'a> {
             },
         };
         let spelled = fit(self.operand(*value, inst)?, &held, &class)?;
-        Some(Some(CExpr::cast(ty, spelled)))
+        Some(Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), spelled))))
     }
 
     fn terminator(&self, addr: u64) -> Option<(InstId, &'a SSAOp<ValueId>)> {
@@ -1393,12 +1790,30 @@ impl<'a> Values<'a> {
         }
     }
 
+    /// The address of the instruction that ends the block at `addr`.
+    pub(super) fn terminator_address(&self, addr: u64) -> Option<u64> {
+        let (inst, _) = self.terminator(addr)?;
+        self.graph.instruction_for_inst(inst)
+    }
+
     /// Whether `stmt`, written for `inst`, evaluates a residual, which makes `inst`'s obligations residual.
     pub(super) fn residual_in(&self, inst: InstId, stmt: &CStmt) {
+        self.keep();
         let mut held = false;
         stmt.visit_exprs(&mut |expr| held |= crate::prelude::holds_residual(expr));
         if held && let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
             *slot = true;
+        }
+    }
+
+    /// Record that the text stands a residual or trap for the block's terminator, where no
+    /// statement already discharged that instruction.
+    pub(super) fn residual_terminator(&self, addr: u64) {
+        let Some((inst, _)) = self.terminator(addr) else {
+            return;
+        };
+        if !self.rendered.borrow()[inst.0 as usize] {
+            self.residual.borrow_mut()[inst.0 as usize] = true;
         }
     }
 
@@ -1432,6 +1847,8 @@ impl<'a> Values<'a> {
             work.push(value);
         }
         let mut seen = std::collections::BTreeSet::new();
+        // A use r2ssa states no observation depends on (a flag `add sp` computes) reads nothing.
+        let unobserved = self.artifact.unobserved_merges().unobserved_uses();
         while let Some(value) = work.pop() {
             let Some(def) = self.graph.def_inst(value) else {
                 continue;
@@ -1441,7 +1858,8 @@ impl<'a> Values<'a> {
             }
             let inputs = self.graph.inst(def).map_or(&[][..], |i| &i.inputs[..]);
             work.extend(inputs.iter().copied().filter(|input| {
-                (self.graph.use_sites(*input).iter()).all(|site| seen.contains(&site.inst))
+                (self.graph.use_sites(*input).iter())
+                    .all(|site| seen.contains(&site.inst) || unobserved.contains(site))
             }));
         }
         seen.into_iter().collect()
@@ -1477,7 +1895,8 @@ impl<'a> Values<'a> {
                 Some(term) => term_reads(&self.projection, self.roots.arena(), term),
                 None => vec![input],
             };
-            copies.push((inst.id, output, self.operand(input, inst.id), reads));
+            let source = self.operand_alone(input, inst.id);
+            copies.push((inst.id, output, source, reads));
         }
         let mut out = Vec::new();
         let writes = copies
@@ -1492,22 +1911,20 @@ impl<'a> Values<'a> {
         });
         let mut staged = Vec::new();
         for (inst, output, source, _) in copies {
-            let (Some(source), Some((name, ty))) = (source, self.names[output.0 as usize].as_ref())
+            let (Some((source, attempt)), Some((name, ty))) =
+                (source, self.names[output.0 as usize].as_ref())
             else {
-                out.push(CStmt::Gap(GapMarker {
-                    kind: "ValuesNotRendered".to_owned(),
-                    origin: "render::values".to_owned(),
-                    block_addr: to,
-                    op_idx: 0,
-                    ops: 0,
-                }));
+                // The edge's gap stands for this merge and the value it could not carry.
+                self.residual.borrow_mut()[inst.0 as usize] = true;
+                out.push(unrendered_copy(to));
                 continue;
             };
+            *self.pending.borrow_mut() = attempt;
             self.mark(inst);
             self.residual_in(inst, &CStmt::Expr(source.clone()));
             self.assigns(output);
             match clobbers {
-                false => out.push(assign(*name, source)),
+                false => out.push(self.assign_value(output, *name, source)),
                 true => {
                     let c = terms::c_type(ty).expect("a named value has a C type");
                     // The name is read before the table is borrowed to declare the temporary.
@@ -1531,11 +1948,15 @@ impl<'a> Values<'a> {
         out
     }
 
-    /// What became of each obligation: rendered where the text discharged its instruction.
+    /// What became of each obligation: rendered where the text discharged its instruction, residual
+    /// where a site in the text stands for it; one with neither stays unaccounted in the proof line.
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
-        let residual = self.residual.borrow();
+        let covered = self.covered_by_residuals();
+        let certificates = self.artifact.certificates();
+        let frame_setup = &certificates.stack_geometry.frame_setup;
+        let unobserved_reads = &certificates.unobserved_private_reads;
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation.source.graph_inst().and_then(|inst| {
@@ -1549,15 +1970,86 @@ impl<'a> Values<'a> {
                     Outcome::Elided(ElisionReason::NoNativeSemantics)
                 }
                 (_, Some(reason)) => Outcome::Elided(reason),
-                _ if index.is_some_and(|i| rendered[i] && residual[i]) => Outcome::Gapped,
-                _ if index.is_some_and(|i| rendered[i]) => Outcome::Rendered,
+                _ if index.is_some_and(|i| covered[i]) => Outcome::Gapped,
+                _ if index.is_some_and(|i| rendered[i]) => {
+                    match self.artifact.obligation_extent_assumption(obligation.id) {
+                        Some(_) => Outcome::Assumed,
+                        None => Outcome::Rendered,
+                    }
+                }
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)
                 }
-                _ => Outcome::Gapped,
+                // Stack-pointer arithmetic r2ssa states only locates the frame the array names.
+                (
+                    SemanticObligationKind::LiveValueProducer
+                    | SemanticObligationKind::LoopCarriedState
+                    | SemanticObligationKind::LiveStateTransition,
+                    _,
+                ) if obligation
+                    .source
+                    .graph_inst()
+                    .is_some_and(|i| frame_setup.contains(i)) =>
+                {
+                    Outcome::Elided(ElisionReason::StackFrame)
+                }
+                // Deleted when r2ssa seeds unobserved obligations (ROADMAP D, the close() elision).
+                (SemanticObligationKind::LiveValueProducer, _)
+                    if matches!(
+                        obligation.id.component,
+                        SemanticObligationComponent::MemoryAccess(_)
+                    ) && obligation
+                        .source
+                        .graph_inst()
+                        .is_some_and(|i| unobserved_reads.contains(i)) =>
+                {
+                    let reason = crate::ledger::UnsitedReason::PendingObligationSeeding;
+                    let _ = ledger.record_unsited(obligation.id, reason);
+                    continue;
+                }
+                _ => continue,
             };
             let _ = ledger.record(obligation.id, outcome);
         }
+    }
+
+    /// By instruction index: a residual site's own instruction, the carriers a residual call reads,
+    /// and each unwritten producer (or merge) of a value one of them reads or owes. Each is pushed
+    /// once: O(V + E).
+    fn covered_by_residuals(&self) -> Vec<bool> {
+        let rendered = self.rendered.borrow();
+        let mut covered = self.residual.borrow().clone();
+        let mut work = (0..covered.len())
+            .filter(|i| covered[*i])
+            .collect::<Vec<_>>();
+        while let Some(index) = work.pop() {
+            let Some(inst) = self.graph.inst(InstId(index as u32)) else {
+                continue;
+            };
+            let owed = self.inventory.obligations_for_inst(inst.id);
+            let inputs = inst.inputs.iter().chain(owed.flat_map(|o| o.inputs.iter()));
+            let unwritten = |producer: &InstId| {
+                !rendered[producer.0 as usize]
+                    && certified_elision(self.artifact, (&self.elisions, &self.dispatch), *producer)
+                        .is_none()
+            };
+            // A call the text could not write also stands for the carriers it reads.
+            let reads = match inst.payload {
+                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {
+                    self.graph.call_boundary_reads(inst.id)
+                }
+                _ => Vec::new(),
+            };
+            let producers = (inputs.filter_map(|v| self.graph.def_inst(*v)))
+                .chain(reads)
+                .filter(unwritten)
+                .map(|p| p.0 as usize)
+                .collect::<Vec<_>>();
+            work.extend(
+                (producers.into_iter()).filter(|at| !std::mem::replace(&mut covered[*at], true)),
+            );
+        }
+        covered
     }
 }
 
@@ -1574,6 +2066,8 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
         r2types::CTypeLike::Int { .. }
         | r2types::CTypeLike::Bool
         | r2types::CTypeLike::Pointer(_)
+        | r2types::CTypeLike::Function { .. }
+        | r2types::CTypeLike::UnprototypedFunction(_)
         | r2types::CTypeLike::Enum(_)
             if matches!(width_bits, 8 | 16 | 32 | 64) =>
         {
@@ -1632,6 +2126,21 @@ pub(super) fn agreed(
     }
 }
 
+/// Whether `name` is an identifier C leaves to the program: no keyword, nothing reserved to the
+/// implementation (C11 7.1.3), and none of the helpers' own prefix.
+fn spells_an_identifier(name: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+        "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+        "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+        "union", "unsigned", "void", "volatile", "while", "bool", "true", "false",
+    ];
+    let reserved = name.starts_with("__")
+        || (name.starts_with('_') && name[1..].starts_with(|c: char| c.is_ascii_uppercase()))
+        || name.starts_with("r2sleigh_");
+    !name.starts_with(|c: char| c.is_ascii_digit()) && !reserved && !KEYWORDS.contains(&name)
+}
+
 /// The parameters in ABI order at the class C passes them in (a declared float a float, else an
 /// integer of its width); `None` where any is unknown (doc/adr-decompiler-rewrite.md).
 fn parameters(
@@ -1669,6 +2178,9 @@ fn parameters(
 enum Gap {
     /// The inventory could not account for the instruction.
     Unsupported,
+    /// A user operation the specification names and no model gives an effect: r2ssa accounts for
+    /// it as an unknown effect, which no C statement states.
+    UserOperation(u32),
     /// A call, until its callsite facts are rendered.
     Call,
     /// An effect with no C statement here: a fence, an atomic, a block transfer, a user operation.
@@ -1683,15 +2195,15 @@ enum Gap {
 }
 
 impl Gap {
-    const fn kind(self) -> &'static str {
+    const fn kind(self) -> GapKind {
         match self {
-            Self::Unsupported => "UnsupportedInstruction",
-            Self::Call => "CallNotRendered",
-            Self::Effect => "EffectNotRendered",
-            Self::Store => "StoreNotSpelled",
-            Self::Term => "TermNotSpelled",
-            Self::Type => "ValueHasNoCType",
-            Self::Unknown => "ValueNotComputed",
+            Self::Unsupported | Self::UserOperation(_) => GapKind::UnsupportedInstruction,
+            Self::Call => GapKind::CallNotRendered,
+            Self::Effect => GapKind::EffectNotRendered,
+            Self::Store => GapKind::StoreNotSpelled,
+            Self::Term => GapKind::TermNotSpelled,
+            Self::Type => GapKind::ValueHasNoCType,
+            Self::Unknown => GapKind::ValueNotComputed,
         }
     }
 }
@@ -1755,6 +2267,32 @@ fn reads_itself(
 }
 
 /// The values a return hands back, by its return-value obligations.
+/// The call `spelled` is, through a cast to the function's own type `ty` at most; else `spelled`.
+fn returned_call(spelled: CExpr, ty: &CType) -> Result<CExpr, CExpr> {
+    match spelled {
+        call @ CExpr::Call { .. } => Ok(call),
+        CExpr::Cast { ty: to, expr, .. } if to == *ty && matches!(*expr, CExpr::Call { .. }) => {
+            Ok(*expr)
+        }
+        other => Err(other),
+    }
+}
+
+fn integer(ty: &CType) -> bool {
+    matches!(ty.unaliased(), CType::Int { .. })
+}
+
+/// A merge copy into `to` the values could not spell: a gap on the edge.
+fn unrendered_copy(to: u64) -> CStmt {
+    CStmt::Gap(GapMarker {
+        kind: GapKind::ValuesNotRendered,
+        origin: "render::values".to_owned(),
+        block_addr: to,
+        op_idx: 0,
+        ops: 0,
+    })
+}
+
 fn returned_values(inventory: &SemanticObligationInventory, inst: InstId) -> Vec<ValueId> {
     inventory
         .obligations_for_inst(inst)
@@ -1785,4 +2323,18 @@ fn writes_value(op: &SSAOp<ValueId>) -> bool {
             | SSAOp::CpuId { .. }
             | SSAOp::New { .. }
     ) && op.dst().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    /// A declared name another language allows can still be a C keyword or reserved spelling.
+    #[test]
+    fn a_declared_name_c_reserves_is_no_identifier() {
+        for name in ["n", "values", "_count", "x2"] {
+            assert!(super::spells_an_identifier(name), "{name}");
+        }
+        for name in ["double", "char", "__x", "_Value", "r2sleigh_load_u8", "2x"] {
+            assert!(!super::spells_an_identifier(name), "{name}");
+        }
+    }
 }

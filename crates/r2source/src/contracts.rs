@@ -3645,9 +3645,12 @@ pub struct SourceConventionSlots {
     abi_class: SourceAbiClass,
     argument_slots: Box<[CanonicalStorageId]>,
     result_slot: Option<CanonicalStorageId>,
-    /// The floating-point argument registers, in order, counted apart from
-    /// the integer ones.
+    /// The floating-point argument registers, in order: counted apart from the integer
+    /// ones, or with them where `shared_positions` says so.
     float_argument_slots: Box<[CanonicalStorageId]>,
+    /// The nth argument takes the nth slot of its class whatever class came before, as
+    /// Microsoft x64's positional pairs have it.
+    shared_positions: bool,
     /// Where a floating-point result is left.
     float_result_slot: Option<CanonicalStorageId>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
@@ -3750,6 +3753,17 @@ impl SourceConventionSlots {
         self.float_result_slot
     }
 
+    #[must_use]
+    pub const fn with_shared_positions(mut self, shared: bool) -> Self {
+        self.shared_positions = shared;
+        self
+    }
+
+    /// Whether integer and float arguments count one position sequence together.
+    pub const fn shared_positions(&self) -> bool {
+        self.shared_positions
+    }
+
     /// Whether the variadic tail starts on the stack whatever registers are
     /// free, as Apple's arm64 ABI has it.
     pub const fn variadic_tail_on_stack(&self) -> bool {
@@ -3801,6 +3815,7 @@ impl SourceConventionSlots {
             argument_slots: argument_slots.into_boxed_slice(),
             result_slot,
             float_argument_slots: Box::default(),
+            shared_positions: false,
             float_result_slot: None,
             stack_arguments: None,
             variadic_tail_on_stack: false,

@@ -420,43 +420,6 @@ pub(crate) fn certified_call_return_address_values(
         .collect()
 }
 
-/// Accesses to a frame slot this function writes and never reads.
-///
-/// A store into memory is an effect, and the ledger holds the rendering to it,
-/// which is why a dead frame slot cannot simply be dropped: the obligation
-/// would go unanswered. But observable means observable from outside, and a
-/// `CalleeStackAllocationCertificate` is the proof that the object lies wholly
-/// inside storage this function owns at every access. Where every one of those
-/// accesses is a write, nothing here or anywhere else can read what was stored,
-/// and the store has no meaning the C has to carry.
-///
-/// This is what left `stack_m48` and its neighbours declared, assigned and
-/// unused in `murmur3_32` and `xxhash32` at -O0: the slots an argument is
-/// spilled into and then read back out of through the object rather than the
-/// slot.
-pub(crate) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
-    let certificates = source.certificates();
-    let mut accesses = BTreeSet::new();
-    for slot in certificates.stack_slots.values() {
-        let Some(allocation) = slot.callee_allocation.as_ref() else {
-            continue;
-        };
-        let Some(owned) = allocation
-            .accesses
-            .iter()
-            .map(|access| certificates.memory_accesses.get(access))
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
-        if owned.is_empty() || owned.iter().any(|access| !access.is_write) {
-            continue;
-        }
-        accesses.extend(owned.iter().map(|access| access.access.inst));
-    }
-    accesses
-}
-
 /// Direct-control target values whose complete use domain is CFG topology.
 pub(crate) fn certified_direct_control_target_values(
     source: &r2ssa::SsaArtifact,
@@ -634,11 +597,8 @@ pub(crate) fn certified_elided_read_instructions(
                 })
                 .map(|access| access.inst),
         )
-        // A store into a frame slot the function owns and never reads. The
-        // effect ledger already answers for the store itself with
-        // `DeadFrameSlotStore`, and the statement is not emitted; a value
-        // folded into it goes with it.
-        .chain(certified_dead_frame_slot_accesses(source))
+        // A dead frame store renders no statement; a value folded into it goes with it.
+        .chain(certificates.dead_frame_stores.iter())
         .collect()
 }
 
@@ -652,7 +612,6 @@ pub(crate) fn certified_stack_geometry_values(
 pub(crate) struct Elisions {
     return_control: BTreeSet<InstId>,
     direct_call_targets: BTreeSet<InstId>,
-    dead_frame_slots: BTreeSet<InstId>,
     round_trips: r2ssa::dense::IdSet<InstId>,
 }
 
@@ -669,7 +628,6 @@ impl Elisions {
         Self {
             return_control: certified_return_control_insts(prepared),
             direct_call_targets: certified_direct_call_target_insts(prepared),
-            dead_frame_slots: certified_dead_frame_slot_accesses(prepared),
             round_trips,
         }
     }
@@ -698,7 +656,9 @@ impl Elisions {
             || self.return_control.contains(&inst)
         {
             Some(ElisionReason::ReturnControl)
-        } else if self.dead_frame_slots.contains(&inst) {
+        } else if certificates.dead_frame_stores.contains(inst)
+            || certificates.dead_frame_store_values.contains(inst)
+        {
             // A store into a slot this function owns and nothing reads.
             Some(ElisionReason::DeadFrameSlotStore)
         } else if self.round_trips.contains(inst) {

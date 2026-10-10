@@ -1731,7 +1731,7 @@ fn unproven_constructs_are_counted_through_nested_bodies() {
     let mut func = CFunction::new("partly_proven".to_string(), CType::Unknown);
     func.body = vec![
         CStmt::Gap(crate::ast::GapMarker {
-            kind: "UnresolvedBranchCondition".to_owned(),
+            kind: crate::ast::GapKind::UnresolvedBranchCondition,
             origin: "structure".to_owned(),
             block_addr: 0x1000,
             op_idx: 0,
@@ -1984,7 +1984,7 @@ fn audited(decompiler: &Decompiler, input: &DecompilerInput) -> DecompileBinding
 }
 
 /// The staged writer polls once per block it writes, between the two phase polls, and every poll
-/// is a point the run stops at.
+/// is a point the run stops at or, once the body is certified, reports a stop at.
 #[test]
 fn the_staged_writer_polls_once_per_block_it_writes() {
     struct CountingControl {
@@ -2022,11 +2022,15 @@ fn the_staged_writer_polls_once_per_block_it_writes() {
     let unbounded = control(None);
     crate::render::render(&staged, &unbounded).expect("the staged pipeline renders");
     assert_eq!(unbounded.polls.get(), 3, "one block, one poll for it");
+    // Every poll is heard: a stop before the body is certified writes nothing, and one after it
+    // keeps the certified body and reports the stop.
     for stop_at in 1..=unbounded.polls.get() {
         let stopped = crate::render::render(&staged, &control(Some(stop_at)));
-        assert!(
-            matches!(stopped, Err(crate::render::RenderStop::Stopped(_))),
-            "poll {stop_at}"
-        );
+        let heard = match &stopped {
+            Err(crate::render::RenderStop::Stopped(_)) => stop_at < unbounded.polls.get(),
+            Ok(rendered) => rendered.stopped().is_some() && stop_at == unbounded.polls.get(),
+            Err(crate::render::RenderStop::Refused(_)) => false,
+        };
+        assert!(heard, "poll {stop_at}");
     }
 }

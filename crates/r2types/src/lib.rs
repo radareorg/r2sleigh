@@ -67,16 +67,17 @@ pub use facts::{
 };
 pub(crate) use function_facts::exact_source_return_type;
 pub use function_facts::{
-    ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact, CallResultFact,
-    CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact, CertifiedEntity,
-    ControlBlockAssumptionFact, DecompileRouteFacts, DecompileRouteKind, ExpressionRenderFact,
-    FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts,
-    FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts, ImportStub,
-    InterprocSummaryView, MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact,
-    PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact,
-    ReturnTypeRefusal, ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
-    StackCallArgumentLocationFact, admissible_declaration_type, admit_declaration_type,
-    aggregate_is_definable, declaration_type_width_bits,
+    AggregateDefinition, ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact,
+    CallResultFact, CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact,
+    CertifiedEntity, ControlBlockAssumptionFact, DecompileRouteFacts, DecompileRouteKind,
+    ExpressionRenderFact, FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts,
+    FunctionControlFacts, FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts,
+    ImportStub, InterprocSummaryView, MemberAccessRenderFact, MemberAccessSource,
+    MemoryAccessRenderFact, PredicateComparisonFact, RegisterCallArgumentLocationFact,
+    ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal, ReturnValueRenderFact,
+    SourceOwnedCalleeSignature, SourceOwnedFunctionFacts, StackCallArgumentLocationFact,
+    admissible_declaration_type, admit_declaration_type, aggregate_is_definable, aggregate_members,
+    declaration_type_width_bits,
 };
 
 pub use model::{Signedness, Type};

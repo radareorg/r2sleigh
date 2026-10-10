@@ -23,6 +23,22 @@ use r2ssa::{
     SsaGraph,
 };
 
+/// Why an obligation counted as residual has no site in the text: each cause is named and counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum UnsitedReason {
+    /// A private frame read r2ssa seeds though nothing observes its value (ROADMAP D, the close()
+    /// elision, blocked behind legacy's deletion).
+    PendingObligationSeeding,
+}
+
+impl UnsitedReason {
+    pub const fn spelled(self) -> &'static str {
+        match self {
+            Self::PendingObligationSeeding => "pending obligation seeding",
+        }
+    }
+}
+
 /// Why an obligation needed no output for the rendering to be complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ElisionReason {
@@ -332,6 +348,9 @@ pub struct ObligationLedger {
     /// Obligations of definitions whose values were split out of a shared
     /// variable, so that every rendered read sees the value it stands for.
     split: BTreeSet<SemanticObligationId>,
+    /// Residual obligations with no site in the text, each with its named cause.
+    #[serde(default)]
+    unsited: BTreeMap<SemanticObligationId, UnsitedReason>,
     /// Every obligation as it is spelled, in the order the spelling reads:
     /// by block, then by an operation's place in it. An obligation names its
     /// operation by identity, so this order is taken from the sealed
@@ -361,6 +380,7 @@ impl ObligationLedger {
             outcomes,
             conflicts: BTreeMap::new(),
             split: BTreeSet::new(),
+            unsited: BTreeMap::new(),
             reading_order,
         }
     }
@@ -408,6 +428,24 @@ impl ObligationLedger {
             .iter()
             .filter(|id| matches!(self.outcomes.get(id), Some(Outcome::Rendered)))
             .count()
+    }
+
+    /// Record `id` residual with no site in the text, for the named `reason`.
+    pub fn record_unsited(&mut self, id: SemanticObligationId, reason: UnsitedReason) -> Record {
+        let record = self.record(id, Outcome::Gapped);
+        if matches!(record, Record::Accepted) {
+            self.unsited.insert(id, reason);
+        }
+        record
+    }
+
+    /// How many residual obligations have no site in the text, by cause.
+    pub fn unsited(&self) -> BTreeMap<UnsitedReason, usize> {
+        let mut counts = BTreeMap::new();
+        for reason in self.unsited.values() {
+            *counts.entry(*reason).or_insert(0) += 1;
+        }
+        counts
     }
 
     pub fn record_conflict(&mut self, id: SemanticObligationId) -> Record {

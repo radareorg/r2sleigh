@@ -91,8 +91,41 @@ pub struct ForLoopCertificate {
         reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
     )
 )]
+/// The private-frame loads whose result reaches no observation: one pass over the loads and
+/// their uses, O(accesses + uses), reading `DeadPhis`'s closure rather than recomputing it.
+fn unobserved_private_reads(
+    graph: &crate::SsaGraph,
+    structured: &StructuredDataflowFacts,
+    private_objects: &BTreeSet<ObjectId>,
+    unobserved: &crate::deadphi::DeadPhis,
+    live_out: &crate::liveout::FunctionLiveOut,
+) -> crate::dense::IdSet<InstId> {
+    let unread = |value: ValueId| {
+        !live_out.contains(value)
+            && (graph.use_sites(value).iter())
+                .all(|site| unobserved.unobserved_uses().contains(site))
+    };
+    (structured.memory_accesses.values())
+        .filter(|access| {
+            !access.is_write
+                && access.provenance_complete
+                && private_objects.contains(&access.object)
+        })
+        .map(|access| access.id.inst)
+        .filter(|inst| {
+            graph.inst(*inst).is_some_and(|inst| {
+                matches!(
+                    inst.payload,
+                    crate::graph::InstPayload::Op(crate::SSAOp::Load { .. })
+                ) && inst.output.is_some_and(unread)
+            })
+        })
+        .collect()
+}
+
 fn dispatch_operations(
     graph: &crate::SsaGraph,
+    unobserved: &crate::deadphi::DeadPhis,
     block_addr: u64,
     selector: Option<ValueId>,
 ) -> Vec<InstId> {
@@ -117,8 +150,9 @@ fn dispatch_operations(
     // the selector: a definition joins once every use of its value is an
     // operation already found. A worklist: each value keeps the uses not
     // yet found, and its definition joins when the last one is.
-    let mut found = BTreeSet::from([transfer]);
-    let mut outstanding = crate::dense::IdMap::<ValueId, BTreeSet<InstId>>::default();
+    let mut found = crate::dense::IdSet::<InstId>::default();
+    found.insert(transfer);
+    let mut outstanding = crate::dense::IdMap::<ValueId, Vec<InstId>>::default();
     let mut pending = vec![transfer];
     while let Some(inst) = pending.pop() {
         let Some(inputs) = graph.inst(inst).map(|inst| inst.inputs.clone()) else {
@@ -131,25 +165,25 @@ fn dispatch_operations(
             let Some(definition) = graph.def_inst(value) else {
                 continue;
             };
-            if found.contains(&definition)
+            if found.contains(definition)
                 || graph.inst(definition).map(|inst| inst.block) != Some(block.id)
             {
                 continue;
             }
+            // A use no observation depends on (a flag the add also computes) keeps nothing outside.
             let uses = outstanding.get_or_insert_with(value, || {
-                graph
-                    .use_sites(value)
-                    .iter()
+                (graph.use_sites(value).iter())
+                    .filter(|site| !unobserved.unobserved_uses().contains(site))
                     .map(|site| site.inst)
                     .collect()
             });
-            uses.remove(&inst);
-            if uses.iter().all(|user| found.contains(user)) && found.insert(definition) {
+            uses.retain(|user| *user != inst);
+            if uses.iter().all(|user| found.contains(*user)) && found.insert(definition) {
                 pending.push(definition);
             }
         }
     }
-    found.into_iter().collect()
+    found.iter().collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +330,8 @@ pub struct StackSlotCertificate {
     /// The slot is storage read at more than one width: `size` is the extent
     /// its accesses reach and it declares as bytes, not as a scalar.
     pub byte_array: bool,
+    /// An access reaches the object at an index no value range bounds, so it may land anywhere.
+    pub unbounded_index: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +431,14 @@ pub struct PreparedFunctionCertificates {
     pub call_return_address_stores: crate::dense::IdSet<InstId>,
     /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
     pub compiler_inserted: crate::dense::IdSet<InstId>,
+    /// Frame stores no code can read back, filled once the artifact is sealed
+    /// (doc/adr-frame-model.md, "Dead frame stores").
+    pub dead_frame_stores: crate::dense::IdSet<InstId>,
+    /// The operations whose value only those dead stores write, sealed with them.
+    pub dead_frame_store_values: crate::dense::IdSet<InstId>,
+    /// Loads of a private frame object whose value no observation reads: every use is one
+    /// `DeadPhis` states unobserved, and the function does not hand it back.
+    pub unobserved_private_reads: crate::dense::IdSet<InstId>,
     pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
     pub call_results_by_inst: crate::dense::IdMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
@@ -448,6 +492,22 @@ pub(crate) fn stack_array_element_index(
         .then_some(StackArrayElementIndex::Value(input(0)?)),
         _ => None,
     }
+}
+
+/// The objects some access reaches at an index no value range bounds: one pass over the accesses.
+fn unbounded_index_objects(
+    values: &crate::values::ValueRanges,
+    objects: &ObjectModel,
+    structured: &StructuredDataflowFacts,
+) -> BTreeSet<ObjectId> {
+    (structured.memory_accesses.values())
+        .filter(|access| {
+            objects.address_is_indexed(access.address)
+                && (objects.index_for_address(access.address))
+                    .is_none_or(|index| values.upper_bound(index).is_none())
+        })
+        .map(|access| access.object)
+        .collect()
 }
 
 /// Decide array geometry once, beside the object and memory facts that own it.
@@ -534,16 +594,18 @@ pub(crate) fn stack_array_layout(
     // read, and its elements are as wide as the accesses.
     let stride = stride.unwrap_or(element_width);
 
-    let mut maximum_constant_offset = None;
+    // The extent bounds every indexed access, so one index no range bounds refuses it.
+    let mut maximum_constant_offset = Some(0);
     let mut indexed_elements = Vec::with_capacity(indexed_addresses.len());
     for address in &indexed_addresses {
         let Some(byte_offset) = objects.index_for_address(*address) else {
+            maximum_constant_offset = None;
             continue;
         };
-        if let Some(bound) = values.upper_bound(byte_offset) {
-            maximum_constant_offset =
-                Some(maximum_constant_offset.map_or(bound, |old: u64| old.max(bound)));
-        }
+        let bound = values.upper_bound(byte_offset);
+        maximum_constant_offset = maximum_constant_offset
+            .zip(bound)
+            .map(|(old, b)| old.max(b));
         indexed_elements.push(StackArrayElementCertificate {
             address: *address,
             byte_offset,
@@ -775,7 +837,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     selector: fact.selector,
                     cases: fact.cases.clone(),
                     default: fact.default,
-                    dispatch: dispatch_operations(graph, *block_addr, fact.selector),
+                    dispatch: dispatch_operations(graph, unobserved, *block_addr, fact.selector),
                     guard: switch_guard(function, graph, predicates, fact),
                 },
             )
@@ -858,7 +920,7 @@ pub(crate) fn collect_prepared_function_certificates(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let callee_stack_allocations = collect_callee_stack_allocation_certificates(
+    let mut callee_stack_allocations = collect_callee_stack_allocation_certificates(
         function,
         prep,
         graph,
@@ -879,26 +941,21 @@ pub(crate) fn collect_prepared_function_certificates(
             unobserved,
             live_out,
         );
-    // A callee allocation names a source-less object. A local radare2 inferred
-    // was admitted above only so that a frame save it named could be proven a
-    // round trip; where it was not, the slot keeps its own identity.
-    let callee_stack_allocations = {
-        let mut allocations = callee_stack_allocations;
-        allocations.retain(|object, _| {
-            let declared = objects
-                .objects
-                .get(object)
-                .is_some_and(|fact| match fact.kind {
-                    ObjectKind::StackSlot { base, offset, .. }
-                    | ObjectKind::FrameObject { base, offset, .. } => {
-                        exact_stack_slots.contains_key(&(base, offset))
-                    }
-                    _ => false,
-                });
-            !declared || stack_frame_round_trips.contains_key(object)
-        });
-        allocations
-    };
+    // A callee allocation names a source-less object: a local radare2 inferred
+    // keeps one only where it proved a frame save round trip.
+    callee_stack_allocations.retain(|object, _| {
+        let declared = objects
+            .objects
+            .get(object)
+            .is_some_and(|fact| match fact.kind {
+                ObjectKind::StackSlot { base, offset, .. }
+                | ObjectKind::FrameObject { base, offset, .. } => {
+                    exact_stack_slots.contains_key(&(base, offset))
+                }
+                _ => false,
+            });
+        !declared || stack_frame_round_trips.contains_key(object)
+    });
     let (machine_return_controls, machine_return_control_by_inst) =
         collect_machine_return_control_certificates(
             boundaries, graph, objects, structured, unobserved,
@@ -917,6 +974,7 @@ pub(crate) fn collect_prepared_function_certificates(
             declared_slots,
         },
     );
+    let unbounded_index = unbounded_index_objects(values, objects, structured);
     let stack_slots = objects
         .objects
         .iter()
@@ -974,13 +1032,7 @@ pub(crate) fn collect_prepared_function_certificates(
                             || callee_stack_allocations
                                 .get(object)
                                 .is_some_and(|allocation| allocation.byte_array),
-                        // Failing both, the object's own accesses say how wide it
-                        // is. Every access reaching it at one width, with complete
-                        // provenance, is a fact about the program rather than an
-                        // opinion about it -- and radare2 has no opinion to offer
-                        // for most of these: it reports no stack variables at all
-                        // for `murmur3_32`, which has fourteen of them.
-                        //
+                        // Failing both, accesses at one width with complete provenance state how wide it is.
                         size: stack_array_layouts
                             .get(object)
                             .and_then(|layout| match layout {
@@ -1009,6 +1061,7 @@ pub(crate) fn collect_prepared_function_certificates(
                         reload_values: crate::dense::IdSet::default(),
                         stored_values: crate::dense::IdSet::default(),
                         callee_allocation: callee_stack_allocations.get(object).cloned(),
+                        unbounded_index: unbounded_index.contains(object),
                     },
                 ))
             }
@@ -1313,6 +1366,15 @@ pub(crate) fn collect_prepared_function_certificates(
         callsites,
         call_return_address_stores,
         compiler_inserted,
+        dead_frame_stores: crate::dense::IdSet::default(),
+        dead_frame_store_values: crate::dense::IdSet::default(),
+        unobserved_private_reads: unobserved_private_reads(
+            graph,
+            structured,
+            private_objects,
+            unobserved,
+            live_out,
+        ),
         call_results,
         call_results_by_inst,
         call_results_by_callsite,

@@ -6,6 +6,7 @@
 
 mod blocks;
 mod build;
+mod dead_frame_stores;
 mod edit;
 mod named_edit;
 mod rewrite;
@@ -575,7 +576,7 @@ fn release_undemanded_bytes(
         );
         return EditPlan::new();
     }
-    let demand = crate::demand::Demand::of(graph, &live_out);
+    let demand = crate::demand::DemandedBytes::of(graph, &live_out);
     function.release_undemanded_insert_bases(graph, &demand)
 }
 
@@ -667,6 +668,7 @@ impl SsaArtifact {
         let mut artifact =
             sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
+        artifact.seal_dead_frame_stores();
         Ok(artifact)
     }
 
@@ -1206,7 +1208,7 @@ impl SsaArtifact {
             &facts.structured.memory_accesses,
             &self.machine_context,
         );
-        Self {
+        let mut assumed = Self {
             authority: SsaArtifactAuthority::new(),
             provenance: SsaArtifactProvenance::Manual,
             sealed: self.sealed.clone(),
@@ -1216,7 +1218,9 @@ impl SsaArtifact {
             machine_context: self.machine_context.clone(),
             aggregate_accesses,
             spellings: self.spellings.clone(),
-        }
+        };
+        assumed.seal_dead_frame_stores();
+        assumed
     }
 
     /// Spellings the source carried for the addresses this function calls.
@@ -1374,25 +1378,46 @@ impl SsaArtifact {
     /// Why the extent this object is declared at is assumed, where nothing declares or proves it.
     pub fn extent_assumption(&self, object: crate::ObjectId) -> Option<crate::ExtentAssumption> {
         let slot = self.certificates().stack_slots.get(&object)?;
-        // A callee's proven reach, or the whole run an escaped address may reach, is its extent.
-        if slot.source_slot.is_some()
-            || !self.declarable_stack_object(object)
-            || self.proved_parameter_home(object).is_some()
-            || self.objects().callee_write_reach.contains_key(&object)
-        {
+        if slot.source_slot.is_some() {
             return None;
         }
-        match slot.array_layout {
+        // An unbounded index may pass any reach, so a reach is the extent only when every index is bounded.
+        let assumption = match slot.array_layout {
+            _ if slot.unbounded_index => Some(crate::ExtentAssumption::UnboundedIndex),
             crate::StackArrayLayoutDisposition::Proven(_) => None,
-            crate::StackArrayLayoutDisposition::Refused(
-                crate::StackArrayLayoutRefusal::MissingConstantOffset,
-            ) => Some(crate::ExtentAssumption::UnboundedIndex),
+            _ if self.objects().callee_write_reach.contains_key(&object) => None,
             _ => self
                 .objects()
                 .frame_reach
                 .escaped(object)
                 .then_some(crate::ExtentAssumption::EscapedAddress),
-        }
+        }?;
+        // Asked last: declarability scans the function's accesses.
+        (self.declarable_stack_object(object) && self.proved_parameter_home(object).is_none())
+            .then_some(assumption)
+    }
+
+    /// Why the frame object a memory obligation reads or writes has an assumed extent, if it does.
+    pub fn obligation_extent_assumption(
+        &self,
+        id: crate::SemanticObligationId,
+    ) -> Option<crate::ExtentAssumption> {
+        use crate::{SemanticObligationComponent as Component, SemanticObligationKind as Kind};
+        // A private frame read is a value producer; its access is still one the extent may not cover.
+        let is_write = match (id.kind, id.component) {
+            (Kind::ObservableMemoryRead | Kind::LiveValueProducer, Component::MemoryAccess(_)) => {
+                false
+            }
+            (Kind::ObservableMemoryWrite, Component::MemoryAccess(_)) => true,
+            _ => return None,
+        };
+        let crate::SemanticSourceSite::GraphInstruction(inst) =
+            self.obligations().obligations().get(&id)?.source
+        else {
+            return None;
+        };
+        let access = self.memory_certificate_for_inst(inst, is_write)?;
+        self.extent_assumption(access.object)
     }
 
     pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
@@ -1763,28 +1788,45 @@ fn unique_call_site_identity(
             .iter()
             .enumerate()
             .filter_map(move |(op_index, op)| {
-                let target = match (call.transfer(), op) {
+                let instruction = || {
+                    block
+                        .op_metadata(op_index)
+                        .and_then(|metadata| metadata.instruction_addr)
+                        .filter(|instruction| *instruction == call.instruction_address())
+                };
+                let last = op_index + 1 == block.ops.len();
+                let (target, reaches) = match (call.transfer(), op) {
                     (r2source::AdvisoryCallTransfer::Call, R2ILOp::Call { target }) => {
-                        CanonicalStorageId::from_varnode(target)
+                        let target = CanonicalStorageId::from_varnode(target);
+                        (target, target.offset)
+                    }
+                    // The site is the target value; the address is what its block folds it to.
+                    (r2source::AdvisoryCallTransfer::Call, R2ILOp::CallInd { target })
+                        if instruction().is_some() =>
+                    {
+                        (
+                            CanonicalStorageId::from_varnode(target),
+                            crate::origin::folded_call_target(block, op_index)?,
+                        )
                     }
                     (r2source::AdvisoryCallTransfer::TailJump, R2ILOp::Branch { target })
-                        if op_index + 1 == block.ops.len() =>
+                        if last =>
                     {
-                        CanonicalStorageId::from_varnode(target)
+                        let target = CanonicalStorageId::from_varnode(target);
+                        (target, target.offset)
                     }
                     (r2source::AdvisoryCallTransfer::TailSlot, R2ILOp::BranchInd { .. })
-                        if op_index + 1 == block.ops.len() =>
+                        if last =>
                     {
-                        crate::machine_context::terminal_indirect_loaded_slot(block, op_index)?
+                        let slot =
+                            crate::machine_context::terminal_indirect_loaded_slot(block, op_index)?;
+                        (slot, slot.offset)
                     }
                     _ => return None,
                 };
-                let instruction = block
-                    .op_metadata(op_index)
-                    .and_then(|metadata| metadata.instruction_addr)?;
-                (instruction == call.instruction_address()
-                    && target.offset == call.target_address())
-                .then(|| SourceCallSiteIdentity::new(instruction, target))
+                let instruction = instruction()?;
+                (reaches == call.target_address())
+                    .then(|| SourceCallSiteIdentity::new(instruction, target))
             })
     });
     let identity = matches.next()?;
@@ -1801,7 +1843,7 @@ fn reads_after(
     let (integer, float) = callee.result_carriers()?;
     blocks.iter().find_map(|block| {
         let index = block.ops.iter().enumerate().position(|(index, op)| {
-            matches!(op, R2ILOp::Call { .. })
+            matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
                 && block
                     .op_metadata(index)
                     .and_then(|metadata| metadata.instruction_addr)

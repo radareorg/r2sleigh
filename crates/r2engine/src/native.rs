@@ -1758,15 +1758,8 @@ impl Native<'_> {
     }
 }
 
-/// Every function this body reaches, each once, in address order.
-///
-/// A tail jump reaches another function exactly as a call does; the only
-/// difference is that its result is this function's own. So does a jump
-/// through a slot the loader fills, which is how an import stub reaches its
-/// import: the slot is what the call site names, so it is what the import's
-/// declaration is placed at. One callee reached two ways is still one
-/// callee: declaring it twice makes the type analysis reject the whole
-/// capture as holding a duplicate address.
+/// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once
+/// in address order: one callee declared twice is a duplicate address the type analysis rejects.
 fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
     body.calls
         .iter()
@@ -1775,7 +1768,6 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
         .chain(
             call_sites(body, program)
                 .into_iter()
-                .filter(|site| site.transfer == r2source::AdvisoryCallTransfer::TailSlot)
                 .map(|site| site.target),
         )
         .collect::<std::collections::BTreeSet<_>>()
@@ -1791,8 +1783,18 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
 fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
-        for index in 0..block.lifted.ops.len() {
-            let Some((target, transfer)) = transfer(&block.lifted, index, body) else {
+        let ops = &block.lifted.ops;
+        // One forward read per block that calls through a value, so each such call folds in `O(1)`.
+        let mut origins = (ops
+            .iter()
+            .any(|op| matches!(op, r2il::R2ILOp::CallInd { .. })))
+        .then(r2ssa::origin::BlockOrigins::default);
+        for (index, op) in ops.iter().enumerate() {
+            let site = transfer(&block.lifted, index, body, origins.as_ref());
+            if let Some(origins) = &mut origins {
+                origins.step(op);
+            }
+            let Some((target, transfer)) = site else {
                 continue;
             };
             let Some(instruction) = block
@@ -1836,23 +1838,23 @@ fn library_evidence(
         .collect()
 }
 
-/// How one operation reaches another function, where it reaches one at all.
-///
-/// A call comes back and a tail jump does not, and which this is a fact about
-/// the body rather than about the callee: the walk decided it when it stopped
-/// at the target's entry. A jump through a loaded value names no code address
-/// at all, so its target is the slot the jump reads, which is what the
-/// relocation on that slot licenses. The slot is read by the same pass that
-/// reads it again when the site is correlated, so the two cannot disagree.
+/// How one operation reaches another function, where it does: a call target the walk folded and a
+/// jump's loaded slot are read by the passes r2ssa correlates the site with, so the two agree.
 fn transfer(
     block: &r2il::R2ILBlock,
     index: usize,
     body: &crate::body::Body,
+    origins: Option<&r2ssa::origin::BlockOrigins>,
 ) -> Option<(u64, r2source::AdvisoryCallTransfer)> {
     match block.ops.get(index)? {
         r2il::R2ILOp::Call { target } => {
             Some((target.offset, r2source::AdvisoryCallTransfer::Call))
         }
+        r2il::R2ILOp::CallInd { target } => origins?
+            .of(target)?
+            .constant()
+            .filter(|target| body.calls.contains(target))
+            .map(|target| (target, r2source::AdvisoryCallTransfer::Call)),
         r2il::R2ILOp::Branch { target } if body.tail_calls.contains(&target.offset) => {
             Some((target.offset, r2source::AdvisoryCallTransfer::TailJump))
         }
@@ -1981,16 +1983,18 @@ impl Native<'_> {
                 else {
                     continue;
                 };
-                let Some(prototype) = self.target.prototypes.get(&callee) else {
+                let Some(declared) = Declared::import(self.target, &callee) else {
                     continue;
                 };
-                for (index, parameter) in prototype.parameters.iter().enumerate() {
+                let prototype = declared.prototype;
+                // The convention places each parameter: by class, or by position where shared.
+                let placed = Placement::new(self.target, &self.machine).placed_prefix(declared);
+                for (index, (parameter, storage)) in
+                    prototype.parameters.iter().zip(&placed).enumerate()
+                {
                     if !parameter.is_function() {
                         continue;
                     }
-                    let Some(storage) = self.machine.slots.argument_slots().get(index) else {
-                        continue;
-                    };
                     let Some(address) = r2ssa::value_reaching(prepared.as_ref(), id, *storage)
                         .and_then(|value| prepared.folded_value(value))
                     else {
@@ -2198,6 +2202,7 @@ pub(crate) fn convention_slots(
         SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
             .and_then(|slots| slots.with_float_slots(float_slots, float_result))
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
+            .with_shared_positions(prototype.shares_positions())
             .with_stack_arguments(stack_arguments)
             .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack)
             .with_entry_stack(target.convention.entry_stack.map(|stack| {
@@ -2404,4 +2409,103 @@ pub(crate) fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId,
 /// passes (doc/adr-frame-model.md, P4.4). A consumer that refuses it is item A's.
 pub(crate) fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
     std::collections::BTreeSet::from([r2source::Premise::UbFreeSource])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: u64 = 0x1000;
+    /// `lea rdi, [0x1020]; xorps xmm0, xmm0; call on_double; ret`, the stub at 0x1018.
+    const HANDS_AFTER_A_DOUBLE: &[u8] = &[
+        0x48, 0x8d, 0x3d, 0x19, 0x00, 0x00, 0x00, // 0x1000 lea rdi, [rip + 0x19]
+        0x0f, 0x57, 0xc0, // 0x1007 xorps xmm0, xmm0
+        0xe8, 0x09, 0x00, 0x00, 0x00, // 0x100a call 0x1018
+        0xc3, // 0x100f ret
+        0, 0, 0, 0, 0, 0, 0, 0,    // to 0x1018
+        0xc3, // 0x1018 the stub
+        0, 0, 0, 0, 0, 0, 0,    // to 0x1020
+        0xc3, // 0x1020 the handed function
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    struct HandsAfterADouble;
+
+    impl crate::body::Program for HandsAfterADouble {
+        fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+            let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+            let slice = HANDS_AFTER_A_DOUBLE.get(offset..)?;
+            (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+        }
+
+        fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
+            let end = BASE + HANDS_AFTER_A_DOUBLE.len() as u64;
+            (BASE..end).contains(&vaddr).then_some(crate::body::Region {
+                start: BASE,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
+        }
+
+        fn is_entry(&self, vaddr: u64) -> bool {
+            matches!(vaddr, BASE | 0x1018 | 0x1020)
+        }
+    }
+
+    impl Program for HandsAfterADouble {
+        fn holds_static_data(&self, _vaddr: u64) -> bool {
+            false
+        }
+
+        fn extents(&self) -> &r2types::ProgramExtents {
+            const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+            NONE
+        }
+
+        fn name_at(&self, vaddr: u64) -> Option<String> {
+            self.import_at(vaddr)
+        }
+
+        fn import_at(&self, vaddr: u64) -> Option<String> {
+            (vaddr == 0x1018).then(|| "on_double".to_owned())
+        }
+    }
+
+    /// System V passes `on_double(double, void (*)())`'s callback in RDI, the first integer
+    /// register, however many floats come before it.
+    #[test]
+    fn a_function_handed_after_a_double_is_read_from_the_first_integer_slot() {
+        let embedded = r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine");
+        let compiler = LanguageProfile::parse(embedded.compiler_spec).expect("parses");
+        let convention =
+            r2abi::calling_convention("x86-64", 64, r2abi::Platform::Unknown).expect("System V");
+        let effect = call_effect(
+            &embedded.arch,
+            64,
+            r2abi::Platform::Unknown,
+            &compiler,
+            convention.variadic_count_register,
+        );
+        let prototypes = r2abi::Prototypes::parse(
+            "on_double=func\nfunc.on_double.args=2\nfunc.on_double.arg.0=double,x\n\
+             func.on_double.arg.1=func,callback\nfunc.on_double.ret=void\n",
+        );
+        let declarations = r2abi::Declarations::default();
+        let target = NativeTarget {
+            arch: &embedded.arch,
+            disasm: &embedded.disasm,
+            cpu: embedded.cpu,
+            convention,
+            call_effect: effect.as_ref(),
+            compiler: &compiler,
+            dwarf: &embedded.dwarf,
+            prototypes: &prototypes,
+            declarations: &declarations,
+        };
+        let walked = walk(&target, &HandsAfterADouble, BASE).expect("walks");
+        let handed = handed(&target, &HandsAfterADouble, walked.root.body);
+        assert_eq!(handed, [0x1020]);
+    }
 }

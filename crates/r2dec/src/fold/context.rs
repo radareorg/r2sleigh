@@ -280,7 +280,7 @@ impl GapIndex {
 /// failed and where the cell was named instead.
 #[derive(Clone)]
 pub(crate) struct GapReason {
-    pub(crate) kind: String,
+    pub(crate) kind: crate::ast::GapKind,
     pub(crate) origin: String,
     /// The lowering refusal to report if the gap cannot be opened after all.
     pub(crate) lowering: Option<crate::fold::op_lower::OpLoweringRefusal>,
@@ -289,16 +289,16 @@ pub(crate) struct GapReason {
 impl GapReason {
     pub(crate) fn from_lowering(refusal: crate::fold::op_lower::OpLoweringRefusal) -> Self {
         Self {
-            kind: refusal.kind().to_string(),
+            kind: crate::ast::GapKind::Refused(refusal.kind().to_owned()),
             origin: refusal.origin_site(),
             lowering: Some(refusal),
         }
     }
 
     /// A cell a later proof could not account for.
-    pub(crate) fn from_proof(kind: &str) -> Self {
+    pub(crate) fn from_proof(kind: crate::ast::GapKind) -> Self {
         Self {
-            kind: kind.to_string(),
+            kind,
             origin: "render proof".to_string(),
             lowering: None,
         }
@@ -753,7 +753,7 @@ impl<'a> FoldingContext<'a> {
     /// The lowering path plans from where it is; a seal or placement refusal
     /// names a cell instead, and the instruction behind that cell is the same
     /// anchor arrived at from the other end.
-    pub(crate) fn plan_gap_at_anchor(&self, anchor: InstId, kind: &str) -> bool {
+    pub(crate) fn plan_gap_at_anchor(&self, anchor: InstId, kind: &crate::ast::GapKind) -> bool {
         if self.gap_anchors.borrow().contains_key(&anchor) {
             return false;
         }
@@ -795,7 +795,7 @@ impl<'a> FoldingContext<'a> {
         };
         self.gap_anchors
             .borrow_mut()
-            .insert(anchor, GapReason::from_proof(kind));
+            .insert(anchor, GapReason::from_proof(kind.clone()));
         self.gap_plans
             .borrow_mut()
             .insert(anchor, closure.sites.clone());
@@ -944,7 +944,7 @@ impl<'a> FoldingContext<'a> {
             op_idx: u32::try_from(op_idx).ok()?,
         };
         let marker = crate::ast::GapMarker {
-            kind: "UnprovenReturn".to_string(),
+            kind: crate::ast::GapKind::UnprovenReturn,
             origin: "interface".to_string(),
             block_addr,
             op_idx,

@@ -466,7 +466,9 @@ pub(crate) fn build_obligation_ledger(
             }
         };
         let outcome = outcome.map(|outcome| match outcome {
-            Outcome::Rendered if accesses_assumed_extent(prepared, id) => Outcome::Assumed,
+            Outcome::Rendered if prepared.obligation_extent_assumption(id).is_some() => {
+                Outcome::Assumed
+            }
             outcome => outcome,
         });
         if let Some(outcome) = outcome {
@@ -474,24 +476,4 @@ pub(crate) fn build_obligation_ledger(
         }
     }
     ledger
-}
-
-/// Whether a memory obligation reads or writes a frame object whose extent is assumed.
-fn accesses_assumed_extent(prepared: &SsaArtifact, id: SemanticObligationId) -> bool {
-    let is_write = match id.kind {
-        SemanticObligationKind::ObservableMemoryRead => false,
-        SemanticObligationKind::ObservableMemoryWrite => true,
-        _ => return false,
-    };
-    let Some(r2ssa::SemanticSourceSite::GraphInstruction(inst)) = prepared
-        .obligations()
-        .obligations()
-        .get(&id)
-        .map(|obligation| obligation.source)
-    else {
-        return false;
-    };
-    prepared
-        .memory_certificate_for_inst(inst, is_write)
-        .is_some_and(|access| prepared.extent_assumption(access.object).is_some())
 }

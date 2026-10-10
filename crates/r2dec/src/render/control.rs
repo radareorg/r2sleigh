@@ -8,7 +8,7 @@ use r2ssa::cfg::BlockTerminator;
 use super::RenderInput;
 use super::values::Values;
 use crate::ast::RenderObservationId;
-use crate::ast::{CExpr, CStmt, CType, GapMarker, SwitchCase};
+use crate::ast::{CExpr, CStmt, CType, GapKind, GapMarker, SwitchCase};
 use crate::prelude::ResidualCause;
 use crate::structure::place::{EdgeShape, Placement};
 
@@ -153,7 +153,7 @@ impl<'i> Writer<'_, 'i> {
             .map_or(0, |block| block.ops().len());
         (ops != 0).then(|| {
             let gap = CStmt::Gap(GapMarker {
-                kind: "ValuesNotRendered".to_owned(),
+                kind: GapKind::ValuesNotRendered,
                 origin: "render::control".to_owned(),
                 block_addr: addr,
                 op_idx: 0,
@@ -237,11 +237,9 @@ impl<'i> Writer<'_, 'i> {
                     .collect::<Vec<_>>();
                 match cases.is_empty() {
                     // No stated target: control goes where the facts do not say, so the text traps.
-                    true => {
-                        let trap = CStmt::Expr(self.residual(&CType::Void));
-                        vec![self.observe(addr, trap)]
-                    }
+                    true => vec![self.trap(addr, GapKind::UnresolvedIndirectBranch)],
                     false => {
+                        self.residual_terminator(addr);
                         let selector = self.residual(&super::word(self.input));
                         self.switch(addr, selector, &cases, None)
                     }
@@ -249,17 +247,29 @@ impl<'i> Writer<'_, 'i> {
             }
             BlockTerminator::Return => {
                 let stmt = self.return_stmt(Some(addr));
-                vec![self.observe(addr, stmt)]
+                // The line accounts for the return instruction, wherever in the block it sits.
+                let at = (self.values)
+                    .and_then(|values| values.terminator_address(addr))
+                    .unwrap_or(addr);
+                vec![self.observe_at(addr, at, stmt)]
+            }
+            BlockTerminator::Call {
+                fallthrough: None, ..
+            }
+            | BlockTerminator::IndirectCall { fallthrough: None }
+                if self
+                    .values
+                    .is_some_and(|values| values.ends_never_returning(addr)) =>
+            {
+                // The call written above is declared never to return, which C ends control at.
+                Vec::new()
             }
             // Control never comes back: a void residual traps, so the text ends here as the machine does.
             BlockTerminator::Call {
                 fallthrough: None, ..
             }
             | BlockTerminator::IndirectCall { fallthrough: None }
-            | BlockTerminator::None => {
-                let trap = CStmt::Expr(self.residual(&CType::Void));
-                vec![self.observe(addr, trap)]
-            }
+            | BlockTerminator::None => vec![self.trap(addr, GapKind::TransferNotFollowed)],
         }
     }
 
@@ -279,8 +289,22 @@ impl<'i> Writer<'_, 'i> {
             values.spelled_terminator(addr, &stmt);
             return stmt;
         }
+        // The interface proves no result: what this return hands back is unproven, not a gap.
+        let unproven = self
+            .input
+            .return_type()
+            .is_some_and(r2types::ReturnTypeFact::is_unproven);
+        if ty != CType::Void
+            && let Some(addr) = addr
+        {
+            self.residual_terminator(addr);
+        }
         match ty {
             CType::Void => CStmt::Return(None),
+            ty if unproven => CStmt::Return(Some(
+                crate::prelude::residual(&ty, ResidualCause::UnprovenReturn)
+                    .unwrap_or_else(|| self.residual(&ty)),
+            )),
             ty => CStmt::Return(Some(self.residual(&ty))),
         }
     }
@@ -295,11 +319,34 @@ impl<'i> Writer<'_, 'i> {
                 values.spelled_terminator(addr, &CStmt::Expr(expr.clone()));
                 expr
             }
-            None => self.residual(ty),
+            None => {
+                self.residual_terminator(addr);
+                self.residual(ty)
+            }
+        }
+    }
+
+    /// The terminator of the block at `addr` is a residual the text spells, which the ledger reads.
+    fn residual_terminator(&self, addr: u64) {
+        if let Some(values) = self.values {
+            values.residual_terminator(addr);
         }
     }
 
     /// A residual of `ty`, or of the machine word where C has no residual of `ty`.
+    /// A transfer the text cannot make, as a gap whose marker names it: running it traps.
+    fn trap(&mut self, addr: u64, kind: GapKind) -> CStmt {
+        self.residual_terminator(addr);
+        let gap = CStmt::Gap(GapMarker {
+            kind,
+            origin: "render::control".to_owned(),
+            block_addr: addr,
+            op_idx: 0,
+            ops: 0,
+        });
+        self.observe(addr, gap)
+    }
+
     fn residual(&self, ty: &CType) -> CExpr {
         crate::prelude::residual(ty, ResidualCause::Gap)
             .or_else(|| crate::prelude::residual(&super::word(self.input), ResidualCause::Gap))
@@ -365,13 +412,15 @@ impl<'i> Writer<'_, 'i> {
                     .map(|stmt| self.observe(from, stmt))
                     .collect();
             }
-            let trap = CStmt::Expr(self.residual(&CType::Void));
-            return vec![self.observe(from, trap)];
+            return vec![self.trap(from, GapKind::TailTransferNotRendered)];
         }
         let mut out = self
             .values
             .map(|values| values.copies(from, to))
             .unwrap_or_default();
+        if let Some(values) = self.values {
+            values.transferred(from);
+        }
         match self.placement.edge(from, to) {
             EdgeShape::Inline => out.extend(self.place(to)),
             EdgeShape::Continue => out.push(CStmt::Continue),

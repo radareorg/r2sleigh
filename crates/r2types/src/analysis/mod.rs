@@ -95,8 +95,8 @@ impl TypeAnalysis {
         &self.function_facts
     }
 
-    /// The render-authorized signature, or where the result is one of two carriers, the body's
-    /// arity, exact in its interface.
+    /// The render-authorized signature, or where the result is one of two carriers and the exact
+    /// interface takes nothing, `(void)`: its result is typed at each call by its caller's read.
     fn signature_for_callers(&self) -> Option<std::borrow::Cow<'_, crate::FunctionSignatureSpec>> {
         let type_facts = self.function_facts.type_facts();
         if let Some(signature) = type_facts.render_authorized_signature() {
@@ -104,17 +104,12 @@ impl TypeAnalysis {
         }
         let interface = self.source.machine_context().function_interface()?;
         interface.result_carriers()?;
-        let parameters = interface.parameters().len();
-        match type_facts.merged_signature.as_ref() {
-            Some(signature) => (signature.params.len() == parameters)
-                .then_some(std::borrow::Cow::Borrowed(signature)),
-            None => (parameters == 0).then(|| {
-                std::borrow::Cow::Owned(crate::FunctionSignatureSpec {
-                    ret_type: None,
-                    params: Vec::new(),
-                })
-            }),
-        }
+        interface.parameters().is_empty().then(|| {
+            std::borrow::Cow::Owned(crate::FunctionSignatureSpec {
+                ret_type: None,
+                params: Vec::new(),
+            })
+        })
     }
 
     /// Export the signature this exact retained body proves for its callers.

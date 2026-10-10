@@ -99,6 +99,7 @@ pub use control::{
     SsaWorkControl, SsaWorkMeter,
 };
 pub use defuse::{DefUseInfo, def_use};
+pub use demand::DemandedBytes;
 pub use function::{
     CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts,
     DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared,
@@ -190,7 +191,7 @@ pub use semantic::{
     StructuredRecursiveCallFact, SupervisorCall, SwitchCertificate, SwitchGuardCertificate,
     SwitchPredicateFact, TripCount, TripGuard, TripRefusal, TripTest, TwoWaySelectionCertificate,
     ValueOwner, VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal,
-    value_reaching,
+    returned_bytes, value_reaching,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use slot_promotion::promoted_slot_offset;

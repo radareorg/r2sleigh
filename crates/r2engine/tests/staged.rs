@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_STUB, opened};
+use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_STUB, STUB, TWO, opened};
 use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
@@ -13,13 +13,12 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
         .rendered(FORKED, RenderTier::Staged)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
-    // `test edi, edi; je L` is the test on the parameter; the merge is one variable both arms assign.
+    // `test edi, edi; je L` is the test on the parameter; the merge is one variable both arms
+    // assign, so it is one assignment of the value the test selects.
     assert!(
-        text.contains("if ((uint8_t)((uint32_t)arg0 == (uint32_t)0U))"),
+        text.contains("rax_3 = (uint8_t)((uint32_t)arg0 == (uint32_t)0U) ? 0x1000 : 5;"),
         "{text}"
     );
-    assert!(text.contains("rax_3 = (uint64_t)0x1000U;"), "{text}");
-    assert!(text.contains("rax_3 = (uint64_t)5U;"), "{text}");
     assert!(
         text.contains("return (uint64_t)((uint64_t)rax_3 + (uint64_t)8U);"),
         "{text}"
@@ -78,6 +77,36 @@ fn a_described_call_is_written_from_the_callsite_facts() {
             .iter()
             .any(|link| link.ident == "one" && link.addr == Some(ONE)),
         "{links:?}"
+    );
+}
+
+/// `mov edi, 1; call exit; mov eax, 7; ret`: the walk gives the call's block no successor, as the
+/// library's declaration of `exit` says, so the call is declared `noreturn` and ends the text there.
+#[test]
+fn a_call_the_block_graph_never_returns_from_is_declared_noreturn() {
+    let mut program = OpenProgram::of(Literal::new().importing("exit").running_on(GLIBC));
+    let call = i32::try_from(STUB as i64 - (TWO + 10) as i64).expect("near");
+    let mut code = vec![0xbf, 0x01, 0, 0, 0, 0xe8];
+    code.extend_from_slice(&call.to_le_bytes());
+    code.extend_from_slice(&[0xb8, 0x07, 0, 0, 0, 0xc3]);
+    program.source_mut().write(TWO, &code);
+    let rendering = program
+        .rendered(TWO, RenderTier::Staged)
+        .expect("the staged pipeline renders");
+    let text = rendering.response.output.text().to_owned();
+    assert!(
+        text.contains("__attribute__((noreturn)) void exit(int32_t);"),
+        "{text}"
+    );
+    // `1` is an `int` the declaration holds, so it is passed as the number.
+    assert!(text.contains("exit(1);"), "{text}");
+    // Nothing follows the call: no trap stands for the edge the block does not have, and no return.
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("return")),
+        "{text}"
     );
 }
 
