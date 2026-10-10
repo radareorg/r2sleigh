@@ -3,23 +3,38 @@ source: crates/r2s/tests/commands.rs
 assertion_line: 527
 expression: run.out
 ---
-uint64_t fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
+uint64_t fnv1a32(uint64_t arg0, uint64_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 26 rendered, 14 elided, 0 refused; 12 statements rendered */
-    if (RSI_0 == 0) {
-        return 0x811c9dc5;
-    } else {
-        uint64_t RAX_1;
-        RSI_0 += RDI_0;
-        RAX_1 = 0x811c9dc5;
-        for (; ; ) {
-            uint8_t tmp_11e00_1 = *(uint8_t*)RDI_0;
-            RDI_0++;
-            RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_1 ^ (uint32_t)RAX_1) * 0x1000193);
-            if (RSI_0 == RDI_0) {
-                break;
+    uint64_t rsi_1;
+    uint64_t rax_2;
+    uint64_t rdi_1;
+    uint8_t tmp_11e00_1;
+    uint64_t rdi_2;
+    uint64_t rax_4;
+
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 14 statements rendered */
+    {
+        if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
+            return (uint64_t)0x811c9dc5U;
+        } else {
+            rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
+            rax_2 = (uint64_t)0x811c9dc5U;
+            rdi_1 = arg0;
+            for (; ; ) {
+                tmp_11e00_1 = r2sleigh_load_u8((void*)rdi_1);
+                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rax_4 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_11e00_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U)) * (uint64_t)0x1000193U) >> 0U);
+                if ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2)) {
+                    rax_2 = rax_4;
+                    rdi_1 = rdi_2;
+                } else {
+                    break;
+                }
+            }
+            {
+                return (uint64_t)rax_4;
             }
         }
-        return RAX_1;
     }
 }
+

@@ -312,7 +312,10 @@ fn a_double_moved_as_its_whole_register_is_the_argument() {
 #[test]
 fn a_constant_loaded_from_read_only_data_is_the_literal() {
     // 1.0 is added to `x`: legacy folds the literal, staged spells its bits as the float (P5, #90).
-    let legacy = run("float_returns_zig_x86_64_O2g", "pdd @ sym.twice_half");
+    let legacy = run(
+        "float_returns_zig_x86_64_O2g",
+        "e dec.pipeline=legacy; pdd @ sym.twice_half",
+    );
     assert!(legacy.contains("x + 1.0;"), "{legacy}");
     let staged = run(
         "float_returns_zig_x86_64_O2g",
