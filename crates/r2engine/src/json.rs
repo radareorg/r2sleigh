@@ -238,7 +238,7 @@ impl RenderedFunctionJson {
                     site: residual.site,
                     ty: residual.ty.tag(),
                     cause: residual.cause.tag(),
-                    gap: residual.gap.clone(),
+                    gap: residual.gap.as_ref().map(ToString::to_string),
                     line: residual.line,
                 })
                 .collect(),

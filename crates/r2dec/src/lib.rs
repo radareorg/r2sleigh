@@ -1851,7 +1851,7 @@ pub enum BindingShadowAuditFailure {
 fn replan_stale_reads(
     repair: &binding_plan::ReachingRepair,
     splits: &mut binding_plan::BindingSplits,
-    seed_gaps: &mut std::collections::BTreeMap<r2ssa::InstId, String>,
+    seed_gaps: &mut std::collections::BTreeMap<r2ssa::InstId, ast::GapKind>,
 ) -> bool {
     if let Some(partition) = repair.partition.clone()
         && splits.split(partition, &repair.evict)
@@ -1876,7 +1876,7 @@ fn replan_stale_reads(
         "a read at {anchor:?} sees another value and cannot be split; \
          planning a gap and rendering again"
     );
-    seed_gaps.insert(anchor, "stale_read".to_string());
+    seed_gaps.insert(anchor, ast::GapKind::StaleRead);
     true
 }
 
@@ -3017,7 +3017,8 @@ impl Decompiler {
                 && let Some(anchor) = gap_anchor_for_native_failure(&failure, input.prepared_ssa())
                 && !seed_gaps.contains_key(&anchor)
             {
-                let kind = DecompileRenderRefusal::from(failure).kind().to_string();
+                let kind =
+                    ast::GapKind::Refused(DecompileRenderRefusal::from(failure).kind().to_owned());
                 r2il::refusal_evidence!(
                     "gap",
                     "the proof named {anchor:?} ({:?}) as {kind}; planning a gap and rendering again",
@@ -3055,7 +3056,7 @@ impl Decompiler {
         &self,
         input: &'a DecompilerInput,
         work: DecompileWorkControl<'a>,
-        seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, String>,
+        seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, ast::GapKind>,
         splits: &binding_plan::BindingSplits,
     ) -> Result<InternalBuildProduct, DecompileExecutionStop> {
         crate::stage_timing::begin(input.prepared_ssa().graph().insts.len());

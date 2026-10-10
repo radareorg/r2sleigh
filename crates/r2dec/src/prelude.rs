@@ -812,7 +812,7 @@ pub(crate) mod tests {
             CStmt::observe_all(
                 [gap],
                 CStmt::Gap(crate::ast::GapMarker {
-                    kind: "UnresolvedBranchCondition".to_owned(),
+                    kind: crate::ast::GapKind::UnresolvedBranchCondition,
                     origin: "structure".to_owned(),
                     block_addr: 0x1000,
                     op_idx: 0,

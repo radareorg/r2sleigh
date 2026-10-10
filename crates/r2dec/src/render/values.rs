@@ -17,7 +17,7 @@ mod transfer;
 use super::RenderInput;
 use super::calls::{self, CallPlan};
 use super::terms::{self, Spell};
-use crate::ast::{CExpr, CExternDecl, CLocal, CParam, CStmt, CType, GapMarker};
+use crate::ast::{CExpr, CExternDecl, CLocal, CParam, CStmt, CType, GapKind, GapMarker};
 use crate::prelude::{Helper, ResidualType};
 use crate::symbol::{SymbolId, SymbolRole, SymbolTable};
 
@@ -1197,17 +1197,16 @@ impl<'a> Values<'a> {
 
     /// The marker's kind: a user operation by the name the specification gives it, which is what
     /// the instruction does; with no name, only that the inventory could not account for it.
-    fn gap_kind(&self, gap: Gap) -> String {
+    fn gap_kind(&self, gap: Gap) -> GapKind {
         match gap {
             Gap::UserOperation(userop) => self
                 .artifact
                 .user_operations()
                 .get(userop as usize)
-                .map_or_else(
-                    || Gap::Unsupported.kind().to_owned(),
-                    |name| format!("UserOperation({name})"),
-                ),
-            gap => gap.kind().to_owned(),
+                .map_or(GapKind::UnsupportedInstruction, |name| {
+                    GapKind::UserOperation(name.clone())
+                }),
+            gap => gap.kind(),
         }
     }
 
@@ -2165,15 +2164,15 @@ enum Gap {
 }
 
 impl Gap {
-    const fn kind(self) -> &'static str {
+    const fn kind(self) -> GapKind {
         match self {
-            Self::Unsupported | Self::UserOperation(_) => "UnsupportedInstruction",
-            Self::Call => "CallNotRendered",
-            Self::Effect => "EffectNotRendered",
-            Self::Store => "StoreNotSpelled",
-            Self::Term => "TermNotSpelled",
-            Self::Type => "ValueHasNoCType",
-            Self::Unknown => "ValueNotComputed",
+            Self::Unsupported | Self::UserOperation(_) => GapKind::UnsupportedInstruction,
+            Self::Call => GapKind::CallNotRendered,
+            Self::Effect => GapKind::EffectNotRendered,
+            Self::Store => GapKind::StoreNotSpelled,
+            Self::Term => GapKind::TermNotSpelled,
+            Self::Type => GapKind::ValueHasNoCType,
+            Self::Unknown => GapKind::ValueNotComputed,
         }
     }
 }
@@ -2255,7 +2254,7 @@ fn integer(ty: &CType) -> bool {
 /// A merge copy into `to` the values could not spell: a gap on the edge.
 fn unrendered_copy(to: u64) -> CStmt {
     CStmt::Gap(GapMarker {
-        kind: "ValuesNotRendered".to_owned(),
+        kind: GapKind::ValuesNotRendered,
         origin: "render::values".to_owned(),
         block_addr: to,
         op_idx: 0,

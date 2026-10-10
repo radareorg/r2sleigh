@@ -1731,7 +1731,7 @@ fn unproven_constructs_are_counted_through_nested_bodies() {
     let mut func = CFunction::new("partly_proven".to_string(), CType::Unknown);
     func.body = vec![
         CStmt::Gap(crate::ast::GapMarker {
-            kind: "UnresolvedBranchCondition".to_owned(),
+            kind: crate::ast::GapKind::UnresolvedBranchCondition,
             origin: "structure".to_owned(),
             block_addr: 0x1000,
             op_idx: 0,
