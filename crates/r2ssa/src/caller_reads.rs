@@ -12,7 +12,10 @@ pub fn reads_after_call(
     integer: Option<CanonicalStorageId>,
     float: Option<CanonicalStorageId>,
 ) -> SourceResultReads {
-    let mut reads = SourceResultReads::default();
+    let mut reads = SourceResultReads {
+        calls: 1,
+        ..SourceResultReads::default()
+    };
     if predicated(block, index) {
         return reads;
     }
@@ -165,6 +168,7 @@ mod tests {
                 float: 0,
                 float_width: SourceFloatReadWidth::Unstated,
                 overwritten: 0,
+                calls: 1,
             }
         );
     }
@@ -219,7 +223,10 @@ mod tests {
         ];
         assert_eq!(
             reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0)),
-            SourceResultReads::default()
+            SourceResultReads {
+                calls: 1,
+                ..SourceResultReads::default()
+            }
         );
     }
 
@@ -245,6 +252,7 @@ mod tests {
                 float: 1,
                 float_width: SourceFloatReadWidth::Bytes(8),
                 overwritten: 0,
+                calls: 1,
             }
         );
     }

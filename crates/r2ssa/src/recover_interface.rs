@@ -918,8 +918,10 @@ fn read_of(
     float: Option<CanonicalStorageId>,
 ) -> Option<ResultRead> {
     match (reads.integer, reads.float, float) {
-        (0, 0, _) if reads.overwritten > 0 => Some(ResultRead::None),
-        (1.., 0, None) => Some(ResultRead::Carrier(CarrierRead::Integer)),
+        (0, 0, _) if reads.calls > 0 && reads.overwritten == reads.calls => Some(ResultRead::None),
+        // A read past the call's block (the next call's argument, under IPA-RA) is still the
+        // integer register the call leaves.
+        (_, 0, None) => Some(ResultRead::Carrier(CarrierRead::Integer)),
         (_, _, Some(float)) => carrier_read(Some(reads), float).map(ResultRead::Carrier),
         _ => None,
     }
@@ -2072,13 +2074,16 @@ pub fn mint_recovered_call_site_interface(
         // A body nobody read owns the arguments beside the result: an import
         // thunk forwards every one and reads none, so what its own body proves
         // is a floor rather than this call's contract.
-        // An unproven result is the register the call reads of it, and none where the caller
-        // writes each result register before reading it: the call is then a statement.
-        SourceFunctionReturn::Unproven => match callee
-            .result_carriers()
-            .zip(caller_reads)
-            .and_then(|(carriers, reads)| Some((carriers, read_of(reads, carriers.float)?)))
-        {
+        // An unproven result is the register the call leaves, and none where the caller writes
+        // each result register before reading it: the call is then a statement.
+        SourceFunctionReturn::Unproven => match callee.result_carriers().and_then(|carriers| {
+            let read = match caller_reads {
+                Some(reads) => read_of(reads, carriers.float)?,
+                None if carriers.float.is_none() => ResultRead::Carrier(CarrierRead::Integer),
+                None => return None,
+            };
+            Some((carriers, read))
+        }) {
             Some((_, ResultRead::None)) => SourceCallResult::Void,
             Some((carriers, ResultRead::Carrier(CarrierRead::Integer))) => {
                 SourceCallResult::Register {
