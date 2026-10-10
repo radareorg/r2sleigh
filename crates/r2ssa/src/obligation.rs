@@ -601,19 +601,25 @@ impl<'a> SeedingFacts<'a> {
     }
 
     /// Seed each conditional branch ending a block whose arms meet as the direct transfer it is,
-    /// its condition unread; the branches seeded.
+    /// with no inputs: its condition is unread. The branches seeded.
     fn seed_direct_branches(
         &self,
         graph: &SsaGraph,
         required: &mut ObligationSeeds,
+        explicit_inputs: &mut BTreeMap<
+            (InstId, SemanticObligationKind, SemanticObligationComponent),
+            Vec<ValueId>,
+        >,
     ) -> crate::dense::IdSet<InstId> {
         let direct = self.direct_branches(graph);
         for inst in direct.iter() {
-            let (kind, whole) = (
+            let identity = (
+                inst,
                 SemanticObligationKind::ControlTransfer,
                 SemanticObligationComponent::Whole,
             );
-            seed_instruction(inst, kind, whole, required);
+            seed_instruction(identity.0, identity.1, identity.2, required);
+            explicit_inputs.insert(identity, Vec::new());
         }
         direct
     }
@@ -654,7 +660,7 @@ impl SemanticObligationInventory {
         let mut duplicate_seeds =
             BTreeSet::<(InstId, SemanticObligationKind, SemanticObligationComponent)>::new();
 
-        let direct = seeding.seed_direct_branches(graph, &mut required);
+        let direct = seeding.seed_direct_branches(graph, &mut required, &mut explicit_inputs);
         for inst in graph.insts.iter().filter(|inst| !direct.contains(inst.id)) {
             match &inst.payload {
                 InstPayload::Op(op) => {
@@ -2012,6 +2018,13 @@ mod tests {
             !producer.contains(&SemanticObligationKind::LiveValueProducer),
             "{producer:?}"
         );
+        // The transfer reads nothing: no root reaches the condition (native.rs checks DeadPhis).
+        let branch = graph.inst_spelled_at(0x1000, 1).expect("the branch");
+        let transfer = inventory
+            .obligations_for_inst(branch)
+            .next()
+            .expect("its transfer");
+        assert!(transfer.inputs.is_empty(), "{transfer:?}");
     }
 
     #[test]

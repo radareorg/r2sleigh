@@ -846,3 +846,73 @@ fn an_adjustment_read_to_name_a_caller_slot_is_not_frame_setup() {
             .contains(adjust)
     );
 }
+
+/// A frame slot written whole and read back narrower, so the read stays a memory access; `observe`
+/// stores what was read to a global, else the register is overwritten unread.
+fn narrow_reread(observe: bool) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact(|block, sp| {
+        let slot = Varnode::unique(0x300, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: slot.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: slot.clone(),
+            val: Varnode::register(24, 8),
+        });
+        let read = Varnode::register(48, 4);
+        block.push(R2ILOp::Load {
+            dst: read.clone(),
+            space: SpaceId::Ram,
+            addr: slot,
+        });
+        let val = match observe {
+            true => read,
+            false => Varnode::constant(0, 4),
+        };
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val,
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(48, 4),
+            src: Varnode::constant(0, 4),
+        });
+    });
+    let load = (artifact.structured().memory_accesses.values())
+        .find(|access| !access.is_write)
+        .unwrap_or_else(|| panic!("the read: {:?}", artifact.structured().memory_accesses))
+        .id
+        .inst;
+    // The shape the renderer's pending-seeding exception asks about: a seeded private read.
+    let seeded = (artifact.facts().obligations.obligations_for_inst(load))
+        .any(|o| o.id.kind == crate::SemanticObligationKind::LiveValueProducer);
+    assert!(seeded, "{load:?}");
+    (artifact, load)
+}
+
+#[test]
+fn a_private_read_nothing_observes_is_certified_unobserved() {
+    let (artifact, load) = narrow_reread(false);
+    assert!(
+        artifact
+            .certificates()
+            .unobserved_private_reads
+            .contains(load)
+    );
+}
+
+/// Staged excuses only a certified read, so a dropped observed read stays unaccounted and refuses.
+#[test]
+fn a_private_read_whose_value_is_stored_is_not_certified_unobserved() {
+    let (artifact, load) = narrow_reread(true);
+    assert!(
+        !artifact
+            .certificates()
+            .unobserved_private_reads
+            .contains(load)
+    );
+}

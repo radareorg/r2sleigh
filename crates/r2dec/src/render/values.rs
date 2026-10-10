@@ -1927,7 +1927,9 @@ impl<'a> Values<'a> {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
         let covered = self.covered_by_residuals();
-        let frame_setup = &self.artifact.certificates().stack_geometry.frame_setup;
+        let certificates = self.artifact.certificates();
+        let frame_setup = &certificates.stack_geometry.frame_setup;
+        let unobserved_reads = &certificates.unobserved_private_reads;
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation.source.graph_inst().and_then(|inst| {
@@ -1965,7 +1967,10 @@ impl<'a> Values<'a> {
                     if matches!(
                         obligation.id.component,
                         SemanticObligationComponent::MemoryAccess(_)
-                    ) =>
+                    ) && obligation
+                        .source
+                        .graph_inst()
+                        .is_some_and(|i| unobserved_reads.contains(i)) =>
                 {
                     let reason = crate::ledger::UnsitedReason::PendingObligationSeeding;
                     let _ = ledger.record_unsited(obligation.id, reason);
