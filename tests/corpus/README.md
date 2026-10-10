@@ -31,9 +31,6 @@ lengths it used (`{0,1,2,3,4,7,8,15,16,17,31,32,61}`).
 - `lldb_r2s.sh` stops `r2s` at one source line and dumps the frame;
   `lldb_mcp.sh` serves an interactive lldb session on `r2s` over MCP
   (`.mcp.json` registers it).
-- `growth_fit.py` and `work_fit.py` fit each render stage's time and counted
-  work against the size of the body, from a timing log:
-  `R2SLEIGH_TIMING=1 tests/coverage/sweep_binary.sh <binary> > log`.
 - `cast_census.py` counts casts and narrowing reads in rendered C.
 - `arg_census.py` and `structure_census.py` measure the Rust tree itself
   (parameter counts, identifier lengths, loop nesting).

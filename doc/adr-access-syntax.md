@@ -1,6 +1,8 @@
 # ADR: one owner for how a memory access is spelled
 
-Status: done
+Status: superseded by D (doc/adr-decompiler-rewrite.md): the binding plan was
+deleted with legacy r2dec on 2026-10-10, and the renderer spells an access in
+`render::frame` and `render::terms`.
 
 ## Decision
 

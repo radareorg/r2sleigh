@@ -64,8 +64,8 @@ one lowering:
 | Tier | Crate | Shape | Print |
 |------|-------|-------|-------|
 | Low | `r2il` | machine-faithful, flags explicit, no variables ([r2il.md](r2il.md)) | `pdil` |
-| Medium | `r2ssa` | SSA with stack variables, resolved calls, dead flags removed ([ssa.md](ssa.md)) | `pdim` |
-| High | `r2dec` | structured, typed, C-shaped ([decompiler.md](decompiler.md)) | `pdih` |
+| Medium | `r2ssa` | SSA with stack variables, resolved calls, dead flags removed ([ssa.md](ssa.md)) | `pddo` (its obligations) |
+| High | `r2dec` | structured, typed, C-shaped ([decompiler.md](decompiler.md)) | `pdd` |
 
 Analysis capability
 -------------------

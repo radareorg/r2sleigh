@@ -4,7 +4,7 @@ r2dec: the high tier
 `crates/r2dec` renders a prepared SSA artifact as C. It is a certifying
 renderer: executable C is printed only where canonical facts justify it, and
 everything else is a visible residual or a refusal. `r2s` runs it as `pdd`
-(`pddj` for JSON) and prints its tree with `pdih`. The direction of the crate
+(`pddj` for JSON). The direction of the crate
 is [adr-renderer-printer.md](adr-renderer-printer.md): r2dec reads only sealed
 facts and owns no policy.
 
@@ -14,8 +14,8 @@ Input and route
 `r2engine` builds the request: it prepares a `TrustedSsaArtifact`
 ([ssa.md](ssa.md)), derives type facts ([types.md](types.md)), selects a
 `r2types::DecompileRouteKind` and seals it into `SourceOwnedFunctionFacts`,
-which retains the exact `Arc<SsaArtifact>`. `r2dec::DecompilerInput::new`
-takes that seal and nothing else.
+which retains the exact `Arc<SsaArtifact>`. `r2dec::render::RenderInput::new`
+borrows that seal and nothing else.
 
 | Route | Output |
 |-------|--------|
@@ -26,23 +26,18 @@ takes that seal and nothing else.
 Pipeline
 --------
 
-The native render runs these stages in order (names as `R2SLEIGH_TIMING`
-reports them):
+`render::render` runs one pass per stage over the sealed facts
+([adr-decompiler-rewrite.md](adr-decompiler-rewrite.md)), with no retry:
 
 | Stage | Module | Job |
 |-------|--------|-----|
-| binding plan | `binding_plan/` | project SSA identities into C bindings: which values are variables, which inline, which share an object; use and write geometry come from `r2ssa`'s `MachineProjection` |
-| fold | `fold/`, `fold/op_lower/` | lower SSA operations to C expressions; calls, memory, subscripts and wide values each have a renderer; a call site is evaluated once (`single_evaluation.rs`) |
-| structure | `structure/` | dominator-tree placement ([adr-structure-dominator-tree.md](adr-structure-dominator-tree.md)) |
-| normalize | `normalize.rs` | operation, origin, certificate and liveness passes over the tree |
-| seal | `structured_region.rs`, `placement/` | fix lexical regions, then place declarations by reaching definitions |
-| effect ledger | `effect_ledger.rs`, `ledger.rs` | account for every source obligation |
+| control | `render/control.rs`, `structure/place.rs` | write every block once by the dominator-tree placement ([adr-structure-dominator-tree.md](adr-structure-dominator-tree.md)); an unresolved test or dispatch is a marked gap |
+| values | `render/values.rs`, `render/calls.rs`, `render/frame.rs` | statements from the obligation inventory, one inline-or-bind rule, calls from their callsite certificates, the frame as one array |
+| terms | `render/terms.rs` | operations spelled as C at their width, helpers from `prelude.rs` where C has none |
+| shape | `structure/shape.rs` | jumps to the next position become fallthrough, `break` or a copied tail |
+| certificate | `structure/certify.rs` | read the text back as control and check it against the CFG |
+| ledger | `ledger.rs`, `render/proof.rs` | account for every source obligation on the proof line |
 | codegen | `codegen.rs` | print the AST (`ast.rs`) with the prelude |
-
-A lowering refusal or a proof failure that names a cell is planned as a gap,
-and a rendered read that does not see its value splits that value out of its
-shared variable; the render then runs again. Each attempt adds an anchor or a
-split no earlier one did, so the loop ends on a finite set.
 
 Structuring
 -----------
@@ -50,8 +45,8 @@ Structuring
 Placement is total for any CFG: every block is written once, in the region of
 its immediate dominator or in the exit list of the outermost loop it leaves,
 and every edge once, as adjacency, an `if` or `switch` arm, `continue` or
-`goto` (`place.rs`). Rewrites in `shape.rs` and `rewrite.rs` then turn jumps
-into `break`, loops and cleaner shapes, carrying no proof of their own.
+`goto` (`place.rs`). Rewrites in `shape.rs` then turn jumps into fallthrough,
+`break` and copied tails, carrying no proof of their own.
 
 The proof is the **control certificate** (`certify.rs`): the rendered body is
 read back by a small interpreter of C control into a graph over block
@@ -70,10 +65,9 @@ Output authority
 | `r2engine` | the route, budgets and refusal policy |
 | `r2dec` | rendering from those facts only |
 
-- **Names.** `symbol.rs` types every identifier as declared or external;
-  `unrendered.rs` reports any name that resolves to nothing (a Sleigh
-  temporary, a raw register, a frame slot) instead of letting it pass as a
-  variable.
+- **Names.** `symbol.rs` types every identifier as declared or external; a
+  value with no spelling is a residual, never a raw register or Sleigh
+  temporary passed off as a variable.
 - **Residuals.** A value the render cannot prove is a call to an
   `r2sleigh_residual_<type>(n)` helper. Flags, bit reinterpretation and other
   operations C lacks are `static inline` helpers from `prelude.rs`, defined

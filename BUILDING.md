@@ -38,6 +38,6 @@ Troubleshooting
 - **`r2s: built without the sleigh feature`**: rebuild with `--features sleigh`.
 - **A function refuses where another renders**: that is the decompiler printing
   only what it can prove. `R2DEC_TRACE_REFUSAL=1` names the refusing
-  predicate; `pdil`/`pdim`/`pdih` narrow a defect to one tier.
+  predicate; `pdil` prints the lift and `pddo` the obligations.
 - **Linker errors**: only Z3 needs a system library, and only with its
   feature on (`apt install libz3-dev`, `dnf install z3-devel`).

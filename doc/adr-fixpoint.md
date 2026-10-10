@@ -41,11 +41,11 @@ stated where it is written.
 - K2: the non-monotone passes rewritten: stack roots (`function/stack_roots.rs`, optimistic on the sparse driver), call-result certificates, control domains, `interproc` call-argument state, `predicates.rs`, and `address.rs` (values and spill slots solved together, optimistically).
 - K3: `optimize.rs` runs one stated order of passes to a fixpoint; a run at its budget (one round per operation) leaves a correct, less simplified function and says so. Its silent round cap is deleted.
 - Already-sound passes keep their own written termination arguments: value ranges, views, demand, dead phis, liveness, SCCP, dominators, `interproc` summaries, the loop-carrier worklist.
+- r2dec's `prepared_semantic` four-round loop went with legacy r2dec (D, 2026-10-10).
 
 ## Left
 
 - r2types `globals` and `arrays` still stop after 6 rounds (`for _ in 0..6`). Exit: rewritten in C3 with a stated lattice or deleted.
-- r2dec `prepared_semantic` still stops after 4 rounds. Exit: deleted with R.
 
 ## Consequences
 

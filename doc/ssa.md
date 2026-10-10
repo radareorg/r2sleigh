@@ -3,7 +3,7 @@ r2ssa: the medium tier
 
 `crates/r2ssa` turns lifted r2il into function-level SSA and owns the
 semantic evidence built on it: prepared facts, certificates and refusal
-evidence. `r2s` prints it with `pdim`. Design records:
+evidence. `r2s` prints its obligations with `pddo`. Design records:
 [adr-one-ir.md](adr-one-ir.md), [adr-stable-identity.md](adr-stable-identity.md),
 [adr-fixpoint.md](adr-fixpoint.md), [adr-written-lanes.md](adr-written-lanes.md).
 

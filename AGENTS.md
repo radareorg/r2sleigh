@@ -153,7 +153,7 @@ command, ask: does radare2 have a name for it (use it)? should it be automatic?
 should it enrich an existing view? is it only a debug surface? A command is one
 entry in `VERBS` in `crates/r2s/src/commands.rs` plus one handler, with
 happy- and failure-path tests in `crates/r2s/tests/`. Maintainer tier:
-`pdil`, `pdim`, `pdih`.
+`pdil`, `pddo`.
 
 ## Task Protocol
 

@@ -49,7 +49,6 @@ and `run_coverage.sh` builds and uses the release binary.
 | Did any rendering move, base against head? | `python3 scripts/census.py run --r2s <r2s> --out <dir>` per side, then `census.py diff <base> <head> --report <file>` (CI: Census + Timing vs Base) |
 | Did a large function get slower? | `python3 scripts/census.py time --r2s <base> --r2s <head> --bins <radare2>/test/bins/elf` (fails above 1.3x in CI) |
 | How robust is one large binary? | `tests/coverage/sweep_binary.sh <binary>` |
-| How does a stage's cost grow with the body? | `R2SLEIGH_TIMING=1 tests/coverage/sweep_binary.sh <bin>`, then `tests/corpus/growth_fit.py` / `work_fit.py` |
 
 `scripts/setup_corpus.py` builds local corpora (coreutils, CGC, Juliet) under
 `/tmp/r2sleigh-corpora`. Keep binaries and reports out of the repository, and
@@ -76,6 +75,5 @@ Diagnostics
 
 `R2DEC_TRACE_REFUSAL=1` prints every `refusal_evidence!` site with its
 predicate, file, line and operands. Use it to find where a refusal happens,
-then a debugger to see why. `R2SLEIGH_TIMING=1` reports per-stage render cost.
-The tier prints `pdil`, `pdim` and `pdih` (see the README) narrow a defect to
-one lowering.
+then a debugger to see why. `pdil` (the lift) and `pddo` (the obligations)
+narrow a defect to the lift or the rendering.
