@@ -543,15 +543,20 @@ pub(super) fn reclass(expr: CExpr, from: &MachineType, to: &MachineType) -> Opti
     }
 }
 
-/// A frame object's address plus a literal offset, as `(object, offset)`.
-fn frame_offset(arena: &TermArena, id: TermId) -> Option<(ObjectId, i64)> {
-    let signed = |id: TermId| match arena.term(id).kind {
+/// A literal read as signed at its own width: a frame offset or index below its base is negative.
+fn signed_literal(arena: &TermArena, id: TermId) -> Option<i64> {
+    match arena.term(id).kind {
         TermKind::Literal(value) => {
             let shift = 64u32.checked_sub(value.width_bits())?;
             Some(((value.bits() << shift) as i64) >> shift)
         }
         _ => None,
-    };
+    }
+}
+
+/// A frame object's address plus a literal offset, as `(object, offset)`.
+fn frame_offset(arena: &TermArena, id: TermId) -> Option<(ObjectId, i64)> {
+    let signed = |id: TermId| signed_literal(arena, id);
     let object = |id: TermId| match arena.term(id).kind {
         TermKind::ObjectAddress(object) => Some(object),
         _ => None,
@@ -618,10 +623,7 @@ impl Spell<'_> {
         bytes: u32,
         object: Option<ObjectId>,
     ) -> Option<CExpr> {
-        let literal_index = match self.arena.term(index).kind {
-            TermKind::Literal(value) => i64::try_from(value.bits()).ok(),
-            _ => None,
-        };
+        let literal_index = signed_literal(self.arena, index);
         if let (Some((named, offset)), Some(element)) =
             (frame_offset(self.arena, base), literal_index)
         {
@@ -1065,5 +1067,49 @@ mod tests {
         // Below the object, or past its end, is another object's memory or none at all.
         assert!(!inside(-8, 8, 16));
         assert!(!inside(12, 8, 16));
+    }
+
+    /// `object[-1]` with the index a 64-bit literal of all ones: element -1 lies below the object,
+    /// so the literal path refuses it and no computed address reaches the bytes before it.
+    #[test]
+    fn a_negative_literal_index_into_a_frame_object_is_refused() {
+        let mut block = r2il::R2ILBlock::new(0x1000, 4);
+        block.push(r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::unique(0x100, 8),
+            src: r2il::Varnode::constant(0, 8),
+        });
+        let artifact = r2ssa::SsaArtifact::from_blocks(&[block], None).expect("an artifact");
+        let projection = r2ssa::MachineProjection::from_artifact(&artifact).expect("a projection");
+        let mut arena = TermArena::new();
+        let base = arena.intern(ADDRESS, TermKind::ObjectAddress(ObjectId(3)));
+        let index = |arena: &mut TermArena, bits: u64| {
+            let bits = MachineBitVector::new(64, bits).expect("a 64-bit literal");
+            arena.intern(ADDRESS, TermKind::Literal(bits))
+        };
+        let (below, first) = (index(&mut arena, u64::MAX), index(&mut arena, 1));
+        let spell = super::Spell {
+            projection: &projection,
+            arena: &arena,
+            bound: &|_, _| None,
+            object: &|object| {
+                (object == ObjectId(3)).then(|| super::Placed {
+                    base: crate::ast::CExpr::UIntLit(0x40),
+                    extent: 16,
+                })
+            },
+            global: &|_, _, _| None,
+            little_endian: true,
+            return_address: None,
+        };
+        assert!(
+            spell
+                .subscript((base, first), 8, Some(ObjectId(3)))
+                .is_some()
+        );
+        assert!(
+            spell
+                .subscript((base, below), 8, Some(ObjectId(3)))
+                .is_none()
+        );
     }
 }
