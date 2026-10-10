@@ -129,6 +129,8 @@ fn a_callee_with_an_unproven_result_still_states_its_arity() {
     .output
     .into_text();
     assert_eq!(text.matches("stash(").count(), 3, "{text}");
+    // No call reads its result, so no return type is claimed for it.
+    assert!(text.contains("void stash("), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains(", 0)"), "{text}");
 }

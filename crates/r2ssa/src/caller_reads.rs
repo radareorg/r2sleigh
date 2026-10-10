@@ -16,7 +16,11 @@ pub fn reads_after_call(
     if predicated(block, index) {
         return reads;
     }
-    let mut open = Open { integer, float };
+    let mut open = Open {
+        integer,
+        float,
+        partial: false,
+    };
     for op in block.ops.iter().skip(index + 1) {
         if op.is_control_flow() {
             break;
@@ -36,6 +40,8 @@ pub fn reads_after_call(
             break;
         }
     }
+    let closed = open.integer.is_none() && open.float.is_none() && !open.partial;
+    reads.overwritten = u32::from(closed && reads.integer == 0 && reads.float == 0);
     reads
 }
 
@@ -43,6 +49,8 @@ pub fn reads_after_call(
 struct Open {
     integer: Option<CanonicalStorageId>,
     float: Option<CanonicalStorageId>,
+    /// Whether a write closed one without covering it, so its other bytes may still be read.
+    partial: bool,
 }
 
 impl Open {
@@ -63,8 +71,12 @@ impl Open {
     }
 
     fn write(&mut self, output: &Varnode) {
-        self.integer = self.integer.filter(|slot| !overlaps(output, *slot));
-        self.float = self.float.filter(|slot| !overlaps(output, *slot));
+        for open in [&mut self.integer, &mut self.float] {
+            if let Some(slot) = open.filter(|slot| overlaps(output, *slot)) {
+                self.partial |= !covers(output, slot);
+                *open = None;
+            }
+        }
     }
 }
 
@@ -86,6 +98,15 @@ fn overlaps(varnode: &Varnode, slot: CanonicalStorageId) -> bool {
     storage.space == slot.space
         && storage.offset < slot.offset.saturating_add(u64::from(slot.size))
         && slot.offset < storage.offset.saturating_add(u64::from(storage.size))
+}
+
+/// Whether `output` writes every byte of `slot`.
+fn covers(output: &Varnode, slot: CanonicalStorageId) -> bool {
+    let storage = CanonicalStorageId::from_varnode(output);
+    storage.space == slot.space
+        && storage.offset <= slot.offset
+        && storage.offset.saturating_add(u64::from(storage.size))
+            >= slot.offset.saturating_add(u64::from(slot.size))
 }
 
 #[cfg(test)]
@@ -142,7 +163,8 @@ mod tests {
             SourceResultReads {
                 integer: 1,
                 float: 0,
-                float_width: SourceFloatReadWidth::Unstated
+                float_width: SourceFloatReadWidth::Unstated,
+                overwritten: 0,
             }
         );
     }
@@ -221,8 +243,25 @@ mod tests {
             SourceResultReads {
                 integer: 0,
                 float: 1,
-                float_width: SourceFloatReadWidth::Bytes(8)
+                float_width: SourceFloatReadWidth::Bytes(8),
+                overwritten: 0,
             }
         );
+    }
+
+    /// `call f; mov rax, 0; mov xmm0, 0`: every result register is written before any read, which
+    /// proves the result unread; writing only `al` would leave the rest of RAX to read later.
+    #[test]
+    fn writes_covering_every_result_register_prove_it_unread() {
+        let write = |offset, size| R2ILOp::Copy {
+            dst: Varnode::register(offset, size),
+            src: Varnode::constant(0, size),
+        };
+        let covered = vec![call(), write(0, 8), write(0x1200, 8)];
+        let reads = reads_after_call(&block(covered), 0, Some(RAX), Some(XMM0));
+        assert_eq!((reads.integer, reads.float, reads.overwritten), (0, 0, 1));
+        let partial = vec![call(), write(0, 1), write(0x1200, 8)];
+        let reads = reads_after_call(&block(partial), 0, Some(RAX), Some(XMM0));
+        assert_eq!((reads.integer, reads.float, reads.overwritten), (0, 0, 0));
     }
 }
