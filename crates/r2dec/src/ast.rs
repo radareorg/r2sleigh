@@ -206,12 +206,6 @@ pub enum BinaryOp {
 }
 
 impl CExpr {
-    /// Attach one observation to this exact occurrence, outside any it
-    /// already carries.
-    pub(crate) fn observe_one(id: RenderObservationId, expr: CExpr) -> Self {
-        Self::observe_all([id], expr)
-    }
-
     /// Attach observations, given outermost first, to this exact occurrence.
     ///
     /// They go outside any the occurrence already carries, and into the same
@@ -255,40 +249,6 @@ impl CExpr {
         })
     }
 
-    /// Separate this occurrence's observations, outermost first, from the
-    /// semantic expression beneath them. Observations inside it stay put.
-    ///
-    /// The by-value form of [`Self::observation_ids`] and
-    /// [`Self::unobserved`]: the ids of every set stacked on the occurrence
-    /// and the expression beneath them all. One step on a canonical tree.
-    pub(crate) fn into_semantic_with_observations(self) -> (Self, Vec<RenderObservationId>) {
-        let mut semantic = self;
-        let mut outer_to_inner = Vec::new();
-        while let Self::Observed { ids, expr } = semantic {
-            if outer_to_inner.is_empty() {
-                outer_to_inner = ids.into_ids();
-            } else {
-                outer_to_inner.extend(ids);
-            }
-            semantic = *expr;
-        }
-        (semantic, outer_to_inner)
-    }
-
-    /// Visit the opaque proof markers nested in this expression.
-    ///
-    /// Semantic visitors deliberately skip wrappers. The observation journal
-    /// needs the complementary view when it composes an outer replacement
-    /// with an already-finalized inner one, so it can require that the inner
-    /// value has its own occurrence instead of marking it twice.
-    pub(crate) fn visit_render_observations(&self, visit: &mut impl FnMut(RenderObservationId)) {
-        visit_expr_observations(self, &mut |id| {
-            visit(id);
-            Ok::<(), ()>(())
-        })
-        .expect("an infallible render-observation visitor cannot refuse");
-    }
-
     /// Borrow the semantic expression beneath this occurrence's observations.
     ///
     /// One step: an occurrence carries all of its observations on one node.
@@ -303,150 +263,6 @@ impl CExpr {
             expr = inner;
         }
         expr
-    }
-
-    /// Structural equality that treats observation wrappers as metadata at
-    /// every depth, not only at the root.
-    pub(crate) fn transparently_eq(&self, other: &Self) -> bool {
-        let left = self.unobserved();
-        let right = other.unobserved();
-        match (left, right) {
-            (Self::IntLit(left), Self::IntLit(right)) => left == right,
-            (Self::UIntLit(left), Self::UIntLit(right)) => left == right,
-            (Self::FloatLit(left, lw), Self::FloatLit(right, rw)) => {
-                left.to_bits() == right.to_bits() && lw == rw
-            }
-            (Self::StringLit(left), Self::StringLit(right)) => left == right,
-            (Self::CharLit(left), Self::CharLit(right)) => left == right,
-            (Self::Var(left), Self::Var(right)) => left == right,
-            (
-                Self::External {
-                    name: left_name,
-                    kind: left_kind,
-                },
-                Self::External {
-                    name: right_name,
-                    kind: right_kind,
-                },
-            ) => left_name == right_name && left_kind == right_kind,
-            (
-                Self::DataObject {
-                    address: left_address,
-                    name: left_name,
-                },
-                Self::DataObject {
-                    address: right_address,
-                    name: right_name,
-                },
-            ) => left_address == right_address && left_name == right_name,
-            (
-                Self::Unary {
-                    op: left_op,
-                    operand: left_operand,
-                },
-                Self::Unary {
-                    op: right_op,
-                    operand: right_operand,
-                },
-            ) => left_op == right_op && left_operand.transparently_eq(right_operand),
-            (
-                Self::Binary {
-                    op: left_op,
-                    left: left_left,
-                    right: left_right,
-                },
-                Self::Binary {
-                    op: right_op,
-                    left: right_left,
-                    right: right_right,
-                },
-            ) => {
-                left_op == right_op
-                    && left_left.transparently_eq(right_left)
-                    && left_right.transparently_eq(right_right)
-            }
-            (
-                Self::Ternary {
-                    cond: left_cond,
-                    then_expr: left_then,
-                    else_expr: left_else,
-                },
-                Self::Ternary {
-                    cond: right_cond,
-                    then_expr: right_then,
-                    else_expr: right_else,
-                },
-            ) => {
-                left_cond.transparently_eq(right_cond)
-                    && left_then.transparently_eq(right_then)
-                    && left_else.transparently_eq(right_else)
-            }
-            (
-                Self::Cast {
-                    ty: left_ty,
-                    expr: left_expr,
-                    ..
-                },
-                Self::Cast {
-                    ty: right_ty,
-                    expr: right_expr,
-                    ..
-                },
-            ) => left_ty == right_ty && left_expr.transparently_eq(right_expr),
-            (
-                Self::Call {
-                    func: left_func,
-                    args: left_args,
-                    site: left_site,
-                },
-                Self::Call {
-                    func: right_func,
-                    args: right_args,
-                    site: right_site,
-                },
-            ) => {
-                left_site == right_site
-                    && left_func.transparently_eq(right_func)
-                    && transparent_expr_slices_eq(left_args, right_args)
-            }
-            (
-                Self::Subscript {
-                    base: left_base,
-                    index: left_index,
-                },
-                Self::Subscript {
-                    base: right_base,
-                    index: right_index,
-                },
-            ) => left_base.transparently_eq(right_base) && left_index.transparently_eq(right_index),
-            (
-                Self::Member {
-                    base: left_base,
-                    member: left_member,
-                },
-                Self::Member {
-                    base: right_base,
-                    member: right_member,
-                },
-            )
-            | (
-                Self::PtrMember {
-                    base: left_base,
-                    member: left_member,
-                },
-                Self::PtrMember {
-                    base: right_base,
-                    member: right_member,
-                },
-            ) => left_member == right_member && left_base.transparently_eq(right_base),
-            (Self::Sizeof(left), Self::Sizeof(right))
-            | (Self::AddrOf(left), Self::AddrOf(right))
-            | (Self::Deref(left), Self::Deref(right))
-            | (Self::Paren(left), Self::Paren(right)) => left.transparently_eq(right),
-            (Self::SizeofType(left), Self::SizeofType(right)) => left == right,
-            (Self::Comma(left), Self::Comma(right)) => transparent_expr_slices_eq(left, right),
-            _ => false,
-        }
     }
 
     /// Clone semantic expression structure without copying occurrence-owned
@@ -1022,7 +838,7 @@ impl CStmt {
     /// Every type this statement and its descendants spell, for rewriting.
     pub fn visit_types_mut(&mut self, f: &mut impl FnMut(&mut CType)) {
         match self {
-            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+            Self::Observed { stmt, .. } => {
                 stmt.visit_types_mut(f);
             }
             Self::Decl { ty, init, .. } => {
@@ -1101,7 +917,7 @@ impl CStmt {
     /// in pre-order; [`CExpr::visit`] reaches what is inside each.
     pub fn visit_exprs(&self, f: &mut impl FnMut(&CExpr)) {
         match self {
-            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+            Self::Observed { stmt, .. } => {
                 stmt.visit_exprs(f);
             }
             Self::Decl { init, .. } => {
@@ -1176,7 +992,7 @@ impl CStmt {
     /// rewriting in place, in the order [`Self::visit_exprs`] visits them.
     pub(crate) fn visit_exprs_mut(&mut self, f: &mut impl FnMut(&mut CExpr)) {
         match self {
-            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+            Self::Observed { stmt, .. } => {
                 stmt.visit_exprs_mut(f);
             }
             Self::Decl { init, .. } => {
@@ -1249,53 +1065,10 @@ impl CStmt {
         }
     }
 
-    /// Every statement this one holds, itself first, for rewriting in place.
-    ///
-    /// Observation and region markers are stepped through, so a statement
-    /// replaced here stays under the markers it stood under.
-    pub(crate) fn visit_stmts_mut(&mut self, f: &mut impl FnMut(&mut CStmt)) {
-        if let Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } = self {
-            stmt.visit_stmts_mut(f);
-            return;
-        }
-        f(self);
-        match self {
-            Self::Block(stmts) => stmts.iter_mut().for_each(|stmt| stmt.visit_stmts_mut(f)),
-            Self::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                then_body.visit_stmts_mut(f);
-                if let Some(body) = else_body {
-                    body.visit_stmts_mut(f);
-                }
-            }
-            Self::While { body, .. } | Self::DoWhile { body, .. } => body.visit_stmts_mut(f),
-            Self::For { init, body, .. } => {
-                if let Some(init) = init {
-                    init.visit_stmts_mut(f);
-                }
-                body.visit_stmts_mut(f);
-            }
-            Self::Switch { cases, default, .. } => {
-                for case in cases {
-                    case.body
-                        .iter_mut()
-                        .for_each(|stmt| stmt.visit_stmts_mut(f));
-                }
-                if let Some(default) = default {
-                    default.iter_mut().for_each(|stmt| stmt.visit_stmts_mut(f));
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Every type this statement and its descendants spell, in pre-order.
     pub fn visit_types(&self, f: &mut impl FnMut(&CType)) {
         match self {
-            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+            Self::Observed { stmt, .. } => {
                 stmt.visit_types(f);
             }
             Self::Decl { ty, init, .. } => {
@@ -1375,13 +1148,6 @@ impl CFunction {
         }
     }
 
-    /// Every statement in the body, for rewriting one in place.
-    pub(crate) fn visit_body_stmts_mut(&mut self, f: &mut impl FnMut(&mut CStmt)) {
-        for stmt in &mut self.body {
-            stmt.visit_stmts_mut(f);
-        }
-    }
-
     /// Every type this rendering spells, for rewriting one in place.
     pub fn visit_types_mut(&mut self, f: &mut impl FnMut(&mut CType)) {
         f(&mut self.ret_type);
@@ -1436,16 +1202,8 @@ impl CFunction {
     }
 }
 
-fn transparent_expr_slices_eq(left: &[CExpr], right: &[CExpr]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| left.transparently_eq(right))
-}
-
-/// Opaque dense identity of one marked AST occurrence: the staged writer's per-statement marker and
-/// the legacy journal's alike. Neither serializable nor deserializable.
+/// Opaque dense identity of one marked AST occurrence: the writer's per-statement marker. Neither
+/// serializable nor deserializable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RenderObservationId(u32);
 
@@ -1456,10 +1214,6 @@ impl RenderObservationId {
 
     pub(crate) fn from_dense_index(index: usize) -> Self {
         Self(u32::try_from(index).expect("validated observation domain fits u32"))
-    }
-
-    pub(crate) const fn from_index(index: u32) -> Self {
-        Self(index)
     }
 }
 
@@ -1597,17 +1351,6 @@ impl UnaryOp {
 /// A C statement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CStmt {
-    /// Internal lexical-region marker attached to one exact statement occurrence.
-    ///
-    /// The marker is transparent to C semantics.  It is minted and sealed by
-    /// the control-flow structurer so later lowering phases can recover exact
-    /// lexical ancestry without rebuilding it from block addresses.
-    #[doc(hidden)]
-    #[serde(skip)]
-    StructuredRegion {
-        marker: crate::structured_region::StructuredRegionMarker,
-        stmt: Box<CStmt>,
-    },
     /// Internal marker attached to one exact rendered statement occurrence.
     ///
     /// This is transparent to C rendering and must be stripped before a
@@ -1694,15 +1437,11 @@ pub enum GapKind {
     ValueNotComputed,
     /// A return the interface proves no result for.
     UnprovenReturn,
-    UnresolvedBranchCondition,
-    UnresolvedSwitchSelector,
     /// A transfer the text cannot make: control does not go on past it.
     UnresolvedIndirectBranch,
     TransferNotFollowed,
     TailTransferNotRendered,
-    /// A read that sees another value and cannot be split out of its variable.
-    StaleRead,
-    /// A legacy lowering or proof refusal, by the name its owner's `kind()` gives it.
+    /// A name no other kind spells, kept as read.
     Refused(String),
 }
 
@@ -1730,12 +1469,9 @@ impl GapKind {
             Self::ValueHasNoCType => "ValueHasNoCType",
             Self::ValueNotComputed => "ValueNotComputed",
             Self::UnprovenReturn => "UnprovenReturn",
-            Self::UnresolvedBranchCondition => "UnresolvedBranchCondition",
-            Self::UnresolvedSwitchSelector => "UnresolvedSwitchSelector",
             Self::UnresolvedIndirectBranch => "UnresolvedIndirectBranch",
             Self::TransferNotFollowed => "TransferNotFollowed",
             Self::TailTransferNotRendered => "TailTransferNotRendered",
-            Self::StaleRead => "stale_read",
             Self::Refused(name) => name.as_str(),
         };
         fixed.into()
@@ -1743,7 +1479,7 @@ impl GapKind {
 
     /// The kind a marker's spelling names: a name no fixed kind has is a refusal's.
     fn from_name(name: String) -> Self {
-        const FIXED: [GapKind; 15] = [
+        const FIXED: [GapKind; 12] = [
             GapKind::ValuesNotRendered,
             GapKind::UnsupportedInstruction,
             GapKind::CallNotRendered,
@@ -1753,12 +1489,9 @@ impl GapKind {
             GapKind::ValueHasNoCType,
             GapKind::ValueNotComputed,
             GapKind::UnprovenReturn,
-            GapKind::UnresolvedBranchCondition,
-            GapKind::UnresolvedSwitchSelector,
             GapKind::UnresolvedIndirectBranch,
             GapKind::TransferNotFollowed,
             GapKind::TailTransferNotRendered,
-            GapKind::StaleRead,
         ];
         if let Some(fixed) = FIXED.into_iter().find(|kind| kind.name() == name.as_str()) {
             return fixed;
@@ -1918,89 +1651,6 @@ fn stacked_observation_ids<'a, T: 'a>(
     }
 }
 
-/// Ordered observation metadata peeled from the outside of one statement.
-///
-/// Shape-changing passes may need to inspect or decompose the semantic
-/// statement, but the observation IDs still belong to the same source
-/// position. This chain is the single owner of that temporary separation: it
-/// is the statement's [`ObservationSet`] taken off -- every set stacked on it,
-/// joined, should a pass have left them nested -- or nothing when the
-/// statement carried none, and it is put back as that same set, so neither the
-/// order nor the cardinality can drift.
-#[derive(Debug, Default)]
-pub(crate) struct StmtObservationChain {
-    set: Option<ObservationSet>,
-}
-
-impl StmtObservationChain {
-    /// Take on another chain's markers, innermost last.
-    ///
-    /// Two statements the text replaces with one still owe every cell they
-    /// owned, so the survivor carries both chains.
-    pub(crate) fn extend(&mut self, other: Self) {
-        self.set = match (self.set.take(), other.set) {
-            (Some(outer), Some(inner)) => Some(outer.join(inner)),
-            (outer, inner) => outer.or(inner),
-        };
-    }
-
-    /// Split the markers this predicate selects out of the chain, keeping both
-    /// sides in order.
-    pub(crate) fn split_out(
-        self,
-        select: &dyn Fn(RenderObservationId) -> bool,
-    ) -> (Vec<RenderObservationId>, Self) {
-        let (selected, rest) = self
-            .into_ids()
-            .into_iter()
-            .partition::<Vec<_>, _>(|id| select(*id));
-        (
-            selected,
-            Self {
-                set: ObservationSet::new(rest),
-            },
-        )
-    }
-
-    /// The markers themselves, outermost first, for a rewrite that has to put
-    /// them somewhere other than around one statement.
-    pub(crate) fn into_ids(self) -> Vec<RenderObservationId> {
-        self.set.map_or_else(Vec::new, ObservationSet::into_ids)
-    }
-
-    /// Reattach this chain to the semantic statement at the same position.
-    pub(crate) fn reapply(self, stmt: CStmt) -> CStmt {
-        match self.set {
-            Some(set) => CStmt::observe_set(set, stmt),
-            None => stmt,
-        }
-    }
-
-    /// Move the exact statement occurrence into an expression-valued header
-    /// position without dropping its observation ownership.
-    pub(crate) fn reapply_expr(self, expr: CExpr) -> CExpr {
-        match self.set {
-            Some(set) => CExpr::observe_set(set, expr),
-            None => expr,
-        }
-    }
-
-    /// Reattach this chain when decomposition has one exact surviving statement.
-    ///
-    /// Returning `false` means the semantic position was deleted or split into
-    /// multiple statements, so no single final occurrence owns the IDs.
-    /// Callers must leave that coverage unaccounted rather than choosing a
-    /// child merely to keep the chain reachable.
-    pub(crate) fn reapply_to_unique(self, stmts: &mut [CStmt]) -> bool {
-        if stmts.len() != 1 {
-            return false;
-        }
-        let semantic = std::mem::replace(&mut stmts[0], CStmt::Empty);
-        stmts[0] = self.reapply(semantic);
-        true
-    }
-}
-
 /// A case in a switch statement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwitchCase {
@@ -2011,17 +1661,6 @@ pub struct SwitchCase {
 }
 
 impl CStmt {
-    /// Attach an unsealed lexical-region marker to this statement occurrence.
-    pub(crate) fn structured_region(
-        marker: crate::structured_region::StructuredRegionMarker,
-        stmt: CStmt,
-    ) -> Self {
-        Self::StructuredRegion {
-            marker,
-            stmt: Box::new(stmt),
-        }
-    }
-
     /// Attach one observation to this exact occurrence, outside any it
     /// already carries.
     #[cfg(test)]
@@ -2058,23 +1697,6 @@ impl CStmt {
         }
     }
 
-    /// Restore one occurrence after a pass rewrote its statement in place.
-    ///
-    /// A pass that descends through an observation and replaces what it finds
-    /// there -- a block collapsing to its only statement, a conditional
-    /// rewritten into an assignment that carries markers of its own -- can
-    /// leave an observed statement directly under this one. Both sets belong
-    /// to the one occurrence, so the inner set joins this one as its innermost
-    /// ids. Constant time when there is nothing to join.
-    pub(crate) fn rejoin_observations(&mut self) {
-        if let Self::Observed { stmt, .. } = self
-            && matches!(stmt.as_ref(), Self::Observed { .. })
-            && let Self::Observed { ids, stmt } = std::mem::replace(self, Self::Empty)
-        {
-            *self = Self::observe_set(ids, *stmt);
-        }
-    }
-
     /// The observations this occurrence carries, outermost first.
     ///
     /// Every id on the sets stacked over [`Self::unobserved`], so the two are
@@ -2087,27 +1709,6 @@ impl CStmt {
             Self::Observed { ids, stmt } => Some((ids, stmt.as_ref())),
             _ => None,
         })
-    }
-
-    /// Separate only the leading statement-observation chain from its semantic
-    /// node. Nested child observations remain in place.
-    ///
-    /// The by-value form of [`Self::observation_ids`] and
-    /// [`Self::unobserved`]: the ids of every set stacked on the occurrence
-    /// and the statement beneath them all. One step on a canonical tree.
-    pub(crate) fn into_semantic_with_observations(self) -> (Self, StmtObservationChain) {
-        let mut semantic = self;
-        let mut outer_to_inner = Vec::new();
-        while let Self::Observed { ids, stmt } = semantic {
-            if outer_to_inner.is_empty() {
-                outer_to_inner = ids.into_ids();
-            } else {
-                outer_to_inner.extend(ids);
-            }
-            semantic = *stmt;
-        }
-        let set = ObservationSet::new(outer_to_inner);
-        (semantic, StmtObservationChain { set })
     }
 
     /// Borrow the semantic statement beneath this occurrence's observations.
@@ -2124,13 +1725,6 @@ impl CStmt {
             stmt = inner;
         }
         stmt
-    }
-
-    /// Clone semantic statement data while omitting every observation wrapper.
-    pub(crate) fn clone_without_render_observations(&self) -> Self {
-        let mut clone = self.clone();
-        strip_stmt_observations(&mut clone);
-        clone
     }
 
     /// Create an expression statement.
@@ -2529,9 +2123,6 @@ pub(crate) enum RenderObservationStripError {
         id: RenderObservationId,
         expected_count: usize,
     },
-    Duplicate {
-        id: RenderObservationId,
-    },
     /// An observed occurrence directly inside another: one occurrence's ids
     /// split over two nodes. Every constructor fuses them, so this is a pass
     /// that built the node by hand or rewrote a child without rejoining.
@@ -2558,9 +2149,6 @@ impl std::fmt::Display for RenderObservationStripError {
                 "observation {} is outside expected domain 0..{expected_count}",
                 id.index()
             ),
-            Self::Duplicate { id } => {
-                write!(f, "observation {} occurs more than once", id.index())
-            }
             Self::NestedObservation { id } => write!(
                 f,
                 "observation {} wraps another observed node instead of sharing its set",
@@ -2581,13 +2169,6 @@ impl std::error::Error for RenderObservationStripError {}
 pub(crate) enum RenderObservationNode<'a> {
     Expr(&'a CExpr),
     Stmt(&'a CStmt),
-}
-
-/// Failure while transactionally inspecting a fixed observation domain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RenderObservationInspectError<E> {
-    Markers(RenderObservationStripError),
-    Observer(E),
 }
 
 fn validate_render_observations(
@@ -2629,52 +2210,7 @@ pub(crate) fn has_render_observations(function: &CFunction) -> bool {
 /// Whether one statement subtree contains any render observation marker.
 #[cfg(test)]
 pub(crate) fn stmt_has_render_observations(stmt: &CStmt) -> bool {
-    let mut found = false;
-    let never = visit_stmt_observations(stmt, &mut |_| {
-        found = true;
-        Ok::<_, std::convert::Infallible>(())
-    });
-    match never {
-        Ok(()) => found,
-        Err(never) => match never {},
-    }
-}
-
-/// Validate every marker before exposing any final wrapped node to `inspect`.
-///
-/// Marker-domain errors invoke no callback.  Callers can likewise accumulate
-/// observations in temporary storage and commit it only after this function
-/// succeeds, making conflict handling transactional as well.
-pub(crate) fn inspect_render_observations<E>(
-    function: &CFunction,
-    expected_count: usize,
-    mut inspect: impl FnMut(RenderObservationId, RenderObservationNode<'_>) -> Result<(), E>,
-) -> Result<ReachableObservations, RenderObservationInspectError<E>> {
-    let observations = validate_render_observations(function, expected_count)
-        .map_err(RenderObservationInspectError::Markers)?;
-    for stmt in &function.body {
-        inspect_stmt_observations(stmt, &mut inspect)
-            .map_err(RenderObservationInspectError::Observer)?;
-    }
-    Ok(observations)
-}
-
-/// Transactionally inspect final wrapped nodes and then remove all markers.
-///
-/// Marker validation and observer callbacks both complete before mutation.
-/// On success the already-validated AST is stripped without a redundant
-/// validation pass.
-#[cfg(test)]
-pub(crate) fn inspect_and_strip_render_observations<E>(
-    function: &mut CFunction,
-    expected_count: usize,
-    inspect: impl FnMut(RenderObservationId, RenderObservationNode<'_>) -> Result<(), E>,
-) -> Result<ReachableObservations, RenderObservationInspectError<E>> {
-    let observations = inspect_render_observations(function, expected_count, inspect)?;
-    for stmt in &mut function.body {
-        strip_stmt_observations(stmt);
-    }
-    Ok(observations)
+    inspect_stmt_observations(stmt, &mut |_, _| Err(())).is_err()
 }
 
 /// Validate and remove every internal render observation before a `CFunction`
@@ -2704,190 +2240,6 @@ pub(crate) fn discard_render_observations(function: &mut CFunction) {
     for stmt in &mut function.body {
         strip_stmt_observations(stmt);
     }
-}
-
-/// Collect the observation identities already carried by one statement tree.
-///
-/// Composite constructs use this before claiming implicit source effects: a
-/// child statement that already owns an effect is the concrete occurrence, so
-/// attaching the same cell to the parent would create two accounting markers
-/// for one rendering.
-pub(crate) fn stmt_render_observation_ids(stmt: &CStmt) -> Vec<RenderObservationId> {
-    let mut ids = Vec::new();
-    let never = visit_stmt_observations(stmt, &mut |id| {
-        ids.push(id);
-        Ok::<_, std::convert::Infallible>(())
-    });
-    match never {
-        Ok(()) => ids,
-        Err(never) => match never {},
-    }
-}
-
-/// Give every marker in a cloned statement tree a fresh occurrence identity.
-///
-/// A semantic block may be emitted in more than one certified region. Its
-/// cached AST is the authoritative fold result, but observation IDs belong to
-/// concrete AST occurrences and therefore cannot be copied with that cache.
-pub(crate) fn remap_render_observation_ids<E>(
-    stmts: &mut [CStmt],
-    remap: &mut impl FnMut(RenderObservationId) -> Result<RenderObservationId, E>,
-) -> Result<(), E> {
-    fn remap_expr<E>(
-        expr: &mut CExpr,
-        remap: &mut impl FnMut(RenderObservationId) -> Result<RenderObservationId, E>,
-    ) -> Result<(), E> {
-        if let CExpr::Observed { ids, expr } = expr {
-            for id in ids.outer_to_inner.iter_mut() {
-                *id = remap(*id)?;
-            }
-            return remap_expr(expr, remap);
-        }
-        match expr {
-            CExpr::Observed { .. } => unreachable!("handled before semantic expression"),
-            CExpr::Unary { operand, .. }
-            | CExpr::Cast { expr: operand, .. }
-            | CExpr::Sizeof(operand)
-            | CExpr::AddrOf(operand)
-            | CExpr::Deref(operand)
-            | CExpr::Paren(operand) => remap_expr(operand, remap)?,
-            CExpr::Binary { left, right, .. } => {
-                remap_expr(left, remap)?;
-                remap_expr(right, remap)?;
-            }
-            CExpr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                remap_expr(cond, remap)?;
-                remap_expr(then_expr, remap)?;
-                remap_expr(else_expr, remap)?;
-            }
-            CExpr::Call { func, args, .. } => {
-                remap_expr(func, remap)?;
-                for arg in args {
-                    remap_expr(arg, remap)?;
-                }
-            }
-            CExpr::Subscript { base, index } => {
-                remap_expr(base, remap)?;
-                remap_expr(index, remap)?;
-            }
-            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-                remap_expr(base, remap)?;
-            }
-            CExpr::Comma(items) => {
-                for item in items {
-                    remap_expr(item, remap)?;
-                }
-            }
-            CExpr::IntLit(_)
-            | CExpr::UIntLit(_)
-            | CExpr::FloatLit(..)
-            | CExpr::StringLit(_)
-            | CExpr::CharLit(_)
-            | CExpr::Var(_)
-            | CExpr::External { .. }
-            | CExpr::DataObject { .. }
-            | CExpr::SizeofType(_) => {}
-        }
-        Ok(())
-    }
-
-    fn remap_stmt<E>(
-        stmt: &mut CStmt,
-        remap: &mut impl FnMut(RenderObservationId) -> Result<RenderObservationId, E>,
-    ) -> Result<(), E> {
-        if let CStmt::Observed { ids, stmt } = stmt {
-            for id in ids.outer_to_inner.iter_mut() {
-                *id = remap(*id)?;
-            }
-            return remap_stmt(stmt, remap);
-        }
-        match stmt {
-            CStmt::StructuredRegion { stmt, .. } => remap_stmt(stmt, remap)?,
-            CStmt::Observed { .. } => unreachable!("handled before semantic statement"),
-            CStmt::Expr(expr) => remap_expr(expr, remap)?,
-            CStmt::Decl { init, .. } | CStmt::Return(init) => {
-                if let Some(expr) = init {
-                    remap_expr(expr, remap)?;
-                }
-            }
-            CStmt::Block(stmts) => {
-                for stmt in stmts {
-                    remap_stmt(stmt, remap)?;
-                }
-            }
-            CStmt::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
-                remap_expr(cond, remap)?;
-                remap_stmt(then_body, remap)?;
-                if let Some(else_body) = else_body {
-                    remap_stmt(else_body, remap)?;
-                }
-            }
-            CStmt::While { cond, body } => {
-                remap_expr(cond, remap)?;
-                remap_stmt(body, remap)?;
-            }
-            CStmt::DoWhile { body, cond } => {
-                remap_stmt(body, remap)?;
-                remap_expr(cond, remap)?;
-            }
-            CStmt::For {
-                init,
-                cond,
-                update,
-                body,
-            } => {
-                if let Some(init) = init {
-                    remap_stmt(init, remap)?;
-                }
-                if let Some(cond) = cond {
-                    remap_expr(cond, remap)?;
-                }
-                if let Some(update) = update {
-                    remap_expr(update, remap)?;
-                }
-                remap_stmt(body, remap)?;
-            }
-            CStmt::Switch {
-                expr,
-                cases,
-                default,
-            } => {
-                remap_expr(expr, remap)?;
-                for case in cases {
-                    remap_expr(&mut case.value, remap)?;
-                    for stmt in &mut case.body {
-                        remap_stmt(stmt, remap)?;
-                    }
-                }
-                if let Some(default) = default {
-                    for stmt in default {
-                        remap_stmt(stmt, remap)?;
-                    }
-                }
-            }
-            CStmt::Empty
-            | CStmt::Break
-            | CStmt::Continue
-            | CStmt::Goto(_)
-            | CStmt::Label(_)
-            | CStmt::Comment(_)
-            | CStmt::Gap(_) => {}
-        }
-        Ok(())
-    }
-
-    for stmt in stmts {
-        remap_stmt(stmt, remap)?;
-    }
-    Ok(())
 }
 
 fn inspect_expr_observations<E>(
@@ -2979,68 +2331,6 @@ impl ReachableObservations {
     }
 }
 
-fn visit_expr_observations<E>(
-    expr: &CExpr,
-    visit: &mut impl FnMut(RenderObservationId) -> Result<(), E>,
-) -> Result<(), E> {
-    if let CExpr::Observed { ids, expr } = expr {
-        for id in ids.iter() {
-            visit(id)?;
-        }
-        return visit_expr_observations(expr, visit);
-    }
-    match expr {
-        CExpr::Observed { .. } => unreachable!("handled before semantic expression"),
-        CExpr::Unary { operand, .. }
-        | CExpr::Cast { expr: operand, .. }
-        | CExpr::Sizeof(operand)
-        | CExpr::AddrOf(operand)
-        | CExpr::Deref(operand)
-        | CExpr::Paren(operand) => visit_expr_observations(operand, visit)?,
-        CExpr::Binary { left, right, .. } => {
-            visit_expr_observations(left, visit)?;
-            visit_expr_observations(right, visit)?;
-        }
-        CExpr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            visit_expr_observations(cond, visit)?;
-            visit_expr_observations(then_expr, visit)?;
-            visit_expr_observations(else_expr, visit)?;
-        }
-        CExpr::Call { func, args, .. } => {
-            visit_expr_observations(func, visit)?;
-            for arg in args {
-                visit_expr_observations(arg, visit)?;
-            }
-        }
-        CExpr::Subscript { base, index } => {
-            visit_expr_observations(base, visit)?;
-            visit_expr_observations(index, visit)?;
-        }
-        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-            visit_expr_observations(base, visit)?;
-        }
-        CExpr::Comma(items) => {
-            for item in items {
-                visit_expr_observations(item, visit)?;
-            }
-        }
-        CExpr::IntLit(_)
-        | CExpr::UIntLit(_)
-        | CExpr::FloatLit(..)
-        | CExpr::StringLit(_)
-        | CExpr::CharLit(_)
-        | CExpr::Var(_)
-        | CExpr::External { .. }
-        | CExpr::DataObject { .. }
-        | CExpr::SizeofType(_) => {}
-    }
-    Ok(())
-}
-
 fn strip_expr_observations(expr: &mut CExpr) {
     // A loop rather than one step: this also strips an audit that failed,
     // whose tree is not known to be canonical.
@@ -3098,95 +2388,6 @@ fn strip_expr_observations(expr: &mut CExpr) {
     }
 }
 
-fn visit_stmt_observations<E>(
-    stmt: &CStmt,
-    visit: &mut impl FnMut(RenderObservationId) -> Result<(), E>,
-) -> Result<(), E> {
-    if let CStmt::Observed { ids, stmt } = stmt {
-        for id in ids.iter() {
-            visit(id)?;
-        }
-        return visit_stmt_observations(stmt, visit);
-    }
-    match stmt {
-        CStmt::StructuredRegion { stmt, .. } => visit_stmt_observations(stmt, visit)?,
-        CStmt::Observed { .. } => unreachable!("handled before semantic statement"),
-        CStmt::Expr(expr) => visit_expr_observations(expr, visit)?,
-        CStmt::Decl { init, .. } | CStmt::Return(init) => {
-            if let Some(expr) = init {
-                visit_expr_observations(expr, visit)?;
-            }
-        }
-        CStmt::Block(stmts) => {
-            for stmt in stmts {
-                visit_stmt_observations(stmt, visit)?;
-            }
-        }
-        CStmt::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
-            visit_expr_observations(cond, visit)?;
-            visit_stmt_observations(then_body, visit)?;
-            if let Some(else_body) = else_body {
-                visit_stmt_observations(else_body, visit)?;
-            }
-        }
-        CStmt::While { cond, body } => {
-            visit_expr_observations(cond, visit)?;
-            visit_stmt_observations(body, visit)?;
-        }
-        CStmt::DoWhile { body, cond } => {
-            visit_stmt_observations(body, visit)?;
-            visit_expr_observations(cond, visit)?;
-        }
-        CStmt::For {
-            init,
-            cond,
-            update,
-            body,
-        } => {
-            if let Some(init) = init {
-                visit_stmt_observations(init, visit)?;
-            }
-            if let Some(cond) = cond {
-                visit_expr_observations(cond, visit)?;
-            }
-            if let Some(update) = update {
-                visit_expr_observations(update, visit)?;
-            }
-            visit_stmt_observations(body, visit)?;
-        }
-        CStmt::Switch {
-            expr,
-            cases,
-            default,
-        } => {
-            visit_expr_observations(expr, visit)?;
-            for case in cases {
-                visit_expr_observations(&case.value, visit)?;
-                for stmt in &case.body {
-                    visit_stmt_observations(stmt, visit)?;
-                }
-            }
-            if let Some(default) = default {
-                for stmt in default {
-                    visit_stmt_observations(stmt, visit)?;
-                }
-            }
-        }
-        CStmt::Empty
-        | CStmt::Break
-        | CStmt::Continue
-        | CStmt::Goto(_)
-        | CStmt::Label(_)
-        | CStmt::Comment(_)
-        | CStmt::Gap(_) => {}
-    }
-    Ok(())
-}
-
 fn inspect_stmt_observations<E>(
     stmt: &CStmt,
     inspect: &mut impl FnMut(RenderObservationId, RenderObservationNode<'_>) -> Result<(), E>,
@@ -3198,7 +2399,6 @@ fn inspect_stmt_observations<E>(
         return inspect_stmt_observations(stmt, inspect);
     }
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } => inspect_stmt_observations(stmt, inspect)?,
         CStmt::Observed { .. } => unreachable!("handled before semantic statement"),
         CStmt::Expr(expr) => inspect_expr_observations(expr, inspect)?,
         CStmt::Decl { init, .. } | CStmt::Return(init) => {
@@ -3276,68 +2476,6 @@ fn inspect_stmt_observations<E>(
     Ok(())
 }
 
-/// Move only a source expression's leading observations onto a replacement
-/// for that same occurrence.
-pub(crate) fn carry_outer_expr_observations(source: &CExpr, replacement: CExpr) -> CExpr {
-    CExpr::observe_all(source.observation_ids().iter().copied(), replacement)
-}
-
-/// Every observation in an expression, in pre-order and each occurrence's
-/// ids outermost first: the order a walk of the old one-wrapper-per-id chains
-/// met them.
-///
-/// An explicit stack over borrowed nodes. The walk this replaces cloned the
-/// subtree at every level to reach its children, which is quadratic in the
-/// height of the expression. Each node takes the ids of every set stacked on
-/// it before the walk descends from beneath them all.
-fn expr_observation_ids_in_preorder(expr: &CExpr) -> Vec<RenderObservationId> {
-    let mut ids = Vec::new();
-    let mut pending = vec![expr];
-    while let Some(expr) = pending.pop() {
-        ids.extend_from_slice(&expr.observation_ids());
-        pending.extend(expr.unobserved().children().into_iter().rev());
-    }
-    ids
-}
-
-/// Move every observation in a source expression onto a replacement that
-/// stands for the whole of it.
-///
-/// `carry_outer_expr_observations` is right when the replacement keeps the
-/// source's subtrees, since the markers inside them travel with those
-/// subtrees. It is wrong when the replacement discards them: folding
-/// `(uint64_t)(int32_t)0xcc9e2d51` down to one literal, or turning an address
-/// into `&name`, throws away whatever the collapsed nodes were marked with,
-/// and the accounting then reports an effect that was rendered as refused.
-///
-/// The replacement renders everything the source rendered, so it owns every
-/// occurrence the source owned. Order is preserved outermost-first so the
-/// rebuilt set reads the same way round as the ones it replaces.
-pub(crate) fn carry_all_expr_observations(source: &CExpr, replacement: CExpr) -> CExpr {
-    CExpr::observe_all(expr_observation_ids_in_preorder(source), replacement)
-}
-
-/// Move every marker in `source` onto its replacement, each at its own kind of position.
-pub(crate) fn carry_all_stmt_observations(source: &[CStmt], replacement: CStmt) -> CStmt {
-    let mut statement_ids = Vec::new();
-    let mut expression_ids = Vec::new();
-    for stmt in source {
-        statement_ids.extend_from_slice(&stmt.observation_ids());
-        let _ = visit_stmt_observations::<std::convert::Infallible>(stmt.unobserved(), &mut |id| {
-            expression_ids.push(id);
-            Ok(())
-        });
-    }
-    let replacement = match (replacement, expression_ids.is_empty()) {
-        (CStmt::Expr(expr), false) => CStmt::Expr(CExpr::observe_all(expression_ids, expr)),
-        (replacement, _) => {
-            statement_ids.extend(expression_ids);
-            replacement
-        }
-    };
-    CStmt::observe_all(statement_ids, replacement)
-}
-
 pub(crate) fn strip_stmt_observations(stmt: &mut CStmt) {
     // A loop rather than one step: this also strips an audit that failed,
     // whose tree is not known to be canonical.
@@ -3345,7 +2483,6 @@ pub(crate) fn strip_stmt_observations(stmt: &mut CStmt) {
         *stmt = std::mem::replace(inner.as_mut(), CStmt::Empty);
     }
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } => strip_stmt_observations(stmt),
         CStmt::Observed { .. } => unreachable!("all leading observations were stripped"),
         CStmt::Expr(expr) => strip_expr_observations(expr),
         CStmt::Decl { init, .. } | CStmt::Return(init) => {
@@ -3430,6 +2567,22 @@ pub(crate) fn literal_value(expr: &CExpr) -> Option<u64> {
         CExpr::IntLit(value) => u64::try_from(*value).ok(),
         CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => literal_value(inner),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+impl RenderObservationId {
+    pub(crate) const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+#[cfg(test)]
+impl CExpr {
+    /// Attach one observation to this exact occurrence, outside any it
+    /// already carries.
+    pub(crate) fn observe_one(id: RenderObservationId, expr: CExpr) -> Self {
+        Self::observe_all([id], expr)
     }
 }
 
@@ -3606,61 +2759,6 @@ mod tests {
     }
 
     #[test]
-    fn statement_observation_chain_round_trips_in_nesting_order_once() {
-        let semantic = CStmt::Expr(CExpr::IntLit(7));
-        let mut owner = RenderObservationOwner::new();
-        let (inner_id, inner) = owner
-            .observe_stmt(semantic.clone())
-            .expect("inner statement observation");
-        let (outer_id, wrapped) = owner
-            .observe_stmt(inner)
-            .expect("outer statement observation");
-
-        let (peeled, observations) = wrapped.clone().into_semantic_with_observations();
-        assert_eq!(peeled, semantic);
-        let rebuilt = observations.reapply(peeled);
-        assert_eq!(rebuilt, wrapped, "outer and inner IDs must not reorder");
-
-        let mut function = CFunction::new("stmt_chain", CType::Void).with_body(vec![rebuilt]);
-        let reachable = strip_render_observations(&mut function, owner.expected_count())
-            .expect("recomposition must retain every ID exactly once");
-        assert!(reachable.contains(inner_id));
-        assert!(reachable.contains(outer_id));
-        assert_eq!(function.body, vec![semantic]);
-    }
-
-    #[test]
-    fn final_node_inspection_visits_subscript_markers_once() {
-        let mut owner = RenderObservationOwner::new();
-        let (base_id, base) = owner
-            .observe_expr(CExpr::IntLit(1))
-            .expect("base observation");
-        let (index_id, index) = owner
-            .observe_expr(CExpr::IntLit(2))
-            .expect("index observation");
-        let function =
-            CFunction::new("inspect", CType::Void).with_body(vec![CStmt::Expr(CExpr::Subscript {
-                base: Box::new(base),
-                index: Box::new(index),
-            })]);
-        let mut visited = Vec::new();
-        inspect_render_observations(
-            &function,
-            owner.expected_count(),
-            |id, node| -> Result<(), std::convert::Infallible> {
-                assert!(matches!(
-                    node,
-                    RenderObservationNode::Expr(CExpr::IntLit(_))
-                ));
-                visited.push(id);
-                Ok(())
-            },
-        )
-        .expect("valid marker inspection");
-        assert_eq!(visited, vec![base_id, index_id]);
-    }
-
-    #[test]
     fn semantic_clones_drop_occurrence_owned_observations() {
         let mut owner = RenderObservationOwner::new();
         let (_, left) = owner
@@ -3791,136 +2889,6 @@ mod tests {
                 Err(RenderObservationStripError::DomainTooLarge { expected_count })
             );
         }
-    }
-
-    /// An observed node directly inside another splits one occurrence's set.
-    ///
-    /// The constructors fuse, and a node built by hand around another -- the
-    /// only way to get one -- is refused by the seal with its own error and
-    /// the tree left as it was, found at the first layer rather than by
-    /// following the chain. A pass that rewrote a child in place puts the two
-    /// back together as one set, outer ids first.
-    #[test]
-    fn a_nested_observation_is_refused_and_rejoins_as_one_set() {
-        let outer = RenderObservationId::from_index(0);
-        let inner = RenderObservationId::from_index(1);
-        let nested = CStmt::Observed {
-            ids: ObservationSet::new(vec![outer]).expect("one id"),
-            stmt: Box::new(CStmt::observe_one(inner, CStmt::Empty)),
-        };
-        let mut function = CFunction::new("nested", CType::Void).with_body(vec![nested.clone()]);
-        assert_eq!(
-            strip_render_observations(&mut function, 2),
-            Err(RenderObservationStripError::NestedObservation { id: outer })
-        );
-        assert_eq!(function.body, vec![nested.clone()]);
-
-        let mut rejoined = nested;
-        rejoined.rejoin_observations();
-        assert!(matches!(
-            rejoined.observation_ids(),
-            std::borrow::Cow::Borrowed(ids) if ids == [outer, inner]
-        ));
-        assert_eq!(rejoined.unobserved(), &CStmt::Empty);
-        assert_eq!(
-            rejoined,
-            CStmt::observe_all([outer], CStmt::observe_one(inner, CStmt::Empty))
-        );
-        let mut function = CFunction::new("rejoined", CType::Void).with_body(vec![rejoined]);
-        let reachable = strip_render_observations(&mut function, 2).expect("one set");
-        assert_eq!(reachable.ids().collect::<Vec<_>>(), vec![outer, inner]);
-    }
-
-    /// A rebuild from a nested occurrence carries every set it stands in.
-    ///
-    /// The rebuilders take the semantic node from beneath every stacked set,
-    /// so they have to take the ids of every one of those sets too: an id
-    /// left behind with a discarded layer is a cell nothing answers, and the
-    /// seal would report it as unaccounted instead of naming the nesting.
-    /// Each rebuild comes out canonical, the sets joined outer first.
-    #[test]
-    fn a_rebuild_from_a_nested_occurrence_carries_every_set() {
-        let [outer, inner, child] = [0, 1, 2].map(RenderObservationId::from_index);
-        let nested_expr = |semantic: CExpr| CExpr::Observed {
-            ids: ObservationSet::new(vec![outer]).expect("one id"),
-            expr: Box::new(CExpr::observe_one(inner, semantic)),
-        };
-        let one_set = |semantic: CExpr| CExpr::observe_all([outer, inner], semantic);
-
-        assert_eq!(
-            *nested_expr(CExpr::IntLit(1)).observation_ids(),
-            [outer, inner]
-        );
-        assert_eq!(
-            carry_all_expr_observations(&nested_expr(CExpr::IntLit(1)), CExpr::IntLit(2)),
-            one_set(CExpr::IntLit(2))
-        );
-        assert_eq!(
-            carry_outer_expr_observations(&nested_expr(CExpr::IntLit(1)), CExpr::IntLit(2)),
-            one_set(CExpr::IntLit(2))
-        );
-        assert_eq!(
-            nested_expr(CExpr::IntLit(1)).into_semantic_with_observations(),
-            (CExpr::IntLit(1), vec![outer, inner])
-        );
-
-        // `(uint8_t)(uint32_t)7` narrows once; the markers on the dropped
-        // conversion land on what it converted.
-        let int = |bits| CType::Int {
-            bits,
-            signedness: r2types::Signedness::Unsigned,
-        };
-        let x = CExpr::UIntLit(7);
-        let widened = CExpr::Cast {
-            ty: int(32),
-            expr: Box::new(x.clone()),
-            role: CastRole::Conversion,
-        };
-        assert_eq!(
-            CExpr::cast_with_role(int(8), nested_expr(widened), CastRole::Conversion),
-            CExpr::Cast {
-                ty: int(8),
-                expr: Box::new(one_set(x)),
-                role: CastRole::Conversion,
-            }
-        );
-
-        let nested_stmt = CStmt::Observed {
-            ids: ObservationSet::new(vec![outer]).expect("one id"),
-            stmt: Box::new(CStmt::observe_one(
-                inner,
-                CStmt::Expr(CExpr::observe_one(child, CExpr::IntLit(1))),
-            )),
-        };
-        assert_eq!(*nested_stmt.observation_ids(), [outer, inner]);
-        let (semantic, chain) = nested_stmt.clone().into_semantic_with_observations();
-        assert_eq!(
-            semantic,
-            CStmt::Expr(CExpr::observe_one(child, CExpr::IntLit(1)))
-        );
-        assert_eq!(
-            chain.reapply(CStmt::Empty),
-            CStmt::observe_all([outer, inner], CStmt::Empty)
-        );
-        assert_eq!(
-            carry_all_stmt_observations(&[nested_stmt], CStmt::Expr(CExpr::IntLit(2))),
-            CStmt::observe_all(
-                [outer, inner],
-                CStmt::Expr(CExpr::observe_one(child, CExpr::IntLit(2)))
-            )
-        );
-    }
-
-    #[test]
-    fn transparent_equality_ignores_nested_observations() {
-        let mut owner = RenderObservationOwner::new();
-        let (_, nested) = owner
-            .observe_expr(CExpr::IntLit(1))
-            .expect("allocate nested observation");
-        let plain = CExpr::binary(BinaryOp::Add, CExpr::IntLit(1), CExpr::IntLit(2));
-        let wrapped = CExpr::binary(BinaryOp::Add, nested, CExpr::IntLit(2));
-        assert!(plain.transparently_eq(&wrapped));
-        assert!(wrapped.transparently_eq(&plain));
     }
 }
 

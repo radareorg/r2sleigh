@@ -1091,16 +1091,8 @@ fn inner_stops_keep_exact_audits(polled: &[EnginePhase]) {
 
 #[test]
 fn r2dec_stop_mapping_preserves_all_decompiler_phases_and_reasons() {
-    // Production r2dec deliberately refuses executable Standard rendering before its
-    // structurer, while every non-Standard route exits at a summary boundary. The r2dec
-    // assignment-consensus test therefore exercises the actual inner Structuring stop;
-    // this engine test covers its exact cross-crate phase/reason mapping without weakening
-    // that fail-closed authorization boundary.
+    // Each renderer phase maps to its engine phase, with the reason spelled and the ledger kept.
     for (decompile_phase, engine_phase) in [
-        (
-            r2dec::DecompileWorkPhase::Normalization,
-            EnginePhase::Normalization,
-        ),
         (
             r2dec::DecompileWorkPhase::Structuring,
             EnginePhase::Structuring,
@@ -1133,10 +1125,7 @@ fn r2dec_stop_mapping_preserves_all_decompiler_phases_and_reasons() {
                     + counted.gapped
                     + counted.unaccounted
             );
-            assert_eq!(
-                mapped.normalization_completed,
-                !matches!(decompile_phase, r2dec::DecompileWorkPhase::Normalization)
-            );
+            assert!(mapped.normalization_completed);
             assert_eq!(
                 mapped.structuring_completed,
                 matches!(decompile_phase, r2dec::DecompileWorkPhase::Rendering)

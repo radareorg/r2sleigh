@@ -13,13 +13,12 @@
 //! kind of outside thing it is, so calling something external is a claim a
 //! reader can check rather than a string that arrived from somewhere.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{CExpr, CType};
+use crate::ast::CType;
 
 /// A name the function declares. Minted only by declaring one.
 ///
@@ -160,21 +159,6 @@ impl SymbolTable {
         }
     }
 
-    /// Reserve the identity of a sealed renderer binding before declaration
-    /// placement is derived.
-    ///
-    /// This does not assert that the final AST declares the symbol. Only the
-    /// placement phase may add it to a parameter, function-local, or lexical
-    /// declaration site; emission refuses any surviving unplaced reference.
-    pub(crate) fn reserve_binding(
-        &mut self,
-        presentation_name: impl Into<String>,
-        ty: CType,
-        role: SymbolRole,
-    ) -> SymbolId {
-        self.declare(presentation_name, ty, role)
-    }
-
     /// Mint an identifier for a position in this table.
     fn id_at(&self, index: usize) -> SymbolId {
         SymbolId {
@@ -282,15 +266,6 @@ impl SymbolTable {
         &self.symbols[self.resolve(id)]
     }
 
-    /// The spelling as a shared handle, so a caller can drop the table borrow.
-    ///
-    /// Reading a spelling and then building an expression is the common shape,
-    /// and building mints, so a caller holding a borrow across it would panic.
-    /// Cloning the handle is a refcount bump, not a copy of the text.
-    pub fn spelling(&self, id: SymbolId) -> Rc<str> {
-        Rc::clone(&self.get(id).name)
-    }
-
     pub fn name(&self, id: SymbolId) -> &str {
         &self.symbols[self.resolve(id)].name
     }
@@ -345,6 +320,24 @@ impl SymbolTable {
     pub fn is_empty(&self) -> bool {
         self.symbols.is_empty()
     }
+}
+
+/// Declare this spelling, or return the identifier it already has.
+///
+/// The borrow ends when this returns, so two declarations may appear in one
+/// statement. Writing `borrow_mut()` inline holds the guard to the end of the
+/// statement instead, and a second declaration there deadlocks.
+#[cfg(test)]
+#[track_caller]
+#[inline(always)]
+pub fn declare(symbols: &std::cell::RefCell<SymbolTable>, name: impl AsRef<str>) -> SymbolId {
+    let name = name.as_ref();
+    if let Some(want) = crate::debug::traced_variable_name()
+        && name.eq_ignore_ascii_case(want)
+    {
+        eprintln!("NAMEDECL {name} via {}", std::panic::Location::caller());
+    }
+    symbols.borrow_mut().declare_or_reuse(name)
 }
 
 #[cfg(test)]
@@ -511,37 +504,4 @@ mod reuse_tests {
         assert_eq!(symbols.declare_or_reuse("total"), declared);
         assert_eq!(symbols.len(), 1);
     }
-}
-
-/// A reference to this spelling, declaring it if nothing has yet.
-///
-/// Analysis builds candidate expressions before anything decides to render
-/// them, so it mints here rather than handing spellings forward for a later
-/// layer to declare. A candidate that is dropped costs one unused table entry.
-#[track_caller]
-#[inline(always)]
-pub fn var_ref(symbols: &RefCell<SymbolTable>, name: impl AsRef<str>) -> CExpr {
-    CExpr::Var(crate::symbol::declare(symbols, name.as_ref()))
-}
-
-/// Declare this spelling, or return the identifier it already has.
-///
-/// The borrow ends when this returns, so two declarations may appear in one
-/// statement. Writing `borrow_mut()` inline holds the guard to the end of the
-/// statement instead, and a second declaration there deadlocks.
-#[track_caller]
-#[inline(always)]
-pub fn declare(symbols: &RefCell<SymbolTable>, name: impl AsRef<str>) -> SymbolId {
-    let name = name.as_ref();
-    if let Some(want) = crate::debug::traced_variable_name()
-        && name.eq_ignore_ascii_case(want)
-    {
-        eprintln!("NAMEDECL {name} via {}", std::panic::Location::caller());
-    }
-    symbols.borrow_mut().declare_or_reuse(name)
-}
-
-/// How a reference is spelled, for code that holds the table rather than a self.
-pub fn spelling(symbols: &RefCell<SymbolTable>, id: SymbolId) -> Rc<str> {
-    symbols.borrow().spelling(id)
 }

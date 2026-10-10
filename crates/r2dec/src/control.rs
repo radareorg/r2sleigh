@@ -5,7 +5,6 @@ use r2ssa::{SsaExecutionStopReason, SsaWorkControl};
 /// Decompiler phase in which cooperative execution stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecompileWorkPhase {
-    Normalization,
     Structuring,
     Rendering,
 }

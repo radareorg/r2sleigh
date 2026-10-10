@@ -8,8 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinaryOp, CExpr, CStmt, RenderObservationId, UnaryOp};
-use crate::structured_region::StructuredRegionKind;
+use crate::ast::{BinaryOp, CExpr, CStmt, RenderObservationId};
 use crate::symbol::SymbolId;
 
 /// What runs after a statement completes normally.
@@ -40,21 +39,19 @@ struct Scope {
 }
 
 /// The structural rewrites, in order: jumps to the next position and to
-/// the end of a breakable go, loops take their shape, unreferenced labels
-/// go.
+/// the end of a breakable go, unreferenced labels go, and a skipped block
+/// is copied into the arms that fall to it.
 /// `fresh` copies a statement as a new occurrence, with markers of its own for the same cells.
 pub(crate) fn shape(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: CStmt) -> CStmt {
     let mut stmt = stmt;
     let scope = Scope {
         break_to: Cont::Unknown,
     };
-    absorb_switch_tails(&mut stmt);
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
     // A skipped block shows only once the jumps to it have gone.
     duplicate_skipped_tails(fresh, &mut stmt);
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
-    rotate_loops(&mut stmt);
     drop_unreferenced_labels(&mut stmt);
     stmt
 }
@@ -76,7 +73,7 @@ pub(crate) fn select(
     }
     let mut each = |stmt: &mut CStmt| select(stmt, convert, block_of, selections);
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => each(stmt),
+        CStmt::Observed { stmt, .. } => each(stmt),
         CStmt::Block(stmts) => stmts.iter_mut().for_each(each),
         CStmt::If {
             then_body,
@@ -173,210 +170,6 @@ fn sole_arm_assignment(arm: &CStmt) -> Option<(Vec<RenderObservationId>, SymbolI
     Some((ids, *target, right.as_ref().clone()))
 }
 
-/// A case arm that is one `goto` to a block placed after the switch takes
-/// that block as its body, when nothing else jumps there: the block was a
-/// merge only because the previous case falls into it, and C says that
-/// by writing the cases in order without `break`.
-fn absorb_switch_tails(stmt: &mut CStmt) {
-    let mut references = std::collections::BTreeMap::<String, usize>::new();
-    count_gotos(stmt, &mut references);
-    absorb_in(stmt, &references);
-}
-
-fn absorb_in(stmt: &mut CStmt, references: &std::collections::BTreeMap<String, usize>) {
-    match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            absorb_in(stmt, references)
-        }
-        CStmt::Block(stmts) => {
-            let mut index = 0;
-            while index < stmts.len() {
-                absorb_in(&mut stmts[index], references);
-                if switch_of(&mut stmts[index]).is_some() {
-                    absorb_following(stmts, index, references);
-                }
-                index += 1;
-            }
-        }
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            absorb_in(then_body, references);
-            if let Some(else_body) = else_body {
-                absorb_in(else_body, references);
-            }
-        }
-        CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            absorb_in(body, references)
-        }
-        CStmt::Switch { cases, default, .. } => {
-            for case in cases {
-                case.body
-                    .iter_mut()
-                    .for_each(|stmt| absorb_in(stmt, references));
-            }
-            if let Some(default) = default {
-                default
-                    .iter_mut()
-                    .for_each(|stmt| absorb_in(stmt, references));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The switch statement inside a switch marker's wrappers.
-fn switch_of(stmt: &mut CStmt) -> Option<&mut CStmt> {
-    let CStmt::StructuredRegion { marker, stmt } = stmt else {
-        return None;
-    };
-    if marker.kind() != StructuredRegionKind::Switch {
-        return None;
-    }
-    let mut inner: &mut CStmt = stmt;
-    while let CStmt::Observed { stmt, .. } = inner {
-        inner = stmt;
-    }
-    matches!(inner, CStmt::Switch { .. }).then_some(inner)
-}
-
-/// Move the labelled blocks following `stmts[index]` into the case arms
-/// that are a lone `goto` to them, one after another.
-fn absorb_following(
-    stmts: &mut Vec<CStmt>,
-    index: usize,
-    references: &std::collections::BTreeMap<String, usize>,
-) {
-    loop {
-        let Some(next) = stmts.get(index + 1) else {
-            return;
-        };
-        let Some(label) = leading_label(next) else {
-            return;
-        };
-        let count = references.get(&label).copied().unwrap_or(0);
-        let arm_index = {
-            let Some(CStmt::Switch { cases, default, .. }) = switch_of(&mut stmts[index]) else {
-                return;
-            };
-            let bodies: Vec<&Vec<CStmt>> = cases
-                .iter()
-                .map(|case| &case.body)
-                .chain(default.iter())
-                .collect();
-            let Some(arm_index) = bodies
-                .iter()
-                .position(|body| lone_goto(body) == Some(label.as_str()))
-            else {
-                return;
-            };
-            // The one other jump allowed is the previous arm falling into
-            // this block, which C spells by writing the arms in order.
-            let previous_falls_in = arm_index > 0
-                && bodies[arm_index - 1]
-                    .last()
-                    .and_then(trailing_goto)
-                    .is_some_and(|name| name == label);
-            if count != 1 + usize::from(previous_falls_in) {
-                return;
-            }
-            arm_index
-        };
-        let block = stmts.remove(index + 1);
-        let Some(CStmt::Switch { cases, default, .. }) = switch_of(&mut stmts[index]) else {
-            return;
-        };
-        let Some(arm) = cases
-            .iter_mut()
-            .map(|case| &mut case.body)
-            .chain(default.iter_mut())
-            .nth(arm_index)
-        else {
-            return;
-        };
-        arm.pop();
-        arm.push(block);
-    }
-}
-
-/// The `goto` a statement's text ends with, through markers and blocks.
-fn trailing_goto(stmt: &CStmt) -> Option<String> {
-    match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => trailing_goto(stmt),
-        CStmt::Block(stmts) => stmts.last().and_then(trailing_goto),
-        CStmt::Goto(name) => Some(name.clone()),
-        _ => None,
-    }
-}
-
-/// The label a body jumps to when its last statement is a `goto` and the
-/// rest are plain statements.
-fn lone_goto(body: &[CStmt]) -> Option<&str> {
-    let (last, rest) = body.split_last()?;
-    if rest.iter().any(|stmt| {
-        !matches!(
-            stmt.unobserved(),
-            CStmt::Expr(_) | CStmt::Empty | CStmt::Comment(_)
-        )
-    }) {
-        return None;
-    }
-    match last.unobserved() {
-        CStmt::Goto(name) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
-fn count_gotos(stmt: &CStmt, into: &mut std::collections::BTreeMap<String, usize>) {
-    let mut names = Vec::new();
-    collect_goto_names(stmt, &mut names);
-    for name in names {
-        *into.entry(name).or_default() += 1;
-    }
-}
-
-fn collect_goto_names(stmt: &CStmt, into: &mut Vec<String>) {
-    match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            collect_goto_names(stmt, into)
-        }
-        CStmt::Block(stmts) => stmts.iter().for_each(|stmt| collect_goto_names(stmt, into)),
-        CStmt::Goto(name) => into.push(name.clone()),
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            collect_goto_names(then_body, into);
-            if let Some(else_body) = else_body {
-                collect_goto_names(else_body, into);
-            }
-        }
-        CStmt::For { init, body, .. } => {
-            if let Some(init) = init {
-                collect_goto_names(init, into);
-            }
-            collect_goto_names(body, into);
-        }
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => collect_goto_names(body, into),
-        CStmt::Switch { cases, default, .. } => {
-            for case in cases {
-                case.body
-                    .iter()
-                    .for_each(|stmt| collect_goto_names(stmt, into));
-            }
-            if let Some(default) = default {
-                default
-                    .iter()
-                    .for_each(|stmt| collect_goto_names(stmt, into));
-            }
-        }
-        _ => {}
-    }
-}
-
 /// `if (c) { A; goto L; } T; L:` where `T` is one block's straight-line
 /// text is the compiler's tail merge of `if (c) { A } else { T }`: the
 /// paths that do not jump each get their own copy of `T`, and the jumps
@@ -384,9 +177,7 @@ fn collect_goto_names(stmt: &CStmt, into: &mut Vec<String>) {
 /// duplicated, because that is the unit a compiler merged.
 fn duplicate_skipped_tails(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: &mut CStmt) {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            duplicate_skipped_tails(fresh, stmt)
-        }
+        CStmt::Observed { stmt, .. } => duplicate_skipped_tails(fresh, stmt),
         CStmt::Block(stmts) => duplicate_in_body(fresh, stmts),
         CStmt::If {
             then_body,
@@ -451,9 +242,6 @@ fn duplicate_in_sequence(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmts: &mut Vec
 /// One block's text, straight-line: statements only, no label or jump.
 fn is_plain_block(stmt: &CStmt) -> bool {
     match stmt {
-        CStmt::StructuredRegion { marker, stmt } => {
-            marker.kind() == StructuredRegionKind::Block && is_plain_block(stmt)
-        }
         CStmt::Observed { stmt, .. } => is_plain_block(stmt),
         CStmt::Block(stmts) => stmts.iter().all(is_plain_block),
         CStmt::Expr(_) | CStmt::Empty | CStmt::Comment(_) => true,
@@ -465,9 +253,7 @@ fn is_plain_block(stmt: &CStmt) -> bool {
 /// out of it; a conditional that does anything else counts as neither.
 fn count_arm_ends(stmt: &CStmt, label: &str, jumps: &mut usize, falls: &mut usize) {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            count_arm_ends(stmt, label, jumps, falls)
-        }
+        CStmt::Observed { stmt, .. } => count_arm_ends(stmt, label, jumps, falls),
         CStmt::Block(stmts) => match stmts.last() {
             Some(last) => count_arm_ends(last, label, jumps, falls),
             None => *falls += 1,
@@ -497,16 +283,9 @@ fn count_arm_ends(stmt: &CStmt, label: &str, jumps: &mut usize, falls: &mut usiz
 /// Append the next copy of the tail to every arm end that falls out.
 fn append_to_falling_arms(stmt: &mut CStmt, copies: &mut impl Iterator<Item = CStmt>) {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            append_to_falling_arms(stmt, copies)
-        }
+        CStmt::Observed { stmt, .. } => append_to_falling_arms(stmt, copies),
         CStmt::Block(stmts) => match stmts.last_mut() {
-            Some(last)
-                if matches!(
-                    last.unobserved(),
-                    CStmt::If { .. } | CStmt::Block(_) | CStmt::StructuredRegion { .. }
-                ) =>
-            {
+            Some(last) if matches!(last.unobserved(), CStmt::If { .. } | CStmt::Block(_)) => {
                 append_to_falling_arms(last, copies)
             }
             Some(last)
@@ -543,7 +322,7 @@ fn append_to_falling_arms(stmt: &mut CStmt, copies: &mut impl Iterator<Item = CS
 /// The first label a statement's text starts with, through markers.
 fn leading_label(stmt: &CStmt) -> Option<String> {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => leading_label(stmt),
+        CStmt::Observed { stmt, .. } => leading_label(stmt),
         CStmt::Block(stmts) => stmts.first().and_then(leading_label),
         CStmt::Label(name) => Some(name.clone()),
         // Entering a body-first loop at its header is entering the loop.
@@ -574,7 +353,7 @@ fn shape_seq(stmts: &mut [CStmt], next: Cont, scope: &Scope) {
 
 fn shape_stmt(stmt: &mut CStmt, next: Cont, scope: &Scope) {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
+        CStmt::Observed { stmt, .. } => {
             shape_stmt(stmt, next, scope);
         }
         CStmt::Block(stmts) => shape_seq(stmts, next, scope),
@@ -648,249 +427,9 @@ fn shape_stmt(stmt: &mut CStmt, next: Cont, scope: &Scope) {
     }
 }
 
-/// A body whose last act is `if (c) continue; else break;` is a
-/// `do { } while (c)`; `for (;;) { h: if (c) { A } else break; }` with
-/// nothing before the test is `while (c) { A }`. A header that computes
-/// before it tests stays a `for (;;)` with the test as a guard, since a
-/// comma-chained condition hides the computation rather than shaping it.
-fn rotate_loops(stmt: &mut CStmt) {
-    match stmt {
-        CStmt::StructuredRegion {
-            marker,
-            stmt: inner,
-        } if marker.kind() == StructuredRegionKind::Loop => {
-            rotate_loops(inner);
-            if let Some(rotated) = rotate_post_test(inner) {
-                **inner = rotated;
-            } else if let Some(rotated) = rotate_pre_test(inner) {
-                **inner = rotated;
-            }
-        }
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            rotate_loops(stmt);
-        }
-        CStmt::Block(stmts) => stmts.iter_mut().for_each(rotate_loops),
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            rotate_loops(then_body);
-            if let Some(else_body) = else_body {
-                rotate_loops(else_body);
-            }
-        }
-        CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            rotate_loops(body);
-        }
-        CStmt::Switch { cases, default, .. } => {
-            for case in cases {
-                case.body.iter_mut().for_each(rotate_loops);
-            }
-            if let Some(default) = default {
-                default.iter_mut().for_each(rotate_loops);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The header block's text: its label, its statements, and the test that
-/// ends it, when the test is the last thing in it.
-fn header_parts(body: &CStmt) -> Option<(Option<String>, Vec<CStmt>, CStmt)> {
-    let CStmt::StructuredRegion { marker, stmt } = body else {
-        return None;
-    };
-    if marker.kind() != StructuredRegionKind::Block {
-        return None;
-    }
-    let CStmt::Block(stmts) = stmt.as_ref() else {
-        return None;
-    };
-    let mut stmts = stmts.clone();
-    let last = stmts.pop()?;
-    let label = match stmts.first() {
-        Some(CStmt::Label(name)) => {
-            let name = name.clone();
-            stmts.remove(0);
-            Some(name)
-        }
-        _ => None,
-    };
-    Some((label, stmts, last))
-}
-
-/// The `if` inside an `IfThenElse` marker, with the marker's and the
-/// observations' wrappers peeled: (cond, then, else, rewrap).
-fn peel_if(
-    stmt: &CStmt,
-) -> Option<(
-    CExpr,
-    CStmt,
-    Option<CStmt>,
-    crate::ast::StmtObservationChain,
-)> {
-    let CStmt::StructuredRegion { marker, stmt } = stmt else {
-        return None;
-    };
-    if marker.kind() != StructuredRegionKind::IfThenElse {
-        return None;
-    }
-    let (semantic, observations) = stmt.as_ref().clone().into_semantic_with_observations();
-    let CStmt::If {
-        cond,
-        then_body,
-        else_body,
-    } = semantic
-    else {
-        return None;
-    };
-    Some((cond, *then_body, else_body.map(|body| *body), observations))
-}
-
-fn is_break(stmt: &CStmt) -> bool {
-    matches!(stmt.unobserved(), CStmt::Break)
-}
-
-fn is_continue(stmt: &CStmt) -> bool {
-    matches!(stmt.unobserved(), CStmt::Continue)
-}
-
-fn rotate_pre_test(inner: &CStmt) -> Option<CStmt> {
-    let CStmt::For {
-        init,
-        cond: None,
-        update,
-        body,
-    } = inner
-    else {
-        return None;
-    };
-    let (label, prefix, last) = header_parts(body)?;
-    if !prefix
-        .iter()
-        .all(|stmt| matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)))
-    {
-        return None;
-    }
-    let (cond, then_body, else_body, observations) = peel_if(&last)?;
-    let else_body = else_body?;
-    let (cond, arm) = if is_break(&else_body) {
-        (cond, then_body)
-    } else if is_break(&then_body) {
-        (negate_condition(cond), else_body)
-    } else {
-        return None;
-    };
-    let arm = strip_trailing_continue(arm);
-    let rotated = if init.is_some() || update.is_some() {
-        CStmt::For {
-            init: init.clone(),
-            cond: Some(cond),
-            update: update.clone(),
-            body: Box::new(arm),
-        }
-    } else {
-        CStmt::While {
-            cond,
-            body: Box::new(arm),
-        }
-    };
-    let rotated = observations.reapply(rotated);
-    Some(match label {
-        Some(label) => CStmt::Block(vec![CStmt::Label(label), rotated]),
-        None => rotated,
-    })
-}
-
-/// The last statement of a loop body's text, and the body without it.
-fn split_trailing(stmt: &CStmt) -> Option<(CStmt, CStmt)> {
-    match stmt {
-        CStmt::StructuredRegion {
-            marker,
-            stmt: inner,
-        } => {
-            let (rest, last) = split_trailing(inner)?;
-            Some((CStmt::structured_region(marker.clone(), rest), last))
-        }
-        CStmt::Block(stmts) => {
-            let mut stmts = stmts.clone();
-            let last = stmts.pop()?;
-            if matches!(
-                last.unobserved(),
-                CStmt::Block(_) | CStmt::StructuredRegion { .. }
-            ) {
-                let (rest, tail) = split_trailing(&last)?;
-                stmts.push(rest);
-                return Some((CStmt::Block(stmts), tail));
-            }
-            Some((CStmt::Block(stmts), last))
-        }
-        _ => None,
-    }
-}
-
-fn contains_continue(stmt: &CStmt) -> bool {
-    match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            contains_continue(stmt)
-        }
-        CStmt::Block(stmts) => stmts.iter().any(contains_continue),
-        CStmt::Continue => true,
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => contains_continue(then_body) || else_body.as_deref().is_some_and(contains_continue),
-        // A nested loop's `continue` is its own.
-        CStmt::For { .. } | CStmt::While { .. } | CStmt::DoWhile { .. } => false,
-        CStmt::Switch { cases, default, .. } => {
-            cases
-                .iter()
-                .any(|case| case.body.iter().any(contains_continue))
-                || default
-                    .as_ref()
-                    .is_some_and(|body| body.iter().any(contains_continue))
-        }
-        _ => false,
-    }
-}
-
-fn rotate_post_test(inner: &CStmt) -> Option<CStmt> {
-    let CStmt::For {
-        init: None,
-        cond: None,
-        update: None,
-        body,
-    } = inner
-    else {
-        return None;
-    };
-    let (rest, last) = split_trailing(body)?;
-    let (cond, then_body, else_body, observations) = peel_if(&last)?;
-    let else_body = else_body?;
-    let cond = if is_continue(&then_body) && is_break(&else_body) {
-        cond
-    } else if is_break(&then_body) && is_continue(&else_body) {
-        negate_condition(cond)
-    } else {
-        return None;
-    };
-    // Any other `continue` would reach the test instead of the top.
-    if contains_continue(&rest) {
-        return None;
-    }
-    Some(observations.reapply(CStmt::DoWhile {
-        body: Box::new(rest),
-        cond,
-    }))
-}
-
 fn collect_gotos(stmt: &CStmt, into: &mut BTreeSet<String>) {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            collect_gotos(stmt, into)
-        }
+        CStmt::Observed { stmt, .. } => collect_gotos(stmt, into),
         CStmt::Block(stmts) => stmts.iter().for_each(|stmt| collect_gotos(stmt, into)),
         CStmt::Goto(name) => {
             into.insert(name.clone());
@@ -926,9 +465,7 @@ fn collect_gotos(stmt: &CStmt, into: &mut BTreeSet<String>) {
 
 fn drop_labels(stmt: &mut CStmt, referenced: &BTreeSet<String>) {
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
-            drop_labels(stmt, referenced)
-        }
+        CStmt::Observed { stmt, .. } => drop_labels(stmt, referenced),
         CStmt::Block(stmts) => stmts
             .iter_mut()
             .for_each(|stmt| drop_labels(stmt, referenced)),
@@ -970,212 +507,4 @@ fn drop_unreferenced_labels(stmt: &mut CStmt) {
     let mut referenced = BTreeSet::new();
     collect_gotos(stmt, &mut referenced);
     drop_labels(stmt, &referenced);
-}
-
-pub(super) fn negate_condition(cond: CExpr) -> CExpr {
-    match cond {
-        CExpr::Observed { ids, expr } => CExpr::observe_all(ids, negate_condition(*expr)),
-        CExpr::Unary {
-            op: UnaryOp::Not,
-            operand,
-        } => *operand,
-        CExpr::Binary {
-            op: BinaryOp::Or,
-            left,
-            right,
-        } => {
-            if let Some(rewritten) = negate_disjunctive_relation_pair(left.as_ref(), right.as_ref())
-            {
-                return rewritten;
-            }
-            CExpr::unary(
-                UnaryOp::Not,
-                CExpr::Binary {
-                    op: BinaryOp::Or,
-                    left,
-                    right,
-                },
-            )
-        }
-        CExpr::Binary { op, left, right } => {
-            let negated = match op {
-                BinaryOp::Eq => Some((BinaryOp::Ne, false)),
-                BinaryOp::Ne => Some((BinaryOp::Eq, false)),
-                BinaryOp::Lt => Some((BinaryOp::Ge, false)),
-                BinaryOp::Le => Some((BinaryOp::Lt, true)),
-                BinaryOp::Gt => Some((BinaryOp::Le, false)),
-                BinaryOp::Ge => Some((BinaryOp::Lt, false)),
-                _ => None,
-            };
-
-            if let Some((op, swap)) = negated {
-                if swap {
-                    CExpr::Binary {
-                        op,
-                        left: right,
-                        right: left,
-                    }
-                } else {
-                    CExpr::Binary { op, left, right }
-                }
-            } else {
-                CExpr::unary(UnaryOp::Not, CExpr::Binary { op, left, right })
-            }
-        }
-        other => CExpr::unary(UnaryOp::Not, other),
-    }
-}
-
-fn negate_disjunctive_relation_pair(left: &CExpr, right: &CExpr) -> Option<CExpr> {
-    let (lhs_a, rhs_a, op_a) = relation_signature(left)?;
-    let (lhs_b, rhs_b, op_b) = relation_signature(right)?;
-    if lhs_a != lhs_b || rhs_a != rhs_b {
-        return None;
-    }
-
-    let negated_op = match (op_a, op_b) {
-        (BinaryOp::Eq, BinaryOp::Lt) | (BinaryOp::Lt, BinaryOp::Eq) => BinaryOp::Gt,
-        (BinaryOp::Eq, BinaryOp::Le) | (BinaryOp::Le, BinaryOp::Eq) => BinaryOp::Gt,
-        (BinaryOp::Eq, BinaryOp::Gt) | (BinaryOp::Gt, BinaryOp::Eq) => BinaryOp::Lt,
-        (BinaryOp::Eq, BinaryOp::Ge) | (BinaryOp::Ge, BinaryOp::Eq) => BinaryOp::Lt,
-        _ => return None,
-    };
-
-    Some(CExpr::Binary {
-        op: negated_op,
-        left: Box::new(lhs_a.clone()),
-        right: Box::new(rhs_a.clone()),
-    })
-}
-
-fn relation_signature(expr: &CExpr) -> Option<(&CExpr, &CExpr, BinaryOp)> {
-    match expr.unobserved() {
-        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => relation_signature(inner),
-        CExpr::Binary { op, left, right }
-            if matches!(
-                op,
-                BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-            ) =>
-        {
-            Some((left.as_ref(), right.as_ref(), *op))
-        }
-        _ => None,
-    }
-}
-
-/// Fix B: Remove trailing `continue` from a loop body (it's implicit).
-/// Also remove trailing `break` inside an if-then at the end of a block
-/// if it's the only exit path.
-pub(super) fn strip_trailing_continue(stmt: CStmt) -> CStmt {
-    match stmt {
-        CStmt::Observed { ids, stmt } => {
-            let stripped = strip_trailing_continue(*stmt);
-            if matches!(stripped.unobserved(), CStmt::Empty) {
-                CStmt::Empty
-            } else {
-                CStmt::observe_all(ids, stripped)
-            }
-        }
-        CStmt::Continue => CStmt::Empty,
-        CStmt::Block(mut stmts) => {
-            // Remove trailing Continue
-            while stmts
-                .last()
-                .is_some_and(|stmt| matches!(stmt.unobserved(), CStmt::Continue))
-            {
-                stmts.pop();
-            }
-            if stmts.is_empty() {
-                CStmt::Empty
-            } else if stmts.len() == 1 {
-                stmts.remove(0)
-            } else {
-                CStmt::Block(stmts)
-            }
-        }
-        other => other,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn relation(op: BinaryOp) -> CExpr {
-        CExpr::binary(op, CExpr::IntLit(1), CExpr::IntLit(2))
-    }
-
-    /// What a relation over two integer literals, or its negation or disjunction, evaluates to.
-    fn holds(expr: &CExpr) -> bool {
-        let int = |expr: &CExpr| match expr {
-            CExpr::IntLit(value) => *value,
-            other => panic!("not a literal: {other:?}"),
-        };
-        match expr {
-            CExpr::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } => !holds(operand),
-            CExpr::Binary {
-                op: BinaryOp::Or,
-                left,
-                right,
-            } => holds(left) || holds(right),
-            CExpr::Binary { op, left, right } => {
-                let (a, b) = (int(left), int(right));
-                match op {
-                    BinaryOp::Eq => a == b,
-                    BinaryOp::Ne => a != b,
-                    BinaryOp::Lt => a < b,
-                    BinaryOp::Le => a <= b,
-                    BinaryOp::Gt => a > b,
-                    BinaryOp::Ge => a >= b,
-                    other => panic!("not an integer relation: {other:?}"),
-                }
-            }
-            other => panic!("not a condition: {other:?}"),
-        }
-    }
-
-    /// Every integer negation `negate_condition` spells is the negation, for every pair of operands in -8..8.
-    #[test]
-    fn every_integer_negation_is_the_negation() {
-        let relations = [
-            BinaryOp::Eq,
-            BinaryOp::Ne,
-            BinaryOp::Lt,
-            BinaryOp::Le,
-            BinaryOp::Gt,
-            BinaryOp::Ge,
-        ];
-        let pairs = (-8..8).flat_map(|a| (-8..8).map(move |b| (a, b)));
-        for ((a, b), op) in pairs.flat_map(|pair| relations.map(|op| (pair, op))) {
-            let rel = |op| CExpr::binary(op, CExpr::IntLit(a), CExpr::IntLit(b));
-            let negated = negate_condition(rel(op));
-            assert_eq!(
-                holds(&negated),
-                !holds(&rel(op)),
-                "!({a} {op:?} {b}) as {negated:?}"
-            );
-            for either in relations.map(|other| CExpr::binary(BinaryOp::Or, rel(op), rel(other))) {
-                let negated = negate_condition(either.clone());
-                assert_eq!(
-                    holds(&negated),
-                    !holds(&either),
-                    "!({either:?}) as {negated:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn an_ordered_float_comparison_negates_to_its_negation_and_an_integer_one_flips() {
-        // A NaN makes `a < b` and `a >= b` both false, so only the integer relation has an opposite.
-        for op in [BinaryOp::FLt, BinaryOp::FLe, BinaryOp::FGt, BinaryOp::FGe] {
-            let negated = negate_condition(relation(op));
-            assert_eq!(negated, CExpr::unary(UnaryOp::Not, relation(op)), "{op:?}");
-        }
-        let flipped = negate_condition(relation(BinaryOp::Lt));
-        assert_eq!(flipped, relation(BinaryOp::Ge));
-    }
 }

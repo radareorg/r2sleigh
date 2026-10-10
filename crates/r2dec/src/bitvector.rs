@@ -6,8 +6,8 @@
 //! first, which is also how the value lies in memory on the little-endian
 //! targets that have one. The struct has no operators. For a carrier wider
 //! than 128 bits, every operation a rendering performs on one is one of the
-//! helpers below, called by name, and `fold::op_lower::wide` refuses any
-//! other operation rather than spell an operator on it. A value of an odd
+//! helpers below, called by name, and `render::terms` gaps any other
+//! operation rather than spell an operator on it. A value of an odd
 //! width at or below 128 bits (24, 40, 80 bits) is also declared as a
 //! carrier, but has no helpers and no such guard; in the coverage corpus it
 //! appears only as a declared stack object, never as an operand.
@@ -36,12 +36,6 @@ use crate::ast::{CAggregateDef, CExpr, CType};
 /// ever declared, never taken apart, so nothing is claimed about it.
 pub(crate) const fn is_supported(width_bits: u32) -> bool {
     matches!(width_bits, 256 | 512)
-}
-
-/// Whether a value this wide is wider than every C integer: a carrier,
-/// which only the helpers below operate on.
-pub(crate) const fn is_wide(width_bits: u32) -> bool {
-    width_bits > 128
 }
 
 /// Whether a value this wide has a representation a rendering can operate

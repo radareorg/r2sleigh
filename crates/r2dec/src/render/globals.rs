@@ -21,7 +21,7 @@ pub(super) struct Named {
 
 /// The named objects of one function, each declared once, in address order.
 pub(super) struct Globals<'a> {
-    /// The container's name at each address the function refers to (legacy's one table).
+    /// The container's name at each address the function refers to.
     symbols: &'a BTreeMap<u64, String>,
     functions: &'a BTreeMap<u64, String>,
     types: &'a ProgramDataObjectTypeFacts,

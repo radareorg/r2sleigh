@@ -177,16 +177,7 @@ pub(crate) enum UnassignedCause {
     Unassigned,
 }
 
-impl UnassignedCause {
-    /// The cause each residual standing for such a read carries.
-    pub(crate) const fn residual(self) -> crate::prelude::ResidualCause {
-        match self {
-            Self::Held => crate::prelude::ResidualCause::HeldFromEntry,
-            Self::UnadmittedArgument => crate::prelude::ResidualCause::UnadmittedArgument,
-            Self::Unassigned => crate::prelude::ResidualCause::NeverAssigned,
-        }
-    }
-}
+impl UnassignedCause {}
 
 /// One object whose every read is now a residual, and why.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

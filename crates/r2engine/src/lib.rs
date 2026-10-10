@@ -2323,13 +2323,12 @@ fn engine_render_stop_from_decompiler(
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
 ) -> EngineRenderExecutionStop {
     let phase = match stop.phase() {
-        r2dec::DecompileWorkPhase::Normalization => EnginePhase::Normalization,
         r2dec::DecompileWorkPhase::Structuring => EnginePhase::Structuring,
         r2dec::DecompileWorkPhase::Rendering => EnginePhase::Rendering,
     };
     let mut mapped = engine_render_stop_reason(stop.reason(), phase);
     mapped.obligation_ledger = Box::new(obligation_ledger);
-    mapped.normalization_completed = phase != EnginePhase::Normalization;
+    mapped.normalization_completed = true;
     mapped.structuring_completed = phase == EnginePhase::Rendering;
     mapped
 }
