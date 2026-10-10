@@ -1986,6 +1986,20 @@ pub(crate) fn call_result_values_after_call(
     if call_defines.is_empty() {
         return Some(Vec::new());
     }
+    // A call that defines no part of the result register leaves the caller's value there, as
+    // one to a body that never writes its argument-slot result does: no value, and complete.
+    let defines_storage = call_defines.iter().any(|(relative_index, _)| {
+        let at = call_op_index
+            .saturating_add(1)
+            .saturating_add(*relative_index);
+        (block.op_id(at))
+            .and_then(|op| graph.inst_for_op(op))
+            .and_then(|inst| graph.inst(inst)?.canonical_storage)
+            .is_some_and(|defined| register_storages_overlap(defined, storage))
+    });
+    if !defines_storage {
+        return Some(Vec::new());
+    }
     let candidates = call_defines
         .into_iter()
         .filter_map(|(relative_index, op)| {

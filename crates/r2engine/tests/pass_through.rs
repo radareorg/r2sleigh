@@ -89,3 +89,46 @@ fn a_register_kept_for_a_call_of_unproven_arity_is_passed() {
         "{text}"
     );
 }
+
+/// AArch64: `stash` is `str x1, [x0]; ret`, leaving its argument slot x0 untouched (an unproven
+/// result); `caller` scrubs x2 (`mov x2, #0`, gcc's canary clear) before only its first call.
+const A64_STASH_TWICE: &[u8] = &[
+    0x01, 0x00, 0x00, 0xf9, // 1000 str x1, [x0]
+    0xc0, 0x03, 0x5f, 0xd6, // 1004 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1008 padding
+    0xfd, 0x7b, 0xbe, 0xa9, // 1010 stp x29, x30, [sp, #-32]!
+    0xfd, 0x03, 0x00, 0x91, // 1014 mov x29, sp
+    0x02, 0x00, 0x80, 0xd2, // 1018 mov x2, #0
+    0xe0, 0x43, 0x00, 0x91, // 101c add x0, sp, #16
+    0xa1, 0x00, 0x80, 0xd2, // 1020 mov x1, #5
+    0xf7, 0xff, 0xff, 0x97, // 1024 bl 0x1000
+    0xe0, 0x63, 0x00, 0x91, // 1028 add x0, sp, #24
+    0xe1, 0x00, 0x80, 0xd2, // 102c mov x1, #7
+    0xf4, 0xff, 0xff, 0x97, // 1030 bl 0x1000
+    0xe0, 0x0b, 0x40, 0xf9, // 1034 ldr x0, [sp, #16]
+    0xfd, 0x7b, 0xc2, 0xa8, // 1038 ldp x29, x30, [sp], #32
+    0xc0, 0x03, 0x5f, 0xd6, // 103c ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 1040 padding
+];
+
+/// A callee whose result is unproven still states its parameters, so both calls pass two: counted
+/// from what the caller wrote, the scrubbed x2 was a third (aarch64 gcc `shape_call_chain`).
+#[test]
+fn a_callee_with_an_unproven_result_still_states_its_arity() {
+    let text = OpenProgram::of(
+        Literal::of_code(
+            A64_STASH_TWICE,
+            &[("stash", BASE, 0x08), ("caller", BASE + 0x10, 0x30)],
+        )
+        .in_aarch64(),
+    )
+    .rendered(BASE + 0x10)
+    .expect("it renders")
+    .response
+    .output
+    .into_text();
+    assert_eq!(text.matches("stash(").count(), 3, "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(!text.contains(", 0)"), "{text}");
+}

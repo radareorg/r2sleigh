@@ -161,8 +161,8 @@ pub struct RecoveredInterface {
     result_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers on its way out.
     result_ambiguous: bool,
-    /// Those two registers, integer then float, where nothing said which a caller reads.
-    result_carriers: Option<(CanonicalStorageId, CanonicalStorageId)>,
+    /// The registers an unproven result may be in, where a caller's read can say which.
+    result_carriers: Option<r2source::SourceResultCarriers>,
     /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
 }
@@ -773,9 +773,9 @@ fn returned_result(
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slots: &SourceConventionSlots,
-) -> RecoveredFunctionResult {
+) -> (RecoveredFunctionResult, bool) {
     let Some(slot) = slots.result_slot() else {
-        return RecoveredFunctionResult::Unproven;
+        return (RecoveredFunctionResult::Unproven, false);
     };
     let entry_is_an_argument = slots
         .argument_slots()
@@ -811,7 +811,13 @@ fn returned_result(
         live_out.unresolved_blocks().count(),
         live_out.clobbered_blocks().count()
     );
-    result
+    // Unproven only because the carrier may still hold what the caller left: no unstated call
+    // touches it, so the register is the result's and the parameters are the body's own.
+    let handed_back = result == RecoveredFunctionResult::Unproven
+        && live_out.has_returns()
+        && live_out.clobbered_blocks().next().is_none()
+        && untouched;
+    (result, handed_back)
 }
 
 /// Whether some return hands back the carrier's entry value, directly or as an
@@ -1254,7 +1260,14 @@ fn recover_interface_inner(
     {
         let mut candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
-        result = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        let handed_back;
+        (result, handed_back) = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        if handed_back {
+            result_carriers = Some(r2source::SourceResultCarriers {
+                integer: candidate,
+                float: None,
+            });
+        }
         // A body that writes both result registers on its way out hands back one of them: the
         // callers' reads say which, where they agree (doc/adr-resolved-bodies.md, "Caller reads").
         if result.register().is_some()
@@ -1274,7 +1287,10 @@ fn recover_interface_inner(
                     candidate_live_out = float_live_out;
                 }
                 None => {
-                    result_carriers = Some((candidate, float));
+                    result_carriers = Some(r2source::SourceResultCarriers {
+                        integer: candidate,
+                        float: Some(float),
+                    });
                     result = RecoveredFunctionResult::Unproven;
                     result_ambiguous = true;
                 }
@@ -1671,7 +1687,7 @@ pub fn mint_recovered_interface(
                 }
             })
             .map(|interface| match recovered.result_carriers {
-                Some((integer, float)) => interface.with_result_carriers(integer, float),
+                Some(carriers) => interface.with_result_carriers(carriers),
                 None => interface,
             });
     if minted.is_none() {
@@ -2037,15 +2053,19 @@ pub fn mint_recovered_call_site_interface(
         // A body nobody read owns the arguments beside the result: an import
         // thunk forwards every one and reads none, so what its own body proves
         // is a floor rather than this call's contract.
-        // A body writing both result registers returns the one this caller reads, where it reads one.
-        SourceFunctionReturn::Unproven => match callee
-            .result_carriers()
-            .and_then(|(integer, float)| Some((integer, carrier_read(caller_reads, float)?)))
-        {
-            Some((storage, CarrierRead::Integer)) | Some((_, CarrierRead::Float(storage))) => {
+        // A body writing both result registers returns the one this caller reads, where it reads
+        // one; with only the integer register in question, the call defines it as any call does.
+        SourceFunctionReturn::Unproven => match callee.result_carriers().map(|carriers| {
+            let read = carriers.float.map_or(Some(CarrierRead::Integer), |float| {
+                carrier_read(caller_reads, float)
+            });
+            (carriers.integer, read)
+        }) {
+            Some((storage, Some(CarrierRead::Integer)))
+            | Some((_, Some(CarrierRead::Float(storage)))) => {
                 SourceCallResult::Register { storage }
             }
-            None => {
+            _ => {
                 r2il::refusal_evidence!(
                     "call-site-minting",
                     "the callee's result is unproven ({:?}, read {:?}), so its body describes no call contract",

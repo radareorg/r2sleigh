@@ -1843,7 +1843,7 @@ fn reads_after(
     identity: SourceCallSiteIdentity,
     callee: &SourceFunctionInterface,
 ) -> Option<r2source::SourceResultReads> {
-    let (integer, float) = callee.result_carriers()?;
+    let carriers = callee.result_carriers()?;
     blocks.iter().find_map(|block| {
         let index = block.ops.iter().enumerate().position(|(index, op)| {
             matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
@@ -1855,8 +1855,8 @@ fn reads_after(
         Some(crate::caller_reads::reads_after_call(
             block,
             index,
-            Some(integer),
-            Some(float),
+            Some(carriers.integer),
+            carriers.float,
         ))
     })
 }
