@@ -5,18 +5,6 @@ use std::fmt::Write as _;
 use crate::ast::{CFunction, CStmt};
 use crate::codegen::sanitize_comment_text_keeping;
 
-/// State what the rendering did and did not show.
-///
-/// "Nothing was marked" and "everything was shown to be right" are different
-/// claims, and only the second earns silence. Nothing here makes the second, so
-/// the note is always emitted: it reports how many constructs carry a residual
-/// marker, and then reports the ledger, which says what became of every effect
-/// the source obliges.
-///
-/// The ledger's columns sum to its total, so an effect that went missing is a
-/// number in the line rather than an absence from it. An unaccounted count is
-/// never zero because nothing went wrong; it is zero only when every obligation
-/// was reached by a rule that named its fate.
 /// The proof line's columns that appear only when they are not zero, in reading order.
 fn proof_columns(
     closure: &crate::ledger::LedgerClosure,
@@ -61,6 +49,8 @@ fn proof_columns(
     line
 }
 
+/// State what the rendering did and did not show; always emitted, since silence would claim
+/// everything was proven (doc/adr-decompiler-rewrite.md, "The proof line").
 pub(crate) fn note_unproven_constructs(
     func: &mut CFunction,
     ledger: Option<&crate::ledger::ObligationLedger>,

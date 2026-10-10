@@ -151,6 +151,17 @@ its array.
 
 Cost: one pass over the frame objects, `O(objects)`.
 
+## The proof line
+
+The proof line states what the rendering did and did not show. "Nothing was
+marked" and "everything was shown to be right" are different claims, and only
+the second earns silence. No stage makes the second claim, so the line is
+always emitted: it counts the constructs carrying a residual marker, then the
+ledger, which says what became of every effect the source obliges. The
+ledger's columns sum to its total, so a missing effect is a number in the line
+rather than an absence from it. The unaccounted count is zero only when every
+obligation was reached by a rule that named its fate.
+
 ## What survives
 
 - The dominator-tree structurer and its certificate (SD, done): ported as D1.
