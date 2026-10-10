@@ -873,6 +873,14 @@ impl Spell<'_> {
     }
 
     /// A machine expression as C: what an opaque term or a leaf stands for.
+    /// The bits a machine expression holds where it is a constant.
+    fn constant(&self, id: MachineExprId) -> Option<u128> {
+        match self.projection.expr(id)?.kind() {
+            MachineExprKind::Constant { value, .. } => Some(u128::from(value.bits())),
+            _ => None,
+        }
+    }
+
     pub(super) fn machine(&self, id: MachineExprId) -> Option<CExpr> {
         let node = self.projection.expr(id)?;
         let ty = *node.ty();
@@ -997,15 +1005,11 @@ impl Spell<'_> {
                     MachineExprKind::Divide { .. } => BinaryOp::Div,
                     _ => BinaryOp::Mod,
                 };
-                let literal = |id: MachineExprId| match self.projection.expr(id)?.kind() {
-                    MachineExprKind::Constant { value, .. } => Some(u128::from(value.bits())),
-                    _ => None,
-                };
                 divide(
                     (op, *interpretation),
                     bits,
-                    (child(*dividend)?, literal(*dividend)),
-                    (child(*divisor)?, literal(*divisor)),
+                    (child(*dividend)?, self.constant(*dividend)),
+                    (child(*divisor)?, self.constant(*divisor)),
                 )
             }
             MachineExprKind::Negate { input, .. } => negate(bits, child(*input)?),
