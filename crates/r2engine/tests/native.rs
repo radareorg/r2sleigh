@@ -5660,3 +5660,37 @@ fn a_value_read_twice_per_step_renders_in_text_linear_in_the_steps() {
         "8 steps: {eight} bytes, 16: {sixteen}, 32: {thirty_two}"
     );
 }
+
+/// `mov eax, edi; cdq; idiv esi; ret`: Sleigh divides EDX:EAX, a 64-bit dividend, by ESI.
+const SIGNED_DIVIDE: &[u8] = &[
+    0x89, 0xf8, // 1000 mov eax, edi
+    0x99, // 1002 cdq
+    0xf7, 0xfe, // 1003 idiv esi
+    0xc3, // 1005 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// The most negative dividend over -1 has no p-code quotient (r2il::eval) and is undefined in C,
+/// so the quotient's arm for it is a residual; the remainder there is 0 in p-code, and C's `%` is
+/// undefined, so that arm is the literal 0.
+#[test]
+fn a_signed_divide_of_the_most_negative_value_by_minus_one_is_not_a_c_division() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: SIGNED_DIVIDE.to_vec(),
+        name: "divide",
+    };
+    let response = staged(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text().to_owned();
+    let line = |operator: &str| {
+        text.lines()
+            .find(|line| line.contains(operator))
+            .unwrap_or_else(|| panic!("no {operator}:\n{text}"))
+    };
+    let quotient = line(" / (int64_t)");
+    assert!(quotient.contains("r2sleigh_residual_u64("), "{text}");
+    assert!(quotient.contains(" ? "), "{text}");
+    let remainder = line(" % (int64_t)");
+    assert!(remainder.contains(" ? "), "{text}");
+    assert!(!remainder.contains("r2sleigh_residual"), "{text}");
+}

@@ -294,19 +294,55 @@ fn float_compare(op: MachineComparisonOp, bits: u32, left: CExpr, right: CExpr) 
     Some(cast(integer(bits)?, test))
 }
 
-/// A quotient or remainder at `bits` under `interpretation`.
+/// A quotient or remainder at `bits` under `interpretation`, each operand with its literal value.
 fn divide(
     (op, interpretation): (BinaryOp, MachineSignedness),
     bits: u32,
-    dividend: CExpr,
-    divisor: CExpr,
+    (dividend, dividend_literal): (CExpr, Option<u128>),
+    (divisor, divisor_literal): (CExpr, Option<u128>),
 ) -> Option<CExpr> {
+    let ty = integer(bits)?;
     let operand = match interpretation {
         MachineSignedness::Signed => signed(bits)?,
-        MachineSignedness::Unsigned => integer(bits)?,
+        MachineSignedness::Unsigned => ty.clone(),
     };
+    let (minimum, all) = (1u128 << (bits - 1), u128::MAX >> (128 - bits));
+    let guarded = interpretation == MachineSignedness::Signed
+        && dividend_literal.is_none_or(|value| value == minimum)
+        && divisor_literal.is_none_or(|value| value == all);
+    let tested = (
+        dividend.clone_without_render_observations(),
+        divisor.clone_without_render_observations(),
+    );
     let quotient = binary(op, cast(operand.clone(), dividend), cast(operand, divisor));
-    Some(cast(integer(bits)?, quotient))
+    let quotient = cast(ty.clone(), quotient);
+    if !guarded {
+        return Some(quotient);
+    }
+    // r2il::eval gives MIN / -1 no value and MIN % -1 the value 0; C leaves both undefined.
+    let (dividend, divisor) = tested;
+    let minimum = binary(
+        BinaryOp::Eq,
+        cast(ty.clone(), dividend),
+        wide_literal(bits, minimum)?,
+    );
+    let minus_one = binary(
+        BinaryOp::Eq,
+        cast(ty.clone(), divisor),
+        wide_literal(bits, all)?,
+    );
+    let (test, arm) = match op {
+        BinaryOp::Div => (
+            binary(BinaryOp::And, minimum, minus_one),
+            crate::prelude::residual(&ty, crate::prelude::ResidualCause::UndefinedQuotient)?,
+        ),
+        _ => (minus_one, wide_literal(bits, 0)?),
+    };
+    Some(CExpr::Ternary {
+        cond: Box::new(test),
+        then_expr: Box::new(arm),
+        else_expr: Box::new(quotient),
+    })
 }
 
 /// A comparison of two `bits`-wide operands under `interpretation`, as a byte holding 0 or 1.
@@ -961,11 +997,15 @@ impl Spell<'_> {
                     MachineExprKind::Divide { .. } => BinaryOp::Div,
                     _ => BinaryOp::Mod,
                 };
+                let literal = |id: MachineExprId| match self.projection.expr(id)?.kind() {
+                    MachineExprKind::Constant { value, .. } => Some(u128::from(value.bits())),
+                    _ => None,
+                };
                 divide(
                     (op, *interpretation),
                     bits,
-                    child(*dividend)?,
-                    child(*divisor)?,
+                    (child(*dividend)?, literal(*dividend)),
+                    (child(*divisor)?, literal(*divisor)),
                 )
             }
             MachineExprKind::Negate { input, .. } => negate(bits, child(*input)?),
@@ -1067,6 +1107,22 @@ mod tests {
         // Below the object, or past its end, is another object's memory or none at all.
         assert!(!inside(-8, 8, 16));
         assert!(!inside(12, 8, 16));
+    }
+
+    /// A literal divisor other than -1 rules out MIN / -1, so that quotient is the C division alone.
+    #[test]
+    fn a_signed_divide_by_a_literal_other_than_minus_one_is_unguarded() {
+        use crate::ast::{BinaryOp, CExpr};
+        let x = || CExpr::UIntLit(9);
+        let signed = (BinaryOp::Div, r2ssa::MachineSignedness::Signed);
+        let by_seven = super::divide(signed, 32, (x(), None), (x(), Some(7))).expect("spelled");
+        assert!(!matches!(by_seven, CExpr::Ternary { .. }), "{by_seven:?}");
+        let by_minus_one =
+            super::divide(signed, 32, (x(), None), (x(), Some(0xffff_ffff))).expect("spelled");
+        assert!(
+            matches!(by_minus_one, CExpr::Ternary { .. }),
+            "{by_minus_one:?}"
+        );
     }
 
     /// `object[-1]` with the index a 64-bit literal of all ones: element -1 lies below the object,
