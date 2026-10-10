@@ -395,7 +395,7 @@ pub struct ResidualSite {
     /// Why the construct is unproven.
     pub cause: crate::prelude::ResidualCause,
     /// For a marked gap, the kind its marker names.
-    pub gap: Option<String>,
+    pub gap: Option<crate::ast::GapKind>,
     /// One-based, in the unit.
     pub line: usize,
 }
@@ -503,7 +503,7 @@ impl<'c> CodeGenerator<'c> {
         &mut self,
         ty: crate::prelude::ResidualType,
         cause: crate::prelude::ResidualCause,
-        gap: Option<&str>,
+        gap: Option<&crate::ast::GapKind>,
     ) {
         let site = u32::try_from(self.residuals.len() + 1).unwrap_or(u32::MAX);
         let line = self.current_line();
@@ -511,7 +511,7 @@ impl<'c> CodeGenerator<'c> {
             site,
             ty,
             cause,
-            gap: gap.map(str::to_owned),
+            gap: gap.cloned(),
             line,
         });
         let start = self.output.len();

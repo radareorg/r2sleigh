@@ -1672,11 +1672,125 @@ pub enum CStmt {
     Gap(GapMarker),
 }
 
+/// Why a marked gap opened, which the marker prints and control reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GapKind {
+    /// A block's values, or a merge copy, D2 could not spell.
+    ValuesNotRendered,
+    /// An instruction the inventory could not account for.
+    UnsupportedInstruction,
+    /// A user operation the specification names, by that name.
+    UserOperation(String),
+    CallNotRendered,
+    EffectNotRendered,
+    StoreNotSpelled,
+    TermNotSpelled,
+    ValueHasNoCType,
+    ValueNotComputed,
+    /// A return the interface proves no result for.
+    UnprovenReturn,
+    UnresolvedBranchCondition,
+    UnresolvedSwitchSelector,
+    /// A transfer the text cannot make: control does not go on past it.
+    UnresolvedIndirectBranch,
+    TransferNotFollowed,
+    TailTransferNotRendered,
+    /// A read that sees another value and cannot be split out of its variable.
+    StaleRead,
+    /// A legacy lowering or proof refusal, by the name its owner's `kind()` gives it.
+    Refused(String),
+}
+
+impl GapKind {
+    /// Whether control does not go on past a gap of this kind.
+    pub const fn ends_control(&self) -> bool {
+        matches!(
+            self,
+            Self::UnresolvedIndirectBranch
+                | Self::TransferNotFollowed
+                | Self::TailTransferNotRendered
+        )
+    }
+
+    /// The kind as a marker spells it; a refusal's name is its owner's.
+    pub fn name(&self) -> std::borrow::Cow<'_, str> {
+        let fixed = match self {
+            Self::ValuesNotRendered => "ValuesNotRendered",
+            Self::UnsupportedInstruction => "UnsupportedInstruction",
+            Self::UserOperation(name) => return format!("UserOperation({name})").into(),
+            Self::CallNotRendered => "CallNotRendered",
+            Self::EffectNotRendered => "EffectNotRendered",
+            Self::StoreNotSpelled => "StoreNotSpelled",
+            Self::TermNotSpelled => "TermNotSpelled",
+            Self::ValueHasNoCType => "ValueHasNoCType",
+            Self::ValueNotComputed => "ValueNotComputed",
+            Self::UnprovenReturn => "UnprovenReturn",
+            Self::UnresolvedBranchCondition => "UnresolvedBranchCondition",
+            Self::UnresolvedSwitchSelector => "UnresolvedSwitchSelector",
+            Self::UnresolvedIndirectBranch => "UnresolvedIndirectBranch",
+            Self::TransferNotFollowed => "TransferNotFollowed",
+            Self::TailTransferNotRendered => "TailTransferNotRendered",
+            Self::StaleRead => "stale_read",
+            Self::Refused(name) => name.as_str(),
+        };
+        fixed.into()
+    }
+
+    /// The kind a marker's spelling names: a name no fixed kind has is a refusal's.
+    fn from_name(name: String) -> Self {
+        const FIXED: [GapKind; 15] = [
+            GapKind::ValuesNotRendered,
+            GapKind::UnsupportedInstruction,
+            GapKind::CallNotRendered,
+            GapKind::EffectNotRendered,
+            GapKind::StoreNotSpelled,
+            GapKind::TermNotSpelled,
+            GapKind::ValueHasNoCType,
+            GapKind::ValueNotComputed,
+            GapKind::UnprovenReturn,
+            GapKind::UnresolvedBranchCondition,
+            GapKind::UnresolvedSwitchSelector,
+            GapKind::UnresolvedIndirectBranch,
+            GapKind::TransferNotFollowed,
+            GapKind::TailTransferNotRendered,
+            GapKind::StaleRead,
+        ];
+        if let Some(fixed) = FIXED.into_iter().find(|kind| kind.name() == name.as_str()) {
+            return fixed;
+        }
+        match name
+            .strip_prefix("UserOperation(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            Some(userop) => Self::UserOperation(userop.to_owned()),
+            None => Self::Refused(name),
+        }
+    }
+}
+
+impl std::fmt::Display for GapKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name())
+    }
+}
+
+impl Serialize for GapKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for GapKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from_name)
+    }
+}
+
 /// What one marked gap covers and why it is there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapMarker {
-    /// The refusal that opened the gap, in its diagnostic spelling.
-    pub kind: String,
+    /// The refusal that opened the gap.
+    pub kind: GapKind,
     /// Where in the decompiler the refusal was decided, as `file.rs:line`.
     pub origin: String,
     /// The block whose operation could not be proven.

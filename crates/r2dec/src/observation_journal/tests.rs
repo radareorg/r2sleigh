@@ -2340,7 +2340,7 @@ fn a_gap_carries_every_cell_it_claims_on_one_node() {
                 op_idx: 0,
             };
             let marker = crate::ast::GapMarker {
-                kind: "test".to_string(),
+                kind: crate::ast::GapKind::Refused("test".to_owned()),
                 origin: "a_gap_carries_every_cell_it_claims_on_one_node".to_string(),
                 block_addr: 0x1000,
                 op_idx: 0,

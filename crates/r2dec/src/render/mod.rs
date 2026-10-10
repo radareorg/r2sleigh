@@ -270,7 +270,7 @@ fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) ->
 
 /// Whether a statement ends control: a residual or a marked gap traps where it is evaluated.
 fn traps(stmt: &CStmt) -> bool {
-    matches!(stmt, CStmt::Gap(marker) if control::ends_control(marker))
+    matches!(stmt, CStmt::Gap(marker) if marker.kind.ends_control())
         || matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
 }
 

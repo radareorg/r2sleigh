@@ -8,24 +8,9 @@ use r2ssa::cfg::BlockTerminator;
 use super::RenderInput;
 use super::values::Values;
 use crate::ast::RenderObservationId;
-use crate::ast::{CExpr, CStmt, CType, GapMarker, SwitchCase};
+use crate::ast::{CExpr, CStmt, CType, GapKind, GapMarker, SwitchCase};
 use crate::prelude::ResidualCause;
 use crate::structure::place::{EdgeShape, Placement};
-
-/// The transfers the text cannot make, each a gap that traps where control would leave.
-const UNRESOLVED_INDIRECT_BRANCH: &str = "UnresolvedIndirectBranch";
-const TRANSFER_NOT_FOLLOWED: &str = "TransferNotFollowed";
-const TAIL_TRANSFER_NOT_RENDERED: &str = "TailTransferNotRendered";
-
-/// Whether `marker` is one of those: control does not go on past it.
-pub(super) fn ends_control(marker: &GapMarker) -> bool {
-    [
-        UNRESOLVED_INDIRECT_BRANCH,
-        TRANSFER_NOT_FOLLOWED,
-        TAIL_TRANSFER_NOT_RENDERED,
-    ]
-    .contains(&marker.kind.as_str())
-}
 
 /// The written body, its labels, and the block and instruction each marked statement stands for.
 pub(super) struct Written {
@@ -168,7 +153,7 @@ impl<'i> Writer<'_, 'i> {
             .map_or(0, |block| block.ops().len());
         (ops != 0).then(|| {
             let gap = CStmt::Gap(GapMarker {
-                kind: "ValuesNotRendered".to_owned(),
+                kind: GapKind::ValuesNotRendered,
                 origin: "render::control".to_owned(),
                 block_addr: addr,
                 op_idx: 0,
@@ -252,7 +237,7 @@ impl<'i> Writer<'_, 'i> {
                     .collect::<Vec<_>>();
                 match cases.is_empty() {
                     // No stated target: control goes where the facts do not say, so the text traps.
-                    true => vec![self.trap(addr, UNRESOLVED_INDIRECT_BRANCH)],
+                    true => vec![self.trap(addr, GapKind::UnresolvedIndirectBranch)],
                     false => {
                         self.residual_terminator(addr);
                         let selector = self.residual(&super::word(self.input));
@@ -284,7 +269,7 @@ impl<'i> Writer<'_, 'i> {
                 fallthrough: None, ..
             }
             | BlockTerminator::IndirectCall { fallthrough: None }
-            | BlockTerminator::None => vec![self.trap(addr, TRANSFER_NOT_FOLLOWED)],
+            | BlockTerminator::None => vec![self.trap(addr, GapKind::TransferNotFollowed)],
         }
     }
 
@@ -350,10 +335,10 @@ impl<'i> Writer<'_, 'i> {
 
     /// A residual of `ty`, or of the machine word where C has no residual of `ty`.
     /// A transfer the text cannot make, as a gap whose marker names it: running it traps.
-    fn trap(&mut self, addr: u64, kind: &'static str) -> CStmt {
+    fn trap(&mut self, addr: u64, kind: GapKind) -> CStmt {
         self.residual_terminator(addr);
         let gap = CStmt::Gap(GapMarker {
-            kind: kind.to_owned(),
+            kind,
             origin: "render::control".to_owned(),
             block_addr: addr,
             op_idx: 0,
@@ -427,7 +412,7 @@ impl<'i> Writer<'_, 'i> {
                     .map(|stmt| self.observe(from, stmt))
                     .collect();
             }
-            return vec![self.trap(from, TAIL_TRANSFER_NOT_RENDERED)];
+            return vec![self.trap(from, GapKind::TailTransferNotRendered)];
         }
         let mut out = self
             .values
