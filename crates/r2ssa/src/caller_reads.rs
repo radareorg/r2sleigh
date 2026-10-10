@@ -2,7 +2,7 @@
 //! "Caller reads"): the caller's own instructions, lifted, before any preparation.
 
 use r2il::{R2ILBlock, R2ILOp, Varnode};
-use r2source::{CanonicalStorageId, SourceResultReads};
+use r2source::{CanonicalStorageId, SourceFloatReadWidth, SourceResultReads};
 
 /// The reads after the call at `index`: a result register read before a write, a transfer or the
 /// block's end; none where the call's own instruction may skip it.
@@ -57,7 +57,7 @@ impl Open {
         reads.float = 1;
         // A read wider than the result lane (a whole-register move) says nothing of the width.
         if input.size <= slot.size {
-            reads.float_bytes = input.size;
+            reads.float_width = SourceFloatReadWidth::Bytes(input.size);
         }
         self.float = None;
     }
@@ -91,7 +91,9 @@ fn overlaps(varnode: &Varnode, slot: CanonicalStorageId) -> bool {
 #[cfg(test)]
 mod tests {
     use r2il::{R2ILBlock, R2ILOp, Varnode};
-    use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceResultReads};
+    use r2source::{
+        CanonicalStorageId, CanonicalStorageSpace, SourceFloatReadWidth, SourceResultReads,
+    };
 
     use super::reads_after_call;
 
@@ -140,7 +142,7 @@ mod tests {
             SourceResultReads {
                 integer: 1,
                 float: 0,
-                float_bytes: 0
+                float_width: SourceFloatReadWidth::Unstated
             }
         );
     }
@@ -219,7 +221,7 @@ mod tests {
             SourceResultReads {
                 integer: 0,
                 float: 1,
-                float_bytes: 8
+                float_width: SourceFloatReadWidth::Bytes(8)
             }
         );
     }

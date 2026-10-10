@@ -896,7 +896,7 @@ fn float_result_written(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CarrierRead {
     Integer,
-    /// The float register, at the width the widest read takes.
+    /// The float register, at the one width every read that states one takes.
     Float(CanonicalStorageId),
 }
 
@@ -908,7 +908,10 @@ fn carrier_read(
     match (reads.integer, reads.float) {
         (1.., 0) => Some(CarrierRead::Integer),
         (0, 1..) => {
-            let bytes = u16::try_from(reads.float_bytes).ok()?;
+            let r2source::SourceFloatReadWidth::Bytes(bytes) = reads.float_width else {
+                return None;
+            };
+            let bytes = u16::try_from(bytes).ok()?;
             (matches!(bytes, 4 | 8) && u32::from(bytes) <= float.size).then_some(
                 CarrierRead::Float(CanonicalStorageId {
                     size: u32::from(bytes),
