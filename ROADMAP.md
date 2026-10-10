@@ -27,18 +27,19 @@ hand before a quality claim.
 | Differential (`scripts/diff_r2.py`) | Where discovery, naming, decoding disagree with radare2, and who is right. |
 | Structure (`scripts/structure-report.sh`) | Did nesting, length, arguments or clones rise? |
 
-Where this stands (2026-10-09, `rebuild` stack #80 to #88, gated at c9361ccc on contabo)
----------------------------------------------------------------------------------------
+Where this stands (2026-10-11, the D switch: #122 to #124 on `rebuild`, follow-ups #126 and #127)
+------------------------------------------------------------------------------------------------
 
 | Measure | Value |
 |---------|-------|
-| Equivalence, legacy | x86-64 638/756 equal (was 629); aarch64 606/756 (was 600); both blessed with a cause per moved record |
-| Equivalence, staged | x86-64 644/756 at the D4 top, no failure legacy's baseline lacks; gating nothing until D's switch |
-| Census | legacy 282 clean, 51 residual, 28 refused of 361; staged 256 clean, 61 gapped, 44 residual |
-| Coverage | `crc32_init` x64 O2 gaps its unproven return, blessed with its cause |
-| Tests | touched-crate suites 1775 passed, 0 failed; workspace clippy clean |
-| Cost (release, instructions retired) | 0pack `pdd @ 0x62ecf0` 22.8 G, `0x58e3d0` 29.2 G; pumasim `0x23fdf0` 38.0 G, `0x4baf30` 24.0 G (34.6 G before #87) |
-| Structure | CI at #88 read too_many_arguments 145 and too_many_lines 390 against 141 and 383 blessed; #86's share (3 and 1) is paid back; the rest is suspended inside D and paid or blessed at its exit |
+| Pipeline | `pdd` renders through the staged decompiler only (#122); the legacy decompiler is deleted (#123); r2dec 17.5k lines against the 20k exit |
+| Equivalence | x86-64 659/756 equal (legacy 635), aarch64 631/756 (legacy 606); no differs, ub, uninit or compile error on either; both baselines blessed at #122 with a cause per moved record |
+| Losses at the switch | 8 records equal to residual-trap, each with its owner: `shape_call_chain` aarch64 gcc-O1/O2 (fixed in #126), `combined` aarch64 clang-O1/O2 (fixed in #127), `shape_byte_indexed_buffer` x86 clang-O2 and aarch64 clang-O2/gcc-O1 (a byte buffer read at `b % 57` whose bound value ranges prove and the frame layout does not use yet), `shape_function_pointer` x86 clang-O0 (an unproven table-call arity, refused by decision) |
+| Coverage | rendered 561 of 562 (was 549); gated gaps rise in Mach-O `_main`, `_start`, `shape_function_pointer`, `vfold`, `shape_signed_divmod`, each named in the bless |
+| Tests | r2ssa, r2types, r2dec, r2engine, r2s 1550 passed at #127 |
+| Cost (release `pdd`, Mac, median of 3) | 0pack `0x58e3d0` 1.96 s and 474 MB (legacy 2.73 s, 560 MB); pumasim `0x23fdf0` 2.83 s (legacy 3.54 s) |
+| Structure | at baseline after the deletion (long_comments 2646, too_many_lines 274) |
+| Exit left | merge #122 to #127 into `rebuild`, then `rebuild` into master with the full exit bar |
 
 The 2026-10-04 review rated the code 4/10: sound ideas and discipline (~7),
 weak algorithms and structure (~3) — hand-rolled iteration, recomputation,
