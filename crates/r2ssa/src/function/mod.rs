@@ -1836,29 +1836,40 @@ fn unique_call_site_identity(
     matches.next().is_none().then_some(identity)
 }
 
-/// What the code after the call at `identity` reads of the two result registers `callee` leaves
-/// one of, where it writes both (doc/adr-resolved-bodies.md, "Caller reads").
+/// What the code after every call to `identity`'s callee in this body reads of the result
+/// registers `callee` leaves, so one prototype holds at each (doc/adr-resolved-bodies.md, "Caller reads").
 fn reads_after(
     blocks: &[R2ILBlock],
     identity: SourceCallSiteIdentity,
     callee: &SourceFunctionInterface,
+    entry: u64,
 ) -> Option<r2source::SourceResultReads> {
     let carriers = callee.result_carriers()?;
-    blocks.iter().find_map(|block| {
-        let index = block.ops.iter().enumerate().position(|(index, op)| {
-            matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
-                && block
-                    .op_metadata(index)
-                    .and_then(|metadata| metadata.instruction_addr)
-                    == Some(identity.instruction())
-        })?;
-        Some(crate::caller_reads::reads_after_call(
-            block,
-            index,
-            Some(carriers.integer),
-            carriers.float,
-        ))
-    })
+    let mut reads = None::<r2source::SourceResultReads>;
+    for block in blocks {
+        for (index, op) in block.ops.iter().enumerate() {
+            let this = match op {
+                R2ILOp::Call { target } => target.offset == entry,
+                R2ILOp::CallInd { .. } => {
+                    block
+                        .op_metadata(index)
+                        .and_then(|metadata| metadata.instruction_addr)
+                        == Some(identity.instruction())
+                }
+                _ => false,
+            };
+            if this {
+                let read = crate::caller_reads::reads_after_call(
+                    block,
+                    index,
+                    Some(carriers.integer),
+                    carriers.float,
+                );
+                reads = Some(reads.map_or(read, |reads| reads.and(read)));
+            }
+        }
+    }
+    reads
 }
 
 #[derive(Clone)]
@@ -1929,7 +1940,7 @@ fn correlate_call_site_interfaces(
                     callee,
                     identity,
                     source.source_revision_identity(),
-                    reads_after(blocks, identity, callee),
+                    reads_after(blocks, identity, callee, call.target_address()),
                 )
             {
                 // The gettext family is named, not prototyped, so the rule
@@ -2472,7 +2483,7 @@ impl TrustedSsaArtifact {
                         own,
                         identity,
                         source.source_revision_identity(),
-                        reads_after(&blocks, identity, own),
+                        reads_after(&blocks, identity, own, call.target_address()),
                     )
                 {
                     call_interfaces.push(interface);

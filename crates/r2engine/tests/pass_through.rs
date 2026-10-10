@@ -134,3 +134,44 @@ fn a_callee_with_an_unproven_result_still_states_its_arity() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains(", 0)"), "{text}");
 }
+
+/// AArch64: `touch` is `ldr x1, [x0]; add x1, x1, #1; str x1, [x0]; ret`, leaving x0 untouched;
+/// `caller` calls it twice in a row, so the second call's argument is the x0 the first one left
+/// (gcc's IPA-RA, aarch64 gcc-O2 `shape_struct_pointer`), and then writes w0.
+const A64_TOUCH_CHAINED: &[u8] = &[
+    0x01, 0x00, 0x40, 0xf9, // 1000 ldr x1, [x0]
+    0x21, 0x04, 0x00, 0x91, // 1004 add x1, x1, #1
+    0x01, 0x00, 0x00, 0xf9, // 1008 str x1, [x0]
+    0xc0, 0x03, 0x5f, 0xd6, // 100c ret
+    0xfd, 0x7b, 0xbe, 0xa9, // 1010 stp x29, x30, [sp, #-32]!
+    0xfd, 0x03, 0x00, 0x91, // 1014 mov x29, sp
+    0xe0, 0x43, 0x00, 0x91, // 1018 add x0, sp, #16
+    0xf9, 0xff, 0xff, 0x97, // 101c bl 0x1000
+    0xf8, 0xff, 0xff, 0x97, // 1020 bl 0x1000
+    0x60, 0x00, 0x80, 0x52, // 1024 mov w0, #3
+    0xfd, 0x7b, 0xc2, 0xa8, // 1028 ldp x29, x30, [sp], #32
+    0xc0, 0x03, 0x5f, 0xd6, // 102c ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 1030 padding
+];
+
+/// One prototype holds at every call to a callee: the first call's result may be read past its
+/// block (the second call's argument), so neither call is a statement of a `void` callee.
+#[test]
+fn a_result_one_call_may_read_is_no_call_s_void() {
+    let text = OpenProgram::of(
+        Literal::of_code(
+            A64_TOUCH_CHAINED,
+            &[("touch", BASE, 0x10), ("caller", BASE + 0x10, 0x20)],
+        )
+        .in_aarch64(),
+    )
+    .rendered(BASE + 0x10)
+    .expect("it renders")
+    .response
+    .output
+    .into_text();
+    assert_eq!(text.matches("touch(").count(), 3, "{text}");
+    assert!(!text.contains("void touch("), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}

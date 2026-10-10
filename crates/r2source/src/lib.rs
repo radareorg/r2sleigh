@@ -99,6 +99,8 @@ pub struct SourceResultReads {
     pub float_width: SourceFloatReadWidth,
     /// Calls whose every result register is written before any read, in the call's own block.
     pub overwritten: u32,
+    /// Calls read.
+    pub calls: u32,
 }
 
 impl SourceResultReads {
@@ -110,6 +112,7 @@ impl SourceResultReads {
             float: self.float.saturating_add(other.float),
             float_width: self.float_width.and(other.float_width),
             overwritten: self.overwritten.saturating_add(other.overwritten),
+            calls: self.calls.saturating_add(other.calls),
         }
     }
 }
