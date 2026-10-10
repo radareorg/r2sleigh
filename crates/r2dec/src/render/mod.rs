@@ -93,7 +93,9 @@ pub fn render(
         })
     };
     let mut body = crate::structure::ControlFlowStructurer::shape(&mut fresh, CStmt::Block(body));
-    let selections = select(&c, &mut body);
+    let selections = select(&c, &mut body, &|id| {
+        blocks.get(id.index() as usize).copied()
+    });
     let never_return = values
         .as_ref()
         .map(values::Values::never_returning)
@@ -207,7 +209,11 @@ fn certify_control(
 }
 
 /// D1.1's selections, each arm converted to `x`'s type as its own assignment converted it.
-fn select(c: &CFunction, body: &mut CStmt) -> std::collections::BTreeSet<RenderObservationId> {
+fn select(
+    c: &CFunction,
+    body: &mut CStmt,
+    block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
+) -> std::collections::BTreeSet<RenderObservationId> {
     let convert = |target: crate::symbol::SymbolId, value: CExpr| {
         let symbols = c.symbols.borrow();
         let ty = symbols.ty(target);
@@ -217,7 +223,7 @@ fn select(c: &CFunction, body: &mut CStmt) -> std::collections::BTreeSet<RenderO
         }
     };
     let mut selections = std::collections::BTreeSet::new();
-    crate::structure::ControlFlowStructurer::select(body, &convert, &mut selections);
+    crate::structure::ControlFlowStructurer::select(body, &convert, block_of, &mut selections);
     selections
 }
 

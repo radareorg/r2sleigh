@@ -67,16 +67,17 @@ impl ControlFlowStructurer<'_, '_> {
     pub(crate) fn select(
         stmt: &mut CStmt,
         convert: &dyn Fn(SymbolId, CExpr) -> CExpr,
+        block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
         selections: &mut BTreeSet<RenderObservationId>,
     ) {
         if let CStmt::Observed { ids, stmt: inner } = stmt
-            && let Some(selection) = Self::selection(inner, convert)
+            && let Some(selection) = Self::selection(inner, convert, block_of)
         {
             selections.extend(ids.iter());
             **inner = selection;
             return;
         }
-        let mut each = |stmt: &mut CStmt| Self::select(stmt, convert, selections);
+        let mut each = |stmt: &mut CStmt| Self::select(stmt, convert, block_of, selections);
         match stmt {
             CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => each(stmt),
             CStmt::Block(stmts) => stmts.iter_mut().for_each(each),
@@ -106,8 +107,13 @@ impl ControlFlowStructurer<'_, '_> {
     }
 
     /// The selection an `if` with an else is, when each arm is one assignment to the same variable
-    /// of a value that writes nothing; each value converted to the variable's type before they meet.
-    fn selection(stmt: &CStmt, convert: &dyn Fn(SymbolId, CExpr) -> CExpr) -> Option<CStmt> {
+    /// of a value that writes nothing and whose markers name at most one block (the certificate
+    /// enters one block per arm); each value converted to the variable's type before they meet.
+    fn selection(
+        stmt: &CStmt,
+        convert: &dyn Fn(SymbolId, CExpr) -> CExpr,
+        block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
+    ) -> Option<CStmt> {
         let CStmt::If {
             cond,
             then_body,
@@ -118,7 +124,11 @@ impl ControlFlowStructurer<'_, '_> {
         };
         let (then_ids, target, then_value) = Self::sole_arm_assignment(then_body)?;
         let (else_ids, other, else_value) = Self::sole_arm_assignment(else_body)?;
-        if target != other {
+        let one_block = |ids: &[RenderObservationId]| {
+            let mut named = ids.iter().filter_map(|id| block_of(*id));
+            named.next().is_none_or(|first| named.all(|at| at == first))
+        };
+        if target != other || !one_block(&then_ids) || !one_block(&else_ids) {
             return None;
         }
         let arm = |ids, value| CExpr::observe_all(ids, convert(target, value));
