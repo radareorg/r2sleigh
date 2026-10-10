@@ -1621,6 +1621,13 @@ impl<'a> Values<'a> {
             .result
             .and_then(|(result, _)| Some((result, self.names.get(result.0 as usize)?.as_ref()?)));
         let Some((result, (name, held))) = named else {
+            // No rendered text reads the result, so the call written for its effect discards it.
+            if let Some(def) = plan
+                .result
+                .and_then(|(result, _)| self.graph.def_inst(result))
+            {
+                self.mark(def);
+            }
             return Some(CStmt::Expr(call));
         };
         let value = fit(call, &self.own.result?, held)?;
