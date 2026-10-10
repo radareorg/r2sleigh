@@ -91,38 +91,6 @@ pub struct ForLoopCertificate {
         reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
     )
 )]
-/// The private-frame loads whose result reaches no observation: one pass over the loads and
-/// their uses, O(accesses + uses), reading `DeadPhis`'s closure rather than recomputing it.
-fn unobserved_private_reads(
-    graph: &crate::SsaGraph,
-    structured: &StructuredDataflowFacts,
-    private_objects: &BTreeSet<ObjectId>,
-    unobserved: &crate::deadphi::DeadPhis,
-    live_out: &crate::liveout::FunctionLiveOut,
-) -> crate::dense::IdSet<InstId> {
-    let unread = |value: ValueId| {
-        !live_out.contains(value)
-            && (graph.use_sites(value).iter())
-                .all(|site| unobserved.unobserved_uses().contains(site))
-    };
-    (structured.memory_accesses.values())
-        .filter(|access| {
-            !access.is_write
-                && access.provenance_complete
-                && private_objects.contains(&access.object)
-        })
-        .map(|access| access.id.inst)
-        .filter(|inst| {
-            graph.inst(*inst).is_some_and(|inst| {
-                matches!(
-                    inst.payload,
-                    crate::graph::InstPayload::Op(crate::SSAOp::Load { .. })
-                ) && inst.output.is_some_and(unread)
-            })
-        })
-        .collect()
-}
-
 fn dispatch_operations(
     graph: &crate::SsaGraph,
     unobserved: &crate::deadphi::DeadPhis,
@@ -453,9 +421,6 @@ pub struct PreparedFunctionCertificates {
     pub dead_frame_stores: crate::dense::IdSet<InstId>,
     /// The operations whose value only those dead stores write, sealed with them.
     pub dead_frame_store_values: crate::dense::IdSet<InstId>,
-    /// Loads of a private frame object whose value no observation reads: every use is one
-    /// `DeadPhis` states unobserved, and the function does not hand it back.
-    pub unobserved_private_reads: crate::dense::IdSet<InstId>,
     /// The caller's stack slots read and never written, filled once the artifact is sealed.
     pub caller_stack_slots: BTreeMap<ObjectId, CallerStackSlotCertificate>,
     pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
@@ -1387,13 +1352,6 @@ pub(crate) fn collect_prepared_function_certificates(
         compiler_inserted,
         dead_frame_stores: crate::dense::IdSet::default(),
         dead_frame_store_values: crate::dense::IdSet::default(),
-        unobserved_private_reads: unobserved_private_reads(
-            graph,
-            structured,
-            private_objects,
-            unobserved,
-            live_out,
-        ),
         caller_stack_slots: BTreeMap::new(),
         call_results,
         call_results_by_inst,

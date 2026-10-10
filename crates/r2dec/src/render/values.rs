@@ -2003,7 +2003,6 @@ impl<'a> Values<'a> {
         let covered = self.covered_by_residuals();
         let certificates = self.artifact.certificates();
         let frame_setup = &certificates.stack_geometry.frame_setup;
-        let unobserved_reads = &certificates.unobserved_private_reads;
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation.source.graph_inst().and_then(|inst| {
@@ -2039,20 +2038,6 @@ impl<'a> Values<'a> {
                     .is_some_and(|i| frame_setup.contains(i)) =>
                 {
                     Outcome::Elided(ElisionReason::StackFrame)
-                }
-                // Deleted when r2ssa seeds unobserved obligations (ROADMAP D, the close() elision).
-                (SemanticObligationKind::LiveValueProducer, _)
-                    if matches!(
-                        obligation.id.component,
-                        SemanticObligationComponent::MemoryAccess(_)
-                    ) && obligation
-                        .source
-                        .graph_inst()
-                        .is_some_and(|i| unobserved_reads.contains(i)) =>
-                {
-                    let reason = crate::ledger::UnsitedReason::PendingObligationSeeding;
-                    let _ = ledger.record_unsited(obligation.id, reason);
-                    continue;
                 }
                 _ => continue,
             };

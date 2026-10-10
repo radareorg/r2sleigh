@@ -32,13 +32,6 @@ fn column(text: &str, noun: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The residuals the proof line says have no site because r2ssa seeds them (`UnsitedReason`).
-fn pending(line: &str) -> usize {
-    line.find(" without a site: pending obligation seeding")
-        .and_then(|end| line[..end].rsplit('(').next()?.parse().ok())
-        .unwrap_or(0)
-}
-
 /// Why `rendered`'s proof line counts what its text does not hold; empty when it agrees.
 fn mismatches(rendered: &str) -> Vec<String> {
     let mut wrong = Vec::new();
@@ -56,7 +49,7 @@ fn mismatches(rendered: &str) -> Vec<String> {
     let marked = (line.split_whitespace().nth(2))
         .and_then(|n| n.parse::<usize>().ok())
         .unwrap_or(0);
-    let unnamed = column(line, "residual").saturating_sub(pending(line));
+    let unnamed = column(line, "residual");
     if unnamed > 0 && sites == 0 {
         wrong.push(format!("{unnamed} residual, no site"));
     }
@@ -87,27 +80,11 @@ fn assert_sited(path: &str) {
     assert!(wrong.is_empty(), "{path}: {wrong:#?}");
 }
 
-/// The one named exception: rv_O0g's private frame reads r2ssa seeds though nothing observes them.
-/// When r2ssa stops seeding them (ROADMAP D, the close() elision) the set empties and this flips.
+/// rv_O0g, whose private frame reads nothing observes owe no obligation (r2ssa's seeding): every
+/// residual its proof lines count has a site, with no exception named.
 #[test]
-fn the_pending_seeding_cause_is_named_on_exactly_these_functions() {
-    let binary = binary("tests/fixtures/rv_O0g");
-    let names = ["sum_array", "list_len", "avg", "fill", "bit_count", "find"];
-    let listing = shell(&binary, "afl");
-    let named = (listing.lines())
-        .filter_map(|line| line.split_whitespace().last())
-        .filter(|name| name.starts_with("sym."))
-        .filter(|name| {
-            let rendered = shell(&binary, &format!("pdd @ {name}"));
-            rendered.contains("without a site: pending obligation seeding)")
-        })
-        .map(|name| name.trim_start_matches("sym.").to_owned())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        named,
-        names.into_iter().map(str::to_owned).collect(),
-        "{listing}"
-    );
+fn every_counted_residual_has_its_site_on_rv_o0g() {
+    assert_sited("tests/fixtures/rv_O0g");
 }
 
 /// RISC-V prologue adds (frame setup) and canary addresses were counted with no site.
