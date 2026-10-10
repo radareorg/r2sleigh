@@ -121,6 +121,9 @@ pub struct StackGeometryCertificate {
     pub insts: crate::dense::IdSet<InstId>,
     pub values: crate::dense::IdSet<ValueId>,
     pub uses: BTreeSet<UseSite>,
+    /// The stack-pointer arithmetic that only locates the frame: the geometry, and the adjustments
+    /// whose other reads form the address of an object of this function's own frame.
+    pub frame_setup: crate::dense::IdSet<InstId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -941,7 +944,7 @@ pub(crate) fn collect_stack_geometry_certificate(
         program_values.extend(boundary.values.iter().map(|value| value.value));
     }
 
-    let mut values = graph
+    let values = graph
         .values
         .iter()
         .filter(|value| {
@@ -955,59 +958,50 @@ pub(crate) fn collect_stack_geometry_certificate(
         })
         .map(|value| value.id)
         .collect::<crate::dense::IdSet<_>>();
-    // The greatest set whose every use stays inside the geometry: a worklist
-    // from the whole candidate set. A value that leaves can only make the
-    // operands of the instruction defining it leave, so those are what it
-    // re-checks.
-    let mut pending = values.iter().collect::<Vec<_>>();
-    while let Some(value) = pending.pop() {
-        if !values.contains(value) {
-            continue;
-        }
-        let Some(site) = graph.use_sites(value).iter().copied().find(|site| {
-            !frame_uses.contains(site)
-                && !return_control_uses.contains(site)
-                && !stack_address_uses.contains(site)
-                // A use inside a definition nothing observes is not a
-                // reader. `sub sp, sp, #0x70` lifts with the carry and
-                // sign computations beside it, and nothing reads those
-                // flags; counting them dropped the stack pointer from
-                // its own geometry, and the prologue then rendered as
-                // `SP_0 = SP_0 - 112` over an entry value no statement
-                // had written.
-                && !unobserved.unobserved_uses().contains(site)
-                && !geometry_outputs
-                    .get(site.inst)
-                    .is_some_and(|output| values.contains(*output))
-        }) else {
-            continue;
-        };
+    // A use inside a definition nothing observes is not a reader: `sub sp, sp, #0x70` lifts with
+    // flag computations nothing reads.
+    let inside = |site: &UseSite| {
+        frame_uses.contains(site)
+            || return_control_uses.contains(site)
+            || stack_address_uses.contains(site)
+            || unobserved.unobserved_uses().contains(site)
+    };
+    let candidates = values.clone();
+    let values = greatest_closed(graph, &geometry_outputs, values, inside, |value, site| {
         r2il::refusal_evidence!(
             "stack-geometry",
-            "{value:?} leaves the geometry: read at {site:?} by {:?}; reader unobserved={} reader output unobserved={:?}; entry root {:?} of {} entry roots, reader output root {:?}",
+            "{value:?} leaves the geometry: read at {site:?} by {:?}; entry root {:?} of {} entry roots",
             graph.inst(site.inst).map(|inst| &inst.payload),
-            unobserved.unobserved_uses().contains(&site),
-            graph
-                .inst(site.inst)
-                .and_then(|inst| inst.output)
-                .map(|output| unobserved.unobserved_values().contains(output)),
             stack_root(value),
             prep.entry_stack_address_roots.len(),
-            graph
-                .inst(site.inst)
-                .and_then(|inst| inst.output)
-                .map(stack_root)
         );
-        values.remove(value);
-        if let Some(inputs) = graph
-            .def_inst(value)
-            .and_then(|inst| graph.inst(inst))
-            .map(|inst| inst.inputs.clone())
-        {
-            pending.extend(inputs.into_iter().filter(|input| values.contains(*input)));
-        }
-    }
-
+    });
+    // Frame setup also admits a read that forms the address of an object starting below the entry
+    // stack pointer: C names that object, so the stack pointer is read only to locate the frame.
+    let names_own_object = |site: &UseSite| {
+        geometry_outputs.get(site.inst).is_some_and(|output| {
+            objects
+                .object_for_value(*output, SpaceId::Ram)
+                .filter(|object| {
+                    matches!(
+                        objects.object(*object).map(|fact| &fact.kind),
+                        Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
+                    )
+                })
+                .and_then(|object| objects.entry_stack_roots.get(&object))
+                .is_some_and(|root| root.base == StackAddressBase::StackPointer && root.offset < 0)
+        })
+    };
+    let setup = greatest_closed(
+        graph,
+        &geometry_outputs,
+        candidates,
+        |site| inside(site) || names_own_object(site),
+        |_, _| {},
+    );
+    let frame_setup = (geometry_outputs.iter())
+        .filter_map(|(inst, output)| setup.contains(*output).then_some(inst))
+        .collect::<crate::dense::IdSet<_>>();
     let insts = geometry_outputs
         .into_iter()
         .filter_map(|(inst, output)| values.contains(output).then_some(inst))
@@ -1027,7 +1021,45 @@ pub(crate) fn collect_stack_geometry_certificate(
         insts,
         values,
         uses,
+        frame_setup,
     }
+}
+
+/// The greatest subset of `values` whose every use is `inside` or an operand of a member's own
+/// definition. A value that leaves re-checks only its operands, so each leaves once: O(V + E).
+fn greatest_closed(
+    graph: &SsaGraph,
+    geometry_outputs: &crate::dense::IdMap<InstId, ValueId>,
+    mut values: crate::dense::IdSet<ValueId>,
+    inside: impl Fn(&UseSite) -> bool,
+    mut leaves: impl FnMut(ValueId, UseSite),
+) -> crate::dense::IdSet<ValueId> {
+    let mut pending = values.iter().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !values.contains(value) {
+            continue;
+        }
+        let Some(site) = graph.use_sites(value).iter().copied().find(|site| {
+            !inside(site)
+                && !geometry_outputs
+                    .get(site.inst)
+                    .is_some_and(|output| values.contains(*output))
+        }) else {
+            continue;
+        };
+        leaves(value, site);
+        values.remove(value);
+        if let Some(definition) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) {
+            pending.extend(
+                definition
+                    .inputs
+                    .iter()
+                    .copied()
+                    .filter(|input| values.contains(*input)),
+            );
+        }
+    }
+    values
 }
 
 /// The one width every complete access to this object uses.

@@ -113,9 +113,54 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     }
     decided.reorder();
     func.apply_edits(decided);
+    let addresses = inserted_addresses(func, &inserted);
+    inserted.extend(addresses.iter());
     func.record_compiler_inserted(inserted, removed);
     // Every decided check removed its failure edge, which holds only of a UB-free source.
     func.record_premise(r2source::Premise::UbFreeSource);
+}
+
+/// The temporary address arithmetic only inserted operations read: the guard's address the
+/// compiler computed for its reads. One pass counts reads; each operation is taken once.
+fn inserted_addresses(func: &SSAFunction, inserted: &IdSet<OpId>) -> IdSet<OpId> {
+    let values = func.values().len();
+    let mut reads = IdMap::<VarId, usize>::new(values);
+    let mut arithmetic = IdMap::<VarId, (OpId, Vec<VarId>)>::new(values);
+    let mut work = Vec::new();
+    for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
+        for (_, phi) in block.sited_phis() {
+            for (_, source) in &phi.sources {
+                *reads.get_or_insert_with(*source, || 0) += 1;
+            }
+        }
+        for (id, op) in block.sited() {
+            match op {
+                SSAOp::Load { addr, .. } if inserted.contains(id) => work.push(*addr),
+                _ if inserted.contains(id) => {}
+                _ => op.for_each_source(|source| *reads.get_or_insert_with(*source, || 0) += 1),
+            }
+            if let SSAOp::IntAdd { dst, .. } | SSAOp::IntSub { dst, .. } | SSAOp::Copy { dst, .. } =
+                op
+                && func.var(*dst).is_temp()
+            {
+                arithmetic.insert(*dst, (id, op.sources().into_iter().copied().collect()));
+            }
+        }
+    }
+    let mut taken = IdSet::new(func.id_limit());
+    while let Some(var) = work.pop() {
+        match arithmetic.get(var) {
+            Some((id, sources))
+                if reads.get(var).is_none_or(|n| *n == 0)
+                    && !inserted.contains(*id)
+                    && taken.insert(*id) =>
+            {
+                work.extend(sources.iter().copied());
+            }
+            _ => {}
+        }
+    }
+    taken
 }
 
 /// Every store whose address is a root plus a constant, by root; written once, by the walk below.

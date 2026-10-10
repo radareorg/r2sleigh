@@ -243,7 +243,11 @@ pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String 
 /// never zero because nothing went wrong; it is zero only when every obligation
 /// was reached by a rule that named its fate.
 /// The proof line's columns that appear only when they are not zero, in reading order.
-fn proof_columns(closure: &crate::ledger::LedgerClosure, split: usize) -> String {
+fn proof_columns(
+    closure: &crate::ledger::LedgerClosure,
+    ledger: &crate::ledger::ObligationLedger,
+) -> String {
+    let split = ledger.split_rendered();
     let mut line = String::new();
     if closure.compiler_inserted > 0 {
         let premise = r2source::Premise::UbFreeSource.spelled();
@@ -263,6 +267,10 @@ fn proof_columns(closure: &crate::ledger::LedgerClosure, split: usize) -> String
     // A function with a residual is rendered, not proven: the count is how many obligations residuals stand in for.
     if closure.gapped > 0 {
         let _ = write!(&mut line, ", {} residual", closure.gapped);
+    }
+    // A residual with no site in the text is spelled with its cause, never silent.
+    for (reason, count) in ledger.unsited() {
+        let _ = write!(&mut line, " ({count} without a site: {})", reason.spelled());
     }
     // Rendered, through a variable split out of a shared one so every read sees its value.
     if split > 0 {
@@ -299,14 +307,13 @@ fn note_unproven_constructs(
             n => format!("{n} constructs are marked below"),
         }
     };
-    let mut detail = match ledger.map(crate::ledger::ObligationLedger::close) {
-        Some(closure) if closure.total > 0 => {
+    let mut detail = match ledger.map(|ledger| (ledger, ledger.close())) {
+        Some((ledger, closure)) if closure.total > 0 => {
             let mut line = format!(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
                 closure.total, closure.rendered, closure.elided, closure.refused
             );
-            let split = ledger.map_or(0, crate::ledger::ObligationLedger::split_rendered);
-            line.push_str(&proof_columns(&closure, split));
+            line.push_str(&proof_columns(&closure, ledger));
             let _ = write!(
                 &mut line,
                 "; {} statements rendered",

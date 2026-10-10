@@ -93,6 +93,7 @@ pub struct ForLoopCertificate {
 )]
 fn dispatch_operations(
     graph: &crate::SsaGraph,
+    unobserved: &crate::deadphi::DeadPhis,
     block_addr: u64,
     selector: Option<ValueId>,
 ) -> Vec<InstId> {
@@ -136,10 +137,10 @@ fn dispatch_operations(
             {
                 continue;
             }
+            // A use no observation depends on (a flag the add also computes) keeps nothing outside.
             let uses = outstanding.get_or_insert_with(value, || {
-                graph
-                    .use_sites(value)
-                    .iter()
+                (graph.use_sites(value).iter())
+                    .filter(|site| !unobserved.unobserved_uses().contains(site))
                     .map(|site| site.inst)
                     .collect()
             });
@@ -780,7 +781,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     selector: fact.selector,
                     cases: fact.cases.clone(),
                     default: fact.default,
-                    dispatch: dispatch_operations(graph, *block_addr, fact.selector),
+                    dispatch: dispatch_operations(graph, unobserved, *block_addr, fact.selector),
                     guard: switch_guard(function, graph, predicates, fact),
                 },
             )

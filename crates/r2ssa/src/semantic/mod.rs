@@ -59,7 +59,7 @@ use crate::machine_context::{
     SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceStackAllocationContract,
     SourceStackSlotRole, SourceStackSlotSpec, SourceTypeKind,
 };
-use crate::obligation::SemanticObligationInventory;
+use crate::obligation::{SeedingFacts, SemanticObligationInventory};
 use crate::op::SSAOp;
 use crate::span::StorageSpans;
 use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
@@ -330,8 +330,11 @@ impl PreparedFunctionFacts {
             &structured,
             &boundaries,
             machine_context,
-            &private_stack_objects,
-            &memory_round_trips,
+            &SeedingFacts::new(
+                &private_stack_objects,
+                &memory_round_trips,
+                &meeting_arms(function),
+            ),
         );
         phase!("obligations", obligations.obligations().len());
         r2il::refusal_evidence!("obligation-shape", "{}", obligations.probe_shape());
@@ -510,4 +513,15 @@ pub(crate) fn collect_predicate_facts_for_test(
     graph: &SsaGraph,
 ) -> PredicateFacts {
     collect_predicate_facts(function, None, graph)
+}
+
+/// The blocks whose conditional branch sends both arms to one block: a direct transfer.
+fn meeting_arms(function: &crate::SSAFunction) -> BTreeSet<u64> {
+    (function.cfg().blocks())
+        .filter(|block| {
+            matches!(block.terminator, crate::cfg::BlockTerminator::ConditionalBranch {
+                true_target, false_target } if true_target == false_target)
+        })
+        .map(|block| block.addr)
+        .collect()
 }

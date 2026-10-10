@@ -179,6 +179,7 @@ jobs:
       - name: Harness contracts
         run: |
           python3 scripts/test_certify_render.py
+          python3 scripts/test_census.py
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote

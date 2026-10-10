@@ -1159,6 +1159,9 @@ impl<'a> Values<'a> {
 
     /// Extend the gap the block's text ends with, or open one at this instruction.
     fn gap(&self, out: &mut Vec<(u64, CStmt)>, (addr, at): (u64, u64), inst: InstId, gap: Gap) {
+        if let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
+            *slot = true;
+        }
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
         let kind = self.gap_kind(gap);
         if let Some((_, CStmt::Gap(marker))) = out.last_mut()
@@ -1696,8 +1699,16 @@ impl<'a> Values<'a> {
 
     /// Record the jump ending `addr` written: the certified control states its one edge.
     pub(super) fn transferred(&self, addr: u64) {
-        if let Some((inst, SSAOp::Branch { .. })) = self.terminator(addr) {
-            self.mark(inst);
+        match self.terminator(addr) {
+            Some((inst, SSAOp::Branch { .. })) => self.mark(inst),
+            // A conditional branch r2ssa owes no predicate goes to one block, as a branch does.
+            Some((inst, SSAOp::CBranch { .. }))
+                if !(self.inventory.obligations_for_inst(inst))
+                    .any(|o| o.id.kind == SemanticObligationKind::ControlPredicate) =>
+            {
+                self.mark(inst);
+            }
+            _ => {}
         }
     }
 
@@ -1770,6 +1781,17 @@ impl<'a> Values<'a> {
         stmt.visit_exprs(&mut |expr| held |= crate::prelude::holds_residual(expr));
         if held && let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
             *slot = true;
+        }
+    }
+
+    /// Record that the text stands a residual or trap for the block's terminator, where no
+    /// statement already discharged that instruction.
+    pub(super) fn residual_terminator(&self, addr: u64) {
+        let Some((inst, _)) = self.terminator(addr) else {
+            return;
+        };
+        if !self.rendered.borrow()[inst.0 as usize] {
+            self.residual.borrow_mut()[inst.0 as usize] = true;
         }
     }
 
@@ -1899,11 +1921,13 @@ impl<'a> Values<'a> {
         out
     }
 
-    /// What became of each obligation: rendered where the text discharged its instruction.
+    /// What became of each obligation: rendered where the text discharged its instruction, residual
+    /// where a site in the text stands for it; one with neither stays unaccounted in the proof line.
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
-        let residual = self.residual.borrow();
+        let covered = self.covered_by_residuals();
+        let frame_setup = &self.artifact.certificates().stack_geometry.frame_setup;
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation.source.graph_inst().and_then(|inst| {
@@ -1917,7 +1941,7 @@ impl<'a> Values<'a> {
                     Outcome::Elided(ElisionReason::NoNativeSemantics)
                 }
                 (_, Some(reason)) => Outcome::Elided(reason),
-                _ if index.is_some_and(|i| rendered[i] && residual[i]) => Outcome::Gapped,
+                _ if index.is_some_and(|i| covered[i]) => Outcome::Gapped,
                 _ if index.is_some_and(|i| rendered[i]) => {
                     match self.artifact.obligation_extent_assumption(obligation.id) {
                         Some(_) => Outcome::Assumed,
@@ -1927,10 +1951,62 @@ impl<'a> Values<'a> {
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)
                 }
-                _ => Outcome::Gapped,
+                // Stack-pointer arithmetic r2ssa states only locates the frame the array names.
+                (SemanticObligationKind::LiveValueProducer, _)
+                    if obligation
+                        .source
+                        .graph_inst()
+                        .is_some_and(|i| frame_setup.contains(i)) =>
+                {
+                    Outcome::Elided(ElisionReason::StackFrame)
+                }
+                // Deleted when r2ssa seeds unobserved obligations (ROADMAP D, the close() elision).
+                (SemanticObligationKind::LiveValueProducer, _)
+                    if matches!(
+                        obligation.id.component,
+                        SemanticObligationComponent::MemoryAccess(_)
+                    ) =>
+                {
+                    let reason = crate::ledger::UnsitedReason::PendingObligationSeeding;
+                    let _ = ledger.record_unsited(obligation.id, reason);
+                    continue;
+                }
+                _ => continue,
             };
             let _ = ledger.record(obligation.id, outcome);
         }
+    }
+
+    /// By instruction index: a residual site's own instruction, and each unwritten producer of a
+    /// value it reads or owes, which reaches the text only through it. Each is pushed once: O(V + E).
+    fn covered_by_residuals(&self) -> Vec<bool> {
+        let rendered = self.rendered.borrow();
+        let mut covered = self.residual.borrow().clone();
+        let mut work = (0..covered.len())
+            .filter(|i| covered[*i])
+            .collect::<Vec<_>>();
+        while let Some(index) = work.pop() {
+            let Some(inst) = self.graph.inst(InstId(index as u32)) else {
+                continue;
+            };
+            let owed = self.inventory.obligations_for_inst(inst.id);
+            let inputs = inst.inputs.iter().chain(owed.flat_map(|o| o.inputs.iter()));
+            let unwritten = |producer: &InstId| {
+                !rendered[producer.0 as usize]
+                    && (self.graph.inst(*producer))
+                        .is_some_and(|p| matches!(p.payload, InstPayload::Op(_)))
+                    && certified_elision(self.artifact, (&self.elisions, &self.dispatch), *producer)
+                        .is_none()
+            };
+            let producers = (inputs.filter_map(|v| self.graph.def_inst(*v)))
+                .filter(unwritten)
+                .map(|p| p.0 as usize)
+                .collect::<Vec<_>>();
+            work.extend(
+                (producers.into_iter()).filter(|at| !std::mem::replace(&mut covered[*at], true)),
+            );
+        }
+        covered
     }
 }
 

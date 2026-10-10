@@ -4451,6 +4451,33 @@ fn a_stack_protector_check_is_compiler_inserted_under_a_ub_free_source() {
     );
 }
 
+/// The guard's address (`fs_base + 0x28`) is the check's too: staged counts no residual for it
+/// (before, `1 residual` with no site in the text).
+#[test]
+fn a_staged_stack_protector_check_owns_the_guard_address() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes: CANARY_CHECKED.to_vec(),
+            name: "canary_checked",
+        },
+        halts: 0x1030,
+    };
+    let response = staged(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    let proof = (output.lines())
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_else(|| panic!("a proof line: {output}"));
+    assert!(
+        proof.contains("compiler-inserted (assuming ub-free)"),
+        "{proof}"
+    );
+    assert!(
+        !proof.contains("residual") && !proof.contains("unaccounted"),
+        "{proof}"
+    );
+}
+
 /// The slot is written again before the check, so the check can fail and stays a residual.
 #[test]
 fn a_canary_written_twice_is_not_decided() {

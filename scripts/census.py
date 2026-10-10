@@ -3,6 +3,8 @@
 
   census.py run  --r2s R2S --out DIR [BINARY...]   pdd every function into DIR/<binary>.txt
   census.py diff BASE_DIR HEAD_DIR [--report FILE] summary of moved renderings; the diff to FILE
+  census.py sites DIR                              each staged function whose proof line counts a
+                                                   residual its text holds no site for; fails on any
   census.py time --r2s BASE --r2s HEAD [--runs N] [--budget R] [--rss-budget R]
                  [--count-r2s BASE --count-r2s HEAD] [--alloc-budget R] --bins DIR
                                                    median release time and peak RSS per case, and
@@ -105,6 +107,65 @@ def diff(args):
         Path(args.report).write_text("".join(report))
 
 
+PROOF = re.compile(r"r2dec proof: (?:(no individual construct is marked)|(\d+) constructs? (?:is|are) marked"
+                   r"|rendering produced no statements)(.*?)\*/")
+
+
+def residual_sites(body):
+    """The proof line's marked count, residual and unaccounted columns, and the sites the text holds."""
+    found = PROOF.search(body)
+    if not found:
+        return None
+    marked = int(found.group(2) or 0)
+    column = lambda name: int(m.group(1)) if (m := re.search(rf"(\d+) {name}\b", found.group(3))) else 0
+    sites = len(re.findall(r"r2sleigh_residual_\w+\(", body[found.end():]))
+    return marked, column("residual"), column("unaccounted"), sites
+
+
+def unsited(body):
+    """The proof line's residuals it states have no site, by the cause it names."""
+    return {cause: int(n) for n, cause in re.findall(r"\((\d+) without a site: ([a-z ]+)\)", body)}
+
+
+REFUSED_UNACCOUNTED = re.compile(r"r2sleigh refused (\S+): .*?(\d+) unaccounted \(([^)]*)\)")
+
+
+def site_mismatches(body):
+    """Why a function's proof line counts a residual its text holds no site for; empty when none."""
+    counted = residual_sites(body)
+    if counted is None:
+        return []
+    marked, residual, unaccounted, found = counted
+    named = sum(unsited(body).values())
+    return [reason for reason, wrong in (
+        (f"{residual - named} residual, no site", residual > named and found == 0),
+        (f"{unaccounted} unaccounted", unaccounted > 0),
+        (f"{marked} marked, {found} in the text", marked != found)) if wrong]
+
+
+def sites(args):
+    """A counted residual needs a site: a residual call or gap marker in the text (ledger.rs, Outcome::Gapped).
+    A residual the proof line names a cause for (`UnsitedReason`), and a refusal, are listed, not failed."""
+    mismatches, refused, named = 0, [], []
+    for path in sorted(Path(args.dir).glob("*.txt")):
+        for address, body in functions(path.read_text()).items():
+            if reasons := site_mismatches(body):
+                mismatches += 1
+                print(f"{path.stem} {address}: {'; '.join(reasons)}")
+            for cause, count in unsited(body).items():
+                named.append(f"{path.stem} {address}: {count} residual, no site: {cause}")
+            if found := REFUSED_UNACCOUNTED.search(body):
+                refused.append(f"{path.stem} {address} {found[1]}: {found[2]} unaccounted ({found[3]})")
+    for line in named:
+        print(f"named cause: {line}")
+    for line in refused:
+        print(f"refused, unaccounted: {line}")
+    print(f"sites: {mismatches} mismatches, {len(named)} residuals without a site under a named cause,"
+          f" {len(refused)} refused for unaccounted obligations")
+    if mismatches:
+        sys.exit(1)
+
+
 def measured(binary, command, executable):
     """Wall seconds, this child's own peak RSS in MB, its output, and the allocations it reported."""
     with tempfile.TemporaryFile() as out:
@@ -180,6 +241,9 @@ def main():
     p.add_argument("head")
     p.add_argument("--report")
     p.set_defaults(func=diff)
+    p = sub.add_parser("sites")
+    p.add_argument("dir")
+    p.set_defaults(func=sites)
     p = sub.add_parser("time")
     p.add_argument("--r2s", action="append", required=True)
     p.add_argument("--bins", required=True)
