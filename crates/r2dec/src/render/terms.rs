@@ -756,7 +756,7 @@ impl Spell<'_> {
             Some(super::globals::Named {
                 object: Some((object, declared)),
                 ..
-            }) => return super::calls::from_declared(object, &declared, ty),
+            }) => return super::calls::from_declared(object, &declared, ty, u64::MAX),
             Some(named) => named.address,
             None => address,
         };

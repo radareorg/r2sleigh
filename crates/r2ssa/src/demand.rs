@@ -1,14 +1,16 @@
 //! Which bytes of each value the function's meaning reads (doc/adr-byte-relation.md),
 //! and the one rewrite it licenses: an INSERT read only in its lane does not read its base.
 
+use std::collections::BTreeSet;
+
 use crate::SSAFunction;
 use crate::bytes::ByteMask;
 use crate::cfg::BlockTerminator;
 use crate::function::EditPlan;
-use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
+use crate::graph::{GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
 use crate::liveout::FunctionLiveOut;
 use crate::op::SSAOp;
-use crate::var::SSAVar;
+use crate::var::{CanonicalStorageId, SSAVar};
 
 /// Every byte of a value `size` bytes wide.
 const fn whole(size: u32) -> u64 {
@@ -129,24 +131,56 @@ pub(crate) fn exits_are_named(function: &SSAFunction, live_out: &FunctionLiveOut
 /// The bytes of each value something reads: the one byte closure
 /// (`crate::bytes::closure`) from the return values and every input of an
 /// operation with an effect.
-pub(crate) struct Demand {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DemandedBytes {
     bytes: crate::dense::IdMap<ValueId, ByteMask>,
 }
 
-impl Demand {
+impl DemandedBytes {
     pub(crate) fn of(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
+        Self::of_returning(graph, live_out, None, &BTreeSet::new())
+    }
+
+    /// The same, where a return reads of its values only the bytes in `result`, the result
+    /// carrier the function's interface states (`None` reads them whole), and no `ignored` read.
+    pub(crate) fn of_returning(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        result: Option<CanonicalStorageId>,
+        ignored: &BTreeSet<UseSite>,
+    ) -> Self {
+        let returned = live_out.iter().map(|value| {
+            let storage = graph.value(value).and_then(|value| value.canonical_storage);
+            let mask = match (storage, result) {
+                (Some(storage), Some(result)) if storage.location() == result.location() => {
+                    ByteMask::whole(result.size.min(storage.size))
+                }
+                _ => ByteMask::All,
+            };
+            (value, mask)
+        });
         let effects = graph
             .insts
             .iter()
             .filter(|inst| has_effect(inst))
-            .flat_map(|inst| inst.inputs.iter().copied());
+            .flat_map(|inst| {
+                let read = |(input_idx, _): &(usize, &ValueId)| {
+                    !ignored.contains(&UseSite {
+                        inst: inst.id,
+                        input_idx: *input_idx,
+                    })
+                };
+                (inst.inputs.iter().enumerate())
+                    .filter(read)
+                    .map(|(_, input)| (*input, ByteMask::All))
+            });
         Self {
-            bytes: crate::bytes::closure(graph, live_out.iter().chain(effects)).bytes,
+            bytes: crate::bytes::closure_of(graph, returned.chain(effects)).bytes,
         }
     }
 
-    /// The bytes of `value` something reads.
-    pub(crate) fn bytes(&self, value: ValueId) -> u64 {
+    /// The bytes of `value` something reads, bit `b` for byte `b`.
+    pub fn bytes(&self, value: ValueId) -> u64 {
         match self.bytes.get(value) {
             None => 0,
             Some(ByteMask::Bytes(bytes)) => *bytes,
@@ -162,7 +196,7 @@ impl SSAFunction {
     pub(crate) fn release_undemanded_insert_bases(
         &self,
         graph: &SsaGraph,
-        demand: &Demand,
+        demand: &DemandedBytes,
     ) -> EditPlan {
         let mut plan = EditPlan::new();
         let mut minting = crate::value_table::Minting::new(self.values());
@@ -278,7 +312,7 @@ mod tests {
         if !exits_are_named(&function, &live_out) {
             return false;
         }
-        let demand = Demand::of(&graph, &live_out);
+        let demand = DemandedBytes::of(&graph, &live_out);
         !function
             .release_undemanded_insert_bases(&graph, &demand)
             .is_empty()

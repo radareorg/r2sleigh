@@ -1503,7 +1503,15 @@ impl<'a> Values<'a> {
                     },
                 };
                 let call = self.call_expr(inst, plan, Some(class))?;
-                let spelled = fit(calls::read_result(plan, call, class)?, class, &own)?;
+                // The function's caller reads the bytes its own result class holds, and no more.
+                let demanded = 1u64
+                    .checked_shl(own.width_bits() / 8)
+                    .map_or(u64::MAX, |n| n - 1);
+                let spelled = fit(
+                    calls::read_result(plan, call, class, demanded)?,
+                    class,
+                    &own,
+                )?;
                 // A call is returned as it is where it is declared the function's own type, or an
                 // integer where the function returns one: `return` converts it as the cast would.
                 let declared = match &plan.declared {
@@ -1537,7 +1545,13 @@ impl<'a> Values<'a> {
             }
             return Some(CStmt::Expr(call));
         };
-        let value = fit(calls::read_result(plan, call, class)?, class, held)?;
+        let demanded = (self.artifact.facts().demanded.as_ref())
+            .map_or(u64::MAX, |demanded| demanded.bytes(*result));
+        let value = fit(
+            calls::read_result(plan, call, class, demanded)?,
+            class,
+            held,
+        )?;
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }
