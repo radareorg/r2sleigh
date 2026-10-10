@@ -150,8 +150,9 @@ fn dispatch_operations(
     // the selector: a definition joins once every use of its value is an
     // operation already found. A worklist: each value keeps the uses not
     // yet found, and its definition joins when the last one is.
-    let mut found = BTreeSet::from([transfer]);
-    let mut outstanding = crate::dense::IdMap::<ValueId, BTreeSet<InstId>>::default();
+    let mut found = crate::dense::IdSet::<InstId>::default();
+    found.insert(transfer);
+    let mut outstanding = crate::dense::IdMap::<ValueId, Vec<InstId>>::default();
     let mut pending = vec![transfer];
     while let Some(inst) = pending.pop() {
         let Some(inputs) = graph.inst(inst).map(|inst| inst.inputs.clone()) else {
@@ -164,7 +165,7 @@ fn dispatch_operations(
             let Some(definition) = graph.def_inst(value) else {
                 continue;
             };
-            if found.contains(&definition)
+            if found.contains(definition)
                 || graph.inst(definition).map(|inst| inst.block) != Some(block.id)
             {
                 continue;
@@ -176,13 +177,13 @@ fn dispatch_operations(
                     .map(|site| site.inst)
                     .collect()
             });
-            uses.remove(&inst);
-            if uses.iter().all(|user| found.contains(user)) && found.insert(definition) {
+            uses.retain(|user| *user != inst);
+            if uses.iter().all(|user| found.contains(*user)) && found.insert(definition) {
                 pending.push(definition);
             }
         }
     }
-    found.into_iter().collect()
+    found.iter().collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
