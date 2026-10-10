@@ -2424,6 +2424,12 @@ fn bounded_and_unbounded_stack_artifact(read_inside: bool) -> SsaArtifact {
             space: SpaceId::Ram,
             addr: inside,
         });
+        // Observed: a private read nothing reads owes no obligation (r2ssa's seeding).
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: Varnode::register(0, 1),
+        });
     }
     block.push(R2ILOp::Return {
         target: Varnode::register(16, 8),
@@ -2473,15 +2479,17 @@ fn one_unbounded_index_refuses_the_layout_a_bounded_index_would_prove() {
 }
 
 /// The masked index's span holds the read, so the object has a reach; the unbounded store may
-/// pass it, so the extent is still assumed and the read's obligation relies on it.
+/// pass it, so the extent is still assumed and the observed read's obligation relies on it.
 #[test]
 fn a_reach_beside_an_unbounded_index_leaves_the_extent_assumed() {
     let artifact = bounded_and_unbounded_stack_artifact(true);
+    // The frame's accesses: the read and the two indexed stores, not the global the read reaches.
     let objects = artifact
         .facts()
         .structured
         .memory_accesses
         .values()
+        .filter(|access| !access.is_write || artifact.objects().address_is_indexed(access.address))
         .map(|access| access.object)
         .collect::<BTreeSet<_>>();
     assert_eq!(objects.len(), 1, "the read is a place in the buffer");

@@ -906,34 +906,40 @@ fn narrow_reread(observe: bool) -> (SsaArtifact, InstId) {
         .unwrap_or_else(|| panic!("the read: {:?}", artifact.structured().memory_accesses))
         .id
         .inst;
-    // The shape the renderer's pending-seeding exception asks about: a seeded private read.
-    let seeded = (artifact.facts().obligations.obligations_for_inst(load))
-        .any(|o| o.id.kind == crate::SemanticObligationKind::LiveValueProducer);
-    assert!(seeded, "{load:?}");
     (artifact, load)
 }
 
+/// Whether the read owes its access: a live value producer of the access's component.
+fn owes_its_access(artifact: &SsaArtifact, load: InstId) -> bool {
+    (artifact.facts().obligations.obligations_for_inst(load)).any(|o| {
+        o.id.kind == crate::SemanticObligationKind::LiveValueProducer
+            && matches!(
+                o.id.component,
+                crate::SemanticObligationComponent::MemoryAccess(_)
+            )
+    })
+}
+
+/// A private read is no observable effect: nothing observing its value, it owes nothing.
 #[test]
-fn a_private_read_nothing_observes_is_certified_unobserved() {
+fn a_private_read_nothing_observes_owes_no_obligation() {
     let (artifact, load) = narrow_reread(false);
     assert!(
         artifact
-            .certificates()
-            .unobserved_private_reads
-            .contains(load)
+            .facts()
+            .obligations
+            .obligations_for_inst(load)
+            .next()
+            .is_none(),
+        "{load:?}"
     );
 }
 
-/// Staged excuses only a certified read, so a dropped observed read stays unaccounted and refuses.
+/// The read whose value is stored owes its access, so a renderer that drops it is unaccounted.
 #[test]
-fn a_private_read_whose_value_is_stored_is_not_certified_unobserved() {
+fn a_private_read_whose_value_is_stored_owes_its_access() {
     let (artifact, load) = narrow_reread(true);
-    assert!(
-        !artifact
-            .certificates()
-            .unobserved_private_reads
-            .contains(load)
-    );
+    assert!(owes_its_access(&artifact, load), "{load:?}");
 }
 
 /// The objects of the frame's indexed accesses, in access order.

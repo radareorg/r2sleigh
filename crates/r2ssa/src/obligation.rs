@@ -659,6 +659,8 @@ impl SemanticObligationInventory {
         let mut unsupported = crate::dense::IdSet::<InstId>::default();
         let mut duplicate_seeds =
             BTreeSet::<(InstId, SemanticObligationKind, SemanticObligationComponent)>::new();
+        // Private frame reads, owed only once the liveness walk reaches them: (inst, ordinal, address).
+        let mut private_reads = Vec::new();
 
         let direct = seeding.seed_direct_branches(graph, &mut required, &mut explicit_inputs);
         for inst in graph.insts.iter().filter(|inst| !direct.contains(inst.id)) {
@@ -717,11 +719,8 @@ impl SemanticObligationInventory {
                     inst.payload
                 );
             }
-            // A slot no pointer outside its own accesses can name is a C
-            // object, so reading it is not an observable effect: the load
-            // produces the variable's own value and lives only while something
-            // reads it. The write stays observable -- it is the assignment,
-            // and dropping it would lose what the variable holds.
+            // Reading a slot no outside pointer can name is no observable effect: the load owes
+            // its value only while something reads it (seeded after the liveness walk below).
             let private_read = !access.is_write
                 && access.provenance_complete
                 && seeding.private_stack_objects.contains(&access.object);
@@ -740,9 +739,11 @@ impl SemanticObligationInventory {
             if round_trip {
                 continue;
             }
-            let kind = if private_read {
-                SemanticObligationKind::LiveValueProducer
-            } else if access.is_write {
+            if private_read {
+                private_reads.push((access.id.inst, access.id.ordinal, access.address));
+                continue;
+            }
+            let kind = if access.is_write {
                 SemanticObligationKind::ObservableMemoryWrite
             } else {
                 SemanticObligationKind::ObservableMemoryRead
@@ -1007,6 +1008,20 @@ impl SemanticObligationInventory {
             }
         }
         propagate_live_dependencies(graph, &direct, &mut required);
+        // A private read the walk reached owes its access; its inputs are already walked.
+        for (inst, ordinal, address) in private_reads {
+            if required.contains(inst) {
+                seed_instruction_with_inputs(
+                    inst,
+                    SemanticObligationKind::LiveValueProducer,
+                    SemanticObligationComponent::MemoryAccess(ordinal),
+                    vec![address],
+                    &mut required,
+                    &mut explicit_inputs,
+                    &mut duplicate_seeds,
+                );
+            }
+        }
         for (inst, _, _) in duplicate_seeds {
             let block_addr = graph
                 .inst(inst)

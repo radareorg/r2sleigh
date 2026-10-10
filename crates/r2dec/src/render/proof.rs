@@ -31,10 +31,6 @@ fn proof_columns(
     if closure.gapped > 0 {
         let _ = write!(&mut line, ", {} residual", closure.gapped);
     }
-    // A residual with no site in the text is spelled with its cause, never silent.
-    for (reason, count) in ledger.unsited() {
-        let _ = write!(&mut line, " ({count} without a site: {})", reason.spelled());
-    }
     // Rendered, through a variable split out of a shared one so every read sees its value.
     if split > 0 {
         let _ = write!(&mut line, " ({split} through a split variable)");
