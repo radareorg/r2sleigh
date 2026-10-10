@@ -150,7 +150,7 @@ fn whole_bytes((size, bits): (u32, Option<u64>)) -> Option<u32> {
         1..8 => bits? & ((1u64 << (8 * size)) - 1),
         _ => bits?,
     };
-    (bits % 8 == 0 && bits / 8 < 64).then(|| (bits / 8) as u32)
+    (bits % 8 == 0 && bits / 8 < 64).then_some((bits / 8) as u32)
 }
 
 /// The bytes of a constant at most eight bytes wide that are zero; a wider
