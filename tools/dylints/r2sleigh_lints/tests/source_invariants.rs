@@ -256,7 +256,7 @@ fn sealed_owners_have_no_public_fields() {
         (types.view(), "pub struct SourceOwnedFunctionFacts "),
         (types.view(), "pub struct TypeAnalysis "),
         (engine.view(), "pub struct EngineAnalysisArtifact "),
-        (dec.view(), "pub struct DecompilerInput "),
+        (dec.view(), "pub struct RenderInput<"),
     ] {
         let owner = source.item(header);
         assert!(
@@ -379,38 +379,18 @@ fn sealed_owners_expose_no_mutators() {
     }
 }
 
-/// Every rendering r2dec produces starts from the sealed `DecompilerInput`:
-/// no public entry takes raw SSA and renders it, and the context the renderer
-/// projects from the sealed facts stays private to it.
+/// Every rendering r2dec produces starts from the sealed `RenderInput`: no
+/// public entry takes raw SSA and renders it, and no render context projected
+/// from the sealed facts is public.
 #[test]
 fn r2dec_renders_only_from_sealed_input() {
     let dec = production("crates/r2dec/src");
     let dec = dec.view();
-    let entries = dec
-        .items("impl Decompiler ")
-        .into_iter()
-        .flat_map(|block| block.items("pub fn "))
-        .map(View::parameters)
-        .filter(|entry| {
-            let name = entry.text()["pub fn ".len()..]
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .next()
-                .unwrap_or_default();
-            ["decompile", "structured_input", "values_input"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-        })
-        .collect::<Vec<_>>();
+    let entry = dec.item("pub fn render(").parameters();
     assert!(
-        !entries.is_empty(),
-        "found no Decompiler rendering entry points"
+        entry.contains("RenderInput"),
+        "r2dec's rendering entry must take the sealed RenderInput:\n{entry}"
     );
-    for entry in entries {
-        assert!(
-            entry.contains("DecompilerInput"),
-            "a Decompiler rendering entry must take the sealed DecompilerInput:\n{entry}"
-        );
-    }
     for raw in ["SSAFunction", "SsaArtifact", "TrustedSsaArtifact"] {
         let taking_raw = dec
             .items("pub fn ")
@@ -438,83 +418,38 @@ fn r2dec_renders_only_from_sealed_input() {
     }
 }
 
-/// The renderer's inputs carry `FunctionFacts` as their one authority. The
-/// facts it reads (callee resolution, callsites, call results, control,
-/// render) are read through it, not carried beside it, and no raw name map
-/// (addresses to function, string or symbol spellings) reaches production
-/// lowering: a name says how to print a thing, not what it is.
+/// The renderer's input carries the sealed `SourceOwnedFunctionFacts` as its
+/// one authority. The facts it reads (callee resolution, callsites, call
+/// results, control, render) are read through it, not carried beside it, and
+/// no raw name map (addresses to function, string or symbol spellings) reaches
+/// rendering: a name says how to print a thing, not what it is.
 #[test]
 fn r2dec_render_inputs_carry_function_facts_as_the_only_authority() {
     let dec = production("crates/r2dec/src");
     let dec = dec.view();
-    for header in [
-        "pub(crate) struct FoldInputs<",
-        "pub(crate) struct PreparedSemanticViewInputs<",
-    ] {
-        let inputs = dec.item(header);
-        assert!(
-            inputs.contains("function_facts: &'a FunctionFacts"),
-            "{header} must carry a non-optional FunctionFacts:\n{inputs}"
-        );
-        for side_channel in [
-            "callee_facts:",
-            "callee_resolution:",
-            "callsite_facts:",
-            "call_result_facts:",
-            "call_render_facts:",
-            "control_facts:",
-            "render_facts:",
-            "semantic_artifact:",
-            "summary_view:",
-            "function_names:",
-            "symbols:",
-            "strings:",
-        ] {
-            assert!(
-                !inputs.contains(side_channel),
-                "{header} must not carry {side_channel} beside FunctionFacts in production:\n{inputs}"
-            );
-        }
-    }
-    let context = dec.item("struct DecompilerContext ");
-    for raw_map in ["function_names:", "symbols:", "strings:"] {
-        assert!(
-            !context.contains(raw_map),
-            "the production render context must carry no raw name map ({raw_map}):\n{context}"
-        );
-    }
-    for accessors in dec.items("impl<'a> PreparedSemanticViewInputs<'a>") {
-        for fallback in [".or(self.", ".and_then(FunctionFacts::"] {
-            assert!(
-                !accessors.contains(fallback),
-                "PreparedSemanticViewInputs must read FunctionFacts with no fallback ({fallback})"
-            );
-        }
-    }
-}
-
-/// The certified render context reads its authority from the render facts
-/// `FunctionFacts` carries, never from the prepared artifact's certificates
-/// directly: a certificate is evidence, and what it licenses to render is
-/// decided in `r2types`.
-#[test]
-fn r2dec_certified_render_context_reads_render_facts() {
-    let dec = production("crates/r2dec/src");
-    let dec = dec.view();
-    let context = dec.item("pub(crate) struct CertifiedRenderContext<");
+    let header = "pub struct RenderInput<";
+    let inputs = dec.item(header);
     assert!(
-        context.contains("render_facts: &'a FunctionRenderFacts"),
-        "CertifiedRenderContext must carry FunctionRenderFacts:\n{context}"
+        inputs.contains("facts: &'a SourceOwnedFunctionFacts"),
+        "{header} must carry the sealed SourceOwnedFunctionFacts:\n{inputs}"
     );
-    let methods = dec.item("impl<'a> CertifiedRenderContext<'a>");
-    for forbidden in [
-        ".certificates()",
-        "return_certificate_for_op",
-        "memory_certificate_for_op_site",
+    for side_channel in [
+        "callee_facts:",
+        "callee_resolution:",
+        "callsite_facts:",
+        "call_result_facts:",
+        "call_render_facts:",
+        "control_facts:",
+        "render_facts:",
+        "semantic_artifact:",
+        "summary_view:",
+        "function_names:",
+        "symbols:",
+        "strings:",
     ] {
         assert!(
-            !methods.contains(forbidden),
-            "CertifiedRenderContext must not read prepared certificates ({forbidden})"
+            !inputs.contains(side_channel),
+            "{header} must not carry {side_channel} beside the sealed facts:\n{inputs}"
         );
     }
 }

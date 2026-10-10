@@ -2,44 +2,6 @@ use std::fs;
 use std::path::Path;
 
 #[test]
-fn analysis_never_imports_fold_in_production() {
-    let analysis_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/analysis");
-    let mut files = Vec::new();
-    collect_rust_files(&analysis_dir, &mut files);
-    files.sort();
-
-    let mut violations = Vec::new();
-
-    for file in files {
-        let rel = relative_analysis_file(&analysis_dir, &file);
-        let text = fs::read_to_string(&file).expect("analysis file should be UTF-8");
-        for (line_idx, line) in production_lines(&text) {
-            let trimmed = line.trim();
-            if !trimmed.contains("crate::fold::") {
-                continue;
-            }
-
-            violations.push(format!("{}:{} {}", rel, line_idx + 1, trimmed));
-        }
-    }
-
-    assert!(
-        violations.is_empty(),
-        "r2dec::analysis must not import renderer-owned fold seams.\n\
-         Move shared facts/policy into r2dec::analysis or an upstream crate first.\n\
-         Violations:\n{}",
-        violations.join("\n")
-    );
-}
-
-fn relative_analysis_file(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-#[test]
 fn production_has_no_legacy_name_identity_or_repair_answerers() {
     let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();

@@ -251,17 +251,14 @@ fn the_ledger_says_what_the_function_owes_and_whether_it_paid() {
 fn each_tier_answers_for_itself() {
     // One lowering per tier, so a defect belongs to exactly one of them.
     let low = r2s(&format!("s {FNV1A32}; pdil"));
-    let medium = r2s(&format!("s {FNV1A32}; pdim"));
-    let high = r2s(&format!("s {FNV1A32}; pdih"));
-    for run in [&low, &medium, &high] {
+    let c = r2s(&format!("s {FNV1A32}; pdd"));
+    for run in [&low, &c] {
         assert!(run.ok, "{}", run.out);
         assert!(!run.out.trim().is_empty());
     }
     assert!(low.out.contains("Entry: 0x401330"), "{}", low.out);
-    assert!(medium.out.contains("Function: fnv1a32"), "{}", medium.out);
-    assert!(high.out.contains("Function: fnv1a32"), "{}", high.out);
-    assert_ne!(low.out, medium.out);
-    assert_ne!(medium.out, high.out);
+    assert!(c.out.contains("fnv1a32("), "{}", c.out);
+    assert_ne!(low.out, c.out);
 }
 
 #[test]
@@ -407,7 +404,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
         .join("../../tests/fixtures/float_calls_zig_x86_64_O2g");
     let staged = on(
         binary,
-        "e dec.pipeline=staged; pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
+        "pdd @ sym.store; pdd @ sym.call_store; pdd @ sym.forward",
     );
     // Each parameter is declared as DWARF states it, by its name: the pointer is read as its word
     // where it is stored through, and passed as itself where the callee declares it the same type.
@@ -446,7 +443,7 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
 /// `_init` calls `__gmon_start__` through the pointer it loads, where one is linked.
 #[test]
 fn a_staged_indirect_call_goes_through_its_target_value() {
-    let staged = r2s("e dec.pipeline=staged; pdd @ 0x401000");
+    let staged = r2s("pdd @ 0x401000");
     assert!(
         staged
             .out
@@ -460,7 +457,7 @@ fn a_staged_indirect_call_goes_through_its_target_value() {
 /// dispatch reads: the `switch` still reads it, so it is computed, never a residual.
 #[test]
 fn a_staged_table_switch_reads_its_selector() {
-    let staged = r2s("e dec.pipeline=staged; pdd @ 0x4018b0");
+    let staged = r2s("pdd @ 0x4018b0");
     assert!(staged.out.contains("& (uint32_t)7U);"), "{}", staged.out);
     assert!(
         !staged.out.contains("switch (r2sleigh_residual"),
@@ -474,10 +471,7 @@ fn a_staged_table_switch_reads_its_selector() {
 #[test]
 fn a_staged_call_passes_its_stack_arguments() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
-    let staged = on(
-        pinned.join("shapes_gcc_x64_O0"),
-        "e dec.pipeline=staged; pdd @ sym.shape_variadic",
-    );
+    let staged = on(pinned.join("shapes_gcc_x64_O0"), "pdd @ sym.shape_variadic");
     assert!(
         staged
             .out
@@ -493,10 +487,7 @@ fn a_staged_call_passes_its_stack_arguments() {
 #[test]
 fn a_staged_register_held_from_entry_reads_as_a_residual() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
-    let staged = on(
-        fixtures.join("rv_O0g"),
-        "e dec.pipeline=staged; pdd @ sym.sext",
-    );
+    let staged = on(fixtures.join("rv_O0g"), "pdd @ sym.sext");
     assert!(
         staged
             .out
@@ -508,14 +499,11 @@ fn a_staged_register_held_from_entry_reads_as_a_residual() {
 }
 
 /// `_init`'s stack pointer chain (the frame's `sub`/`add rsp` and the call's push) is return
-/// control, which the certificates elide for both pipelines alike: no obligation goes unanswered.
+/// control, which the certificates elide: no obligation goes unanswered.
 #[test]
 fn a_staged_ledger_elides_what_the_certificates_elide() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
-    let staged = on(
-        fixtures.join("rv_O0g"),
-        "e dec.pipeline=staged; pdd @ sym._init",
-    );
+    let staged = on(fixtures.join("rv_O0g"), "pdd @ sym._init");
     assert!(
         staged
             .out
@@ -532,7 +520,7 @@ fn a_staged_read_of_a_name_nothing_assigned_is_a_residual() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
     let staged = on(
         pinned.join("shapes_gcc_x64_O0"),
-        "e dec.pipeline=staged; pdd @ sym.shape_struct_value",
+        "pdd @ sym.shape_struct_value",
     );
     assert!(
         staged
@@ -551,7 +539,7 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let staged = on(
         fixtures.join("float_moves_zig_x86_64_O2g"),
-        "e dec.pipeline=staged; pdd @ 0x01001510",
+        "pdd @ 0x01001510",
     );
     assert!(staged.out.contains("> -2147483649.0 && "), "{}", staged.out);
     assert!(
@@ -587,10 +575,7 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
             "return scale(b, a);",
         ),
     ] {
-        let staged = on(
-            fixtures.join(binary),
-            &format!("e dec.pipeline=staged; pdd @ {function}"),
-        );
+        let staged = on(fixtures.join(binary), &format!("pdd @ {function}"));
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
         assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
     }
@@ -609,10 +594,7 @@ fn a_staged_control_residual_states_its_cause() {
         ),
         ("sym.__do_global_dtors_aux", "unproven-return", None),
     ] {
-        let staged = on(
-            binary.clone(),
-            &format!("e dec.pipeline=staged; pddj @ {function}"),
-        );
+        let staged = on(binary.clone(), &format!("pddj @ {function}"));
         let answer: serde_json::Value =
             serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
         let residuals = answer["residuals"].as_array().expect("residuals");
@@ -629,7 +611,7 @@ fn a_staged_control_residual_states_its_cause() {
 #[test]
 fn a_staged_constant_argument_is_the_constant() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
-    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.main");
+    let staged = on(binary, "pdd @ sym.main");
     for call in ["bit_count(0xf0f0)", "fact(5)", ", 16);", ", 16, 7);"] {
         assert!(staged.out.contains(call), "{call}: {}", staged.out);
     }
@@ -645,31 +627,18 @@ fn a_staged_constant_argument_is_the_constant() {
 #[test]
 fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for pipeline in ["legacy", "staged"] {
-        let avg = on(
-            root.join("tests/fixtures/rv_O0g_stripped"),
-            &format!("e dec.pipeline={pipeline}; pdd @ 0x12ef"),
-        );
-        assert!(
-            avg.out.starts_with("double fcn_12ef("),
-            "{pipeline}: {}",
-            avg.out
-        );
-        assert!(
-            !avg.out.contains("r2sleigh_residual"),
-            "{pipeline}: {}",
-            avg.out
-        );
-        let unread = on(
-            root.join("tests/coverage/pinned/hashes_gcc_x64_O2"),
-            &format!("e dec.pipeline={pipeline}; pdd @ sym.crc32_init"),
-        );
-        assert!(
-            unread.out.contains("return r2sleigh_residual_u64("),
-            "{pipeline}: {}",
-            unread.out
-        );
-    }
+    let avg = on(root.join("tests/fixtures/rv_O0g_stripped"), "pdd @ 0x12ef");
+    assert!(avg.out.starts_with("double fcn_12ef("), "{}", avg.out);
+    assert!(!avg.out.contains("r2sleigh_residual"), "{}", avg.out);
+    let unread = on(
+        root.join("tests/coverage/pinned/hashes_gcc_x64_O2"),
+        "pdd @ sym.crc32_init",
+    );
+    assert!(
+        unread.out.contains("return r2sleigh_residual_u64("),
+        "{}",
+        unread.out
+    );
 }
 
 /// The library table says `__libc_start_main` takes functions (`func`) it gives no parameters for:
@@ -678,20 +647,15 @@ fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
 fn an_import_stub_spells_a_function_its_declaration_gives_no_parameters() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/float_calls_zig_aarch64_O2g");
-    for pipeline in ["legacy", "staged"] {
-        let run = on(
-            binary.clone(),
-            &format!("e dec.pipeline={pipeline}; pdd @ 0x01010640"),
-        );
-        assert!(
-            run.out.contains(
-                "extern int32_t __libc_start_main(void(*)(), int32_t, char**, void(*)(), void(*)(), void(*)(), void*);"
-            ),
-            "{pipeline}: {}",
-            run.out
-        );
-        assert!(!run.out.contains("unknown"), "{pipeline}: {}", run.out);
-    }
+    let run = on(binary, "pdd @ 0x01010640");
+    assert!(
+        run.out.contains(
+            "extern int32_t __libc_start_main(void(*)(), int32_t, char**, void(*)(), void(*)(), void(*)(), void*);"
+        ),
+        "{}",
+        run.out
+    );
+    assert!(!run.out.contains("unknown"), "{}", run.out);
 }
 
 /// A double comes back in XMM0's low lane: the call's result is its bits, the rest of the register
@@ -700,7 +664,7 @@ fn an_import_stub_spells_a_function_its_declaration_gives_no_parameters() {
 fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
     let binary =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/two_units_O0g");
-    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.from_b");
+    let staged = on(binary, "pdd @ sym.from_b");
     for line in [
         "double from_b(const double* values, int64_t count)",
         "double helper(const double*, int64_t);",
@@ -717,7 +681,7 @@ fn a_staged_call_returns_a_float_in_its_register_s_low_lane() {
 #[test]
 fn a_staged_computed_index_off_a_named_global_is_spelled_off_that_global() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
-    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fill");
+    let staged = on(binary, "pdd @ sym.fill");
     for line in [
         "extern int32_t g_counter;",
         "extern int32_t g_table[16];",
@@ -734,7 +698,7 @@ fn a_staged_computed_index_off_a_named_global_is_spelled_off_that_global() {
 #[test]
 fn a_staged_recursive_call_agrees_with_its_own_definition() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
-    let staged = on(binary, "e dec.pipeline=staged; pdd @ sym.fact");
+    let staged = on(binary, "pdd @ sym.fact");
     assert!(
         staged.out.contains("int32_t fact(int32_t n)"),
         "{}",
@@ -756,7 +720,7 @@ fn a_staged_recursive_call_agrees_with_its_own_definition() {
 fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/float_calls_zig_aarch64_O2g");
-    let staged = on(binary, "e dec.pipeline=staged; pdd @ main");
+    let staged = on(binary, "pdd @ main");
     for line in [
         "_Alignas(16) uint8_t frame[32];",
         "call_store((double*)(uint64_t)(frame + 8U));",
@@ -766,13 +730,11 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
     }
 }
 
-/// `dec.pipeline=staged` hands `pdd` to the staged decompiler (ROADMAP D): its control is
-/// certified, and the hash loop's values render from the sealed facts with no gap.
+/// `pdd` writes certified control, and the hash loop's values render from the sealed facts with
+/// no gap.
 #[test]
-fn the_staged_pipeline_writes_pdd_from_the_sealed_facts() {
-    let staged = r2s(&format!(
-        "e dec.pipeline=staged; pdd @ {FNV1A32}; e dec.pipeline"
-    ));
+fn pdd_writes_from_the_sealed_facts() {
+    let staged = r2s(&format!("pdd @ {FNV1A32}"));
     for line in [
         "return (uint64_t)0x811c9dc5U;",
         "r2sleigh_load_u8((void*)rdi_1)",
@@ -782,15 +744,6 @@ fn the_staged_pipeline_writes_pdd_from_the_sealed_facts() {
     }
     assert!(!staged.out.contains("r2dec gap"), "{}", staged.out);
     assert!(!staged.out.contains("r2sleigh refused"), "{}", staged.out);
-    assert!(staged.out.ends_with("staged\n"), "{}", staged.out);
-    let refused = r2s("e dec.pipeline=fast");
-    assert!(
-        refused
-            .out
-            .contains("dec.pipeline takes legacy or staged, not 'fast'"),
-        "{}",
-        refused.out
-    );
 }
 
 /// `e` reads and sets the keys the shell acts on, by radare2's names: a key
@@ -802,7 +755,6 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
         run.out,
         "asm.bytes = true\n\
          scr.color = 0\n\
-         dec.pipeline = staged\n\
          \x20           0x00401330      endbr64\n\
          false\n\
          r2s: asm.bytes takes true or false, not 'maybe'\n",
@@ -938,20 +890,6 @@ mod tiers {
         let run = r2s(&format!("s {FNV1A32}; pdil"));
         assert!(run.ok, "{}", run.out);
         insta::assert_snapshot!("fnv1a32_r2il", run.out);
-    }
-
-    #[test]
-    fn medium_tier_is_pinned() {
-        let run = r2s(&format!("s {FNV1A32}; pdim"));
-        assert!(run.ok, "{}", run.out);
-        insta::assert_snapshot!("fnv1a32_r2ssa", run.out);
-    }
-
-    #[test]
-    fn high_tier_is_pinned() {
-        let run = r2s(&format!("s {FNV1A32}; pdih"));
-        assert!(run.ok, "{}", run.out);
-        insta::assert_snapshot!("fnv1a32_tree", run.out);
     }
 
     #[test]
@@ -1300,7 +1238,7 @@ mod dispatch_table {
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
-    /// The block counts and the frame are the prepared analysis's, whichever pipeline renders
+    /// The block counts and the frame are the prepared analysis's, whatever renders
     /// (doc/adr-frame-model.md): the saved `x29`/`x30` pair is frame management; the loop counter,
     /// the accumulator, the table and the homes of `x0`/`x1` are the body's own.
     #[test]
@@ -1509,37 +1447,6 @@ fn the_blocks_of_a_switch_on_a_spilled_parameter_reach_every_arm() {
     assert_eq!(lines.len(), 11, "{}", run.out);
 }
 
-/// `pdim` states the frame partition: gcc -O0's `copy_name` hands no frame
-/// address out, so every object is private, and both of its calls have a
-/// complete interface whose argument area holds none of them.
-#[test]
-fn pdim_states_which_frame_objects_outside_code_can_reach() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
-    let run = on(fixture, "pdim @ 0x13e3");
-    assert!(run.ok, "{}", run.out);
-    // How many objects depends on what the declarations name; that none of
-    // them escapes is the invariant.
-    let frame = run
-        .out
-        .lines()
-        .find(|line| line.starts_with("Frame: "))
-        .unwrap_or_default();
-    assert!(frame.ends_with(" objects, 0 escaped"), "{}", run.out);
-    let calls = run
-        .out
-        .lines()
-        .filter(|line| line.trim_start().starts_with("call "))
-        .collect::<Vec<_>>();
-    assert_eq!(calls.len(), 2, "{}", run.out);
-    assert!(
-        calls
-            .iter()
-            .all(|line| line.ends_with("reaches no private object")),
-        "{}",
-        run.out
-    );
-}
-
 /// `/as` lists every instruction Sleigh says enters the kernel, in a body the
 /// walk reached, with the call its number register proves. A number that
 /// comes from a parameter is not proven here, and is listed as `?` rather
@@ -1582,7 +1489,7 @@ fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
         .filter_map(|line| line.strip_prefix("| "))
         .map(|row| row.split_whitespace().next().expect("a verb").to_owned())
         .collect::<Vec<_>>();
-    for verb in ["s", "pd", "pdd", "afl", "axt", "wx", "V", "?e", "w", "pdim"] {
+    for verb in ["s", "pd", "pdd", "afl", "axt", "wx", "V", "?e", "w", "pdil"] {
         assert!(
             listed.iter().any(|name| name == verb),
             "{verb} missing from:\n{}",
@@ -1594,7 +1501,7 @@ fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
         .find("\nMaintainer:")
         .expect("a maintainer section");
     assert!(help.out[..maintainer].contains("| pdd "));
-    assert!(help.out[maintainer..].contains("| pdim "));
+    assert!(help.out[maintainer..].contains("| pdil "));
     for verb in &listed {
         let usage = r2s(&format!("{verb}?"));
         assert!(usage.ok, "{verb}?: {}", usage.out);

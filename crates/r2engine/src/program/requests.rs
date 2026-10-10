@@ -17,7 +17,7 @@ use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
     Stop, Unread, WalkedBody, Work,
 };
-use crate::{EngineDecompileResponse, RenderTier, SealedFunctionAnalysis};
+use crate::{EngineDecompileResponse, SealedFunctionAnalysis};
 
 /// One function listed block by block, and why the analysis its lines would
 /// carry was refused, where it was.
@@ -142,7 +142,7 @@ pub struct AnalysisRefused {
     pub unresolved: Vec<u64>,
 }
 
-/// A function rendered at one tier, with what of its analysis the rendering is shown with.
+/// A function rendered, with what of its analysis the rendering is shown with.
 #[derive(Clone)]
 pub struct Rendering {
     pub response: EngineDecompileResponse,
@@ -278,12 +278,12 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(isolated(|| read(&sealed)).map_err(refused))
     }
 
-    /// One function rendered at one tier.
-    pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
+    /// One function rendered.
+    pub fn rendered(&mut self, entry: u64) -> Result<Rendering, String> {
         self.start_request();
         self.loaded()?;
         self.assembled()?;
-        let key = (entry, self.view().thumb_at(entry), tier);
+        let key = (entry, self.view().thumb_at(entry));
         let render = self.db.get::<super::analysis::Rendered>(&key);
         let render = render.map_err(|cycle| format!("{cycle:?}"))?;
         let drawn = render.0.as_ref().map_err(Clone::clone)?;

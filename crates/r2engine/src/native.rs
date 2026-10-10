@@ -553,33 +553,13 @@ impl std::fmt::Display for Unread {
     }
 }
 
-/// The structured tier for one function: the tree the C is generated from.
-///
-/// The same analysis and the same request as `decompile`, rendered one step
-/// earlier, so the two can be read against each other.
-pub fn structured(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Result<EngineDecompileResponse, NativeRefusal> {
-    render(target, program, entry, crate::RenderTier::Structured)
-}
-
+/// The C of one function, rendered from its sealed facts.
 pub fn decompile(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
-    render(target, program, entry, crate::RenderTier::C)
-}
-
-/// The staged decompiler's C (ROADMAP D), which replaces `decompile` at D's switch.
-pub fn staged(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Result<EngineDecompileResponse, NativeRefusal> {
-    render(target, program, entry, crate::RenderTier::Staged)
+    render(target, program, entry)
 }
 
 /// Whether a body that transfers to these callees and reads these import slots calls anything declared to take a function.
@@ -647,25 +627,15 @@ pub(crate) fn declared_return(
     Some(!prototype.is_some_and(|prototype| prototype.noreturn))
 }
 
-/// What the binding plan decided about each value.
-pub fn values(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Result<EngineDecompileResponse, NativeRefusal> {
-    render(target, program, entry, crate::RenderTier::Values)
-}
-
 fn render(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
-    tier: crate::RenderTier,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
     let control = program.control();
     let prepared = analysed(target, program, entry)?;
     Ok(match sealed(target, entry, &prepared, &control) {
-        Ok(sealed) => EngineSession::new().render_sealed(&sealed, tier, &control),
+        Ok(sealed) => EngineSession::new().render_sealed(&sealed, &control),
         Err(refused) => *refused,
     })
 }

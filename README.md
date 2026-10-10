@@ -30,9 +30,9 @@ target/release/r2s -q -c 's main; pd 16' /bin/ls          # disassemble
 target/release/r2s /bin/ls                                # interactive; V for the visual mode
 ```
 
-Each IL tier prints on its own, so a defect belongs to one lowering: `pdil`
-(r2il as lifted), `pdim` (r2ssa with its binding plan), `pdih` (the r2dec
-tree). `R2DEC_TRACE_REFUSAL=1` names the predicate and site behind a refusal.
+`pdil` prints r2il as lifted and `pddo` a function's source obligations, so a
+defect is either in the lift or in the rendering. `R2DEC_TRACE_REFUSAL=1` names
+the predicate and site behind a refusal.
 
 Architectures
 -------------
@@ -68,8 +68,8 @@ Extending
 
 - **An opcode**: `R2ILOp` in `crates/r2il/src/opcode.rs`, its P-code
   translation in `crates/r2sleigh-lift/src/translate.rs`, text in `text.rs`,
-  `SSAOp` in `crates/r2ssa/src/op.rs`, lowering in
-  `crates/r2dec/src/fold/op_lower/`.
+  `SSAOp` in `crates/r2ssa/src/op.rs`, its C in
+  `crates/r2dec/src/render/terms.rs`.
 - **An architecture**: a trusted language in `crates/r2sleigh-lift`
   (`TrustedSleighProfile`, `embedded_machine`) whose compiler specification
   the `LanguageProfile` parses; nothing below the lifter matches its name

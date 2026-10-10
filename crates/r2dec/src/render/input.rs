@@ -152,12 +152,12 @@ impl<'a> RenderInput<'a> {
     }
 
     /// The text at each address the capture proves holds it: static data the program never writes,
-    /// as r2engine states it in the snapshot. The one table legacy's literals read.
+    /// as r2engine states it in the snapshot.
     pub fn string_literals(&self) -> &'a std::collections::BTreeMap<u64, String> {
         self.facts.report().display_names().strings()
     }
 
-    /// The container's name for each data address the function refers to: legacy's one table.
+    /// The container's name for each data address the function refers to.
     pub fn data_symbols(&self) -> &'a std::collections::BTreeMap<u64, String> {
         self.facts.report().display_names().symbols()
     }

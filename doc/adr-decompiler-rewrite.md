@@ -167,7 +167,8 @@ obligation was reached by a rule that named its fate.
 - The dominator-tree structurer and its certificate (SD, done): ported as D1.
 - R1's proved rules (`cast.concat_zero_high`, the cast collapses, the ordered
   float comparisons): they are D3's rule set.
-- `typed.rs`'s C typing at render boundaries: D4 reads it.
+- `typed.rs`'s C typing at render boundaries: D4 typed in `render::terms` and
+  `render::tags` instead, so `typed.rs` had no reader and went with legacy.
 - The `Emission` / `pddj` output contract: D5 produces it, so `r2s` and the
   gates do not change.
 
@@ -176,6 +177,8 @@ obligation was reached by a rule that named its fate.
 `observation_journal`, `binding_plan`, `placement`, `normalize`, `fold`,
 `analysis/prepared_semantic`, `effect_ledger`, `single_evaluation`,
 `unrendered` and the retry loops in `lib.rs`. The target is under 20k lines.
+Done (2026-10-10), with `structured_region`, `typed`, `stage_timing`, the legacy
+structurer and `pdim`/`pdih`: `crates/r2dec/src` went from 84,963 to 17,564 lines.
 
 ## How it lands
 

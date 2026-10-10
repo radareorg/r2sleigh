@@ -136,14 +136,9 @@ pub fn render(
     );
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
-    let markers = addresses.len();
     ready.seal_observation_markers(
         &mut crate::codegen::ObservationSealAuthority::staged(),
-        crate::codegen::ObservationLocations::new(
-            addresses.into_iter().map(Some).collect(),
-            vec![None; markers],
-            vec![None; markers],
-        ),
+        crate::codegen::ObservationLocations::new(addresses.into_iter().map(Some).collect()),
     );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
     Ok(Rendered {

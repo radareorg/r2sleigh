@@ -86,7 +86,7 @@ fn a_struct_parameter_costs_the_function_none_of_its_types() {
 /// each tag it spells once, reading no member the declaration does not type at the access.
 #[test]
 fn staged_declares_the_struct_and_function_pointer_types_the_source_states() {
-    let list_len = run("rv_O0g", "e dec.pipeline=staged; pdd @ sym.list_len");
+    let list_len = run("rv_O0g", "pdd @ sym.list_len");
     assert!(
         list_len.contains("int32_t list_len(const struct node* n)"),
         "{list_len}"
@@ -95,7 +95,7 @@ fn staged_declares_the_struct_and_function_pointer_types_the_source_states() {
         !list_len.contains("->") && !list_len.contains(".next"),
         "{list_len}"
     );
-    let main = run("rv_O0g", "e dec.pipeline=staged; pdd @ sym.main");
+    let main = run("rv_O0g", "pdd @ sym.main");
     for c in [&list_len, &main] {
         assert_eq!(c.matches("struct node {").count(), 1, "{c}");
         assert!(c.find("struct node {") < c.find("struct node*"), "{c}");
@@ -108,7 +108,7 @@ fn staged_declares_the_struct_and_function_pointer_types_the_source_states() {
         main.contains("int32_t dispatch(int32_t(*)(int32_t, int32_t), int32_t);"),
         "{main}"
     );
-    let dispatch = run("rv_O0g", "e dec.pipeline=staged; pdd @ sym.dispatch");
+    let dispatch = run("rv_O0g", "pdd @ sym.dispatch");
     assert!(
         dispatch.contains("int32_t dispatch(int32_t (*fn)(int32_t, int32_t), int32_t a)"),
         "{dispatch}"
@@ -311,28 +311,19 @@ fn a_double_moved_as_its_whole_register_is_the_argument() {
 /// `.rodata` (P5). A slot the loader fills is still read at its address (below).
 #[test]
 fn a_constant_loaded_from_read_only_data_is_the_literal() {
-    // 1.0 is added to `x`: legacy folds the literal, staged spells its bits as the float (P5, #90).
-    let legacy = run(
-        "float_returns_zig_x86_64_O2g",
-        "e dec.pipeline=legacy; pdd @ sym.twice_half",
-    );
-    assert!(legacy.contains("x + 1.0;"), "{legacy}");
-    let staged = run(
-        "float_returns_zig_x86_64_O2g",
-        "e dec.pipeline=staged; pdd @ sym.twice_half",
-    );
+    // 1.0 is added to `x`, spelled as its bits read as the float (P5, #90).
+    let staged = run("float_returns_zig_x86_64_O2g", "pdd @ sym.twice_half");
     assert!(
         staged.contains("half(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U))"),
         "{staged}"
     );
     // And nothing reads `.rodata` for it, by either spelling of a load.
-    for out in [legacy, staged] {
-        assert!(!out.contains("*(uint64_t*)0x"), "{out}");
-        assert!(
-            !out.contains("r2sleigh_load_u64((void*)(uint64_t)0x"),
-            "{out}"
-        );
-    }
+    let out = staged;
+    assert!(!out.contains("*(uint64_t*)0x"), "{out}");
+    assert!(
+        !out.contains("r2sleigh_load_u64((void*)(uint64_t)0x"),
+        "{out}"
+    );
 }
 
 /// `_init` reads `__gmon_start__`'s global offset table slot to see whether profiling is linked.

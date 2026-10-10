@@ -4,7 +4,6 @@
 mod common;
 
 use common::{BASE, Literal};
-use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
 /// `pxor xmm0, xmm0; mov eax, 7; ret`, as vectorized integer code leaves XMM0 written, then
@@ -21,9 +20,9 @@ const READ_AS_INTEGER: &[u8] = &[
     0xcc, // 1018 padding
 ];
 
-fn rendered(program: Literal, tier: RenderTier) -> String {
+fn rendered(program: Literal) -> String {
     OpenProgram::of(program)
-        .rendered(BASE, tier)
+        .rendered(BASE)
         .expect("it renders")
         .response
         .output
@@ -38,25 +37,18 @@ fn a_caller_reading_the_integer_register_decides_the_result() {
             &[("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x08)],
         )
     };
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let text = rendered(program(), tier);
-        assert!(text.starts_with("uint64_t f("), "{tier:?}: {text}");
-        assert!(text.contains("7"), "{tier:?}: {text}");
-        assert!(!text.contains("r2sleigh_residual"), "{tier:?}: {text}");
-    }
+    let text = rendered(program());
+    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(text.contains("7"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// The same body with no call to it: nothing says which register is its result.
 #[test]
 fn without_a_reading_call_the_result_stays_a_residual() {
     let program = || Literal::of_code(READ_AS_INTEGER, &[("f", BASE, 0x0a)]);
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let text = rendered(program(), tier);
-        assert!(
-            text.contains("return r2sleigh_residual_"),
-            "{tier:?}: {text}"
-        );
-    }
+    let text = rendered(program());
+    assert!(text.contains("return r2sleigh_residual_"), "{text}");
 }
 
 /// clang -O0's `double first(double *v)`: RAX holds the loaded pointer, and XMM0 the result reloaded
@@ -92,7 +84,7 @@ fn a_float_result_reloaded_from_the_frame_is_declared_at_its_type() {
         &[("first", BASE, 0x2b), ("caller", BASE + 0x30, 0x0a)],
     );
     let text = OpenProgram::of(program)
-        .rendered(BASE + 0x30, RenderTier::C)
+        .rendered(BASE + 0x30)
         .expect("it renders")
         .response
         .output
@@ -124,7 +116,7 @@ fn an_aarch64_float_result_is_its_lane() {
     )
     .in_aarch64();
     let text = OpenProgram::of(program)
-        .rendered(BASE + 0x10, RenderTier::C)
+        .rendered(BASE + 0x10)
         .expect("it renders")
         .response
         .output
@@ -159,7 +151,7 @@ fn an_aarch64_float_merged_in_its_vector_register_returns_its_lane() {
         &[("f", BASE, 0x18), ("caller", BASE + 0x20, 0x0c)],
     )
     .in_aarch64();
-    let text = rendered(program, RenderTier::C);
+    let text = rendered(program);
     assert!(text.contains("double f("), "{text}");
     let body = &text[text.find("double f(").expect("the definition")..];
     let returned = body
@@ -203,20 +195,18 @@ fn each_call_takes_the_register_its_caller_reads() {
             ],
         )
     };
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let render = |at| {
-            OpenProgram::of(program())
-                .rendered(at, tier)
-                .expect("it renders")
-                .response
-                .output
-                .into_text()
-        };
-        let (a, b, f) = (render(BASE + 0x10), render(BASE + 0x20), render(BASE));
-        assert!(a.contains("uint64_t f(void);"), "{tier:?}: {a}");
-        assert!(b.contains("double f(void);"), "{tier:?}: {b}");
-        assert!(f.contains("return r2sleigh_residual_u64("), "{tier:?}: {f}");
-    }
+    let render = |at| {
+        OpenProgram::of(program())
+            .rendered(at)
+            .expect("it renders")
+            .response
+            .output
+            .into_text()
+    };
+    let (a, b, f) = (render(BASE + 0x10), render(BASE + 0x20), render(BASE));
+    assert!(a.contains("uint64_t f(void);"), "{a}");
+    assert!(b.contains("double f(void);"), "{b}");
+    assert!(f.contains("return r2sleigh_residual_u64("), "{f}");
 }
 
 /// `f` as above, `caller_a`: `call f; movss [rsi], xmm0; ret`, `caller_b`: `call f; movsd [rsi], xmm0; ret`.
@@ -250,11 +240,9 @@ fn float_reads_at_two_widths_prove_no_result() {
             ],
         )
     };
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let f = rendered(program(), tier);
-        assert!(!f.starts_with("double f("), "{tier:?}: {f}");
-        assert!(f.contains("return r2sleigh_residual_"), "{tier:?}: {f}");
-    }
+    let f = rendered(program());
+    assert!(!f.starts_with("double f("), "{f}");
+    assert!(f.contains("return r2sleigh_residual_"), "{f}");
 }
 
 /// `f(x)` is `pxor xmm0, xmm0; mov rax, rdi; ret`; `caller_a`: `call f; mov [rsi], eax; ret`,
@@ -289,23 +277,18 @@ fn callers_declare_a_two_carrier_body_as_its_header_does() {
             ],
         )
     };
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let f = rendered(program(), tier);
-        assert!(f.contains("return r2sleigh_residual_u64("), "{tier:?}: {f}");
-        let header = f.lines().next().expect("a header");
-        let (_, parameter) = header.split_once("f(").expect("f's header");
-        let (ty, _) = parameter.rsplit_once(' ').expect("one named parameter");
-        for at in [BASE + 0x10, BASE + 0x20] {
-            let caller = OpenProgram::of(program())
-                .rendered(at, tier)
-                .expect("it renders")
-                .response
-                .output
-                .into_text();
-            assert!(
-                caller.contains(&format!(" f({ty});")),
-                "{tier:?}: {f}\n{caller}"
-            );
-        }
+    let f = rendered(program());
+    assert!(f.contains("return r2sleigh_residual_u64("), "{f}");
+    let header = f.lines().next().expect("a header");
+    let (_, parameter) = header.split_once("f(").expect("f's header");
+    let (ty, _) = parameter.rsplit_once(' ').expect("one named parameter");
+    for at in [BASE + 0x10, BASE + 0x20] {
+        let caller = OpenProgram::of(program())
+            .rendered(at)
+            .expect("it renders")
+            .response
+            .output
+            .into_text();
+        assert!(caller.contains(&format!(" f({ty});")), "{f}\n{caller}");
     }
 }

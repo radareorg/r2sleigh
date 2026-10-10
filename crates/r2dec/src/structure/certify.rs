@@ -9,14 +9,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::OnceLock;
 
 use r2ssa::cfg::{BlockTerminator, CFG};
 use r2ssa::domtree::DomTree;
 
 use crate::ast::RenderObservationId;
 use crate::ast::{CExpr, CStmt};
-use crate::structured_region::StructuredRegionKind;
 
 /// What a terminator says about one of its edges.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -403,17 +401,6 @@ impl Walker<'_> {
     fn walk(&mut self, stmt: &CStmt, open: Vec<OpenEnd>) -> Vec<OpenEnd> {
         match stmt {
             CStmt::Observed { .. } => self.walk_observed(stmt, open),
-            // A region's marker names the block its text starts with; a
-            // loop's names its header, which the loop's own walk opens.
-            CStmt::StructuredRegion { marker, stmt } => {
-                let open = match marker.kind() {
-                    StructuredRegionKind::Block
-                    | StructuredRegionKind::IfThenElse
-                    | StructuredRegionKind::Switch => self.enter_block(open, marker.entry()),
-                    _ => open,
-                };
-                self.walk(stmt, open)
-            }
             CStmt::Block(stmts) => self.walk_seq(stmts, open),
             CStmt::Label(name) => match (self.label_block)(name) {
                 Some(block) => self.enter_block(open, block),
@@ -541,7 +528,6 @@ impl Walker<'_> {
                     return false;
                 }
                 CStmt::Observed { stmt, .. } => stack.push(stmt),
-                CStmt::StructuredRegion { stmt, .. } => stack.push(stmt),
                 CStmt::Block(statements) => stack.extend(statements.iter()),
                 CStmt::If {
                     then_body,
@@ -921,30 +907,6 @@ pub(crate) fn writes(expr: &CExpr) -> bool {
     writes
 }
 
-/// The external callee a statement calls, when the statement is a call or
-/// an assignment of one.
-pub(crate) fn stmt_callee_name(stmt: &CStmt) -> Option<&str> {
-    let expr = match stmt.unobserved() {
-        CStmt::Expr(expr) => expr,
-        _ => return None,
-    };
-    let call = match expr.unobserved() {
-        CExpr::Binary {
-            op: crate::ast::BinaryOp::Assign,
-            right,
-            ..
-        } => right.unobserved(),
-        other => other,
-    };
-    match call {
-        CExpr::Call { func, .. } => match func.unobserved() {
-            CExpr::External { name, .. } => Some(name.as_str()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// The one block a nothing-rendering region entered here leaves through.
 ///
 /// A single pass-through block is the degenerate case of this, and it was the
@@ -1285,37 +1247,6 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         inversions,
         unreachable_missing,
     }
-}
-
-fn reporting() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("R2DEC_CONTROL_CERTIFICATE").is_some())
-}
-
-/// Print one line per function under `R2DEC_CONTROL_CERTIFICATE`, and the
-/// same line on the refusal-evidence channel. The register-identity census
-/// (`doc/adr-register-identity.md`, S0) rides on the same switch.
-pub(crate) fn report(
-    function: &str,
-    certificate: &ControlCertificate,
-    rewrites: &str,
-    identity: r2ssa::RegisterIdentityCensus,
-) {
-    r2il::refusal_evidence!(
-        "control-certificate",
-        "{function}: {certificate} rewrites={rewrites}"
-    );
-    if !reporting() {
-        return;
-    }
-    eprintln!("control-certificate {function}: {certificate} rewrites={rewrites}");
-    for violation in certificate.violations.iter().take(12) {
-        eprintln!("control-certificate {function}:   - {violation}");
-    }
-    eprintln!(
-        "register-identity {function}: split_entries={}",
-        identity.split_entry_families
-    );
 }
 
 #[cfg(test)]

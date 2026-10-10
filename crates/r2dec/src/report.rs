@@ -124,7 +124,6 @@ pub(crate) fn variables(func: &CFunction) -> Vec<RenderedVariable> {
 /// order the emitter writes them.
 fn declarations<'f>(stmt: &'f CStmt, found: &mut Vec<(SymbolId, &'f CType)>) {
     match stmt.unobserved() {
-        CStmt::StructuredRegion { stmt, .. } => declarations(stmt, found),
         CStmt::Decl { ty, name, .. } => found.push((*name, ty)),
         CStmt::Block(body) => body.iter().for_each(|stmt| declarations(stmt, found)),
         CStmt::If {

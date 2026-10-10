@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{ProgramInputs, Source, View};
 use crate::native::{CalleeRead, NativeRefusal, Prepared, Unreadable};
 use crate::query::db::{Db, Hold, Query};
-use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
+use crate::{EngineDecompileResponse, EngineSession, SealedFunctionAnalysis};
 
 /// A shared answer compared by identity: a recomputed analysis is a new one, never backdated.
 pub(super) struct Shared<T>(pub(super) Arc<T>);
@@ -258,7 +258,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
     }
 }
 
-/// One function rendered at one tier: a session redraws what it rendered.
+/// One function rendered: a session redraws what it rendered.
 pub(super) struct Rendered;
 
 /// A rendering, or why the function has none.
@@ -278,16 +278,13 @@ impl PartialEq for Render {
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
-    type Key = (u64, bool, RenderTier);
+    type Key = (u64, bool);
     type Value = Render;
     const NAME: &'static str = "rendered";
     /// A rendering is the C text and its facts, far smaller than the analysis it is read from.
     const CAPACITY: Option<usize> = Some(16);
 
-    fn compute(
-        db: &Db<ProgramInputs<S>>,
-        &(entry, thumb, tier): &(u64, bool, RenderTier),
-    ) -> Render {
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Render {
         let analysis = db
             .get::<Analysed>(&(entry, thumb))
             .expect("an analysis asks for no rendering");
@@ -304,7 +301,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
         let control = db.inputs().control.clone();
         let response = match &*sealing {
             Sealing::Sealed(sealed) => {
-                let render = || EngineSession::new().render_sealed(&sealed.0, tier, &control);
+                let render = || EngineSession::new().render_sealed(&sealed.0, &control);
                 crate::isolation::isolated(render).unwrap_or_else(|panicked| {
                     let phase = crate::EnginePhase::Structuring;
                     crate::panicked_decompile_response(&sealed.0.function_name, &panicked, phase)

@@ -131,7 +131,7 @@ mod tests {
     fn a_verb_completes_from_the_table_at_the_start_of_a_statement() {
         let (start, found) = values("pd", &[]);
         assert_eq!(start, 0);
-        for verb in ["pd", "pdf", "pdd", "pddj", "pdil", "pdim", "pdih", "pddo"] {
+        for verb in ["pd", "pdf", "pdd", "pddj", "pdil", "pddo"] {
             assert!(found.iter().any(|name| name == verb), "{verb}: {found:?}");
         }
         assert!(!found.iter().any(|name| name == "px"));

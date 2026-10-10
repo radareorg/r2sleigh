@@ -29,36 +29,3 @@ pub(crate) fn debug_merges() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| flag("R2SLEIGH_DEBUG_MERGES"))
 }
-
-/// Whether to report each merge materialisation.
-pub(crate) fn trace_materialization() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| flag("R2SLEIGH_TRACE_MAT"))
-}
-
-/// The one value whose inlining decision a run was asked to trace.
-pub(crate) fn traced_inline_name() -> Option<&'static str> {
-    static TRACED: OnceLock<Option<String>> = OnceLock::new();
-    TRACED
-        .get_or_init(|| value("R2SLEIGH_TRACE_INLINE"))
-        .as_deref()
-}
-
-/// Whether to dump the SSA the render was given.
-pub(crate) fn dump_ssa() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| flag("R2SLEIGH_DUMP_SSA"))
-}
-
-/// Where to append the unowned-value log, when one was asked for.
-pub(crate) fn unowned_log_path() -> Option<&'static str> {
-    static PATH: OnceLock<Option<String>> = OnceLock::new();
-    PATH.get_or_init(|| value("R2SLEIGH_DEBUG_UNOWNED_LOG"))
-        .as_deref()
-}
-
-/// Where to write the marked tree as placement sees it, when asked for.
-pub(crate) fn dump_ast_path() -> Option<&'static str> {
-    static PATH: OnceLock<Option<String>> = OnceLock::new();
-    PATH.get_or_init(|| value("R2SLEIGH_DUMP_AST")).as_deref()
-}

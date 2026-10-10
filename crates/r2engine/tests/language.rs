@@ -3,7 +3,6 @@
 mod common;
 
 use common::{BASE, GLIBC, Literal};
-use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
 /// `lea rax, [rax + rbx]; ret`: Go's ABIInternal passes its first two integers in RAX and RBX.
@@ -11,7 +10,7 @@ const ADDS: &[u8] = &[0x48, 0x8d, 0x04, 0x18, 0xc3];
 
 fn rendered(program: Literal) -> Result<String, String> {
     OpenProgram::of(program.running_on(GLIBC))
-        .rendered(BASE, RenderTier::C)
+        .rendered(BASE)
         .map(|rendering| rendering.response.output.into_text())
 }
 

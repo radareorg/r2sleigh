@@ -215,16 +215,8 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
     // the link register the specification names holding `0x100c` is what says
     // control comes back, so the transfer renders as a call.
     let mut program = opened_over(&LINK_REGISTER_CALL, Endian::Little);
-    let response = program
-        .rendered(ARM, r2engine::RenderTier::C)
-        .expect("it renders")
-        .response;
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
+    let response = program.rendered(ARM).expect("it renders").response;
+    assert!(response.output.function().is_some(), "{}", response.output);
     assert!(
         response.output.text().contains("fcn_ffff0fc0();"),
         "the helper call is missing:\n{}",

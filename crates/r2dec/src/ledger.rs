@@ -27,7 +27,7 @@ use r2ssa::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum UnsitedReason {
     /// A private frame read r2ssa seeds though nothing observes its value (ROADMAP D, the close()
-    /// elision, blocked behind legacy's deletion).
+    /// elision).
     PendingObligationSeeding,
 }
 
@@ -90,46 +90,6 @@ pub enum ElisionReason {
     /// object nothing ever assigned would read an uninitialised variable. The
     /// read it puts back goes with it, since nothing else consumes it.
     MemoryRoundTrip,
-    /// An immutable phi whose inputs and output are one certified renderer
-    /// binding has no runtime C operation. Its graph cells remain accounted,
-    /// but no assignment or read is fabricated for the SSA merge itself.
-    CoalescedImmutablePhi,
-    /// A copy whose source and destination are one renderer binding, whole.
-    /// Whatever wrote that binding has already written it, so the copy would
-    /// only spell `x = x`.
-    ///
-    /// The copies normalization makes for a merge are the common case -- one
-    /// on each materialised edge, and the initializer relocated ahead of a
-    /// certified carrier's entry edges -- and the program's own copies are
-    /// the other: `subs x1, x1, #1` lifts to a subtraction into a temporary
-    /// and a copy of the temporary into `x1`, and once a carrier certificate
-    /// puts the two in one object the copy says nothing. A program copy
-    /// keeps its statement where it does something the name does not, a
-    /// narrowing write or a converting read.
-    ///
-    /// This was once restricted to a certified loop carrier's edges with a
-    /// defined source, which is where the case was found rather than the
-    /// reason it holds: what makes the copy say nothing is that both sides
-    /// are one binding. A source nothing defines -- a parameter -- is
-    /// rendered by the binding's declaration, not by the copy.
-    CoalescedCopy,
-    /// Every incoming edge of a merge is either an SSA identity or coalesced
-    /// to the merge's own binding, so the merge needs no standalone C write.
-    ///
-    /// Its output is not elided with it. The value is still rendered, under
-    /// the binding's name, by whatever wrote that binding.
-    CoalescedIdentityPhi,
-    /// An object written on every path only to carry a value to one reader,
-    /// where the text now reads each path's value at that reader instead.
-    ///
-    /// The machine had one `return` and two ways to reach it, so it merged
-    /// through a frame slot and returned the slot. The text writes a return in
-    /// each arm reading that arm's own value, which is what the source said;
-    /// the carrier is then written nowhere and read nowhere, and no C statement
-    /// has to carry it.
-    SpecialisedMergeCarrier,
-    /// A lifted temporary or constant carrier nothing outside its definition reads.
-    DeadUnusedTemporary,
     /// A native instruction the lifter decoded to no semantics at all.
     ///
     /// There is nothing for the rendering to emit because the instruction does
@@ -137,32 +97,8 @@ pub enum ElisionReason {
     /// so this is a positive fact about the instruction and not a way of
     /// saying the effect is unknown.
     NoNativeSemantics,
-    /// A bound object placement removed because nothing read it.
-    ///
-    /// Distinct from `DeadUnusedTemporary`, which names a lifted temporary with
-    /// no reader outside its own definition. This is the outcome for an object
-    /// that had readers when the decisions were derived and lost them when
-    /// another dead object's statements went: the value still exists in the
-    /// source, and a caller-supplied one has no defining instruction at all, so
-    /// there is no write cell to answer for it. What the removed statements did
-    /// besides producing the value is answered by the effect ledger.
-    DeadUnreadBinding,
     /// A write to the stack base that frame handling accounts for instead.
     DeadStackBase,
-    /// A merge no observation depends on, so nothing reads what it decides.
-    UnobservedMerge,
-    /// A pure value outside the complete transitive observation slice.
-    UnobservedValue,
-    /// A source-classified structural instruction produced a value with no
-    /// graph use and owns no semantic obligation.
-    UnusedStructuralValue,
-    /// A value nothing reads, whose defining instruction renders regardless.
-    ///
-    /// A load's read of memory happens whether or not anything uses what it
-    /// produced, so the value is elided and the statement is not: the effect is
-    /// discharged by rendering it. Every other dead-value reason means the
-    /// instruction renders nothing, which is why this one is separate.
-    UnreadEffectfulValue,
     /// The content an object already held when the function started.
     ///
     /// A value with no defining instruction was put there by the caller, so no
@@ -178,40 +114,6 @@ pub enum ElisionReason {
     /// certificate claims it, so no statement here assigns it; where every read
     /// of it is itself elided there is no occurrence to render.
     UnclaimedCallClobber,
-    /// A carrier a call boundary reads or leaves changed, rather than a
-    /// statement.
-    ///
-    /// `SSAOp::CallUse` states what a call consumes so that liveness can see
-    /// it. It is a fact about the boundary and renders nothing of its own: an
-    /// argument the call really passes is spelled inside the call expression,
-    /// and a convention carrier the callee does not take is spelled nowhere.
-    /// `SSAOp::CallDefine` states what the call may leave changed, and the call
-    /// statement is the operation that changes it. Either way the cell has no
-    /// statement, and this is where it is answered.
-    CallBoundaryCarrier,
-    /// Which way a block operation walks, which its loop's form already says.
-    ///
-    /// A repeated string instruction reads the direction flag to choose
-    /// between an ascending and a descending walk. The rendering picks one and
-    /// writes it -- an ascending loop is ascending in its own text -- so the
-    /// operand that chose it is not a C expression, in the same way a branch's
-    /// target is not one where the structure already expresses the transfer.
-    BlockTransferDirection,
-    /// A scan's or a compare's whole answer, and each part's read of it: the statement assigns the parts.
-    BlockAnswerPart,
-    /// A removed merge input already names the merge result, so its edge copy
-    /// would be the identity assignment `x = x`.
-    RedundantPhiEdge,
-    /// Every input of a removed merge is written by a copy on its own incoming
-    /// edge, so the state the merge carried is carried by those copies and the
-    /// merge itself needs no standalone C operation.
-    MaterializedPhiEdges,
-    /// A wide constant store's value operand, written out member by member.
-    ///
-    /// C cannot spell a value wider than its widest scalar, so the store is
-    /// rendered as one assignment per member and each carries its own slice of
-    /// the constant. The operand itself therefore has no occurrence.
-    DecomposedWideStore,
 }
 
 impl std::fmt::Display for ElisionReason {
@@ -225,26 +127,10 @@ impl std::fmt::Display for ElisionReason {
             Self::CallReturnAddress => "call-return-address",
             Self::DeadFrameSlotStore => "dead-frame-slot-store",
             Self::MemoryRoundTrip => "memory-round-trip",
-            Self::CoalescedImmutablePhi => "coalesced-immutable-phi",
-            Self::CoalescedCopy => "coalesced-copy",
-            Self::CoalescedIdentityPhi => "coalesced-identity-phi",
-            Self::SpecialisedMergeCarrier => "specialised-merge-carrier",
-            Self::DeadUnusedTemporary => "dead-unused-temp",
-            Self::CallBoundaryCarrier => "call-boundary-carrier",
             Self::NoNativeSemantics => "no-native-semantics",
-            Self::DeadUnreadBinding => "dead-unread-binding",
             Self::DeadStackBase => "dead-stack-base",
-            Self::UnobservedMerge => "unobserved-merge",
-            Self::UnobservedValue => "unobserved-value",
-            Self::UnusedStructuralValue => "unused-structural-value",
-            Self::UnreadEffectfulValue => "unread-effectful-value",
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
-            Self::BlockTransferDirection => "block-transfer-direction",
-            Self::BlockAnswerPart => "block-answer-part",
-            Self::RedundantPhiEdge => "redundant-phi-edge",
-            Self::MaterializedPhiEdges => "materialized-phi-edges",
-            Self::DecomposedWideStore => "decomposed-wide-store",
         })
     }
 }
@@ -858,7 +744,7 @@ mod tests {
         assert_eq!(ledger.record(id, rendered), Record::Accepted);
         assert_eq!(ledger.record(id, rendered), Record::Redundant);
         assert_eq!(
-            ledger.record(id, Outcome::Elided(ElisionReason::DeadUnusedTemporary)),
+            ledger.record(id, Outcome::Elided(ElisionReason::StackFrame)),
             Record::Conflict(rendered)
         );
 

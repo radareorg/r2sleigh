@@ -1,4 +1,4 @@
-//! One analysis serves every tier asked of one function.
+//! One analysis serves every view asked of one function.
 
 mod common;
 
@@ -8,39 +8,13 @@ use common::{
 use r2engine::program::OpenProgram;
 
 #[test]
-fn every_tier_of_one_function_is_rendered_from_one_analysis() {
-    let mut program = opened();
-    for tier in [
-        r2engine::RenderTier::C,
-        r2engine::RenderTier::Structured,
-        r2engine::RenderTier::Values,
-    ] {
-        let rendering = program.rendered(ONE, tier).expect("it renders");
-        assert!(!rendering.response.output.into_text().is_empty());
-    }
-    let stats = program.analysis_stats();
-    assert_eq!(
-        (
-            stats.analysed.computed,
-            stats.analysed.reused,
-            stats.analysed.recomputed
-        ),
-        // Two tiers and the one sealing reuse the analysis the first tier computed.
-        (1, 3, 0),
-        "three tiers walked and prepared the same body more than once"
-    );
-}
-
-#[test]
 fn afi_afv_and_pdd_read_one_type_analysis() {
     // `afi`, then `afv`, then `pdd`: one prepared function, so one sealed type analysis.
     let mut program = opened();
     let first = program.function_info(ONE).expect("it is described");
     let second = program.function_info(ONE).expect("it is described again");
     assert_eq!(first, second);
-    let rendering = program
-        .rendered(ONE, r2engine::RenderTier::C)
-        .expect("it renders");
+    let rendering = program.rendered(ONE).expect("it renders");
     assert!(!rendering.response.output.into_text().is_empty());
     let stats = program.analysis_stats();
     assert_eq!(
@@ -395,7 +369,7 @@ fn a_rendering_is_redrawn_without_analysing_again() {
     // `pdd` on one function, another, then the first: the session redraws what it rendered.
     let mut program = opened();
     let text = |program: &mut OpenProgram<Literal>, entry| {
-        let rendering = program.rendered(entry, r2engine::RenderTier::C);
+        let rendering = program.rendered(entry);
         rendering.expect("it renders").response.output.into_text()
     };
     let first = text(&mut program, ONE);
@@ -420,10 +394,8 @@ fn a_rendering_the_request_stopped_is_not_held() {
         cancellation.clone(),
     ));
     cancellation.cancel();
-    let _ = program.rendered(ONE, r2engine::RenderTier::C);
-    let rendering = program
-        .rendered(ONE, r2engine::RenderTier::C)
-        .expect("a fresh request renders");
+    let _ = program.rendered(ONE);
+    let rendering = program.rendered(ONE).expect("a fresh request renders");
     assert!(!rendering.response.output.into_text().is_empty());
     assert_eq!(
         program.analysis_stats().analysed.computed,
@@ -461,7 +433,7 @@ fn asked(program: &mut OpenProgram<Literal>, step: &Step) -> String {
         Step::Render(entry) => format!(
             "{:?}",
             program
-                .rendered(entry, r2engine::RenderTier::C)
+                .rendered(entry)
                 .map(|rendering| (rendering.response.output.into_text(), rendering.unread))
         ),
         Step::List(entry) => format!(
@@ -518,9 +490,7 @@ fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
         ("root", base + 0x20, 11),
     ];
     let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
-    let rendering = program
-        .rendered(base + 0x20, r2engine::RenderTier::C)
-        .expect("it renders");
+    let rendering = program.rendered(base + 0x20).expect("it renders");
     let text = rendering.response.output.into_text();
     assert!(text.contains("uint64_t thunk(uint64_t);"), "{text}");
     assert!(text.contains("= thunk(5);"), "{text}");
@@ -537,9 +507,7 @@ fn a_return_one_arm_leaves_untouched_proves_no_result() {
     let base = common::BASE;
     let functions = [("bump", base, 4), ("maybe", base + 0x30, 10)];
     let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
-    let rendering = program
-        .rendered(base + 0x30, r2engine::RenderTier::C)
-        .expect("it renders");
+    let rendering = program.rendered(base + 0x30).expect("it renders");
     let text = rendering.response.output.into_text();
     assert!(!text.contains("r2sleigh refused"), "{text}");
     assert!(text.contains("return r2sleigh_residual"), "{text}");

@@ -68,16 +68,11 @@ impl Default for CodeGenConfig {
     }
 }
 
-/// Capability required to expose a marked emission tree for journal sealing.
-/// Only the journal's seal and the staged writer construct it.
+/// Capability required to seal a marked emission tree: only the renderer, whose
+/// writer states the instruction each marker was written for, constructs it.
 pub(crate) struct ObservationSealAuthority(());
 
 impl ObservationSealAuthority {
-    pub(crate) fn new() -> Self {
-        Self(())
-    }
-
-    /// The staged pipeline's seal: its writer states the instruction each marker was written for.
     pub(crate) fn staged() -> Self {
         Self(())
     }
@@ -87,11 +82,11 @@ impl ObservationSealAuthority {
 ///
 /// Observation sealing must inspect this exact function. The emitter accepts
 /// no raw `CFunction`, which prevents a private clone from being rewritten
-/// after the provenance journal has certified a different tree.
+/// after the seal has named a different tree's markers.
 pub(crate) struct EmissionReadyFunction {
     function: CFunction,
-    /// The instruction each observation marker stands for, once the journal
-    /// has sealed this tree.
+    /// The instruction each observation marker stands for, once this tree is
+    /// sealed.
     ///
     /// A sealed tree keeps its markers: they are where each statement came
     /// from, and the emitter reads them to say which instructions each line
@@ -102,60 +97,25 @@ pub(crate) struct EmissionReadyFunction {
 
 /// The instruction address each observation marker of one sealed tree names,
 /// by the marker's dense index.
-///
-/// A marker names a cell -- a value a statement computes, a use it makes, a
-/// write it performs, an effect it discharges -- and each cell belongs to one
-/// instruction. A read of a value computed elsewhere names no instruction here:
-/// the line reading it does not account for the instruction that computed it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ObservationLocations {
     at: Box<[Option<u64>]>,
-    /// The obligation each effect marker discharges where it stands. Any other
-    /// marker discharges none.
-    effects: Box<[Option<r2ssa::SemanticObligationId>]>,
-    /// The SSA version each read marker stands for. Any other marker reads none.
-    reads: Box<[Option<r2ssa::ValueId>]>,
 }
 
 impl ObservationLocations {
-    /// One entry per marker in each table, by the marker's dense index.
-    pub(crate) fn new(
-        at: Vec<Option<u64>>,
-        effects: Vec<Option<r2ssa::SemanticObligationId>>,
-        reads: Vec<Option<r2ssa::ValueId>>,
-    ) -> Self {
-        debug_assert_eq!(at.len(), effects.len());
-        debug_assert_eq!(at.len(), reads.len());
+    /// One entry per marker, by the marker's dense index.
+    pub(crate) fn new(at: Vec<Option<u64>>) -> Self {
         Self {
             at: at.into_boxed_slice(),
-            effects: effects.into_boxed_slice(),
-            reads: reads.into_boxed_slice(),
         }
-    }
-
-    /// The SSA version this marker's read stands for, where it marks a read.
-    pub(crate) fn read(&self, id: RenderObservationId) -> Option<r2ssa::ValueId> {
-        self.reads.get(id.index() as usize).copied().flatten()
     }
 
     fn at(&self, id: RenderObservationId) -> Option<u64> {
         self.at.get(id.index() as usize).copied().flatten()
     }
-
-    /// The obligation this marker discharges, where it is an effect's.
-    pub(crate) fn effect(&self, id: RenderObservationId) -> Option<r2ssa::SemanticObligationId> {
-        self.effects.get(id.index() as usize).copied().flatten()
-    }
 }
 
 impl EmissionReadyFunction {
-    /// The function as the aggregate-definition pass reads it: no observation
-    /// assertion, because that pass runs before the markers are discarded and
-    /// reads only declarations.
-    pub(crate) fn function_for_aggregate_definitions(&self) -> &CFunction {
-        &self.function
-    }
-
     pub(crate) fn set_aggregate_definitions(&mut self, aggregates: Vec<crate::ast::CAggregateDef>) {
         self.function.aggregates = aggregates;
     }
@@ -167,69 +127,15 @@ impl EmissionReadyFunction {
         self.function.bitvector_helpers = helpers;
     }
 
-    pub(crate) fn set_typedef_definitions(&mut self, typedefs: Vec<crate::ast::CTypedefDef>) {
-        self.function.typedefs = typedefs;
-    }
-
-    /// The function as the named-type pass reads and repairs it.
-    ///
-    /// No observation assertion, for the same reason the aggregate pass has
-    /// none: it runs before the markers are discarded and touches only types.
-    pub(crate) fn function_mut_for_type_declarations(&mut self) -> &mut CFunction {
-        &mut self.function
-    }
-
     pub(crate) fn function(&self) -> &CFunction {
         assert!(
             self.locations.is_some() || !has_render_observations(&self.function),
-            "marked C AST reached an emission/public boundary without journal sealing"
+            "marked C AST reached an emission/public boundary unsealed"
         );
         &self.function
     }
 
-    /// Rewrite a function the journal has sealed, keeping what its markers name.
-    ///
-    /// For the passes that run after the seal and change no marker: the proof
-    /// note, and the residuals for reads of objects nothing assigns. The
-    /// table the seal built is read by marker, so a rewrite that added,
-    /// dropped or duplicated one would make the line map name instructions a
-    /// line does not account for. The markers are compared before and after
-    /// wherever debug assertions run.
-    pub(crate) fn rewrite_sealed<T>(&mut self, rewrite: impl FnOnce(&mut CFunction) -> T) -> T {
-        let markers = |function: &CFunction| {
-            let mut ids = function
-                .body
-                .iter()
-                .flat_map(crate::ast::stmt_render_observation_ids)
-                .collect::<Vec<_>>();
-            ids.sort_unstable();
-            ids
-        };
-        let before = cfg!(debug_assertions).then(|| markers(&self.function));
-        let result = rewrite(&mut self.function);
-        if let Some(before) = before {
-            assert_eq!(
-                before,
-                markers(&self.function),
-                "a rewrite after the seal changed which markers the tree carries"
-            );
-        }
-        result
-    }
-
-    /// What the markers of this sealed tree name, once it is sealed.
-    pub(crate) fn observation_locations(&self) -> Option<&ObservationLocations> {
-        self.locations.as_deref()
-    }
-
-    pub(crate) fn function_mut_for_observation_seal(
-        &mut self,
-        _authority: &mut ObservationSealAuthority,
-    ) -> &mut CFunction {
-        &mut self.function
-    }
-
-    /// Keep the markers the journal just sealed, with what each one names.
+    /// Seal the markers, with the instruction each one names.
     pub(crate) fn seal_observation_markers(
         &mut self,
         _authority: &mut ObservationSealAuthority,
@@ -238,28 +144,14 @@ impl EmissionReadyFunction {
         self.locations = Some(Rc::new(locations));
     }
 
-    /// Remove lexical proof markers only after exact observation sealing has
-    /// inspected the same emission-ready tree.
-    pub(crate) fn strip_structured_region_markers(
-        &mut self,
-        regions: &crate::structured_region::SealedStructuredRegionArtifact,
-    ) -> Result<(), crate::structured_region::StructuredRegionFinalizationError> {
-        crate::structured_region::strip_final_region_markers(&mut self.function.body, regions)
-    }
-
     /// The function as it leaves the decompiler, with no marker left in it.
     pub(crate) fn into_function(mut self) -> CFunction {
         assert!(
             self.locations.is_some() || !has_render_observations(&self.function),
-            "marked C AST reached a public boundary without journal sealing"
+            "marked C AST reached a public boundary unsealed"
         );
         crate::ast::discard_render_observations(&mut self.function);
         self.function
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn function_for_marker_test(&self) -> &CFunction {
-        &self.function
     }
 }
 
@@ -587,12 +479,6 @@ impl<'c> CodeGenerator<'c> {
         }
     }
 
-    /// Count what this generator emits against the run's work budget.
-    pub(crate) fn with_work(mut self, work: &'c dyn r2ssa::SsaWorkControl) -> Self {
-        self.work = Some(work);
-        self
-    }
-
     /// One unit for one emitted node, and false once the run is stopped.
     fn charge(&mut self) -> bool {
         if self.stopped {
@@ -832,32 +718,6 @@ impl<'c> CodeGenerator<'c> {
         }
     }
 
-    /// Read names from the table that issued them.
-    pub(crate) fn adopt_symbols(&mut self, symbols: &crate::symbol::SymbolTable) {
-        self.symbols = symbols.clone();
-    }
-
-    /// Generate code for a statement.
-    pub(crate) fn generate_stmt(&mut self, stmt: &CStmt) -> String {
-        #[cfg(test)]
-        assert!(
-            !stmt_has_render_observations(stmt),
-            "marked C statement reached codegen without journal sealing"
-        );
-        self.output.clear();
-        self.roles.clear();
-        self.emit_stmt(stmt);
-        self.output.clone()
-    }
-
-    /// Generate code for an expression.
-    pub(crate) fn generate_expr(&mut self, expr: &CExpr) -> String {
-        self.roles.clear();
-        self.output.clear();
-        self.emit_expr(expr, 0);
-        self.output.clone()
-    }
-
     /// Emit a statement.
     fn emit_stmt(&mut self, stmt: &CStmt) {
         if !self.charge() {
@@ -869,7 +729,6 @@ impl<'c> CodeGenerator<'c> {
         }
         let stmt = stmt.unobserved();
         match stmt {
-            CStmt::StructuredRegion { stmt, .. } => self.emit_stmt(stmt),
             CStmt::Empty => {}
             CStmt::Expr(expr) => {
                 self.emit_indent();
@@ -1457,9 +1316,6 @@ fn prepare_stmt_sequence_for_emission(stmts: Vec<CStmt>) -> Vec<CStmt> {
 
 fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
     match stmt {
-        CStmt::StructuredRegion { marker, stmt } => {
-            CStmt::structured_region(marker, prepare_stmt_for_emission(*stmt))
-        }
         CStmt::Observed { ids, stmt } => CStmt::observe_all(ids, prepare_stmt_for_emission(*stmt)),
         CStmt::Block(stmts) => CStmt::Block(prepare_stmt_sequence_for_emission(stmts)),
         CStmt::If {
@@ -1791,6 +1647,30 @@ impl RenderedFunction {
     /// The tree that C was written from, for a consumer that walks rather than parses.
     pub const fn function(&self) -> &CFunction {
         &self.function
+    }
+}
+
+#[cfg(test)]
+impl<'c> CodeGenerator<'c> {
+    /// Generate code for a statement.
+    pub(crate) fn generate_stmt(&mut self, stmt: &CStmt) -> String {
+        #[cfg(test)]
+        assert!(
+            !stmt_has_render_observations(stmt),
+            "marked C statement reached codegen unsealed"
+        );
+        self.output.clear();
+        self.roles.clear();
+        self.emit_stmt(stmt);
+        self.output.clone()
+    }
+
+    /// Generate code for an expression.
+    pub(crate) fn generate_expr(&mut self, expr: &CExpr) -> String {
+        self.roles.clear();
+        self.output.clear();
+        self.emit_expr(expr, 0);
+        self.output.clone()
     }
 }
 

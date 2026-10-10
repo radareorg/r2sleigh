@@ -3,12 +3,11 @@
 mod common;
 
 use common::{BASE, CALLER, GLIBC, Literal, ONE, STUB, TEXT, TWO, opened};
-use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
 fn c_of(program: &mut OpenProgram<Literal>, entry: u64) -> String {
     program
-        .rendered(entry, RenderTier::C)
+        .rendered(entry)
         .expect("it renders")
         .response
         .output
@@ -70,7 +69,8 @@ fn a_tail_jump_to_a_defined_function_is_a_call_to_it_and_no_import() {
     let c = c_of(&mut program, g);
     let head = c.lines().next().unwrap_or_default();
     assert!(head.contains(" g(") && !head.contains(" t("), "{c}");
-    assert!(c.contains("return t("), "{c}");
+    let tail_call = |line: &str| line.trim_start().starts_with("return") && line.contains(")t(");
+    assert!(c.lines().any(tail_call), "{c}");
     assert!(!c.contains("import stub"), "{c}");
 }
 
@@ -110,7 +110,7 @@ fn an_address_no_instruction_can_run_at_is_refused_rather_than_rendered_as_a_fun
         .with_data_after(common::TRANSFERRED)
         .data_mapped_after(common::TRANSFERRED);
     let mut program = OpenProgram::of(data);
-    let Err(refused) = program.rendered(common::TRANSFERRED, RenderTier::C) else {
+    let Err(refused) = program.rendered(common::TRANSFERRED) else {
         panic!("data was rendered as a function");
     };
     assert_eq!(
