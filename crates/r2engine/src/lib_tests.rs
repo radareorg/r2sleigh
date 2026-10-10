@@ -874,8 +874,15 @@ fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
 
 /// Its C, asked under a fresh control.
 fn render_request(sealed: &SealedFunctionAnalysis) -> EngineDecompileRequest<'_> {
+    render_request_at(sealed, RenderTier::C)
+}
+
+fn render_request_at(
+    sealed: &SealedFunctionAnalysis,
+    tier: RenderTier,
+) -> EngineDecompileRequest<'_> {
     EngineDecompileRequest {
-        tier: RenderTier::C,
+        tier,
         sealed,
         execution: EngineExecutionControl::default(),
     }
@@ -935,11 +942,34 @@ fn engine_decompiler_input_retains_exact_source_owned_facts() {
     );
 }
 
+/// Legacy polls while it normalizes, structures and renders.
 #[test]
 fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
+    inner_stops_keep_exact_audits(
+        RenderTier::C,
+        &[
+            EnginePhase::Normalization,
+            EnginePhase::Structuring,
+            EnginePhase::Rendering,
+        ],
+    );
+}
+
+/// Staged polls while it writes the control and once more to render the certified body.
+#[test]
+fn staged_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
+    inner_stops_keep_exact_audits(
+        RenderTier::Staged,
+        &[EnginePhase::Structuring, EnginePhase::Rendering],
+    );
+}
+
+/// A stop at each poll refuses the phase the pipeline polled in, and only that one: each phase in
+/// `polled` is reached by some poll, and no other is.
+fn inner_stops_keep_exact_audits(tier: RenderTier, polled: &[EnginePhase]) {
     let session = EngineSession::new();
     let sealed = controlled_r2dec_sealed();
-    let request = render_request(&sealed);
+    let request = render_request_at(&sealed, tier);
     let decompiler_input = decompiler_input_for_engine_request(&request);
     let legacy_output = r2dec::Decompiler::new(request.sealed.render_target.to_decompiler_config())
         .decompile_input(&decompiler_input);
@@ -989,12 +1019,14 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
     }
     // The last poll stops the rendering itself, after everything before it completed.
     observed.insert(EnginePhase::Rendering, total_polls);
-    assert!(observed.len() > 1, "polls={total_polls}: {observed:?}");
+    let reached = render_phases
+        .into_iter()
+        .filter(|phase| observed.contains_key(phase))
+        .collect::<Vec<_>>();
+    assert_eq!(reached, polled, "polls={total_polls}: {observed:?}");
 
-    for phase in render_phases {
-        let Some(&stop_at) = observed.get(&phase) else {
-            continue;
-        };
+    for &phase in polled {
+        let stop_at = observed[&phase];
         let reason = if phase == EnginePhase::Rendering {
             r2ssa::SsaExecutionStopReason::DeadlineExceeded
         } else {

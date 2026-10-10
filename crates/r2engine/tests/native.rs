@@ -1430,15 +1430,22 @@ fn an_indirect_branch_the_walk_could_not_follow_is_no_tail_call() {
     // `return ((int32_t(*)(void))*(...))();` with nothing refused: a tail
     // call the program never makes, in place of the switch it does.
     let machine = Machine::new("x86-64", "x86-64", 64);
-    let response = decompile(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
-    let output = response.output.text();
-    // Unproven, whether the rendering refuses or traps where the walk stopped.
+    // Legacy refuses the function; staged traps where the walk stopped (D1).
+    let legacy = decompile(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
+    let staged = staged(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
+    assert!(legacy.render_refusal.is_some(), "{}", legacy.output);
+    assert!(staged.render_refusal.is_none(), "{}", staged.output);
     assert!(
-        response.render_refusal.is_some() || output.contains("r2sleigh_residual_void("),
-        "{output}"
+        staged.output.text().contains(
+            "r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x1000 "
+        ),
+        "{}",
+        staged.output
     );
-    assert!(!output.contains(")()"), "{output}");
-    assert!(!output.contains("return (("), "{output}");
+    for output in [legacy.output.text(), staged.output.text()] {
+        assert!(!output.contains(")()"), "{output}");
+        assert!(!output.contains("return (("), "{output}");
+    }
 }
 
 #[test]
