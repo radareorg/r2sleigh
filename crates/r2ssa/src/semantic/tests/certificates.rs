@@ -916,3 +916,78 @@ fn a_private_read_whose_value_is_stored_is_not_certified_unobserved() {
             .contains(load)
     );
 }
+
+/// The objects of the frame's indexed accesses, in access order.
+fn indexed_objects(artifact: &SsaArtifact) -> Vec<crate::ObjectId> {
+    (artifact.structured().memory_accesses.values())
+        .filter(|access| artifact.objects().address_is_indexed(access.address))
+        .map(|access| access.object)
+        .collect()
+}
+
+#[test]
+fn a_bounded_store_beside_an_unbounded_one_is_not_a_dead_store() {
+    let artifact = framed_artifact(|block, sp| {
+        for (bounded, unique) in [(true, 0x100), (false, 0x200)] {
+            let address = indexed_address(block, sp, (8, bounded), unique);
+            block.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: address,
+                val: Varnode::register(40, 1),
+            });
+        }
+    });
+    let objects = indexed_objects(&artifact);
+    assert_eq!(objects.len(), 2);
+    assert_eq!(objects[0], objects[1], "both stores reach one object");
+    let certificates = artifact.certificates();
+    assert!(
+        certificates.stack_slots[&objects[0]]
+            .callee_allocation
+            .is_some()
+    );
+    assert!(certificates.dead_frame_stores.is_empty());
+}
+
+/// An unbounded byte read at `sp + index` beside a halfword read at `sp`: two widths, so the
+/// object has no callee allocation; with `owned_store`, a bounded write-only store at `sp + 8`.
+fn unowned_unbounded_read_artifact(owned_store: bool) -> SsaArtifact {
+    framed_artifact(|block, sp| {
+        if owned_store {
+            indexed_byte_store(block, sp, true);
+        }
+        let address = indexed_address(block, sp, (0, false), 0x200);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(48, 1),
+            space: SpaceId::Ram,
+            addr: address,
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(56, 2),
+            space: SpaceId::Ram,
+            addr: sp.clone(),
+        });
+    })
+}
+
+#[test]
+fn an_unbounded_index_into_an_unowned_object_leaves_its_extent_assumed() {
+    let artifact = unowned_unbounded_read_artifact(false);
+    let object = indexed_objects(&artifact)[0];
+    let slot = &artifact.certificates().stack_slots[&object];
+    assert!(slot.callee_allocation.is_none(), "{slot:?}");
+    assert!(!matches!(
+        slot.array_layout,
+        crate::StackArrayLayoutDisposition::Proven(_)
+    ));
+    assert_eq!(
+        artifact.extent_assumption(object),
+        Some(crate::ExtentAssumption::UnboundedIndex)
+    );
+}
+
+#[test]
+fn an_unbounded_read_of_an_unowned_object_keeps_every_store() {
+    let artifact = unowned_unbounded_read_artifact(true);
+    assert_eq!(store_ownership(&artifact), (true, false));
+}

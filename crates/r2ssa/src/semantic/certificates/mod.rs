@@ -330,6 +330,8 @@ pub struct StackSlotCertificate {
     /// The slot is storage read at more than one width: `size` is the extent
     /// its accesses reach and it declares as bytes, not as a scalar.
     pub byte_array: bool,
+    /// An access reaches the object at an index no value range bounds, so it may land anywhere.
+    pub unbounded_index: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +490,22 @@ pub(crate) fn stack_array_element_index(
         .then_some(StackArrayElementIndex::Value(input(0)?)),
         _ => None,
     }
+}
+
+/// The objects some access reaches at an index no value range bounds: one pass over the accesses.
+fn unbounded_index_objects(
+    values: &crate::values::ValueRanges,
+    objects: &ObjectModel,
+    structured: &StructuredDataflowFacts,
+) -> BTreeSet<ObjectId> {
+    (structured.memory_accesses.values())
+        .filter(|access| {
+            objects.address_is_indexed(access.address)
+                && (objects.index_for_address(access.address))
+                    .is_none_or(|index| values.upper_bound(index).is_none())
+        })
+        .map(|access| access.object)
+        .collect()
 }
 
 /// Decide array geometry once, beside the object and memory facts that own it.
@@ -900,7 +918,7 @@ pub(crate) fn collect_prepared_function_certificates(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let callee_stack_allocations = collect_callee_stack_allocation_certificates(
+    let mut callee_stack_allocations = collect_callee_stack_allocation_certificates(
         function,
         prep,
         graph,
@@ -921,26 +939,21 @@ pub(crate) fn collect_prepared_function_certificates(
             unobserved,
             live_out,
         );
-    // A callee allocation names a source-less object. A local radare2 inferred
-    // was admitted above only so that a frame save it named could be proven a
-    // round trip; where it was not, the slot keeps its own identity.
-    let callee_stack_allocations = {
-        let mut allocations = callee_stack_allocations;
-        allocations.retain(|object, _| {
-            let declared = objects
-                .objects
-                .get(object)
-                .is_some_and(|fact| match fact.kind {
-                    ObjectKind::StackSlot { base, offset, .. }
-                    | ObjectKind::FrameObject { base, offset, .. } => {
-                        exact_stack_slots.contains_key(&(base, offset))
-                    }
-                    _ => false,
-                });
-            !declared || stack_frame_round_trips.contains_key(object)
-        });
-        allocations
-    };
+    // A callee allocation names a source-less object: a local radare2 inferred
+    // keeps one only where it proved a frame save round trip.
+    callee_stack_allocations.retain(|object, _| {
+        let declared = objects
+            .objects
+            .get(object)
+            .is_some_and(|fact| match fact.kind {
+                ObjectKind::StackSlot { base, offset, .. }
+                | ObjectKind::FrameObject { base, offset, .. } => {
+                    exact_stack_slots.contains_key(&(base, offset))
+                }
+                _ => false,
+            });
+        !declared || stack_frame_round_trips.contains_key(object)
+    });
     let (machine_return_controls, machine_return_control_by_inst) =
         collect_machine_return_control_certificates(
             boundaries, graph, objects, structured, unobserved,
@@ -959,6 +972,7 @@ pub(crate) fn collect_prepared_function_certificates(
             declared_slots,
         },
     );
+    let unbounded_index = unbounded_index_objects(values, objects, structured);
     let stack_slots = objects
         .objects
         .iter()
@@ -1016,13 +1030,7 @@ pub(crate) fn collect_prepared_function_certificates(
                             || callee_stack_allocations
                                 .get(object)
                                 .is_some_and(|allocation| allocation.byte_array),
-                        // Failing both, the object's own accesses say how wide it
-                        // is. Every access reaching it at one width, with complete
-                        // provenance, is a fact about the program rather than an
-                        // opinion about it -- and radare2 has no opinion to offer
-                        // for most of these: it reports no stack variables at all
-                        // for `murmur3_32`, which has fourteen of them.
-                        //
+                        // Failing both, accesses at one width with complete provenance state how wide it is.
                         size: stack_array_layouts
                             .get(object)
                             .and_then(|layout| match layout {
@@ -1051,6 +1059,7 @@ pub(crate) fn collect_prepared_function_certificates(
                         reload_values: crate::dense::IdSet::default(),
                         stored_values: crate::dense::IdSet::default(),
                         callee_allocation: callee_stack_allocations.get(object).cloned(),
+                        unbounded_index: unbounded_index.contains(object),
                     },
                 ))
             }
