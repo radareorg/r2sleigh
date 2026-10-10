@@ -133,8 +133,20 @@ pub(crate) enum Rule {
     /// Output byte `i` reads bytes `0..=i` of each input: an add, subtract or multiply modulo
     /// 2^(8(i+1)), whose carries, borrows and partial products move only upward.
     LowClosed,
+    /// Inputs `[value, count]`, a left shift by a constant whole number of bytes: byte `i` is the
+    /// value's byte `i - bytes`, zero below; the count is read whole.
+    ShiftUp { bytes: u32 },
+    /// Inputs `[value, count]`, a right shift by a constant whole number of bytes: byte `i` is the
+    /// value's byte `i + bytes`; above it zeros, or for `sign` the top byte of a `width`-byte value.
+    ShiftDown { bytes: u32, sign: bool, width: u32 },
     /// Every output byte reads every input whole.
     Whole,
+}
+
+/// A constant shift count, in whole bytes, where it is one.
+fn whole_bytes(bits: Option<u64>) -> Option<u32> {
+    bits.filter(|bits| bits % 8 == 0 && bits / 8 < 64)
+        .map(|bits| (bits / 8) as u32)
 }
 
 /// The bytes of a constant at most eight bytes wide that are zero; a wider
@@ -180,6 +192,20 @@ pub(crate) fn rule<V>(op: &SSAOp<V>, facts: impl Fn(&V) -> (u32, Option<u64>)) -
         }
         SSAOp::IntOr { .. } | SSAOp::IntXor { .. } => Rule::Lanewise { cleared: [0; 2] },
         SSAOp::IntAdd { .. } | SSAOp::IntSub { .. } | SSAOp::IntMult { .. } => Rule::LowClosed,
+        SSAOp::IntLeft { b, .. } => match whole_bytes(facts(b).1) {
+            Some(bytes) => Rule::ShiftUp { bytes },
+            None => Rule::Whole,
+        },
+        SSAOp::IntRight { a, b, .. } | SSAOp::IntSRight { a, b, .. } => {
+            match whole_bytes(facts(b).1) {
+                Some(bytes) => Rule::ShiftDown {
+                    bytes,
+                    sign: matches!(op, SSAOp::IntSRight { .. }),
+                    width: facts(a).0,
+                },
+                None => Rule::Whole,
+            }
+        }
         _ => Rule::Whole,
     }
 }
@@ -215,6 +241,17 @@ impl Rule {
                 ByteMask::Bytes(_) => ByteMask::whole(out.extent_bytes().unwrap_or(64)),
                 ByteMask::All => ByteMask::All,
             },
+            (Self::ShiftUp { bytes }, 0) => out.shifted_down(bytes),
+            (Self::ShiftDown { bytes, sign, width }, 0) => {
+                let filled = out.without(ByteMask::whole(width.saturating_sub(bytes)));
+                match sign && !filled.is_empty() && width > 0 {
+                    true => out
+                        .shifted_up(bytes)
+                        .union(ByteMask::Bytes(1).shifted_up(width - 1)),
+                    false => out.shifted_up(bytes),
+                }
+            }
+            (Self::ShiftUp { .. } | Self::ShiftDown { .. }, 1) => ByteMask::All,
             (Self::Whole, _) => ByteMask::All,
             _ => return None,
         })
@@ -458,6 +495,31 @@ mod tests {
             2,
             &masked,
         );
+    }
+
+    /// A shift by a constant whole number of bytes (one, and none, of a two-byte value) reads only
+    /// the bytes it moves into the demanded ones, against the machine (`r2il::eval`).
+    #[test]
+    fn a_constant_byte_shift_reads_only_the_bytes_it_moves() {
+        let values = (0u128..=0xffff).step_by(0x3d);
+        for (bytes, count) in [(1, 8), (0, 0)] {
+            let shifted = values.clone().map(|v| [v, count]).collect::<Vec<_>>();
+            holds(
+                Rule::ShiftUp { bytes },
+                Operation::Left,
+                &[2, 1],
+                2,
+                &shifted,
+            );
+            for (sign, operation) in [(false, Operation::Right), (true, Operation::SRight)] {
+                let rule = Rule::ShiftDown {
+                    bytes,
+                    sign,
+                    width: 2,
+                };
+                holds(rule, operation, &[2, 1], 2, &shifted);
+            }
+        }
     }
 
     /// An add read in its low byte reads only the inputs' low bytes; read in byte 1, bytes 0 and 1.
