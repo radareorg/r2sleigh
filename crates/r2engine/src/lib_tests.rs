@@ -964,6 +964,29 @@ fn staged_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
     );
 }
 
+/// The first poll whose stop refuses each phase, stopping at every poll in turn.
+fn first_stop_in_each_phase(
+    session: &EngineSession,
+    request: &EngineDecompileRequest<'_>,
+    total_polls: usize,
+    phases: &[EnginePhase],
+) -> HashMap<EnginePhase, usize> {
+    let mut observed = HashMap::new();
+    for stop_at in 1..=total_polls {
+        let stop = StopRenderAtPoll::new(stop_at, r2ssa::SsaExecutionStopReason::Cancelled);
+        let response = session.decompile_with_r2dec_control(request.clone(), &stop);
+        let phase = (phases.iter().copied())
+            .find(|phase| {
+                response.metrics.phase_timings.iter().any(|timing| {
+                    timing.phase == *phase && timing.status == EnginePhaseStatus::Refused
+                })
+            })
+            .expect("stopped render must mark one render phase refused");
+        observed.entry(phase).or_insert(stop_at);
+    }
+    observed
+}
+
 /// A stop at each poll refuses the phase the pipeline polled in, and only that one: each phase in
 /// `polled` is reached by some poll, and no other is.
 fn inner_stops_keep_exact_audits(tier: RenderTier, polled: &[EnginePhase]) {
@@ -1003,20 +1026,7 @@ fn inner_stops_keep_exact_audits(tier: RenderTier, polled: &[EnginePhase]) {
         EnginePhase::Structuring,
         EnginePhase::Rendering,
     ];
-    let mut observed = HashMap::new();
-    for stop_at in 1..=total_polls {
-        let stop = StopRenderAtPoll::new(stop_at, r2ssa::SsaExecutionStopReason::Cancelled);
-        let response = session.decompile_with_r2dec_control(request.clone(), &stop);
-        let phase = render_phases
-            .into_iter()
-            .find(|phase| {
-                response.metrics.phase_timings.iter().any(|timing| {
-                    timing.phase == *phase && timing.status == EnginePhaseStatus::Refused
-                })
-            })
-            .expect("stopped render must mark one render phase refused");
-        observed.entry(phase).or_insert(stop_at);
-    }
+    let mut observed = first_stop_in_each_phase(&session, &request, total_polls, &render_phases);
     // The last poll stops the rendering itself, after everything before it completed.
     observed.insert(EnginePhase::Rendering, total_polls);
     let reached = render_phases
