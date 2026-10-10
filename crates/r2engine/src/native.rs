@@ -2410,3 +2410,102 @@ pub(crate) fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId,
 pub(crate) fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
     std::collections::BTreeSet::from([r2source::Premise::UbFreeSource])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: u64 = 0x1000;
+    /// `lea rdi, [0x1020]; xorps xmm0, xmm0; call on_double; ret`, the stub at 0x1018.
+    const HANDS_AFTER_A_DOUBLE: &[u8] = &[
+        0x48, 0x8d, 0x3d, 0x19, 0x00, 0x00, 0x00, // 0x1000 lea rdi, [rip + 0x19]
+        0x0f, 0x57, 0xc0, // 0x1007 xorps xmm0, xmm0
+        0xe8, 0x09, 0x00, 0x00, 0x00, // 0x100a call 0x1018
+        0xc3, // 0x100f ret
+        0, 0, 0, 0, 0, 0, 0, 0,    // to 0x1018
+        0xc3, // 0x1018 the stub
+        0, 0, 0, 0, 0, 0, 0,    // to 0x1020
+        0xc3, // 0x1020 the handed function
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    struct HandsAfterADouble;
+
+    impl crate::body::Program for HandsAfterADouble {
+        fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+            let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+            let slice = HANDS_AFTER_A_DOUBLE.get(offset..)?;
+            (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+        }
+
+        fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
+            let end = BASE + HANDS_AFTER_A_DOUBLE.len() as u64;
+            (BASE..end).contains(&vaddr).then_some(crate::body::Region {
+                start: BASE,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
+        }
+
+        fn is_entry(&self, vaddr: u64) -> bool {
+            matches!(vaddr, BASE | 0x1018 | 0x1020)
+        }
+    }
+
+    impl Program for HandsAfterADouble {
+        fn holds_static_data(&self, _vaddr: u64) -> bool {
+            false
+        }
+
+        fn extents(&self) -> &r2types::ProgramExtents {
+            const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+            NONE
+        }
+
+        fn name_at(&self, vaddr: u64) -> Option<String> {
+            self.import_at(vaddr)
+        }
+
+        fn import_at(&self, vaddr: u64) -> Option<String> {
+            (vaddr == 0x1018).then(|| "on_double".to_owned())
+        }
+    }
+
+    /// System V passes `on_double(double, void (*)())`'s callback in RDI, the first integer
+    /// register, however many floats come before it.
+    #[test]
+    fn a_function_handed_after_a_double_is_read_from_the_first_integer_slot() {
+        let embedded = r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine");
+        let compiler = LanguageProfile::parse(embedded.compiler_spec).expect("parses");
+        let convention =
+            r2abi::calling_convention("x86-64", 64, r2abi::Platform::Unknown).expect("System V");
+        let effect = call_effect(
+            &embedded.arch,
+            64,
+            r2abi::Platform::Unknown,
+            &compiler,
+            convention.variadic_count_register,
+        );
+        let prototypes = r2abi::Prototypes::parse(
+            "on_double=func\nfunc.on_double.args=2\nfunc.on_double.arg.0=double,x\n\
+             func.on_double.arg.1=func,callback\nfunc.on_double.ret=void\n",
+        );
+        let declarations = r2abi::Declarations::default();
+        let target = NativeTarget {
+            arch: &embedded.arch,
+            disasm: &embedded.disasm,
+            cpu: embedded.cpu,
+            convention,
+            call_effect: effect.as_ref(),
+            compiler: &compiler,
+            dwarf: &embedded.dwarf,
+            prototypes: &prototypes,
+            declarations: &declarations,
+        };
+        let walked = walk(&target, &HandsAfterADouble, BASE).expect("walks");
+        let handed = handed(&target, &HandsAfterADouble, walked.root.body);
+        assert_eq!(handed, [0x1020]);
+    }
+}
