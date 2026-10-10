@@ -5538,3 +5538,91 @@ fn a_microsoft_x64_int_after_a_float_takes_the_second_position() {
     assert_eq!(arguments.len(), 2, "{text}");
     assert_eq!(common::bare(&arguments[1]), "3", "{text}");
 }
+
+/// `rax = f(rdi); rdi = rax + 1; f(rdi); return 0`, `f` at 0x1011 being `mov eax, edi; ret`.
+const CALL_TWICE: &[u8] = &[
+    0xe8, 0x0c, 0x00, 0x00, 0x00, // 0x1000 call 0x1011
+    0x48, 0x8d, 0x78, 0x01, // 0x1005 lea rdi, [rax+1]
+    0xe8, 0x03, 0x00, 0x00, 0x00, // 0x1009 call 0x1011
+    0x31, 0xc0, // 0x100e xor eax, eax
+    0xc3, // 0x1010 ret
+    0x89, 0xf8, 0xc3, // 0x1011 mov eax, edi; ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `CALL_TWICE`, its callee named `arg0`: the caller's parameter holds that name, so no call is C.
+struct CalleeNamedLikeAParameter;
+
+impl r2engine::body::Program for CalleeNamedLikeAParameter {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = CALL_TWICE.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(CALL_TWICE.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1011)
+    }
+}
+
+impl Program for CalleeNamedLikeAParameter {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        match vaddr {
+            BASE => Some("caller".to_owned()),
+            0x1011 => Some("arg0".to_owned()),
+            _ => None,
+        }
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+/// A call that spelled its argument and then failed is a gap, so the `lea` its argument absorbed
+/// reaches the text only through that gap: the ledger may not call any of its obligations rendered.
+#[test]
+fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = CalleeNamedLikeAParameter;
+    let response = staged(&target, &program, BASE).expect("decompile");
+    let text = response.output.text().to_owned();
+    assert!(
+        text.contains("r2dec gap: CallNotRendered at 0x1000:14 "),
+        "{text}"
+    );
+    let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+    let graph = prepared.artifact().graph();
+    let at_lea = response
+        .obligation_ledger
+        .as_ref()
+        .expect("a ledger")
+        .entries()
+        .filter_map(|(id, outcome)| match id.instruction.site {
+            r2ssa::CanonicalInstructionSite::Op(op) => graph
+                .inst_for_op(op)
+                .and_then(|inst| graph.instruction_for_inst(inst))
+                .filter(|at| *at == 0x1005)
+                .map(|_| (op, outcome)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!at_lea.is_empty(), "{text}");
+    for (op, outcome) in at_lea {
+        assert_eq!(outcome, r2dec::ledger::Outcome::Gapped, "{op:?}\n{text}");
+    }
+}
