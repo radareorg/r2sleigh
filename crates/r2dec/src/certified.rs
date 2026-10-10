@@ -656,7 +656,9 @@ impl Elisions {
             || self.return_control.contains(&inst)
         {
             Some(ElisionReason::ReturnControl)
-        } else if certificates.dead_frame_stores.contains(inst) {
+        } else if certificates.dead_frame_stores.contains(inst)
+            || certificates.dead_frame_store_values.contains(inst)
+        {
             // A store into a slot this function owns and nothing reads.
             Some(ElisionReason::DeadFrameSlotStore)
         } else if self.round_trips.contains(inst) {

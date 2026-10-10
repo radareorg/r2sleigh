@@ -1010,3 +1010,61 @@ fn an_unbounded_read_of_an_unowned_object_keeps_every_store() {
     let artifact = unowned_unbounded_read_artifact(true);
     assert_eq!(store_ownership(&artifact), (true, false));
 }
+
+/// A dead byte store of `r40 + 1`; `observe` also writes that sum to a global.
+fn dead_store_of_a_sum(observe: bool) -> (SsaArtifact, InstId) {
+    let artifact = framed_artifact(|block, sp| {
+        let sum = Varnode::unique(0x400, 1);
+        block.push(R2ILOp::IntAdd {
+            dst: sum.clone(),
+            a: Varnode::register(40, 1),
+            b: Varnode::constant(1, 1),
+        });
+        let address = indexed_address(block, sp, (8, true), 0x100);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: address,
+            val: sum.clone(),
+        });
+        if observe {
+            block.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x9000, 8),
+                val: sum,
+            });
+        }
+    });
+    let sum = (artifact.graph().insts.iter())
+        .find(|inst| {
+            matches!(inst.payload, InstPayload::Op(SSAOp::IntAdd { .. }))
+                && inst
+                    .inputs
+                    .iter()
+                    .all(|v| artifact.graph().var(*v).size == 1)
+        })
+        .expect("the sum")
+        .id;
+    (artifact, sum)
+}
+
+#[test]
+fn a_value_only_a_dead_frame_store_writes_is_dead_with_it() {
+    let (artifact, sum) = dead_store_of_a_sum(false);
+    let certificates = artifact.certificates();
+    assert!(
+        !certificates.dead_frame_stores.is_empty(),
+        "the byte store is dead"
+    );
+    assert!(certificates.dead_frame_store_values.contains(sum));
+}
+
+#[test]
+fn a_value_a_live_store_also_writes_is_not_dead() {
+    let (artifact, sum) = dead_store_of_a_sum(true);
+    assert!(
+        !artifact
+            .certificates()
+            .dead_frame_store_values
+            .contains(sum)
+    );
+}
