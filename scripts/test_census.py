@@ -67,5 +67,19 @@ class ResidualSites(unittest.TestCase):
         self.assertEqual((found[1], found[2], found[3]), ("sum_array", "10", "live-value-producer at 0x11e0:op:24"))
 
 
+class ExponentFit(unittest.TestCase):
+    def test_a_power_law_fits_its_exponent(self):
+        slope, r2 = census.fit([(n, 3 * n**2) for n in (300, 600, 1200, 5000)])
+        self.assertAlmostEqual(slope, 2.0)
+        self.assertAlmostEqual(r2, 1.0)
+
+    def test_a_sample_spans_every_size(self):
+        rows = [(address, address // 10) for address in range(3000, 13000, 10)]
+        picked = census.evenly(rows, 5)
+        self.assertEqual(len(picked), 5)
+        self.assertEqual(min(n for _, n in picked), 300)
+        self.assertEqual(max(n for _, n in picked), 1299)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,11 @@
                                                    median release time and peak RSS per case, and
                                                    the allocation count from alloc-count builds;
                                                    fails when HEAD exceeds a budget x BASE
+  census.py exponent --r2s R2S [--min-instructions N] [--sample N] [--out FILE] BINARY...
+                                                   how `pdd` cost and peak RSS grow with a
+                                                   function's instructions (ROADMAP LX's exit):
+                                                   instructions retired by `afl; pdd @ f` less
+                                                   `afl`'s, under `perf stat` (Linux)
 
 With no binaries, `run` reads the repository's own: tests/coverage/pinned,
 tests/fixtures and, where the coverage sweep compiled them, tests/coverage/artifacts/bin.
@@ -18,6 +23,7 @@ import argparse
 import concurrent.futures
 import difflib
 import hashlib
+import math
 import os
 import re
 import statistics
@@ -33,6 +39,7 @@ TIMED = [("0pack", "pdd @ 0x0058e3d0"), ("0pack", "pdd @ 0x0062ecf0"),
          ("pumasim", "pdd @ 0x0023fdf0"), ("pumasim", "pdd @ 0x004baf30"),
          ("pumasim", "afl"), ("0pack", "afl")]
 ALLOCATIONS = re.compile(r"^r2s: allocations: (\d+)$", re.MULTILINE)
+INFO = re.compile(r"^addr: (0x[0-9a-f]+)\n(?:.*\n)*?num-instrs: (\d+)$", re.MULTILINE)
 
 
 def corpus():
@@ -228,6 +235,76 @@ def time_cases(args):
         sys.exit(1)
 
 
+def retired(binary, command, executable):
+    """User-space instructions retired by one run, and its peak RSS in MB; `perf` is Linux's."""
+    with tempfile.NamedTemporaryFile() as counts:
+        child = subprocess.Popen(["perf", "stat", "-x,", "-e", "instructions:u", "-o", counts.name,
+                                  executable, "-q", "-c", command, str(binary)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # wait4 reports the largest resident set among the child and what it reaped.
+        _, _, usage = os.wait4(child.pid, 0)
+        text = Path(counts.name).read_text()
+    count = next((int(line.split(",")[0]) for line in text.splitlines() if "instructions" in line), None)
+    if count is None:
+        sys.exit(f"perf counted no instructions: {text.strip()[:200]}")
+    return count, usage.ru_maxrss / 1024
+
+
+def instruction_counts(binary, executable):
+    """Each function's instruction count, by address, from `afi` in batches of 256."""
+    listing = r2s(binary, "afl", executable)
+    addresses = [line.split()[0] for line in listing.splitlines() if line.startswith("0x")]
+    found = {}
+    for start in range(0, len(addresses), 256):
+        text = r2s(binary, "; ".join(f"afi @ {a}" for a in addresses[start:start + 256]), executable)
+        found.update((int(a, 16), int(n)) for a, n in INFO.findall(text))
+    return found
+
+
+def fit(points):
+    """Least squares of log y on log x: the slope and R squared."""
+    xs = [math.log(x) for x, _ in points]
+    ys = [math.log(y) for _, y in points]
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    syy = sum((y - my) ** 2 for y in ys)
+    return sxy / sxx, (sxy * sxy) / (sxx * syy) if syy else 1.0
+
+
+def evenly(rows, count):
+    """`count` rows evenly spaced by instruction count, so a fit sees the whole range."""
+    by_size = sorted(rows, key=lambda row: (row[1], row[0]))
+    if len(by_size) <= count or count < 2:
+        return sorted(rows)
+    step = (len(by_size) - 1) / (count - 1)
+    return sorted({by_size[round(i * step)] for i in range(count)})
+
+
+def exponent(args):
+    rows = []
+    for binary in map(Path, args.binaries):
+        large = [row for row in instruction_counts(binary, args.r2s).items() if row[1] >= args.min_instructions]
+        print(f"{binary.name}: {len(large)} functions of {args.min_instructions}+ instructions", flush=True)
+        if not large:
+            continue
+        base_cost, base_peak = retired(binary, "afl", args.r2s)
+        for address, count in evenly(large, args.sample):
+            cost, peak = retired(binary, f"afl; pdd @ {address:#x}", args.r2s)
+            rows.append((binary.name, address, count, max(cost - base_cost, 1), peak - base_peak))
+            print(f"  {address:#x} {count} {(cost - base_cost) / 1e6:.1f}M {peak - base_peak:.0f}MB", flush=True)
+    if args.out:
+        Path(args.out).write_text("".join(f"{b}\t{a:#x}\t{n}\t{c}\t{p:.1f}\n" for b, a, n, c, p in rows))
+    if len(rows) < 3:
+        sys.exit("fewer than three functions: no fit")
+    slope, r2 = fit([(n, c) for _, _, n, c, _ in rows])
+    print(f"cost: instructions^{slope:.2f} (R^2 {r2:.2f}) over {len(rows)} functions")
+    grown = [(n, p) for _, _, n, _, p in rows if p > 1]
+    if len(grown) >= 3:
+        slope, r2 = fit(grown)
+        print(f"peak RSS above afl's: instructions^{slope:.2f} (R^2 {r2:.2f}) over {len(grown)} functions")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -253,6 +330,13 @@ def main():
     p.add_argument("--count-r2s", action="append")
     p.add_argument("--alloc-budget", type=float, default=1.3)
     p.set_defaults(func=time_cases)
+    p = sub.add_parser("exponent")
+    p.add_argument("--r2s", required=True)
+    p.add_argument("--min-instructions", type=int, default=300)
+    p.add_argument("--sample", type=int, default=40)
+    p.add_argument("--out")
+    p.add_argument("binaries", nargs="+")
+    p.set_defaults(func=exponent)
     args = parser.parse_args()
     if args.command == "time" and len(args.r2s) != 2:
         parser.error("time takes --r2s twice: base, then head")
