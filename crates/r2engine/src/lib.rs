@@ -1491,14 +1491,15 @@ pub(crate) struct EngineFunctionDecompileRequest {
 /// request that computes the facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum RenderTier {
-    #[default]
+    /// The legacy decompiler's C, `dec.pipeline=legacy`, deleted with it (ROADMAP D).
     C,
     /// The structured tree the C is generated from.
     Structured,
     /// What the binding plan decided about each value: which variable it
     /// became, which expression it was folded into, or why nothing spells it.
     Values,
-    /// The C of the staged decompiler (ROADMAP D), read from the sealed facts alone.
+    /// The C of the staged decompiler (ROADMAP D), read from the sealed facts alone: `pdd`.
+    #[default]
     Staged,
 }
 
@@ -1539,7 +1540,7 @@ impl EngineFunctionDecompileRequestInput {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
-            tier: RenderTier::C,
+            tier: RenderTier::default(),
         }
     }
 
