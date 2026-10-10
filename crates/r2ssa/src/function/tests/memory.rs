@@ -690,9 +690,14 @@ fn a_calls_return_address_push_is_refunded_by_the_callee() {
     ] {
         block.push(op);
     }
-    let artifact =
-        crate::testing::prepared(&[block], &arch, Some(interface), Vec::new(), [storage(0)])
-            .expect("artifact");
+    let artifact = crate::testing::prepared(
+        &[block],
+        &crate::Arch::from(arch.clone()),
+        Some(interface),
+        Vec::new(),
+        [storage(0)],
+    )
+    .expect("artifact");
     assert_eq!(
         promoted_sites(artifact.function()),
         BTreeSet::from([(0x4000, 2), (0x4000, 6)]),
@@ -794,7 +799,7 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
-            arch: Some(&arch),
+            arch: Some(&crate::Arch::from(arch.clone())),
             function_interface: Some(interface),
             machine_roles: roles,
             call_effect: preserving([storage(32, 8)]),
@@ -899,7 +904,7 @@ fn reads_of_the_same_bytes_under_the_same_memory_are_one_content_in_any_block() 
     // The call keeps x0, so every read after it is still of the parameter's memory.
     let artifact = crate::testing::prepared(
         &[first, next],
-        &arch,
+        &crate::Arch::from(arch.clone()),
         Some(interface),
         Vec::new(),
         [parameter],

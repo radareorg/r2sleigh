@@ -1132,7 +1132,7 @@ fn return_boundary_without_typed_machine_roles_carries_values_but_no_exit_state(
 
 #[test]
 fn return_boundary_refuses_unrepresented_partial_overlap() {
-    let mut arch = composed_return_arch("whole", "slice", "pc");
+    let mut arch = composed_return_arch_spec("whole", "slice", "pc");
     arch.add_register(RegisterDef::new("partial", 3, 2));
     let mut block = R2ILBlock::new(0x5180, 4);
     block.push(R2ILOp::Copy {
@@ -1148,7 +1148,7 @@ fn return_boundary_refuses_unrepresented_partial_overlap() {
     });
     let artifact = SsaArtifact::for_decompile_with_interface(
         &[block],
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         composed_return_interface(),
     )
     .expect("partial-overlap artifact");

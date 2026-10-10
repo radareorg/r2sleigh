@@ -2149,8 +2149,11 @@ mod tests {
             op_metadata: Default::default(),
         }];
 
-        let function = crate::function::SSAFunction::from_blocks_raw(&blocks, Some(&arch))
-            .expect("raw SSA with colliding register spellings");
+        let function = crate::function::SSAFunction::from_blocks_raw(
+            &blocks,
+            Some(&crate::Arch::from(arch.clone())),
+        )
+        .expect("raw SSA with colliding register spellings");
         let ops = function
             .named_block(0x2000)
             .expect("entry block")

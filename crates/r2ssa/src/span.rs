@@ -301,7 +301,11 @@ mod tests {
         Varnode::new(SpaceId::Register, offset, size)
     }
 
-    fn arch() -> ArchSpec {
+    fn arch() -> crate::Arch {
+        crate::Arch::new(arch_spec())
+    }
+
+    fn arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("RAX", 0, 8));
@@ -541,7 +545,7 @@ mod tests {
         // A loop whose body updates RAX twice and whose exit reads the header
         // value. Every path from an update to the exit passes the merge, which
         // redefines the carrier, so no update is live beside the merge.
-        let mut arch = arch();
+        let mut arch = arch_spec();
         arch.add_register(RegisterDef::new("RDX", 16, 8));
         arch.add_register(RegisterDef::new("cond", 32, 1));
         let mut entry = R2ILBlock::new(0x1000, 4);
@@ -584,7 +588,7 @@ mod tests {
         });
         let func = SSAFunction::from_blocks_with_arch(
             &[entry, header, first_update, second_update, exit],
-            Some(&arch),
+            Some(&crate::Arch::from(arch.clone())),
         )
         .expect("ssa");
         let graph = SsaGraph::from_function(&func);

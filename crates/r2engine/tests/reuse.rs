@@ -246,7 +246,7 @@ fn rendered_returning_object(declared: Option<&str>) -> String {
             function_name: "sym.object".to_owned(),
             function_addr: 0x1000,
             blocks: Vec::new(),
-            arch: Some(embedded.arch),
+            arch: Some(r2ssa::Arch::new(embedded.arch)),
             semantic_metadata_enabled: true,
             source_snapshot: None,
         },

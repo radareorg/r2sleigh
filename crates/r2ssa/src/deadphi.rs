@@ -368,7 +368,11 @@ mod tests {
         }]
     }
 
-    fn arch() -> ArchSpec {
+    fn arch() -> crate::Arch {
+        crate::Arch::new(arch_spec())
+    }
+
+    fn arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("RAX", 0, 8));
@@ -509,10 +513,14 @@ mod tests {
         assert_eq!(graph.use_sites(rax).len(), 1, "the store owns its use site");
     }
 
+    fn wide_arch() -> crate::Arch {
+        crate::Arch::new(wide_arch_spec())
+    }
+
     /// Registers of the widths the observation masks have to count: a word,
     /// a vector, and one wider than a mask word names.
-    fn wide_arch() -> ArchSpec {
-        let mut arch = arch();
+    fn wide_arch_spec() -> ArchSpec {
+        let mut arch = arch_spec();
         arch.add_register(RegisterDef::new("XMM0", 0x1200, 16));
         arch.add_register(RegisterDef::new("WIDE", 0x2000, 80));
         arch

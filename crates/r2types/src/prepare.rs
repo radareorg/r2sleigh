@@ -333,8 +333,12 @@ mod tests {
             switch_info: None,
             op_metadata: Default::default(),
         };
-        r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-            .expect("prepared AArch64 parameter")
+        r2ssa::SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&r2ssa::Arch::from(arch.clone())),
+            interface,
+        )
+        .expect("prepared AArch64 parameter")
     }
 
     #[test]

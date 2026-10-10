@@ -28,7 +28,7 @@ pub use source::*;
 
 use std::collections::BTreeMap;
 
-use r2sleigh_lift::EmbeddedMachine;
+use crate::machine::Machine;
 
 use std::rc::Rc;
 
@@ -52,10 +52,10 @@ struct Assembled {
 
 /// The decoders for a program's instruction sets and what a native request needs of them.
 struct Machines {
-    machine: EmbeddedMachine,
+    machine: Machine,
     /// The same instruction set with TMode set, where the architecture has
     /// one. Which functions it decodes is what `modes` says.
-    thumb: Option<EmbeddedMachine>,
+    thumb: Option<Machine>,
     assembled: Result<Assembled, String>,
     /// What a Go function needs, where the container states any: Go's convention by its
     /// toolchain's version (doc/adr-language-profile.md, LP1).
@@ -74,10 +74,12 @@ impl Machines {
             Format::Pe => r2sleigh_lift::embedded_windows_machine(&arch),
             _ => r2sleigh_lift::embedded_machine(&arch),
         }
+        .map(Machine::new)
         .map_err(|error| error.to_string())?;
         // Whether any function is Thumb is discovery's answer, so the
         // decoder is loaded wherever the architecture has one.
         let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
+            .map(|machine| machine.map(Machine::new))
             .transpose()
             .map_err(|error| error.to_string())?;
         let psabi = kernel(container);
@@ -138,7 +140,7 @@ impl Machines {
 /// Assemble what a native request needs of the machine under one convention, once per program:
 /// constant while it is open.
 fn assemble(
-    machine: &EmbeddedMachine,
+    machine: &Machine,
     container: &Container,
     convention: &'static r2abi::CallingConvention,
 ) -> Result<Assembled, String> {
@@ -450,7 +452,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// The decoder the code at this address is written in: whichever is
     /// nearest below it of a mapping symbol and a function discovery placed,
     /// the container's statement winning a tie.
-    fn machine_at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
+    fn machine_at(&self, vaddr: u64) -> Option<&Machine> {
         self.view().machine_at(vaddr)
     }
 
@@ -466,7 +468,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 }
 
 impl<S: Source + 'static> Decoders for OpenProgram<S> {
-    fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
+    fn at(&self, vaddr: u64) -> Option<&Machine> {
         self.machine_at(vaddr)
     }
 }

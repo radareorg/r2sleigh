@@ -89,7 +89,7 @@ pub fn artifact_with_parameters(ops: Vec<R2ILOp>, parameters: &[u64]) -> SsaArti
     .and_then(|interface| interface.with_stack_pointer_storage(storage(RSP)))
     .expect("exact fixture interface");
     let arch = arch();
-    SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+    SsaArtifact::for_decompile_with_interface(&[block], Some(&r2ssa::Arch::from(arch)), interface)
         .expect("prepared SSA should build")
         .with_name("r2rewrite_fixture")
 }

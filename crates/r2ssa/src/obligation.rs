@@ -2156,7 +2156,11 @@ mod tests {
         vec![entry, left, right, split, back]
     }
 
-    fn x86_64_call_arch() -> ArchSpec {
+    fn x86_64_call_arch() -> crate::Arch {
+        crate::Arch::new(x86_64_call_arch_spec())
+    }
+
+    fn x86_64_call_arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.add_register(RegisterDef::new("rax", 0, 8));
         arch.add_register(RegisterDef::new("rdi", 8, 8));
@@ -2277,8 +2281,10 @@ mod tests {
         let mut second_arch = ArchSpec::new("test-b");
         second_arch.add_register(RegisterDef::new("counter_b", 0, 8));
 
-        let first = SsaArtifact::raw(&blocks, Some(&first_arch)).expect("first artifact");
-        let second = SsaArtifact::raw(&blocks, Some(&second_arch)).expect("second artifact");
+        let first = SsaArtifact::raw(&blocks, Some(&crate::Arch::from(first_arch.clone())))
+            .expect("first artifact");
+        let second = SsaArtifact::raw(&blocks, Some(&crate::Arch::from(second_arch.clone())))
+            .expect("second artifact");
         assert_eq!(
             first.obligations().obligations.keys().collect::<Vec<_>>(),
             second.obligations().obligations.keys().collect::<Vec<_>>()

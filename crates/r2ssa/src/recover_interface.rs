@@ -2131,7 +2131,11 @@ mod tests {
 
     use super::*;
 
-    fn arch() -> ArchSpec {
+    fn arch() -> crate::Arch {
+        crate::Arch::new(arch_spec())
+    }
+
+    fn arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("aarch64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("x0", 0, 8));

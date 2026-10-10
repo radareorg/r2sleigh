@@ -23,6 +23,7 @@
 pub(crate) mod abi;
 pub(crate) mod address;
 pub(crate) mod aggregate_access;
+mod arch;
 pub mod arena;
 pub(crate) mod assumption;
 pub mod block;
@@ -49,6 +50,7 @@ pub mod lanes;
 pub mod liveness;
 pub(crate) mod liveout;
 pub(crate) mod machine;
+pub use arch::Arch;
 pub(crate) mod machine_context;
 pub(crate) mod mirror;
 pub mod name;

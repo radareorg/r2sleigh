@@ -223,10 +223,11 @@ impl Lookahead<'_, '_> {
 mod tests {
     use super::*;
     use crate::body::Program;
+    use crate::machine::Machine;
     use crate::query::Support;
     use crate::query::records::{AnnotationKind, Decoders, Memory, WalkedBody};
     use r2il::Endianness;
-    use r2sleigh_lift::{EmbeddedMachine, embedded_machine};
+    use r2sleigh_lift::embedded_machine;
 
     /// A flat run of bytes mapped at one address and nothing else.
     struct Mapped {
@@ -292,10 +293,10 @@ mod tests {
     }
 
     /// One decoder, whatever the address.
-    struct Everywhere(EmbeddedMachine);
+    struct Everywhere(Machine);
 
     impl Decoders for Everywhere {
-        fn at(&self, _vaddr: u64) -> Option<&EmbeddedMachine> {
+        fn at(&self, _vaddr: u64) -> Option<&Machine> {
             Some(&self.0)
         }
     }
@@ -303,7 +304,9 @@ mod tests {
     const BASE: u64 = 0x1000;
 
     fn answer(bytes: &[u8], count: usize, work: Work) -> Answer<Vec<Line>> {
-        let machine = Everywhere(embedded_machine("x86-64").expect("x86-64 is compiled in"));
+        let machine = Everywhere(Machine::new(
+            embedded_machine("x86-64").expect("x86-64 is compiled in"),
+        ));
         let program = Mapped::new(BASE, bytes.to_vec());
         let answered = Answered {
             decoders: &machine,
@@ -329,13 +332,13 @@ mod tests {
 
     /// ARM below the boundary, Thumb at it and above.
     struct Boundary {
-        arm: EmbeddedMachine,
-        thumb: EmbeddedMachine,
+        arm: Machine,
+        thumb: Machine,
         at: u64,
     }
 
     impl Decoders for Boundary {
-        fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
+        fn at(&self, vaddr: u64) -> Option<&Machine> {
             Some(match vaddr < self.at {
                 true => &self.arm,
                 false => &self.thumb,
@@ -351,8 +354,8 @@ mod tests {
         let mut bytes = vec![0x00, 0x00, 0xa0, 0xe3, 0x00, 0x20];
         bytes.resize(32, 0);
         let decoders = Boundary {
-            arm: embedded_machine("arm").expect("ARM is compiled in"),
-            thumb: embedded_machine("arm-thumb").expect("Thumb is compiled in"),
+            arm: Machine::new(embedded_machine("arm").expect("ARM is compiled in")),
+            thumb: Machine::new(embedded_machine("arm-thumb").expect("Thumb is compiled in")),
             at: BASE + 4,
         };
         let answered = Answered {
@@ -386,7 +389,9 @@ mod tests {
         let mut bytes = vec![0x00, 0x28, 0x08, 0xbf, 0x01, 0x20, 0x70, 0x47];
         bytes.resize(32, 0);
         let program = Mapped::new(BASE, bytes);
-        let thumb = Everywhere(embedded_machine("arm-thumb").expect("Thumb is compiled in"));
+        let thumb = Everywhere(Machine::new(
+            embedded_machine("arm-thumb").expect("Thumb is compiled in"),
+        ));
         let body = crate::body::lift_body(BASE, &thumb.0.disasm, &program, &Default::default())
             .expect("the body walks");
         let mut walked = std::collections::BTreeMap::<u64, Vec<r2il::R2ILOp>>::new();
@@ -640,7 +645,9 @@ mod tests {
 
     /// What each line of AArch64 code at `BASE` claims, listed in one run at `work` inside the body walked from `BASE`.
     fn aarch64_claims(code: &[u8], work: Work) -> Vec<Vec<AnnotationKind>> {
-        let machine = Everywhere(embedded_machine("aarch64").expect("AArch64 is compiled in"));
+        let machine = Everywhere(Machine::new(
+            embedded_machine("aarch64").expect("AArch64 is compiled in"),
+        ));
         // Mapped far enough that the page and the address in it are the program's.
         let mut image = code.to_vec();
         image.resize(0x1100, 0);
@@ -648,7 +655,7 @@ mod tests {
         let walked = crate::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
         let blocks = walked.expect("it walks").blocks.into_iter();
         let blocks = blocks.map(|block| block.lifted).collect::<Vec<_>>();
-        let body = WalkedBody::new(&blocks, &machine.0.arch);
+        let body = WalkedBody::new(&blocks, machine.0.tables());
         let answered = Answered {
             decoders: &machine,
             memory: Memory {
@@ -727,7 +734,9 @@ mod tests {
         // ldreq r3, [pc, 0x10] -- lifted as a guarded load, which reads when the condition holds.
         let mut bytes = vec![0x10, 0x30, 0x9f, 0x05];
         bytes.resize(0x40, 0);
-        let machine = Everywhere(embedded_machine("arm").expect("ARM is compiled in"));
+        let machine = Everywhere(Machine::new(
+            embedded_machine("arm").expect("ARM is compiled in"),
+        ));
         let program = Mapped::new(BASE, bytes);
         let answered = Answered {
             decoders: &machine,

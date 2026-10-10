@@ -401,7 +401,11 @@ fn x86_64_result_call_effect() -> r2ssa::SourceCallEffect {
     .expect("a call effect")
 }
 
-fn x86_64_result_arch() -> r2il::ArchSpec {
+fn x86_64_result_arch() -> r2ssa::Arch {
+    r2ssa::Arch::new(x86_64_result_arch_spec())
+}
+
+fn x86_64_result_arch_spec() -> r2il::ArchSpec {
     let mut arch = r2il::ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.set_memory_endianness(r2il::Endianness::Little);
@@ -422,8 +426,12 @@ fn x86_64_result_arch() -> r2il::ArchSpec {
     arch
 }
 
-fn x86_64_exact_rdi_arch() -> r2il::ArchSpec {
-    let mut arch = x86_64_result_arch();
+fn x86_64_exact_rdi_arch() -> r2ssa::Arch {
+    r2ssa::Arch::new(x86_64_exact_rdi_arch_spec())
+}
+
+fn x86_64_exact_rdi_arch_spec() -> r2il::ArchSpec {
+    let mut arch = x86_64_result_arch_spec();
     arch.add_register(r2il::RegisterDef::new("rdi", 0x10, 8));
     arch
 }
@@ -433,13 +441,15 @@ fn x86_64_exact_rdi_arch() -> r2il::ArchSpec {
 fn a_render_target_is_the_machines_identity_and_width() {
     let mut arch = r2il::ArchSpec::new("amd64");
     arch.addr_size = 8;
-    let requested = EngineRenderTarget::for_arch(Some(&arch), 64);
+    let requested = EngineRenderTarget::for_arch(Some(&r2ssa::Arch::from(arch.clone())), 64);
     assert_eq!(requested.architecture, "amd64");
     assert_eq!(requested.ptr_bits, 64);
 
-    let prepared =
-        r2ssa::SsaArtifact::for_decompile(&const_return_blocks(0x401000, 0), Some(&arch))
-            .expect("prepared");
+    let prepared = r2ssa::SsaArtifact::for_decompile(
+        &const_return_blocks(0x401000, 0),
+        Some(&r2ssa::Arch::from(arch)),
+    )
+    .expect("prepared");
     assert_eq!(EngineRenderTarget::for_prepared(&prepared), Some(requested));
     assert!(
         EngineRenderTarget::for_arch(None, 32)
@@ -487,7 +497,7 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
         function_name: "sym.input_builder".to_string(),
         function_addr: 0x402000,
         blocks: const_return_blocks(0x402000, 0),
-        arch: Some(arch),
+        arch: Some(arch.into()),
         source_snapshot: Some(test_source_snapshot("sym.input_builder/rev1")),
         ptr_bits: None,
         semantic_metadata_enabled: true,
@@ -565,14 +575,18 @@ fn interproc_summary_build_uses_only_trusted_callee_bodies() {
     let root_prepared = Arc::new(
         r2ssa::SsaArtifact::for_decompile_with_interface(
             &root_blocks,
-            Some(&arch),
+            Some(&r2ssa::Arch::from(arch.clone())),
             interface.clone(),
         )
         .expect("root prepared"),
     );
     let helper_prepared = Arc::new(
-        r2ssa::SsaArtifact::for_decompile_with_interface(&helper_blocks, Some(&arch), interface)
-            .expect("helper prepared"),
+        r2ssa::SsaArtifact::for_decompile_with_interface(
+            &helper_blocks,
+            Some(&r2ssa::Arch::from(arch.clone())),
+            interface,
+        )
+        .expect("helper prepared"),
     );
     let analysis = EngineAnalysis::from_prepared_ssa(Arc::clone(&root_prepared));
     // A body that is not source-owned is refused when its contribution is

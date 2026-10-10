@@ -325,7 +325,7 @@ fn prepared_local_inference_certifies_cross_block_spill_reload() {
     .expect("exact SysV64 stack-home interface");
     let prepared = r2ssa::SsaArtifact::for_decompile_with_interface(
         &[entry, successor],
-        Some(&arch),
+        Some(&r2ssa::Arch::from(arch.clone())),
         interface,
     )
     .expect("prepared SSA");

@@ -296,7 +296,11 @@ mod tests {
         Varnode::new(SpaceId::Register, offset, size)
     }
 
-    fn x86_64_arch() -> ArchSpec {
+    fn x86_64_arch() -> crate::Arch {
+        crate::Arch::new(x86_64_arch_spec())
+    }
+
+    fn x86_64_arch_spec() -> ArchSpec {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("RAX", 0, 8));
@@ -412,7 +416,7 @@ mod tests {
 
     #[test]
     fn canonical_return_storage_is_invariant_under_abi_name_collision() {
-        let mut renamed = x86_64_arch();
+        let mut renamed = x86_64_arch_spec();
         for register in &mut renamed.registers {
             if register.offset == 0 {
                 register.name = if register.size == 8 { "rdi" } else { "edi" }.to_string();
@@ -432,7 +436,9 @@ mod tests {
             ],
             ..R2ILBlock::default()
         };
-        let function = SSAFunction::from_blocks_with_arch(&[block], Some(&renamed)).expect("ssa");
+        let function =
+            SSAFunction::from_blocks_with_arch(&[block], Some(&crate::Arch::from(renamed.clone())))
+                .expect("ssa");
         let graph = SsaGraph::from_function(&function);
 
         let live = FunctionLiveOut::compute(&function, &graph, &x86_64_return_storages());
@@ -594,7 +600,8 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("return alias SSA")
+        SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("return alias SSA")
     }
 
     /// A body writing only the low half of the return register.
@@ -611,7 +618,8 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("narrow return SSA")
+        SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("narrow return SSA")
     }
 
     /// Two arms writing the whole register, merging, then a low overlay.
@@ -650,8 +658,11 @@ mod tests {
         merge.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[entry, left, right, merge], Some(&arch))
-            .expect("return phi overlay SSA")
+        SSAFunction::from_blocks_raw(
+            &[entry, left, right, merge],
+            Some(&crate::Arch::from(arch.clone())),
+        )
+        .expect("return phi overlay SSA")
     }
 
     /// A body writing the low byte twice, so the first is shadowed.
@@ -676,7 +687,8 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("shadowed overlay SSA")
+        SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("shadowed overlay SSA")
     }
 
     /// A frame pointer restored from the stack before returning.
@@ -709,7 +721,8 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("frame pop SSA")
+        SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("frame pop SSA")
     }
 
     /// A frame pointer restored in a block that then branches to its returns.
@@ -751,7 +764,8 @@ mod tests {
             });
             blocks.push(second_return);
         }
-        SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("predecessor frame restore SSA")
+        SSAFunction::from_blocks_raw(&blocks, Some(&crate::Arch::from(arch.clone())))
+            .expect("predecessor frame restore SSA")
     }
 
     /// The storages of the values the caller reads, in graph order.
@@ -887,7 +901,8 @@ mod tests {
         block.push(R2ILOp::Return {
             target: reg(0x80, 8),
         });
-        let func = SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("spoofed SSA");
+        let func = SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch.clone())))
+            .expect("spoofed SSA");
         assert_eq!(live_storages(&func, &[storage(0, 8)]), vec![storage(0, 8)]);
     }
 

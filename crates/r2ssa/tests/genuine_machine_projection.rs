@@ -31,7 +31,7 @@ fn genuine_optimized_projection(
         .expect("complete genuine instruction lift");
     let arch = lifted.authority().arch_spec().clone();
     let blocks = [lifted.block().clone()];
-    let artifact = SsaArtifact::for_decompile(&blocks, Some(&arch))
+    let artifact = SsaArtifact::for_decompile(&blocks, Some(&r2ssa::Arch::from(arch.clone())))
         .expect("decompiler-optimized SSA artifact");
     let projection = MachineProjection::from_artifact(&artifact).expect("typed machine projection");
     assert!(
@@ -56,7 +56,7 @@ fn genuine_projection_allowing_residuals(
         .expect("complete genuine instruction lift");
     let arch = lifted.authority().arch_spec().clone();
     let blocks = [lifted.block().clone()];
-    let artifact = SsaArtifact::for_decompile(&blocks, Some(&arch))
+    let artifact = SsaArtifact::for_decompile(&blocks, Some(&r2ssa::Arch::from(arch.clone())))
         .expect("decompiler-optimized SSA artifact");
     let projection = MachineProjection::from_artifact(&artifact).expect("typed machine projection");
     (artifact, projection, arch)
@@ -335,7 +335,8 @@ fn genuine_x86_xmm_subpieces_read_their_operand_whole_of_the_owned_carrier() {
         switch_info: None,
         op_metadata: Default::default(),
     }];
-    let artifact = SsaArtifact::raw(&blocks, Some(&arch)).expect("x86 vector subpiece SSA");
+    let artifact =
+        SsaArtifact::raw(&blocks, Some(&r2ssa::Arch::from(arch))).expect("x86 vector subpiece SSA");
     let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
 
     let slices = exact_uses_from_storage(&artifact, &projection, xmm2);

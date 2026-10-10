@@ -136,7 +136,7 @@ pub struct CalleeRead {
 
 /// Everything about the machine that does not change between functions.
 pub struct NativeTarget<'a> {
-    pub arch: &'a ArchSpec,
+    pub arch: &'a r2ssa::Arch,
     pub disasm: &'a Disassembler,
     /// The processor context the decoder runs in, as the snapshot's machine
     /// tuple spells it. `arm` and `thumb` share an architecture, and this is
@@ -1719,6 +1719,7 @@ impl Native<'_> {
         let evidence = callees.evidence(library);
         let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
             lifted,
+            Some(self.target.arch),
             &self.control,
             &evidence,
             &accepted_premises(),
@@ -2447,7 +2448,9 @@ mod tests {
     /// register, however many floats come before it.
     #[test]
     fn a_function_handed_after_a_double_is_read_from_the_first_integer_slot() {
-        let embedded = r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine");
+        let embedded = crate::machine::Machine::new(
+            r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine"),
+        );
         let compiler = LanguageProfile::parse(embedded.compiler_spec).expect("parses");
         let convention =
             r2abi::calling_convention("x86-64", 64, r2abi::Platform::Unknown).expect("System V");
@@ -2464,7 +2467,7 @@ mod tests {
         );
         let declarations = r2abi::Declarations::default();
         let target = NativeTarget {
-            arch: &embedded.arch,
+            arch: embedded.tables(),
             disasm: &embedded.disasm,
             cpu: embedded.cpu,
             convention,

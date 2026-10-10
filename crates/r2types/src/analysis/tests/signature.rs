@@ -43,8 +43,11 @@ fn source_owned_enrichment_without_interface_claims_no_parameters() {
     let mut arch = r2il::ArchSpec::new("x86-64");
     arch.add_register(r2il::RegisterDef::new("rax", 0, 8));
     let source = Arc::new(
-        SsaArtifact::for_decompile(&[r2il::R2ILBlock::new(0x401800, 1)], Some(&arch))
-            .expect("prepared source without interface"),
+        SsaArtifact::for_decompile(
+            &[r2il::R2ILBlock::new(0x401800, 1)],
+            Some(&r2ssa::Arch::from(arch.clone())),
+        )
+        .expect("prepared source without interface"),
     );
     let request = TypeAnalysisRequest::new(source, ParsedExternalContext::default())
         .expect("matching assumptions");

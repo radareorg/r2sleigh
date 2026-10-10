@@ -279,8 +279,12 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
         dst: Varnode::unique(0x100, 8),
         src: Varnode::register(0x20, 8),
     });
-    let source = r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("prepared source");
+    let source = r2ssa::SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&r2ssa::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("prepared source");
 
     let resolver = exact_source_param_slot_resolver(&source).expect("exact resolver");
     let parameter = source
@@ -313,8 +317,11 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
 fn exact_source_param_slots_refuse_missing_interface() {
     let mut arch = ArchSpec::new("x86-64");
     arch.add_register(RegisterDef::new("rdi", 0x20, 8));
-    let source = r2ssa::SsaArtifact::for_decompile(&[R2ILBlock::new(0x1000, 1)], Some(&arch))
-        .expect("prepared source without interface");
+    let source = r2ssa::SsaArtifact::for_decompile(
+        &[R2ILBlock::new(0x1000, 1)],
+        Some(&r2ssa::Arch::from(arch.clone())),
+    )
+    .expect("prepared source without interface");
 
     assert!(exact_source_param_slot_resolver(&source).is_none());
 }
@@ -439,8 +446,12 @@ fn signed_i32_return_source(has_return: bool, read: bool) -> r2ssa::SsaArtifact 
         }
     })
     .expect("exact signed return interface");
-    r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("prepared signed return source")
+    r2ssa::SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&r2ssa::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("prepared signed return source")
 }
 
 #[test]
@@ -642,7 +653,7 @@ fn exact_source_param_slots_accept_exact_empty_interface() {
     .expect("exact empty interface");
     let source = r2ssa::SsaArtifact::for_decompile_with_interface(
         &[R2ILBlock::new(0x1000, 1)],
-        Some(&arch),
+        Some(&r2ssa::Arch::from(arch.clone())),
         interface,
     )
     .expect("prepared source");
@@ -2002,7 +2013,11 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
     );
 }
 
-fn x86_stack_home_arch() -> ArchSpec {
+fn x86_stack_home_arch() -> r2ssa::Arch {
+    r2ssa::Arch::new(x86_stack_home_arch_spec())
+}
+
+fn x86_stack_home_arch_spec() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.add_register(RegisterDef::new("rax", 0x00, 8));
     arch.add_register(RegisterDef::sub("eax", 0x00, 4, "rax"));
@@ -2414,7 +2429,8 @@ fn member_load_prepared_for_register(arch: &ArchSpec, register_offset: u64) -> r
         space: SpaceId::Ram,
         addr: Varnode::unique(0x100, 8),
     });
-    r2ssa::SsaArtifact::for_decompile(&[block], Some(arch)).expect("prepared")
+    r2ssa::SsaArtifact::for_decompile(&[block], Some(&r2ssa::Arch::from(arch.clone())))
+        .expect("prepared")
 }
 
 fn field_certificate_type_facts(slot: usize, offset: u64) -> FunctionTypeFacts {
@@ -3457,8 +3473,12 @@ fn untyped_return_source() -> r2ssa::SsaArtifact {
     block.push(R2ILOp::Return {
         target: Varnode::register(8, 8),
     });
-    r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("prepared untyped return")
+    r2ssa::SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&r2ssa::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("prepared untyped return")
 }
 
 #[test]
@@ -3497,7 +3517,8 @@ fn no_value_is_void_only_where_the_boundary_proves_it() {
     block.push(R2ILOp::Return {
         target: Varnode::register(8, 8),
     });
-    let unstated = r2ssa::SsaArtifact::for_patterns(&[block], Some(&arch)).expect("prepared");
+    let unstated = r2ssa::SsaArtifact::for_patterns(&[block], Some(&r2ssa::Arch::from(arch)))
+        .expect("prepared");
     assert_eq!(
         ReturnTypeFact::decide(
             &unstated,

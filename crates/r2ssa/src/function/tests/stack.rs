@@ -136,8 +136,12 @@ fn stack_root_follows_a_displacement_materialised_into_a_temp() {
         switch_info: None,
         op_metadata: Default::default(),
     }];
-    let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("frame artifact must build");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("frame artifact must build");
     let facts = artifact.decompile_prep_facts();
     assert!(
         facts.stack_address_roots.values().any(|root| *root
@@ -152,7 +156,7 @@ fn stack_root_follows_a_displacement_materialised_into_a_temp() {
 
 #[test]
 fn decompile_artifact_two_address_stack_updates_read_incoming_versions() {
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::new("rip", 32, 8));
     let rsp = make_reg(16, 8);
     let rbp = make_reg(24, 8);
@@ -221,8 +225,12 @@ fn decompile_artifact_two_address_stack_updates_read_incoming_versions() {
         [],
     )
     .expect("exact source interface");
-    let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("decompile SSA artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("decompile SSA artifact");
     let updates = artifact
         .function()
         .named_block(0x1000)
@@ -372,7 +380,7 @@ fn prepared_function_ssa_refuses_display_named_stack_object_facts() {
 
 #[test]
 fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::new("rip", 0x30, 8));
     let slot = make_unique(0x1880, 8);
     let stored = make_unique(0x1888, 8);
@@ -421,8 +429,12 @@ fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
         },
     ];
 
-    let prepared = prepared_preserving(&blocks, &arch, &["rbx", "rsp", "rbp"])
-        .expect("prepared SSA should build");
+    let prepared = prepared_preserving(
+        &blocks,
+        &crate::Arch::from(arch.clone()),
+        &["rbx", "rsp", "rbp"],
+    )
+    .expect("prepared SSA should build");
     let return_op_idx = prepared
         .function()
         .named_block(0x1890)
@@ -443,7 +455,7 @@ fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
 
 #[test]
 fn prepared_function_refuses_display_named_stack_merge_at_control_return() {
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::new("rip", 0x30, 8));
     let slot = make_unique(0x1900, 8);
     let cmp_load = make_unique(0x1908, 8);
@@ -523,8 +535,8 @@ fn prepared_function_refuses_display_named_stack_merge_at_control_return() {
         },
     ];
 
-    let prepared =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
+    let prepared = SsaArtifact::for_decompile(&blocks, Some(&crate::Arch::from(arch.clone())))
+        .expect("prepared SSA should build");
     let return_op_idx = prepared
         .function()
         .named_block(0x190c)
@@ -630,7 +642,7 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
         SourceMachineRoles::new(Some(register(72)), Some(register(64))).expect("machine roles");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         None,
         roles,
         Some(convention),
@@ -640,7 +652,7 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
     machine_context.bind_source_string_literals(&[(0x3000, "%d".to_string())]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
-        Some(&arch),
+        Some(&crate::Arch::from(arch.clone())),
         InterfaceQuestions::new(&machine_context),
         &machine_context,
         &CalleeBoundaries::default(),
@@ -663,7 +675,7 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
 
 #[test]
 fn prepared_stack_reload_refuses_display_named_param_home() {
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::new("rsi", 32, 8));
     arch.add_register(RegisterDef::new("esi", 32, 4));
 
@@ -698,8 +710,8 @@ fn prepared_stack_reload_refuses_display_named_param_home() {
         op_metadata: Default::default(),
     }];
 
-    let prepared =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
+    let prepared = SsaArtifact::for_decompile(&blocks, Some(&crate::Arch::from(arch.clone())))
+        .expect("prepared SSA should build");
     assert!(
         prepared
             .inst_at(0x1820, 2)
@@ -854,7 +866,7 @@ fn test_decompile_prep_facts_refuse_display_named_stack_roots() {
 
 #[test]
 fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::new("rip", 32, 8));
     let rsp = make_reg(16, 8);
     let rbp = make_reg(24, 8);
@@ -938,8 +950,12 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     .with_stack_pointer_storage(sp_storage)
     .expect("stack-pointer carrier");
 
-    let typed = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("typed decompile artifact");
+    let typed = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("typed decompile artifact");
     let typed_function = typed.function();
     let typed_facts = typed.decompile_prep_facts();
     let op_roots = typed_function
@@ -1052,8 +1068,8 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
             }
     }));
 
-    let source_free =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("source-free decompile artifact");
+    let source_free = SsaArtifact::for_decompile(&blocks, Some(&crate::Arch::from(arch.clone())))
+        .expect("source-free decompile artifact");
     assert!(
         source_free
             .decompile_prep_facts()
@@ -1128,8 +1144,12 @@ fn artifact_projects_typed_stack_roots_by_value_id_without_register_aliases() {
     .with_frame_pointer_storage(fp_storage)
     .expect("frame-pointer carrier");
 
-    let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("typed decompile artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("typed decompile artifact");
     let frame_setup = artifact
         .graph()
         .inst_spelled_at(0x3400, 0)
@@ -1238,8 +1258,12 @@ fn a_mask_that_aligns_the_stack_pointer_opens_a_frame_of_its_own() {
         switch_info: None,
         op_metadata: Default::default(),
     }];
-    let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("realigned artifact must build");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("realigned artifact must build");
     let facts = artifact.decompile_prep_facts();
     let realigned = facts
         .stack_address_roots
@@ -1356,7 +1380,7 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
         }];
         let artifact = crate::testing::prepared(
             &blocks,
-            &arch,
+            &crate::Arch::from(arch.clone()),
             Some(interface.clone()),
             Vec::new(),
             [sp_storage],
@@ -1384,7 +1408,7 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
 
 #[test]
 fn new_subregister_result_cannot_inherit_stack_address_authority() {
-    let mut arch = make_x86_64_prep_arch();
+    let mut arch = make_x86_64_prep_arch_spec();
     arch.add_register(RegisterDef::sub("esp", 16, 4, "rsp"));
     arch.add_register(RegisterDef::new("rip", 32, 8));
     let sp_storage = CanonicalStorageId {
@@ -1438,8 +1462,12 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
         switch_info: None,
         op_metadata: Default::default(),
     }];
-    let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("subregister New artifact");
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch.clone())),
+        interface,
+    )
+    .expect("subregister New artifact");
     let block = artifact
         .function()
         .named_block(0x3480)

@@ -442,7 +442,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
 
     let prepared = crate::testing::prepared(
         &blocks,
-        &arch,
+        &crate::Arch::from(arch.clone()),
         Some(function_interface),
         vec![call_interface],
         [stack_pointer_storage],
@@ -506,7 +506,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
 
 #[test]
 fn prepared_certificates_index_call_args_memory_and_returns() {
-    let mut arch = make_arm64_alias_arch();
+    let mut arch = make_arm64_alias_arch_spec();
     for register in &mut arch.registers {
         if register.offset == 0 {
             register.name = if register.size == 8 { "rdx" } else { "edx" }.to_string();
@@ -560,8 +560,14 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         SourceCallResult::Void,
     )
     .expect("exact callsite interface");
-    let prepared = crate::testing::prepared(&blocks, &arch, None, vec![call_interface], [])
-        .expect("prepared SSA");
+    let prepared = crate::testing::prepared(
+        &blocks,
+        &crate::Arch::from(arch.clone()),
+        None,
+        vec![call_interface],
+        [],
+    )
+    .expect("prepared SSA");
     let call = prepared
         .sole_callsite_certificate_in_block(0x1600)
         .expect("callsite certificate");
@@ -811,7 +817,7 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
-            arch: Some(&arch),
+            arch: Some(&crate::Arch::from(arch.clone())),
             function_interface: Some(interface),
             machine_roles: SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
                 .expect("machine roles"),
@@ -892,7 +898,7 @@ fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_
     .expect("exact function interface");
     let artifact = crate::testing::prepared(
         &[block],
-        &arch,
+        &crate::Arch::from(arch.clone()),
         Some(interface),
         Vec::new(),
         [register(0x4200, 8)],
