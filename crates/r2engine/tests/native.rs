@@ -5626,3 +5626,37 @@ fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
         assert_eq!(outcome, r2dec::ledger::Outcome::Gapped, "{op:?}\n{text}");
     }
 }
+
+/// `mov rax, rdi`, then `mov rcx, rax; shr rcx, 1; xor rax, rcx` `steps` times, then `ret`.
+fn gray_steps(steps: usize) -> Vec<u8> {
+    let mut bytes = vec![0x48, 0x89, 0xf8];
+    for _ in 0..steps {
+        bytes.extend([0x48, 0x89, 0xc1, 0x48, 0xd1, 0xe9, 0x48, 0x31, 0xc8]);
+    }
+    bytes.push(0xc3);
+    bytes.resize(bytes.len() + 16, 0);
+    bytes
+}
+
+/// Each step reads the value before it twice, so inlining every read doubles the text per step:
+/// sixteen steps were 2^16 leaves. Over the duplication budget the value is a local: text is linear.
+#[test]
+fn a_value_read_twice_per_step_renders_in_text_linear_in_the_steps() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let length = |steps: usize| {
+        let program = Fixture {
+            bytes: gray_steps(steps),
+            name: "gray",
+        };
+        let response = staged(&machine.target(), &program, BASE).expect("decompile");
+        let text = response.output.text().to_owned();
+        assert!(!text.contains("r2dec gap"), "{text}");
+        text.len()
+    };
+    let (eight, sixteen, thirty_two) = (length(8), length(16), length(32));
+    // Linear text grows by twice as much over sixteen steps as over eight; doubling grows by 2^16.
+    assert!(
+        thirty_two - sixteen < 3 * (sixteen - eight),
+        "8 steps: {eight} bytes, 16: {sixteen}, 32: {thirty_two}"
+    );
+}

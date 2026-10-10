@@ -218,17 +218,22 @@ pub fn default_expansion_policy(query: &ExpansionQuery<'_>) -> bool {
         )
 }
 
+/// The largest tree a term copied to every reader may be: R readers spell at most R times this,
+/// so text stays linear; a larger term is one local, assigned once and read by name.
+pub const DUPLICABLE_TREE_BUDGET: u64 = 64;
+
 /// Whether every read `term` makes is of a literal or of an entry value the
-/// function never redefines, the term is not opaque, and it reads no memory
+/// function never redefines, the term is not opaque, it reads no memory
 /// -- a cell read twice is observed twice, and nothing here proves the two
-/// reads see the same store.
+/// reads see the same store -- and it is within [`DUPLICABLE_TREE_BUDGET`].
 pub fn term_is_duplicable(
     projection: &MachineProjection,
     arena: &TermArena,
     entry_never_redefined: &BTreeSet<ValueId>,
     term: TermId,
 ) -> bool {
-    !matches!(arena.term(term).kind, TermKind::Opaque(_))
+    arena.tree_measure(term) <= DUPLICABLE_TREE_BUDGET
+        && !matches!(arena.term(term).kind, TermKind::Opaque(_))
         && !arena.reads_memory(term)
         && arena
             .leaves(term)

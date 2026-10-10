@@ -473,6 +473,8 @@ pub struct PointerWalk {
 #[derive(Debug, Clone, Default)]
 pub struct TermArena {
     nodes: Vec<Term>,
+    /// By term: its size as a tree, fixed when it is minted, since a term never changes.
+    sizes: Vec<u64>,
     /// Where each interned term sits in `nodes`, by hash.
     ///
     /// A map from the term to its identifier held the term a second time --
@@ -598,6 +600,7 @@ impl TermArena {
             ty,
             kind: TermKind::Leaf(LeafRead { expr, occurrence }),
         });
+        self.sizes.push(1);
         self.canonical_leaves.entry(expr).or_insert(id);
         if let Some(origin) = origin {
             self.origins.insert(occurrence, origin);
@@ -659,7 +662,11 @@ impl TermArena {
             return id;
         }
         let id = TermId(self.nodes.len() as u32);
+        let size = (term.kind.children()).fold(1u64, |acc, child| {
+            acc.saturating_add(self.sizes[child.index()])
+        });
         self.nodes.push(term);
+        self.sizes.push(size);
         self.interned.insert(id, &self.nodes);
         id
     }
@@ -878,23 +885,6 @@ impl TermArena {
     /// decreases this for the term it rewrites, so it bounds how often rules
     /// can fire at one node; the driver derives its budget from it.
     pub fn tree_measure(&self, root: TermId) -> u64 {
-        let mut memo: HashMap<TermId, u64> = HashMap::new();
-        self.tree_measure_memo(root, &mut memo)
-    }
-
-    fn tree_measure_memo(&self, id: TermId, memo: &mut HashMap<TermId, u64>) -> u64 {
-        if let Some(size) = memo.get(&id) {
-            return *size;
-        }
-        let kind = self.term(id).kind;
-        let size = if kind.is_nullary() {
-            1
-        } else {
-            kind.children().fold(1u64, |acc, child| {
-                acc.saturating_add(self.tree_measure_memo(child, memo))
-            })
-        };
-        memo.insert(id, size);
-        size
+        self.sizes[root.index()]
     }
 }
