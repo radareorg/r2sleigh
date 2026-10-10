@@ -1011,14 +1011,26 @@ fn an_unbounded_read_of_an_unowned_object_keeps_every_store() {
     assert_eq!(store_ownership(&artifact), (true, false));
 }
 
-/// A dead byte store of `r40 + 1`; `observe` also writes that sum to a global.
+/// A dead byte store of `r40 + 1` (or `r40 / r41` when `divide`); `observe` also writes it to a
+/// global.
 fn dead_store_of_a_sum(observe: bool) -> (SsaArtifact, InstId) {
+    dead_store_of(observe, false)
+}
+
+fn dead_store_of(observe: bool, divide: bool) -> (SsaArtifact, InstId) {
     let artifact = framed_artifact(|block, sp| {
         let sum = Varnode::unique(0x400, 1);
-        block.push(R2ILOp::IntAdd {
-            dst: sum.clone(),
-            a: Varnode::register(40, 1),
-            b: Varnode::constant(1, 1),
+        block.push(match divide {
+            false => R2ILOp::IntAdd {
+                dst: sum.clone(),
+                a: Varnode::register(40, 1),
+                b: Varnode::constant(1, 1),
+            },
+            true => R2ILOp::IntDiv {
+                dst: sum.clone(),
+                a: Varnode::register(40, 1),
+                b: Varnode::register(41, 1),
+            },
         });
         let address = indexed_address(block, sp, (8, true), 0x100);
         block.push(R2ILOp::Store {
@@ -1036,11 +1048,13 @@ fn dead_store_of_a_sum(observe: bool) -> (SsaArtifact, InstId) {
     });
     let sum = (artifact.graph().insts.iter())
         .find(|inst| {
-            matches!(inst.payload, InstPayload::Op(SSAOp::IntAdd { .. }))
-                && inst
-                    .inputs
-                    .iter()
-                    .all(|v| artifact.graph().var(*v).size == 1)
+            matches!(
+                inst.payload,
+                InstPayload::Op(SSAOp::IntAdd { .. } | SSAOp::IntDiv { .. })
+            ) && inst
+                .inputs
+                .iter()
+                .all(|v| artifact.graph().var(*v).size == 1)
         })
         .expect("the sum")
         .id;
@@ -1067,4 +1081,16 @@ fn a_value_a_live_store_also_writes_is_not_dead() {
             .dead_frame_store_values
             .contains(sum)
     );
+}
+
+/// A division can trap, so the dead store it feeds does not make it dead.
+#[test]
+fn a_division_a_dead_frame_store_writes_is_not_dead() {
+    let (artifact, quotient) = dead_store_of(false, true);
+    let certificates = artifact.certificates();
+    assert!(
+        !certificates.dead_frame_stores.is_empty(),
+        "the byte store is dead"
+    );
+    assert!(!certificates.dead_frame_store_values.contains(quotient));
 }
