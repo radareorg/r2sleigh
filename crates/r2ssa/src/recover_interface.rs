@@ -906,6 +906,25 @@ enum CarrierRead {
     Float(CanonicalStorageId),
 }
 
+/// What a call reads of an unproven result: nothing, proven, or one carrier.
+enum ResultRead {
+    None,
+    Carrier(CarrierRead),
+}
+
+/// The reads after a call to a callee whose result carriers are the integer one and `float`.
+fn read_of(
+    reads: r2source::SourceResultReads,
+    float: Option<CanonicalStorageId>,
+) -> Option<ResultRead> {
+    match (reads.integer, reads.float, float) {
+        (0, 0, _) if reads.overwritten > 0 => Some(ResultRead::None),
+        (1.., 0, None) => Some(ResultRead::Carrier(CarrierRead::Integer)),
+        (_, _, Some(float)) => carrier_read(Some(reads), float).map(ResultRead::Carrier),
+        _ => None,
+    }
+}
+
 fn carrier_read(
     reads: Option<r2source::SourceResultReads>,
     float: CanonicalStorageId,
@@ -2053,19 +2072,23 @@ pub fn mint_recovered_call_site_interface(
         // A body nobody read owns the arguments beside the result: an import
         // thunk forwards every one and reads none, so what its own body proves
         // is a floor rather than this call's contract.
-        // A body writing both result registers returns the one this caller reads, where it reads
-        // one; with only the integer register in question, the call defines it as any call does.
-        SourceFunctionReturn::Unproven => match callee.result_carriers().map(|carriers| {
-            let read = carriers.float.map_or(Some(CarrierRead::Integer), |float| {
-                carrier_read(caller_reads, float)
-            });
-            (carriers.integer, read)
-        }) {
-            Some((storage, Some(CarrierRead::Integer)))
-            | Some((_, Some(CarrierRead::Float(storage)))) => {
+        // An unproven result is the register the call reads of it, and none where the caller
+        // writes each result register before reading it: the call is then a statement.
+        SourceFunctionReturn::Unproven => match callee
+            .result_carriers()
+            .zip(caller_reads)
+            .and_then(|(carriers, reads)| Some((carriers, read_of(reads, carriers.float)?)))
+        {
+            Some((_, ResultRead::None)) => SourceCallResult::Void,
+            Some((carriers, ResultRead::Carrier(CarrierRead::Integer))) => {
+                SourceCallResult::Register {
+                    storage: carriers.integer,
+                }
+            }
+            Some((_, ResultRead::Carrier(CarrierRead::Float(storage)))) => {
                 SourceCallResult::Register { storage }
             }
-            _ => {
+            None => {
                 r2il::refusal_evidence!(
                     "call-site-minting",
                     "the callee's result is unproven ({:?}, read {:?}), so its body describes no call contract",
