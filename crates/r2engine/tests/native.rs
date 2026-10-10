@@ -4478,6 +4478,43 @@ fn a_staged_stack_protector_check_owns_the_guard_address() {
     );
 }
 
+/// `cmp edi, 5; jle next` where `next` is the fallthrough: both arms reach one block.
+const MEETING_ARMS: &[u8] = &[
+    0x83, 0xff, 0x05, // 1000 cmp edi, 5
+    0x7e, 0x00, // 1003 jle 0x1005
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1005 mov eax, 1
+    0xc3, // 100a ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+];
+
+/// The branch owes its transfer with no inputs, so nothing observes the parameter-fed condition.
+#[test]
+fn a_branch_whose_arms_meet_leaves_its_condition_unobserved() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: MEETING_ARMS.to_vec(),
+        name: "meeting_arms",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    let branch = (graph.insts.iter())
+        .find(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CBranch { .. })))
+        .expect("the jle");
+    let owed = (artifact.facts().obligations.obligations_for_inst(branch.id))
+        .map(|o| (o.id.kind, o.inputs.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owed,
+        [(r2ssa::SemanticObligationKind::ControlTransfer, Vec::new())]
+    );
+    let condition = *branch.inputs.last().expect("the condition");
+    assert!(
+        artifact.unobserved_values().contains(condition),
+        "{condition:?}"
+    );
+}
+
 /// The slot is written again before the check, so the check can fail and stays a residual.
 #[test]
 fn a_canary_written_twice_is_not_decided() {
