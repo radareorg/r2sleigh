@@ -39,7 +39,9 @@ Where this stands (2026-10-11, the D switch: #122 to #124 on `rebuild`, follow-u
 | Tests | r2ssa, r2types, r2dec, r2engine, r2s 1550 passed at #127 |
 | Cost (release `pdd`, Mac, median of 3) | 0pack `0x58e3d0` 1.96 s and 474 MB (legacy 2.73 s, 560 MB); pumasim `0x23fdf0` 2.83 s (legacy 3.54 s) |
 | Structure | at baseline after the deletion (long_comments 2646, too_many_lines 274) |
-| Exit left | D27 merges `rebuild` at the switch with LX's and SM's exits met, and neither is met or measured yet (no exponent fit exists; callee reads were 35 to 42% of sort 0x3f50 `pdd`). Amending D27 to merge at the switch, or running LX and SM on `rebuild` first, is the maintainer's decision |
+| LX exit, measured 2026-10-11 at #127 | marginal `pdd` cost (instructions retired by `afl; pdd @ f` less `afl`, contabo) grows as instructions^0.80 (R^2 0.44) over 80 functions of 300+ instructions sampled from 0pack and pumasim: met. Peak RSS above the open grows as instructions^1.17 (R^2 0.36): not met; the pumasim Gui constructor peaks at 452 MB against 250 |
+| SM exit, measured 2026-10-11 | callee reads are 52.8% of sort 0x3f50 `pdd` against 10%, and 85.8% of pumasim 0x1dc0a0 (300 instructions, 18.6 G instructions, 219 MB above the open): the low R^2 above is callee preparation, not body size |
+| Exit left | D27 merges `rebuild` with LX's and SM's exits met: LX's RSS and SM's callee share are not. Amending D27 to merge at the switch, or running SM and LX's RSS on `rebuild` first, is the maintainer's decision |
 
 The 2026-10-04 review rated the code 4/10: sound ideas and discipline (~7),
 weak algorithms and structure (~3) — hand-rolled iteration, recomputation,
