@@ -78,7 +78,7 @@ fn assert_sited(path: &str) {
     let wrong = addresses
         .iter()
         .flat_map(|addr| {
-            let rendered = shell(&binary, &format!("e dec.pipeline=staged; pdd @ {addr}"));
+            let rendered = shell(&binary, &format!("pdd @ {addr}"));
             mismatches(&rendered)
                 .into_iter()
                 .map(move |why| format!("{addr}: {why}"))
@@ -98,7 +98,7 @@ fn the_pending_seeding_cause_is_named_on_exactly_these_functions() {
         .filter_map(|line| line.split_whitespace().last())
         .filter(|name| name.starts_with("sym."))
         .filter(|name| {
-            let rendered = shell(&binary, &format!("e dec.pipeline=staged; pdd @ {name}"));
+            let rendered = shell(&binary, &format!("pdd @ {name}"));
             rendered.contains("without a site: pending obligation seeding)")
         })
         .map(|name| name.trim_start_matches("sym.").to_owned())

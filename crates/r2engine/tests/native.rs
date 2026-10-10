@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::TABLE_SWITCH;
 
 use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
-use r2engine::native::{NativeTarget, Program, call_effect, decompile, staged};
+use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
 use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
@@ -259,12 +259,7 @@ fn a_function_is_decompiled_from_bytes_alone() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
+    assert!(response.output.function().is_some(), "{}", response.output);
     // Both arguments arrive in the convention's registers and the sum comes
     // back, which is the whole claim this function makes.
     assert!(
@@ -515,12 +510,7 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
     // The thunk itself: `mov rsi, [rsp]; ret`, which reads what the call left.
     let response = decompile(&target, &program, BASE + 0x0b).expect("decompile");
 
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
+    assert!(response.output.function().is_some(), "{}", response.output);
     assert!(
         response
             .output
@@ -543,16 +533,14 @@ const A64_EMPTY_FRAME: &[u8] = &[
 /// function returned the caller's frame pointer, which its source never does.
 #[test]
 fn a_frame_pointer_the_body_restores_is_no_result() {
-    for text in rendered_both(EMPTY_FRAME, "empty_frame") {
-        assert!(text.contains("void empty_frame(void)"), "{text}");
-        assert!(!text.to_lowercase().contains("rbp_"), "{text}");
-    }
+    let text = rendered(EMPTY_FRAME, "empty_frame");
+    assert!(text.contains("void empty_frame(void)"), "{text}");
+    assert!(!text.to_lowercase().contains("rbp_"), "{text}");
     // AArch64's untouched x0 may be an argument handed back, so the result is unproven, not x29.
     let a64 = Machine::new("aarch64", "aarch64", 64);
-    for text in rendered_both_on(&a64, A64_EMPTY_FRAME, "empty_frame") {
-        assert!(text.contains("return r2sleigh_residual_u64("), "{text}");
-        assert!(!text.to_lowercase().contains("x29_"), "{text}");
-    }
+    let text = rendered_on(&a64, A64_EMPTY_FRAME, "empty_frame");
+    assert!(text.contains("return r2sleigh_residual_u64("), "{text}");
+    assert!(!text.to_lowercase().contains("x29_"), "{text}");
 }
 
 /// A program where the called address is a library function by name, as an
@@ -607,7 +595,7 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
         bytes: CALLER.to_vec(),
         name: "caller",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(
         text.contains("uint32_t fcn_100a(uint32_t, uint32_t);"),
@@ -637,7 +625,7 @@ fn a_staged_return_line_names_the_return_instruction() {
         bytes: CALLER.to_vec(),
         name: "caller",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let emission = emission(&response);
     let unit = emission.unit();
     assert_eq!(named_by(emission, "return"), vec![0x1005], "{unit}");
@@ -652,7 +640,7 @@ fn a_staged_return_line_names_the_return_instruction() {
 fn a_staged_call_passes_a_declared_import_its_declared_types() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    let response = staged(&target, &Importing, BASE).expect("decompile");
+    let response = decompile(&target, &Importing, BASE).expect("decompile");
     let text = response.output.text();
     assert!(text.contains("strlen(const char*);"), "{text}");
     assert!(text.contains("strlen((const char*)"), "{text}");
@@ -736,7 +724,7 @@ impl Program for Texts {
 fn a_staged_call_passes_a_proven_string_as_a_literal() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    let response = staged(&target, &Texts, BASE).expect("decompile");
+    let response = decompile(&target, &Texts, BASE).expect("decompile");
     let text = response.output.text();
     assert!(text.contains("strlen(\"hi\");"), "{text}");
     assert!(!text.contains("\"no\""), "{text}");
@@ -814,12 +802,10 @@ impl Program for HalfWords {
 fn text_bytes_passed_where_no_declaration_takes_characters_stay_an_address() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    for pipeline in [decompile, staged] {
-        let response = pipeline(&target, &HalfWords, BASE).expect("decompile");
-        let text = response.output.text();
-        assert!(!text.contains("\"\\t\""), "{text}");
-        assert!(text.contains("0x2000"), "{text}");
-    }
+    let response = decompile(&target, &HalfWords, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("\"\\t\""), "{text}");
+    assert!(text.contains("0x2000"), "{text}");
 }
 
 #[test]
@@ -949,7 +935,7 @@ fn a_staged_access_to_a_named_global_spells_its_name() {
     let mut machine = Machine::new("x86-64", "x86-64", 64);
     machine.declarations = declarations;
     let target = machine.target();
-    let response = staged(&target, &Globals, BASE).expect("decompile");
+    let response = decompile(&target, &Globals, BASE).expect("decompile");
     let text = response.output.text();
     assert!(text.contains("extern int32_t counter;"), "{text}");
     assert!(text.contains("= (uint32_t)counter;"), "{text}");
@@ -980,12 +966,7 @@ fn a_function_is_decompiled_on_aarch64_too() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
+    assert!(response.output.function().is_some(), "{}", response.output);
     assert!(
         response.output.text().contains("add_one("),
         "{}",
@@ -1028,19 +1009,13 @@ fn a_released_wide_insert_base_is_rendered_where_it_is_read() {
         bytes: LANE_INSERT.to_vec(),
         name: "lane",
     };
-    // Both pipelines: the staged one writes the 256-bit Z registers through the same helpers.
-    for pipeline in [decompile, staged] {
-        let response = pipeline(&target, &program, BASE).expect("decompile");
-        let output = response.output.text();
-        assert!(
-            response.render_refusal.is_none(),
-            "{:?}\n{output}",
-            response.render_refusal
-        );
-        assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
-        assert!(output.contains("return"), "{output}");
-        assert!(!output.contains("ValueHasNoCType"), "{output}");
-    }
+    // The 256-bit Z registers are written through the bitvector helpers.
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert!(output.contains("r2sleigh_bits_insert_"), "{output}");
+    assert!(output.contains("return"), "{output}");
+    assert!(!output.contains("ValueHasNoCType"), "{output}");
 }
 
 /// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
@@ -1066,12 +1041,7 @@ fn a_load_nothing_reads_still_reads() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
+    assert!(response.output.function().is_some(), "{}", response.output);
     assert!(
         discards_a_read(response.output.text()),
         "the discarded read is missing:\n{}",
@@ -1111,31 +1081,20 @@ fn the_medium_tier_is_readable_without_rendering() {
     assert!(!dump.contains("SSAVar {"), "derived Debug leaked:\n{dump}");
 }
 
-/// The structured tier is the tree the C is generated from.
-///
-/// Read against the C, it says whether a defect is already in the tree or
-/// belongs to the generation below it.
+/// A load nothing reads is still a read, on ARM too.
 #[test]
-fn the_structured_tier_is_the_tree_the_c_comes_from() {
+fn a_load_nothing_reads_still_reads_on_arm() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
         bytes: ARM_DEAD_LOAD.to_vec(),
         name: "dead_load",
     };
-    let tree = r2engine::native::structured(&target, &program, BASE)
-        .expect("structured")
-        .output
-        .into_text();
     let c = decompile(&target, &program, BASE)
         .expect("decompile")
         .output
         .into_text();
 
-    assert!(tree.contains("Function: dead_load"), "{tree}");
-    // The statements are spelled by the emitter that writes the C, so the two
-    // tiers disagree about their shape and about nothing else.
-    assert!(discards_a_read(&tree), "{tree}");
     assert!(discards_a_read(&c), "{c}");
 }
 
@@ -1181,12 +1140,7 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
         name: "pick",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
+    assert!(response.output.function().is_some(), "{}", response.output);
     let output = response.output.text();
     assert!(output.contains("switch ("), "{output}");
     // The `switch` is what the dispatch is: scaling the index, addressing the
@@ -1432,11 +1386,9 @@ fn an_indirect_branch_the_walk_could_not_follow_is_no_tail_call() {
     // `return ((int32_t(*)(void))*(...))();` with nothing refused: a tail
     // call the program never makes, in place of the switch it does.
     let machine = Machine::new("x86-64", "x86-64", 64);
-    // Legacy refuses the function; staged traps where the walk stopped (D1).
-    let legacy = decompile(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
-    let staged = staged(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
-    assert!(legacy.render_refusal.is_some(), "{}", legacy.output);
-    assert!(staged.render_refusal.is_none(), "{}", staged.output);
+    // The rendering traps where the walk stopped (D1).
+    let staged = decompile(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
+    assert!(staged.output.function().is_some(), "{}", staged.output);
     assert!(
         staged.output.text().contains(
             "r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x1000 "
@@ -1444,10 +1396,9 @@ fn an_indirect_branch_the_walk_could_not_follow_is_no_tail_call() {
         "{}",
         staged.output
     );
-    for output in [legacy.output.text(), staged.output.text()] {
-        assert!(!output.contains(")()"), "{output}");
-        assert!(!output.contains("return (("), "{output}");
-    }
+    let output = staged.output.text();
+    assert!(!output.contains(")()"), "{output}");
+    assert!(!output.contains("return (("), "{output}");
 }
 
 #[test]
@@ -1461,11 +1412,7 @@ fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{output}");
     assert!(!output.starts_with("void "), "{output}");
     for returns in ["10", "20", "30"] {
         assert!(output.contains(&format!("return {returns};")), "{output}");
@@ -1489,13 +1436,9 @@ fn a_machine_operation_the_specification_names_is_a_gap_by_that_name() {
         bytes: BARRIER.to_vec(),
         name: "barrier",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{output}");
     assert!(
         output.contains("r2dec gap: UserOperation(DataMemoryBarrier) at 0x1000:"),
         "{output}"
@@ -1521,9 +1464,9 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
         bytes: ATOMIC_INCREMENT.to_vec(),
         name: "increment",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(response.render_refusal.is_none(), "{output}");
+    assert!(response.output.function().is_some(), "{output}");
     for site in ["0x1000:7", "0x1000:19"] {
         assert!(
             output.contains(&format!("r2dec gap: EffectNotRendered at {site} ")),
@@ -1549,13 +1492,9 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
         bytes: BARRIER_LEAF.to_vec(),
         name: "order",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{output}");
     assert!(
         output.contains("r2dec gap: UserOperation(DataMemoryBarrier) at 0x1000:"),
         "{output}"
@@ -1651,11 +1590,7 @@ fn a_result_written_on_one_path_only_is_a_marked_gap() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{output}");
     assert!(marks_an_unproven_return(output), "{output}");
 }
 
@@ -1676,13 +1611,9 @@ fn a_system_call_leaves_the_return_a_marked_gap_and_the_function_still_renders()
         bytes: EXIT.to_vec(),
         name: "start",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{output}");
     assert!(
         output.contains("r2dec gap: UserOperation(CallSupervisor) at 0x1000:2 "),
         "{output}"
@@ -1707,11 +1638,7 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{output}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{output}");
     assert!(marks_an_unproven_return(output), "{output}");
 
     // On x86-64 rax is no argument, so a caller never filled it and nothing is returned.
@@ -1833,9 +1760,8 @@ fn a_loop_with_two_entries_is_decompiled_in_bounded_time() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     assert!(
-        response.render_refusal.is_none() && response.output.text().contains("return"),
-        "{:?}\n{}",
-        response.render_refusal,
+        response.output.function().is_some() && response.output.text().contains("return"),
+        "{}",
         response.output
     );
 }
@@ -1880,7 +1806,7 @@ struct Rendered {
 impl Rendered {
     fn of(response: &r2engine::EngineDecompileResponse) -> Self {
         let text = response.output.text();
-        assert!(response.render_refusal.is_none(), "{text}");
+        assert!(response.output.function().is_some(), "{text}");
         let r2engine::EngineRendering::Function(rendered) = &response.output else {
             panic!("no function was rendered:\n{text}");
         };
@@ -1982,7 +1908,7 @@ const RETURNS_A_DECLARED_INT: &[u8] = &[
 #[test]
 fn a_declared_int_returned_reads_no_bits_above_it() {
     let machine = declaring_each(&[(BASE, "caller", "int", &[]), (0x1010, "f", "int", &[])]);
-    let [_, text] = rendered_both_on(&machine, RETURNS_A_DECLARED_INT, "caller");
+    let text = rendered_on(&machine, RETURNS_A_DECLARED_INT, "caller");
     assert!(text.contains("(uint32_t)fcn_1010()"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
@@ -2056,7 +1982,7 @@ impl Program for TailToRand {
 fn a_tail_transfer_returning_a_declared_int_reads_no_bits_above_it() {
     let machine = declaring_at(BASE, "wrapper", "int", &[]);
     let target = machine.target();
-    let text = staged(&target, &TailToRand, BASE)
+    let text = decompile(&target, &TailToRand, BASE)
         .expect("decompile")
         .output
         .text()
@@ -2086,7 +2012,7 @@ const STORES_A_DECLARED_INT: &[u8] = &[
 #[test]
 fn bits_above_a_declared_narrower_result_nothing_reads_are_no_residual() {
     let machine = declaring_at(0x1011, "f", "int", &[]);
-    let [_, text] = rendered_both_on(&machine, STORES_A_DECLARED_INT, "stores");
+    let text = rendered_on(&machine, STORES_A_DECLARED_INT, "stores");
     assert!(text.contains("= (uint64_t)(uint32_t)fcn_1011();"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
@@ -2096,7 +2022,7 @@ fn bits_above_a_declared_narrower_result_nothing_reads_are_no_residual() {
 #[test]
 fn bits_above_a_declared_narrower_result_are_never_zero() {
     let machine = declaring_at(0x1010, "f", "int", &[]);
-    let [_, text] = rendered_both_on(&machine, STORES_A_DECLARED_INT_WHOLE, "stores");
+    let text = rendered_on(&machine, STORES_A_DECLARED_INT_WHOLE, "stores");
     assert!(text.contains("int32_t fcn_1010(void);"), "{text}");
     assert!(
         text.contains("rax_1 = (uint64_t)(uint32_t)fcn_1010() | r2sleigh_residual_u64(1) << 32;"),
@@ -2105,22 +2031,6 @@ fn bits_above_a_declared_narrower_result_are_never_zero() {
 }
 
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
-/// The function at `BASE` in both pipelines, legacy then staged, each rendered without a refusal.
-fn rendered_both(bytes: &'static [u8], name: &'static str) -> [Rendered; 2] {
-    rendered_both_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
-}
-
-fn rendered_both_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> [Rendered; 2] {
-    let target = machine.target();
-    let program = Fixture {
-        bytes: bytes.to_vec(),
-        name,
-    };
-    let legacy = decompile(&target, &program, BASE).expect("decompile");
-    let staged = staged(&target, &program, BASE).expect("decompile");
-    [Rendered::of(&legacy), Rendered::of(&staged)]
-}
-
 fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> Rendered {
     let target = machine.target();
     let program = Fixture {
@@ -3094,14 +3004,13 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
         (COPY_32, "copy_32", 32),
     ] {
         let machine = declaring(name, "int", &["void *", "void *"]);
-        let rendered = rendered_both_on(&machine, bytes, name);
-        for (pipeline, text) in ["legacy", "staged"].iter().zip(rendered) {
-            assert!(!text.contains("byte["), "{text}");
-            run_rendered(
-                &format!("{name}_{pipeline}"),
-                &[&text],
-                &format!(
-                    r#"int main(void) {{
+        let text = rendered_on(&machine, bytes, name);
+        assert!(!text.contains("byte["), "{text}");
+        run_rendered(
+            name,
+            &[&text],
+            &format!(
+                r#"int main(void) {{
     _Alignas(32) uint8_t source[48];
     _Alignas(32) uint8_t got[48];
     for (int i = 0; i < 48; i++) {{
@@ -3116,14 +3025,13 @@ fn an_access_wider_than_eight_bytes_moves_every_byte() {
     }}
     for (int i = {width}; i < 48; i++) {{
         if (got[i] != 0xa5) {{
-            return 4;
+        return 4;
         }}
     }}
     return 0;
 }}"#
-                ),
-            );
-        }
+            ),
+        );
     }
 
     let text = rendered_on(
@@ -3175,9 +3083,9 @@ fn an_unmodelled_user_operation_is_a_gap_by_name() {
         bytes: UNMODELLED_SHUFFLE.to_vec(),
         name: "shuffle",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_string();
-    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(response.output.function().is_some(), "{text}");
     assert!(
         text.contains("r2dec gap: UserOperation(pshufb) at 0x1000:2 "),
         "{text}"
@@ -3261,31 +3169,26 @@ const LOWEST_SET_BIT: &[u8] = &[
 /// what the machine does at every source, zero included.
 #[test]
 fn a_bit_scan_renders_as_the_count_it_computes() {
-    let trailing = rendered_both(TRAILING_ZEROS, "trailing");
-    let lowest = rendered_both(LOWEST_SET_BIT, "lowest");
-    for (pipeline, (trailing, lowest)) in ["legacy", "staged"]
-        .iter()
-        .zip(trailing.iter().zip(&lowest))
-    {
-        run_rendered(
-            &format!("bit_scan_{pipeline}"),
-            &[trailing, lowest],
-            r#"int main(void) {
+    let trailing = rendered(TRAILING_ZEROS, "trailing");
+    let lowest = rendered(LOWEST_SET_BIT, "lowest");
+    run_rendered(
+        "bit_scan",
+        &[&trailing, &lowest],
+        r#"int main(void) {
     const uint64_t cases[] = {0, 1, 2, 0x80, 0x100, 0x8000000000000000ull, 0x0123456789abcde0ull, ~0ull};
     for (int i = 0; i < 8; i++) {
-        uint64_t x = cases[i];
-        uint64_t count = x ? (uint64_t)__builtin_ctzll(x) : 64;
-        if (trailing(x) != count) {
-            return 1 + i;
-        }
-        if (lowest(x, 0x5a5a5a5a5a5a5a5aull) != (x ? count : 0x5a5a5a5a5a5a5a5aull)) {
-            return 10 + i;
-        }
+    uint64_t x = cases[i];
+    uint64_t count = x ? (uint64_t)__builtin_ctzll(x) : 64;
+    if (trailing(x) != count) {
+        return 1 + i;
+    }
+    if (lowest(x, 0x5a5a5a5a5a5a5a5aull) != (x ? count : 0x5a5a5a5a5a5a5a5aull)) {
+        return 10 + i;
+    }
     }
     return 0;
 }"#,
-        );
-    }
+    );
 }
 
 /// `vpxor` of two 256-bit loads, whose high half is read back:
@@ -3324,7 +3227,7 @@ fn an_operator_on_a_wide_carrier_is_a_gap() {
         bytes: WIDE_EXCLUSIVE_OR.to_vec(),
         name: "wide_xor",
     };
-    let rendered = Rendered::of(&staged(&target, &program, BASE).expect("decompile"));
+    let rendered = Rendered::of(&decompile(&target, &program, BASE).expect("decompile"));
     assert!(
         rendered.contains("r2dec gap: TermNotSpelled at 0x1000:20 "),
         "{rendered}"
@@ -3674,7 +3577,7 @@ fn a_repeated_move_walks_the_way_the_specification_says() {
         bytes: REPEATED_MOVE.to_vec(),
         name: "copy",
     };
-    let rendered = Rendered::of(&staged(&target, &program, BASE).expect("decompile"));
+    let rendered = Rendered::of(&decompile(&target, &program, BASE).expect("decompile"));
     assert!(
         rendered.contains("uint64_t to = (uint64_t)arg0;"),
         "{rendered}"
@@ -3735,9 +3638,9 @@ fn a_clear_direction_flag_survives_a_call() {
         stub: 0x1012,
     };
     for convention in ["amd64", "ms"] {
-        let response = staged(&machine.under(convention), &program, BASE).expect("decompile");
+        let response = decompile(&machine.under(convention), &program, BASE).expect("decompile");
         let text = response.output.text();
-        assert!(response.render_refusal.is_none(), "{convention}\n{text}");
+        assert!(response.output.function().is_some(), "{convention}\n{text}");
         // The import states no result, so the return is a residual. The move's operands are
         // registers the function entered holding, which C cannot spell: a residual each.
         assert!(marks_an_unproven_return(text), "{convention}\n{text}");
@@ -3828,7 +3731,7 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
             };
             let response = decompile(&machine.target(), &program, BASE).expect("decompile");
             (
-                response.render_refusal.is_none(),
+                response.output.function().is_some(),
                 response.output.text().to_string(),
                 response.effect_obligations(),
             )
@@ -3837,8 +3740,7 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
         .join()
         .expect("the rendering finishes on half a megabyte of stack");
     let (rendered, text, effects) = rendering;
-    // Rendered, so the observation journal sealed with every value, use and
-    // write accounted for and none refused: a seal short of that refuses.
+    // Rendered, with every effect accounted for and none refused.
     assert!(rendered, "{text}");
 
     // One marker, and every store is accounted to it: covered by the gap, or written reading the
@@ -3969,7 +3871,7 @@ fn the_sign_word_a_division_extends_into_is_not_the_parameter_it_extends() {
     // The rendering never writes a parameter: both are read, only.
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
-    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(response.output.function().is_some(), "{text}");
     let signature = text
         .lines()
         .find(|line| line.contains("mul_div("))
@@ -4339,11 +4241,7 @@ fn a_merge_of_two_variables_is_one_assignment_of_a_conditional() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{text}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{text}");
     // One statement assigns the merge, choosing between the two variables.
     let selection = text
         .lines()
@@ -4499,11 +4397,7 @@ fn a_parameter_every_read_of_which_is_rewritten_away_is_still_declared() {
         name: "zero_of",
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}",
-        response.render_refusal
-    );
+    assert!(response.output.function().is_some(), "{}", response.output);
     let output = response.output.text();
     assert!(output.contains("return 0;"), "{output}");
 }
@@ -4624,7 +4518,7 @@ fn a_staged_stack_protector_check_owns_the_guard_address() {
         },
         halts: 0x1030,
     };
-    let response = staged(&machine.target(), &program, BASE).expect("decompile");
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
     let proof = (output.lines())
         .find(|line| line.contains("r2dec proof:"))
@@ -5095,7 +4989,7 @@ fn the_base_of_an_indexed_word_read_is_no_string_literal() {
     let target = machine.target();
     let response = decompile(&target, &LookupTable, BASE).expect("decompile");
     let text = response.output.text().to_string();
-    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(response.output.function().is_some(), "{text}");
     assert!(
         !text.contains("\"\\n\""),
         "the table's address is spelled as text: {text}"
@@ -5168,10 +5062,7 @@ fn an_unseen_argument_below_a_written_one_leaves_the_call_unrendered() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(!text.contains("(void))"), "{text}");
-    assert!(
-        response.render_refusal.is_some() || text.contains("r2sleigh_residual"),
-        "{text}"
-    );
+    assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// `f` hands `rdi` on unchanged to a call through memory and adds `rsi` to its
@@ -5236,10 +5127,7 @@ fn an_argument_merged_from_two_writes_past_the_floor_refuses_the_count() {
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
     assert!(!text.contains("merged(3)"), "{text}");
-    assert!(
-        response.render_refusal.is_some() || text.contains("r2sleigh_residual"),
-        "{text}"
-    );
+    assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// `f(a, b)` calls itself with `(a - 1, b + 1)`, passing `b + 1` through `rdx`
@@ -5428,16 +5316,14 @@ fn a_store_into_a_slot_whose_address_escapes_is_rendered() {
         bytes: ESCAPED_SLOT.to_vec(),
         name: "escape",
     };
-    for pipeline in [decompile, staged] {
-        let response = pipeline(&target, &program, BASE).expect("decompile");
-        let output = response.output.text();
-        let stores = output
-            .lines()
-            .filter(|line| line.contains("r2sleigh_store_u64("))
-            .count();
-        assert_eq!(stores, 1, "{output}");
-        assert!(!output.contains("r2sleigh_residual"), "{output}");
-    }
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    let stores = output
+        .lines()
+        .filter(|line| line.contains("r2sleigh_store_u64("))
+        .count();
+    assert_eq!(stores, 1, "{output}");
+    assert!(!output.contains("r2sleigh_residual"), "{output}");
 }
 
 /// Two byte stores from bases one apart, at an index no range bounds, read through the second
@@ -5461,20 +5347,18 @@ fn a_store_at_an_unbounded_index_is_rendered_though_its_own_slot_is_never_read()
         bytes: INTERLEAVED.to_vec(),
         name: "interleaved",
     };
-    for pipeline in [decompile, staged] {
-        let response = pipeline(&target, &program, BASE).expect("decompile");
-        let output = response.output.text();
-        let stores = output
-            .lines()
-            .filter(|line| {
-                line.contains("r2sleigh_store_u8(")
-                    || line
-                        .split_once(" = ")
-                        .is_some_and(|(place, _)| place.trim_end().ends_with(']'))
-            })
-            .count();
-        assert_eq!(stores, 2, "{output}");
-    }
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    let stores = output
+        .lines()
+        .filter(|line| {
+            line.contains("r2sleigh_store_u8(")
+                || line
+                    .split_once(" = ")
+                    .is_some_and(|(place, _)| place.trim_end().ends_with(']'))
+        })
+        .count();
+    assert_eq!(stores, 2, "{output}");
 }
 
 /// The first stack argument, read and never written, is an argument slot no parameter admits, as
@@ -5493,7 +5377,7 @@ fn staged_names_an_unwritten_stack_argument_slot_from_the_certificate() {
             bytes: bytes.to_vec(),
             name,
         };
-        let response = staged(&target, &program, BASE).expect("decompile");
+        let response = decompile(&target, &program, BASE).expect("decompile");
         let text = response.output.text().to_owned();
         let proof = (text.lines())
             .find(|line| line.contains("r2dec proof:"))
@@ -5512,7 +5396,6 @@ fn staged_names_an_unwritten_stack_argument_slot_from_the_certificate() {
 }
 
 /// A slot only written, above a read at an index no range bounds, which may land on it.
-/// Staged only: legacy binds the slot to the parameter it stores and renders no store.
 #[test]
 fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
     const REACHED: &[u8] = &[
@@ -5533,7 +5416,7 @@ fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
         bytes: REACHED.to_vec(),
         name: "reached",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(output.contains("r2sleigh_store_u8("), "{output}");
     assert!(!output.contains("r2sleigh_residual"), "{output}");
@@ -5541,7 +5424,7 @@ fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
 
 /// A masked byte store and a store at an index no range bounds into one stack buffer, then a read
 /// past the 16 bytes the mask admits. The mask alone proved a 16-byte array that nothing reads, so
-/// staged elided both stores. Staged only: legacy refuses the read (missing_definition).
+/// staged elided both stores.
 #[test]
 fn an_unbounded_store_beside_a_bounded_one_keeps_both() {
     const MIXED: &[u8] = &[
@@ -5557,7 +5440,7 @@ fn an_unbounded_store_beside_a_bounded_one_keeps_both() {
         bytes: MIXED.to_vec(),
         name: "mixed",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     let stores = output
         .lines()
@@ -5586,14 +5469,12 @@ fn accesses_relying_on_an_assumed_extent_are_counted_on_the_proof_line() {
         name: "in_bounds",
     };
     // The masked store's 16-byte span holds the read, which proved no extent the other store keeps.
-    for render in [staged, decompile] {
-        let response = render(&target, &program, BASE).expect("decompile");
-        let output = response.output.text();
-        assert!(
-            output.contains(", 3 assumed (frame extent unproven)"),
-            "{output}"
-        );
-    }
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        output.contains(", 3 assumed (frame extent unproven)"),
+        "{output}"
+    );
 }
 
 /// RISC-V calls as `auipc ra, 0; jalr ra, imm(ra)`: `CALLIND` of a target the block folds. The
@@ -5627,7 +5508,7 @@ fn a_call_through_a_folded_target_takes_the_callees_interface() {
         bytes: RISCV_AUIPC_CALLS.to_vec(),
         name: "caller",
     };
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(!text.contains("r2dec gap"), "{text}");
     assert!(text.contains("fcn_1030(uint64_t, uint64_t);"), "{text}");
@@ -5727,7 +5608,7 @@ impl Program for Ldexpf {
 #[test]
 fn a_microsoft_x64_int_after_a_float_takes_the_second_position() {
     let machine = Machine::new("x86-64", "x86-64", 64);
-    let response = staged(&machine.under("ms"), &Ldexpf, BASE).expect("decompile");
+    let response = decompile(&machine.under("ms"), &Ldexpf, BASE).expect("decompile");
     let text = response.output.text();
     let arguments = common::call_arguments(text, "ldexpf").expect("a call to ldexpf");
     assert_eq!(arguments.len(), 2, "{text}");
@@ -5794,7 +5675,7 @@ fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = CalleeNamedLikeAParameter;
-    let response = staged(&target, &program, BASE).expect("decompile");
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     assert!(
         text.contains("r2dec gap: CallNotRendered at 0x1000:14 "),
@@ -5843,7 +5724,7 @@ fn a_value_read_twice_per_step_renders_in_text_linear_in_the_steps() {
             bytes: gray_steps(steps),
             name: "gray",
         };
-        let response = staged(&machine.target(), &program, BASE).expect("decompile");
+        let response = decompile(&machine.target(), &program, BASE).expect("decompile");
         let text = response.output.text().to_owned();
         assert!(!text.contains("r2dec gap"), "{text}");
         text.len()
@@ -5875,7 +5756,7 @@ fn a_signed_divide_of_the_most_negative_value_by_minus_one_is_not_a_c_division()
         bytes: SIGNED_DIVIDE.to_vec(),
         name: "divide",
     };
-    let response = staged(&machine.target(), &program, BASE).expect("decompile");
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     let line = |operator: &str| {
         text.lines()
@@ -5898,7 +5779,7 @@ fn sited_staged(arch: &str, name: &'static str, bytes: &[u8]) -> String {
         bytes: [bytes, &[0x90; 16]].concat(),
         name,
     };
-    let response = staged(&machine.target(), &program, BASE).expect("decompile");
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     assert!(!text.contains("r2sleigh refused"), "{text}");
     let proof = (text.lines())

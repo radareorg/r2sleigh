@@ -4,13 +4,12 @@
 mod common;
 
 use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_STUB, STUB, TWO, opened};
-use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
 #[test]
 fn the_staged_pipeline_renders_a_leaf_function_s_values() {
     let rendering = opened()
-        .rendered(FORKED, RenderTier::Staged)
+        .rendered(FORKED)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     // `test edi, edi; je L` is the test on the parameter; the merge is one variable both arms
@@ -57,7 +56,7 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
 #[test]
 fn a_described_call_is_written_from_the_callsite_facts() {
     let rendering = opened()
-        .rendered(CALLER, RenderTier::Staged)
+        .rendered(CALLER)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     // `call one; ret`: the result register the call leaves is what `caller` returns.
@@ -90,9 +89,7 @@ fn a_call_the_block_graph_never_returns_from_is_declared_noreturn() {
     code.extend_from_slice(&call.to_le_bytes());
     code.extend_from_slice(&[0xb8, 0x07, 0, 0, 0, 0xc3]);
     program.source_mut().write(TWO, &code);
-    let rendering = program
-        .rendered(TWO, RenderTier::Staged)
-        .expect("the staged pipeline renders");
+    let rendering = program.rendered(TWO).expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     assert!(
         text.contains("__attribute__((noreturn)) void exit(int32_t);"),
@@ -120,7 +117,7 @@ fn merges_that_swap_copy_through_a_temporary() {
     ];
     let program = Literal::of_code(SWAPS, &[("swaps", BASE, SWAPS.len() as u64)]).running_on(GLIBC);
     let rendering = OpenProgram::of(program)
-        .rendered(BASE, RenderTier::Staged)
+        .rendered(BASE)
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     assert!(text.contains("_next = "), "{text}");
@@ -128,22 +125,20 @@ fn merges_that_swap_copy_through_a_temporary() {
 }
 
 /// A stub is one jump through the slot the loader fills with `_Exit`. r2engine's route decides it
-/// once, and both pipelines render the import's declaration, never a body forwarding through it.
+/// once, and the rendering is the import's declaration, never a body forwarding through it.
 #[test]
-fn an_import_stub_is_its_import_s_declaration_in_both_pipelines() {
+fn an_import_stub_is_its_import_s_declaration() {
     let mut program = OpenProgram::of(Literal::plt());
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let text = program
-            .rendered(PLT_STUB, tier)
-            .expect("it renders")
-            .response
-            .output
-            .into_text();
-        assert!(
-            text.contains(&format!("import stub at {PLT_STUB:#x}")) && text.contains("`_Exit`"),
-            "{tier:?}: {text}"
-        );
-        assert!(!text.contains("return"), "{tier:?}: {text}");
-        assert!(!text.contains("r2sleigh_residual"), "{tier:?}: {text}");
-    }
+    let text = program
+        .rendered(PLT_STUB)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(
+        text.contains(&format!("import stub at {PLT_STUB:#x}")) && text.contains("`_Exit`"),
+        "{text}"
+    );
+    assert!(!text.contains("return"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
 }

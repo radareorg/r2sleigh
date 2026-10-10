@@ -52,7 +52,7 @@ fn afi_and_the_header_declare_a_parameter_alike() {
     );
     let info = program.function_info(BASE).expect("it is described");
     let rendered = program
-        .rendered(BASE, r2engine::RenderTier::C)
+        .rendered(BASE)
         .expect("it renders")
         .response
         .output
@@ -117,7 +117,7 @@ fn afi_and_the_header_declare_an_unproven_return_alike() {
     ));
     let info = program.function_info(BASE).expect("it is described");
     let rendered = program
-        .rendered(BASE, r2engine::RenderTier::C)
+        .rendered(BASE)
         .expect("it renders")
         .response
         .output

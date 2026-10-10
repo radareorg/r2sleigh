@@ -8,7 +8,6 @@
 use crate::grep::Suffix;
 use crate::line::{Command, Statement};
 use crate::session::Session;
-use r2engine::RenderTier;
 use r2engine::query::Role;
 
 /// Run one statement: its command, where it asks, then its grep. The answer
@@ -367,20 +366,6 @@ pub(crate) const VERBS: &[Verb] = &[
         Maintainer,
         "the low IL tier",
         Some(low_tier)
-    ),
-    verb!(
-        ["pdim"],
-        Address,
-        Maintainer,
-        "the medium IL tier",
-        Some(medium_tier)
-    ),
-    verb!(
-        ["pdih"],
-        Address,
-        Maintainer,
-        "the high IL tier",
-        Some(high_tier)
     ),
     verb!(
         ["pddo"],
@@ -1345,40 +1330,10 @@ fn low_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     session.program.lifted(addr)
 }
 
-/// The analysis tier for one function: blocks, phis, operations, edges.
-///
-/// The renderer's input, printed. A defect in the C is either already here or
-/// is the lowering's, and that is the whole reason this exists. Beside the
-/// operations, what the renderer decided about each value: the operations
-/// alone never answered which variable a value became, or why nothing spells
-/// it.
-fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> {
-    let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, RenderTier::Values)?;
-    let ssa = session
-        .program
-        .prepared(addr)?
-        .artifact()
-        .artifact()
-        .function()
-        .dump();
-    Ok(format!("{ssa}\n{}", rendering.response.output.into_text()))
-}
-
-/// The structured tier: the tree the C is generated from.
-///
-/// Read against `pdd`, this says whether a defect is already in the tree or
-/// belongs to the generation below it.
-fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
-    let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, RenderTier::Structured)?;
-    Ok(rendering.response.output.into_text())
-}
-
 /// `pdd`: decompile the function at the cursor, with no radare2 anywhere.
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, session.tier)?;
+    let rendering = session.program.rendered(addr)?;
     let roles = match (&rendering.response.output, session.paints()) {
         (r2engine::EngineRendering::Function(rendered), true) => {
             Some(crate::listing::c_roles(rendered.emission().roles()))
@@ -1411,7 +1366,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 /// the two cannot disagree.
 fn decompile_json(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, session.tier)?;
+    let rendering = session.program.rendered(addr)?;
     let name = session
         .program
         .names()
@@ -1427,7 +1382,7 @@ fn decompile_json(session: &mut Session, argument: &str) -> Result<String, Strin
 /// call to a callee nothing proved renders from the call site alone.
 fn obligations(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let rendering = session.program.rendered(addr, session.tier)?;
+    let rendering = session.program.rendered(addr)?;
     let Some(ledger) = rendering.response.obligation_ledger.as_ref() else {
         return Ok(
             "no obligation ledger: the function did not reach native rendering\n".to_owned(),

@@ -4,7 +4,6 @@
 mod common;
 
 use common::{BASE, Literal};
-use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
 /// `f`: `call g; mov eax, 1; ret`, handing on the `rdi` it arrived with; `g`: `mov eax, [rdi]; ret`;
@@ -29,27 +28,25 @@ const HANDED_ON: &[u8] = &[
 /// unwritten, so `f` is resolved again with `g`, which states what it reads: `f(5)`.
 #[test]
 fn a_call_to_a_body_that_hands_on_its_argument_passes_it() {
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let text = OpenProgram::of(Literal::of_code(
-            HANDED_ON,
-            &[
-                ("f", BASE, 0x0b),
-                ("g", BASE + 0x10, 0x03),
-                ("caller", BASE + 0x20, 0x0b),
-            ],
-        ))
-        .rendered(BASE + 0x20, tier)
-        .expect("it renders")
-        .response
-        .output
-        .into_text();
-        assert!(
-            text.contains("f(5)") || text.contains("f((uint64_t)5U)"),
-            "{tier:?}: {text}"
-        );
-        assert!(!text.contains("f()"), "{tier:?}: {text}");
-        assert!(!text.contains("r2sleigh_residual"), "{tier:?}: {text}");
-    }
+    let text = OpenProgram::of(Literal::of_code(
+        HANDED_ON,
+        &[
+            ("f", BASE, 0x0b),
+            ("g", BASE + 0x10, 0x03),
+            ("caller", BASE + 0x20, 0x0b),
+        ],
+    ))
+    .rendered(BASE + 0x20)
+    .expect("it renders")
+    .response
+    .output
+    .into_text();
+    assert!(
+        text.contains("f(5)") || text.contains("f((uint64_t)5U)"),
+        "{text}"
+    );
+    assert!(!text.contains("f()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// `f` increments `*rdi`, keeps the `rsi` it arrived with in `rbx`, and hands `rbx + 1` to a
@@ -78,19 +75,17 @@ const KEPT_FOR_AN_UNPROVEN_CALL: &[u8] = &[
 /// observes: its parameters are a floor, and the caller passes the 5 it wrote.
 #[test]
 fn a_register_kept_for_a_call_of_unproven_arity_is_passed() {
-    for tier in [RenderTier::C, RenderTier::Staged] {
-        let text = OpenProgram::of(Literal::of_code(
-            KEPT_FOR_AN_UNPROVEN_CALL,
-            &[("f", BASE, 0x1f), ("caller", BASE + 0x20, 0x10)],
-        ))
-        .rendered(BASE + 0x20, tier)
-        .expect("it renders")
-        .response
-        .output
-        .into_text();
-        assert!(
-            text.contains("f(3, 5)") || text.contains("f((uint64_t)3U, (uint64_t)5U)"),
-            "{tier:?}: {text}"
-        );
-    }
+    let text = OpenProgram::of(Literal::of_code(
+        KEPT_FOR_AN_UNPROVEN_CALL,
+        &[("f", BASE, 0x1f), ("caller", BASE + 0x20, 0x10)],
+    ))
+    .rendered(BASE + 0x20)
+    .expect("it renders")
+    .response
+    .output
+    .into_text();
+    assert!(
+        text.contains("f(3, 5)") || text.contains("f((uint64_t)3U, (uint64_t)5U)"),
+        "{text}"
+    );
 }
