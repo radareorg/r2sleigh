@@ -95,8 +95,8 @@ pub struct SourceResultReads {
     pub integer: u32,
     /// Calls whose first touch of the float result register after the call is a read.
     pub float: u32,
-    /// The widest of those float reads, in bytes.
-    pub float_bytes: u32,
+    /// The width those float reads take.
+    pub float_width: SourceFloatReadWidth,
 }
 
 impl SourceResultReads {
@@ -106,7 +106,31 @@ impl SourceResultReads {
         Self {
             integer: self.integer.saturating_add(other.integer),
             float: self.float.saturating_add(other.float),
-            float_bytes: self.float_bytes.max(other.float_bytes),
+            float_width: self.float_width.and(other.float_width),
+        }
+    }
+}
+
+/// The width a set of float result reads takes: two reads at different widths state none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SourceFloatReadWidth {
+    /// No read states a width: there is none, or each reads the whole register.
+    #[default]
+    Unstated,
+    /// Every read that states a width states this one, in bytes.
+    Bytes(u32),
+    /// Two reads state different widths.
+    Disagree,
+}
+
+impl SourceFloatReadWidth {
+    /// The width these reads and `other`'s take together.
+    #[must_use]
+    pub const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unstated, width) | (width, Self::Unstated) => width,
+            (Self::Bytes(a), Self::Bytes(b)) if a == b => Self::Bytes(a),
+            _ => Self::Disagree,
         }
     }
 }
@@ -1174,6 +1198,16 @@ impl Eq for OwnedFunctionSnapshot {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Float reads at 4 and 8 bytes state no width, whatever else joins them.
+    #[test]
+    fn float_reads_at_two_widths_state_none() {
+        use SourceFloatReadWidth::{Bytes, Disagree, Unstated};
+        assert_eq!(Bytes(4).and(Unstated), Bytes(4));
+        assert_eq!(Bytes(8).and(Bytes(8)), Bytes(8));
+        assert_eq!(Bytes(4).and(Bytes(8)), Disagree);
+        assert_eq!(Disagree.and(Bytes(4)).and(Unstated), Disagree);
+    }
 
     fn snapshot() -> OwnedFunctionSnapshot {
         OwnedFunctionSnapshot::from_captured_parts(

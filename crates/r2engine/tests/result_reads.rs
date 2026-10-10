@@ -218,3 +218,41 @@ fn each_call_takes_the_register_its_caller_reads() {
         assert!(f.contains("return r2sleigh_residual_u64("), "{tier:?}: {f}");
     }
 }
+
+/// `f` as above, `caller_a`: `call f; movss [rsi], xmm0; ret`, `caller_b`: `call f; movsd [rsi], xmm0; ret`.
+const READ_AT_TWO_WIDTHS: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1004 mov eax, 7
+    0xc3, // 1009 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 100a padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xf3, 0x0f, 0x11, 0x06, // 1015 movss [rsi], xmm0
+    0xc3, // 1019 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 101a padding
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1025 movsd [rsi], xmm0
+    0xc3, // 1029 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 102a padding
+];
+
+/// The calls read XMM0 as a `float` and as a `double`: no one width is the result, so `f` proves
+/// none, where the widest read made it a `double` beside a call that reads a `float`.
+#[test]
+fn float_reads_at_two_widths_prove_no_result() {
+    let program = || {
+        Literal::of_code(
+            READ_AT_TWO_WIDTHS,
+            &[
+                ("f", BASE, 0x0a),
+                ("caller_a", BASE + 0x10, 0x0a),
+                ("caller_b", BASE + 0x20, 0x0a),
+            ],
+        )
+    };
+    for tier in [RenderTier::C, RenderTier::Staged] {
+        let f = rendered(program(), tier);
+        assert!(!f.starts_with("double f("), "{tier:?}: {f}");
+        assert!(f.contains("return r2sleigh_residual_"), "{tier:?}: {f}");
+    }
+}
