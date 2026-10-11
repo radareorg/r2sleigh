@@ -67,11 +67,7 @@ pub(crate) fn collect_call_result_certificates(
                 block,
                 callsites_by_inst,
                 input.clone(),
-                CallResultSink {
-                    call_results: &mut crate::dense::IdMap::default(),
-                    call_results_by_inst: &mut crate::dense::IdMap::default(),
-                    call_results_by_callsite: &mut BTreeMap::new(),
-                },
+                None,
             )
         },
     );
@@ -96,11 +92,11 @@ pub(crate) fn collect_call_result_certificates(
             block,
             callsites_by_inst,
             input.clone(),
-            CallResultSink {
+            Some(CallResultSink {
                 call_results: &mut call_results,
                 call_results_by_inst: &mut call_results_by_inst,
                 call_results_by_callsite: &mut call_results_by_callsite,
-            },
+            }),
         );
     }
 
@@ -114,7 +110,8 @@ pub(crate) fn collect_call_result_certificates(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CallResultFlowState {
-    pub(crate) tracked: crate::dense::IdMap<ValueId, CallResultCertificate>,
+    /// A few results at a time, so a copy per block costs what it holds (model 8).
+    pub(crate) tracked: crate::dense::SparseMap<ValueId, CallResultCertificate>,
     pub(crate) stack_owners: BTreeMap<(ObjectId, i64), CallResultCertificate>,
 }
 
@@ -146,7 +143,7 @@ pub(crate) fn process_call_result_flow_block(
     block: &crate::SSABlock<crate::VarId>,
     callsites_by_inst: &crate::dense::IdMap<InstId, CallSiteId>,
     mut state: CallResultFlowState,
-    sink: CallResultSink<'_>,
+    mut sink: Option<CallResultSink<'_>>,
 ) -> CallResultFlowState {
     let graph = body.graph;
     let width = |id: &crate::VarId| body.function.var(*id).size;
@@ -156,11 +153,6 @@ pub(crate) fn process_call_result_flow_block(
         derived.call_sites,
         derived.structured,
     );
-    let CallResultSink {
-        call_results,
-        call_results_by_inst,
-        call_results_by_callsite,
-    } = sink;
     let mut active_call = None;
     for (id, op) in block.sited() {
         let Some(inst) = graph.inst_for_op(id) else {
@@ -263,13 +255,7 @@ pub(crate) fn process_call_result_flow_block(
                     carrier,
                     owner: Some(ValueOwner::Value(value)),
                 };
-                insert_call_result_certificate(
-                    call_results,
-                    call_results_by_inst,
-                    call_results_by_callsite,
-                    &mut state.tracked,
-                    cert,
-                );
+                insert_call_result_certificate(sink.as_mut(), &mut state.tracked, cert);
             }
             SSAOp::Copy { dst, src } => {
                 let Some(src_value) = graph.value_of(*src) else {
@@ -290,13 +276,7 @@ pub(crate) fn process_call_result_flow_block(
                     carrier: source.carrier.clone(),
                     owner: source.owner.clone().or(Some(ValueOwner::Value(src_value))),
                 };
-                insert_call_result_certificate(
-                    call_results,
-                    call_results_by_inst,
-                    call_results_by_callsite,
-                    &mut state.tracked,
-                    cert,
-                );
+                insert_call_result_certificate(sink.as_mut(), &mut state.tracked, cert);
             }
             SSAOp::IntZExt { dst, src }
             | SSAOp::IntSExt { dst, src }
@@ -321,13 +301,7 @@ pub(crate) fn process_call_result_flow_block(
                     carrier: source.carrier.clone(),
                     owner: source.owner.clone().or(Some(ValueOwner::Value(src_value))),
                 };
-                insert_call_result_certificate(
-                    call_results,
-                    call_results_by_inst,
-                    call_results_by_callsite,
-                    &mut state.tracked,
-                    cert,
-                );
+                insert_call_result_certificate(sink.as_mut(), &mut state.tracked, cert);
             }
             SSAOp::Store {
                 space: SpaceId::Ram,
@@ -374,7 +348,10 @@ pub(crate) fn process_call_result_flow_block(
                         ..source.clone()
                     },
                 );
-                if let Some(cert) = call_results.get_mut(value) {
+                if let Some(cert) = sink
+                    .as_mut()
+                    .and_then(|sink| sink.call_results.get_mut(value))
+                {
                     cert.owner = Some(ValueOwner::StackSlot { object, offset });
                 }
                 if let Some(cert) = state.tracked.get_mut(value) {
@@ -417,13 +394,7 @@ pub(crate) fn process_call_result_flow_block(
                     },
                     owner: Some(ValueOwner::StackSlot { object, offset }),
                 };
-                insert_call_result_certificate(
-                    call_results,
-                    call_results_by_inst,
-                    call_results_by_callsite,
-                    &mut state.tracked,
-                    cert,
-                );
+                insert_call_result_certificate(sink.as_mut(), &mut state.tracked, cert);
             }
             _ => {}
         }
@@ -437,20 +408,23 @@ pub(crate) fn kill_return_register_flow_values(state: &mut CallResultFlowState) 
         .retain(|_, certificate| !matches!(certificate.carrier, ReturnCarrier::Register { .. }));
 }
 
+/// Track `cert` in the flow state, and record it where a sink takes certificates.
 pub(crate) fn insert_call_result_certificate(
-    call_results: &mut crate::dense::IdMap<ValueId, CallResultCertificate>,
-    call_results_by_inst: &mut crate::dense::IdMap<InstId, ValueId>,
-    call_results_by_callsite: &mut BTreeMap<CallSiteId, Vec<ValueId>>,
-    tracked: &mut crate::dense::IdMap<ValueId, CallResultCertificate>,
+    sink: Option<&mut CallResultSink<'_>>,
+    tracked: &mut crate::dense::SparseMap<ValueId, CallResultCertificate>,
     cert: CallResultCertificate,
 ) {
-    call_results_by_inst.insert(cert.at, cert.value);
-    call_results_by_callsite
+    let Some(sink) = sink else {
+        tracked.insert(cert.value, cert);
+        return;
+    };
+    sink.call_results_by_inst.insert(cert.at, cert.value);
+    sink.call_results_by_callsite
         .entry(cert.call_site)
         .or_default()
         .push(cert.value);
     tracked.insert(cert.value, cert.clone());
-    call_results.insert(cert.value, cert);
+    sink.call_results.insert(cert.value, cert);
 }
 
 pub(crate) struct StackMemoryAccessInput<'a> {

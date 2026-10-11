@@ -8,6 +8,7 @@
 //!
 //! - [`IdVec`]: a value for every id.
 //! - [`IdMap`]: a value for some ids.
+//! - [`SparseMap`]: a value for a few ids, sized by its entries: a dataflow state copied per block.
 //! - [`IdSet`]: a set of ids, as a bitset.
 //! - [`Csr`]: for each id, a slice of related items (def-use, predecessors),
 //!   in compressed sparse row form.
@@ -553,8 +554,86 @@ impl<I: DenseId, T> Csr<I, T> {
     }
 }
 
+/// A value for a few ids, kept sorted by id and sized by its entries alone.
+///
+/// A dataflow state copied at every block is this, not an [`IdMap`], whose slots grow with the
+/// largest id: `O(entries)` per copy where a dense state costs `O(bound)` (doc/adr-next-pass.md,
+/// model 8). Lookup and insertion are `O(log entries)` and `O(entries)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparseMap<I, T> {
+    entries: Vec<(I, T)>,
+}
+
+impl<I, T> Default for SparseMap<I, T> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<I: DenseId, T> SparseMap<I, T> {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn position(&self, id: I) -> Result<usize, usize> {
+        self.entries.binary_search_by(|(at, _)| at.cmp(&id))
+    }
+
+    pub fn get(&self, id: I) -> Option<&T> {
+        let at = self.position(id).ok()?;
+        Some(&self.entries[at].1)
+    }
+
+    pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
+        let at = self.position(id).ok()?;
+        Some(&mut self.entries[at].1)
+    }
+
+    /// Set `id`'s value, returning the one it replaces.
+    pub fn insert(&mut self, id: I, value: T) -> Option<T> {
+        match self.position(id) {
+            Ok(at) => Some(std::mem::replace(&mut self.entries[at].1, value)),
+            Err(at) => {
+                self.entries.insert(at, (id, value));
+                None
+            }
+        }
+    }
+
+    /// Keep only the values `keep` accepts, in id order.
+    pub fn retain(&mut self, mut keep: impl FnMut(I, &mut T) -> bool) {
+        self.entries.retain_mut(|(id, value)| keep(*id, value));
+    }
+
+    /// Every id with a value, in id order.
+    pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
+        self.entries.iter().map(|(id, value)| (*id, value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A sparse map answers as an ordered map does, whatever order its ids arrive in.
+    #[test]
+    fn a_sparse_map_keeps_its_ids_in_order() {
+        use crate::graph::ValueId;
+        let mut map = SparseMap::<ValueId, u32>::default();
+        for id in [7u32, 2, 9, 2] {
+            map.insert(ValueId(id), id * 10);
+        }
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get(ValueId(2)), Some(&20));
+        assert_eq!(map.get(ValueId(3)), None);
+        map.retain(|id, _| id != ValueId(7));
+        assert_eq!(map.iter().map(|(id, _)| id.0).collect::<Vec<_>>(), [2, 9]);
+    }
+
     use super::*;
     use crate::graph::ValueId;
 
