@@ -16,8 +16,9 @@ Three measurements, each one flag of `scripts/command_gap.py`:
 - **What r2sleigh has** (`--what verbs`): 38 names (33 commands) from `VERBS`
   in `crates/r2s/src/commands.rs`.
 - **Which commands radare2 itself checks** (`--what tested`): for every
-  `CMDS` block in `../radare2/test/db`, the last command that prints, since
-  `q`, `?e` and `echo` produce no output. Earlier lines are fixture setup.
+  `CMDS` block in `../radare2/test/db`, the last command that prints more
+  than its own text: `q` prints nothing, and `?e` and `echo` print only the
+  text they are given, which checks no command. Earlier lines are fixture setup.
 
 The last-command rule approximates: `EXPECT` checks the whole block's
 concatenated output, so a count attributes a block to one command. The

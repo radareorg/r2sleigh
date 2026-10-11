@@ -525,8 +525,10 @@ replayed call with the same arguments reuses the cached result. Owner: P6's
 callee summaries. Obligation: the proof of purity; a name is not one.
 
 **Theorem F (parallel indexing).** Segments replay independently from their
-checkpoints, so building an index over n steps takes O(n / cores) wall clock
-while native execution is serial. Owner: Q.
+checkpoints, so indexing the segments takes O(n / cores) wall clock. The
+checkpoints themselves are taken by one serial replay to each boundary, so a
+first index costs that O(n) serial pass plus the parallel work; only a recorder
+that saved its checkpoints while recording removes it. Owner: Q.
 
 The statement that follows from A to F, put plainly: the first run is bounded
 below by native speed; every question after it is sublinear in the run.

@@ -21,7 +21,8 @@ VERB = re.compile(r"verb!\(\s*\[(.*?)\]", re.S)
 BLOCK = re.compile(r"^CMDS=<<(\w+)\n(.*?)^\1\n", re.S | re.M)
 INLINE = re.compile(r"^CMDS=(?!<<)(.*)$", re.M)
 COMMAND = re.compile(r"^([a-zA-Z/?!][a-zA-Z0-9_/?*.+-]*)")
-# These print nothing, so a block ending in one is checked on the line above.
+# These print nothing (`q`, `exit`) or only the text they are given (`?e`, `echo`), which tests no
+# command, so a block ending in one is checked on the line above.
 SILENT = re.compile(r"^(q|\?e|echo|exit)\b")
 
 
@@ -52,7 +53,7 @@ def under_test(line):
 
 
 def checked(lines):
-    """The command whose output EXPECT checks: the last one that prints."""
+    """The command whose output EXPECT checks: the last one that prints more than its own text."""
     for line in reversed(lines):
         if not SILENT.match(line):
             return line
