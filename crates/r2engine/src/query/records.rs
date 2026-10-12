@@ -11,9 +11,9 @@ use r2il::Endianness;
 use r2sleigh_lift::{NumberSpan, Syntax};
 use r2ssa::fate::{Fate, Fates};
 
-use super::Support;
 use super::references::Role;
 use crate::native::Program;
+use r2source::confidence::Basis;
 
 /// Which decoder the code at an address is written in.
 ///
@@ -46,7 +46,7 @@ pub trait Parameters {
         &self,
         callee: Callee,
         held: &dyn Fn(&r2ssa::CanonicalStorageId) -> bool,
-    ) -> Option<Support>;
+    ) -> Option<Basis>;
 }
 
 /// The program's own memory, and how it spells a word in it.
@@ -211,7 +211,7 @@ impl Line {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {
     pub kind: AnnotationKind,
-    pub support: Support,
+    pub support: Basis,
     /// Which number in the operand body this is about, where exactly one of
     /// them spells it. Two operands holding the same value leave this empty
     /// rather than guessing which was meant.

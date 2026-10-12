@@ -60,25 +60,6 @@ pub enum Work {
     Function,
 }
 
-/// The smallest evidence that establishes a claim, each rung reading more of the program; an unclaimed number has none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Support {
-    /// The container states it: the loader writes this address into this word.
-    Stated,
-    /// The instruction alone says it: where it transfers, what it accesses, or the bound its own operations put on what it writes.
-    Decoded,
-    /// Evaluated over the run of instructions around it in its block.
-    Folded,
-    /// Exact over the whole function: its def-use, or a certificate `r2ssa` issued.
-    Certified,
-    /// A bound an analysis over the whole function proved: true everywhere, exact nowhere.
-    Solved,
-    /// A callee's own body loads or stores through the parameter the number arrives in.
-    Dereferenced,
-    /// A library declaration types the parameter the number arrives in as a pointer.
-    Declared,
-}
-
 /// Why an answer stopped where it did.
 ///
 /// Kept apart from the facts on purpose: a deadline is a fact about this

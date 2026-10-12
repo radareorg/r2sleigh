@@ -8,8 +8,9 @@ use common::{
     OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
     THUMB_LEAF, TRANSFERRED, TWO, VENEER, handing, opened, table_switch, transferring,
 };
+use r2engine::discovery::Basis;
 use r2engine::program::{Container, LoaderWrite, OpenProgram, Source, WriteKind};
-use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
+use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop};
 
 /// The result each line claims, by address.
 fn computes(lines: &[Line]) -> Vec<(u64, Option<u64>)> {
@@ -144,7 +145,7 @@ fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() 
         width: 8,
     };
     let run = program.listing(listing).expect("it lists").value;
-    assert_eq!(supported(&run[0]), [(read.clone(), Support::Decoded)]);
+    assert_eq!(supported(&run[0]), [(read.clone(), Basis::Decoded)]);
     let whole = program
         .function_listing(STUB)
         .expect("it lists")
@@ -158,7 +159,7 @@ fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() 
     };
     assert_eq!(
         supported(&whole[0]),
-        [(read, Support::Decoded), (call, Support::Certified)]
+        [(read, Basis::Decoded), (call, Basis::Certified)]
     );
 }
 
@@ -177,7 +178,7 @@ fn a_function_listing_reads_through_an_address_until_a_byte_of_its_register_is_w
         reads.collect::<Vec<_>>()
     };
     // `mov rcx, [rax]` reads the word the line before put in rax, which only the block's fold sees.
-    assert_eq!(reads(BASE + 7), [(BASE + 0x10, 8, Support::Folded)]);
+    assert_eq!(reads(BASE + 7), [(BASE + 0x10, 8, Basis::Folded)]);
     // `mov al, 5` wrote a byte of rax, so the load after it names no address.
     assert_eq!(reads(BASE + 0xc), []);
 }
@@ -198,14 +199,14 @@ fn a_movw_and_movt_pair_is_one_address_the_load_after_them_reads() {
     let mut program = OpenProgram::of(Literal::of_code(MOVED, &[("f", BASE, 0x10)]).in_arm());
     let (address, width) = (BASE + 0x10, 4);
     let read = [
-        (AnnotationKind::Reads { address, width }, Support::Folded),
+        (AnnotationKind::Reads { address, width }, Basis::Folded),
         (
             AnnotationKind::Holds {
                 address,
                 width,
                 value: 0x0bad_f00d,
             },
-            Support::Folded,
+            Basis::Folded,
         ),
     ];
     // The block folds `movw` into `movt`, so the load reads the word the pair addresses.
@@ -228,7 +229,7 @@ fn an_address_the_next_instruction_adds_to_is_a_step() {
 }
 
 /// Each claim a line carries, with the rung it stands on.
-fn supported(line: &Line) -> Vec<(AnnotationKind, Support)> {
+fn supported(line: &Line) -> Vec<(AnnotationKind, Basis)> {
     line.annotations
         .iter()
         .map(|annotation| (annotation.kind.clone(), annotation.support))
@@ -252,7 +253,7 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
     assert_eq!(
         supported(&stepped[1]),
         [
-            (AnnotationKind::Computes { value: sum }, Support::Certified),
+            (AnnotationKind::Computes { value: sum }, Basis::Certified),
             // The block folds the lea into the add, so the one value the range holds needs no more than the run.
             (
                 AnnotationKind::Bounds {
@@ -261,12 +262,12 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
                     high: sum,
                     stride: 0,
                 },
-                Support::Folded,
+                Basis::Folded,
             ),
         ]
     );
     // lea rdi, [one]; call one -- the call clobbers rdi, so the run after the lea settles it in either listing.
-    let computes = [(AnnotationKind::Computes { value: ONE }, Support::Folded)];
+    let computes = [(AnnotationKind::Computes { value: ONE }, Basis::Folded)];
     let plain = opened()
         .listing(Listing {
             start: PASSES,
@@ -306,7 +307,7 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
         high: 5,
         stride: 0,
     };
-    assert_eq!(copy.map(supported), Some(vec![(bound, Support::Certified)]));
+    assert_eq!(copy.map(supported), Some(vec![(bound, Basis::Certified)]));
 }
 
 /// `mov eax, 5; test edi, edi; je L; nop; L: mov ecx, eax; ret`
@@ -387,7 +388,7 @@ fn a_word_read_claims_only_the_text_that_runs_past_it() {
                     address: pointer,
                     width
                 },
-                Support::Decoded
+                Basis::Decoded
             ),
             (
                 AnnotationKind::Holds {
@@ -395,7 +396,7 @@ fn a_word_read_claims_only_the_text_that_runs_past_it() {
                     width,
                     value: 0x40_2041,
                 },
-                Support::Decoded,
+                Basis::Decoded,
             ),
         ]
     );
@@ -406,7 +407,7 @@ fn a_word_read_claims_only_the_text_that_runs_past_it() {
         text: "hello world".to_owned(),
     };
     let said = supported(&lines[1]);
-    assert!(said.contains(&(text, Support::Decoded)), "{said:?}");
+    assert!(said.contains(&(text, Basis::Decoded)), "{said:?}");
 }
 
 #[test]
@@ -428,8 +429,8 @@ fn a_line_says_the_text_at_an_address_it_uses() {
     assert_eq!(
         supported(&lines[0]),
         [
-            (AnnotationKind::Computes { value: TEXT_AT }, Support::Folded),
-            (text, Support::Folded),
+            (AnnotationKind::Computes { value: TEXT_AT }, Basis::Folded),
+            (text, Basis::Folded),
         ]
     );
     // One character is text by chance too often to name it from a scan, so the name table has no string there.
@@ -537,7 +538,7 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
         .flat_map(|line| &line.annotations)
         .find(|annotation| matches!(annotation.kind, AnnotationKind::Bounds { .. }))
         .map(|annotation| annotation.support);
-    assert_eq!(rung, Some(Support::Decoded));
+    assert_eq!(rung, Some(Basis::Decoded));
     // Writing eax only restates the width a 32-bit write clears, which says nothing.
     assert!(!proved.contains(&(TWO, 0, 0xffff_ffff)), "{proved:?}");
     let plain = program
@@ -550,7 +551,7 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
 }
 
 /// What the certificates anchor at each line, by address, in the order the line lists them.
-fn certified(lines: &[Line]) -> Vec<(u64, AnnotationKind, Support)> {
+fn certified(lines: &[Line]) -> Vec<(u64, AnnotationKind, Basis)> {
     let certified = |kind: &AnnotationKind| {
         matches!(
             kind,
@@ -606,7 +607,7 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
             (
                 HANDS,
                 AnnotationKind::ArgumentOf { call, index: 0 },
-                Support::Certified
+                Basis::Certified
             ),
             (
                 call,
@@ -615,9 +616,9 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
                     arguments: Some(vec![argument]),
                     uncounted: None,
                 },
-                Support::Certified,
+                Basis::Certified,
             ),
-            (call + 5, returns.clone(), Support::Certified),
+            (call + 5, returns.clone(), Basis::Certified),
         ]
     );
     let ident = program
@@ -625,7 +626,7 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         .expect("it lists")
         .lines
         .value;
-    assert_eq!(certified(&ident), [(BASE + 3, returns, Support::Certified)]);
+    assert_eq!(certified(&ident), [(BASE + 3, returns, Basis::Certified)]);
 }
 
 #[test]
@@ -656,7 +657,7 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
         table: Some(table),
     };
     let said = certified(&lines);
-    let switched = |at: u64, kind: AnnotationKind| (at, kind, Support::Solved);
+    let switched = |at: u64, kind: AnnotationKind| (at, kind, Basis::Solved);
     for expected in [
         switched(dispatch, switch),
         switched(0x100e, case(0)),

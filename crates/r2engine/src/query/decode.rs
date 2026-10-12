@@ -224,10 +224,10 @@ mod tests {
     use super::*;
     use crate::body::Program;
     use crate::machine::Machine;
-    use crate::query::Support;
     use crate::query::records::{AnnotationKind, Decoders, Memory, WalkedBody};
     use r2il::Endianness;
     use r2sleigh_lift::embedded_machine;
+    use r2source::confidence::Basis;
 
     /// A flat run of bytes mapped at one address and nothing else.
     struct Mapped {
@@ -464,7 +464,7 @@ mod tests {
             .find(|annotation| matches!(annotation.kind, AnnotationKind::Target { call: true, .. }))
             .expect("a direct call encodes its target");
         assert_eq!(call.kind.address(), Some(BASE + 0x10));
-        assert_eq!(call.support, Support::Decoded);
+        assert_eq!(call.support, Basis::Decoded);
         let body = &line.syntax.as_ref().expect("decoded").body;
         let span = call.operand.expect("one operand spells that address");
         assert_eq!(&body[span.start..span.end], "0x1010");
@@ -519,7 +519,7 @@ mod tests {
                     address: 0x1234,
                     width: 4,
                 }
-                && annotation.support == Support::Decoded
+                && annotation.support == Basis::Decoded
         }));
     }
 

@@ -11,11 +11,12 @@ use std::sync::Arc;
 
 use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, SLOT, STEPPED, STUB, TEXT, TWO};
 use r2engine::body::{Unresolved, UnresolvedReason};
+use r2engine::discovery::Basis;
 use r2engine::program::OpenProgram;
-use r2engine::query::{AnnotationKind, Listing, Reference, Role, Stop, Support, Unread};
+use r2engine::query::{AnnotationKind, Listing, Reference, Role, Stop, Unread};
 
 /// Every fact as `(from, to, role, support)`.
-fn listed(facts: &[Reference]) -> Vec<(u64, u64, Role, Support)> {
+fn listed(facts: &[Reference]) -> Vec<(u64, u64, Role, Basis)> {
     facts
         .iter()
         .map(|fact| (fact.from, fact.to, fact.role, fact.support))
@@ -75,7 +76,7 @@ fn each_reference_says_how_its_instruction_uses_the_address_and_what_shows_it() 
     // program; `mov eax, 1` and the return address a call pushes are neither.
     let mut program = OpenProgram::of(Literal::new().importing("strlen"));
     let facts = program.references().expect("the index builds").value;
-    use Support::{Certified, Decoded, Folded};
+    use Basis::{Certified, Decoded, Folded};
     assert_eq!(
         listed(facts.facts()),
         [
@@ -160,17 +161,17 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
                 movsb,
                 BASE + 0x20,
                 Role::Write { width: byte },
-                Support::Folded
+                Basis::Folded
             ),
             (
                 movsb,
                 BASE + 0x30,
                 Role::Read { width: byte },
-                Support::Folded
+                Basis::Folded
             ),
             // lea rax, [callee], which the call takes as it stands; then call rax
-            (CALLS, CALLEE, Role::Value, Support::Folded),
-            (CALLS + 7, CALLEE, Role::Call, Support::Folded),
+            (CALLS, CALLEE, Role::Value, Basis::Folded),
+            (CALLS + 7, CALLEE, Role::Call, Basis::Folded),
         ]
     );
     // The references to one address come back by source, each with the instruction and the function holding it.
@@ -247,8 +248,8 @@ fn a_branch_that_leaves_its_return_address_in_the_link_register_is_a_call() {
     assert_eq!(
         listed(index.facts()),
         [
-            (BASE + 8, BASE + 0x10, Role::Value, Support::Folded),
-            (BASE + 0xc, callee, Role::Call, Support::Folded),
+            (BASE + 8, BASE + 0x10, Role::Value, Basis::Folded),
+            (BASE + 0xc, callee, Role::Call, Basis::Folded),
         ]
     );
 }
@@ -337,7 +338,7 @@ fn declared_callee() -> Literal {
 }
 
 /// What the `mov edi, TEXT` line claims about TEXT in `pd`, and the support `ax` holds it on.
-fn claimed_at_caller(literal: Literal) -> (Option<Support>, Option<Support>) {
+fn claimed_at_caller(literal: Literal) -> (Option<Basis>, Option<Basis>) {
     let mut program = OpenProgram::of(literal);
     let listing = Listing {
         start: CALLER,
@@ -360,13 +361,13 @@ fn claimed_at_caller(literal: Literal) -> (Option<Support>, Option<Support>) {
 #[test]
 fn a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one() {
     // The callee's own body loads through the parameter the number arrives in.
-    let dereferenced = Some(Support::Dereferenced);
+    let dereferenced = Some(Basis::Dereferenced);
     assert_eq!(
         claimed_at_caller(reading_callee()),
         (dereferenced, dereferenced)
     );
     // A declaration types the parameter as a pointer.
-    let declared = Some(Support::Declared);
+    let declared = Some(Basis::Declared);
     assert_eq!(claimed_at_caller(declared_callee()), (declared, declared));
     // `one` returns 1 and never reads its parameter, so the same number is only a number.
     let mut literal = Literal::new().with_data();

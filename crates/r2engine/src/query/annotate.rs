@@ -10,11 +10,11 @@ use r2ssa::CanonicalStorageId;
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::Support;
 use super::Work;
 use super::decode::Lookahead;
 use super::records::{Annotation, AnnotationKind, Answered, Line, Memory, WalkedBody};
 use super::references::Role;
+use r2source::confidence::Basis;
 
 /// How far on a run is lifted again to see which numbers move with it.
 ///
@@ -148,10 +148,10 @@ fn referenced(memory: &Memory<'_>, kind: &AnnotationKind) -> bool {
 }
 
 /// Decoded where the instruction alone folds the number, folded where the block before it had to.
-fn folded_support(own: bool) -> Support {
+fn folded_support(own: bool) -> Basis {
     match own {
-        true => Support::Decoded,
-        false => Support::Folded,
+        true => Basis::Decoded,
+        false => Basis::Folded,
     }
 }
 
@@ -322,11 +322,11 @@ fn relative_over(
 /// executed, so a string there would contradict the claim it hangs on.
 fn revision_at(
     memory: &Memory<'_>,
-    claims: &[(AnnotationKind, Support)],
-) -> Vec<(AnnotationKind, Support)> {
+    claims: &[(AnnotationKind, Basis)],
+) -> Vec<(AnnotationKind, Basis)> {
     let mut said = Vec::new();
     // Each address a claim uses as data, with how many bytes the claim itself accesses there.
-    let mut used = BTreeMap::<u64, Vec<(u32, Support)>>::new();
+    let mut used = BTreeMap::<u64, Vec<(u32, Basis)>>::new();
     for (kind, support) in claims {
         if let AnnotationKind::Reads { address, width } = *kind
             && let Some(word) = memory.word(address, width)
@@ -383,7 +383,7 @@ struct After<'a, 'r, 'b> {
     /// Which parameters of a callee take an address, where the number's use decides whether it is one.
     parameters: Option<&'a dyn super::records::Parameters>,
     /// The strongest support a call handing the number to such a parameter gave.
-    used: Option<Support>,
+    used: Option<Basis>,
 }
 
 /// The rung that settles the number an instruction leaves in `output` as its result: the run after it, else the def-use.
@@ -397,15 +397,15 @@ fn result_of(
     after: &mut After<'_, '_, '_>,
     output: &Varnode,
     address: u64,
-) -> Option<Support> {
+) -> Option<Basis> {
     match straight_line_fate(lift, after, output) {
-        Fate::Result => Some(Support::Folded),
+        Fate::Result => Some(Basis::Folded),
         Fate::Step => None,
         Fate::Unknown => {
             let settled = after
                 .body?
                 .fate_of(address, CanonicalStorageId::from_varnode(output))?;
-            (settled == r2ssa::fate::Fate::Result).then_some(Support::Certified)
+            (settled == r2ssa::fate::Fate::Result).then_some(Basis::Certified)
         }
     }
 }
@@ -483,7 +483,7 @@ fn pointer_use(
     block: &r2il::R2ILBlock,
     at: usize,
     holders: &[Varnode],
-) -> Option<Support> {
+) -> Option<Basis> {
     use super::records::Callee;
     let op = block.ops.get(at)?;
     let call = op.transfer().filter(|transfer| transfer.call)?;

@@ -273,7 +273,7 @@ fn stopped(completion: Completion) -> String {
 fn claim(
     line: &r2engine::query::Line,
     number: r2engine::NumberSpan,
-) -> Option<r2engine::query::Support> {
+) -> Option<r2engine::discovery::Basis> {
     line.annotations
         .iter()
         .filter(|annotation| annotation.operand == Some(number) && annotation.reference)
@@ -505,17 +505,8 @@ fn addresses(blocks: &[u64]) -> String {
 }
 
 /// The rung a claim stands on, as a reader reads it.
-pub(crate) fn rung(support: r2engine::query::Support) -> &'static str {
-    use r2engine::query::Support;
-    match support {
-        Support::Stated => "stated",
-        Support::Decoded => "decoded",
-        Support::Folded => "folded",
-        Support::Certified => "certified",
-        Support::Solved => "solved",
-        Support::Dereferenced => "dereferenced",
-        Support::Declared => "declared",
-    }
+pub(crate) fn rung(support: r2engine::discovery::Basis) -> &'static str {
+    support.spelled()
 }
 
 /// The renderer's roles in the palette's terms.
@@ -588,7 +579,7 @@ mod tests {
                             address: u64::try_from(number.value).ok()?,
                             call: true,
                         },
-                        support: r2engine::query::Support::Decoded,
+                        support: r2engine::discovery::Basis::Decoded,
                         operand: Some(*number),
                         reference: true,
                     })

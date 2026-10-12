@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 
 use crate::body::{Unresolved, UnresolvedReason};
 
-use super::{Line, Support};
+use super::Line;
 use crate::native::NativeRefusal;
+use r2source::confidence::Basis;
 
 /// Every reference the walked bodies make, and what the walks covered.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,7 +35,7 @@ pub struct Reference {
     pub from: u64,
     pub to: u64,
     pub role: Role,
-    pub support: Support,
+    pub support: Basis,
 }
 
 /// What the instruction does with the address.
@@ -155,7 +156,7 @@ impl Indexing {
                 flow: None,
                 annotations: vec![super::Annotation {
                     kind: super::AnnotationKind::Points { value },
-                    support: Support::Stated,
+                    support: Basis::Stated,
                     operand: None,
                     reference: true,
                 }],

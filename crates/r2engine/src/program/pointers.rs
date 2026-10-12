@@ -12,12 +12,13 @@ use r2ssa::CanonicalStorageId;
 
 use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::query::db::{Db, Hold, Query};
-use crate::query::{Callee, Parameters, Support};
+use crate::query::{Callee, Parameters};
+use r2source::confidence::Basis;
 
 /// A callee's pointer parameters, and whether a call cycle or the request's stop cut the answer short.
 #[derive(Clone, PartialEq)]
 pub(super) struct Pointed {
-    found: Arc<[(CanonicalStorageId, Support)]>,
+    found: Arc<[(CanonicalStorageId, Basis)]>,
     cut: Cut,
 }
 
@@ -61,7 +62,7 @@ impl<S: Source + 'static> Parameters for OpenProgram<S> {
         &self,
         callee: Callee,
         held: &dyn Fn(&CanonicalStorageId) -> bool,
-    ) -> Option<Support> {
+    ) -> Option<Basis> {
         self.view().pointer_use(callee, held)
     }
 }
@@ -71,7 +72,7 @@ impl<S: Source + 'static> Parameters for View<'_, S> {
         &self,
         callee: Callee,
         held: &dyn Fn(&CanonicalStorageId) -> bool,
-    ) -> Option<Support> {
+    ) -> Option<Basis> {
         let (Callee::At(address) | Callee::ThroughSlot(address)) = callee;
         let target = self.target(address).ok()?;
         // A number in no argument register reaches no parameter, so the callee need not be read.
@@ -92,7 +93,7 @@ impl<S: Source + 'static> Parameters for View<'_, S> {
 fn derived<S: Source + 'static>(
     view: &View<'_, S>,
     callee: Callee,
-) -> (BTreeMap<CanonicalStorageId, Support>, Cut) {
+) -> (BTreeMap<CanonicalStorageId, Basis>, Cut) {
     let (Callee::At(address) | Callee::ThroughSlot(address)) = callee;
     let Ok(target) = view.target(address) else {
         return (BTreeMap::new(), Cut::Whole);
@@ -101,7 +102,7 @@ fn derived<S: Source + 'static>(
         let declared = crate::native::declared_pointers(&target, &name);
         let declared = declared
             .into_iter()
-            .map(|storage| (storage, Support::Declared));
+            .map(|storage| (storage, Basis::Declared));
         return (declared.collect(), Cut::Whole);
     }
     // A slot the loader fills with no import is a word of data, not a body to read.
@@ -132,7 +133,7 @@ fn body_pointers<S: Source + 'static>(
     view: &View<'_, S>,
     target: &crate::native::NativeTarget<'_>,
     address: u64,
-) -> (BTreeMap<CanonicalStorageId, Support>, Cut) {
+) -> (BTreeMap<CanonicalStorageId, Basis>, Cut) {
     // A callee some root has read already carries its summary; otherwise it
     // is prepared for this alone, which costs less than reading it whole.
     let key = (address, target.cpu == "thumb");
@@ -154,7 +155,7 @@ fn body_pointers<S: Source + 'static>(
         .dereferenced_arguments()
         .iter()
         .filter_map(|index| slots.get(*index))
-        .map(|storage| (*storage, Support::Dereferenced))
+        .map(|storage| (*storage, Basis::Dereferenced))
         .collect::<BTreeMap<_, _>>();
     let mut cut = Cut::Whole;
     for (onward, there, here) in summary.forwarded_arguments() {

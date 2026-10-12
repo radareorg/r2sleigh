@@ -8,14 +8,14 @@ use r2ssa::{
     SsaArtifact, SsaGraph, StridedInterval, TripCount, ValueId,
 };
 
-use super::Support;
 use super::records::{AnnotationKind, Answered, ArgumentSlot, CallArgument, Operand, Trips};
 use crate::native::Prepared;
+use r2source::confidence::Basis;
 
 /// A prepared function, with every claim its certificates anchor at an instruction, by the line it is on.
 pub struct Proved<'a> {
     prepared: &'a Prepared,
-    anchored: BTreeMap<u64, Vec<(AnnotationKind, Support)>>,
+    anchored: BTreeMap<u64, Vec<(AnnotationKind, Basis)>>,
 }
 
 impl<'a> Proved<'a> {
@@ -39,17 +39,17 @@ impl<'a> Proved<'a> {
     }
 
     /// What the certificates say of the line at this address.
-    fn at(&self, address: u64) -> &[(AnnotationKind, Support)] {
+    fn at(&self, address: u64) -> &[(AnnotationKind, Basis)] {
         self.anchored.get(&address).map_or(&[], Vec::as_slice)
     }
 }
 
 /// The claims being gathered, by line.
 #[derive(Default)]
-struct Anchored(BTreeMap<u64, Vec<(AnnotationKind, Support)>>);
+struct Anchored(BTreeMap<u64, Vec<(AnnotationKind, Basis)>>);
 
 impl Anchored {
-    fn push(&mut self, line: u64, kind: AnnotationKind, support: Support) {
+    fn push(&mut self, line: u64, kind: AnnotationKind, support: Basis) {
         self.0.entry(line).or_default().push((kind, support));
     }
 
@@ -63,9 +63,7 @@ impl Anchored {
             // An arity read off the registers written before the call is no proof the callee reads them.
             let proven = call.arguments_complete && call.described;
             let handed = proven.then(|| handed(artifact, call));
-            let support = handed
-                .as_ref()
-                .map_or(Support::Certified, |(_, rung)| *rung);
+            let support = handed.as_ref().map_or(Basis::Certified, |(_, rung)| *rung);
             let uncounted = call
                 .variadic
                 .then_some(call.variadic_argument_count_refusal)
@@ -87,7 +85,7 @@ impl Anchored {
             });
             for (set, index) in set.collect::<Vec<_>>() {
                 let kind = AnnotationKind::ArgumentOf { call: line, index };
-                self.push(set, kind, Support::Certified);
+                self.push(set, kind, Basis::Certified);
             }
         }
     }
@@ -111,7 +109,7 @@ impl Anchored {
                 table: prepared.table_at(dispatch).copied(),
             };
             // The selector's domain is a range the value analysis solved, and the arms are words the revision holds.
-            self.push(dispatch, kind, Support::Solved);
+            self.push(dispatch, kind, Basis::Solved);
             let mut reaching = BTreeMap::<u64, Vec<u64>>::new();
             for (value, target) in &switch.cases {
                 reaching.entry(*target).or_default().push(*value);
@@ -120,11 +118,11 @@ impl Anchored {
                 values.sort_unstable();
                 values.dedup();
                 let kind = AnnotationKind::Case { values, dispatch };
-                self.push(target, kind, Support::Solved);
+                self.push(target, kind, Basis::Solved);
             }
             if let Some((target, guard)) = default {
                 let kind = AnnotationKind::Default { dispatch, guard };
-                self.push(target, kind, Support::Solved);
+                self.push(target, kind, Basis::Solved);
             }
         }
     }
@@ -137,7 +135,7 @@ impl Anchored {
             }
             let claims = self.0.get(&stop.addr).map_or(&[][..], Vec::as_slice);
             if !claims.iter().any(|(kind, _)| followed(kind)) {
-                self.push(stop.addr, AnnotationKind::Unresolved, Support::Decoded);
+                self.push(stop.addr, AnnotationKind::Unresolved, Basis::Decoded);
             }
         }
     }
@@ -159,7 +157,7 @@ impl Anchored {
                 latches: fact.latches.clone(),
                 exits: fact.exits.clone(),
             };
-            self.push(fact.header, kind, Support::Certified);
+            self.push(fact.header, kind, Basis::Certified);
             let inductions = carried.remove(id).unwrap_or_default();
             let valid = inductions.into_iter().filter(|one| one.validate(graph));
             for (kind, support) in valid.filter_map(|one| carries(artifact, one)) {
@@ -172,7 +170,7 @@ impl Anchored {
                 .ok()
                 .and_then(|trips| counted(graph, trips))
             {
-                self.push(fact.header, AnnotationKind::Trips(count), Support::Solved);
+                self.push(fact.header, AnnotationKind::Trips(count), Basis::Solved);
             }
         }
     }
@@ -186,18 +184,18 @@ impl Anchored {
             };
             if let Some(line) = graph.instruction_for_inst(certificate.at) {
                 let kind = AnnotationKind::Returns { storage };
-                self.push(line, kind, Support::Certified);
+                self.push(line, kind, Basis::Certified);
             }
         }
     }
 }
 
 /// The arguments a call's boundary proved it hands on, and the highest rung any exact value among them stands on.
-fn handed(artifact: &SsaArtifact, call: &CallsiteCertificate) -> (Vec<CallArgument>, Support) {
-    let mut support = Support::Certified;
+fn handed(artifact: &SsaArtifact, call: &CallsiteCertificate) -> (Vec<CallArgument>, Basis) {
+    let mut support = Basis::Certified;
     let arguments = call.argument_certificates.iter().map(|argument| {
         let value = exact(artifact, argument.value);
-        support = support.max(value.map_or(Support::Certified, |(_, rung)| rung));
+        support = support.max(value.map_or(Basis::Certified, |(_, rung)| rung));
         let slot = match argument.location {
             CallArgumentLocation::Register { storage } => ArgumentSlot::Register(storage),
             CallArgumentLocation::Stack { offset, .. }
@@ -221,7 +219,7 @@ fn followed(kind: &AnnotationKind) -> bool {
 }
 
 /// What a header's induction carries, from what it starts at, on the rung its start stands on.
-fn carries(artifact: &SsaArtifact, induction: &InductionFact) -> Option<(AnnotationKind, Support)> {
+fn carries(artifact: &SsaArtifact, induction: &InductionFact) -> Option<(AnnotationKind, Basis)> {
     let storage = register(artifact.graph(), induction.phi)?;
     let init = operand(artifact, induction.init);
     let kind = AnnotationKind::Induction {
@@ -230,8 +228,8 @@ fn carries(artifact: &SsaArtifact, induction: &InductionFact) -> Option<(Annotat
         step: induction.step,
         width_bits: induction.width_bits,
     };
-    let support = init.map_or(Support::Certified, |(_, rung)| rung);
-    Some((kind, support.max(Support::Certified)))
+    let support = init.map_or(Basis::Certified, |(_, rung)| rung);
+    Some((kind, support.max(Basis::Certified)))
 }
 
 /// A trip count as a claim names it: exact, or affine over what registers held on entry.
@@ -275,21 +273,21 @@ fn transfer_line(graph: &SsaGraph, block_addr: u64) -> Option<u64> {
 }
 
 /// The one value a value is, and the rung that shows it: the def-use's fold, else a singleton range.
-fn exact(artifact: &SsaArtifact, value: ValueId) -> Option<(u64, Support)> {
+fn exact(artifact: &SsaArtifact, value: ValueId) -> Option<(u64, Basis)> {
     if let Some(folded) = artifact.folded_value(value) {
-        return Some((folded, Support::Certified));
+        return Some((folded, Basis::Certified));
     }
     let range = artifact.values().get(value)?.as_constant()?;
-    Some((range, Support::Solved))
+    Some((range, Basis::Solved))
 }
 
 /// A value as a claim may name it: exactly, or as what a register held on entry.
-fn operand(artifact: &SsaArtifact, value: ValueId) -> Option<(Operand, Support)> {
+fn operand(artifact: &SsaArtifact, value: ValueId) -> Option<(Operand, Basis)> {
     if let Some((value, support)) = exact(artifact, value) {
         return Some((Operand::Exact(value), support));
     }
     let storage = entry(artifact.graph(), value)?;
-    Some((Operand::Entry(storage), Support::Certified))
+    Some((Operand::Entry(storage), Basis::Certified))
 }
 
 /// The register a value was entered with, where the caller supplied it.
@@ -314,7 +312,7 @@ pub(super) fn proved_about(
     answered: &Answered<'_>,
     address: u64,
     folded: &dyn Fn(CanonicalStorageId) -> Option<u64>,
-) -> Vec<(AnnotationKind, Support)> {
+) -> Vec<(AnnotationKind, Basis)> {
     let Some(proved) = answered.proved else {
         return Vec::new();
     };
@@ -329,7 +327,7 @@ fn bounded(
     prepared: &Prepared,
     address: u64,
     folded: &dyn Fn(CanonicalStorageId) -> Option<u64>,
-) -> Vec<(AnnotationKind, Support)> {
+) -> Vec<(AnnotationKind, Basis)> {
     let (Some(body), Some(machine)) = (answered.body, answered.decoders.at(address)) else {
         return Vec::new();
     };
@@ -369,7 +367,7 @@ fn claimed(
     own: InstructionBound,
     folded: Option<u64>,
     certified: impl FnOnce() -> Option<u64>,
-) -> Option<(StridedInterval, Support)> {
+) -> Option<(StridedInterval, Basis)> {
     let bound = own.range;
     if range.is_bottom() || range.width_bits() != bound.width_bits() {
         return None;
@@ -377,18 +375,18 @@ fn claimed(
     // Where the function proves no more, the claim is the instruction's own bound, unless that is one value or only the width written.
     if bound.join(&range) == range {
         let says_nothing = bound.as_constant().is_some() || own.spans_width_written;
-        return (!says_nothing).then_some((bound, Support::Decoded));
+        return (!says_nothing).then_some((bound, Basis::Decoded));
     }
     // One value inside that bound needs the run where the run folds it, else the def-use where that does; any other range needs the solver.
     let Some(value) = range.as_constant() else {
-        return Some((range, Support::Solved));
+        return Some((range, Basis::Solved));
     };
     let support = if folded == Some(value) {
-        Support::Folded
+        Basis::Folded
     } else if certified() == Some(value) {
-        Support::Certified
+        Basis::Certified
     } else {
-        Support::Solved
+        Basis::Solved
     };
     Some((range, support))
 }
