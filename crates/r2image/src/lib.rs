@@ -792,7 +792,7 @@ impl Image {
     ///
     /// A range reaching past a segment's file extent reads as zero, which is how
     /// `.bss` and any other zero-filled tail answers. The borrowed case is the
-    /// common one; only a read crossing into a zero-filled tail allocates.
+    /// common one; only a read crossing into a zero-filled tail or another segment allocates.
     pub fn read(&self, vaddr: u64, len: usize) -> Option<Cow<'_, [u8]>> {
         if len == 0 {
             return Some(Cow::Borrowed(&[]));
@@ -802,9 +802,13 @@ impl Image {
         if !segment.permissions.read {
             return None;
         }
-        let offset_in_segment = vaddr - segment.vaddr;
-        if (len as u64) > segment.vsize - offset_in_segment {
-            return None;
+        let here = segment.vsize - (vaddr - segment.vaddr);
+        if (len as u64) > here {
+            // Memory runs on into a segment that begins where this one ends.
+            let mut bytes = self.read(vaddr, here as usize)?.into_owned();
+            let rest = self.read(segment.vaddr + segment.vsize, len - here as usize)?;
+            bytes.extend_from_slice(&rest);
+            return Some(Cow::Owned(bytes));
         }
 
         // A patched range is answered from the layer, which means an owned
@@ -851,15 +855,23 @@ impl Image {
         Some(Cow::Owned(bytes))
     }
 
-    /// As much of `max` bytes at `vaddr` as the containing segment holds.
+    /// As much of `max` bytes at `vaddr` as is mapped without a gap.
     ///
     /// A decoder wants a window rather than an exact length, since it does not
     /// know an instruction's size until it has read it, and a window at the end
-    /// of a segment is short rather than absent.
+    /// of mapped memory is short rather than absent.
     pub fn read_upto(&self, vaddr: u64, max: usize) -> Option<Cow<'_, [u8]>> {
         let segment = self.segment_at(vaddr)?;
-        let available = (segment.vsize - (vaddr - segment.vaddr)).min(max as u64) as usize;
-        self.read(vaddr, available)
+        let wanted = vaddr.saturating_add(max as u64);
+        let mut end = segment.vaddr + segment.vsize;
+        // The window runs on through readable segments that each begin where the last ends.
+        while end < wanted {
+            match self.segment_at(end) {
+                Some(next) if next.vaddr == end && next.permissions.read => end += next.vsize,
+                _ => break,
+            }
+        }
+        self.read(vaddr, (end.min(wanted) - vaddr) as usize)
     }
 
     /// Write bytes over what the file holds, in a layer.
@@ -1305,6 +1317,23 @@ mod tests {
         let image = image_with(vec![segment(0x1000, 8, 0, 2)], vec![0xaa, 0xbb]);
         assert_eq!(image.read(0x1000, 4).unwrap().as_ref(), &[0xaa, 0xbb, 0, 0]);
         assert_eq!(image.read(0x1004, 2).unwrap().as_ref(), &[0, 0]);
+    }
+
+    #[test]
+    fn reads_on_into_a_segment_that_begins_where_its_own_ends() {
+        let segments = vec![segment(0x1000, 4, 0, 4), segment(0x1004, 4, 4, 4)];
+        let image = image_with(segments, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(image.read(0x1002, 4).unwrap().as_ref(), &[3, 4, 5, 6]);
+        assert_eq!(
+            image.read_upto(0x1002, 64).unwrap().as_ref(),
+            &[3, 4, 5, 6, 7, 8]
+        );
+        let gapped = image_with(
+            vec![segment(0x1000, 4, 0, 4), segment(0x1008, 4, 4, 4)],
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+        );
+        assert!(gapped.read(0x1002, 4).is_none());
+        assert_eq!(gapped.read_upto(0x1002, 64).unwrap().as_ref(), &[3, 4]);
     }
 
     #[test]
