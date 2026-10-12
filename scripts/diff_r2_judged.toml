@@ -130,14 +130,6 @@ reason = "Sleigh spells `ptr` and a scale of one; owner r2sleigh-lift's display"
 
 [[judged]]
 command = "pd"
-binaries = "*"
-r2 = 'str\.[A-Za-z0-9_]*\.[A-Za-z0-9_.]*'
-r2s = 'str\.[A-Za-z0-9_]*$'
-verdict = "r2-right"
-reason = "radare2's flag filter keeps `.` in a string's name; r2s's identifier replaces it; owner r2engine names"
-
-[[judged]]
-command = "pd"
 binaries = "*.ko"
 r2 = 'call (reloc\.|[A-Za-z_])'
 r2s = 'call 0x'

@@ -176,14 +176,35 @@ impl Name {
     }
 }
 
-/// The text with everything an identifier cannot hold replaced.
+/// The text as radare2 names a string's flag: its escaped form (`r_str_escape`) through the flag
+/// filter (`r_name_filter`): letters, digits, `.`, `:` and `_` kept, dash-like characters made `_`.
 fn identifier(text: &str) -> String {
-    text.chars()
-        .map(|c| match c.is_ascii_alphanumeric() {
-            true => c,
-            false => '_',
-        })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_') => out.push(c),
+            // An escape letter after the backslash the escaping writes: the backslash becomes `_`.
+            '\n' | '\r' | '\t' | '\x0c' | '\x08' | '\x0b' | '\x07' => {
+                out.push('_');
+                out.push(match c {
+                    '\n' => 'n',
+                    '\r' => 'r',
+                    '\t' => 't',
+                    '\x0c' => 'f',
+                    '\x08' => 'b',
+                    '\x0b' => 'v',
+                    _ => 'a',
+                });
+            }
+            '\\' if chars.peek().is_some_and(|next| "sbfnrtva".contains(*next)) => out.push('_'),
+            c if c.is_ascii_control() => out.push_str(&format!("x{:02x}", c as u32)),
+            '!' | '"' | '$' | '%' | '(' | ')' | ',' | '-' | '/' | ';' | '<' | '>' | '?' | '@'
+            | '[' | ']' | '`' | '~' | ' ' => out.push('_'),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Every address this program has a name for.
@@ -350,7 +371,7 @@ mod tests {
     fn a_string_is_stored_as_itself_and_spelled_as_an_identifier() {
         let name = named("hello %s\n", Namespace::String, 10);
         assert_eq!(&*name.text, "hello %s\n");
-        assert_eq!(name.spelled(), "str.hello__s_");
+        assert_eq!(name.spelled(), "str.hello__s_n");
     }
 
     #[test]
@@ -453,7 +474,7 @@ mod tests {
         assert_eq!(db.address_of("sym.printf"), None);
         // A string seeks by its identifier, which is not its text.
         db.insert(0x5000, named("hello %s\n", Namespace::String, 9));
-        assert_eq!(db.address_of("str.hello__s_"), Some(0x5000));
+        assert_eq!(db.address_of("str.hello__s_n"), Some(0x5000));
         assert_eq!(db.address_of("str.hello %s\n"), None);
     }
 }

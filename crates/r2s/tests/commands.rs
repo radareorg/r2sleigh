@@ -1025,7 +1025,8 @@ mod listing {
             .unwrap_or_default();
         // `__printf_chk` is declared to take its format as a pointer, and the number stays put.
         assert!(
-            format.ends_with(r#"mov esi, str.fnv1a32______08x_ ; "fnv1a32     %08x\n" (declared)"#),
+            format
+                .ends_with(r#"mov esi, str.fnv1a32______08x_n ; "fnv1a32     %08x\n" (declared)"#),
             "{}",
             run.out
         );
