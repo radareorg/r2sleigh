@@ -1,5 +1,5 @@
 //! The file's bytes as an image holds them: mapped from the file it was opened from, or owned
-//! (doc/adr-memory-model.md, MM.4).
+//! (doc/adr-memory-model.md, MM.4). A clone shares the map: patches are each image's own layer.
 
 use std::ops::{Deref, Range};
 use std::sync::Arc;
@@ -14,7 +14,8 @@ pub(crate) enum Held {
 }
 
 impl Held {
-    /// The file at `file`, mapped read-only. An empty file is held as nothing, which no map is.
+    /// The file at `file`, mapped read-only. An empty file is held as no bytes: mmap(2) maps no
+    /// zero-length range.
     pub(crate) fn map(file: &std::fs::File) -> std::io::Result<Self> {
         if file.metadata()?.len() == 0 {
             return Ok(Self::Owned(Vec::new()));

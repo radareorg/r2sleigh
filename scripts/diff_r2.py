@@ -106,8 +106,9 @@ def canonical_numbers(line):
 def run(argv, timeout):
     """Return (stdout, stderr, code); code is None when the tool never ran."""
     try:
+        # A listing of a non-text byte is not UTF-8; it is shown, not fatal.
         done = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False
+            argv, capture_output=True, text=True, errors="replace", timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired:
         return "", "timeout", None
