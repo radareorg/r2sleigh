@@ -625,7 +625,7 @@ impl Literal {
         program.code = &STUB_HELPER;
         program.container.segments = vec![code_segment(BASE, STUB_HELPER.len() as u64)];
         program.container.sections.truncate(1);
-        program.container.sections[0].name = "__stub_helper".to_owned();
+        "__stub_helper".clone_into(&mut program.container.sections[0].name);
         program.container.sections[0].vsize = STUB_HELPER.len() as u64;
         program
     }
