@@ -1235,8 +1235,11 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
 
     // The header counts columns from the address's own low byte, two hex
     // digits wide, and the legend starts at its low nibble rather than at zero.
+    // It is padded to the widest row's address, as radare2 pads it past ten digits.
     let low = addr as u8;
-    let mut out = String::from("- offset -  ");
+    let last = addr + (bytes.len().saturating_sub(1) / 16 * 16) as u64;
+    let width = format!("{last:#010x}").len();
+    let mut out = format!("- offset -{}", " ".repeat(width - 8));
     for column in 0..8u8 {
         out.push_str(&format!(
             "{:2X}{:2X} ",
