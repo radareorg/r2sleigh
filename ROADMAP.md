@@ -422,6 +422,16 @@ maintainer accepts broken renderings on `rebuild` until it merges.
             instruction) and an imported value carry a 32-byte canonical
             instruction id the graph already implies; an obligation copies
             its instruction's graph inputs where it states none of its own.
+            Step 1 done (#188): a graph instruction's disposition is its
+            state and its run of the sorted table (12 bytes), the identity
+            read off the graph when asked (`CanonicalInstructionId::of`);
+            `obligations_for_inst` reads the run in O(1) where it searched by
+            a 32-byte key. Heap peak 0pack 148.2 to 144.2 MiB, pumasim 133.1
+            to 130.0, session 168.5 to 163.4; census byte-identical. Left:
+            each obligation's 80-byte identity and its own copy of its
+            instruction's inputs (0pack: 4.5 MiB at the peak), the rewrite's
+            substitutions and `discharges` naming producers by canonical
+            identity where r2dec maps them back to instructions.
          4. **MM.8** the machine projection (13.6 MB, a 72-byte node, 32
             of it the type) and render's own structures (7.6 MB). Step 1
             done (#185): an entity stated its output and producer beside
