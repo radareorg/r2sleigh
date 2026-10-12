@@ -547,7 +547,7 @@ pub struct Relocation {
     /// a Mach-O rebase.
     pub addend: Option<i64>,
     /// The symbol it is computed against, where it names one.
-    pub symbol: Option<RelocationSymbol>,
+    pub symbol: Option<Box<RelocationSymbol>>,
     /// What the loader computes for it.
     pub applies: Applies,
 }

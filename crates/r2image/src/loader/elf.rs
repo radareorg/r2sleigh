@@ -363,7 +363,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     ntype,
                     width,
                     addend,
-                    symbol,
+                    symbol: symbol.map(Box::new),
                     applies,
                 })
             })

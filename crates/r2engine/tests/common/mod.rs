@@ -388,10 +388,10 @@ pub fn import_slot(vaddr: u64, import: &str) -> Relocation {
         vaddr,
         ntype: 7,
         width: 8,
-        symbol: Some(RelocationSymbol {
+        symbol: Some(Box::new(RelocationSymbol {
             name: import.to_owned(),
             ..RelocationSymbol::default()
-        }),
+        })),
         applies: Applies::Symbol,
         ..Relocation::default()
     }
