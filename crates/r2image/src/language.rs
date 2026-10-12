@@ -39,21 +39,58 @@ const FUNC_FLAG_ASM: u8 = 1 << 2;
 
 /// The assembly functions Go's pclntab states, read from its section or `runtime.pclntab`.
 fn go_assembly(file: &object::File<'_>, symbols: &[Symbol]) -> Option<BTreeSet<u64>> {
-    let named = ["__gopclntab", ".gopclntab"]
-        .iter()
-        .find_map(|name| file.section_by_name(name)?.data().ok());
-    let table = named.or_else(|| {
+    let named = ["__gopclntab", ".gopclntab"].iter().find_map(|name| {
+        let section = file.section_by_name(name)?;
+        Some((section.address(), section.data().ok()?))
+    });
+    let (at, table) = named.or_else(|| {
         let symbol = symbols
             .iter()
             .find(|symbol| symbol.defined && &*symbol.name == "runtime.pclntab")?;
-        read_at(file, symbol.vaddr, usize::try_from(symbol.size).ok()?)
+        let table = read_at(file, symbol.vaddr, usize::try_from(symbol.size).ok()?)?;
+        Some((symbol.vaddr, table))
     })?;
-    pclntab_assembly(table, file.endianness() == object::Endianness::Little)
+    let little = file.endianness() == object::Endianness::Little;
+    pclntab_assembly(table, little, |module| {
+        file.sections()
+            .filter(|section| section.kind() == object::SectionKind::Data)
+            .find_map(|section| module_text(section.data().ok()?, little, at, module))
+    })
+}
+
+/// What finds a pclntab's module record: its word size, function count and `functab` offset.
+#[derive(Clone, Copy)]
+struct Module {
+    pointer: usize,
+    functions: u64,
+    table: u64,
+}
+
+/// `moduledata.text` from the record in `data` whose `pcHeader` is the pclntab at `pclntab` and
+/// whose `ftab` slice is its `functab`, `functions + 1` entries long.
+fn module_text(data: &[u8], little: bool, pclntab: u64, module: Module) -> Option<u64> {
+    // `text` follows `pcHeader`, six slices of three words, `findfunctab`, `minpc` and `maxpc`.
+    const FTAB: usize = 16;
+    const TEXT: usize = 22;
+    let pointer = module.pointer;
+    let word = |at: usize| Some(read_word(data.get(at..at.checked_add(pointer)?)?, little));
+    let ftab = pclntab.checked_add(module.table)?;
+    let record = (0..data.len()).step_by(pointer).find(|at| {
+        word(*at) == Some(pclntab)
+            && word(at + FTAB * pointer) == Some(ftab)
+            && word(at + (FTAB + 1) * pointer) == module.functions.checked_add(1)
+    })?;
+    word(record + TEXT * pointer)
 }
 
 /// The entries `funcFlag_ASM` marks in a pclntab of Go 1.18's or Go 1.20's layout (the only ones
-/// that state it); `None` for any other layout, or one that does not fit its bytes.
-fn pclntab_assembly(data: &[u8], little: bool) -> Option<BTreeSet<u64>> {
+/// that state it); `None` for any other layout, or one that does not fit its bytes. Entries count
+/// from `textStart`, or where Go no longer stores it (Go 1.27 writes 0), from the module's `text`.
+fn pclntab_assembly(
+    data: &[u8],
+    little: bool,
+    module_text: impl FnOnce(Module) -> Option<u64>,
+) -> Option<BTreeSet<u64>> {
     let word = |at: usize, size: usize| {
         let bytes = data.get(at..at.checked_add(size)?)?;
         Some(read_word(bytes, little))
@@ -69,12 +106,19 @@ fn pclntab_assembly(data: &[u8], little: bool) -> Option<BTreeSet<u64>> {
         return None;
     }
     let functions = usize::try_from(word(8, pointer)?).ok()?;
-    let text = word(8 + 2 * pointer, pointer)?;
     let table = usize::try_from(word(8 + 7 * pointer, pointer)?).ok()?;
     // `functab`: one `(entryoff, funcoff)` pair per function, so a count past the bytes is a lie.
     if functions.checked_mul(8)? > data.len().checked_sub(table)? {
         return None;
     }
+    let text = match word(8 + 2 * pointer, pointer)? {
+        0 => module_text(Module {
+            pointer,
+            functions: u64::try_from(functions).ok()?,
+            table: u64::try_from(table).ok()?,
+        })?,
+        text => text,
+    };
     let mut assembly = BTreeSet::new();
     for index in 0..functions {
         let pair = table + index * 8;
@@ -703,16 +747,56 @@ mod tests {
             table[pair + 4..pair + 8].copy_from_slice(&function.to_le_bytes());
         }
         table[0x60 + 0x50 + 41] = FUNC_FLAG_ASM;
+        let unread = |_: Module| -> Option<u64> { panic!("textStart is stated") };
         assert_eq!(
-            pclntab_assembly(&table, true),
+            pclntab_assembly(&table, true, unread),
             Some(BTreeSet::from([0x40_1040]))
         );
+        // Go 1.27 writes no `textStart`: entries count from the module's `text`, or state nothing.
+        table[8 + 16..8 + 24].fill(0);
+        assert_eq!(
+            pclntab_assembly(&table, true, |module| {
+                assert_eq!(
+                    (module.pointer, module.functions, module.table),
+                    (8, 2, 0x60)
+                );
+                Some(0x1_1000)
+            }),
+            Some(BTreeSet::from([0x1_1040]))
+        );
+        assert_eq!(pclntab_assembly(&table, true, |_| None), None);
         // Go 1.16's layout states no flag of the kind, and a count past the bytes is refused.
         table[..4].copy_from_slice(&0xffff_fffau32.to_le_bytes());
-        assert_eq!(pclntab_assembly(&table, true), None);
+        assert_eq!(pclntab_assembly(&table, true, unread), None);
         table[..4].copy_from_slice(&0xffff_fff1u32.to_le_bytes());
         table[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert_eq!(pclntab_assembly(&table, true), None);
+        assert_eq!(pclntab_assembly(&table, true, unread), None);
+    }
+
+    /// The module record a Go 1.27 binary's `.noptrdata` holds: found by its `pcHeader` and
+    /// `ftab`, read for `text`; a record whose `ftab` does not match is another.
+    #[test]
+    fn the_module_record_states_where_text_begins() {
+        let module = Module {
+            pointer: 8,
+            functions: 2,
+            table: 0x60,
+        };
+        let record = |ftab: u64| {
+            let mut words = [0u64; 24];
+            words[0] = 0xbc248;
+            words[16] = ftab;
+            words[17] = 3;
+            words[22] = 0x1_1000;
+            let mut data = vec![0u8; 0x20];
+            data.extend(words.iter().flat_map(|word| word.to_le_bytes()));
+            data
+        };
+        assert_eq!(
+            module_text(&record(0xbc248 + 0x60), true, 0xbc248, module),
+            Some(0x1_1000)
+        );
+        assert_eq!(module_text(&record(0xbc300), true, 0xbc248, module), None);
     }
 
     /// go-cdetect's header (Go 1.18.1, inline) and dwarf_go_tree's (Go 1.14.7, through

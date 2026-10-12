@@ -216,7 +216,8 @@ fn only_read_by(
 }
 
 /// `cond` as unsigned `a <= b`, with the operations that compute it: an `INT_LESSEQUAL`, or the
-/// carry-or-zero of a compare (`INT_LESS` or'd with `a - b == 0`, or with `a == b`).
+/// carry-or-zero of a compare (`a < b`, as x86's borrow or AArch64's `!(b <= a)`, or'd with
+/// `a - b == 0` or `a == b`).
 fn unsigned_at_most(
     func: &SSAFunction,
     defs: &Definitions,
@@ -228,14 +229,10 @@ fn unsigned_at_most(
     match op {
         SSAOp::IntLessEqual { a, b, .. } => Some((*a, *b, ops)),
         SSAOp::BoolOr { a, b, .. } => {
-            let (less, equal) = [(*a, *b), (*b, *a)].into_iter().find_map(|(less, equal)| {
-                let (less_id, less_op) = defs.op(defs.copied(less))?;
-                let SSAOp::IntLess { a, b, .. } = less_op else {
-                    return None;
-                };
-                Some(((*less_id, *a, *b), equal))
-            })?;
-            let (less_id, left, right) = less;
+            let (less, equal) = [(*a, *b), (*b, *a)]
+                .into_iter()
+                .find_map(|(less, equal)| Some((strictly_below(defs, less)?, equal)))?;
+            let (less_ids, left, right) = less;
             let (equal_id, equal_op) = defs.op(defs.copied(equal))?;
             let SSAOp::IntEqual { a, b, .. } = equal_op else {
                 return None;
@@ -252,12 +249,32 @@ fn unsigned_at_most(
             if !same && difference.is_none() {
                 return None;
             }
-            ops.insert(less_id);
+            ops.extend(less_ids.iter());
             ops.insert(*equal_id);
             if let Some((sub, _)) = difference {
                 ops.insert(*sub);
             }
             Some((left, right, ops))
+        }
+        _ => None,
+    }
+}
+
+/// `value` as unsigned `a < b`, with the operations that compute it: an `INT_LESS`, or the
+/// negation of `b <= a`.
+fn strictly_below(defs: &Definitions, value: VarId) -> Option<(IdSet<OpId>, VarId, VarId)> {
+    let (id, op) = defs.op(defs.copied(value))?;
+    let mut ops = IdSet::default();
+    ops.insert(*id);
+    match op {
+        SSAOp::IntLess { a, b, .. } => Some((ops, *a, *b)),
+        SSAOp::BoolNot { src, .. } => {
+            let (at_most, op) = defs.op(defs.copied(*src))?;
+            let SSAOp::IntLessEqual { a, b, .. } = op else {
+                return None;
+            };
+            ops.insert(*at_most);
+            Some((ops, *b, *a))
         }
         _ => None,
     }

@@ -65,11 +65,15 @@ The profile, owned by r2abi (the cited rows) and selected by r2engine, states:
    The check compares a stack-pointer value
    with `stackguard0`, which r2abi states per architecture (the goroutine
    register, R14 on amd64 and R28 on arm64, and the field's offset in
-   `runtime.g`).
+   `runtime.g`). The compare is the machine's unsigned `<=`, whether the
+   flags spell it as x86's borrow-or-zero or AArch64's `!(b <= a) || zero`.
 4. **Runtime models.** Library and runtime functions per language, in r2abi:
    libc for C, Go's runtime, Rust's `core` and `alloc`, the C++ ABI
    (`__cxa_throw`, operator `new`). A model names a callee's effect and
    whether it returns; it never names semantics a body would have to prove.
+   Go's compiler ends a block after `runtime.throw`, `gopanic` and the
+   `panic*` helpers (`cmd/compile/internal/ssagen/ssa.go`), so their model
+   is that they never return, under `go-runtime`.
 5. **Names.** A demangler per scheme, in r2engine's naming, producing a
    display name. A name stays a hint. Planned (2026-10-13): `Name.text`
    keeps the mangled spelling prototype tables are keyed by, and the

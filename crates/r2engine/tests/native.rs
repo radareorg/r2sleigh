@@ -5920,6 +5920,25 @@ const GO_STACK_CHECK: &[u8] = &[
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
 ];
 
+/// The prologue on AArch64: `ldr x16, [x28, 0x10]; sub x17, sp, 0x20; cmp x17, x16; b.ls grow`,
+/// whose `b.ls` is `!(x16 <= x17) || x17 - x16 == 0`.
+const GO_STACK_CHECK_A64: &[u8] = &[
+    0x90, 0x0b, 0x40, 0xf9, // 0x00 ldr x16, [x28, 0x10]
+    0xf1, 0x83, 0x00, 0xd1, // 0x04 sub x17, sp, 0x20
+    0x3f, 0x02, 0x10, 0xeb, // 0x08 cmp x17, x16
+    0xa9, 0x00, 0x00, 0x54, // 0x0c b.ls 0x20
+    0xff, 0x83, 0x00, 0xd1, // 0x10 sub sp, sp, 0x20
+    0x20, 0x00, 0x80, 0xd2, // 0x14 mov x0, 1
+    0xff, 0x83, 0x00, 0x91, // 0x18 add sp, sp, 0x20
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1c ret
+    0xe3, 0x03, 0x1e, 0xaa, // 0x20 mov x3, x30
+    0x03, 0x00, 0x00, 0x94, // 0x24 bl 0x30
+    0xf6, 0xff, 0xff, 0x17, // 0x28 b 0x00
+    0x1f, 0x20, 0x03, 0xd5, // 0x2c nop
+    0xc0, 0x03, 0x5f, 0xd6, // 0x30 runtime.morestack_noctxt.abi0
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 0x34
+];
+
 /// The same prologue whose growth path runs `cpuid` before it calls: an effect no model accounts
 /// for.
 const GO_STACK_CHECK_EFFECTFUL: &[u8] = &[
@@ -5981,8 +6000,12 @@ impl Program for GoStack {
 
 /// The machine under Go's ABIInternal, which states `g.stackguard0`.
 fn go_machine() -> Machine {
-    let mut machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
-    let convention = r2abi::go_calling_convention("x86-64", 64, Platform::Linux, Some((1, 21)))
+    go_machine_on("x86-64")
+}
+
+fn go_machine_on(arch: &str) -> Machine {
+    let mut machine = Machine::on(arch, arch, 64, Platform::Linux);
+    let convention = r2abi::go_calling_convention(arch, 64, Platform::Linux, Some((1, 21)))
         .expect("ABIInternal");
     let compiler = LanguageProfile::parse(
         machine
@@ -6033,6 +6056,29 @@ fn go_stack(growth: &str) -> GoStack {
 fn a_go_stack_check_is_compiler_inserted_by_the_runtime_model() {
     let machine = go_machine();
     let program = go_stack("runtime.morestack_noctxt.abi0");
+    let response = decompile(&machine.under("golang"), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("morestack"), "{text}");
+    assert!(
+        !text.contains("if ("),
+        "the body runs unconditionally:\n{text}"
+    );
+    assert!(
+        text.contains("compiler-inserted (assuming go-runtime)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_aarch64_go_stack_check_is_compiler_inserted_by_the_runtime_model() {
+    let machine = go_machine_on("aarch64");
+    let program = GoStack {
+        fixture: Fixture {
+            bytes: GO_STACK_CHECK_A64.to_vec(),
+            name: "main.main",
+        },
+        growth: "runtime.morestack_noctxt.abi0".to_owned(),
+    };
     let response = decompile(&machine.under("golang"), &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(!text.contains("morestack"), "{text}");
