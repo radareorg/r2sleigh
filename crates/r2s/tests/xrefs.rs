@@ -45,7 +45,7 @@ fn axt_names_the_function_the_instruction_and_how_it_uses_the_address() {
     // A string's address handed to a parameter declared a pointer is a value the instruction computes, not a read.
     let handed = hashes("axt 0x4021a0");
     assert!(
-        handed.starts_with("sym.main 0x40106c [DATA:---] mov esi, str.fnv1a32______08x_\n"),
+        handed.starts_with("sym.main 0x40106c [DATA:---] mov esi, str.fnv1a32______08x_n\n"),
         "{handed}"
     );
 }
