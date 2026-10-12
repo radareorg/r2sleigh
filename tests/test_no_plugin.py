@@ -39,6 +39,7 @@ PLUGIN_SPELLINGS = (
 # Where radare2 itself is run, and why that is allowed.
 RADARE2_ORACLES = {
     "scripts/diff_r2.py": "the differential gate: radare2 is the target r2s is graded against",
+    "scripts/diff_r2_judged.toml": "the differential's judged disagreements, each naming what radare2 does",
 }
 
 # What follows the program's name when it is run: a flag, a quoted or
