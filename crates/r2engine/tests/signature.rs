@@ -75,9 +75,12 @@ fn afi_and_the_header_declare_a_parameter_alike() {
     assert_eq!(format!("{ty} _"), declared[0], "{header}");
     assert!(info.returns.is_some(), "afi decides no return for {header}");
     // Both rest on the program's own declaration.
-    let bases = (info.arguments.iter().map(|argument| argument.ty.confidence.basis))
-        .chain(info.returns.iter().map(|returns| returns.confidence.basis))
-        .collect::<Vec<_>>();
+    let bases = (info
+        .arguments
+        .iter()
+        .map(|argument| argument.ty.confidence.basis))
+    .chain(info.returns.iter().map(|returns| returns.confidence.basis))
+    .collect::<Vec<_>>();
     assert_eq!(bases, [Basis::DebugInfo, Basis::DebugInfo], "{header}");
 }
 
