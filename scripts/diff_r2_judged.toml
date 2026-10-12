@@ -398,3 +398,21 @@ r2 = 'b 0x'
 r2s = 'b sym\.imp\.'
 verdict = "r2s-right"
 reason = "a branch to a linkage stub r2s names by the slot it reads; radare2 leaves the number"
+
+[[judged]]
+command = "is"
+binaries = ["fat-intel", "hellocxx-osx-fat-intel", "libexpat.1.dylib"]
+verdict = "deliberate"
+reason = "a fat file of i386 and x86-64: r2s reads the 64-bit slice, radare2 the first, so their symbols' addresses differ"
+
+[[judged]]
+command = "is"
+binaries = "TrollStore"
+verdict = "deliberate"
+reason = "a fat file of arm64 and arm64e: r2s reads the arm64 slice, radare2 the arm64e one"
+
+[[judged]]
+command = "pd"
+binaries = "TrollStore"
+verdict = "deliberate"
+reason = "a fat file of arm64 and arm64e: r2s reads the arm64 slice, radare2 the arm64e one, so their entries differ"
