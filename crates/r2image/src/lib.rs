@@ -334,6 +334,8 @@ fn states_instructions<'a>(section: &impl object::read::ObjectSection<'a>) -> bo
 #[derive(Debug, Clone)]
 pub struct Image {
     data: held::Held,
+    /// Where these bytes begin in the file: a fat Mach-O's slice, zero for any other.
+    file_base: u64,
     /// What the container states, read once: nothing after the parse changes
     /// which sections, symbols or relocations exist.
     container: Container,
@@ -398,9 +400,9 @@ impl Image {
     }
 
     fn held(data: held::Held) -> Result<Self, ImageError> {
-        let data = match select_fat_slice(&data)? {
-            Some(range) => data.narrowed(range),
-            None => data,
+        let (data, file_base) = match select_fat_slice(&data)? {
+            Some(range) => (data.narrowed(range.clone()), range.start as u64),
+            None => (data, 0),
         };
         let file = object::File::parse(&*data).map_err(|e| ImageError::Parse(e.to_string()))?;
 
@@ -705,6 +707,7 @@ impl Image {
 
         Ok(Self {
             data,
+            file_base,
             container: Container {
                 format,
                 arch,
@@ -779,6 +782,12 @@ impl Image {
 
     pub fn segment_at(&self, vaddr: u64) -> Option<&Segment> {
         self.container.segment_at(vaddr)
+    }
+
+    /// Where the image's bytes begin in the file it was read from: a fat Mach-O's slice is
+    /// one range of it, and a file offset the image states is from the slice's start.
+    pub const fn file_base(&self) -> u64 {
+        self.file_base
     }
 
     /// The file's own bytes at a file offset, whether or not the loader maps them.
@@ -1274,6 +1283,7 @@ mod tests {
     fn image_with(segments: Vec<Segment>, data: Vec<u8>) -> Image {
         Image {
             data: held::Held::Owned(data),
+            file_base: 0,
             container: Container {
                 format: Format::Elf,
                 arch: Arch {

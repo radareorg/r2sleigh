@@ -902,7 +902,8 @@ fn every_string(session: &Session) -> Result<String, String> {
     out.push_str(&"-".repeat(66));
     for (nth, (paddr, vaddr, text)) in found.iter().enumerate() {
         out.push_str(&format!(
-            "\n{nth:<3} {paddr:#010x} {vaddr:#010x} {:<3} {:<4} {:<15} {:<5} {}",
+            "\n{nth:<3} {:#010x} {vaddr:#010x} {:<3} {:<4} {:<15} {:<5} {}",
+            image.file_base() + paddr,
             text.chars().count(),
             text.len() + 1,
             section_of(session, *paddr, true),
@@ -1039,7 +1040,7 @@ pub(crate) fn sections(session: &Session) -> Table {
             section.loaded.then_some(section.vaddr),
             format!(
                 "{nth:<3} {:#010x} {:>6} {:#010x} {:>6} -{}{}{} {:<5} {kind:<11} {name}",
-                section.file_offset,
+                session.image().file_base() + section.file_offset,
                 format!("{:#x}", section.file_size),
                 section.vaddr,
                 format!("{:#x}", section.vsize),
@@ -1399,8 +1400,11 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
     Ok(out)
 }
 
+/// The offset in the file of what `vaddr` holds: in a fat Mach-O, past the slice's own start.
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
-    let segment = session.image().segment_at(vaddr)?;
+    let image = session.image();
+    let segment = image.segment_at(vaddr)?;
     let offset_in_segment = vaddr - segment.vaddr;
-    (offset_in_segment < segment.file_size).then(|| segment.file_offset + offset_in_segment)
+    (offset_in_segment < segment.file_size)
+        .then(|| image.file_base() + segment.file_offset + offset_in_segment)
 }
