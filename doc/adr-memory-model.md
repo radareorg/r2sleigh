@@ -108,6 +108,7 @@ stays alive until the response is built.
 | #187 | A written-lane record of data throughout is its size; the pass keeps one copy | heap peak 0pack 158.3 to 148.2 MB, pumasim 139.9 to 133.1, session 179.6 to 168.5 |
 | #188 | A graph instruction's disposition is its state and its run of the table; its identity is the graph's | heap peak 0pack 148.2 to 144.2 MB, pumasim 133.1 to 130.0, session 168.5 to 163.4 |
 | #189 | The image maps its file rather than copying it into the heap | heap peak pumasim `afl` 95.4 to 86.4 MB, 0pack `afl` 57.5 to 50.0, session 163.4 to 154.3 |
+| #191 | A relocation boxes its symbol; a symbol's name is one string shared by the name table and its seeks | `F` (pumasim's stub) 28.46 to 25.00 MB of heap |
 
 ## Left
 

@@ -425,10 +425,25 @@ maintainer accepts broken renderings on `rebuild` until it merges.
             pumasim `afl` 95.4 to 86.4 MiB, 0pack `afl` 57.5 to 50.0, pumasim
             `0x23fdf0` 130.0 to 120.9, the session 163.4 to 154.3; census
             byte-identical. The mapped pages count in RSS once read, and the
-            kernel can drop them without swap. Left: a symbol's name and its
-            name-table entry are two copies of one string (6.0 and 4.1 MiB),
-            relocations 3.8, the loader's composed writes 2.6, the unwind
-            frames 3.2.
+            kernel can drop them without swap. Step 2 done (#191): a
+            relocation boxes its symbol (112 to 64 bytes; pumasim's 28,026
+            relocations nearly all name none), and a symbol's name is one
+            `Arc<str>` shared by the symbol, the name table and its seeks,
+            which are one map per namespace keyed by the text past the
+            prefix where they were four copies. pumasim's stub 28.46 to
+            25.00 MB of heap (12%); census byte-identical. Left: the loader's
+            composed writes 2.6, the unwind frames 3.2, the symbols' own
+            layout (96 bytes, three `Option<usize>` indexes).
+
+            The exit (`c ≤ 600 B`) is not in reach of MM's contained steps:
+            at #191 `c` is 1.07 KB on pumasim's largest function, and the
+            cuts left and sized (the type interned 2.3 MiB, value geometries
+            3.4, obligation identities about 3, native spans 1.7) reach about
+            950 B. The rest is F2's single numbering, F2.4 and F2.5:
+            `GraphInst` and `GraphValue` are 64 bytes each (12 MiB on 0pack),
+            and interface recovery collects the fact pass the seal collects
+            again (LX4). MM pauses here until the stacks merge and that plan
+            is agreed.
          3. **MM.7** compact identities: a disposition (48 B per
             instruction) and an imported value carry a 32-byte canonical
             instruction id the graph already implies; an obligation copies
