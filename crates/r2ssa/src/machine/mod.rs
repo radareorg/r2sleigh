@@ -1322,10 +1322,10 @@ impl MachineProjection {
                 write_dispositions.push(None);
                 continue;
             };
-            let disposition = artifact
-                .obligations()
-                .instruction_for_inst(graph, inst.id)
-                .ok_or(MachineBuildError::MissingInstructionDisposition(inst.id))?;
+            let disposed = artifact.obligations().state_of(inst.id).is_some();
+            if !disposed {
+                return Err(MachineBuildError::MissingInstructionDisposition(inst.id));
+            }
             let graph_value = graph
                 .value(output_id)
                 .ok_or(MachineBuildError::MissingGraphValue(output_id))?;
@@ -1352,7 +1352,10 @@ impl MachineProjection {
                     )));
                     failures.push(MachineProjectionFailure {
                         output: output_id,
-                        producer: disposition.id,
+                        producer: (artifact.obligations())
+                            .instruction_for_inst(graph, inst.id)
+                            .ok_or(MachineBuildError::MissingInstructionDisposition(inst.id))?
+                            .id,
                         error,
                     });
                 }

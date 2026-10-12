@@ -559,6 +559,7 @@ pub struct SemanticObligationInventory {
     /// canonical operation for. They have no graph instruction to be indexed
     /// by, and there are none in an ordinary function.
     span_instructions: BTreeMap<CanonicalInstructionId, SemanticInstructionDisposition>,
+    /// Mutated only by `ObligationTable::of` and `extend_new`, each followed by `index_runs`.
     obligations: ObligationTable,
     native_spans: BTreeMap<CanonicalInstructionId, crate::GenuineNativeInstructionSpan>,
     construction_failures: Vec<ObligationInventoryFailure>,
@@ -1371,7 +1372,7 @@ impl SemanticObligationInventory {
                 .map(|d| self.owned(d).count())
                 .sum::<usize>();
         format!(
-            "instructions {} obligations {} by_inst {} native_spans {} inputs {} owned {} sizeof(id) {} sizeof(obligation) {} sizeof(disposition) {} sizeof(instid) {} sizeof(span) {}",
+            "instructions {} obligations {} by_inst {} native_spans {} inputs {} owned {} sizeof(id) {} sizeof(obligation) {} sizeof(owed) {} sizeof(instid) {} sizeof(span) {}",
             self.disposition_count(),
             self.obligations.len(),
             self.graph_instruction_count(),
@@ -2352,6 +2353,30 @@ mod tests {
                 || inventory.owned(&instruction).next().is_some()
         }));
         assert!(inventory.is_complete());
+    }
+
+    #[test]
+    fn an_instruction_s_run_holds_the_obligations_its_graph_identity_names() {
+        let artifact = SsaArtifact::raw(&obligation_fixture(), None).expect("SSA artifact");
+        let (graph, inventory) = (artifact.graph(), &artifact.facts().obligations);
+        let mut owing = 0;
+        for inst in &graph.insts {
+            let id = (inventory.instruction_for_inst(graph, inst.id))
+                .expect("every instruction is dispositioned")
+                .id;
+            let run = inventory.obligations_for_inst(inst.id).collect::<Vec<_>>();
+            owing += usize::from(!run.is_empty());
+            assert!(run.iter().all(|obligation| obligation.id.instruction == id
+                && obligation.source == SemanticSourceSite::GraphInstruction(inst.id)));
+            // The run is all of them: the table by identity finds no other.
+            assert_eq!(
+                inventory.obligations.run(&id).len(),
+                run.len(),
+                "{:?}",
+                inst.id
+            );
+        }
+        assert!(owing > 0, "the fixture owes something");
     }
 
     #[test]
