@@ -337,6 +337,26 @@ fn declared_callee() -> Literal {
     literal
 }
 
+/// `caller`: `mov ebx, TEXT; mov edi, ebx; call one; mov edi, ebx; call strlen; ret`.
+fn both_callees() -> Literal {
+    let mut literal = Literal::new().with_data().importing("strlen");
+    literal.write(ONE, &[0x8b, 0x07, 0xc3]);
+    let call = |at: u64, to: u64| {
+        let mut bytes = vec![0xe8];
+        bytes.extend((to.wrapping_sub(at + 5) as u32).to_le_bytes());
+        bytes
+    };
+    let mut bytes = vec![0xbb];
+    bytes.extend((TEXT as u32).to_le_bytes());
+    bytes.extend([0x89, 0xdf]);
+    bytes.extend(call(CALLER + 7, ONE));
+    bytes.extend([0x89, 0xdf]);
+    bytes.extend(call(CALLER + 14, STUB));
+    bytes.push(0xc3);
+    literal.write(CALLER, &bytes);
+    literal
+}
+
 /// What the `mov edi, TEXT` line claims about TEXT in `pd`, and the support `ax` holds it on.
 fn claimed_at_caller(literal: Literal) -> (Option<Basis>, Option<Basis>) {
     let mut program = OpenProgram::of(literal);
@@ -369,6 +389,9 @@ fn a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one() {
     // A declaration types the parameter as a pointer.
     let declared = Some(Basis::Declared);
     assert_eq!(claimed_at_caller(declared_callee()), (declared, declared));
+    // Handed to both, the declaration is the stronger reason: the grades put a library's stated
+    // prototype above one callee's observed use (doc/adr-provenance.md, C4).
+    assert_eq!(claimed_at_caller(both_callees()), (declared, declared));
     // `one` returns 1 and never reads its parameter, so the same number is only a number.
     let mut literal = Literal::new().with_data();
     passing_text(&mut literal, ONE);

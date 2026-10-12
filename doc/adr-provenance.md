@@ -60,6 +60,14 @@ It replaces about 45 ad hoc flags, scores and source enums.
   A declaration's carries the types' basis; a body proof is `Certified` and
   fills only a gap that a declaration left.
 
+- C4, references (#196): annotations, references, claims and pointer
+  parameters carry `Basis` (`Copy`, and no reference rests on a premise), and
+  `query::Support` is deleted. Its one ordering disagreement is judged for
+  the grades: a library's declaration, the contract of the import the loader
+  binds, outranks one callee's dereference, where `Support` ranked them the
+  other way (`a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one`
+  pins it).
+
 ## Left
 
 - C1 rest: r2dec reads the grade. Exit: `from_source_signature` is deleted.
@@ -68,10 +76,8 @@ It replaces about 45 ad hoc flags, scores and source enums.
 - C3 (with K's r2types loops): r2types candidates and source enums onto
   `Basis`. Exit: every `confidence: u8`, `TypeFactSource`, `StructDeclSource`,
   `ConstraintSource` and the projection-confidence fields are deleted.
-- C4: references carry `Confidence`, and the answer-field Dylint lands. Exit:
-  `query::Support` is deleted, and its one ordering disagreement is judged and
-  pinned by a test. (`Support` ranks `Dereferenced` above `Declared`; the
-  grades put it below.)
+- C4 rest: the answer-field Dylint. A reference carries a `Confidence` once
+  one first rests on a premise; none does today.
 
 ## Consequences
 
