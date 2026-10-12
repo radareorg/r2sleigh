@@ -68,11 +68,21 @@ It replaces about 45 ad hoc flags, scores and source enums.
   other way (`a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one`
   pins it).
 
+- C2, the function's answer (#197): `FunctionInfo::returns` is a
+  `Fact<Option<CTypeLike>>` and `return_unproven` is deleted; an argument's
+  type is a `Fact` that r2types states (`parameter_declaration_fact`: the
+  signature's on the interface's types, the body's solve's as `Solved`, else
+  the carrier width). A return's basis is read off its evidence: the
+  program's declaration `DebugInfo`, a proven void `Certified`, one type
+  every exit agrees on `Solved`, a carrier's word `CarrierWidth`, an unproven
+  one the `Convention`; `afi` marks `/* unproven */` at grade `Assumed`, so
+  its text is unchanged.
+
 ## Left
 
 - C1 rest: r2dec reads the grade. Exit: `from_source_signature` is deleted.
-- C2: r2engine answers as `Fact`, read by `afi`, `afv`, `aflj` and `pddj`.
-  Exit: `return_unproven` is deleted.
+- C2 rest: the convention, a local's type and the syscall number and name as
+  `Fact`s, and `aflj` and `pddj` carrying each confidence.
 - C3 (with K's r2types loops): r2types candidates and source enums onto
   `Basis`. Exit: every `confidence: u8`, `TypeFactSource`, `StructDeclSource`,
   `ConstraintSource` and the projection-confidence fields are deleted.

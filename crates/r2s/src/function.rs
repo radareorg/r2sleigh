@@ -50,10 +50,11 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
 
 /// `signature: <ret> <name> (<type> <arg>, ...);`, as radare2's `afcf` spells one, where it is authorized.
 fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -> Option<String> {
-    // An unproven return is the carrier the rendered header declares, marked
-    // as the unproven value it is; with no carrier, the mark alone keeps the
-    // arity showing.
-    let returns = match (&info.returns, info.return_unproven) {
+    // A return the convention alone states is the carrier the rendered header declares, marked as
+    // the unproven value it is; with no carrier, the mark alone keeps the arity showing.
+    let returns = info.returns.as_ref()?;
+    let assumed = returns.grade() == r2engine::discovery::Grade::Assumed;
+    let returns = match (&returns.value, assumed) {
         (Some(returns), false) => returns.to_string(),
         (Some(carrier), true) => format!("/* unproven */ {carrier}"),
         (None, true) => "/* unproven */".to_owned(),
@@ -98,7 +99,7 @@ fn spell_argument(session: &Session, entry: u64, argument: &Argument) -> String 
         .and_then(|storage| session.program.spell_storage(entry, storage))
         .map(|register| format!(" @ {register}"))
         .unwrap_or_default();
-    format!("arg {} {}{at}", argument.ty, argument_name(argument))
+    format!("arg {} {}{at}", argument.ty.value, argument_name(argument))
 }
 
 /// `var <type> <name> @ <base><offset>`, named as the decompiler names it.

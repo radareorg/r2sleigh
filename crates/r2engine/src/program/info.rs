@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use r2source::confidence::{Basis, Fact};
 use r2types::{CTypeLike, CertifiedEntity, SourceOwnedFunctionFacts};
 
 pub use r2ssa::StackAddressBase as StackBase;
@@ -23,12 +24,10 @@ pub struct FunctionInfo {
     pub convention: Option<String>,
     pub arguments: Vec<Argument>,
     pub locals: Vec<Local>,
-    /// What a definition of it declares it returns, as r2types states it: the
-    /// decided type, or the result carrier where the value is unproven.
-    pub returns: Option<CTypeLike>,
-    /// Whether the boundary proves neither a result nor its absence, so
-    /// `returns` is the carrier a caller reads and not a proven type.
-    pub return_unproven: bool,
+    /// What a definition of it declares it returns, and what that rests on: the decided type, or
+    /// the result carrier a caller reads, on the convention alone, where the value is unproven
+    /// (none where C has no carrier that wide). Absent where r2types refuses a type.
+    pub returns: Option<Fact<Option<CTypeLike>>>,
     /// Whether the whole program proves control never comes back from it.
     pub noreturn: bool,
 }
@@ -48,7 +47,9 @@ pub struct Argument {
     pub slot: u32,
     /// The storage it arrives in, where the entry value names one.
     pub storage: Option<r2ssa::CanonicalStorageId>,
-    pub ty: CTypeLike,
+    /// Its type, and what that rests on: the interface's types, the body's solve, or only the
+    /// width of the carrier it arrives in.
+    pub ty: Fact<CTypeLike>,
     /// What the source calls it, where the source names it.
     pub name: Option<String>,
 }
@@ -67,7 +68,7 @@ pub struct Local {
 impl Argument {
     /// This parameter declared under a name, as C spells the declaration.
     pub fn declared_as(&self, name: &str) -> String {
-        r2types::c_object_declaration(&self.ty, name)
+        r2types::c_object_declaration(&self.ty.value, name)
     }
 }
 
@@ -96,9 +97,6 @@ impl FunctionInfo {
             convention: facts.type_facts().callconv.clone(),
             arguments: arguments(artifact, sealed, &entities),
             returns: returns(artifact, sealed),
-            return_unproven: sealed
-                .return_type()
-                .is_some_and(r2types::ReturnTypeFact::is_unproven),
             locals: locals(artifact, sealed, &entities),
             noreturn,
         }
@@ -219,9 +217,8 @@ fn arguments(
                     .display_names()
                     .parameter(*slot as usize)
                     .map(str::to_owned),
-                ty: sealed
-                    .parameter_declaration(*slot as usize, width_bits)
-                    .unwrap_or_else(|| CTypeLike::machine_bits(width_bits)),
+                ty: (sealed.parameter_declaration_fact(*slot as usize, width_bits))
+                    .unwrap_or_else(|| carrier_typed(width_bits)),
             })
         })
         .collect::<Vec<_>>();
@@ -243,25 +240,53 @@ fn arguments(
                 .display_names()
                 .parameter(slot as usize)
                 .map(str::to_owned),
-            ty: sealed
-                .parameter_declaration(slot as usize, width_bits)
-                .unwrap_or_else(|| CTypeLike::machine_bits(width_bits)),
+            ty: (sealed.parameter_declaration_fact(slot as usize, width_bits))
+                .unwrap_or_else(|| carrier_typed(width_bits)),
         });
     }
     arguments.sort_unstable_by_key(|argument| argument.slot);
     arguments
 }
 
+/// A type that is only the width of the carrier a value arrives in.
+fn carrier_typed(width_bits: u32) -> Fact<CTypeLike> {
+    Fact::new(CTypeLike::machine_bits(width_bits), Basis::CarrierWidth)
+}
+
 /// The decided return, spelled as a rendering declares it.
-fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> Option<CTypeLike> {
+fn returns(
+    artifact: &r2ssa::SsaArtifact,
+    sealed: &SourceOwnedFunctionFacts,
+) -> Option<Fact<Option<CTypeLike>>> {
     let bits = artifact
         .machine_context()
         .memory_model()
         .default_address_bits();
-    Some(r2types::spellable_c_type_like(
-        sealed.return_type()?.declared()?,
-        bits,
-    ))
+    let fact = sealed.return_type()?;
+    let declared = fact
+        .declared()
+        .map(|ty| r2types::spellable_c_type_like(ty, bits));
+    Some(Fact::new(declared, return_basis(fact)?))
+}
+
+/// What a return type rests on (doc/adr-provenance.md, C2); none where r2types refuses one.
+fn return_basis(fact: &r2types::ReturnTypeFact) -> Option<Basis> {
+    use r2types::{ReturnTypeEvidence as By, ReturnTypeFact as Return};
+    Some(match fact {
+        Return::Decided { by, .. } => match by {
+            // The program's own declaration, in its debug information.
+            By::ExactSource | By::Declared => Basis::DebugInfo,
+            // Every exit proven to hand back no value.
+            By::VoidBoundary => Basis::Certified,
+            // One type agreed by every exit: true of each, exact of none.
+            By::Exits => Basis::Solved,
+            // Only the width of the storage word every return certifies.
+            By::Carrier => Basis::CarrierWidth,
+        },
+        // The convention's result slot, which no exit is proven to fill.
+        Return::Unproven { .. } => Basis::Convention,
+        Return::Refused(_) => return None,
+    })
 }
 
 /// Every declarable stack object, and every frame slot promotion took out of memory: the frame

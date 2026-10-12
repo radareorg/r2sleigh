@@ -2,6 +2,8 @@
 
 mod common;
 
+use r2engine::discovery::Basis;
+
 use common::{BASE, Literal};
 use r2engine::program::OpenProgram;
 
@@ -61,7 +63,7 @@ fn afi_and_the_header_declare_a_parameter_alike() {
     let declared = info
         .arguments
         .iter()
-        .map(|argument| r2types::c_object_declaration(&argument.ty, "_"))
+        .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
         .collect::<Vec<_>>();
     // The declaration's `const` lives on the signature, not on the type graph the parameter entity carries.
     assert_eq!(declared, ["const char* _"], "{header}");
@@ -72,6 +74,11 @@ fn afi_and_the_header_declare_a_parameter_alike() {
         .expect("a typed parameter");
     assert_eq!(format!("{ty} _"), declared[0], "{header}");
     assert!(info.returns.is_some(), "afi decides no return for {header}");
+    // Both rest on the program's own declaration.
+    let bases = (info.arguments.iter().map(|argument| argument.ty.confidence.basis))
+        .chain(info.returns.iter().map(|returns| returns.confidence.basis))
+        .collect::<Vec<_>>();
+    assert_eq!(bases, [Basis::DebugInfo, Basis::DebugInfo], "{header}");
 }
 
 /// A body the program calls `strlen` is the program's own, and the library
@@ -90,9 +97,12 @@ fn a_body_named_after_a_library_function_takes_nothing_from_the_table() {
     let declared = info
         .arguments
         .iter()
-        .map(|argument| r2types::c_object_declaration(&argument.ty, "_"))
+        .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
         .collect::<Vec<_>>();
     assert_eq!(declared, ["uint64_t _"]);
+    // Recovered, so nothing declares it: the type is no more than the body's reading of it.
+    let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
+    assert_eq!(bases.collect::<Vec<_>>(), [Basis::CarrierWidth]);
 }
 
 /// `sub rsp, 8; call rdi; add rsp, 8; ret`: it returns whatever the function
@@ -122,8 +132,13 @@ fn afi_and_the_header_declare_an_unproven_return_alike() {
         .response
         .output
         .into_text();
-    assert!(info.return_unproven, "{info:?}\n{rendered}");
-    let declared = info.returns.as_ref().expect("the carrier is declared");
+    let returns = info.returns.as_ref().expect("a return is stated");
+    assert_eq!(
+        returns.confidence.basis,
+        Basis::Convention,
+        "{info:?}\n{rendered}"
+    );
+    let declared = returns.value.as_ref().expect("the carrier is declared");
     assert_eq!(declared.to_string(), "uint64_t", "{rendered}");
     let header = rendered.lines().next().expect("a header");
     assert!(

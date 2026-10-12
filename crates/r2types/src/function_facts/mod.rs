@@ -1086,16 +1086,33 @@ impl SourceOwnedFunctionFacts {
 
     /// The type parameter `slot` is declared with at this width: the signature's where it fits, else the certified entity's.
     pub fn parameter_declaration(&self, slot: usize, width_bits: u32) -> Option<CTypeLike> {
+        self.parameter_declaration_fact(slot, width_bits)
+            .map(|fact| fact.value)
+    }
+
+    /// [`Self::parameter_declaration`], with what it rests on (doc/adr-provenance.md, C2): the
+    /// signature's on the interface's types, the certified entity's on the body's type solve.
+    pub fn parameter_declaration_fact(
+        &self,
+        slot: usize,
+        width_bits: u32,
+    ) -> Option<r2source::confidence::Fact<CTypeLike>> {
+        use r2source::confidence::{Basis, Confidence, Fact};
         let ptr_bits = self
             .source
             .machine_context()
             .memory_model()
             .default_address_bits();
+        let types = (self.source.machine_context().function_interface()).map_or_else(
+            || Confidence::of(Basis::Convention),
+            |interface| interface.types().clone(),
+        );
         let signed = self
             .report
             .type_facts()
             .render_authorized_signature()
-            .and_then(|signature| signature.params.get(slot)?.ty.clone());
+            .and_then(|signature| signature.params.get(slot)?.ty.clone())
+            .map(|ty| (ty, types));
         let certified = u32::try_from(slot).ok().and_then(|slot| {
             match self
                 .report
@@ -1107,10 +1124,14 @@ impl SourceOwnedFunctionFacts {
                 _ => None,
             }
         });
+        let certified = certified.map(|ty| (ty, Confidence::of(Basis::Solved)));
         signed
             .into_iter()
             .chain(certified)
-            .find_map(|ty| admissible_declaration_type(ty, width_bits, ptr_bits))
+            .find_map(|(ty, confidence)| {
+                admissible_declaration_type(ty, width_bits, ptr_bits)
+                    .map(|ty| Fact::new(ty, confidence))
+            })
     }
 
     pub(crate) fn stamp_report_decompile_route(
