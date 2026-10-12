@@ -11,11 +11,22 @@ use std::collections::BTreeMap;
 
 use super::source::{EntryKind, Section, Source, Symbol, SymbolKind};
 use crate::names::{Name, NameDb, Namespace};
+use crate::program::Binding;
 use r2il::R2ILOp;
 use r2sleigh_lift::Disassembler;
 
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
+
+/// How strongly a binding names its address: a global before a weak alias before a local one.
+const fn binding_strength(binding: Binding) -> u8 {
+    match binding {
+        Binding::Global => 0,
+        Binding::Weak => 1,
+        Binding::Local => 2,
+        Binding::Other(_) => 3,
+    }
+}
 
 /// Every address this binary names, as the container states it.
 pub fn of(source: &impl Source) -> NameDb {
@@ -38,10 +49,13 @@ pub fn of(source: &impl Source) -> NameDb {
             },
         );
     }
-    for symbol in &image.symbols {
-        if !names_an_address(symbol) {
-            continue;
-        }
+    // Of several symbols at one address the strongest binding names it (`_exit` over its WEAK
+    // alias `_Exit`, `write` over a LOCAL `__GI___libc_write`); a stable sort keeps names' order.
+    let mut symbols = (image.symbols.iter())
+        .filter(|symbol| names_an_address(symbol))
+        .collect::<Vec<_>>();
+    symbols.sort_by_key(|symbol| (symbol.vaddr, binding_strength(symbol.binding)));
+    for symbol in symbols {
         db.insert(
             symbol.vaddr,
             Name {

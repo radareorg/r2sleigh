@@ -208,11 +208,11 @@ reason = "the stub at 0x3e110 loads pc from 0x41b88, __cxa_finalize's slot; rada
 
 [[judged]]
 command = "pd"
-binaries = "*libc*"
-r2 = 'call sym\.(_exit|__write|write)$'
-r2s = 'call sym\.(_Exit|__GI___libc_write)$'
-verdict = "r2-right"
-reason = "of several symbols at one address r2s names the alphabetically first (WEAK _Exit, LOCAL __GI___libc_write); the strongest binding should name it (GLOBAL _exit, WEAK write); owner r2engine naming"
+binaries = "glibc-2.34*"
+r2 = 'call sym\.write$'
+r2s = 'call sym\.__write$'
+verdict = "deliberate"
+reason = "two exported WEAK aliases at one address: r2s names the first by name, radare2 the later table entry (__write in 2.31, write in 2.34)"
 
 [[judged]]
 command = "pd"
