@@ -1,0 +1,152 @@
+# Disagreements between radare2 and r2s that are judged: who is right, and why
+# (ROADMAP P11). `diff_r2.py` fails on any disagreement no entry covers and
+# reports an entry nothing matched.
+#
+# command   the verb (`pd`, `px`, `iS`, `is`, `ie`)
+# binaries  a shell pattern over the file name
+# r2, r2s   for a listing: regular expressions each tool's line must match
+#           (`<missing>` where the tool printed no line); an absent one is any
+# values    for a values listing: the values r2s reports and radare2 does not
+# verdict   r2s-right: radare2's defect, an upstream candidate
+#           r2-right: r2s's defect, with its owner in the reason
+#           unfilled: r2s does not yet state what radare2 does
+#           deliberate: r2s spells it otherwise on purpose
+
+[[judged]]
+command = "pd"
+binaries = "armeb_hello_static"
+verdict = "r2s-right"
+reason = "e_flags 0x5800202 states BE8: code is little-endian; radare2 decodes it big-endian"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = '(push|mov r8,|ldr (ip|r0|r3),) (sym\.__libc_csu_|main$)'
+r2s = '(push|mov r8,|ldr (ip|r0|r3),) (0x|\[0x)'
+verdict = "deliberate"
+reason = "a number is named only where the engine claims it as an address; a pool load is spelled as encoded (listing.rs `held`)"
+
+[[judged]]
+command = "pd"
+binaries = "_Exit (42)"
+r2 = ' ff +invalid$'
+r2s = '^<missing>$'
+verdict = "r2s-right"
+reason = "past the last PT_LOAD (0x8049030) nothing is mapped; radare2 lists its 0xff fill"
+
+[[judged]]
+command = "px"
+binaries = "_Exit (42)"
+r2 = 'ffff ffff ffff ffff'
+r2s = '^<missing>$'
+verdict = "r2s-right"
+reason = "past the last PT_LOAD (0x8049030) nothing is mapped; radare2 dumps its 0xff fill"
+
+[[judged]]
+command = "px"
+binaries = "syscall_x86"
+r2 = '^0x00400104 .*0a00 ffff ffff ffff'
+verdict = "r2s-right"
+reason = ".rodata ends at 0x40010e and nothing is mapped after it; radare2 dumps its 0xff fill"
+
+[[judged]]
+command = "px"
+binaries = "test_o"
+r2 = 'ffff'
+verdict = "r2s-right"
+reason = "a relocatable object's .text ends at 0x08000056 and .comment is not loaded; radare2 dumps its 0xff fill"
+
+[[judged]]
+command = "iS"
+binaries = "*"
+values = ["0x70000001", "0x70000003"]
+verdict = "unfilled"
+reason = "processor-specific types (ARM_EXIDX, ARM_ATTRIBUTES by e_machine): r2s prints the number, radare2 `----`; both owe the name"
+
+[[judged]]
+command = "iS"
+binaries = "*"
+values = ["0x60000002"]
+verdict = "unfilled"
+reason = "an OS-specific type (Android's packed RELA): r2s prints the number, radare2 `----`; both owe the name"
+
+[[judged]]
+command = "is"
+binaries = "arm*"
+values = ["0x1", "0x5f7d7", "0x677d7", "0x61a2d", "0x69a2d"]
+verdict = "r2s-right"
+reason = "STT_OBJECTs at odd addresses (only STT_FUNC carries the Thumb bit; radare2 clears it), and SHN_ABS value 1 (radare2 rebases it to 0x8000)"
+
+[[judged]]
+command = "is"
+binaries = "0pack"
+values = ["0x55078", "0x455078"]
+verdict = "r2s-right"
+reason = "a .plt.got stub, `jmp qword [reloc._ZNSt13runtime_errorD1Ev]`, that radare2 does not name as an import"
+
+[[judged]]
+command = "ie"
+binaries = "libc-2.2*-debug.so"
+values = ["0x18", "0x20be0", "0x212e0"]
+verdict = "r2s-right"
+reason = "a debuginfo file's header states e_entry (field at 0x18); radare2 reports no entry for it"
+
+[[judged]]
+command = "pd"
+binaries = "libc-2.2*-debug.so"
+verdict = "r2s-right"
+reason = "listed at the stated e_entry, which radare2 drops, so the two list different places of a NOBITS .text"
+
+[[judged]]
+command = "px"
+binaries = "libc-2.2*-debug.so"
+verdict = "r2s-right"
+reason = "dumped at the stated e_entry, which radare2 drops, so the two dump different places"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'lea r8, \[0x'
+r2s = 'lea r8, 0x'
+verdict = "r2-right"
+reason = "Sleigh spells lea's memory operand without brackets; owner r2sleigh-lift's display"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'push \{'
+r2s = 'stmdb sp!, \{'
+verdict = "r2-right"
+reason = "UAL prefers the push alias; Sleigh spells stmdb; owner r2sleigh-lift's display"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'nop word cs:'
+r2s = 'nop word ptr cs:'
+verdict = "r2-right"
+reason = "Sleigh spells `ptr` and a scale of one; owner r2sleigh-lift's display"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'str\.[A-Za-z0-9_]*\.[A-Za-z0-9_.]*'
+r2s = 'str\.[A-Za-z0-9_]*$'
+verdict = "r2-right"
+reason = "radare2's flag filter keeps `.` in a string's name; r2s's identifier replaces it; owner r2engine names"
+
+[[judged]]
+command = "pd"
+binaries = "*.ko"
+r2 = 'call (reloc\.|[A-Za-z_])'
+r2s = 'call 0x'
+verdict = "unfilled"
+reason = "a relocatable object's call is resolved by its relocation; r2s does not apply ET_REL relocations to listings yet"
+
+[[judged]]
+command = "pd"
+binaries = "test.ko"
+r2 = 'mov rdi, \.rodata'
+r2s = 'mov rdi, 0x'
+verdict = "unfilled"
+reason = "a relocatable object's operand is resolved by its relocation; r2s does not apply ET_REL relocations to listings yet"

@@ -71,7 +71,17 @@ The profile, owned by r2abi (the cited rows) and selected by r2engine, states:
    (`__cxa_throw`, operator `new`). A model names a callee's effect and
    whether it returns; it never names semantics a body would have to prove.
 5. **Names.** A demangler per scheme, in r2engine's naming, producing a
-   display name. A name stays a hint.
+   display name. A name stays a hint. Planned (2026-10-13): `Name.text`
+   keeps the mangled spelling prototype tables are keyed by, and the
+   demangled form (Itanium, Rust v0 and legacy, by the mangling LP0 reads)
+   is a column beside it, which `is` shows as radare2's `demangled` column
+   does. Which spelling a flag (`afl`, a seek) and a C identifier (`pdd`)
+   take is command and renderer policy, decided with D: radare2's flags
+   filter the demangled form (`r_name_filter`: letters, digits, `.`, `:` and
+   `_` kept, brackets, `~`, `,`, `-`, `/`, `;`, `?`, `@`, quotes and spaces
+   made `_`, the rest dropped), and C has no `::`. The demanglers
+   (`cpp_demangle`, `rustc-demangle`) are dependencies for the maintainer
+   to accept.
 6. **Rendering.** The spelling of the language-neutral render tree.
 
 ## What stays neutral
