@@ -106,30 +106,6 @@ reason = "dumped at the stated e_entry, which radare2 drops, so the two dump dif
 
 [[judged]]
 command = "pd"
-binaries = "*"
-r2 = 'lea r8, \[0x'
-r2s = 'lea r8, 0x'
-verdict = "r2-right"
-reason = "Sleigh spells lea's memory operand without brackets; owner r2sleigh-lift's display"
-
-[[judged]]
-command = "pd"
-binaries = "*"
-r2 = 'push \{'
-r2s = 'stmdb sp!, \{'
-verdict = "r2-right"
-reason = "UAL prefers the push alias; Sleigh spells stmdb; owner r2sleigh-lift's display"
-
-[[judged]]
-command = "pd"
-binaries = "*"
-r2 = 'nop word cs:'
-r2s = 'nop word ptr cs:'
-verdict = "r2-right"
-reason = "Sleigh spells `ptr` and a scale of one; owner r2sleigh-lift's display"
-
-[[judged]]
-command = "pd"
 binaries = "*.ko"
 r2 = 'call (reloc\.|[A-Za-z_])'
 r2s = 'call 0x'
@@ -219,14 +195,6 @@ command = "pd"
 binaries = "libverifyPass.so"
 verdict = "r2-right"
 reason = "ARM32 (ungraded): PLT0's literal word (0xed4) does not decode, so the stub walk refuses the .plt and its stubs go unnamed, and a listing steps one byte past an undecodable ARM word; the adr spelling is Sleigh's UAL; owners r2engine naming and the listing"
-
-[[judged]]
-command = "pd"
-binaries = "*"
-r2 = 'ldr r0, \[r0\]$'
-r2s = 'ldr r0, \[r0, 0x0\]$'
-verdict = "r2-right"
-reason = "Sleigh spells a zero offset; owner r2sleigh-lift's display"
 
 [[judged]]
 command = "pd"

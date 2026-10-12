@@ -195,6 +195,17 @@ pub(crate) fn painted(
         if start < at || end > syntax.body.len() {
             continue;
         }
+        // `lea` computes the address it brackets, so a name standing for it takes the brackets:
+        // radare2 writes `lea r8, sym.fini` and `lea r8, [0x11e0]`.
+        let (start, end) = match named.is_some()
+            && syntax.mnemonic == "lea"
+            && syntax.body[..start].ends_with('[')
+            && syntax.body[end..].starts_with(']')
+            && start > at
+        {
+            true => (start - 1, end + 1),
+            false => (start, end),
+        };
         text.push_str(&syntax.body[at..start]);
         let from = text.len();
         text.push_str(named.as_deref().unwrap_or(&syntax.body[start..end]));
@@ -604,6 +615,22 @@ mod tests {
         assert_eq!(
             spelled(&line("call", "0x100000340"), &db()),
             "call sym._add_two"
+        );
+    }
+
+    #[test]
+    fn a_named_effective_address_takes_its_brackets_and_a_named_read_keeps_them() {
+        assert_eq!(
+            spelled(&line("lea", "r8, [0x100000340]"), &db()),
+            "lea r8, sym._add_two"
+        );
+        assert_eq!(
+            spelled(&line("lea", "r8, [0x100000341]"), &db()),
+            "lea r8, [0x100000341]"
+        );
+        assert_eq!(
+            spelled(&line("mov", "rax, qword [0x100000340]"), &db()),
+            "mov rax, qword [sym._add_two]"
         );
     }
 
