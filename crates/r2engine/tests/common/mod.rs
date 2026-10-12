@@ -179,6 +179,19 @@ const PLT_CET: [u8; 0x36] = [
     0xc3, // ret
 ];
 
+/// A Mach-O `__stub_helper`: a header jumping through the binder's bound slot, and two lazy
+/// entries jumping to the header.
+const STUB_HELPER: [u8; 0x24] = [
+    0x4c, 0x8d, 0x1d, 0x01, 0x10, 0x00, 0x00, // lea r11, [rip + 0x1001]
+    0x41, 0x53, // push r11
+    0xff, 0x25, 0xf1, 0x0f, 0x00, 0x00, // jmp qword [rip + 0xff1], the binder's slot
+    0x90, // nop
+    0x68, 0x00, 0x00, 0x00, 0x00, // push 0
+    0xe9, 0xe6, 0xff, 0xff, 0xff, // jmp the header
+    0x68, 0x01, 0x00, 0x00, 0x00, // push 1
+    0xe9, 0xdc, 0xff, 0xff, 0xff, // jmp the header
+];
+
 /// Where [`PLT_CET`]'s `.plt.sec` stub begins.
 pub const PLT_SEC_STUB: u64 = BASE + 0x20;
 
@@ -603,6 +616,17 @@ impl Literal {
             },
             import_write(PLT_SLOT, 8, import),
         ];
+        program
+    }
+
+    /// A Mach-O stub helper whose header reads `dyld_stub_binder`'s slot.
+    pub fn stub_helper() -> Self {
+        let mut program = Self::plt_importing("dyld_stub_binder");
+        program.code = &STUB_HELPER;
+        program.container.segments = vec![code_segment(BASE, STUB_HELPER.len() as u64)];
+        program.container.sections.truncate(1);
+        program.container.sections[0].name = "__stub_helper".to_owned();
+        program.container.sections[0].vsize = STUB_HELPER.len() as u64;
         program
     }
 

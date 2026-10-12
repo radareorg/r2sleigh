@@ -412,6 +412,10 @@ fn section_stubs(
     let mut transfers: Vec<u64> = Vec::new();
     // Whether any run left as linkage code leaves: through a loader word or within the section.
     let mut left = false;
+    // Where the section's own entries jump: the resolver they share, which no import's stub is.
+    let mut entered = std::collections::BTreeSet::new();
+    // Where each reader's run began, beside it in `readers`.
+    let mut runs: Vec<u64> = Vec::new();
     let mut run = fresh_run(section.vaddr);
     // Where each instruction of the run begins, and its first operation.
     let mut starts: Vec<(u64, usize)> = Vec::new();
@@ -454,6 +458,15 @@ fn section_stubs(
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::BranchInd { .. }));
+        let section_range = section.vaddr..end;
+        entered.extend(lifted.ops.iter().filter_map(|op| match op {
+            R2ILOp::Branch { target }
+                if target.space == r2il::SpaceId::Ram && section_range.contains(&target.offset) =>
+            {
+                Some(target.offset)
+            }
+            _ => None,
+        }));
         starts.push((pc, run.ops.len()));
         run.ops.extend(lifted.ops);
         run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
@@ -492,10 +505,15 @@ fn section_stubs(
         if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
             let start = stub_start(&run, &starts, section.align);
             readers.push((leaving_at, start, (*found).to_owned()));
+            runs.push(run.addr);
         }
         run = fresh_run(pc);
         starts.clear();
     }
+    // Mach-O's __stub_helper header jumps through dyld_stub_binder's bound slot, as each lazy
+    // entry jumps to it: it is the section's resolver, and names no import.
+    let mut ran = runs.into_iter();
+    readers.retain(|_| ran.next().is_none_or(|addr| !entered.contains(&addr)));
     // A section that is all linkage code holds no function, whether or not it names a stub.
     left.then(|| cells(readers, &transfers, end))
 }

@@ -171,3 +171,15 @@ fn a_call_is_read_against_the_c_library_the_container_names_and_no_other() {
     // An identifier is looked up as it is: a program's own `_strlen` is not `strlen`.
     assert_eq!(declared("_strlen", &[Interpreter(Glibc)]), None);
 }
+
+/// The helper's lazy entries all jump to its header, which jumps through the binder's slot: the
+/// header is the section's resolver and no import's stub, as ELF's PLT0 is.
+#[test]
+fn a_header_the_section_s_entries_jump_to_is_no_import_s_stub() {
+    let program = OpenProgram::of(Literal::stub_helper());
+    let named = program.imports().stubs.clone();
+    assert!(
+        named.values().all(|stub| stub.symbol != "dyld_stub_binder"),
+        "{named:x?}"
+    );
+}

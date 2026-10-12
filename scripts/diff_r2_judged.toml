@@ -416,10 +416,3 @@ command = "pd"
 binaries = "TrollStore"
 verdict = "deliberate"
 reason = "a fat file of arm64 and arm64e: r2s reads the arm64 slice, radare2 the arm64e one, so their entries differ"
-
-[[judged]]
-command = "is"
-binaries = "*"
-r2s = 'imp\.dyld_stub_binder$'
-verdict = "r2-right"
-reason = "__stub_helper's header jumps through dyld_stub_binder's bound slot, so the stub walk names the whole helper as that import's stub; a helper's header is no import's stub; owner r2engine naming"

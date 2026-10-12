@@ -315,7 +315,10 @@ mod tests {
     fn sleigh_s_spellings_read_as_radare2_writes_them() {
         let text = |mnemonic, body, arch| radare2(mnemonic, body, 4, arch).text();
         assert_eq!(text("stmdb", "r13!,{r11,r14}", "ARM"), "push {fp, lr}");
-        assert_eq!(text("stmdb", "r13!,{r8,r10,r11}", "ARM"), "push {r8, sl, fp}");
+        assert_eq!(
+            text("stmdb", "r13!,{r8,r10,r11}", "ARM"),
+            "push {r8, sl, fp}"
+        );
         assert_eq!(text("ldmia", "r13!,{r4,r15}", "ARM"), "pop {r4, pc}");
         assert_eq!(text("ldmia", "r0!,{r1,r2}", "ARM"), "ldm r0!, {r1, r2}");
         assert_eq!(text("ldr", "r0,[r0,#0x0]", "ARM"), "ldr r0, [r0]");
