@@ -63,18 +63,18 @@ class Judged(unittest.TestCase):
 
     def test_a_value_is_judged_only_by_its_listed_values(self):
         table = judgments()
-        self.assertIsNotNone(diff_r2.judgment_for(table, "any", "iS", ("value", (0x70000001, "type"))))
-        self.assertIsNone(diff_r2.judgment_for(table, "any", "iS", ("value", (0x70000002, "type"))))
+        self.assertIsNotNone(diff_r2.judgment_for(table, "any", "iS", ("value", (0x70000001, "type", "1 0x70000001"))))
+        self.assertIsNone(diff_r2.judgment_for(table, "any", "iS", ("value", (0x70000002, "type", "1 0x70000002"))))
 
     def test_a_column_judgment_covers_only_values_in_its_columns(self):
         table = judgments()
-        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "ie", ("value", (0x468, "vhaddr"))))
-        self.assertIsNone(diff_r2.judgment_for(table, "a", "ie", ("value", (0x468, "paddr"))))
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "ie", ("value", (0x468, "vhaddr", "0x10 0x468"))))
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "ie", ("value", (0x468, "paddr", "0x468 0x10"))))
 
     def test_a_value_takes_the_column_its_header_names(self):
         lines = ["paddr      vaddr      phaddr     vhaddr     type", "0x10 0x1000 0x18 0x100018 program"]
-        self.assertEqual(diff_r2.columns(lines)[0x100018], "vhaddr")
-        self.assertEqual(diff_r2.columns(lines)[0x10], "paddr")
+        self.assertEqual(diff_r2.columns(lines)[0x100018][0], "vhaddr")
+        self.assertEqual(diff_r2.columns(lines)[0x10][0], "paddr")
 
     def test_a_judgment_nothing_matched_is_left_unmatched(self):
         table = judgments()

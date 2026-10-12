@@ -87,7 +87,7 @@ def values(lines):
 
 
 def columns(lines):
-    """Each value with the column its header names, where the listing has a header."""
+    """Each value with the column its header names, where the listing has a header, and its row."""
     header = next((line.split() for line in lines if "vaddr" in line.split()), None)
     found = {}
     for line in lines:
@@ -95,7 +95,7 @@ def columns(lines):
             if not HEX.fullmatch(token):
                 continue
             column = header[index] if header and index < len(header) else None
-            found.setdefault(int(token, 16), column)
+            found.setdefault(int(token, 16), (column, line))
     return found
 
 
@@ -151,7 +151,10 @@ def differences(command, mode, left, right):
     left_lines, right_lines = normalise(left, strip), normalise(right, strip)
     if mode == "values":
         theirs, ours = values(right_lines), columns(left_lines)
-        return [("value", (value, ours.get(value))) for value in sorted(values(left_lines) - theirs)]
+        return [
+            ("value", (value, *ours.get(value, (None, ""))))
+            for value in sorted(values(left_lines) - theirs)
+        ]
     found = []
     for index in range(max(len(left_lines), len(right_lines))):
         ours = left_lines[index] if index < len(left_lines) else None
@@ -187,12 +190,13 @@ def judgment_for(judgments, binary, command, difference):
         if kind == "value":
             # No values listed covers every value of those binaries, as no pattern covers any line;
             # columns listed cover only values r2s prints in them.
-            value, column = detail
-            listing = "r2" in judgment or "r2s" in judgment
+            # An `r2s` pattern is matched against the row r2s prints the value in.
+            value, column, row = detail
             covered = (
-                not listing
+                "r2" not in judgment
                 and (not judgment["values"] or value in judgment["values"])
                 and (not judgment["columns"] or column in judgment["columns"])
+                and re.search(judgment.get("r2s", ""), row) is not None
             )
         else:
             theirs, ours = detail
@@ -211,7 +215,7 @@ def spelled(difference):
     """One disagreement as the report prints it, indented under its command."""
     kind, detail = difference
     if kind == "value":
-        value, column = detail
+        value, column, _ = detail
         return "      {:#x}{}".format(value, " ({})".format(column) if column else "")
     theirs, ours = detail
     return "      r2  {}\n      r2s {}".format(
