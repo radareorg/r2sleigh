@@ -244,13 +244,14 @@ fn x86_condition_alias(text: &str) -> String {
     text.to_owned()
 }
 
-/// radare2 spells the three ARM registers that have a job by that job.
+/// radare2 spells the ARM registers that have a job by that job.
 ///
-/// The procedure call standard gives r11, r12, r13 and r14 the roles of frame
+/// The procedure call standard gives r10 to r14 the roles of stack limit, frame
 /// pointer, intra-procedure scratch, stack pointer and link register, and
 /// every ARM disassembler but Sleigh's prints the role.
 fn arm_role_registers(text: &str) -> String {
-    const ROLES: [(&str, &str); 5] = [
+    const ROLES: [(&str, &str); 6] = [
+        ("r10", "sl"),
         ("r11", "fp"),
         ("r12", "ip"),
         ("r13", "sp"),
@@ -314,6 +315,7 @@ mod tests {
     fn sleigh_s_spellings_read_as_radare2_writes_them() {
         let text = |mnemonic, body, arch| radare2(mnemonic, body, 4, arch).text();
         assert_eq!(text("stmdb", "r13!,{r11,r14}", "ARM"), "push {fp, lr}");
+        assert_eq!(text("stmdb", "r13!,{r8,r10,r11}", "ARM"), "push {r8, sl, fp}");
         assert_eq!(text("ldmia", "r13!,{r4,r15}", "ARM"), "pop {r4, pc}");
         assert_eq!(text("ldmia", "r0!,{r1,r2}", "ARM"), "ldm r0!, {r1, r2}");
         assert_eq!(text("ldr", "r0,[r0,#0x0]", "ARM"), "ldr r0, [r0]");

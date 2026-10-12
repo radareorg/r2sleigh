@@ -220,9 +220,9 @@ reason = "a relocatable object's call is resolved by its relocation; r2s does no
 
 [[judged]]
 command = "pd"
-binaries = "*.so"
-r2 = 'adrp x0, (segment|section)\.'
-r2s = 'adrp x0, 0x'
+binaries = "*"
+r2 = 'adrp x\d+, (segment|section|reloc|sym)\.'
+r2s = 'adrp x\d+, 0x'
 verdict = "deliberate"
 reason = "a page base is no address the instruction uses, so r2s names none (listing.rs `painted`)"
 
@@ -330,3 +330,71 @@ binaries = ["a.out", "AppIOSEntitlements.ios", "BatteryLife", "cat-macos-arm64",
 columns = ["paddr"]
 verdict = "r2s-right"
 reason = "a fat file's offsets are the file's: radare2's iS counts from the slice where its own is and ie count from the file"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = '(lea|mov) r\w+, (qword )?\[?(str|sym|section|segment|loc)\.'
+r2s = '(lea|mov) r\w+, (qword )?\[0x'
+verdict = "deliberate"
+reason = "a number is named only where the engine claims it as an address; pd claims no lea or load target radare2 flags"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = '(lea|mov) r\w+, (qword )?\[?(sym|str|section)\.'
+r2s = '(lea|mov) r\w+, (qword )?\[?(reloc|obj)\.'
+verdict = "deliberate"
+reason = "of several names at one address r2s takes a relocation's before a symbol's, and calls a data symbol obj."
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'bl? main$'
+r2s = 'bl? sym\._main$'
+verdict = "deliberate"
+reason = "radare2 names LC_MAIN's target main; r2s names it by its symbol"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = '^(?!.*_\$s)'
+r2s = '(sym|obj)\.(imp\.)?_?\$s|sym\._\$s'
+verdict = "unfilled"
+reason = "Swift names: radare2 demangles them, r2s spells them mangled until LP3's demangler"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'bl sym\.func\.'
+r2s = 'bl 0x'
+verdict = "unfilled"
+reason = "radare2 names each LC_FUNCTION_STARTS entry sym.func.*; r2s names no function start in a listing"
+
+[[judged]]
+command = "pd"
+binaries = ["TestRTTI-armv7", "arm-or-thumb", "arm16-ofp.lzh", "arm32-ofp.lzh", "hello-objc-arm", "ired-thumb", "misaligned_data-iOS-armv7", "test-thumb", "thumb-test", "BatteryLife.arm_32.0"]
+verdict = "r2-right"
+reason = "ARMv7 (ungraded): r2s decodes ARM at a Mach-O entry radare2 reads as Thumb (mov r7, sp); owner r2image's entry mode"
+
+[[judged]]
+command = "pd"
+binaries = ["fat-intel", "hellocxx-osx-fat-intel", "libexpat.1.dylib"]
+verdict = "deliberate"
+reason = "a fat file of i386 and x86-64: r2s reads the 64-bit slice, radare2 the first"
+
+[[judged]]
+command = "pd"
+binaries = ["ansi", "emoji"]
+r2 = 'call sym\.'
+r2s = 'call sym\.'
+verdict = "r2-right"
+reason = "a symbol's flag keeps characters radare2's flag filter drops (#, an emoji); owner r2engine names"
+
+[[judged]]
+command = "pd"
+binaries = "Alamofire-stripped"
+r2 = 'b 0x'
+r2s = 'b sym\.imp\.'
+verdict = "r2s-right"
+reason = "a branch to a linkage stub r2s names by the slot it reads; radare2 leaves the number"
