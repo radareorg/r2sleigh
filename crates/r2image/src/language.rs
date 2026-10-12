@@ -45,7 +45,7 @@ fn go_assembly(file: &object::File<'_>, symbols: &[Symbol]) -> Option<BTreeSet<u
     let table = named.or_else(|| {
         let symbol = symbols
             .iter()
-            .find(|symbol| symbol.defined && symbol.name == "runtime.pclntab")?;
+            .find(|symbol| symbol.defined && &*symbol.name == "runtime.pclntab")?;
         read_at(file, symbol.vaddr, usize::try_from(symbol.size).ok()?)
     })?;
     pclntab_assembly(table, file.endianness() == object::Endianness::Little)
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn a_mangled_name_places_a_function_only_in_a_language_the_container_states() {
         let symbols = [Symbol {
-            name: "_ZN3foo3barEv".to_owned(),
+            name: "_ZN3foo3barEv".into(),
             kind: SymbolKind::Function,
             defined: true,
             vaddr: 0x1000,
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn a_macho_name_is_read_without_its_decoration() {
         let defined = |name: &str| Symbol {
-            name: name.to_owned(),
+            name: name.into(),
             defined: true,
             ..Symbol::default()
         };

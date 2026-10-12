@@ -861,7 +861,7 @@ pub(crate) fn strings(session: &Session) -> Result<Table, String> {
         .names()
         .iter()
         .filter(|(_, name)| name.namespace == r2engine::names::Namespace::String)
-        .map(|(vaddr, name)| (vaddr, name.text.clone()))
+        .map(|(vaddr, name)| (vaddr, name.text.to_string()))
         .collect();
     Ok(string_table(session, &found))
 }
@@ -1183,7 +1183,7 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
     let linkage = session.program.imports();
     let stubs = &linkage.stubs;
     for symbol in imports {
-        let stub = stubs.iter().find(|(_, stub)| stub.symbol == symbol.name);
+        let stub = stubs.iter().find(|(_, stub)| *stub.symbol == *symbol.name);
         let at = stub.map(|(at, _)| *at);
         table.row(
             at,
@@ -1304,7 +1304,7 @@ pub(crate) fn relocations(session: &Session) -> Table {
         let mut name = relocation
             .symbol
             .as_ref()
-            .map(|symbol| symbol.name.clone())
+            .map(|symbol| symbol.name.to_string())
             .unwrap_or_default();
         match relocation.addend {
             Some(addend) if addend < 0 => name.push_str(&format!(" - {:#010x}", -addend)),

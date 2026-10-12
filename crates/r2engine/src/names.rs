@@ -13,6 +13,7 @@
 //! binary fills it; the engine and the shell read it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// The longest text that will be read out of one address.
 ///
@@ -103,6 +104,19 @@ pub enum Namespace {
 }
 
 impl Namespace {
+    const ALL: [Self; 10] = [
+        Self::Import,
+        Self::Reloc,
+        Self::Symbol,
+        Self::Object,
+        Self::Entry,
+        Self::Function,
+        Self::Label,
+        Self::String,
+        Self::Section,
+        Self::Segment,
+    ];
+
     /// The prefix radare2 writes before a name of this kind.
     pub const fn prefix(self) -> &'static str {
         match self {
@@ -126,7 +140,7 @@ impl Namespace {
 pub struct Name {
     /// The name itself, with no namespace on it. This is what a prototype
     /// table is keyed by and what a rendering spells a call with.
-    pub text: String,
+    pub text: Arc<str>,
     pub namespace: Namespace,
     /// How far this name reaches, where the container said. Zero means the
     /// name covers only its own address, which is what keeps a nearest-name
@@ -140,14 +154,18 @@ impl Name {
     /// A string is stored as the text it is, because that is what a listing of
     /// strings is for; what a flag can be written as is a projection of it,
     /// with everything an identifier cannot hold replaced.
-    /// Every spelling that seeks to this name: the listed one, and a symbol's
-    /// bare text, which radare2 also accepts (`s main` as well as `s sym.main`).
-    fn seeks(&self) -> Vec<String> {
-        let spelled = self.spelled();
-        match self.namespace == Namespace::Symbol && spelled != self.text {
-            true => vec![spelled, self.text.clone()],
-            false => vec![spelled],
+    /// Every spelling that seeks to this name, as `NameDb::by_spelling` keys it: the listed one
+    /// past its prefix, and a symbol's bare text, which radare2 also accepts (`s main`).
+    fn seeks(&self) -> Vec<(usize, Arc<str>)> {
+        let listed = match self.namespace {
+            Namespace::String => identifier(&self.text).into(),
+            _ => Arc::clone(&self.text),
+        };
+        let mut seeks = vec![(self.namespace as usize, listed)];
+        if self.namespace == Namespace::Symbol {
+            seeks.push((BARE, Arc::clone(&self.text)));
         }
+        seeks
     }
 
     pub fn spelled(&self) -> String {
@@ -178,9 +196,13 @@ fn identifier(text: &str) -> String {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NameDb {
     by_address: BTreeMap<u64, Vec<Name>>,
-    /// The lowest address each spelling names, the one a seek reads; names are only ever added.
-    by_spelling: BTreeMap<Box<str>, u64>,
+    /// The lowest address each spelling names, by its namespace and the rest past the prefix,
+    /// which is the name's own text, shared; `BARE` holds symbols' bare text. Only ever added to.
+    by_spelling: [BTreeMap<Arc<str>, u64>; BARE + 1],
 }
+
+/// `NameDb::by_spelling`'s map of symbols' bare text, after one per namespace.
+const BARE: usize = Namespace::ALL.len();
 
 impl NameDb {
     pub fn new() -> Self {
@@ -193,8 +215,8 @@ impl NameDb {
         if held.iter().any(|at| at.namespace == name.namespace) {
             return;
         }
-        for spelling in name.seeks() {
-            let lowest = self.by_spelling.entry(spelling.into()).or_insert(vaddr);
+        for (seek, key) in name.seeks() {
+            let lowest = self.by_spelling[seek].entry(key).or_insert(vaddr);
             *lowest = (*lowest).min(vaddr);
         }
         // An address nearly always has one name; a first push would reserve four.
@@ -208,7 +230,15 @@ impl NameDb {
     /// This is what `s sym.main` or `s entry0` reads: the name `f` lists for an
     /// address is the name that seeks there.
     pub fn address_of(&self, spelling: &str) -> Option<u64> {
-        self.by_spelling.get(spelling).copied()
+        // Prefixes nest (`sym.`, `sym.imp.`, and an entry's none): each that fits is asked.
+        let prefixed = Namespace::ALL.iter().filter_map(|namespace| {
+            let rest = spelling.strip_prefix(namespace.prefix())?;
+            self.by_spelling[*namespace as usize].get(rest)
+        });
+        prefixed
+            .chain(self.by_spelling[BARE].get(spelling))
+            .copied()
+            .min()
     }
 
     /// The strongest name at exactly this address.
@@ -243,7 +273,7 @@ impl NameDb {
     /// The plain name at exactly this address, which is what the engine keys
     /// prototypes and callee facts by.
     pub fn text_at(&self, vaddr: u64) -> Option<&str> {
-        self.of(vaddr).map(|name| name.text.as_str())
+        self.of(vaddr).map(|name| &*name.text)
     }
 
     /// The strongest name covering this address, and where it begins.
@@ -310,7 +340,7 @@ mod tests {
 
     fn named(text: &str, namespace: Namespace, size: u64) -> Name {
         Name {
-            text: text.to_owned(),
+            text: text.into(),
             namespace,
             size,
         }
@@ -319,14 +349,14 @@ mod tests {
     #[test]
     fn a_string_is_stored_as_itself_and_spelled_as_an_identifier() {
         let name = named("hello %s\n", Namespace::String, 10);
-        assert_eq!(name.text, "hello %s\n");
+        assert_eq!(&*name.text, "hello %s\n");
         assert_eq!(name.spelled(), "str.hello__s_");
     }
 
     #[test]
     fn a_name_is_stored_plain_and_spelled_with_its_namespace() {
         let name = named("printf", Namespace::Import, 0);
-        assert_eq!(name.text, "printf");
+        assert_eq!(&*name.text, "printf");
         assert_eq!(name.spelled(), "sym.imp.printf");
     }
 
@@ -361,7 +391,7 @@ mod tests {
         let mut db = NameDb::new();
         db.insert(0x1000, named(".text", Namespace::Section, 0x200));
         assert_eq!(db.text_at(0x1000), None);
-        assert_eq!(db.at(0x1000).map(|name| name.text.as_str()), Some(".text"));
+        assert_eq!(db.at(0x1000).map(|name| &*name.text), Some(".text"));
     }
 
     #[test]
@@ -407,5 +437,23 @@ mod tests {
         db.insert(0x1000, named("work", Namespace::Symbol, 0));
         assert!(db.containing(0x1000).is_some());
         assert!(db.containing(0x1001).is_none());
+    }
+
+    #[test]
+    fn a_spelling_two_namespaces_reach_seeks_the_lower_of_their_addresses() {
+        let mut db = NameDb::new();
+        db.insert(0x2000, named("printf", Namespace::Import, 0));
+        db.insert(0x1000, named("imp.printf", Namespace::Symbol, 0));
+        db.insert(0x3000, named("entry0", Namespace::Entry, 0));
+        db.insert(0x4000, named("entry0", Namespace::Symbol, 0));
+        assert_eq!(db.address_of("sym.imp.printf"), Some(0x1000));
+        assert_eq!(db.address_of("imp.printf"), Some(0x1000));
+        assert_eq!(db.address_of("entry0"), Some(0x3000));
+        assert_eq!(db.address_of("sym.entry0"), Some(0x4000));
+        assert_eq!(db.address_of("sym.printf"), None);
+        // A string seeks by its identifier, which is not its text.
+        db.insert(0x5000, named("hello %s\n", Namespace::String, 9));
+        assert_eq!(db.address_of("str.hello__s_"), Some(0x5000));
+        assert_eq!(db.address_of("str.hello %s\n"), None);
     }
 }

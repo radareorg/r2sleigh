@@ -538,8 +538,8 @@ impl Image {
             Some(Symbol {
                 // An import is named by the C identifier it binds.
                 name: match (format, import) {
-                    (Format::MachO, true) => macho_identifier(name).to_owned(),
-                    _ => name.to_owned(),
+                    (Format::MachO, true) => macho_identifier(name).into(),
+                    _ => name.into(),
                 },
                 vaddr: match symbol.kind() {
                     object::SymbolKind::Text => code_address(&arch, address),
@@ -1453,7 +1453,7 @@ mod dynamic_symbol_tests {
         let named = image
             .symbols()
             .iter()
-            .find(|symbol| symbol.name == "pick")
+            .find(|symbol| &*symbol.name == "pick")
             .expect("the dynamic table names it");
         assert_eq!(named.vaddr, 0x1000);
         assert_eq!(named.kind, SymbolKind::Function);

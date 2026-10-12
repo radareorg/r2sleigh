@@ -32,7 +32,7 @@ pub fn of(source: &impl Source) -> NameDb {
         db.insert(
             section.vaddr,
             Name {
-                text: section.name.clone(),
+                text: section.name.as_str().into(),
                 namespace: Namespace::Section,
                 size: section.vsize,
             },
@@ -100,7 +100,7 @@ pub fn of(source: &impl Source) -> NameDb {
         db.insert(
             entry.vaddr,
             Name {
-                text,
+                text: text.into(),
                 namespace: Namespace::Entry,
                 size: 0,
             },
@@ -168,7 +168,7 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
                 db.insert(
                     start + (at + offset) as u64,
                     Name {
-                        text: text.to_owned(),
+                        text: text.into(),
                         namespace: Namespace::String,
                         // The terminator belongs to the string: it is what a
                         // reader has to step over to reach the next one.
@@ -223,7 +223,7 @@ pub fn name_imports(db: &mut NameDb, imports: &BTreeMap<u64, Stub>) {
         db.insert(
             *stub,
             Name {
-                text: symbol.clone(),
+                text: symbol.as_str().into(),
                 namespace: Namespace::Import,
                 size: *size,
             },
@@ -261,7 +261,7 @@ pub fn name_slots(
         db.insert(
             *slot,
             Name {
-                text: symbol.clone(),
+                text: symbol.as_str().into(),
                 namespace: Namespace::Reloc,
                 size,
             },
@@ -660,7 +660,7 @@ mod tests {
         db.insert(
             0x100000340,
             Name {
-                text: "_add_two".to_owned(),
+                text: "_add_two".into(),
                 namespace: Namespace::Symbol,
                 size: 0x20,
             },
@@ -736,7 +736,7 @@ mod tests {
         // address zero: radare2 puts none of them on an operand.
         for (name, vaddr) in [("$d", 0x1000), ("a/b.c", 0x1000), ("zero", 0)] {
             let symbol = Symbol {
-                name: name.to_owned(),
+                name: name.into(),
                 vaddr,
                 size: 0,
                 kind: SymbolKind::Function,

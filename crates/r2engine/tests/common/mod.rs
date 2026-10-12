@@ -389,7 +389,7 @@ pub fn import_slot(vaddr: u64, import: &str) -> Relocation {
         ntype: 7,
         width: 8,
         symbol: Some(Box::new(RelocationSymbol {
-            name: import.to_owned(),
+            name: import.into(),
             ..RelocationSymbol::default()
         })),
         applies: Applies::Symbol,
@@ -435,7 +435,7 @@ pub struct Literal {
 impl Literal {
     pub fn new() -> Self {
         let function = |name: &str, vaddr, size| Symbol {
-            name: name.to_owned(),
+            name: name.into(),
             vaddr,
             size,
             kind: SymbolKind::Function,
@@ -487,7 +487,7 @@ impl Literal {
         program.container.symbols = functions
             .iter()
             .map(|(name, vaddr, size)| Symbol {
-                name: (*name).to_owned(),
+                name: (*name).into(),
                 vaddr: *vaddr,
                 size: *size,
                 kind: SymbolKind::Function,
@@ -507,7 +507,7 @@ impl Literal {
         program.container.segments = vec![code_segment(BASE, ARM_THUMB.len() as u64)];
         program.container.sections[0].vsize = ARM_THUMB.len() as u64;
         let symbol = |name: &str, vaddr, kind, thumb| Symbol {
-            name: name.to_owned(),
+            name: name.into(),
             vaddr,
             size: 0,
             kind,
@@ -658,14 +658,16 @@ impl Literal {
 
     /// The same program with one symbol stripped from the container.
     pub fn stripped_of(mut self, name: &str) -> Self {
-        self.container.symbols.retain(|symbol| symbol.name != name);
+        self.container
+            .symbols
+            .retain(|symbol| &*symbol.name != name);
         self
     }
 
     /// The same program with one more function stated, wherever it points.
     pub fn stating(mut self, name: &str, vaddr: u64) -> Self {
         self.container.symbols.push(Symbol {
-            name: name.to_owned(),
+            name: name.into(),
             vaddr,
             size: 0,
             kind: SymbolKind::Function,

@@ -105,7 +105,7 @@ fn span(data: &[u8], offset: u32, size: u64) -> Option<&[u8]> {
 /// A symbol a bind names, by the C identifier it binds.
 fn imported(name: &str, weak: bool) -> RelocationSymbol {
     RelocationSymbol {
-        name: crate::macho_identifier(name).to_owned(),
+        name: crate::macho_identifier(name).into(),
         defined: None,
         size: 0,
         binding: if weak { Binding::Weak } else { Binding::Global },
@@ -324,7 +324,7 @@ impl<'d> Macho<'d> {
                 if symbol.defined.is_none() && matches!(record.addend, None | Some(0)) =>
             {
                 WriteKind::Import {
-                    symbol: symbol.name.clone(),
+                    symbol: symbol.name.to_string(),
                 }
             }
             _ => WriteKind::Unknown,

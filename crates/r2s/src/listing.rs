@@ -539,7 +539,7 @@ mod tests {
         db.insert(
             0x100000340,
             Name {
-                text: "_add_two".to_owned(),
+                text: "_add_two".into(),
                 namespace: Namespace::Symbol,
                 size: 0,
             },
@@ -547,7 +547,7 @@ mod tests {
         db.insert(
             0x4,
             Name {
-                text: "_nl_current".to_owned(),
+                text: "_nl_current".into(),
                 namespace: Namespace::Label,
                 size: 0,
             },

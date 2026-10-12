@@ -72,7 +72,7 @@ fn opened_as(endian: Endian) -> OpenProgram<Mixed> {
     // `$a` at the ARM code too, which the Thumb function after it outranks.
     for vaddr in [ARM, DATA] {
         mixed.container.symbols.push(Symbol {
-            name: "$a".to_owned(),
+            name: "$a".into(),
             vaddr,
             size: 0,
             kind: SymbolKind::Mapping(Mapping::Arm),
@@ -125,7 +125,7 @@ fn arm_only(code: &'static [u8], endian: Endian) -> Mixed {
                 ..Section::default()
             }],
             symbols: vec![Symbol {
-                name: "arm".to_owned(),
+                name: "arm".into(),
                 vaddr: ARM,
                 size: code.len() as u64,
                 kind: SymbolKind::Function,
@@ -167,7 +167,7 @@ fn arm_and_thumb_functions_in_one_program_each_decode_as_stated() {
 fn a_thumb_mapping_symbol_switches_one_arm_function_to_thumb() {
     // No entry and no symbol says Thumb here; only the `$t` does.
     let mapping = |name: &str, vaddr, mapping| Symbol {
-        name: name.to_owned(),
+        name: name.into(),
         vaddr,
         size: 0,
         kind: SymbolKind::Mapping(mapping),
@@ -265,7 +265,7 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
     // `atexit` is declared by each C library: this program is glibc's.
     mixed.container.platform = [PlatformEvidence::Interpreter(Libc::Glibc)].into();
     mixed.container.symbols.push(Symbol {
-        name: "atexit".to_owned(),
+        name: "atexit".into(),
         vaddr: ARM + 0x10,
         size: 4,
         kind: SymbolKind::Function,

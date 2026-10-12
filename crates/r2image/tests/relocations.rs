@@ -49,7 +49,7 @@ fn a_pie_states_its_relative_records_with_their_addends_beside_its_symbol_bindin
     assert_eq!(printf.ntype, 7, "R_X86_64_JUMP_SLOT");
     assert_eq!(printf.applies, Applies::Symbol);
     let symbol = printf.symbol.as_ref().expect("it names printf");
-    assert_eq!((symbol.name.as_str(), symbol.defined), ("printf", None));
+    assert_eq!((&*symbol.name, symbol.defined), ("printf", None));
 
     // The stripped fixture has three, as `readelf -r` lists them.
     let hashes = image(include_bytes!(
@@ -87,9 +87,7 @@ fn a_mach_o_stub_is_an_import_stub_and_never_a_relocation() {
     let bound: Vec<(u64, &str)> = limits
         .relocations()
         .iter()
-        .filter_map(|relocation| {
-            Some((relocation.vaddr, relocation.symbol.as_ref()?.name.as_str()))
-        })
+        .filter_map(|relocation| Some((relocation.vaddr, &*relocation.symbol.as_ref()?.name)))
         .collect();
     assert_eq!(bound, [(0x1_0000_4000, "memcpy")]);
     let rebased: Vec<(u64, Option<i64>)> = limits
@@ -115,11 +113,16 @@ fn a_mach_o_stub_is_an_import_stub_and_never_a_relocation() {
         .symbols()
         .iter()
         .filter(|symbol| symbol.import)
-        .map(|symbol| symbol.name.as_str())
+        .map(|symbol| &*symbol.name)
         .collect();
     assert_eq!(imported, ["memcpy"]);
     // A symbol the program defines keeps the name its table gives it.
-    assert!(limits.symbols().iter().any(|symbol| symbol.name == "_main"));
+    assert!(
+        limits
+            .symbols()
+            .iter()
+            .any(|symbol| &*symbol.name == "_main")
+    );
 }
 
 /// A static executable whose only relocation table is `.rela.iplt`, which

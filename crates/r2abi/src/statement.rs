@@ -495,7 +495,7 @@ pub struct Symbol {
     /// What the symbol table calls it. An import is named by the C identifier
     /// it binds: Mach-O's one leading underscore of decoration is dropped
     /// there, which is the name its declaration and radare2 know it by.
-    pub name: String,
+    pub name: std::sync::Arc<str>,
     pub vaddr: u64,
     pub size: u64,
     pub kind: SymbolKind,
@@ -569,7 +569,7 @@ pub struct Record {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelocationSymbol {
     /// The C identifier the record binds, Mach-O's decoration dropped once.
-    pub name: String,
+    pub name: std::sync::Arc<str>,
     /// The address this image defines it at; `None` where it is an import.
     pub defined: Option<u64>,
     pub size: u64,

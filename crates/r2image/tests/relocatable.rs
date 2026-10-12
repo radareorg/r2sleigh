@@ -45,7 +45,7 @@ fn a_symbol_moves_with_its_section_whatever_its_type() {
         image
             .symbols()
             .iter()
-            .find(|symbol| symbol.name == name)
+            .find(|symbol| &*symbol.name == name)
             .map(|symbol| (symbol.vaddr, symbol.defined))
     };
     assert_eq!(at("f"), Some((BASE + 0x40, true)));

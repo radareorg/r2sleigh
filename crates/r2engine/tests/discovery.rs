@@ -67,7 +67,7 @@ fn a_function_handed_to_an_import_through_its_slot_is_found_as_handed() {
 #[test]
 fn a_data_symbol_or_an_import_s_symbol_states_no_function() {
     let symbol = |name: &str, kind, defined| Symbol {
-        name: name.to_owned(),
+        name: name.into(),
         vaddr: TWO + 0x8,
         size: 0,
         kind,

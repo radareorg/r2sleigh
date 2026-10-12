@@ -29,7 +29,7 @@ fn a_branch_inside_a_function_stays_inside_it() {
     // An import's undefined symbol, a nameless one and a data label at the
     // branch target each say no function begins there.
     let stray = |name: &str, kind, defined| Symbol {
-        name: name.to_owned(),
+        name: name.into(),
         vaddr: TWO + 0xa,
         size: 0,
         kind,

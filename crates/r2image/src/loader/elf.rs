@@ -172,7 +172,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 let Some(defined) = symbol.defined else {
                     return match offset {
                         0 => WriteKind::Import {
-                            symbol: symbol.name.clone(),
+                            symbol: symbol.name.to_string(),
                         },
                         _ => WriteKind::Unknown,
                     };
@@ -181,7 +181,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 match self.binds_locally(symbol) {
                     true => WriteKind::Absolute(value),
                     false => WriteKind::Preemptible {
-                        symbol: symbol.name.clone(),
+                        symbol: symbol.name.to_string(),
                         default: value,
                     },
                 }
@@ -475,7 +475,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         let name = core::str::from_utf8(name).ok()?.to_owned();
         let defined = symbol.st_shndx(endian) != elf::SHN_UNDEF;
         Some(RelocationSymbol {
-            name,
+            name: name.into(),
             defined: defined.then(|| symbol.st_value(endian).into()),
             size: symbol.st_size(endian).into(),
             binding: binding(symbol.st_bind()),
