@@ -24,7 +24,7 @@ fn a_global_names_its_address_before_a_weak_alias_or_a_local_one() {
         let program = symbols
             .into_iter()
             .fold(Literal::new().stripped_of("one"), Literal::declaring);
-        let mut program = OpenProgram::of(program);
+        let program = OpenProgram::of(program);
         program.names().of(ONE).map(|name| name.spelled())
     };
     let aliases = [
