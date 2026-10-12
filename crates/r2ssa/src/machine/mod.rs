@@ -414,7 +414,7 @@ impl MachineValueUse {
             .map(|inst| {
                 artifact
                     .obligations()
-                    .instruction_for_inst(inst)
+                    .instruction_for_inst(artifact.graph(), inst)
                     .map(|instruction| instruction.id)
                     .ok_or(MachineBuildError::MissingInstructionDisposition(inst))
             })
@@ -1324,7 +1324,7 @@ impl MachineProjection {
             };
             let disposition = artifact
                 .obligations()
-                .instruction_for_inst(inst.id)
+                .instruction_for_inst(graph, inst.id)
                 .ok_or(MachineBuildError::MissingInstructionDisposition(inst.id))?;
             let graph_value = graph
                 .value(output_id)
@@ -1584,7 +1584,7 @@ impl MachineProjection {
             }
             let disposition = artifact
                 .obligations()
-                .instruction_for_inst(inst_id)
+                .instruction_for_inst(graph, inst_id)
                 .ok_or(MachineBuildError::MissingInstructionDisposition(inst_id))?;
             if disposition.id != failure.producer {
                 return Err(MachineBuildError::EntityMismatch(inst_id));
@@ -2577,7 +2577,7 @@ impl MachineFunction {
                 .ok_or(MachineBuildError::MissingGraphValue(output))?;
             artifact
                 .obligations()
-                .instruction_for_inst(inst.id)
+                .state_of(inst.id)
                 .ok_or(MachineBuildError::MissingInstructionDisposition(inst.id))?;
             if self.arena.get(root).is_none() {
                 r2il::refusal_evidence!("machine-entity", "{:?}: no node at {root:?}", inst.id);

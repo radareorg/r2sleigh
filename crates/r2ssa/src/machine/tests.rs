@@ -322,10 +322,7 @@ fn unsigned_64_bit_multiply_retains_wrapping_arithmetic() {
     assert_eq!(value.bits(), FNV_PRIME);
     assert_eq!(entity.inst(), mult_inst);
     assert!(
-        artifact
-            .obligations()
-            .instruction_for_inst(mult_inst)
-            .is_some(),
+        artifact.obligations().state_of(mult_inst).is_some(),
         "the multiply's obligations state its producer"
     );
 }

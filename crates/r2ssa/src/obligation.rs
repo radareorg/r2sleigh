@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CanonicalStorageId;
 use crate::arena::OpId;
-use crate::graph::{InstId, InstPayload, SsaGraph, UseSite, ValueId};
+use crate::graph::{GraphInst, InstId, InstPayload, SsaGraph, UseSite, ValueId};
 use crate::op::SSAOp;
 use crate::semantic::{SourceBoundaryFacts, StructuredDataflowFacts};
 
@@ -43,6 +43,31 @@ pub enum CanonicalInstructionSite {
 }
 
 impl CanonicalInstructionId {
+    /// A graph instruction's identity: its block, and its operation, or for a phi the storage it
+    /// merges. The inventory reads it here and holds none.
+    pub fn of(graph: &SsaGraph, inst: &GraphInst) -> Result<Self, ObligationInventoryFailure> {
+        let failure = |block_addr, kind| ObligationInventoryFailure {
+            inst: inst.id,
+            block_addr,
+            kind,
+        };
+        let block_addr = (graph.block(inst.block).map(|block| block.addr))
+            .ok_or_else(|| failure(None, ObligationInventoryFailureKind::MissingBlock))?;
+        let missing = |kind| failure(Some(block_addr), kind);
+        let site = match inst.payload {
+            InstPayload::Phi { .. } => {
+                CanonicalInstructionSite::Phi((graph.written_storage(inst)).ok_or_else(|| {
+                    missing(ObligationInventoryFailureKind::MissingCanonicalPhiStorage)
+                })?)
+            }
+            InstPayload::Op(_) => CanonicalInstructionSite::Op(
+                (graph.op_for_inst(inst.id))
+                    .ok_or_else(|| missing(ObligationInventoryFailureKind::MissingOperationSite))?,
+            ),
+        };
+        Ok(Self { block_addr, site })
+    }
+
     /// This instruction as a person reads it, an operation by its place in
     /// its block: `0x{block}:op:{n}`.
     pub fn spelled(self, graph: &SsaGraph) -> SpelledInstruction {
@@ -381,7 +406,7 @@ impl std::fmt::Display for SemanticInstructionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticInstructionDisposition {
     pub id: CanonicalInstructionId,
     pub source: SemanticSourceSite,
@@ -527,9 +552,9 @@ pub struct ObligationInventoryFailure {
 pub struct SemanticObligationInventory {
     schema_version: u32,
     source_instruction_count: usize,
-    /// What every graph instruction owes, indexed by the instruction; its identity is the
-    /// disposition's own, held once.
-    instructions: Vec<Option<SemanticInstructionDisposition>>,
+    /// What every graph instruction owes, indexed by the instruction: its state and its run of
+    /// the table. Its identity is the graph's, read when asked (`CanonicalInstructionId::of`).
+    instructions: Vec<Option<Owed>>,
     /// The dispositions of native instruction spans the translator emitted no
     /// canonical operation for. They have no graph instruction to be indexed
     /// by, and there are none in an ordinary function.
@@ -538,6 +563,9 @@ pub struct SemanticObligationInventory {
     native_spans: BTreeMap<CanonicalInstructionId, crate::GenuineNativeInstructionSpan>,
     construction_failures: Vec<ObligationInventoryFailure>,
     unstructured_cycle_blocks: BTreeSet<u64>,
+    /// Whether some graph instruction's obligations were not one run of the table, or named an
+    /// instruction with no disposition: the inventory then does not close.
+    split_runs: bool,
     /// Whether the inventory closes, decided when it was built.
     ///
     /// Deciding it is a walk of every instruction and every obligation with a
@@ -559,25 +587,19 @@ impl SemanticObligationInventory {
             native_spans: BTreeMap::new(),
             construction_failures: Vec::new(),
             unstructured_cycle_blocks: BTreeSet::new(),
+            split_runs: false,
             complete: false,
         }
     }
 }
 
-/// The dispositions that owe an obligation: graph instructions by index, native spans by identity.
-#[derive(Default)]
-struct Owing {
-    graph: crate::dense::IdSet<InstId>,
-    spans: BTreeSet<CanonicalInstructionId>,
-}
-
-impl Owing {
-    fn owes(&self, disposition: &SemanticInstructionDisposition) -> bool {
-        match disposition.source {
-            SemanticSourceSite::GraphInstruction(inst) => self.graph.contains(inst),
-            SemanticSourceSite::GenuineNativeSpan => self.spans.contains(&disposition.id),
-        }
-    }
+/// One graph instruction's disposition as held: its state, and where its obligations sit in the
+/// table, a run since identities sort by instruction first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct Owed {
+    state: SemanticInstructionState,
+    start: u32,
+    len: u32,
 }
 
 /// What obligation seeding reads beside the graph and boundaries: the private stack objects, the
@@ -1091,13 +1113,14 @@ impl SemanticObligationInventory {
                     edge_use: explicit_edge_uses.remove(&(inst.id, kind, component)),
                 });
             }
-            inventory.instructions[inst.id.0 as usize] = Some(SemanticInstructionDisposition {
-                id,
-                source: SemanticSourceSite::GraphInstruction(inst.id),
+            inventory.instructions[inst.id.0 as usize] = Some(Owed {
                 state,
+                start: 0,
+                len: 0,
             });
         }
         inventory.obligations = ObligationTable::of(obligations);
+        inventory.index_runs();
         inventory.complete = inventory.derive_is_complete();
         inventory
     }
@@ -1168,12 +1191,67 @@ impl SemanticObligationInventory {
         if !self.obligations.extend_new(late) {
             return false;
         }
+        self.index_runs();
         self.complete = self.derive_is_complete();
         true
     }
 
-    pub fn instruction_for_inst(&self, inst: InstId) -> Option<&SemanticInstructionDisposition> {
+    /// What `inst` owes, with its identity read off the graph. A reader that needs only the
+    /// state asks [`Self::state_of`].
+    pub fn instruction_for_inst(
+        &self,
+        graph: &SsaGraph,
+        inst: InstId,
+    ) -> Option<SemanticInstructionDisposition> {
+        let state = self.state_of(inst)?;
+        let id = CanonicalInstructionId::of(graph, graph.inst(inst)?).ok()?;
+        Some(SemanticInstructionDisposition {
+            id,
+            source: SemanticSourceSite::GraphInstruction(inst),
+            state,
+        })
+    }
+
+    /// The state of `inst`'s disposition. O(1).
+    pub fn state_of(&self, inst: InstId) -> Option<SemanticInstructionState> {
+        Some(self.owed(inst)?.state)
+    }
+
+    fn owed(&self, inst: InstId) -> Option<&Owed> {
         self.instructions.get(inst.0 as usize)?.as_ref()
+    }
+
+    /// Point each graph instruction at its run of the table, once the table is sorted. The
+    /// runs of one instruction are adjacent; where one is not, its run is left empty and the
+    /// inventory does not close (`derive_is_complete`).
+    fn index_runs(&mut self) {
+        for owed in self.instructions.iter_mut().flatten() {
+            (owed.start, owed.len) = (0, 0);
+        }
+        self.split_runs = false;
+        let mut at = 0;
+        while at < self.obligations.0.len() {
+            let SemanticSourceSite::GraphInstruction(inst) = self.obligations.0[at].source else {
+                at += 1;
+                continue;
+            };
+            let len = (self.obligations.0[at..].iter())
+                .take_while(|obligation| {
+                    obligation.source == SemanticSourceSite::GraphInstruction(inst)
+                })
+                .count();
+            match self
+                .instructions
+                .get_mut(inst.0 as usize)
+                .and_then(Option::as_mut)
+            {
+                Some(owed) if owed.len == 0 => {
+                    (owed.start, owed.len) = (at as u32, len as u32);
+                }
+                _ => self.split_runs = true,
+            }
+            at += len;
+        }
     }
 
     /// How many graph instructions have a disposition.
@@ -1211,22 +1289,17 @@ impl SemanticObligationInventory {
             return None;
         }
         let mut values = crate::dense::IdSet::default();
-        let owing = self.owing();
-        for instruction in self.dispositions() {
-            if instruction.state != SemanticInstructionState::StructuralControlOnly
-                || owing.owes(instruction)
-            {
+        for graph_inst in &graph.insts {
+            let Some(owed) = self.owed(graph_inst.id) else {
                 continue;
-            }
-            let inst = instruction.source.graph_inst()?;
-            let graph_inst = graph.inst(inst)?;
-            if self.instruction_for_inst(inst) != Some(instruction) {
-                return None;
+            };
+            if owed.state != SemanticInstructionState::StructuralControlOnly || owed.len != 0 {
+                continue;
             }
             let Some(value) = graph_inst.output else {
                 continue;
             };
-            if graph.def_inst(value) != Some(inst) || graph.value(value).is_none() {
+            if graph.def_inst(value) != Some(graph_inst.id) || graph.value(value).is_none() {
                 return None;
             }
             if graph
@@ -1250,24 +1323,13 @@ impl SemanticObligationInventory {
 
     /// Every instruction's disposition: the graph's, then the native spans
     /// that produced no canonical operation.
-    pub fn dispositions(&self) -> impl Iterator<Item = &SemanticInstructionDisposition> {
-        self.instructions
-            .iter()
-            .flatten()
-            .chain(self.span_instructions.values())
-    }
-
-    /// The disposition an obligation's instruction identity names, found the
-    /// way the obligation's own source site says to.
-    fn disposition_of(
-        &self,
-        id: CanonicalInstructionId,
-        source: SemanticSourceSite,
-    ) -> Option<&SemanticInstructionDisposition> {
-        match source {
-            SemanticSourceSite::GraphInstruction(inst) => self.instruction_for_inst(inst),
-            SemanticSourceSite::GenuineNativeSpan => self.span_instructions.get(&id),
-        }
+    pub fn dispositions<'a>(
+        &'a self,
+        graph: &'a SsaGraph,
+    ) -> impl Iterator<Item = SemanticInstructionDisposition> + 'a {
+        (0..self.instructions.len())
+            .filter_map(move |index| self.instruction_for_inst(graph, InstId(index as u32)))
+            .chain(self.span_instructions.values().copied())
     }
 
     /// The disposition with this exact identity, by search.
@@ -1276,9 +1338,11 @@ impl SemanticObligationInventory {
     #[cfg(test)]
     pub(crate) fn disposition_with_id(
         &self,
+        graph: &SsaGraph,
         id: CanonicalInstructionId,
-    ) -> Option<&SemanticInstructionDisposition> {
-        self.dispositions().find(|disposition| disposition.id == id)
+    ) -> Option<SemanticInstructionDisposition> {
+        self.dispositions(graph)
+            .find(|disposition| disposition.id == id)
     }
 
     /// How many instructions the inventory dispositioned.
@@ -1300,7 +1364,12 @@ impl SemanticObligationInventory {
     /// What the inventory holds, for the byte fit.
     pub fn probe_shape(&self) -> String {
         let obligation_inputs: usize = self.obligations.values().map(|o| o.inputs.len()).sum();
-        let owned: usize = self.dispositions().map(|d| self.owned(d).count()).sum();
+        let owned = (self.instructions.iter().flatten())
+            .map(|owed| owed.len as usize)
+            .sum::<usize>()
+            + (self.span_instructions.values())
+                .map(|d| self.owned(d).count())
+                .sum::<usize>();
         format!(
             "instructions {} obligations {} by_inst {} native_spans {} inputs {} owned {} sizeof(id) {} sizeof(obligation) {} sizeof(disposition) {} sizeof(instid) {} sizeof(span) {}",
             self.disposition_count(),
@@ -1311,7 +1380,7 @@ impl SemanticObligationInventory {
             owned,
             std::mem::size_of::<SemanticObligationId>(),
             std::mem::size_of::<SemanticObligation>(),
-            std::mem::size_of::<SemanticInstructionDisposition>(),
+            std::mem::size_of::<Option<Owed>>(),
             std::mem::size_of::<CanonicalInstructionId>(),
             std::mem::size_of::<crate::GenuineNativeInstructionSpan>(),
         )
@@ -1346,86 +1415,78 @@ impl SemanticObligationInventory {
             || !self.construction_failures.is_empty()
             || self.disposition_count() != self.source_instruction_count + zero_op_span_count
             || self.graph_instruction_count() != self.source_instruction_count
+            || self.split_runs
         {
             // An incomplete inventory refuses the function at the binding
-            // plan, and until now it said only that. Which of the five
+            // plan, and until now it said only that. Which of the six
             // conditions failed is the whole difference between a lifter gap,
             // an unstructured cycle and a seeding defect.
             r2il::refusal_evidence!(
                 "obligation-inventory",
                 "incomplete: schema={} failures={:?} unstructured_cycles={:?} \
-                 instructions={} sources={} zero_op_spans={} by_inst={}",
+                 instructions={} sources={} zero_op_spans={} by_inst={} split_runs={}",
                 self.schema_version,
                 self.construction_failures,
                 self.unstructured_cycle_blocks,
                 self.disposition_count(),
                 self.source_instruction_count,
                 zero_op_span_count,
-                self.graph_instruction_count()
+                self.graph_instruction_count(),
+                self.split_runs
             );
             return false;
         }
-        let owing = self.owing();
-        for instruction in self.dispositions() {
-            let id = &instruction.id;
-            if match instruction.source {
-                SemanticSourceSite::GraphInstruction(inst) => {
-                    self.instruction_for_inst(inst).map(|held| &held.id) != Some(id)
-                }
-                SemanticSourceSite::GenuineNativeSpan => {
-                    self.native_spans.get(id).is_none_or(|span| {
-                        (span.canonical_op_count() != 0)
-                            != (instruction.state == SemanticInstructionState::CompilerInserted)
-                            || id.block_addr != span.block_addr()
-                            || !matches!(
-                                id.site,
-                                CanonicalInstructionSite::NativeSpan {
-                                    instruction_addr,
-                                    size,
-                                } if instruction_addr == span.instruction_addr()
-                                    && size == span.size()
-                            )
-                    })
-                }
-            } {
-                return false;
-            }
-            let should_have_obligations = matches!(
-                instruction.state,
+        let owes = |state| {
+            matches!(
+                state,
                 SemanticInstructionState::LiveObligation
                     | SemanticInstructionState::UnsupportedUnknown
                     | SemanticInstructionState::CompilerInserted
-            );
-            if should_have_obligations != owing.owes(instruction) {
-                return false;
-            }
+            )
+        };
+        // A graph instruction owes exactly where its run is not empty.
+        if (self.instructions.iter().flatten()).any(|owed| owes(owed.state) != (owed.len != 0)) {
+            return false;
         }
-        for (index, held) in self.instructions.iter().enumerate() {
-            let inst = InstId(index as u32);
-            if held.is_none() {
-                continue;
-            }
-            if self
-                .instruction_for_inst(inst)
-                .and_then(|instruction| instruction.source.graph_inst())
-                != Some(inst)
+        let owing_spans = (self.obligations.values())
+            .filter(|obligation| obligation.source == SemanticSourceSite::GenuineNativeSpan)
+            .map(|obligation| obligation.id.instruction)
+            .collect::<BTreeSet<_>>();
+        for (id, instruction) in &self.span_instructions {
+            if instruction.id != *id
+                || instruction.source != SemanticSourceSite::GenuineNativeSpan
+                || self.native_spans.get(id).is_none_or(|span| {
+                    (span.canonical_op_count() != 0)
+                        != (instruction.state == SemanticInstructionState::CompilerInserted)
+                        || id.block_addr != span.block_addr()
+                        || !matches!(
+                            id.site,
+                            CanonicalInstructionSite::NativeSpan {
+                                instruction_addr,
+                                size,
+                            } if instruction_addr == span.instruction_addr()
+                                && size == span.size()
+                        )
+                })
+                || owes(instruction.state) != owing_spans.contains(id)
             {
                 return false;
             }
         }
         for (id, obligation) in &self.obligations {
-            if self
-                .disposition_of(id.instruction, obligation.source)
-                .is_none_or(|instruction| instruction.source != obligation.source)
-                || match (id.kind, id.component, obligation.source) {
-                    (
-                        SemanticObligationKind::LiveStateTransition,
-                        SemanticObligationComponent::LoopTransition { .. },
-                        SemanticSourceSite::GraphInstruction(inst),
-                    ) => obligation.edge_use.is_none_or(|site| site.inst != inst),
-                    _ => obligation.edge_use.is_some(),
+            if match obligation.source {
+                SemanticSourceSite::GraphInstruction(inst) => self.owed(inst).is_none(),
+                SemanticSourceSite::GenuineNativeSpan => {
+                    !self.span_instructions.contains_key(&id.instruction)
                 }
-            {
+            } || match (id.kind, id.component, obligation.source) {
+                (
+                    SemanticObligationKind::LiveStateTransition,
+                    SemanticObligationComponent::LoopTransition { .. },
+                    SemanticSourceSite::GraphInstruction(inst),
+                ) => obligation.edge_use.is_none_or(|site| site.inst != inst),
+                _ => obligation.edge_use.is_some(),
+            } {
                 return false;
             }
         }
@@ -1449,36 +1510,31 @@ impl SemanticObligationInventory {
         true
     }
 
+    /// What `inst` owes: its run of the table. O(1).
     pub fn obligations_for_inst(&self, inst: InstId) -> impl Iterator<Item = &SemanticObligation> {
-        self.instruction_for_inst(inst)
-            .into_iter()
-            .flat_map(|instruction| self.owned(instruction))
+        self.owed(inst)
+            .map_or(&[][..], |owed| self.run_of(owed))
+            .iter()
     }
 
-    /// Which dispositions owe anything, read in one pass over the table, so a pass over every
-    /// disposition asks in `O(1)`.
-    fn owing(&self) -> Owing {
-        let mut owing = Owing::default();
-        for obligation in self.obligations.values() {
-            match obligation.source {
-                SemanticSourceSite::GraphInstruction(inst) => {
-                    owing.graph.insert(inst);
-                }
-                SemanticSourceSite::GenuineNativeSpan => {
-                    owing.spans.insert(obligation.id.instruction);
-                }
-            }
-        }
-        owing
+    fn run_of(&self, owed: &Owed) -> &[SemanticObligation] {
+        &self.obligations.0[owed.start as usize..(owed.start + owed.len) as usize]
     }
 
-    /// What one disposition owes: its instruction's run of the table, from its own source.
+    /// What one disposition owes: a graph instruction's run, or a native span's by its identity.
     pub fn owned<'a>(
         &'a self,
-        disposition: &'a SemanticInstructionDisposition,
+        disposition: &SemanticInstructionDisposition,
     ) -> impl Iterator<Item = &'a SemanticObligation> + 'a {
-        let run = self.obligations.run(&disposition.id).iter();
-        run.filter(move |obligation| obligation.source == disposition.source)
+        let source = disposition.source;
+        let run = match source {
+            SemanticSourceSite::GraphInstruction(inst) => {
+                self.owed(inst).map_or(&[][..], |owed| self.run_of(owed))
+            }
+            SemanticSourceSite::GenuineNativeSpan => self.obligations.run(&disposition.id),
+        };
+        run.iter()
+            .filter(move |obligation| obligation.source == source)
     }
 }
 
@@ -1503,39 +1559,14 @@ fn collect_canonical_instruction_ids(
     let mut owners = BTreeMap::<CanonicalInstructionId, InstId>::new();
     let mut failures = Vec::new();
     for inst in &graph.insts {
-        let Some(block_addr) = graph.block(inst.block).map(|block| block.addr) else {
-            failures.push(ObligationInventoryFailure {
-                inst: inst.id,
-                block_addr: None,
-                kind: ObligationInventoryFailureKind::MissingBlock,
-            });
-            continue;
-        };
-        let site = match inst.payload {
-            InstPayload::Phi { .. } => {
-                let Some(storage) = graph.written_storage(inst) else {
-                    failures.push(ObligationInventoryFailure {
-                        inst: inst.id,
-                        block_addr: Some(block_addr),
-                        kind: ObligationInventoryFailureKind::MissingCanonicalPhiStorage,
-                    });
-                    continue;
-                };
-                CanonicalInstructionSite::Phi(storage)
-            }
-            InstPayload::Op(_) => {
-                let Some(op) = graph.op_for_inst(inst.id) else {
-                    failures.push(ObligationInventoryFailure {
-                        inst: inst.id,
-                        block_addr: Some(block_addr),
-                        kind: ObligationInventoryFailureKind::MissingOperationSite,
-                    });
-                    continue;
-                };
-                CanonicalInstructionSite::Op(op)
+        let id = match CanonicalInstructionId::of(graph, inst) {
+            Ok(id) => id,
+            Err(failure) => {
+                failures.push(failure);
+                continue;
             }
         };
-        let id = CanonicalInstructionId { block_addr, site };
+        let block_addr = id.block_addr;
         if owners.insert(id, inst.id).is_some() {
             failures.push(ObligationInventoryFailure {
                 inst: inst.id,
@@ -2316,9 +2347,9 @@ mod tests {
             inventory.graph_instruction_count(),
             artifact.graph().insts.len()
         );
-        assert!(inventory.dispositions().all(|instruction| {
+        assert!(inventory.dispositions(artifact.graph()).all(|instruction| {
             instruction.state != SemanticInstructionState::LiveObligation
-                || inventory.owned(instruction).next().is_some()
+                || inventory.owned(&instruction).next().is_some()
         }));
         assert!(inventory.is_complete());
     }
@@ -2412,13 +2443,13 @@ mod tests {
         assert!(arguments.is_empty());
         let call = artifact
             .obligations()
-            .disposition_with_id(operation_at(&artifact, 0x3000, 2))
+            .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x3000, 2))
             .expect("call instruction");
         assert_eq!(call.state, SemanticInstructionState::UnsupportedUnknown);
         assert!(
             artifact
                 .obligations()
-                .owned(call)
+                .owned(&call)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::Call
@@ -2428,7 +2459,7 @@ mod tests {
         assert!(
             artifact
                 .obligations()
-                .owned(call)
+                .owned(&call)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::VolatileOrUnknownEffect
@@ -2438,13 +2469,13 @@ mod tests {
         for ordinal in 0..2 {
             let setup = artifact
                 .obligations()
-                .disposition_with_id(operation_at(&artifact, 0x3000, ordinal))
+                .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x3000, ordinal))
                 .expect("implicit argument setup");
             assert_eq!(setup.state, SemanticInstructionState::UnsupportedUnknown);
             assert!(
                 artifact
                     .obligations()
-                    .owned(setup)
+                    .owned(&setup)
                     .map(|obligation| &obligation.id)
                     .any(|id| {
                         id.kind == SemanticObligationKind::VolatileOrUnknownEffect
@@ -2886,13 +2917,13 @@ mod tests {
             SsaArtifact::raw(&[block], Some(&x86_64_call_arch())).expect("return artifact");
         let producer = artifact
             .obligations()
-            .disposition_with_id(operation_at(&artifact, 0x3100, 0))
+            .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x3100, 0))
             .expect("potential return-value producer");
         assert_eq!(producer.state, SemanticInstructionState::UnsupportedUnknown);
         assert!(
             artifact
                 .obligations()
-                .owned(producer)
+                .owned(&producer)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::VolatileOrUnknownEffect
@@ -2985,7 +3016,7 @@ mod tests {
         assert_eq!(returned.values.len(), 1);
         let producer = artifact
             .obligations()
-            .disposition_with_id(operation_at(&artifact, 0x3140, 1))
+            .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x3140, 1))
             .expect("return producer");
         // The boundary is complete, so nothing taints the value that reaches
         // it. An unattributed frame used to make this an unknown effect.
@@ -2993,7 +3024,7 @@ mod tests {
         assert!(
             !artifact
                 .obligations()
-                .owned(producer)
+                .owned(&producer)
                 .map(|obligation| &obligation.id)
                 .any(|obligation| {
                     obligation.kind == SemanticObligationKind::VolatileOrUnknownEffect
@@ -3050,7 +3081,10 @@ mod tests {
             .expect("argument-carrier definition");
         let next_iteration_argument = artifact
             .obligations()
-            .disposition_with_id(operation_at(&artifact, block_addr, op_index))
+            .disposition_with_id(
+                artifact.graph(),
+                operation_at(&artifact, block_addr, op_index),
+            )
             .expect("next-iteration argument producer");
         assert_eq!(
             next_iteration_argument.state,
@@ -3059,7 +3093,7 @@ mod tests {
         assert!(
             artifact
                 .obligations()
-                .owned(next_iteration_argument)
+                .owned(&next_iteration_argument)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::LiveValueProducer
@@ -3069,7 +3103,7 @@ mod tests {
         assert!(
             !artifact
                 .obligations()
-                .owned(next_iteration_argument)
+                .owned(&next_iteration_argument)
                 .map(|obligation| &obligation.id)
                 .any(|id| { id.kind == SemanticObligationKind::VolatileOrUnknownEffect })
         );
@@ -3182,12 +3216,12 @@ mod tests {
         let artifact = SsaArtifact::raw(&[block], None).expect("atomic artifact");
         let atomic = artifact
             .obligations()
-            .disposition_with_id(operation_at(&artifact, 0x5000, 0))
+            .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x5000, 0))
             .expect("atomic instruction");
         assert_eq!(
             artifact
                 .obligations()
-                .owned(atomic)
+                .owned(&atomic)
                 .map(|obligation| &obligation.id)
                 .filter(|id| id.kind == SemanticObligationKind::ObservableMemoryRead)
                 .count(),
@@ -3196,7 +3230,7 @@ mod tests {
         assert_eq!(
             artifact
                 .obligations()
-                .owned(atomic)
+                .owned(&atomic)
                 .map(|obligation| &obligation.id)
                 .filter(|id| id.kind == SemanticObligationKind::ObservableMemoryWrite)
                 .count(),
@@ -3205,7 +3239,7 @@ mod tests {
         assert!(
             artifact
                 .obligations()
-                .owned(atomic)
+                .owned(&atomic)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::ObservableMemoryRead
@@ -3215,7 +3249,7 @@ mod tests {
         assert!(
             artifact
                 .obligations()
-                .owned(atomic)
+                .owned(&atomic)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::ObservableMemoryWrite
@@ -3225,7 +3259,7 @@ mod tests {
         assert!(
             artifact
                 .obligations()
-                .owned(atomic)
+                .owned(&atomic)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::Atomicity
@@ -3235,7 +3269,7 @@ mod tests {
         assert!(
             artifact
                 .obligations()
-                .owned(atomic)
+                .owned(&atomic)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::MemoryOrdering
@@ -3259,13 +3293,13 @@ mod tests {
         let artifact = SsaArtifact::raw(&[block], None).expect("fence artifact");
         let fence = artifact
             .obligations()
-            .disposition_with_id(operation_at(&artifact, 0x6000, 0))
+            .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x6000, 0))
             .expect("fence instruction");
         assert_eq!(fence.state, SemanticInstructionState::UnsupportedUnknown);
         assert!(
             artifact
                 .obligations()
-                .owned(fence)
+                .owned(&fence)
                 .map(|obligation| &obligation.id)
                 .any(|id| {
                     id.kind == SemanticObligationKind::MemoryOrdering

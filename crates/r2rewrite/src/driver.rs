@@ -221,7 +221,7 @@ fn discharged_from(
             projection.expr(leaf).map(|expr| expr.kind())
             && let Some(inst) = graph.def_inst(binding.value())
             && projection.root_of(inst).is_some()
-            && let Some(read) = artifact.obligations().instruction_for_inst(inst)
+            && let Some(read) = artifact.obligations().instruction_for_inst(graph, inst)
         {
             discharged.remove(&read.id);
         }

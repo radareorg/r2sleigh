@@ -128,7 +128,7 @@ fn needed<T>(value: Option<T>, inst: InstId, what: &str) -> Option<T> {
 
 /// Whether an instruction between a producer and its reader is one a moved read or trap may not cross.
 fn has_effect(inventory: &SemanticObligationInventory, inst: InstId) -> bool {
-    match inventory.instruction_for_inst(inst).map(|d| d.state) {
+    match inventory.state_of(inst) {
         Some(SemanticInstructionState::LiveObligation) => {
             inventory.obligations_for_inst(inst).any(|obligation| {
                 !matches!(
@@ -292,7 +292,7 @@ impl Demand<'_> {
         let (artifact, inventory) = (input.artifact(), input.obligations());
         let live = |inst: InstId| {
             matches!(
-                inventory.instruction_for_inst(inst).map(|d| d.state),
+                inventory.state_of(inst),
                 Some(SemanticInstructionState::LiveObligation)
             ) && certified_elision(artifact, certified, inst).is_none()
         };
@@ -603,7 +603,7 @@ impl<'a> Readers<'a> {
             .map(|site| self.used_by.get(site.inst).copied().unwrap_or(site.inst))
             .filter(|inst| {
                 matches!(
-                    self.inventory.instruction_for_inst(*inst).map(|d| d.state),
+                    self.inventory.state_of(*inst),
                     Some(
                         SemanticInstructionState::LiveObligation
                             | SemanticInstructionState::UnsupportedUnknown
@@ -1166,10 +1166,7 @@ impl<'a> Values<'a> {
                 continue;
             };
             self.attempt();
-            let state = self
-                .inventory
-                .instruction_for_inst(inst.id)
-                .map(|d| d.state);
+            let state = self.inventory.state_of(inst.id);
             let stmt = match state {
                 _ if certified_elision(
                     self.artifact,

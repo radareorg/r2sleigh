@@ -184,10 +184,8 @@ impl DeadPhis {
                     && !observed.contains(value.id)
                     && graph
                         .def_inst(value.id)
-                        .and_then(|inst| obligations.instruction_for_inst(inst))
-                        .is_none_or(|instruction| {
-                            instruction.state == SemanticInstructionState::ProvenDead
-                        })
+                        .and_then(|inst| obligations.state_of(inst))
+                        .is_none_or(|state| state == SemanticInstructionState::ProvenDead)
             })
             .map(|value| value.id)
             .collect();
@@ -203,10 +201,8 @@ impl DeadPhis {
             // and ask for an operand the plan had already elided.
             let proven_dead_effect = inst.output.is_none()
                 && obligations
-                    .instruction_for_inst(inst.id)
-                    .is_some_and(|instruction| {
-                        instruction.state == SemanticInstructionState::ProvenDead
-                    });
+                    .state_of(inst.id)
+                    .is_some_and(|state| state == SemanticInstructionState::ProvenDead);
             if !proven_dead_effect
                 && !inst
                     .output
@@ -282,11 +278,11 @@ impl DeadPhis {
                 .collect::<Vec<_>>();
             let definition = graph
                 .def_inst(value.id)
-                .and_then(|inst| obligations.instruction_for_inst(inst));
+                .and_then(|inst| obligations.instruction_for_inst(graph, inst));
             let definition_state = definition.map(|instruction| format!("{:?}", instruction.state));
             let own_obligations = definition
                 .map(|instruction| {
-                    (obligations.owned(instruction))
+                    (obligations.owned(&instruction))
                         .map(|obligation| {
                             let id = obligation.id;
                             format!(

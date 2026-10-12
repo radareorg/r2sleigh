@@ -111,7 +111,7 @@ fn copy_is_elided_and_its_single_use_source_expanded() {
         .expect("entity");
     let and_producer = artifact
         .obligations()
-        .instruction_for_inst(and_producer_entity.inst())
+        .instruction_for_inst(artifact.graph(), and_producer_entity.inst())
         .expect("its producer")
         .id;
     assert_eq!(
@@ -166,7 +166,7 @@ fn a_value_read_twice_stays_a_leaf_unless_duplicable() {
         .expect("entity");
     let sum_producer = artifact
         .obligations()
-        .instruction_for_inst(sum_producer_entity.inst())
+        .instruction_for_inst(artifact.graph(), sum_producer_entity.inst())
         .expect("its producer")
         .id;
     assert!(
