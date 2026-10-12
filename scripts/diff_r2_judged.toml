@@ -6,7 +6,8 @@
 # binaries  a shell pattern over the file name
 # r2, r2s   for a listing: regular expressions each tool's line must match
 #           (`<missing>` where the tool printed no line); an absent one is any
-# values    for a values listing: the values r2s reports and radare2 does not
+# values    for a values listing: the values r2s reports and radare2 does not;
+#           none listed covers every value of the binaries
 # verdict   r2s-right: radare2's defect, an upstream candidate
 #           r2-right: r2s's defect, with its owner in the reason
 #           unfilled: r2s does not yet state what radare2 does
@@ -21,8 +22,8 @@ reason = "e_flags 0x5800202 states BE8: code is little-endian; radare2 decodes i
 [[judged]]
 command = "pd"
 binaries = "*"
-r2 = '(push|mov r8,|ldr (ip|r0|r3),) (sym\.__libc_csu_|main$)'
-r2s = '(push|mov r8,|ldr (ip|r0|r3),) (0x|\[0x)'
+r2 = '(push|mov r8,|ldr (ip|r0|r3),|lea rsi,) (sym\.__libc_csu_|main$|str\.|loc\.|segment\.)'
+r2s = '(push|mov r8,|ldr (ip|r0|r3),|lea rsi,) (0x|\[0x)'
 verdict = "deliberate"
 reason = "a number is named only where the engine claims it as an address; a pool load is spelled as encoded (listing.rs `held`)"
 
@@ -146,7 +147,205 @@ reason = "a relocatable object's call is resolved by its relocation; r2s does no
 [[judged]]
 command = "pd"
 binaries = "test.ko"
-r2 = 'mov rdi, \.rodata'
-r2s = 'mov rdi, 0x'
+r2 = 'mov r[ds]i, [A-Za-z_.]'
+r2s = 'mov r[ds]i, 0x'
 verdict = "unfilled"
 reason = "a relocatable object's operand is resolved by its relocation; r2s does not apply ET_REL relocations to listings yet"
+
+[[judged]]
+command = "is"
+binaries = "ls-focal"
+values = ["0x46d0", "0x46e0", "0x46f0"]
+verdict = "r2s-right"
+reason = ".plt.got stubs (endbr64; jmp through the slot) that radare2 does not name as imports"
+
+[[judged]]
+command = "is"
+binaries = "libc-2.3[12].so"
+values = ["0x25320", "0x26330"]
+verdict = "r2s-right"
+reason = "a .plt.got stub that radare2 does not name as an import"
+
+[[judged]]
+command = "is"
+binaries = "*_mod"
+values = ["0x1040"]
+verdict = "r2s-right"
+reason = "a .plt.got stub (__cxa_finalize) that radare2 does not name as an import"
+
+[[judged]]
+command = "is"
+binaries = "dwarf_test_func_patched"
+values = ["0x1040"]
+verdict = "r2s-right"
+reason = "a .plt.got stub (__cxa_finalize) that radare2 does not name as an import"
+
+[[judged]]
+command = "is"
+binaries = "ls-toybox"
+verdict = "r2s-right"
+reason = "its .plt's entries are 24 bytes apart and r2s reads each stub's slot (0x75928 reads strtod's 0x7b498); radare2 assumes 16 and drifts"
+
+[[judged]]
+command = "is"
+binaries = "libarm.so"
+verdict = "r2s-right"
+reason = "objects at odd addresses (radare2 clears the Thumb bit) and stubs radare2 names one entry off (0x3e110 reads 0x41b88, __cxa_finalize's slot)"
+
+[[judged]]
+command = "is"
+binaries = "libflutter.so"
+verdict = "r2s-right"
+reason = "radare2 names each ARM stub one entry off: 0x4e6da0 reads 0x510fbc, __cxa_atexit's slot, which radare2 puts at 0x4e6d90"
+
+[[judged]]
+command = "pd"
+binaries = "libarm.so"
+r2 = 'b sym\.imp\.__cxa_atexit'
+r2s = 'b sym\.imp\.__cxa_finalize'
+verdict = "r2s-right"
+reason = "the stub at 0x3e110 loads pc from 0x41b88, __cxa_finalize's slot; radare2 names the stub one entry off"
+
+[[judged]]
+command = "pd"
+binaries = "*libc*"
+r2 = 'call sym\.(_exit|__write|write)$'
+r2s = 'call sym\.(_Exit|__GI___libc_write)$'
+verdict = "r2-right"
+reason = "of several symbols at one address r2s names the alphabetically first (WEAK _Exit, LOCAL __GI___libc_write); the strongest binding should name it (GLOBAL _exit, WEAK write); owner r2engine naming"
+
+[[judged]]
+command = "pd"
+binaries = "libarm64.so"
+r2 = 'sym\.imp\.'
+r2s = 'b 0x'
+verdict = "unfilled"
+reason = "no section headers: r2s's stub walk reads code sections, so the .plt's stubs are unnamed; owner r2engine naming"
+
+[[judged]]
+command = "pd"
+binaries = "libverifyPass.so"
+verdict = "r2-right"
+reason = "ARM32 (ungraded): PLT0's literal word (0xed4) does not decode, so the stub walk refuses the .plt and its stubs go unnamed, and a listing steps one byte past an undecodable ARM word; the adr spelling is Sleigh's UAL; owners r2engine naming and the listing"
+
+[[judged]]
+command = "pd"
+binaries = "*"
+r2 = 'ldr r0, \[r0\]$'
+r2s = 'ldr r0, \[r0, 0x0\]$'
+verdict = "r2-right"
+reason = "Sleigh spells a zero offset; owner r2sleigh-lift's display"
+
+[[judged]]
+command = "pd"
+binaries = "main.elf"
+r2 = '(ldm r0!|invalid$)'
+r2s = '(ldmia r0!|msr msp, r1$)'
+verdict = "deliberate"
+reason = "Cortex-M (ungraded): Sleigh decodes msr msp, which radare2 calls invalid (r2s right), and spells the pre-UAL ldmia (radare2 right)"
+
+[[judged]]
+command = "pd"
+binaries = "ip-riscv"
+verdict = "unfilled"
+reason = "RISC-V is outside the graded architectures: Sleigh spells compressed forms (c.mv) and names a call to entry.preinit0 where radare2 prints the number"
+
+[[judged]]
+command = "pd"
+binaries = "*_o"
+r2 = 'call [A-Za-z_]'
+r2s = 'call 0x'
+verdict = "unfilled"
+reason = "a relocatable object's call is resolved by its relocation; r2s does not apply ET_REL relocations to listings yet"
+
+[[judged]]
+command = "pd"
+binaries = "*.so"
+r2 = 'adrp x0, (segment|section)\.'
+r2s = 'adrp x0, 0x'
+verdict = "deliberate"
+reason = "a page base is no address the instruction uses, so r2s names none (listing.rs `painted`)"
+
+[[judged]]
+command = "pd"
+binaries = "libstdc++.so.6"
+r2 = 'call qword \[reloc\.'
+r2s = 'call qword \[0x'
+verdict = "unfilled"
+reason = "a call through a relocated slot outside a stub is spelled as a number; r2s claims the slot only in a linkage stub; owner the listing's claims"
+
+[[judged]]
+command = "pd"
+binaries = "libcurl.so*"
+r2 = 'b loc\.imp\.'
+r2s = 'b sym\.imp\.'
+verdict = "deliberate"
+reason = "0x77cc is a linkage stub reading __gmon_start__'s slot; r2s names every stub sym.imp., whatever the import's binding"
+
+[[judged]]
+command = "pd"
+binaries = "special-sym-with-dot.bin"
+r2 = 'ldr r1, \[0x'
+r2s = 'ldr r1, \[pc, r1\]'
+verdict = "r2s-right"
+reason = "0xe79f1001 is LDR (register), pc plus r1; radare2 spells an immediate pool load"
+
+[[judged]]
+command = "pd"
+binaries = "switch-hello-world.elf"
+verdict = "unfilled"
+reason = "a static-pie whose e_entry is 0, where .crt0 begins: r2s states no entry and radare2 guesses .text's start; neither lists the stated 0x0; owner r2image entries"
+
+[[judged]]
+command = "px"
+binaries = "switch-hello-world.elf"
+verdict = "unfilled"
+reason = "the two seek different entries: r2s states none for e_entry 0, radare2 guesses .text's start"
+
+[[judged]]
+command = "pd"
+binaries = "libshella-*.so"
+verdict = "unfilled"
+reason = "a shared object's e_entry 0 names no entry; at 0 radare2 lists the ELF header as data, r2s decodes it as code"
+
+[[judged]]
+command = "is"
+binaries = "*.obj"
+verdict = "unfilled"
+reason = "a relocatable states no addresses: r2s places a NOBITS .bss at the base, radare2 at its sh_offset (over .rodata); owner r2image placement"
+
+[[judged]]
+command = "iS"
+binaries = "libmemalloc-dump-mem"
+verdict = "r2-right"
+reason = "a memory dump whose section headers are text (sh_offset 0x6568206d, past the file): radare2 drops the table, r2s lists it; owner r2image"
+
+[[judged]]
+command = "pd"
+binaries = "libmemalloc-dump-mem"
+verdict = "unfilled"
+reason = "a memory dump: the two seek different entries (radare2 an unaligned 0x1de1), and r2s reads its garbage section table"
+
+[[judged]]
+command = "px"
+binaries = "libmemalloc-dump-mem"
+verdict = "unfilled"
+reason = "a memory dump: the two seek different entries (radare2 an unaligned 0x1de1)"
+
+[[judged]]
+command = "pd"
+binaries = "libflutter.so"
+verdict = "r2-right"
+reason = "ARM32 (ungraded): e_entry 0x132700 points at text; r2s steps one byte past the undecodable word where an ARM listing steps four; owner the listing"
+
+[[judged]]
+command = "pd"
+binaries = "libflutterapp.so"
+verdict = "unfilled"
+reason = "a shared object's e_entry 0 names no entry, so the two list different places"
+
+[[judged]]
+command = "pd"
+binaries = "r2pay-arm32.so"
+verdict = "unfilled"
+reason = "a shared object's e_entry 0 names no entry, so the two list different places"

@@ -168,7 +168,9 @@ def judgment_for(judgments, binary, command, difference):
         if judgment["command"] != verb or not fnmatch.fnmatchcase(binary, judgment["binaries"]):
             continue
         if kind == "value":
-            covered = detail in judgment["values"]
+            # No values listed covers every value of those binaries, as no pattern covers any line.
+            listing = "r2" in judgment or "r2s" in judgment
+            covered = not listing and (not judgment["values"] or detail in judgment["values"])
         else:
             theirs, ours = detail
             covered = not judgment["values"] and all(
