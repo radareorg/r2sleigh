@@ -8,6 +8,7 @@
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 mod debug;
+mod held;
 mod language;
 mod loader;
 mod platform;
@@ -332,7 +333,7 @@ fn states_instructions<'a>(section: &impl object::read::ObjectSection<'a>) -> bo
 /// A parsed binary, with its bytes retained for address reads.
 #[derive(Debug, Clone)]
 pub struct Image {
-    data: Vec<u8>,
+    data: held::Held,
     /// What the container states, read once: nothing after the parse changes
     /// which sections, symbols or relocations exist.
     container: Container,
@@ -381,18 +382,24 @@ fn next_identity() -> u64 {
 }
 
 impl Image {
+    /// The binary at `path`, its bytes mapped from the file rather than copied into the heap.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ImageError> {
         let path = path.as_ref();
-        let data = std::fs::read(path).map_err(|source| ImageError::Io {
+        let io = |source| ImageError::Io {
             path: path.display().to_string(),
             source,
-        })?;
-        Self::parse(data)
+        };
+        let file = std::fs::File::open(path).map_err(io)?;
+        Self::held(held::Held::map(&file).map_err(io)?)
     }
 
     pub fn parse(data: Vec<u8>) -> Result<Self, ImageError> {
+        Self::held(held::Held::Owned(data))
+    }
+
+    fn held(data: held::Held) -> Result<Self, ImageError> {
         let data = match select_fat_slice(&data)? {
-            Some(range) => data[range].to_vec(),
+            Some(range) => data.narrowed(range),
             None => data,
         };
         let file = object::File::parse(&*data).map_err(|e| ImageError::Parse(e.to_string()))?;
@@ -616,7 +623,7 @@ impl Image {
             relocations,
             writes: loader_writes,
             import_stubs,
-        } = loader::read(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
+        } = loader::read(&file, &data[..], &placed, u64::from(arch.bits / 8));
 
         let sealed = loader::sealed(&file);
         let platform = platform::evidence(&file);
@@ -630,7 +637,7 @@ impl Image {
         let mut entries = Vec::new();
         let declared_entry = file.entry();
         let entry = code_address(&arch, declared_entry);
-        let c_main = macho_c_main(&file, data.as_slice());
+        let c_main = macho_c_main(&file, &data[..]);
         // Where the header states the entry: ELF's `e_entry`, Mach-O's `LC_MAIN`.
         let entry_field = match format {
             Format::Elf => Some(ELF_ENTRY_FIELD),
@@ -667,12 +674,7 @@ impl Image {
                 });
             }
         }
-        entries.extend(initialisers(
-            &sections,
-            &loader_writes,
-            data.as_slice(),
-            &arch,
-        ));
+        entries.extend(initialisers(&sections, &loader_writes, &data[..], &arch));
         if let Some((vaddr, field)) = c_main
             && executable(vaddr)
         {
@@ -688,7 +690,7 @@ impl Image {
         }
         // The linker wrote one entry per function it laid out, so a body no
         // symbol names and nothing calls is still stated here.
-        for vaddr in macho_function_starts(&file, data.as_slice()) {
+        for vaddr in macho_function_starts(&file, &data[..]) {
             if executable(vaddr) {
                 entries.push(Entry {
                     vaddr,
@@ -1259,7 +1261,7 @@ mod tests {
 
     fn image_with(segments: Vec<Segment>, data: Vec<u8>) -> Image {
         Image {
-            data,
+            data: held::Held::Owned(data),
             container: Container {
                 format: Format::Elf,
                 arch: Arch {
