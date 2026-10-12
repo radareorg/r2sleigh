@@ -31,6 +31,13 @@ verdict = "unfilled"
 reason = "processor-specific type"
 
 [[judged]]
+command = "ie"
+binaries = "*"
+columns = ["vhaddr"]
+verdict = "r2s-right"
+reason = "a column radare2 leaves empty"
+
+[[judged]]
 command = "px"
 binaries = "gone"
 verdict = "r2s-right"
@@ -56,8 +63,18 @@ class Judged(unittest.TestCase):
 
     def test_a_value_is_judged_only_by_its_listed_values(self):
         table = judgments()
-        self.assertIsNotNone(diff_r2.judgment_for(table, "any", "iS", ("value", 0x70000001)))
-        self.assertIsNone(diff_r2.judgment_for(table, "any", "iS", ("value", 0x70000002)))
+        self.assertIsNotNone(diff_r2.judgment_for(table, "any", "iS", ("value", (0x70000001, "type"))))
+        self.assertIsNone(diff_r2.judgment_for(table, "any", "iS", ("value", (0x70000002, "type"))))
+
+    def test_a_column_judgment_covers_only_values_in_its_columns(self):
+        table = judgments()
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "ie", ("value", (0x468, "vhaddr"))))
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "ie", ("value", (0x468, "paddr"))))
+
+    def test_a_value_takes_the_column_its_header_names(self):
+        lines = ["paddr      vaddr      phaddr     vhaddr     type", "0x10 0x1000 0x18 0x100018 program"]
+        self.assertEqual(diff_r2.columns(lines)[0x100018], "vhaddr")
+        self.assertEqual(diff_r2.columns(lines)[0x10], "paddr")
 
     def test_a_judgment_nothing_matched_is_left_unmatched(self):
         table = judgments()

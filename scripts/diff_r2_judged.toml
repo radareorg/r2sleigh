@@ -3,7 +3,7 @@
 # reports an entry nothing matched.
 #
 # command   the verb (`pd`, `px`, `iS`, `is`, `ie`)
-# binaries  a shell pattern over the file name
+# binaries  a shell pattern over the file name, or a list of them
 # r2, r2s   for a listing: regular expressions each tool's line must match
 #           (`<missing>` where the tool printed no line); an absent one is any
 # values    for a values listing: the values r2s reports and radare2 does not;
@@ -309,3 +309,24 @@ command = "pd"
 binaries = "r2pay-arm32.so"
 verdict = "unfilled"
 reason = "a shared object's e_entry 0 names no entry, so the two list different places"
+
+[[judged]]
+command = "ie"
+binaries = "*"
+columns = ["vhaddr"]
+verdict = "r2s-right"
+reason = "the address the entry's field is mapped at (Mach-O's LC_MAIN entryoff): r2s states it, radare2 leaves the column empty"
+
+[[judged]]
+command = "iS"
+binaries = "*"
+columns = ["flags"]
+verdict = "r2s-right"
+reason = "a Mach-O section header's flags field (0x80000400: pure and some instructions): r2s states it, radare2 prints 0x0"
+
+[[judged]]
+command = "iS"
+binaries = ["a.out", "AppIOSEntitlements.ios", "BatteryLife", "cat-macos-arm64", "fat-intel", "fatmach0-3true", "hellocxx-osx-fat-intel", "ired", "libexpat.1.dylib", "libswiftCoreFoundation.dylib", "ls-m1", "ls-sequoia", "mac-ls3", "mac-ls4", "modernobjc-noarm64", "TestApp.ios", "TestApp.ios.stripped", "TrollStore"]
+columns = ["paddr"]
+verdict = "r2s-right"
+reason = "a fat file's offsets are the file's: radare2's iS counts from the slice where its own is and ie count from the file"

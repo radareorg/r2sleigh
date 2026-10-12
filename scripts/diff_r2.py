@@ -86,6 +86,19 @@ def values(lines):
     return found
 
 
+def columns(lines):
+    """Each value with the column its header names, where the listing has a header."""
+    header = next((line.split() for line in lines if "vaddr" in line.split()), None)
+    found = {}
+    for line in lines:
+        for index, token in enumerate(line.split()):
+            if not HEX.fullmatch(token):
+                continue
+            column = header[index] if header and index < len(header) else None
+            found.setdefault(int(token, 16), column)
+    return found
+
+
 # `\b` never matches before a minus, so a negative decimal used to lose its
 # sign: radare2's `[sp, -4]` normalised to `-0x4` while Sleigh's `[sp, -0x4]`
 # normalised to the unsigned word, and the same displacement read as two.
@@ -137,7 +150,8 @@ def differences(command, mode, left, right):
     strip = command.startswith("pd")
     left_lines, right_lines = normalise(left, strip), normalise(right, strip)
     if mode == "values":
-        return [("value", value) for value in sorted(values(left_lines) - values(right_lines))]
+        theirs, ours = values(right_lines), columns(left_lines)
+        return [("value", (value, ours.get(value))) for value in sorted(values(left_lines) - theirs)]
     found = []
     for index in range(max(len(left_lines), len(right_lines))):
         ours = left_lines[index] if index < len(left_lines) else None
@@ -156,6 +170,7 @@ def load_judgments(path):
         if judgment["verdict"] not in VERDICTS:
             raise ValueError("unknown verdict {!r}".format(judgment["verdict"]))
         judgment["values"] = {int(value, 16) for value in judgment.get("values", [])}
+        judgment["columns"] = set(judgment.get("columns", []))
         judgment["matched"] = 0
     return judged
 
@@ -165,12 +180,20 @@ def judgment_for(judgments, binary, command, difference):
     verb = command.split()[0]
     kind, detail = difference
     for judgment in judgments:
-        if judgment["command"] != verb or not fnmatch.fnmatchcase(binary, judgment["binaries"]):
+        patterns = judgment["binaries"]
+        patterns = [patterns] if isinstance(patterns, str) else patterns
+        if judgment["command"] != verb or not any(fnmatch.fnmatchcase(binary, p) for p in patterns):
             continue
         if kind == "value":
-            # No values listed covers every value of those binaries, as no pattern covers any line.
+            # No values listed covers every value of those binaries, as no pattern covers any line;
+            # columns listed cover only values r2s prints in them.
+            value, column = detail
             listing = "r2" in judgment or "r2s" in judgment
-            covered = not listing and (not judgment["values"] or detail in judgment["values"])
+            covered = (
+                not listing
+                and (not judgment["values"] or value in judgment["values"])
+                and (not judgment["columns"] or column in judgment["columns"])
+            )
         else:
             theirs, ours = detail
             covered = not judgment["values"] and all(
@@ -188,7 +211,8 @@ def spelled(difference):
     """One disagreement as the report prints it, indented under its command."""
     kind, detail = difference
     if kind == "value":
-        return "      {:#x}".format(detail)
+        value, column = detail
+        return "      {:#x}{}".format(value, " ({})".format(column) if column else "")
     theirs, ours = detail
     return "      r2  {}\n      r2s {}".format(
         theirs if theirs is not None else "<missing>", ours if ours is not None else "<missing>"
