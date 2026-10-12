@@ -26,7 +26,7 @@ expression: run.out
             0x00401548      0fb617         movzx edx, byte [rdi] ; loop: latches 0x40156d, exits 0x401576 (certified) ; induction rdi = rdi@entry, +0x1 per trip (certified) ; trips rsi@entry (solved)
             0x0040154b      31d0           xor eax, edx
             0x0040154d      ba08000000     mov edx, 0x8
-            0x00401552      660f1f440000   nop word [rax + rax*0x1]
+            0x00401552      660f1f440000   nop word [rax + rax]
             0x00401558      89c1           mov ecx, eax ; loop: latches 0x401558, exits 0x40156d (certified)
             0x0040155a      83e001         and eax, 0x1 ; defines rax in [0x0, 0x1] (decoded)
             0x0040155d      f7d8           neg eax

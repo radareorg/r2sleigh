@@ -161,14 +161,16 @@ fn radare2_text(text: &str, arch: &str) -> String {
             out.push(' ');
         }
     }
-    // Sleigh writes the x86 memory-operand size as `dword ptr [..]` and a
-    // negative displacement as `+ -0x4`; radare2 writes `dword [..]` and
-    // `- 0x4`. Same operand, and the two spellings are only spellings.
-    let out = out.replace(" ptr [", " [").replace("+ -", "- ");
-    let out = bare_effective_address(&out);
+    // Sleigh writes the x86 memory-operand size as `dword ptr [..]` (`word ptr cs:[..]`) and a
+    // negative displacement as `+ -0x4`; radare2 writes `dword [..]` and `- 0x4`.
+    let out = out.replace(" ptr ", " ").replace("+ -", "- ");
     if arch == "ARM" {
+        // A zero offset says nothing radare2 writes: `[r0, 0x0]` is `[r0]`.
+        let out = out.replace(", 0x0]", "]");
         arm_alias(&arm_it_condition(&arm_role_registers(&out)))
     } else {
+        // Nor a scale of one: `[rax + rax*0x1]` is `[rax + rax]`.
+        let out = out.replace("*0x1]", "]").replace("*0x1 ", " ");
         x86_condition_alias(&out)
     }
 }
@@ -190,14 +192,27 @@ fn arm_it_condition(text: &str) -> String {
     }
 }
 
-/// Two ARM spellings Sleigh keeps from before the unified syntax.
+/// ARM spellings Sleigh keeps from before the unified syntax.
 ///
-/// `cpy rd, rm` is what `mov rd, rm` was called, and a post-indexed load of one
-/// register from the stack pointer is a `pop` of it. Every other ARM
+/// `cpy rd, rm` is what `mov rd, rm` was called, a post-indexed load of one
+/// register from the stack pointer is a `pop` of it, a store or load multiple
+/// on the stack is a `push` or `pop`, and `ldmia` is `ldm`. Every other ARM
 /// disassembler prints the later name.
 fn arm_alias(text: &str) -> String {
     if let Some(rest) = text.strip_prefix("cpy ") {
         return format!("mov {rest}");
+    }
+    if let Some(list) = text.strip_prefix("stmdb sp!, ") {
+        return format!("push {list}");
+    }
+    if let Some(list) = text.strip_prefix("ldmia sp!, ") {
+        return format!("pop {list}");
+    }
+    if let Some(rest) = text.strip_prefix("ldmia ") {
+        return format!("ldm {rest}");
+    }
+    if let Some(rest) = text.strip_prefix("stmia ") {
+        return format!("stm {rest}");
     }
     if let Some(register) = text
         .strip_prefix("ldr ")
@@ -265,28 +280,6 @@ fn arm_role_registers(text: &str) -> String {
     out
 }
 
-/// `lea` loads an address rather than what is there, and radare2 writes that
-/// address without the brackets that would say it was read.
-///
-/// Only where the brackets hold one thing: `lea r8, [0x8f0]` is that address,
-/// while `lea rax, [rbp - 0x4]` is a computation and keeps its shape.
-fn bare_effective_address(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("lea ") else {
-        return text.to_owned();
-    };
-    let Some(open) = rest.find('[') else {
-        return text.to_owned();
-    };
-    let Some(close) = rest.rfind(']') else {
-        return text.to_owned();
-    };
-    let inside = &rest[open + 1..close];
-    if close + 1 != rest.len() || inside.contains(' ') || inside.is_empty() {
-        return text.to_owned();
-    }
-    format!("lea {}{}", &rest[..open], inside)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +307,22 @@ mod tests {
         assert_eq!(syntax.body, "r0, r1");
         let popped = radare2("ldr", "r4, [r13], #0x4", 4, "ARM");
         assert_eq!(popped.text(), "pop {r4}");
+    }
+
+    /// Each spelling as radare2's own tests write it (test/db/cmd/cmd_pd).
+    #[test]
+    fn sleigh_s_spellings_read_as_radare2_writes_them() {
+        let text = |mnemonic, body, arch| radare2(mnemonic, body, 4, arch).text();
+        assert_eq!(text("stmdb", "r13!,{r11,r14}", "ARM"), "push {fp, lr}");
+        assert_eq!(text("ldmia", "r13!,{r4,r15}", "ARM"), "pop {r4, pc}");
+        assert_eq!(text("ldmia", "r0!,{r1,r2}", "ARM"), "ldm r0!, {r1, r2}");
+        assert_eq!(text("ldr", "r0,[r0,#0x0]", "ARM"), "ldr r0, [r0]");
+        assert_eq!(text("ldr", "r0,[r0,#0x10]", "ARM"), "ldr r0, [r0, 0x10]");
+        assert_eq!(text("LEA", "R8,[0x11e0]", "x86-64"), "lea r8, [0x11e0]");
+        let nop = text("NOP", "word ptr CS:[RAX + RAX*0x1]", "x86-64");
+        assert_eq!(nop, "nop word cs:[rax + rax]");
+        let scaled = text("MOV", "EAX,dword ptr [RAX + RBX*0x10]", "x86-64");
+        assert_eq!(scaled, "mov eax, dword [rax + rbx*0x10]");
     }
 
     #[test]

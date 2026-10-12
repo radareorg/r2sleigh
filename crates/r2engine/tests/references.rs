@@ -189,7 +189,7 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
         .to(CALLEE)
         .filter_map(|(_, source)| Some(source.line.syntax.as_ref()?.text()))
         .collect::<Vec<_>>();
-    assert_eq!(text, ["lea rax, 0x1050", "call rax"]);
+    assert_eq!(text, ["lea rax, [0x1050]", "call rax"]);
 }
 
 /// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
