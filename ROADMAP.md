@@ -417,7 +417,18 @@ maintainer accepts broken renderings on `rebuild` until it merges.
             assertions, and the `formal_*` maps keyed by `VarId`, which no
             post-seal reader can reach.
          2. **MM.4** the fixed cost `F` (29.8 MB: the file's bytes 9.5,
-            symbols 7.6, names 4.2), PF's.
+            symbols 7.6, names 4.2), PF's. Measured 2026-10-13 (dhat,
+            pumasim's 6-byte stub): 36.2 MiB of heap, 93.4 MB RSS. Step 1
+            done (#189): the image maps its file read-only (`memmap2`; a fat
+            Mach-O's slice is a range of the map) where it read a copy into
+            the heap. Heap peak falls by the file's size in every case:
+            pumasim `afl` 95.4 to 86.4 MiB, 0pack `afl` 57.5 to 50.0, pumasim
+            `0x23fdf0` 130.0 to 120.9, the session 163.4 to 154.3; census
+            byte-identical. The mapped pages count in RSS once read, and the
+            kernel can drop them without swap. Left: a symbol's name and its
+            name-table entry are two copies of one string (6.0 and 4.1 MiB),
+            relocations 3.8, the loader's composed writes 2.6, the unwind
+            frames 3.2.
          3. **MM.7** compact identities: a disposition (48 B per
             instruction) and an imported value carry a 32-byte canonical
             instruction id the graph already implies; an obligation copies
