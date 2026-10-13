@@ -199,7 +199,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s
           path: target/ci
@@ -244,7 +244,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s
           path: target/ci
@@ -285,7 +285,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s
           path: ${{ runner.temp }}/head
@@ -306,7 +306,7 @@ jobs:
             --manifest-path "$RUNNER_TEMP/base-src/Cargo.toml"
           mkdir -p "$RUNNER_TEMP/base"
           cp target/ci/r2s "$RUNNER_TEMP/base/r2s"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s-count
           path: ${{ runner.temp }}/head-count
@@ -367,7 +367,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s
           path: target/ci
@@ -446,7 +446,7 @@ jobs:
             sources: tests/corpus/shapes.c
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s
           path: target/ci
@@ -483,7 +483,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: equiv-shard-*
           path: ${{ runner.temp }}/shards
@@ -527,7 +527,7 @@ jobs:
             sources: tests/corpus/shapes.c
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: r2s
           path: target/ci
@@ -578,7 +578,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: equiv-aarch64-shard-*
           path: ${{ runner.temp }}/shards
