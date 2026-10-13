@@ -468,6 +468,8 @@ pub struct MemorySSAFacts {
     pub uses_by_inst: crate::dense::IdMap<InstId, Vec<MemoryUseFact>>,
     pub defs_by_inst: crate::dense::IdMap<InstId, Vec<MemoryDefFact>>,
     pub phis_by_block: BTreeMap<u64, Vec<MemoryPhiFact>>,
+    /// The solve moved a state past its height: the function refuses (doc/adr-fixpoint.md).
+    pub exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

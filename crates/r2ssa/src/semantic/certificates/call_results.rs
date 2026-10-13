@@ -34,7 +34,7 @@ pub enum ValueOwner {
 pub(crate) fn collect_call_result_certificates(
     body: Body<'_>,
     derived: Derived<'_>,
-) -> crate::dense::IdMap<ValueId, CallResultCertificate> {
+) -> Result<crate::dense::IdMap<ValueId, CallResultCertificate>, crate::fixpoint::Exhausted> {
     let function = body.function;
     let call_sites = derived.call_sites;
     let mut call_results = crate::dense::IdMap::default();
@@ -67,7 +67,7 @@ pub(crate) fn collect_call_result_certificates(
         Ok(solved) => solved,
         Err(exhausted) => {
             r2il::refusal_evidence!("call-results", "{exhausted}");
-            return Default::default();
+            return Err(exhausted);
         }
     };
     // Then the certificates, once, from each block's settled entry state.
@@ -90,7 +90,7 @@ pub(crate) fn collect_call_result_certificates(
         );
     }
 
-    call_results
+    Ok(call_results)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

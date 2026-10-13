@@ -167,6 +167,13 @@ impl PhaseRecorder {
 }
 
 impl PreparedFunctionFacts {
+    /// The first of its passes that moved a state past its stated height (doc/adr-fixpoint.md).
+    pub fn exhausted(&self) -> Option<crate::fixpoint::Exhausted> {
+        (self.control_domains.exhausted)
+            .or(self.memory.exhausted)
+            .or(self.certificates.exhausted)
+    }
+
     pub fn collect(function: &SSAFunction, graph: &SsaGraph) -> Self {
         Self::collect_inner(
             CollectionOver {

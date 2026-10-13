@@ -313,7 +313,10 @@ pub(crate) fn build_memory_ssa(
         Ok(solved) => solved,
         Err(exhausted) => {
             r2il::refusal_evidence!("memory-ssa", "{exhausted}");
-            return MemorySSAFacts::default();
+            return MemorySSAFacts {
+                exhausted: Some(exhausted),
+                ..MemorySSAFacts::default()
+            };
         }
     };
 
@@ -409,6 +412,7 @@ pub(crate) fn build_memory_ssa(
         uses_by_inst,
         defs_by_inst,
         phis_by_block,
+        exhausted: None,
     }
 }
 

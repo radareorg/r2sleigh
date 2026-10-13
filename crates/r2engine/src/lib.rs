@@ -582,6 +582,7 @@ fn ssa_prepare_execution_refusal(
         r2ssa::SsaPrepareError::NoCallEffect => {
             "the convention states nothing a call leaves standing".to_string()
         }
+        r2ssa::SsaPrepareError::Exhausted(exhausted) => exhausted.to_string(),
     };
     engine_execution_refusal(reason, EnginePhase::Ssa, metrics)
 }

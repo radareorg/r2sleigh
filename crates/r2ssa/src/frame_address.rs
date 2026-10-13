@@ -27,6 +27,8 @@ pub(crate) struct Definitions {
     merges: IdMap<VarId, Merge>,
     /// Each value as a root and offset up to the first merge or opaque definition.
     chains: IdMap<VarId, Affine>,
+    /// The merge solve moved a state past its height; whoever built these refuses the function.
+    exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 /// What a merge of addresses is, solved once over every merge of the function.
@@ -78,6 +80,7 @@ impl Definitions {
             values,
             merges: IdMap::new(values),
             chains: IdMap::new(values),
+            exhausted: None,
         };
         definitions.index_chains(func);
         definitions.solve_merges(func);
@@ -176,8 +179,16 @@ impl Definitions {
                     })
             },
         );
-        // An exhausted driver is a defect it reports; every merge then stays unresolved.
-        self.merges = solved.unwrap_or_else(|_| IdMap::new(self.values));
+        // An exhausted driver is a defect: every merge stays unresolved, and the function refuses.
+        self.merges = solved.unwrap_or_else(|exhausted| {
+            self.exhausted = Some(exhausted);
+            IdMap::new(self.values)
+        });
+    }
+
+    /// Whether the merge solve exceeded its height: a defect the function refuses on.
+    pub(crate) const fn exhausted(&self) -> Option<crate::fixpoint::Exhausted> {
+        self.exhausted
     }
 
     /// The constant a value is, through copies, extensions and constant arithmetic.

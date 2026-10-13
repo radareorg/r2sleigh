@@ -147,6 +147,8 @@ pub struct DecompilePrepFacts {
     pub formal_parameters: IdMap<crate::graph::ValueId, usize>,
     /// Full-width entry ABI values that may serve as parameter address bases.
     pub formal_parameter_bases: IdMap<crate::graph::ValueId, usize>,
+    /// The stack-root solve moved a state past its height: the function refuses.
+    pub exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl Default for DecompilePrepFacts {
@@ -158,6 +160,7 @@ impl Default for DecompilePrepFacts {
             indexed_stack_address_roots: IdMap::new(0),
             formal_parameters: IdMap::new(0),
             formal_parameter_bases: IdMap::new(0),
+            exhausted: None,
         }
     }
 }
@@ -2849,6 +2852,8 @@ pub struct SSAFunction {
     /// function was lifted and kept through every rewrite by id
     /// (doc/adr-written-lanes.md).
     written: crate::lanes::Written,
+    /// The first pass over it that moved a state past its stated height: the function refuses.
+    exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 /// Reads that see one content: loads of the same bytes of one object -- the
@@ -2998,6 +3003,17 @@ impl SSAFunction {
             false => std::borrow::Cow::Borrowed(&self.written),
             true => std::borrow::Cow::Owned(crate::lanes::Written::capture(self)),
         }
+    }
+
+    /// Record that a pass over this function moved a state past its stated height; the first
+    /// stands, and preparation refuses with it.
+    pub(crate) fn note_exhausted(&mut self, exhausted: crate::fixpoint::Exhausted) {
+        self.exhausted.get_or_insert(exhausted);
+    }
+
+    /// The first pass over this function that moved a state past its stated height.
+    pub(crate) const fn exhausted(&self) -> Option<crate::fixpoint::Exhausted> {
+        self.exhausted
     }
 
     /// Record what each operation writes, before anything rewrites one.
@@ -3191,6 +3207,7 @@ impl Clone for SSAFunction {
             formal_roots: self.formal_roots.clone(),
             entry_lanes: self.entry_lanes.clone(),
             written: self.written.clone(),
+            exhausted: self.exhausted,
         }
     }
 }

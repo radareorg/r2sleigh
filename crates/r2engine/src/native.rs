@@ -206,6 +206,7 @@ impl NativeRefusal {
             r2ssa::SsaPrepareError::Cancelled | r2ssa::SsaPrepareError::DeadlineExceeded => {
                 Self::Stopped(error)
             }
+            r2ssa::SsaPrepareError::Exhausted(exhausted) => Self::Prepare(exhausted.to_string()),
             error => Self::Prepare(format!("{error:?}")),
         }
     }

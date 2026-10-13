@@ -566,6 +566,7 @@ impl SSAFunction {
             indexed_stack_address_roots: crate::dense::IdMap::new(values),
             formal_parameters: crate::dense::IdMap::new(values),
             formal_parameter_bases: crate::dense::IdMap::new(values),
+            exhausted: None,
         };
         control.poll()?;
         let mut declared_stack_bases = BTreeMap::new();
@@ -635,10 +636,11 @@ impl SSAFunction {
                 facts.entry_stack_address_roots = roots.entry;
                 facts.indexed_stack_address_roots = roots.indexed;
             }
-            // A monotone solve settles within its budget; past it, only the
-            // seeds -- what the entry states -- are claimed.
+            // Past its height the solve is a defect: only the seeds are claimed, and the function
+            // refuses at preparation's end.
             Err(exhausted) => {
                 r2il::refusal_evidence!("stack-roots", "{:#x}: {exhausted}", self.entry);
+                facts.exhausted = Some(exhausted);
             }
         }
         control.poll()?;
