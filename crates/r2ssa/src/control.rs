@@ -76,6 +76,9 @@ pub enum SsaPrepareError {
     DeadlineExceeded,
     /// The body calls and its convention states nothing a call leaves standing.
     NoCallEffect,
+    /// A pass moved a state past its stated lattice height: a defect in it, refused with the
+    /// function (doc/adr-fixpoint.md).
+    Exhausted(crate::fixpoint::Exhausted),
 }
 
 impl std::fmt::Display for SsaPrepareError {
@@ -85,6 +88,7 @@ impl std::fmt::Display for SsaPrepareError {
             Self::Cancelled => "SSA preparation cancelled",
             Self::DeadlineExceeded => "SSA preparation deadline exceeded",
             Self::NoCallEffect => "the convention states nothing a call leaves standing",
+            Self::Exhausted(exhausted) => return write!(formatter, "{exhausted}"),
         })
     }
 }

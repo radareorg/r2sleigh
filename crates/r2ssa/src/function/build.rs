@@ -50,6 +50,7 @@ impl SSAFunction {
             formal_roots: crate::dense::IdMap::default(),
             entry_lanes: crate::dense::IdMap::default(),
             written: crate::lanes::Written::default(),
+            exhausted: None,
         }
     }
 
@@ -565,6 +566,7 @@ impl SSAFunction {
             formal_roots: crate::dense::IdMap::default(),
             entry_lanes: crate::dense::IdMap::default(),
             written: crate::lanes::Written::default(),
+            exhausted: None,
         };
         function.zero_scratch_insert_roots(abi_carriers);
         // The validator answers with a typed integrity error naming the block

@@ -46,6 +46,9 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         return;
     };
     let defs = Definitions::of(func);
+    if let Some(exhausted) = defs.exhausted() {
+        func.note_exhausted(exhausted);
+    }
     let slots = SlotStores::of(func, &defs);
     let checks = func
         .block_addrs()

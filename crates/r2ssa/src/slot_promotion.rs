@@ -80,6 +80,9 @@ pub(crate) fn promote(
         return IdSet::default();
     };
     let defs = Definitions::of(func);
+    if let Some(exhausted) = defs.exhausted() {
+        func.note_exhausted(exhausted);
+    }
     // A call may read the convention's argument registers (every register, with no convention),
     // so a frame address one of those holds is handed on.
     let calls = has_call(func);

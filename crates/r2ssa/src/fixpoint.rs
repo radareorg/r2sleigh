@@ -28,7 +28,7 @@ pub trait Join: Clone + PartialEq {
 
 /// A pass that moved one state more times than its stated lattice height allows: a transfer that
 /// is not monotone, or a height that is wrong.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exhausted {
     pub pass: &'static str,
     pub height: usize,

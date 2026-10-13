@@ -337,6 +337,13 @@ impl Sealed {
                 },
                 control,
             )?;
+        // A pass that moved a state past its stated height is a defect in it: the function refuses.
+        let exhausted = (self.ir.exhausted())
+            .or(self.prep.exhausted)
+            .or(facts.exhausted());
+        if let Some(exhausted) = exhausted {
+            return Err(SsaPrepareError::Exhausted(exhausted));
+        }
         // What one prepared function holds is the space every later stage has
         // to work above, so it is reported beside the phases that built it.
         r2il::refusal_evidence!(

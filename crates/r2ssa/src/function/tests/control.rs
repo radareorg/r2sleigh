@@ -1525,3 +1525,38 @@ fn the_graph_spells_the_blocks_as_the_function_does() {
     );
     assert_eq!(from_graph, spelled(function.named_blocks()));
 }
+
+/// A pass that moved a state past its stated height leaves no partial facts behind: preparation
+/// refuses the function, naming the pass (doc/adr-fixpoint.md).
+#[test]
+fn an_exhausted_pass_refuses_the_function() {
+    let mut block = R2ILBlock::new(0x1000, 4);
+    block.push_from(
+        R2ILOp::Return {
+            target: make_const(0, 8),
+        },
+        0x1000,
+    );
+    let context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+        &[block.clone()],
+        None,
+        None,
+        SourceMachineRoles::default(),
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut function = SSAFunction::from_blocks_for_decompile(&[block], None).expect("SSA");
+    let exhausted = crate::fixpoint::Exhausted {
+        pass: "frame-address-merges",
+        height: 2,
+    };
+    function.note_exhausted(exhausted);
+    let prepared = SsaArtifact::new_with_context_and_control(
+        function,
+        context,
+        &crate::control::UncheckedSsaWorkControl,
+    );
+    assert_eq!(prepared.err(), Some(SsaPrepareError::Exhausted(exhausted)));
+}

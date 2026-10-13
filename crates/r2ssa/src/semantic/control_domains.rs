@@ -6,6 +6,8 @@ use super::*;
 pub struct ControlDomainFacts {
     pub domains: BTreeMap<ControlDomainId, ControlDomain>,
     pub by_block: BTreeMap<u64, ControlDomainId>,
+    /// The solve moved a state past its height: the function refuses (doc/adr-fixpoint.md).
+    pub exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl ControlDomainFacts {
@@ -92,11 +94,11 @@ pub(crate) fn collect_control_domain_facts(
         },
         |_, state| state.clone(),
     );
-    let mut states = match solved {
-        Ok(solved) => solved.entry,
+    let (mut states, exhausted) = match solved {
+        Ok(solved) => (solved.entry, None),
         Err(exhausted) => {
             r2il::refusal_evidence!("control-domains", "{exhausted}");
-            BTreeMap::new()
+            (BTreeMap::new(), Some(exhausted))
         }
     };
 
@@ -144,7 +146,11 @@ pub(crate) fn collect_control_domain_facts(
         };
         by_block.insert(block_addr, id);
     }
-    ControlDomainFacts { domains, by_block }
+    ControlDomainFacts {
+        domains,
+        by_block,
+        exhausted,
+    }
 }
 
 /// Meet two guard sets: what is true on both paths into a block.
