@@ -569,6 +569,7 @@ impl<'d> Macho<'d> {
             at: 0,
             written: 0,
             address: None,
+            backed: 0..0,
             width: self.pointer,
             ntype: 1,
             symbol: None,
@@ -589,10 +590,12 @@ impl<'d> Macho<'d> {
         }
     }
 
-    /// Where a segment index and an offset in it place a write.
-    fn placed(&self, segment: u8, offset: u64) -> Option<u64> {
+    /// Where a segment index and an offset in it place a write, and the segment's file-backed
+    /// bytes every write of the stream must land in.
+    fn placed(&self, segment: u8, offset: u64) -> Option<(u64, std::ops::Range<u64>)> {
         let segment = self.segments.get(usize::from(segment))?;
-        Some(segment.vmaddr.wrapping_add(offset))
+        let backed = segment.vmaddr..segment.vmaddr.saturating_add(segment.filesize);
+        Some((segment.vmaddr.wrapping_add(offset), backed))
     }
 
     fn rebase(&self, state: &mut Opcodes<'_>, byte: u8, found: &mut Found) -> Option<()> {
@@ -607,7 +610,8 @@ impl<'d> Macho<'d> {
                 state.ntype = u32::from(immediate);
             }
             macho::REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
-                state.address = self.placed(immediate, state.uleb()?);
+                let offset = state.uleb()?;
+                state.place(self.placed(immediate, offset));
             }
             macho::REBASE_OPCODE_ADD_ADDR_ULEB => {
                 let by = state.uleb()?;
@@ -658,7 +662,8 @@ impl<'d> Macho<'d> {
                 state.ntype = u32::from(immediate);
             }
             macho::BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
-                state.address = self.placed(immediate, state.uleb()?);
+                let offset = state.uleb()?;
+                state.place(self.placed(immediate, offset));
             }
             macho::BIND_OPCODE_ADD_ADDR_ULEB => {
                 let by = state.uleb()?;
@@ -859,6 +864,8 @@ struct Opcodes<'b> {
     written: u64,
     /// Where the next write goes, once a segment and offset are set.
     address: Option<u64>,
+    /// The file-backed bytes of that segment, where every write lands or the stream is malformed.
+    backed: std::ops::Range<u64>,
     width: u64,
     ntype: u32,
     /// The symbol a bind binds, and whether it is a weak import.
@@ -915,6 +922,14 @@ impl Opcodes<'_> {
         Some(text)
     }
 
+    /// Set where the next write goes, and the bytes of its segment it may write.
+    fn place(&mut self, placed: Option<(u64, std::ops::Range<u64>)>) {
+        (self.address, self.backed) = match placed {
+            Some((address, backed)) => (Some(address), backed),
+            None => (None, 0..0),
+        };
+    }
+
     fn advance(&mut self, by: u64) -> Option<()> {
         self.address = Some(self.address?.wrapping_add(by));
         Some(())
@@ -956,12 +971,17 @@ impl Opcodes<'_> {
         }
     }
 
-    /// Write `times` times, stepping a pointer and `skip` more after each; a threaded bind names its symbols before any address.
+    /// Write `times` times, stepping a pointer and `skip` more; a write outside the segment's file
+    /// bytes ends the stream, as dyld refuses it, so `times` costs at most the segment's pointers.
     fn repeat(&mut self, times: u64, skip: u64, pointer: u64, found: &mut Found) -> Option<()> {
         let Some(mut address) = self.address else {
             return Some(());
         };
         for _ in 0..times {
+            let end = address.checked_add(self.width)?;
+            if !self.backed.contains(&address) || end > self.backed.end {
+                return None;
+            }
             let record = self.record(address);
             found.push(record);
             address = address.wrapping_add(skip).wrapping_add(pointer);
@@ -1177,6 +1197,21 @@ mod tests {
                 }
             )
         );
+    }
+
+    /// `fuzzed`: a rebase of 2^62 pointers ends where its segment's file bytes do, as dyld refuses
+    /// a write outside them, so the count from the file costs at most the segment's pointers.
+    #[test]
+    fn a_repeat_past_its_segment_ends_the_stream() {
+        let macho = macho(&[]);
+        // set type pointer; segment 1 offset 0x10; rebase 2^62 times (ULEB); done
+        let stream = [
+            0x11, 0x21, 0x10, 0x60, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40, 0x00,
+        ];
+        let mut found = Found::default();
+        macho.stream(&stream, 0x100, Stream::Rebase, &mut found);
+        assert_eq!(found.records.len(), (0x100 - 0x10) / 8);
+        assert_eq!(super::super::merged(found.ranges), [0x4010..0x4100]);
     }
 
     #[test]
