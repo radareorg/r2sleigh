@@ -1275,6 +1275,8 @@ fn recover_interface_inner(
     let no_tail_boundary = matches!(tail, TailResult::NoTailBoundary);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
     let mut result_ambiguous = false;
+    // The argument register handed back untouched as the result, which the return reads.
+    let mut returned_argument = None;
     let mut result_carriers = None;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
@@ -1342,6 +1344,28 @@ fn recover_interface_inner(
                 Some(CarrierRead::Integer) => {}
                 None => result_ambiguous = result_reads.is_none(),
             }
+        } else if handed_back
+            && slots
+                .argument_slots()
+                .iter()
+                .any(|argument| argument.location() == candidate.location())
+        {
+            // An argument register the body hands back untouched is its result where every reading
+            // call reads it: AArch64's `ret` of a narrowing function returns its argument in x0.
+            match result_reads.map(|reads| (reads.integer, reads.float)) {
+                Some((1.., 0)) => {
+                    result = RecoveredFunctionResult::Register(RecoveredResult {
+                        slot: candidate,
+                        observed: candidate,
+                        signed: false,
+                        float: false,
+                    });
+                    result_carriers = None;
+                    returned_argument = Some(candidate);
+                }
+                Some(_) => {}
+                None => result_ambiguous = true,
+            }
         }
         if !candidate_live_out.is_empty()
             && (candidate_live_out.unresolved_blocks().next().is_none()
@@ -1395,7 +1419,10 @@ fn recover_interface_inner(
     // either case a preserved carrier is a real entry read by the call. Final
     // preparation materializes its source-declared boundary value so every
     // consumer can use the same identity.
-    for storage in passed_through_entry_storages(&facts.boundaries, graph) {
+    for storage in passed_through_entry_storages(&facts.boundaries, graph)
+        .into_iter()
+        .chain(returned_argument)
+    {
         if !reads.contains(&storage) {
             reads.push(storage);
         }
