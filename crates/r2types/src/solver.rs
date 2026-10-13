@@ -133,6 +133,12 @@ impl<K: SolverNode> IncrementalSolver<K> {
         self.types[class]
     }
 
+    /// The class `node` is in, by its root, seeing the node first where it is new.
+    pub fn class_seeing(&mut self, node: &K) -> usize {
+        let id = self.intern(node);
+        self.classes.find(id)
+    }
+
     /// The class `node` is in, by its root, where the node has been seen.
     pub fn class_of(&mut self, node: &K) -> Option<usize> {
         let id = self.nodes.get(node)?;
