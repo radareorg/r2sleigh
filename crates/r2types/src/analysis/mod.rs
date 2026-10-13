@@ -1028,6 +1028,18 @@ fn void_pointer_type() -> CTypeLike {
 pub fn build_source_owned_type_analysis(
     request: TypeAnalysisRequest,
 ) -> Result<TypeAnalysis, TypeAnalysisError> {
+    if std::env::var_os("T4_A").is_none() {
+        return build_with_callsites(request, &BTreeMap::new());
+    }
+    let first = build_with_callsites(request.clone(), &BTreeMap::new())?;
+    let callsites = first.function_facts.report().callsite_signatures();
+    build_with_callsites(request, &callsites)
+}
+
+fn build_with_callsites(
+    request: TypeAnalysisRequest,
+    callsites: &BTreeMap<r2ssa::CallSiteId, crate::FunctionType>,
+) -> Result<TypeAnalysis, TypeAnalysisError> {
     let TypeAnalysisRequest {
         source,
         parsed_context,
@@ -1052,7 +1064,8 @@ pub fn build_source_owned_type_analysis(
         .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
     let named_blocks = source.graph().named_blocks();
     let ssa_blocks = named_blocks.as_slice();
-    let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
+    let inferred_signature =
+        crate::signature_infer::infer_signature_with_callsites(source.as_ref(), callsites);
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
     let diagnostics = TypeAnalysisDiagnostics::default();
     let local_structs = infer_local_struct_artifacts_from_prepared_ssa(source.as_ref());

@@ -61,6 +61,13 @@ pub struct RecoveredSignatureParam {
 }
 
 pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSignature {
+    infer_signature_with_callsites(prepared, &BTreeMap::new())
+}
+
+pub(crate) fn infer_signature_with_callsites(
+    prepared: &SsaArtifact,
+    callsites: &BTreeMap<r2ssa::CallSiteId, crate::FunctionType>,
+) -> InferredSignature {
     let function_name = prepared
         .function()
         .name
@@ -72,7 +79,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> Infer
         .default_address_bits();
     let recovered_params = recover_signature_params_from_prepared_ssa(prepared, ptr_bits);
     let arch_name = prepared_arch_display_name(prepared).unwrap_or("");
-    let evidence_types = crate::solve_evidence_types(prepared, &BTreeMap::new(), ptr_bits);
+    let evidence_types = crate::solve_evidence_types(prepared, callsites, ptr_bits);
     let certified_parameter_widths = certified_parameter_memory_widths(prepared);
 
     let mut canonical_params = recovered_params
