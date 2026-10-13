@@ -9,11 +9,11 @@
 //! - work is the set of blocks whose input may have moved, taken in reverse
 //!   postorder, so the order is deterministic and a round visits only what
 //!   changed;
-//! - the caller states the height of its lattice, and the budget is
-//!   `blocks × (height + 1)` visits. A monotone transfer over a lattice of
-//!   that height cannot exceed it, so exceeding it is a defect in the pass,
-//!   reported as [`Exhausted`] with evidence, which the caller refuses on. No
-//!   result is partial and silent.
+//! - the caller states the height of its lattice, and no state may move more
+//!   times than that: a move past it is a transfer that is not monotone or a
+//!   height that is wrong, reported as [`Exhausted`] with evidence, which the
+//!   caller refuses on. No result is partial and silent. Work stays within
+//!   `blocks + edges × (height + 1)`, or `values + edges × height` over values.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,19 +26,20 @@ pub trait Join: Clone + PartialEq {
     fn join(&mut self, other: &Self) -> bool;
 }
 
-/// A pass that ran past the visits its stated height allows.
+/// A pass that moved one state more times than its stated lattice height allows: a transfer that
+/// is not monotone, or a height that is wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exhausted {
     pub pass: &'static str,
-    pub budget: usize,
+    pub height: usize,
 }
 
 impl std::fmt::Display for Exhausted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} did not settle within {} block visits, which its stated lattice height allows",
-            self.pass, self.budget
+            "{} moved a state more than the {} times its stated lattice height allows",
+            self.pass, self.height
         )
     }
 }
@@ -95,7 +96,9 @@ pub fn forward_on_edges<S: Clone + PartialEq>(
         .map(|(index, addr)| (*addr, index))
         .collect::<BTreeMap<_, _>>();
     let root = function.root();
-    let budget = order.len().saturating_mul(height.saturating_add(1)).max(1);
+    // Each entry moves at most `height` times past its first value, so a block is taken at most
+    // once more per move of a predecessor's exit: `B + E · (height + 1)` visits, checked per move.
+    let mut moves = vec![0usize; order.len()];
     let mut entry = BTreeMap::<u64, S>::new();
     let mut exit = BTreeMap::<u64, S>::new();
     let mut work = rank
@@ -103,13 +106,7 @@ pub fn forward_on_edges<S: Clone + PartialEq>(
         .copied()
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let mut visits = 0usize;
     while let Some(index) = work.pop_first() {
-        visits += 1;
-        if visits > budget {
-            r2il::refusal_evidence!("fixpoint", "{pass}: {budget} block visits were not enough");
-            return Err(Exhausted { pass, budget });
-        }
         let block = order[index];
         // The join of what reached it; the function's own entry is reached
         // with the initial state as well as from any edge back to it.
@@ -128,7 +125,16 @@ pub fn forward_on_edges<S: Clone + PartialEq>(
             continue;
         };
         let out = transfer(block, &state);
-        entry.insert(block, state);
+        if entry
+            .insert(block, state.clone())
+            .is_some_and(|held| held != state)
+        {
+            moves[index] += 1;
+            if moves[index] > height {
+                r2il::refusal_evidence!("fixpoint", "{pass}: block {block:#x} moved past {height}");
+                return Err(Exhausted { pass, height });
+            }
+        }
         if exit.get(&block) == Some(&out) {
             continue;
         }
@@ -177,23 +183,24 @@ pub fn sparse<I: DenseId, L: Clone + PartialEq>(
         rank.insert(*id, index);
         cells.insert(*id, start.clone());
     }
-    let budget = order.len().saturating_mul(height.saturating_add(1)).max(1);
+    // A cell moves at most `height` times, so a value is taken at most once more per move of a
+    // value it reads: `V + E · height` visits, checked per move.
+    let mut moves = vec![0usize; order.len()];
     let mut queued = vec![true; order.len()];
     let mut work = (0..order.len())
         .map(std::cmp::Reverse)
         .collect::<std::collections::BinaryHeap<_>>();
-    let mut visits = 0usize;
     while let Some(std::cmp::Reverse(index)) = work.pop() {
         queued[index] = false;
-        visits += 1;
-        if visits > budget {
-            r2il::refusal_evidence!("fixpoint", "{pass}: {budget} value visits were not enough");
-            return Err(Exhausted { pass, budget });
-        }
         let id = order[index];
         let next = eval(id, &cells);
         if cells.get(id) == Some(&next) {
             continue;
+        }
+        moves[index] += 1;
+        if moves[index] > height {
+            r2il::refusal_evidence!("fixpoint", "{pass}: a cell moved past {height}");
+            return Err(Exhausted { pass, height });
         }
         cells.insert(id, next);
         for reader in readers.get(id) {
@@ -210,6 +217,32 @@ pub fn sparse<I: DenseId, L: Clone + PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cell read by three that each move twice is taken after each move: 16 visits, more than
+    /// `V · (height + 1)` = 12. A visit budget refused this monotone pass; no cell moves past 2.
+    #[test]
+    fn a_merge_read_by_many_settles() {
+        use crate::ValueId;
+        let order = [ValueId(0), ValueId(1), ValueId(2), ValueId(3)];
+        // 0 merges 1, 2 and 3; each of those reads itself, moving one step per visit up to 2.
+        let pairs = (1..4).flat_map(|at| [(ValueId(at), ValueId(0)), (ValueId(at), ValueId(at))]);
+        let readers = Csr::from_pairs(4, pairs);
+        let mut visits = 0;
+        let solved = sparse("fan-in", 2, &order, &readers, 0u8, |id, cells| {
+            visits += 1;
+            let at = |id: ValueId| cells.get(id).copied().unwrap_or(0);
+            match id.0 {
+                0 => (1..4).map(|from| at(ValueId(from))).max().unwrap_or(0),
+                _ => (at(id) + 1).min(2),
+            }
+        })
+        .expect("a monotone pass settles");
+        assert!(
+            visits > 12,
+            "{visits} visits: the case the old budget refused"
+        );
+        assert_eq!(solved.get(ValueId(0)), Some(&2));
+    }
     use r2il::{R2ILBlock, R2ILOp, Varnode};
 
     /// The set of block addresses a path has passed, joined by union.
@@ -278,13 +311,12 @@ mod tests {
                 out
             },
         );
-        // A height of one allows two visits per block.
-        let budget = function.block_addrs().len() * 2;
+        // A height of one allows each entry one move past its first value.
         assert_eq!(
             solved,
             Err(Exhausted {
                 pass: "runaway",
-                budget
+                height: 1
             })
         );
     }
