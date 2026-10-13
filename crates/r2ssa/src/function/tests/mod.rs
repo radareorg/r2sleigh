@@ -5,6 +5,14 @@ mod lift;
 mod memory;
 mod stack;
 
+/// The one site the source's call names, over an index of these blocks alone.
+fn identity_of(
+    blocks: &[R2ILBlock],
+    call: &r2source::AdvisoryCallSite,
+) -> Option<SourceCallSiteIdentity> {
+    unique_call_site_identity(blocks, &CallOperations::of(blocks), call)
+}
+
 fn advisory_call_site(
     instruction: u64,
     target: u64,

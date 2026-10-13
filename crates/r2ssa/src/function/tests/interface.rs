@@ -15,7 +15,7 @@ fn tail_slot_identity_unifies_direct_ram_and_loaded_register_targets() {
         },
         0x2010,
     );
-    let direct_identity = unique_call_site_identity(&[direct_ram], &tail)
+    let direct_identity = identity_of(&[direct_ram], &tail)
         .expect("the terminal branch reads the relocated RAM slot directly");
 
     let base = Varnode::constant(0x1000_4000, 8);
@@ -39,13 +39,13 @@ fn tail_slot_identity_unifies_direct_ram_and_loaded_register_targets() {
         src: loaded,
     });
     through_register.push_from(R2ILOp::BranchInd { target: pc }, 0x2010);
-    let loaded_identity = unique_call_site_identity(&[through_register], &tail)
+    let loaded_identity = identity_of(&[through_register], &tail)
         .expect("the terminal branch reads a value loaded from the relocated slot");
 
     assert_eq!(direct_identity.target(), loaded_identity.target());
     assert_eq!(direct_identity.target().space, CanonicalStorageSpace::Ram);
     assert_eq!(direct_identity.target().offset, slot);
-    assert!(unique_call_site_identity(&[R2ILBlock::new(0x2000, 0x14)], &tail,).is_none());
+    assert!(identity_of(&[R2ILBlock::new(0x2000, 0x14)], &tail,).is_none());
 }
 
 #[test]
