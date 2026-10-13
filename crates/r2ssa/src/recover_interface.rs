@@ -1481,6 +1481,17 @@ fn recover_interface_inner(
             live_out = candidate_live_out;
         }
     }
+    // EXPERIMENT (Q7 measurement, never merged): an unproven result every call overwrites is void.
+    if result == RecoveredFunctionResult::Unproven
+        && result_reads.is_some_and(|r| {
+            r.integer == 0 && r.float == 0 && r.second == 0 && r.calls > 0 && r.overwritten == r.calls
+        })
+    {
+        result = RecoveredFunctionResult::Void;
+        live_out = crate::liveout::FunctionLiveOut::default();
+        result_carriers = None;
+        result_ambiguous = false;
+    }
     r2il::refusal_evidence!(
         "interface-recovery",
         "observation roots: live_out={} unresolved_blocks={} positive obligations={}",
