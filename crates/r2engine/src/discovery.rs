@@ -29,6 +29,29 @@ use crate::native::Program;
 /// engine's answers carry it, so the shell reads it from here.
 pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
 
+/// Whether control comes back from a call to a function, and what a "never" takes for granted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Return {
+    Comes,
+    /// Never comes back: proven where no premise is named, else assuming each one.
+    Never(BTreeSet<Premise>),
+}
+
+impl Return {
+    pub const fn comes(&self) -> bool {
+        matches!(self, Self::Comes)
+    }
+
+    /// What a "never" takes for granted; nothing for a call that comes back.
+    pub fn premises(&self) -> &BTreeSet<Premise> {
+        static NONE: BTreeSet<Premise> = BTreeSet::new();
+        match self {
+            Self::Comes => &NONE,
+            Self::Never(premises) => premises,
+        }
+    }
+}
+
 /// One address discovery believes is a function.
 #[derive(Debug, Clone)]
 pub struct Discovered {
@@ -74,8 +97,9 @@ pub trait Walker {
     /// Where a finished body hands a function to a parameter declared to take one, and whether each is Thumb.
     fn handed(&self, walk: &Self::Walk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)>;
 
-    /// Whether control comes back from the import at this address, as its own declaration says; `None` for anything else.
-    fn declared(&self, address: u64) -> Option<bool>;
+    /// Whether control comes back from the routine at this address as a declaration or a runtime
+    /// model says; `None` for anything else.
+    fn declared(&self, address: u64) -> Option<Return>;
 }
 
 /// Which believed bodies hold each address.
@@ -132,7 +156,7 @@ impl Holders {
 /// Every function in the program, whether control can come back from each, and each body as the fixpoint left it.
 pub struct Discovery<T, E> {
     pub functions: Vec<Discovered>,
-    pub returns: BTreeMap<u64, bool>,
+    pub returns: BTreeMap<u64, Return>,
     pub walks: BTreeMap<u64, Result<T, E>>,
 }
 
@@ -148,11 +172,7 @@ pub fn functions<W: Walker>(
         fixpoint.offer(address, confidence, thumb);
     }
     fixpoint.run();
-    let returns = fixpoint
-        .believed
-        .keys()
-        .map(|address| (*address, fixpoint.comes_back(*address)))
-        .collect();
+    let returns = fixpoint.answers(fixpoint.believed.keys().copied());
     Discovery {
         functions: fixpoint
             .believed
@@ -172,17 +192,13 @@ pub fn functions<W: Walker>(
 /// Whether control can come back from `seed` and from each function walked to decide it, walking a callee only while an undecided caller waits on it.
 pub fn returns<W: Walker>(
     seed: u64,
-    known: &dyn Fn(u64) -> Option<bool>,
+    known: &dyn Fn(u64) -> Option<Return>,
     walker: &W,
-) -> BTreeMap<u64, bool> {
+) -> BTreeMap<u64, Return> {
     let mut fixpoint = Fixpoint::new(walker, known, Some(seed));
     fixpoint.pending.push(seed);
     fixpoint.run();
-    fixpoint
-        .walks
-        .keys()
-        .map(|address| (*address, fixpoint.returning.contains(address)))
-        .collect()
+    fixpoint.answers(fixpoint.walks.keys().copied())
 }
 
 /// What a caller waits on a callee for.
@@ -198,7 +214,7 @@ enum Wait {
 struct Fixpoint<'w, W: Walker> {
     walker: &'w W,
     /// What an earlier run settled, which this one neither walks nor revises.
-    known: &'w dyn Fn(u64) -> Option<bool>,
+    known: &'w dyn Fn(u64) -> Option<Return>,
     /// The one function whose return is asked, where discovery is not walking every believed body.
     seed: Option<u64>,
     believed: BTreeMap<u64, (Confidence, bool)>,
@@ -215,7 +231,7 @@ struct Fixpoint<'w, W: Walker> {
 }
 
 impl<'w, W: Walker> Fixpoint<'w, W> {
-    fn new(walker: &'w W, known: &'w dyn Fn(u64) -> Option<bool>, seed: Option<u64>) -> Self {
+    fn new(walker: &'w W, known: &'w dyn Fn(u64) -> Option<Return>, seed: Option<u64>) -> Self {
         Self {
             walker,
             known,
@@ -250,9 +266,50 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             || waited.is_some_and(|waiters| waiters.iter().any(undecided))
     }
 
-    /// A status no walk here decides: an earlier run's, or an import's declaration.
-    fn settled(&self, address: u64) -> Option<bool> {
+    /// A status no walk here decides: an earlier run's, or a declaration's.
+    fn settled(&self, address: u64) -> Option<Return> {
         settled(self.walker, self.known, address)
+    }
+
+    /// Each address's answer once the fixpoint has run. One that never comes back takes for
+    /// granted every premise of a settled callee it still waits on, through any chain of waits:
+    /// a worklist over the wait edges whose sets only grow, `O((V + E) · P)`.
+    fn answers(&self, addresses: impl Iterator<Item = u64>) -> BTreeMap<u64, Return> {
+        let mut premises = BTreeMap::<u64, BTreeSet<Premise>>::new();
+        let mut work = Vec::new();
+        for callee in self.waiting.keys() {
+            if let Some(Return::Never(assumed)) = self.settled(*callee)
+                && !assumed.is_empty()
+            {
+                premises.insert(*callee, assumed);
+                work.push(*callee);
+            }
+        }
+        while let Some(callee) = work.pop() {
+            let assumed = premises.get(&callee).cloned().unwrap_or_default();
+            for (caller, _) in self.waiting.get(&callee).into_iter().flatten() {
+                if self.comes_back(*caller) || self.settled(*caller).is_some() {
+                    continue;
+                }
+                let held = premises.entry(*caller).or_default();
+                let before = held.len();
+                held.extend(assumed.iter().copied());
+                if held.len() > before {
+                    work.push(*caller);
+                }
+            }
+        }
+        addresses
+            .map(|address| {
+                let answer = self.settled(address).unwrap_or_else(|| {
+                    match self.returning.contains(&address) {
+                        true => Return::Comes,
+                        false => Return::Never(premises.remove(&address).unwrap_or_default()),
+                    }
+                });
+                (address, answer)
+            })
+            .collect()
     }
 
     fn comes_back(&self, address: u64) -> bool {
@@ -384,19 +441,20 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
 
 fn settled<W: Walker>(
     walker: &W,
-    known: &dyn Fn(u64) -> Option<bool>,
+    known: &dyn Fn(u64) -> Option<Return>,
     address: u64,
-) -> Option<bool> {
+) -> Option<Return> {
     known(address).or_else(|| walker.declared(address))
 }
 
 fn comes_back<W: Walker>(
     walker: &W,
-    known: &dyn Fn(u64) -> Option<bool>,
+    known: &dyn Fn(u64) -> Option<Return>,
     returning: &BTreeSet<u64>,
     address: u64,
 ) -> bool {
-    settled(walker, known, address).unwrap_or_else(|| returning.contains(&address))
+    settled(walker, known, address)
+        .map_or_else(|| returning.contains(&address), |answer| answer.comes())
 }
 
 #[cfg(test)]
@@ -554,9 +612,16 @@ mod tests {
             handed.collect()
         }
 
-        fn declared(&self, _address: u64) -> Option<bool> {
-            None
+        fn declared(&self, address: u64) -> Option<Return> {
+            (address == EXIT).then(|| Return::Never(BTreeSet::from([Premise::GoRuntime])))
         }
+    }
+
+    /// A routine with no body here that a model says never returns, under the runtime's contract.
+    const EXIT: u64 = 0x9000;
+
+    fn never() -> Return {
+        Return::Never(BTreeSet::new())
     }
 
     fn found(bodies: &[(u64, &[Step])], seeds: &[u64]) -> Discovery<At, ()> {
@@ -629,7 +694,7 @@ mod tests {
         assert_eq!(seen(&found).len(), 2);
         assert_eq!(
             found.returns,
-            BTreeMap::from([(0x1000, false), (0x2000, false)])
+            BTreeMap::from([(0x1000, never()), (0x2000, never())])
         );
     }
 
@@ -639,7 +704,7 @@ mod tests {
         assert_eq!(seen(&found).len(), 2);
         assert_eq!(
             found.returns,
-            BTreeMap::from([(0x1000, true), (0x2000, true)])
+            BTreeMap::from([(0x1000, Return::Comes), (0x2000, Return::Comes)])
         );
     }
 
@@ -653,10 +718,32 @@ mod tests {
         let forward = found(&bodies, &[0x1000, 0x2000, 0x3000]);
         let backward = found(&bodies, &[0x3000, 0x2000, 0x1000]);
         assert_eq!(forward.returns, backward.returns);
-        assert!(forward.returns.values().all(|returns| !returns));
+        assert!(forward.returns.values().all(|returns| *returns == never()));
         // The same walks, asked of one function against what an earlier run settled.
-        let settled = |address| (address == 0x3000).then_some(true);
+        let settled = |address| (address == 0x3000).then_some(Return::Comes);
         let from = returns(0x1000, &settled, &Bodies::of(&bodies));
-        assert_eq!(from, BTreeMap::from([(0x1000, true), (0x2000, true)]));
+        assert_eq!(
+            from,
+            BTreeMap::from([(0x1000, Return::Comes), (0x2000, Return::Comes)])
+        );
+    }
+
+    /// A body that never returns only through a call a model settles takes the model's premise for
+    /// granted, and so does each caller left waiting on it; one that loops proves its own.
+    #[test]
+    fn a_never_resting_on_a_model_carries_its_premise_to_each_waiting_caller() {
+        let bodies: [(u64, &[Step]); 3] = [
+            (0x1000, &[Step::Call(0x2000), Step::Return]),
+            (0x2000, &[Step::Call(EXIT), Step::Return]),
+            (0x3000, &[Step::Tail(0x3000)]),
+        ];
+        let found = found(&bodies, &[0x1000, 0x3000]);
+        let assumed = Return::Never(BTreeSet::from([Premise::GoRuntime]));
+        assert_eq!(found.returns[&0x2000], assumed);
+        assert_eq!(found.returns[&0x1000], assumed);
+        assert_eq!(found.returns[&EXIT], assumed);
+        assert_eq!(found.returns[&0x3000], never());
+        let asked = returns(0x1000, &|_| None, &Bodies::of(&bodies));
+        assert_eq!(asked[&0x1000], assumed);
     }
 }

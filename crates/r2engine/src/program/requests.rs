@@ -318,7 +318,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.start_request();
         let prepared = self.prepare(entry)?;
         let artifact = prepared.artifact().artifact();
-        let noreturn = !self.comes_back(entry);
+        let noreturn = (!self.comes_back(entry)).then(|| self.view().exit_premises(entry));
         let read = |sealed: &SealedFunctionAnalysis| {
             super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
         };

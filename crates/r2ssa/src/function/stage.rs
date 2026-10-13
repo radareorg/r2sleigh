@@ -149,6 +149,12 @@ impl Prepared {
         self
     }
 
+    /// The same function, its walk having ended at these calls on a model's word.
+    pub(crate) fn with_assumed_exits(mut self, exits: &super::AssumedExits) -> Self {
+        self.ir.record_assumed_exits(exits);
+        self
+    }
+
     /// The prep facts of a function that is analysed here and never sealed:
     /// interface recovery reads them off the provisional function it
     /// recovers from.

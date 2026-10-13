@@ -104,12 +104,12 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
-    CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts,
-    DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared,
-    RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction,
-    SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite, SsaArtifact,
-    SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot,
-    TrustedSsaArtifact, def_use_graph,
+    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs,
+    DecompilePrepFacts, DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut,
+    PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
+    RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite,
+    SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
+    StackAddressRoot, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

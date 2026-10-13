@@ -94,6 +94,11 @@ pub trait Program: crate::body::Program {
     /// objects only here, however low the program is linked.
     fn extents(&self) -> &r2types::ProgramExtents;
 
+    /// The language the function at this address is written in, as the container states it.
+    fn language_at(&self, _vaddr: u64) -> r2abi::statement::SourceLanguage {
+        r2abi::statement::SourceLanguage::C
+    }
+
     /// The machine the function at this address is written in, where the
     /// program has more than one; `None` keeps the caller's.
     fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {
@@ -664,10 +669,25 @@ pub(crate) fn declared_return(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     address: u64,
-) -> Option<bool> {
-    let name = program.import_at(address)?;
+) -> Option<crate::discovery::Return> {
+    use crate::discovery::Return;
+    let Some(name) = program.import_at(address) else {
+        // A Go function the runtime model says never returns, under the runtime's contract.
+        let go = program.language_at(address) == r2abi::statement::SourceLanguage::Go;
+        let premise = r2source::Premise::GoRuntime;
+        return (go && accepted_premises().contains(&premise))
+            .then(|| program.name_at(address))
+            .flatten()
+            .filter(|name| r2abi::runtime::exits(name))
+            .map(|_| Return::Never(std::collections::BTreeSet::from([premise])));
+    };
     let prototype = target.prototypes.get(&name);
-    Some(!prototype.is_some_and(|prototype| prototype.noreturn))
+    Some(
+        match prototype.is_some_and(|prototype| prototype.noreturn) {
+            true => Return::Never(std::collections::BTreeSet::new()),
+            false => Return::Comes,
+        },
+    )
 }
 
 fn render(
@@ -1144,6 +1164,7 @@ impl Callees {
         &self,
         library: BTreeMap<u64, r2ssa::interproc::FunctionSemanticSummary>,
         reentering: BTreeSet<u64>,
+        exits: r2ssa::AssumedExits,
     ) -> r2ssa::CalleeEvidence {
         r2ssa::CalleeEvidence {
             interfaces: self.interfaces.clone(),
@@ -1151,6 +1172,7 @@ impl Callees {
             reach: self.reach.clone(),
             library,
             reentering,
+            exits,
         }
     }
 
@@ -1778,6 +1800,7 @@ impl Native<'_> {
         let calls = call_sites(&walked.body, self.program);
         let library = library_evidence(self.program, &calls);
         let reentering = reentering_calls(&calls);
+        let exits = walked.body.exits.clone();
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
@@ -1818,7 +1841,7 @@ impl Native<'_> {
             r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)?;
         let lifted = Disassembler::lift_owned_function(snapshot)
             .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
-        Ok((lifted, callees.evidence(library, reentering)))
+        Ok((lifted, callees.evidence(library, reentering, exits)))
     }
 }
 

@@ -37,8 +37,17 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("is-lineal: {}", info.is_lineal()),
         format!("end-bbs: {}", info.exits()),
     ]);
-    // Only a proof is printed: a function nothing proves never returns may still never return.
-    out.extend(info.noreturn.then(|| "noreturn: true".to_owned()));
+    // Only a proof is printed, with what it takes for granted: unproven, a function may still never return.
+    out.extend(info.noreturn.as_ref().map(|premises| {
+        let assuming = premises.iter().map(|premise| premise.spelled());
+        match premises.is_empty() {
+            true => "noreturn: true".to_owned(),
+            false => format!(
+                "noreturn: true (assuming {})",
+                assuming.collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }));
     out.extend([
         format!("recursive: {}", info.is_recursive()),
         format!("out-degree: {}", info.direct_calls()),

@@ -73,7 +73,10 @@ The profile, owned by r2abi (the cited rows) and selected by r2engine, states:
    whether it returns; it never names semantics a body would have to prove.
    Go's compiler ends a block after `runtime.throw`, `gopanic` and the
    `panic*` helpers (`cmd/compile/internal/ssagen/ssa.go`), so their model
-   is that they never return, under `go-runtime`.
+   is that they never return, under `go-runtime`, where the container states
+   the callee is Go. The no-return answer carries the premises it rests on,
+   so discovery, a body's walk, its proof line and `afi` each say what they
+   took for granted.
 5. **Names.** A demangler per scheme, in r2engine's naming, producing a
    display name. A name stays a hint. Planned (2026-10-13): `Name.text`
    keeps the mangled spelling prototype tables are keyed by, and the

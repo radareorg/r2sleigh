@@ -59,6 +59,12 @@ pub trait Program {
         true
     }
 
+    /// What `returns` saying a call to `callee` never comes back takes for granted; nothing where
+    /// the program proves it.
+    fn exit_premises(&self, _callee: u64) -> BTreeSet<r2source::Premise> {
+        BTreeSet::new()
+    }
+
     /// Whether control comes back from a call through the pointer held at
     /// `slot` -- `call [slot]` -- where the program says what the slot holds:
     /// an import the loader binds there, declared as never returning.
@@ -125,6 +131,8 @@ pub struct Body {
     pub entered_with: BTreeMap<u64, u64>,
     /// Every place the walk stopped without knowing where control went.
     pub unresolved: Vec<Unresolved>,
+    /// The calls the walk ended a block at on a model's word that the callee never returns.
+    pub exits: r2ssa::AssumedExits,
 }
 
 /// One basic block: what it lifts to, the bytes it is, and where it goes.
@@ -377,6 +385,8 @@ struct Walk {
     unresolved: Vec<Unresolved>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
+    /// What each gated callee's "never returns" takes for granted, where it is a model's word.
+    assumed: BTreeMap<u64, BTreeSet<r2source::Premise>>,
     /// The instructions that enter the supervisor, as the language's own
     /// user-operation table says.
     supervisor: BTreeSet<u64>,
@@ -411,6 +421,7 @@ impl Walk {
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
             gated: BTreeMap::new(),
+            assumed: BTreeMap::new(),
             supervisor: BTreeSet::new(),
             context: None,
             reached: Reached::default(),
@@ -631,7 +642,13 @@ impl Walk {
                 match (predicated || program.returns(target), fallthrough) {
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
-                    (false, Some(after)) => self.gate(target, addr, after),
+                    (false, Some(after)) => {
+                        let premises = program.exit_premises(target);
+                        if !premises.is_empty() {
+                            self.assumed.insert(target, premises);
+                        }
+                        self.gate(target, addr, after);
+                    }
                     (false, None) => {}
                 }
             }
@@ -775,6 +792,15 @@ impl Walk {
             blocks.push(finish(&mut parts, link, &self.dispatched, false));
         }
 
+        // A call still closed ends its block; one a model closed takes the model's premises.
+        let mut exits = r2ssa::AssumedExits::default();
+        for (callee, premises) in &self.assumed {
+            let calls = self.gated.get(callee).map_or(0, Vec::len);
+            if calls > 0 {
+                exits.calls += calls;
+                exits.premises.extend(premises.iter().copied());
+            }
+        }
         Body {
             entry: self.entry,
             blocks,
@@ -782,6 +808,7 @@ impl Walk {
             tail_calls: self.tail_calls.into_iter().collect(),
             entered_with: self.entered_with,
             unresolved: self.unresolved,
+            exits,
         }
     }
 }

@@ -484,6 +484,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.comes_back(callee)
     }
 
+    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
+        self.view().exit_premises(callee)
+    }
+
     fn returns_through(&self, slot: u64) -> bool {
         self.view().returns_through(slot)
     }
@@ -529,6 +533,10 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
     fn extents(&self) -> &r2types::ProgramExtents {
         &self.db.inputs().extents
+    }
+
+    fn language_at(&self, vaddr: u64) -> r2abi::statement::SourceLanguage {
+        self.view().language_at(vaddr)
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {

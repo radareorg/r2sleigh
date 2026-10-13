@@ -6,7 +6,7 @@ use crate::body::{Body, BodyError, Trace};
 use crate::machine::Machine;
 
 use super::{ProgramInputs, Source, View};
-use crate::discovery::{Transfers, Walker};
+use crate::discovery::{Return, Transfers, Walker};
 use crate::native::{NativeRefusal, NativeTarget};
 use crate::query::db::{Db, Query};
 
@@ -209,7 +209,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             .collect()
     }
 
-    fn declared(&self, address: u64) -> Option<bool> {
+    fn declared(&self, address: u64) -> Option<crate::discovery::Return> {
         crate::native::declared_return(&self.primary, &self.program, address)
     }
 }
@@ -219,12 +219,12 @@ pub(crate) struct ComesBack;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for ComesBack {
     type Key = u64;
-    type Value = bool;
+    type Value = Return;
     const NAME: &'static str = "comes-back";
 
-    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> bool {
+    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Return {
         let Ok(walker) = Walking::new(View::new(db, true), false) else {
-            return true;
+            return Return::Comes;
         };
         if let Some(declared) = walker.declared(callee) {
             return declared;
@@ -232,11 +232,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComesBack {
         let known = |address| {
             db.held::<ComesBack>(&address)
                 .expect("a held lookup never computes")
-                .map(|answer| *answer)
+                .map(|answer| (*answer).clone())
         };
-        let found = crate::discovery::returns(callee, &known, &walker);
-        let others = found.iter().filter(|(address, _)| **address != callee);
-        db.deposit::<ComesBack>(others.map(|(address, answer)| (*address, *answer)));
-        found.get(&callee).copied().unwrap_or(true)
+        let mut found = crate::discovery::returns(callee, &known, &walker);
+        let answer = found.remove(&callee).unwrap_or(Return::Comes);
+        db.deposit::<ComesBack>(found);
+        answer
     }
 }

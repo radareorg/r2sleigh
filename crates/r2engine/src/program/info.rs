@@ -28,8 +28,9 @@ pub struct FunctionInfo {
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
     /// (none where C has no carrier that wide). Absent where r2types refuses a type.
     pub returns: Option<Fact<Option<CTypeLike>>>,
-    /// Whether the whole program proves control never comes back from it.
-    pub noreturn: bool,
+    /// Whether control never comes back from it, and what that takes for granted: nothing where
+    /// the whole program proves it, a premise where a runtime model says it. `None` where it may.
+    pub noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
 }
 
 /// One basic block.
@@ -78,7 +79,7 @@ impl FunctionInfo {
         entry: u64,
         artifact: &r2ssa::SsaArtifact,
         sealed: &SourceOwnedFunctionFacts,
-        noreturn: bool,
+        noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
     ) -> Self {
         let facts = sealed.report();
         let certificates = artifact.certificates();

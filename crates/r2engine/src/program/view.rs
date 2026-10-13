@@ -153,11 +153,23 @@ impl<'a, S: Source + 'static> View<'a, S> {
         )
     }
 
-    /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
+    /// Whether control comes back from a call to `callee`: false only where the program proves it
+    /// never does, or a runtime model says so under a premise the engine grants.
     pub(super) fn comes_back(&self, callee: u64) -> bool {
         self.db
             .get::<super::returns::ComesBack>(&callee)
-            .map_or(true, |answer| *answer)
+            .map_or(true, |answer| answer.comes())
+    }
+
+    /// What a call to `callee` that never comes back takes for granted.
+    pub(super) fn exit_premises(
+        &self,
+        callee: u64,
+    ) -> std::collections::BTreeSet<r2source::Premise> {
+        self.db
+            .get::<super::returns::ComesBack>(&callee)
+            .map(|answer| answer.premises().clone())
+            .unwrap_or_default()
     }
 }
 
@@ -204,11 +216,15 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         self.comes_back(callee)
     }
 
+    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
+        View::exit_premises(self, callee)
+    }
+
     fn returns_through(&self, slot: u64) -> bool {
         super::returns::Walking::new(self.clone(), false)
             .ok()
             .and_then(|walker| crate::discovery::Walker::declared(&walker, slot))
-            .unwrap_or(true)
+            .is_none_or(|answer| answer.comes())
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
@@ -291,6 +307,10 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn extents(&self) -> &r2types::ProgramExtents {
         &self.db.inputs().extents
+    }
+
+    fn language_at(&self, vaddr: u64) -> r2abi::statement::SourceLanguage {
+        self.source().container().languages.at(vaddr)
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {

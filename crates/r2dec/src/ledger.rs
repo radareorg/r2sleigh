@@ -230,6 +230,12 @@ pub struct ObligationLedger {
     split: BTreeSet<u32>,
     /// The premises the function's decided checks rely on; none where a runtime model decided them.
     premises: BTreeSet<r2source::Premise>,
+    /// The calls the body ends at on a model's word that the callee never returns, and what that
+    /// takes for granted.
+    #[serde(default)]
+    exits: usize,
+    #[serde(default)]
+    exit_premises: BTreeSet<r2source::Premise>,
 }
 
 impl ObligationLedger {
@@ -257,6 +263,8 @@ impl ObligationLedger {
             conflicts: BTreeMap::new(),
             split: BTreeSet::new(),
             premises: BTreeSet::new(),
+            exits: 0,
+            exit_premises: BTreeSet::new(),
         }
     }
 
@@ -275,6 +283,20 @@ impl ObligationLedger {
 
     pub const fn premises(&self) -> &BTreeSet<r2source::Premise> {
         &self.premises
+    }
+
+    /// The same ledger, stating the calls the body ends at on a model's word.
+    pub fn with_exits(self, exits: &r2ssa::AssumedExits) -> Self {
+        Self {
+            exits: exits.calls,
+            exit_premises: exits.premises.clone(),
+            ..self
+        }
+    }
+
+    /// How many calls the body ends at on a model's word, and what that takes for granted.
+    pub const fn exits(&self) -> (usize, &BTreeSet<r2source::Premise>) {
+        (self.exits, &self.exit_premises)
     }
 
     /// Every obligation, spelled, in the order the spelling reads.

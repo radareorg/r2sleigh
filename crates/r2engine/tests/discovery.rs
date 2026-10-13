@@ -274,7 +274,7 @@ const MUTUAL: &[u8] = &[
 /// Where a function's blocks end, and whether the program proves it never returns.
 fn extent(program: &mut OpenProgram<Literal>, entry: u64) -> (u64, bool) {
     let info = program.function_info(entry).expect("it is described");
-    (info.max_addr(), info.noreturn)
+    (info.max_addr(), info.noreturn.is_some())
 }
 
 #[test]

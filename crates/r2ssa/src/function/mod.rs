@@ -2261,6 +2261,7 @@ impl TrustedSsaArtifact {
             reach: callee_argument_reach,
             library,
             reentering,
+            exits,
         } = evidence;
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
@@ -2565,6 +2566,7 @@ impl TrustedSsaArtifact {
         if function.entry != source.image().entry_address() {
             return Err(malformed_ssa_input());
         }
+        let function = function.with_assumed_exits(exits);
         control.poll()?;
         Ok(Constructed {
             function,
@@ -2729,6 +2731,8 @@ pub struct SSAFunction {
     compiler_inserted_blocks: BTreeSet<u64>,
     /// The premises a rewrite of this function relied on, whatever later became of what it rewrote.
     premises: BTreeSet<r2source::Premise>,
+    /// The calls its walk ended at on a model's word that the callee never returns.
+    assumed_exits: AssumedExits,
     /// The architectural stack pointer, as the machine roles name it.
     ///
     /// The roles know it for every function, including one whose signature
@@ -3111,6 +3115,7 @@ impl Clone for SSAFunction {
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             premises: self.premises.clone(),
+            assumed_exits: self.assumed_exits.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
@@ -3461,6 +3466,16 @@ pub struct CalleeEvidence {
     pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry (Go's stack growth).
     pub reentering: BTreeSet<u64>,
+    /// The calls the walk ended the body at because a model says the callee never returns.
+    pub exits: AssumedExits,
+}
+
+/// Calls whose fall-through a body's walk ended because a model, not the program, says the callee
+/// never returns, and what that takes for granted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssumedExits {
+    pub calls: usize,
+    pub premises: BTreeSet<r2source::Premise>,
 }
 
 /// What the callees this function calls said about their own boundaries.
@@ -3648,9 +3663,20 @@ impl SSAFunction {
         self.premises.insert(premise);
     }
 
-    /// The premises a rewrite of this function relied on: a decided check changed its control flow.
+    /// The premises a rewrite of this function relied on: a decided check changed its control flow,
+    /// or its walk ended at a call a model says never returns.
     pub fn premises(&self) -> &BTreeSet<r2source::Premise> {
         &self.premises
+    }
+
+    /// The calls its walk ended at on a model's word that the callee never returns.
+    pub fn assumed_exits(&self) -> &AssumedExits {
+        &self.assumed_exits
+    }
+
+    fn record_assumed_exits(&mut self, exits: &AssumedExits) {
+        self.premises.extend(exits.premises.iter().copied());
+        self.assumed_exits = exits.clone();
     }
 
     /// The failure blocks a decided compiler-inserted check removed.

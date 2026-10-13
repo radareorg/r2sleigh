@@ -23,6 +23,17 @@ fn proof_columns(
             premises.collect::<Vec<_>>().join(", ")
         );
     }
+    let (exits, premises) = ledger.exits();
+    if exits > 0 {
+        let premises = premises.iter().map(|premise| premise.spelled());
+        let _ = write!(
+            &mut line,
+            ", {exits} {} never {} (assuming {})",
+            if exits == 1 { "call" } else { "calls" },
+            if exits == 1 { "returns" } else { "return" },
+            premises.collect::<Vec<_>>().join(", ")
+        );
+    }
     if closure.assumed > 0 {
         let _ = write!(
             &mut line,
