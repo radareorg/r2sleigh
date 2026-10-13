@@ -754,38 +754,40 @@ fn build_type_analysis_inner(
         input.ptr_bits,
     );
     let mut local_structs = input.local_structs;
-    augment_local_struct_artifacts_with_projection(
-        &mut local_structs,
-        &semantic_projection,
-        input.ptr_bits,
-    );
-    if let Some(semantic) = semantic_inputs.as_ref() {
-        augment_local_struct_artifacts_with_local_field_accesses(
+    if std::env::var_os("T3C_S").is_none() {
+        augment_local_struct_artifacts_with_projection(
             &mut local_structs,
-            semantic.local_field_accesses,
+            &semantic_projection,
+            input.ptr_bits,
+        );
+        if let Some(semantic) = semantic_inputs.as_ref() {
+            augment_local_struct_artifacts_with_local_field_accesses(
+                &mut local_structs,
+                semantic.local_field_accesses,
+                input.ptr_bits,
+            );
+        }
+        align_local_structs_with_external(
+            &mut local_structs.struct_decls,
+            &mut local_structs.slot_type_overrides,
+            &local_structs.slot_field_profiles,
+            &external_structs,
+            input.ptr_bits,
+        );
+        prefer_stronger_local_struct_overrides(
+            &local_structs.struct_decls,
+            &mut local_structs.slot_type_overrides,
+            &local_structs.slot_field_profiles,
+            input.ptr_bits,
+        );
+        materialize_unresolved_signature_struct_layouts(
+            merged_signature.as_ref(),
+            &mut local_structs.struct_decls,
+            &mut local_structs.slot_type_overrides,
+            &input.parsed_context.external_type_db,
             input.ptr_bits,
         );
     }
-    align_local_structs_with_external(
-        &mut local_structs.struct_decls,
-        &mut local_structs.slot_type_overrides,
-        &local_structs.slot_field_profiles,
-        &external_structs,
-        input.ptr_bits,
-    );
-    prefer_stronger_local_struct_overrides(
-        &local_structs.struct_decls,
-        &mut local_structs.slot_type_overrides,
-        &local_structs.slot_field_profiles,
-        input.ptr_bits,
-    );
-    materialize_unresolved_signature_struct_layouts(
-        merged_signature.as_ref(),
-        &mut local_structs.struct_decls,
-        &mut local_structs.slot_type_overrides,
-        &input.parsed_context.external_type_db,
-        input.ptr_bits,
-    );
     let array_index_field_profiles = local_structs.slot_field_profiles.clone();
     let indexed_local_struct_refinement_slots = indexed_local_struct_refinement_slots(
         &local_structs,
