@@ -1321,6 +1321,28 @@ fn recover_interface_inner(
                 }
             }
         }
+        // A body whose integer register holds nothing it computed (the caller's value, or none)
+        // and that writes the float one hands back the float one where every reading call reads it
+        // there; unasked, it asks them.
+        let integer_unheld = handed_back || result == RecoveredFunctionResult::Void;
+        if integer_unheld
+            && let Some((float, float_live_out)) = float_result_written(func, graph, slots)
+        {
+            match carrier_read(result_reads, float) {
+                Some(CarrierRead::Float(observed)) => {
+                    result = RecoveredFunctionResult::Register(RecoveredResult {
+                        slot: observed,
+                        observed,
+                        signed: false,
+                        float: true,
+                    });
+                    result_carriers = None;
+                    candidate_live_out = float_live_out;
+                }
+                Some(CarrierRead::Integer) => {}
+                None => result_ambiguous = result_reads.is_none(),
+            }
+        }
         if !candidate_live_out.is_empty()
             && (candidate_live_out.unresolved_blocks().next().is_none()
                 || result.register().is_some())

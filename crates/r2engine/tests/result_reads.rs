@@ -292,3 +292,29 @@ fn callers_declare_a_two_carrier_body_as_its_header_does() {
         assert!(caller.contains(&format!(" f({ty});")), "{f}\n{caller}");
     }
 }
+
+/// clang's `double avg(...)` shape: `cvtsi2sd xmm0, edi; ret` writes only XMM0 and leaves RAX as
+/// the caller left it, and the caller stores XMM0 with `movsd [rsi], xmm0`.
+const ONLY_XMM0_WRITTEN: &[u8] = &[
+    0xf2, 0x0f, 0x2a, 0xc7, // 1000 cvtsi2sd xmm0, edi
+    0xc3, // 1004 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1005 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1015 movsd [rsi], xmm0
+    0xc3, // 1019 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 101a padding
+];
+
+/// RAX handed back as the caller left it is no result where every reading call reads XMM0: the
+/// float register is, at the width the reads take. With no call, nothing says so.
+#[test]
+fn a_float_result_beside_an_untouched_integer_register_is_the_one_callers_read() {
+    let program =
+        |functions: &[(&'static str, u64, u64)]| Literal::of_code(ONLY_XMM0_WRITTEN, functions);
+    let text = rendered(program(&[("f", BASE, 5), ("caller", BASE + 0x10, 0x0a)]));
+    assert!(text.starts_with("double f("), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    let unread = rendered(program(&[("f", BASE, 5)]));
+    assert!(unread.contains("return r2sleigh_residual_"), "{unread}");
+}
