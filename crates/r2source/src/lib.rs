@@ -103,6 +103,9 @@ pub struct SourceResultReads {
     pub second: u32,
     /// Calls read.
     pub calls: u32,
+    /// Whether these calls are every way the image enters the function: each caller read, and no
+    /// export, entry, jump, computed or stored address reaches it (`Premise::ClosedWorld`).
+    pub exhaustive: bool,
 }
 
 impl SourceResultReads {
@@ -116,7 +119,23 @@ impl SourceResultReads {
             overwritten: self.overwritten.saturating_add(other.overwritten),
             second: self.second.saturating_add(other.second),
             calls: self.calls.saturating_add(other.calls),
+            exhaustive: self.exhaustive && other.exhaustive,
         }
+    }
+
+    /// Whether every call writes each result register before reading any.
+    pub const fn all_overwrite(&self) -> bool {
+        self.calls > 0
+            && self.overwritten == self.calls
+            && self.integer == 0
+            && self.float == 0
+            && self.second == 0
+    }
+
+    /// Whether, besides, these calls are every way in: under a closed world, the program reads no
+    /// result of the function.
+    pub const fn none_read(&self) -> bool {
+        self.exhaustive && self.all_overwrite()
     }
 }
 

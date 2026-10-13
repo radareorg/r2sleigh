@@ -96,7 +96,59 @@ equivalence run `aa` first.
 The evidence is as strong as the body's own writes: a compiler reads a
 clobbered register after a call only as the callee's result. A caller that
 hands the value straight back without reading it (`return f();`) is no
-evidence, and a void function whose callers read nothing stays unproven.
+evidence. A void function whose callers read nothing stays unproven, except
+in a closed world, below.
+
+### Closed world
+
+An unproven result that every call writes before reading, in each result
+register, is read by no call the image shows. It is void only if those calls
+are every way into the function: the void rests on `Premise::ClosedWorld`,
+which r2engine grants only under `aa` and r2dec spells on the proof line
+("no call reads the result (assuming closed-world)"). A proven result is
+never made void this way: a helper whose callers ignore its value keeps it.
+
+`SourceResultReads.exhaustive` states that the calls read are every way in.
+r2engine sets it where all of these hold:
+
+1. Every caller the survey found was walked and lifted, and the reference
+   index claims exactly as many calls to the function as were read.
+2. No reference other than a call names the entry: no jump from another
+   function (a tail call), no computed address (`lea`, `adrp`+`add`, a
+   loader write). A jump to a function's own entry is a loop.
+3. The container states no other entry there: no entry point, initialiser
+   or finaliser, and no export (ELF's dynamic table, any non-local Mach-O
+   symbol).
+4. No mapped file word names it (`Escapes`): every pointer-wide window, and
+   on a 64-bit machine every 32-bit one (`imm32`, `.long`), with bit 0
+   cleared. This catches a non-PIE vtable or function table, which holds
+   absolute words with no relocation and no code reference.
+5. The index read every body and no walk stopped at an unresolved transfer,
+   since code past one is in no body and may call or name anything.
+6. The machine is x86-64 or AArch64, whose addresses an index claim or a
+   word holds whole. `movw`/`movt` and `lui`+`addi` split one across
+   immediates and hide it from both. The format is ELF or Mach-O, and the
+   function's language C, C++ or Rust: Swift, Objective-C, Go and .NET reach
+   functions through tables of relative offsets.
+
+AArch64's large code model builds an address with `movz`/`movk`, which item
+6 does not catch. No compiler in the corpus emits it.
+Code discovery never reached is in no body and is not past an unresolved
+transfer, so item 5 does not see it either. ELF and Mach-O compilers state a
+frame (CFI) for every function they emit, and each frame seeds discovery
+(ROADMAP I), so this is hand-written code without CFI. A check that every
+executable byte is in a body or padding would close it. It needs padding
+decoded per machine and is a follow-up.
+
+Cost: `Escapes` is computed once per program under `aa`: one pass over the
+references, symbols and entries, and one over the mapped file bytes, with a
+range check per word and a search per word in range: O(R + S + B log F).
+
+Two shapes stay residual, measured at #215: a call whose next instruction is
+another call (`call crc32_init; call fnv1a32`), where the block-local read
+stops at the transfer, and a later call to a stripped local function, which
+has no stated interface. Deciding them needs the caller's liveness past later
+calls and their callees' entry reads.
 
 ### Budget
 

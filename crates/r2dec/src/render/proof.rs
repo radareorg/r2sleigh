@@ -14,8 +14,10 @@ fn proof_columns(
     let mut line = String::new();
     if closure.compiler_inserted > 0 {
         // Each decided check passes under its premise: a canary the UB-free source, Go's stack
-        // check the runtime's contract.
-        let premises = ledger.premises().iter().map(|premise| premise.spelled());
+        // check the runtime's contract. A closed world is the result's, spelled below.
+        let premises = (ledger.premises().iter())
+            .filter(|premise| **premise != r2source::Premise::ClosedWorld)
+            .map(|premise| premise.spelled());
         let _ = write!(
             &mut line,
             ", {} compiler-inserted (assuming {})",
@@ -33,6 +35,10 @@ fn proof_columns(
             if exits == 1 { "returns" } else { "return" },
             premises.collect::<Vec<_>>().join(", ")
         );
+    }
+    // A void result no call reads holds only where those calls are every way in.
+    if ledger.premises().contains(&r2source::Premise::ClosedWorld) {
+        line.push_str(", no call reads the result (assuming closed-world)");
     }
     if closure.assumed > 0 {
         let _ = write!(

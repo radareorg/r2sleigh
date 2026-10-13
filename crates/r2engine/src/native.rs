@@ -1716,7 +1716,7 @@ impl Native<'_> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &accepted_premises(),
+            &premises_reading(result_reads.is_some()),
         )
         .map_err(NativeRefusal::of_preparation)?;
         Ok(Arc::new(artifact))
@@ -2499,6 +2499,16 @@ pub(crate) fn accepted_premises() -> std::collections::BTreeSet<r2source::Premis
         r2source::Premise::UbFreeSource,
         r2source::Premise::GoRuntime,
     ])
+}
+
+/// Those premises, and a closed world where the request read the program's callers (`aa`): what
+/// every call the image shows does is what the program does (doc/adr-resolved-bodies.md).
+fn premises_reading(callers_read: bool) -> std::collections::BTreeSet<r2source::Premise> {
+    let mut premises = accepted_premises();
+    if callers_read {
+        premises.insert(r2source::Premise::ClosedWorld);
+    }
+    premises
 }
 
 #[cfg(test)]
