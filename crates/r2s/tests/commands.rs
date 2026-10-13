@@ -670,17 +670,20 @@ fn a_staged_constant_argument_is_the_constant() {
     );
 }
 
-/// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); its caller's `movsd` of XMM0
-/// says which is the result. Vectorized `crc32_init` writes both, no call reads either: a residual.
+/// Stripped `avg` writes RAX (its loop test) and XMM0 (its double); after `aa`, its caller's `movsd`
+/// of XMM0 says which is the result. Vectorized `crc32_init` writes both, no call reads either.
 #[test]
 fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let avg = on(root.join("tests/fixtures/rv_O0g_stripped"), "pdd @ 0x12ef");
+    let avg = on(
+        root.join("tests/fixtures/rv_O0g_stripped"),
+        "aa; pdd @ 0x12ef",
+    );
     assert!(avg.out.starts_with("double fcn_12ef("), "{}", avg.out);
     assert!(!avg.out.contains("r2sleigh_residual"), "{}", avg.out);
     let unread = on(
         root.join("tests/coverage/pinned/hashes_gcc_x64_O2"),
-        "pdd @ sym.crc32_init",
+        "aa; pdd @ sym.crc32_init",
     );
     assert!(
         unread.out.contains("return r2sleigh_residual_u64("),
