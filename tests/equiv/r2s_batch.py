@@ -329,7 +329,11 @@ def _one_process(r2s, binary, addresses, first_index, command, parse, function_t
     deadline_used = startup_timeout
     ended = False
     started = time.monotonic()
-    for offset, address in enumerate(addresses):
+    # `aa` first, so each rendering reads its callers as an analysed session's does; it prints
+    # nothing, and its time is the startup's.
+    if not send("aa\n"):
+        ended = True
+    for offset, address in enumerate(addresses if not ended else []):
         index = first_index + offset
         began = False
         body = []

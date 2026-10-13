@@ -125,6 +125,17 @@ fn edges_of(
     edges
 }
 
+/// Whether a function's own analysis reads what the program's calls to it read of its result
+/// registers (doc/adr-resolved-bodies.md, "Caller reads"). Reading them surveys the program.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Callers {
+    /// The body and its callees alone: a fresh open.
+    #[default]
+    Unread,
+    /// The program's calls too, once `aa` surveyed it.
+    Read,
+}
+
 /// Why a function's listing carries no analysis, and what the plain walk could not follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisRefused {
@@ -306,7 +317,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.start_request();
         self.loaded()?;
         self.assembled()?;
-        let key = (entry, self.view().thumb_at(entry));
+        let key = self.analysis_key(entry);
         let render = self.db.get::<super::analysis::Rendered>(&key);
         let render = render.map_err(|cycle| format!("{cycle:?}"))?;
         let drawn = render.0.as_ref().map_err(Clone::clone)?;
@@ -508,6 +519,15 @@ impl<S: Source + 'static> OpenProgram<S> {
             refused: Some(AnalysisRefused { reason, unresolved }),
         };
         Ok((listing, shape))
+    }
+
+    /// Survey the program, and from then on read each function's callers where its own body
+    /// leaves its result open (doc/adr-resolved-bodies.md, "Caller reads"): radare2's `aa`.
+    pub fn analyse_program(&mut self) -> Result<(), String> {
+        self.start_request();
+        self.surveyed()?;
+        self.callers = Callers::Read;
+        Ok(())
     }
 
     /// Every function the program has, from what the container states and

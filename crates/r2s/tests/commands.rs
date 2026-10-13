@@ -113,6 +113,54 @@ fn every_discovered_address_says_why_it_is_believed() {
     assert!(rows.len() >= defined, "{}", run.out);
 }
 
+/// The stripped `rv` binary's `fcn_12ef` writes RAX and XMM0, and its one caller reads XMM0: a
+/// fresh `pdd` reads the body alone, which leaves the result open; after `aa`, the call decides it.
+#[test]
+fn aa_reads_each_functions_callers() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g_stripped");
+    let alone = on(fixture.clone(), "pdd @ 0x12ef");
+    assert!(alone.ok, "{}", alone.out);
+    assert!(
+        alone.out.contains("return r2sleigh_residual_"),
+        "{}",
+        alone.out
+    );
+    let analysed = on(fixture.clone(), "aa; pdd @ 0x12ef");
+    assert!(analysed.ok, "{}", analysed.out);
+    assert!(
+        analysed.out.starts_with("double fcn_12ef("),
+        "{}",
+        analysed.out
+    );
+    assert!(
+        !analysed.out.contains("r2sleigh_residual"),
+        "{}",
+        analysed.out
+    );
+    assert_eq!(on(fixture, "aa").out, "");
+}
+
+/// `aa` surveys the program, which needs its machine: an ELF whose machine has no Sleigh
+/// description is refused, and the shell says so.
+#[test]
+fn aa_refuses_a_machine_it_cannot_decode() {
+    let mut bytes = std::fs::read(fixture()).expect("the fixture");
+    bytes[18..20].copy_from_slice(&22u16.to_le_bytes()); // e_machine: EM_S390
+    let dir = std::env::temp_dir().join(format!("r2s-aa-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temporary directory");
+    let binary = dir.join("s390.elf");
+    std::fs::write(&binary, bytes).expect("write the binary");
+    let run = on(binary, "aa");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!run.ok, "{}", run.out);
+    assert!(
+        run.out.contains("no architecture mapping for S390"),
+        "{}",
+        run.out
+    );
+}
+
 /// `afl` is radare2's: no header, then `addr nbbs size name`, the size being
 /// the bytes of the blocks and not the span with the padding between them.
 /// gcc's `deregister_tm_clones` ends in a `jmp rax` with its `ret` eight

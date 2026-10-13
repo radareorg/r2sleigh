@@ -78,13 +78,20 @@ read decides the call's result, a float at the read's width; r2types types it
 there (`call_result_type`). Both or neither leave the call without a contract.
 The cost is one scan of the call's block, O(ops after the call).
 
-The function's own rendering asks every call in the program: the walked
-bodies whose trace calls it (`Survey`, inverted once, O(call edges)), each
-lifted without preparation. Every reading call agreeing on one register
+After `aa`, the function's own rendering asks every call in the program: the
+walked bodies whose trace calls it (`Survey`, inverted once, O(call edges)),
+each lifted without preparation. Every reading call agreeing on one register
 decides it; none, or calls that disagree, leave it unproven. Only the
-rendered root is prepared again with that evidence (`SourceResultReads`):
-a callee read for its caller never asks, so a `pdd` pays whole-program
-discovery only for a function whose own body is ambiguous.
+rendered root is prepared again with that evidence (`SourceResultReads`); a
+callee read for its caller never asks.
+
+Reading callers surveys the whole program, so a fresh open reads the body
+alone and its open result stays a residual. On pumasim, `pdd @ 0x4baf30`
+takes 4.6 s alone and 10.3 s with the survey (contabo, 2026-10-13). `aa`
+surveys once and sets `Callers::Read`, which every analysis, sealing and
+rendering key carries, so a session's answers never depend on which command
+first ran the survey. Census, certification, the coverage sweep and
+equivalence run `aa` first.
 
 The evidence is as strong as the body's own writes: a compiler reads a
 clobbered register after a call only as the callee's result. A caller that
