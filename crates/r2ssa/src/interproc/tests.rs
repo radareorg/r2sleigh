@@ -2039,8 +2039,10 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
 
 #[test]
 fn call_carrier_nonconvergence_degrades_all_observations() {
-    let arch = x86_64_arch();
-    let prepared = SsaArtifact::for_symbolic(
+    let arch = windows_x64_arch();
+    // A block that loops on itself and writes an argument register moves its own entry, which a
+    // stated height of nought does not allow.
+    let prepared = exact_untyped_artifact(
         &[
             block(
                 0x1000,
@@ -2048,13 +2050,15 @@ fn call_carrier_nonconvergence_degrades_all_observations() {
                     target: c(0x1010, 8),
                 }],
             ),
-            // A block that loops on itself is walked twice, which a stated
-            // height of nought does not allow.
             block(
                 0x1010,
                 vec![
                     R2ILOp::Call {
-                        target: c(0x8000, 8),
+                        target: c(0x7000, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: reg(8, 8),
+                        src: c(1, 8),
                     },
                     R2ILOp::CBranch {
                         target: c(0x1010, 8),
@@ -2064,10 +2068,17 @@ fn call_carrier_nonconvergence_degrades_all_observations() {
             ),
             block(0x1020, vec![R2ILOp::Return { target: c(0, 8) }]),
         ],
-        Some(&arch),
-    )
-    .expect("advisory SSA");
-    let state = collect_call_arg_state_of_height(&prepared, &AbiProfile::default(), 0);
+        &arch,
+        b"windows-carrier-loop",
+        "windows-x64",
+        &[8, 16, 24, 32],
+        40,
+        48,
+    );
+    let abi = prepared.abi().expect("exact Windows ABI");
+    // RCX moves once, from the entry's argument to unknown: a height of one settles it.
+    assert!(collect_call_arg_state_of_height(&prepared, &abi, 1).converged);
+    let state = collect_call_arg_state_of_height(&prepared, &abi, 0);
 
     assert!(!state.converged);
     assert!(
