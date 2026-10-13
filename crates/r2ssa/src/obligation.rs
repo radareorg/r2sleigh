@@ -624,6 +624,13 @@ impl<'a> SeedingFacts<'a> {
 
     /// Seed each conditional branch ending a block whose arms meet as the direct transfer it is,
     /// with no inputs: its condition is unread. The branches seeded.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     fn seed_direct_branches(
         &self,
         graph: &SsaGraph,
@@ -661,6 +668,13 @@ impl<'a> SeedingFacts<'a> {
 }
 
 impl SemanticObligationInventory {
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     pub(crate) fn collect(
         graph: &SsaGraph,
         structured: &StructuredDataflowFacts,
@@ -1688,6 +1702,13 @@ fn taint_incomplete_boundary_inputs(
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn seed_direct_obligations(
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
@@ -1914,6 +1935,13 @@ fn seed_instruction(
     required.insert(inst, kind, component);
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn seed_instruction_with_inputs(
     inst: InstId,
     kind: SemanticObligationKind,

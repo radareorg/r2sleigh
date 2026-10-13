@@ -482,6 +482,13 @@ struct Node {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub struct TermArena {
     nodes: Vec<Node>,
     /// Each distinct type once, in first-use order; `type_ids` finds one and is never iterated.
@@ -785,6 +792,13 @@ impl TermArena {
     }
 
     /// Whether any term under `root` reads memory.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     pub fn reads_memory(&self, root: TermId) -> bool {
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![root];
@@ -836,6 +850,13 @@ impl TermArena {
     }
 
     /// Whether `object`'s address is spelled anywhere inside `root`.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     pub fn names_object_address(&self, root: TermId, object: ObjectId) -> bool {
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![root];
@@ -851,6 +872,13 @@ impl TermArena {
         false
     }
 
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     pub fn leaves(&self, root: TermId) -> Vec<MachineExprId> {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -881,6 +909,13 @@ impl TermArena {
     }
 
     /// Every free variable in the term, each once, in first-visit order.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     pub fn variables(&self, root: TermId) -> Vec<(u32, MachineType)> {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -903,6 +938,13 @@ impl TermArena {
     }
 
     /// Whether `needle` occurs anywhere in the term rooted at `root`.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     pub fn contains(&self, root: TermId, needle: TermId) -> bool {
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![root];

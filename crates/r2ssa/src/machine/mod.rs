@@ -3195,6 +3195,13 @@ impl MachineFunction {
 }
 
 #[derive(Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 struct MachineBuilder {
     nodes: Vec<MachineExpr>,
     value_nodes: BTreeMap<(ValueId, MachineType), MachineExprId>,

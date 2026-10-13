@@ -15,6 +15,7 @@
 //! Keys, mouse, resizes, the engine's answers and a clock tick arrive as one
 //! stream of [`Msg`]s, so a decompilation that takes seconds leaves every
 //! other key answered and every frame drawn.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 mod app;
 pub mod graph;

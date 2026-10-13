@@ -190,6 +190,13 @@ struct Sinks<'a> {
 /// Every exact access to the frame, by entry offset, what the frame's escapes reach, and the
 /// places an address was stored into. An address stored into a place of `carried` (every place
 /// when `None`) flows to that place's loads instead of escaping.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn classify(
     func: &SSAFunction,
     defs: &Definitions,
@@ -478,6 +485,13 @@ impl<'a> Classifier<'a> {
         }
     }
 
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     fn partial_merges(&self) -> BTreeSet<VarId> {
         self.phi_uses
             .iter()

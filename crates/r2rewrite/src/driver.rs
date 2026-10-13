@@ -92,6 +92,13 @@ impl std::fmt::Display for RewriteError {
 impl std::error::Error for RewriteError {}
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub struct CanonicalRoots {
     arena: TermArena,
     import: Import,
@@ -278,6 +285,13 @@ impl Budget {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 struct Driver<'a> {
     arena: &'a mut TermArena,
     canonical: HashMap<TermId, TermId>,
@@ -362,6 +376,13 @@ pub fn canonicalize(
 /// Canonicalise every value of `projection`, asking `policy` whether each
 /// read may absorb its producer's term and `declared_pointers` which values
 /// the caller's declarations call pointers.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub fn canonicalize_with(
     artifact: &SsaArtifact,
     projection: &MachineProjection,
@@ -476,6 +497,13 @@ pub fn canonicalize_with(
 /// The rewrites applied while canonicalising `root`: those recorded at every
 /// node of its imported term, and at every term a recorded rewrite produced,
 /// in first-visit order.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn collect_rewrites(
     arena: &TermArena,
     rewrites_at: &HashMap<TermId, Vec<Rewrite>>,

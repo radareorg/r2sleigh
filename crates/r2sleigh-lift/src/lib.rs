@@ -22,6 +22,7 @@
 //! )?;
 //! r2il::serialize::save(&spec, "x86-64.r2il")?;
 //! ```
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 pub mod context;
 pub mod disasm;

@@ -109,6 +109,13 @@ pub fn clamp_arithmetic_shift_count(arena: &mut TermArena, id: TermId) -> TermId
 /// over a sum -- so the output never has more nodes than the input, and
 /// re-collecting the output yields the same sum, so the form is idempotent.
 /// Applied only where it changes the term.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub fn affine_normalize(arena: &mut TermArena, id: TermId) -> TermId {
     let term = arena.term(id);
     if !matches!(term.ty, r2ssa::MachineType::Integer { .. }) {
@@ -146,6 +153,13 @@ pub fn affine_normalize(arena: &mut TermArena, id: TermId) -> TermId {
     emitted
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn collect_affine(
     arena: &TermArena,
     id: TermId,
@@ -223,6 +237,13 @@ pub(crate) fn is_negative(k: u64, width: u32) -> bool {
     width < 64 && k >> (width - 1) == 1 || width == 64 && k >> 63 == 1
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn emit_affine(
     arena: &mut TermArena,
     ty: r2ssa::MachineType,

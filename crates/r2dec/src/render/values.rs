@@ -1985,6 +1985,13 @@ impl<'a> Values<'a> {
     }
 
     /// The producers only a return's return address and exit stack pointer read.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+        )
+    )]
     fn restores(&self, inst: InstId) -> Vec<InstId> {
         let Some(boundary) = self.artifact.facts().boundaries.returns.get(inst) else {
             return Vec::new();

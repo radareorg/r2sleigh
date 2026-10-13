@@ -3,6 +3,7 @@
 
 extern crate rustc_ast;
 extern crate rustc_hir;
+extern crate rustc_hir_analysis;
 extern crate rustc_lint;
 extern crate rustc_middle;
 extern crate rustc_session;
@@ -2360,9 +2361,9 @@ rustc_session::declare_lint!(
     /// ### What it does
     ///
     /// Warns when a `BTreeMap`, `HashMap`, `BTreeSet` or `HashSet` is keyed
-    /// by a function's own entity (`SSAVar`, `ValueId`, `InstId`,
-    /// `BlockId`, `OpId`, or the optimiser's `VarKey`) in r2ssa, r2types or
-    /// r2dec.
+    /// by a function's own entity (`SSAVar`, `VarId`, `ValueId`, `InstId`,
+    /// `BlockId`, `OpId`, the optimiser's `VarKey`, r2rewrite's `TermId`), or
+    /// by a tuple holding one, in any crate of the workspace.
     ///
     /// ### Why is this bad?
     ///
@@ -2375,8 +2376,8 @@ rustc_session::declare_lint!(
     /// two places for it to disagree.
     ///
     /// The check reads the types written in signatures, fields and aliases,
-    /// and the type of every `let`. A map built and consumed inside one
-    /// expression is not seen.
+    /// through any alias, and the type of every `let`. A map built and
+    /// consumed inside one expression is not seen.
     ///
     /// ### Example
     ///
@@ -6265,13 +6266,7 @@ fn is_r2dec_ast_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
 /// The crates whose facts about a function become indexes over its dense ids.
 fn is_entity_index_owner_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
     let filename = format!("{:?}", cx.sess().source_map().span_to_filename(span));
-    [
-        "crates/r2ssa/src/",
-        "crates/r2types/src/",
-        "crates/r2dec/src/",
-    ]
-    .iter()
-    .any(|owner| filename.contains(owner))
+    filename.contains("crates/") && filename.contains("/src/")
 }
 
 /// Whether `span` is r2engine's, outside the query database and the panic plumbing.
@@ -6319,38 +6314,23 @@ fn written_inside_a_body(cx: &LateContext<'_>, ty: rustc_hir::HirId) -> bool {
 
 /// The identities a sealed function numbers densely, and the optimiser's
 /// name-shaped key for them.
-const FUNCTION_ENTITIES: &[&str] = &["SSAVar", "ValueId", "InstId", "BlockId", "OpId", "VarKey"];
+const FUNCTION_ENTITIES: &[&str] = &[
+    "SSAVar", "VarId", "ValueId", "InstId", "BlockId", "OpId", "VarKey", "TermId",
+];
 
 const KEYED_COLLECTIONS: &[&str] = &["BTreeMap", "HashMap", "BTreeSet", "HashSet"];
 
 /// The collection's name, when `ty` is written as an ordered or hashed map or
-/// set whose key is a function entity.
-fn written_entity_keyed_collection(
-    cx: &LateContext<'_>,
-    ty: &rustc_hir::Ty<'_>,
+/// set whose key is a function entity, read through any alias.
+fn written_entity_keyed_collection<'tcx>(
+    cx: &LateContext<'tcx>,
+    ty: &rustc_hir::Ty<'tcx>,
 ) -> Option<&'static str> {
-    let rustc_hir::TyKind::Path(QPath::Resolved(None, path)) = ty.kind else {
+    // Only a path can name a collection; lowering anything else is wasted work.
+    let rustc_hir::TyKind::Path(_) = ty.kind else {
         return None;
     };
-    let rustc_hir::def::Res::Def(_, collection) = path.res else {
-        return None;
-    };
-    let name = cx.tcx.get_diagnostic_name(collection)?;
-    let collection = KEYED_COLLECTIONS
-        .iter()
-        .find(|keyed| name.as_str() == **keyed)?;
-    let rustc_hir::GenericArg::Type(key) = path.segments.last()?.args?.args.first()? else {
-        return None;
-    };
-    let rustc_hir::TyKind::Path(QPath::Resolved(None, key)) = key.as_unambig_ty().kind else {
-        return None;
-    };
-    let rustc_hir::def::Res::Def(_, key) = key.res else {
-        return None;
-    };
-    FUNCTION_ENTITIES
-        .contains(&cx.tcx.item_name(key).as_str())
-        .then_some(*collection)
+    inferred_entity_keyed_collection(cx, rustc_hir_analysis::lower_ty(cx.tcx, ty))
 }
 
 /// The same, for a type rustc inferred.
@@ -6365,12 +6345,17 @@ fn inferred_entity_keyed_collection(
     let collection = KEYED_COLLECTIONS
         .iter()
         .find(|keyed| name.as_str() == **keyed)?;
-    let rustc_middle::ty::Adt(key, _) = args.types().next()?.kind() else {
-        return None;
-    };
-    FUNCTION_ENTITIES
-        .contains(&cx.tcx.item_name(key.did()).as_str())
-        .then_some(*collection)
+    is_entity_key(cx, args.types().next()?).then_some(*collection)
+}
+
+/// Whether a key is a function entity, a reference to one, or a tuple holding one.
+fn is_entity_key(cx: &LateContext<'_>, key: rustc_middle::ty::Ty<'_>) -> bool {
+    match key.kind() {
+        rustc_middle::ty::Adt(key, _) => FUNCTION_ENTITIES.contains(&cx.tcx.item_name(key.did()).as_str()),
+        rustc_middle::ty::Ref(_, key, _) => is_entity_key(cx, *key),
+        rustc_middle::ty::Tuple(keys) => keys.iter().any(|key| is_entity_key(cx, key)),
+        _ => false,
+    }
 }
 
 fn is_r2dec_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {

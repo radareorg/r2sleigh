@@ -3,6 +3,7 @@
 //! `render::render` writes one function from its sealed facts: the control
 //! (`structure`), the values and terms (`render`), and the certified emitter
 //! (`codegen`); every obligation is answered in a `ledger`.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 pub mod ast;
 pub mod bitvector;

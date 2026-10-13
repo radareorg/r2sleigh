@@ -5,6 +5,7 @@
 //! address. Everything is extracted into owned values at open time, so an
 //! `Image` borrows nothing, is `Send + Sync`, and can be shared across analysis
 //! threads behind an `Arc`.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 mod debug;

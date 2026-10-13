@@ -26,6 +26,7 @@
 //! let mut block = R2ILBlock::new(0x1000, 5);
 //! block.push(R2ILOp::Copy { dst: eax, src: imm });
 //! ```
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 pub mod allocation;
 pub mod endianness;

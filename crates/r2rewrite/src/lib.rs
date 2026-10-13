@@ -7,6 +7,7 @@
 //! reports per value the canonical term, the rules that produced it, and the
 //! instructions rendering it would discharge. The binding plan decides what
 //! to render; this crate decides what is equal to what.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 pub mod address;
 pub mod canon;

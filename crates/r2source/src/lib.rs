@@ -7,7 +7,7 @@
 //! may deep-copy the opaque radare snapshot into [`OwnedFunctionSnapshot`].
 //! Stable hashes remain diagnostics; exact authority is the retained `Arc`
 //! identity of one capture event.
-
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 // This crate holds the source's own facts and has no reason to reach for
 // unsafe; the manifest said so until the lints moved to the workspace.
 #![deny(unsafe_code)]

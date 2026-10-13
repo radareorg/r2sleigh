@@ -1,4 +1,5 @@
 //! r2s: a radare2-compatible shell over the r2sleigh engine.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 mod allocator;
 mod commands;

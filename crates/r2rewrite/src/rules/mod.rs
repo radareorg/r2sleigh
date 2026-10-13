@@ -85,11 +85,25 @@ impl MeasureVector {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub fn measure(arena: &TermArena, root: TermId) -> MeasureVector {
     let mut memo = std::collections::HashMap::new();
     measure_memo(arena, root, &mut memo)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn measure_memo(
     arena: &TermArena,
     id: TermId,

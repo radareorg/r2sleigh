@@ -41,6 +41,13 @@ pub struct AddressForm {
 ///
 /// An address the arena types as an address rather than an integer -- a leaf
 /// that was never expanded -- is one atom with a unit coefficient.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) struct Affine {
     pub(crate) coefficients: BTreeMap<TermId, u64>,
     pub(crate) constant: u64,
@@ -48,6 +55,13 @@ pub(crate) struct Affine {
     pub(crate) ty: MachineType,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn affine_of(arena: &TermArena, address: TermId) -> Option<Affine> {
     let term = arena.term(address);
     let width = term.width_bits();

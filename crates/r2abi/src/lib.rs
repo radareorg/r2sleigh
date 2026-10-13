@@ -1,6 +1,7 @@
 //! What a platform's ABI and its C library state, read natively: library
 //! prototypes, system calls, types and the cited ABI rows (`platform`). Where a
 //! call's arguments arrive is the compiler specification's (`r2sleigh_lift::profile`).
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 pub mod declarations;
 pub mod frames;

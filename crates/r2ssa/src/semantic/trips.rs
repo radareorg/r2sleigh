@@ -11,6 +11,13 @@ pub(crate) struct TripLoop<'a> {
 }
 
 /// Trip counts for one function's loops.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) struct TripCounter<'a> {
     function: &'a SSAFunction,
     graph: &'a SsaGraph,

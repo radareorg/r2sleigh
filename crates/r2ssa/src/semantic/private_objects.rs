@@ -32,6 +32,13 @@ pub(crate) fn private_stack_objects(objects: &ObjectModel) -> BTreeSet<ObjectId>
 /// this exists for. What is required is that both accesses are exactly
 /// modelled -- an access the memory facts do not state completely carries an
 /// unknown effect of its own and is never certified here.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn collect_memory_round_trips(
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,

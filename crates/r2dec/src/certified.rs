@@ -46,6 +46,13 @@ fn certified_return_transfer_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseS
 /// certificate absorbed it: that write has no reader once the reload is
 /// elided, and leaving it out of this set is what rendered it as an assignment
 /// to a variable no one reads.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn certified_return_control_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
     let graph = source.graph();
     let mut insts = certified_return_control_values(source)
@@ -68,6 +75,13 @@ pub(crate) fn certified_return_control_insts(source: &r2ssa::SsaArtifact) -> BTr
 /// set is itself in it. Re-scanning every value once per pass was quadratic in
 /// the value count; a value can only become eligible when one of the copies it
 /// feeds enters the set, so only those are re-examined.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn close_over_control_copies(graph: &r2ssa::SsaGraph, values: &mut BTreeSet<ValueId>) {
     let mut work = values.iter().copied().collect::<Vec<_>>();
     while let Some(output) = work.pop() {
@@ -107,6 +121,13 @@ fn close_over_control_copies(graph: &r2ssa::SsaGraph, values: &mut BTreeSet<Valu
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn certified_return_control_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
     let graph = source.graph();
     let sites = certified_return_transfer_sites(source);
@@ -170,6 +191,13 @@ pub(crate) fn certified_direct_call_target_sites(source: &r2ssa::SsaArtifact) ->
 }
 
 /// Direct-call target values whose complete use domain is the callee's name.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn certified_direct_call_target_values(
     source: &r2ssa::SsaArtifact,
 ) -> BTreeSet<ValueId> {
@@ -200,6 +228,13 @@ pub(crate) fn certified_direct_call_target_values(
 /// The copy that materializes a call target renders nothing -- the call spells
 /// the callee's name -- so its write and its operands are accounted here rather
 /// than left for a statement that will not be emitted.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn certified_direct_call_target_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
     let graph = source.graph();
     certified_direct_call_target_values(source)
@@ -209,6 +244,13 @@ pub(crate) fn certified_direct_call_target_insts(source: &r2ssa::SsaArtifact) ->
 }
 
 /// The instructions a certificate says render no statement, indexed once per function.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) struct Elisions {
     return_control: BTreeSet<InstId>,
     direct_call_targets: BTreeSet<InstId>,

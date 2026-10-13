@@ -62,6 +62,13 @@ fn stride_of(term: Term) -> Option<u64> {
 /// read as signed at the address width, so that scaling the index back by
 /// the stride returns exactly the address it came from. Something must
 /// remain, because a plain dereference is not an element.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn element_index(arena: &mut TermArena, affine: &Affine, stride: u64) -> Option<TermId> {
     let modulus = mask(affine.width) as u64;
     let divide = |k: u64| -> Option<u64> {

@@ -207,6 +207,13 @@ pub struct ImportedAccess {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub struct Import {
     values: Vec<Option<ImportedValue>>,
     accesses: BTreeMap<StructuredAccessId, ImportedAccess>,
@@ -315,6 +322,13 @@ impl Import {
 
 /// What the expansion policy is asked about: one read of `value` inside a
 /// reader's term, with the producer's own imported term already built.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub struct ExpansionQuery<'a> {
     pub artifact: &'a SsaArtifact,
     pub projection: &'a MachineProjection,
@@ -365,6 +379,13 @@ pub const DUPLICABLE_TREE_BUDGET: u64 = 64;
 /// function never redefines, the term is not opaque, it reads no memory
 /// -- a cell read twice is observed twice, and nothing here proves the two
 /// reads see the same store -- and it is within [`DUPLICABLE_TREE_BUDGET`].
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub fn term_is_duplicable(
     projection: &MachineProjection,
     arena: &TermArena,
@@ -386,6 +407,13 @@ pub fn term_is_duplicable(
 /// definition, and an entry value the function never writes is the same at
 /// every site because nothing between the sites can change it. Everything else
 /// is read once.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn leaf_is_duplicable(
     projection: &MachineProjection,
     entry_never_redefined: &BTreeSet<ValueId>,
@@ -487,6 +515,13 @@ pub fn interior_stack_object_address(
 }
 
 /// Entry values whose storage no instruction of the function writes.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 fn entry_values_never_redefined(graph: &r2ssa::SsaGraph) -> BTreeSet<ValueId> {
     let mut rewritten_locations = BTreeSet::new();
     for inst in &graph.insts {
@@ -526,6 +561,13 @@ struct RootTerm {
     opaque: bool,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 struct Importer<'a> {
     artifact: &'a SsaArtifact,
     projection: &'a MachineProjection,
@@ -585,6 +627,13 @@ pub fn no_declared_pointers(_: ValueId) -> Option<bool> {
 }
 
 /// Import, asking `policy` whether each read may absorb its producer's term.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub fn import_with(
     artifact: &SsaArtifact,
     projection: &MachineProjection,

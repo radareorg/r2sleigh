@@ -5,6 +5,7 @@
 //!   r2sleigh info <input.r2il>
 //!   r2sleigh test-arch <arch>
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
 #[cfg(feature = "sleigh-config")]
 mod export;

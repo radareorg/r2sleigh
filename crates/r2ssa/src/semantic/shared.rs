@@ -2184,6 +2184,13 @@ pub(crate) fn member_run_source(slice: &[ByteSource]) -> Option<MemberRunSource>
         .then_some(MemberRunSource::Lane(value))
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn insert_loop_carrier_member_role(
     rows: &mut LoopCarrierMemberRoles,
     value: ValueId,
@@ -2192,6 +2199,13 @@ pub(crate) fn insert_loop_carrier_member_role(
     rows.entry(value).or_default().insert(role)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn insert_loop_carrier_peer_roles(
     rows: &mut LoopCarrierMemberRoles,
     peer: &LoopCarrierPeerCandidate,
@@ -2350,6 +2364,13 @@ pub(crate) fn loop_carrier_projection_key(
     Some((carrier, span, entry_predecessors, update_predecessors))
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
+    )
+)]
 pub(crate) fn expand_loop_carrier_storage_continuations(
     graph: &SsaGraph,
     storage_spans: &StorageSpans,
