@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use r2il::R2ILOp;
 use r2source::SourceResultReads;
 
 use super::requests::SurveyQuery;
@@ -19,7 +18,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
     type Value = Option<SourceResultReads>;
     const NAME: &'static str = "result-reads";
 
-    /// Work: one lift per caller discovery found, each scanned to its call's block end.
+    /// Work: one lift per caller discovery found, each read from each call the walk found to `callee`
+    /// to its block's end.
     fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Self::Value {
         let survey = db.get::<SurveyQuery>(&()).ok()?;
         let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
@@ -39,11 +39,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
                 continue;
             };
             let calls = body.blocks.iter().flat_map(|block| {
-                let ops = block.lifted.ops.iter().enumerate();
-                ops.filter(
-                    |(_, op)| matches!(op, R2ILOp::Call { target } if target.offset == callee),
-                )
-                .map(move |(index, _)| (&block.lifted, index))
+                (block.transfers.iter())
+                    .filter(|transfer| {
+                        transfer.target == callee
+                            && transfer.kind == r2source::AdvisoryCallTransfer::Call
+                    })
+                    .map(move |transfer| (&block.lifted, transfer.op))
             });
             for (lifted, index) in calls {
                 reads = reads.and(r2ssa::caller_reads::reads_after_call(

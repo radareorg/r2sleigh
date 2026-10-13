@@ -1875,37 +1875,20 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
         .collect()
 }
 
-/// Where each direct call is made and what it reaches.
-///
-/// The walk collects call targets without saying which instruction made each
-/// one, so the instruction is found by looking for the call operation in the
-/// block that carries it.
+/// Where each transfer to another function is made and what it reaches, as the walk read it.
 fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
-        let ops = &block.lifted.ops;
-        // One forward read per block that calls through a value, so each such call folds in `O(1)`.
-        let mut origins = (ops
-            .iter()
-            .any(|op| matches!(op, r2il::R2ILOp::CallInd { .. })))
-        .then(r2ssa::origin::BlockOrigins::default);
-        for (index, op) in ops.iter().enumerate() {
-            let site = transfer(&block.lifted, index, body, origins.as_ref());
-            if let Some(origins) = &mut origins {
-                origins.step(op);
-            }
-            let Some((target, transfer)) = site else {
-                continue;
-            };
-            let Some(instruction) = block.lifted.instruction_of(index) else {
+        for transfer in &block.transfers {
+            let Some(instruction) = block.lifted.instruction_of(transfer.op) else {
                 continue;
             };
             sites.push(NativeCall {
                 instruction,
-                target,
-                name: program.name_at(target),
-                transfer,
-                linkage: match program.import_at(target) {
+                target: transfer.target,
+                name: program.name_at(transfer.target),
+                transfer: transfer.kind,
+                linkage: match program.import_at(transfer.target) {
                     Some(_) => r2source::AdvisoryCalleeLinkage::Imported,
                     None => r2source::AdvisoryCalleeLinkage::Internal,
                 },
@@ -1947,34 +1930,6 @@ fn reentering_calls(calls: &[NativeCall]) -> BTreeSet<u64> {
         })
         .map(|call| call.target)
         .collect()
-}
-
-/// How one operation reaches another function, where it does: a call target the walk folded and a
-/// jump's loaded slot are read by the passes r2ssa correlates the site with, so the two agree.
-fn transfer(
-    block: &r2il::R2ILBlock,
-    index: usize,
-    body: &crate::body::Body,
-    origins: Option<&r2ssa::origin::BlockOrigins>,
-) -> Option<(u64, r2source::AdvisoryCallTransfer)> {
-    match block.ops.get(index)? {
-        r2il::R2ILOp::Call { target } => {
-            Some((target.offset, r2source::AdvisoryCallTransfer::Call))
-        }
-        r2il::R2ILOp::CallInd { target } => origins?
-            .of(target)?
-            .constant()
-            .filter(|target| body.calls.contains(target))
-            .map(|target| (target, r2source::AdvisoryCallTransfer::Call)),
-        r2il::R2ILOp::Branch { target } if body.tail_calls.contains(&target.offset) => {
-            Some((target.offset, r2source::AdvisoryCallTransfer::TailJump))
-        }
-        r2il::R2ILOp::BranchInd { .. } => Some((
-            r2ssa::terminal_indirect_loaded_slot(block, index)?.offset,
-            r2source::AdvisoryCallTransfer::TailSlot,
-        )),
-        _ => None,
-    }
 }
 
 impl Native<'_> {
