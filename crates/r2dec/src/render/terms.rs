@@ -278,7 +278,7 @@ fn boolean_not(bits: u32, x: CExpr) -> Option<CExpr> {
 }
 
 /// `bits` of a `wide`-bit `input` from bit `lsb`.
-fn extract((wide, bits): (u32, u32), input: CExpr, lsb: u32) -> Option<CExpr> {
+pub(super) fn extract((wide, bits): (u32, u32), input: CExpr, lsb: u32) -> Option<CExpr> {
     if self::wide(wide) {
         return wide_extract(wide, bits, input, lsb);
     }
@@ -546,7 +546,7 @@ fn boolean(op: MachineBooleanOp, bits: u32, left: CExpr, right: CExpr) -> Option
 }
 
 /// `high` above `low`, as one integer of their summed widths.
-fn concat(bits: u32, low_bits: u32, high: CExpr, low: CExpr) -> Option<CExpr> {
+pub(super) fn concat(bits: u32, low_bits: u32, high: CExpr, low: CExpr) -> Option<CExpr> {
     if wide(bits) {
         let insert = crate::bitvector::BitVectorHelper::insert(bits, bits.checked_sub(low_bits)?)?;
         let low = wide_zero_extend(low_bits, bits, low)?;

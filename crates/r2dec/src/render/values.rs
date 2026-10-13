@@ -536,7 +536,7 @@ fn plan_calls(
                     carriers.and_then(|c| calls::Prototype::of_widths(c, fixed, returns, bits));
             }
         }
-        if let Some((result, _)) = plan.result {
+        for result in plan.result.iter().flat_map(calls::CallResult::values) {
             results.insert(result);
         }
         planned.insert(inst.id, plan);
@@ -1175,7 +1175,7 @@ impl<'a> Values<'a> {
                 )
                 .is_some() =>
                 {
-                    Ok(None)
+                    Ok(Vec::new())
                 }
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
@@ -1184,15 +1184,16 @@ impl<'a> Values<'a> {
                     SSAOp::CallOther { userop, .. } => Gap::UserOperation(*userop),
                     _ => Gap::Unsupported,
                 }),
-                _ => Ok(None),
+                _ => Ok(Vec::new()),
             };
             let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             match stmt {
-                Ok(Some(stmt)) => {
-                    self.wrote(inst, &stmt);
-                    out.push((at, stmt));
+                Ok(stmts) => {
+                    for stmt in stmts {
+                        self.wrote(inst, &stmt);
+                        out.push((at, stmt));
+                    }
                 }
-                Ok(None) => {}
                 Err(gap) => self.gap(&mut out, (addr, at), inst.id, gap),
             }
         }
@@ -1240,49 +1241,48 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// The statement one live instruction owes: `Ok(None)` where it owes none here, `Err` where
-    /// it owes one the facts cannot spell.
+    /// The statements one live instruction owes, in order (a pair call owes several): none where
+    /// it owes none here, `Err` where it owes one the facts cannot spell.
     fn statement(
         &self,
         inst: InstId,
         op: &SSAOp<ValueId>,
         output: Option<ValueId>,
-    ) -> Result<Option<CStmt>, Gap> {
+    ) -> Result<Vec<CStmt>, Gap> {
         match op {
             SSAOp::CBranch { .. }
             | SSAOp::Branch { .. }
             | SSAOp::Switch { .. }
             | SSAOp::Return { .. }
-            | SSAOp::BranchInd { .. } => Ok(None),
-            SSAOp::Store { addr, val, .. } => {
-                self.store(inst, *addr, *val).map(Some).ok_or(Gap::Store)
-            }
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                self.call(inst).map(Some).ok_or(Gap::Call)
-            }
+            | SSAOp::BranchInd { .. } => Ok(Vec::new()),
+            SSAOp::Store { addr, val, .. } => self
+                .store(inst, *addr, *val)
+                .map(|stmt| vec![stmt])
+                .ok_or(Gap::Store),
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } => self.call(inst).ok_or(Gap::Call),
             SSAOp::BlockTransfer(transfer) => self
                 .block_transfer(inst, transfer)
-                .map(Some)
+                .map(|stmt| vec![stmt])
                 .ok_or(Gap::Effect),
             // The block operation's statement assigns the part of its answer this reads.
             SSAOp::Subpiece { .. }
                 if output.is_some_and(|o| transfer::reads_answer(self.graph, o)) =>
             {
-                Ok(None)
+                Ok(Vec::new())
             }
             // The described call's statement assigns its result.
             SSAOp::CallDefine { .. } if output.is_some_and(|o| self.results.contains(o)) => {
-                Ok(None)
+                Ok(Vec::new())
             }
             SSAOp::CallDefine { .. } if output.is_some_and(|o| self.is_named(o)) => {
                 Err(Gap::Unknown)
             }
             _ if writes_value(op) => {
                 let Some(output) = output else {
-                    return Ok(None);
+                    return Ok(Vec::new());
                 };
                 if !self.bound[inst.0 as usize] {
-                    return Ok(None);
+                    return Ok(Vec::new());
                 }
                 let (name, _) = self.names[output.0 as usize].ok_or(Gap::Type)?;
                 let canonical = self.roots.value(output).ok_or(Gap::Term)?;
@@ -1296,9 +1296,9 @@ impl<'a> Values<'a> {
                 }
                 let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
                 self.mark_discharged(output);
-                Ok(Some(self.binding(output, name, canonical.canonical, value)))
+                Ok(vec![self.binding(output, name, canonical.canonical, value)])
             }
-            _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(None),
+            _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(Vec::new()),
             _ => Err(Gap::Effect),
         }
     }
@@ -1350,12 +1350,16 @@ impl<'a> Values<'a> {
 
     /// A described call: its callee by name, each argument at the class its signature passes it
     /// in, its result assigned.
-    fn call(&self, inst: InstId) -> Option<CStmt> {
+    fn call(&self, inst: InstId) -> Option<Vec<CStmt>> {
         let plan = self.calls.get(inst)?;
         if self.calls_itself(plan) {
-            return self.recursive_call(inst, plan);
+            return self.recursive_call(inst, plan).map(|stmt| vec![stmt]);
         }
-        let call = self.call_expr(inst, plan, plan.result.as_ref().map(|(_, class)| class))?;
+        let call = self.call_expr(
+            inst,
+            plan,
+            plan.result.as_ref().map(calls::CallResult::class),
+        )?;
         needed(
             self.assign_call(inst, plan, call),
             inst,
@@ -1567,16 +1571,20 @@ impl<'a> Values<'a> {
     }
 
     /// The call as a statement, its result assigned to the value the boundary defines after it.
-    fn assign_call(&self, _inst: InstId, plan: &CallPlan, call: CExpr) -> Option<CStmt> {
-        let Some((result, class)) = &plan.result else {
-            return Some(CStmt::Expr(call));
+    fn assign_call(&self, inst: InstId, plan: &CallPlan, call: CExpr) -> Option<Vec<CStmt>> {
+        let (result, class) = match &plan.result {
+            None => return Some(vec![CStmt::Expr(call)]),
+            Some(calls::CallResult::One(result, class)) => (result, class),
+            Some(calls::CallResult::Pair { low, high, class }) => {
+                return self.assign_pair(inst, call, (*low, *high), class);
+            }
         };
         let Some((name, held)) = self.names.get(result.0 as usize).and_then(Option::as_ref) else {
             // No rendered text reads the result, so the call written for its effect discards it.
             if let Some(def) = self.graph.def_inst(*result) {
                 self.mark(def);
             }
-            return Some(CStmt::Expr(call));
+            return Some(vec![CStmt::Expr(call)]);
         };
         let demanded = (self.artifact.facts().demanded.as_ref())
             .map_or(u64::MAX, |demanded| demanded.bytes(*result));
@@ -1589,7 +1597,70 @@ impl<'a> Values<'a> {
             self.mark(def);
         }
         self.assigns(*result);
-        Some(assign(*name, value))
+        Some(vec![assign(*name, value)])
+    }
+
+    /// A pair call: the value it returns held once in a local of both widths, each half that is
+    /// read assigned its bits (doc/adr-language-profile.md, item 1).
+    fn assign_pair(
+        &self,
+        inst: InstId,
+        call: CExpr,
+        halves: (Option<ValueId>, Option<ValueId>),
+        class: &MachineType,
+    ) -> Option<Vec<CStmt>> {
+        let named = |value: Option<ValueId>| {
+            let value = value?;
+            let (name, held) = self.names.get(value.0 as usize)?.as_ref()?;
+            Some((value, *name, *held))
+        };
+        let read: Vec<_> = [named(halves.0), named(halves.1)]
+            .into_iter()
+            .zip([0, 1])
+            .collect();
+        let mut stmts = Vec::with_capacity(3);
+        if read.iter().any(|(named, _)| named.is_some()) {
+            let bits = class.width_bits();
+            let ty = terms::c_type(class)?;
+            let at = self.graph.instruction_for_inst(inst)?;
+            let pair = (self.symbols.borrow_mut()).declare(
+                format!("pair_{at:x}"),
+                ty.clone(),
+                SymbolRole::Carrier,
+            );
+            let half = MachineType::Integer {
+                width_bits: bits / 2,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            };
+            stmts.push(assign(pair, call));
+            for (named, index) in &read {
+                let Some((_, name, held)) = named else {
+                    continue;
+                };
+                let bits_of = terms::extract((bits, bits / 2), CExpr::var(pair), index * bits / 2)?;
+                stmts.push(assign(*name, fit(bits_of, &half, held)?));
+            }
+            self.locals.borrow_mut().push(CLocal {
+                ty,
+                name: pair,
+                stack_offset: None,
+                align: None,
+            });
+        } else {
+            stmts.push(CStmt::Expr(call));
+        }
+        for value in read
+            .iter()
+            .filter_map(|(named, _)| named.map(|(value, ..)| value))
+        {
+            self.assigns(value);
+        }
+        for value in [halves.0, halves.1].into_iter().flatten() {
+            if let Some(def) = self.graph.def_inst(value) {
+                self.mark(def);
+            }
+        }
+        Some(stmts)
     }
 
     /// A call to the function's own entry: by its own name and at its own parameters' classes, so
@@ -1609,15 +1680,17 @@ impl<'a> Values<'a> {
             kind: crate::symbol::ExternalKind::Function,
         };
         let call = CExpr::call_at(inst, callee, arguments);
-        let named = plan
-            .result
-            .and_then(|(result, _)| Some((result, self.names.get(result.0 as usize)?.as_ref()?)));
+        // A pair calls itself through no one value: refused.
+        let result = match &plan.result {
+            None => None,
+            Some(calls::CallResult::One(result, _)) => Some(*result),
+            Some(calls::CallResult::Pair { .. }) => return None,
+        };
+        let named =
+            result.and_then(|result| Some((result, self.names.get(result.0 as usize)?.as_ref()?)));
         let Some((result, (name, held))) = named else {
             // No rendered text reads the result, so the call written for its effect discards it.
-            if let Some(def) = plan
-                .result
-                .and_then(|(result, _)| self.graph.def_inst(result))
-            {
+            if let Some(def) = result.and_then(|result| self.graph.def_inst(result)) {
                 self.mark(def);
             }
             return Some(CStmt::Expr(call));
@@ -1787,6 +1860,11 @@ impl<'a> Values<'a> {
             .inventory
             .obligations_for_inst(inst)
             .any(|o| o.id.kind == SemanticObligationKind::ReturnValue && o.inputs.is_empty());
+        let returns = (self.artifact.machine_context().function_interface())
+            .map(r2source::SourceFunctionInterface::return_kind);
+        if let Some(r2source::SourceFunctionReturn::Pair { low, high }) = returns {
+            return self.returned_pair(inst, (low, high), ty).map(Some);
+        }
         let values = returned_values(self.inventory, inst);
         let [value] = values.as_slice() else {
             return matches!(ty, Some(CType::Void)).then_some(None);
@@ -1821,6 +1899,40 @@ impl<'a> Values<'a> {
         };
         let spelled = fit(self.operand(*value, inst)?, &held, &class)?;
         Some(Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), spelled))))
+    }
+
+    /// A pair's return: its two registers' values joined, the high half above the low, as the one
+    /// integer of both widths (doc/adr-language-profile.md, item 1).
+    fn returned_pair(
+        &self,
+        inst: InstId,
+        (low, high): (r2ssa::CanonicalStorageId, r2ssa::CanonicalStorageId),
+        ty: Option<&CType>,
+    ) -> Option<CExpr> {
+        let half = |storage: r2ssa::CanonicalStorageId| -> Option<CExpr> {
+            let value =
+                (self.inventory.obligations_for_inst(inst)).find_map(|o| match o.id.component {
+                    SemanticObligationComponent::RegisterSlot { storage: slot, .. }
+                        if o.id.kind == SemanticObligationKind::ReturnValue && slot == storage =>
+                    {
+                        o.inputs.first().copied()
+                    }
+                    _ => None,
+                })?;
+            let held = self.value_type(value)?;
+            let class = MachineType::Integer {
+                width_bits: storage.size * 8,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            };
+            fit(self.operand(value, inst)?, &held, &class)
+        };
+        let bits = (low.size + high.size) * 8;
+        let joined = terms::concat(bits, low.size * 8, half(high)?, half(low)?)?;
+        let ty = match ty {
+            Some(ty) => ty.clone(),
+            None => CType::uint(bits),
+        };
+        Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), joined)))
     }
 
     fn terminator(&self, addr: u64) -> Option<(InstId, &'a SSAOp<ValueId>)> {

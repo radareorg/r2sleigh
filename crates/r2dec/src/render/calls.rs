@@ -33,14 +33,45 @@ pub(super) struct CallPlan {
     /// How many leading arguments the prototype names; the rest are its variadic tail.
     pub(super) fixed: usize,
     pub(super) variadic: bool,
-    /// The value the call leaves in its result register and the class it is returned in.
-    pub(super) result: Option<(ValueId, MachineType)>,
+    /// What the call leaves its caller: one value, or a pair's halves.
+    pub(super) result: Option<CallResult>,
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
     pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
     /// The callee's declared prototype, where C spells every type in it with no definition.
     pub(super) declared: Option<Prototype>,
+}
+
+/// What a call leaves its caller.
+#[derive(Debug, Clone)]
+pub(super) enum CallResult {
+    /// The value in its result register and the class it is returned in.
+    One(ValueId, MachineType),
+    /// One value in two registers (doc/adr-language-profile.md, item 1): the halves the boundary
+    /// defines after the call, each where something reads it, and the class of both together.
+    Pair {
+        low: Option<ValueId>,
+        high: Option<ValueId>,
+        class: MachineType,
+    },
+}
+
+impl CallResult {
+    /// The class the call returns in.
+    pub(super) const fn class(&self) -> &MachineType {
+        match self {
+            Self::One(_, class) | Self::Pair { class, .. } => class,
+        }
+    }
+
+    /// The values the call defines.
+    pub(super) fn values(&self) -> Vec<ValueId> {
+        match self {
+            Self::One(value, _) => vec![*value],
+            Self::Pair { low, high, .. } => low.iter().chain(high).copied().collect(),
+        }
+    }
 }
 
 /// A callee's fixed parameters and result at the types its declaration states.
@@ -303,7 +334,22 @@ fn planned(
     let graph = artifact.graph();
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
     let callee = callee(certificate, identity, graph, inst).ok_or(Unplanned::NoCallee)?;
-    let result = result_value(inventory, graph, inst).ok_or(Unplanned::ResultUnclear)?;
+    let pair = (artifact.facts().boundaries.calls.get(site)).and_then(|boundary| {
+        match boundary.result_kind {
+            Some(r2source::SourceCallResult::Pair { low, high }) => Some((low, high)),
+            _ => None,
+        }
+    });
+    let pair = match pair {
+        Some(registers) => {
+            Some(pair_values(inventory, graph, inst, registers).ok_or(Unplanned::ResultUnclear)?)
+        }
+        None => None,
+    };
+    let result = match pair {
+        Some(_) => None,
+        None => result_value(inventory, graph, inst).ok_or(Unplanned::ResultUnclear)?,
+    };
     // Each argument passes in the class its register says, which a signature, where there is one,
     // must agree with; C passes a float in the variadic tail as a double.
     let signature = identity.and_then(|identity| identity.signature.as_ref());
@@ -320,9 +366,17 @@ fn planned(
     )?;
     let arguments =
         arguments(artifact, certificate, signature, fixed).ok_or(Unplanned::ArgumentClass)?;
-    let result = match result {
-        None => None,
-        Some(value) => Some((
+    let result = match (pair, result) {
+        (Some((low, high, bits)), _) => Some(CallResult::Pair {
+            low,
+            high,
+            class: MachineType::Integer {
+                width_bits: bits,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            },
+        }),
+        (None, None) => None,
+        (None, Some(value)) => Some(CallResult::One(
             value,
             result_class(artifact, (*site, inst), signature, value)
                 .ok_or(Unplanned::ResultClass)?,
@@ -506,6 +560,37 @@ fn result_value(
         }
         _ => None,
     }
+}
+
+/// A pair call's halves: each value a call result obligation names is the `CallDefine` of the low or
+/// the high register, and anything else leaves the result unclear. Each half is absent where
+/// nothing reads it; the width is both registers'.
+fn pair_values(
+    inventory: &SemanticObligationInventory,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+    (low, high): (CanonicalStorageId, CanonicalStorageId),
+) -> Option<(Option<ValueId>, Option<ValueId>, u32)> {
+    let mut halves = (None, None);
+    for value in (inventory.obligations_for_inst(inst))
+        .filter(|o| o.id.kind == SemanticObligationKind::CallResult)
+        .flat_map(|o| o.inputs.iter().copied())
+    {
+        let def = graph.def_inst(value).and_then(|def| graph.inst(def))?;
+        if !matches!(def.payload, InstPayload::Op(SSAOp::CallDefine { .. })) {
+            return None;
+        }
+        let half = match graph.written_storage(def)? {
+            storage if storage == low => &mut halves.0,
+            storage if storage == high => &mut halves.1,
+            _ => return None,
+        };
+        if half.is_some_and(|held| held != value) {
+            return None;
+        }
+        *half = Some(value);
+    }
+    Some((halves.0, halves.1, (low.size + high.size).checked_mul(8)?))
 }
 
 /// Each argument and the class it passes in: its register's, which a signature, where there is

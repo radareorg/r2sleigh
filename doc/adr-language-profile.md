@@ -43,6 +43,27 @@ The profile, owned by r2abi (the cited rows) and selected by r2engine, states:
    pairs (a `(ptr, len)` argument in two registers, a two-word result in two).
    A boundary carries several results natively, and an argument or a result
    may span two registers as one value.
+
+   A value in two registers is `SourceFunctionReturn::Pair` and
+   `SourceCallResult::Pair` (P7, 2026-10-13). Its halves are distinct,
+   non-overlapping registers of one space and one width. They are ordered as
+   the compiler specification orders its result entries, the first holding the
+   low half: SysV RDX:RAX, AAPCS64 x1:x0. No targeted ABI spans more than two
+   registers with one value. A larger value returns indirectly, and Go's
+   several results are several values, which a list of results states. Ghidra
+   joins Go's results into one nine-piece storage; this contract keeps them apart.
+   - The pair's type is the integer of both halves' width (`__uint128_t` for
+     two 64-bit halves), never a struct unless a declaration states one.
+   - The body proves a pair where it writes both registers on every return
+     path and one call reads the second register after it: that register is
+     caller-saved, so a read after the call reads the result ("Caller reads",
+     [resolved-bodies](adr-resolved-bodies.md)).
+   - Each call site that reads the second register takes the pair; a site that
+     reads only the first keeps the one register, and its C is unchanged.
+   - A call to a pair defines both registers, and the rendering splits one
+     value into them; the callee's return joins its two halves.
+   - A pair is handled or it refuses: no consumer reads it as one register or
+     as none.
 2. **Premises.** What the language guarantees, as `Premise` values the
    consumer accepts or refuses: `UbFreeSource` for C and C++, `MemorySafe`
    for safe Rust and Go (a callee reaches the frame only through what it is

@@ -51,9 +51,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
                     index,
                     slots.result_slot(),
                     slots.float_result_slot(),
+                    slots.second_result_slot(),
                 ));
             }
         }
-        (reads.integer > 0 || reads.float > 0).then_some(reads)
+        (reads.integer > 0 || reads.float > 0 || reads.second > 0).then_some(reads)
     }
 }

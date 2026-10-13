@@ -67,7 +67,7 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    unassigned: &[UnassignedRead],
+    (unassigned, open_second_result): (&[UnassignedRead], bool),
 ) {
     let rendered_nothing = func.body.is_empty();
     // Each residual is a construct the rendering says it did not prove, and
@@ -153,6 +153,9 @@ pub(crate) fn note_unproven_constructs(
             &mut detail,
             "; {radare2_prototypes} {noun} supplied by the source"
         );
+    }
+    if open_second_result {
+        detail.push_str("; the result's second register is open: no call read decides it");
     }
     if radare2_local_names > 0 {
         let noun = if radare2_local_names == 1 {

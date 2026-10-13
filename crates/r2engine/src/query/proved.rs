@@ -179,12 +179,16 @@ impl Anchored {
     fn returns(&mut self, artifact: &SsaArtifact) {
         let graph = artifact.graph();
         for certificate in &artifact.certificates().returns {
-            let Some(ReturnCarrier::Register { storage }) = certificate.carrier else {
-                continue;
+            // A pair returns in both of its registers.
+            let storages = match certificate.carrier {
+                Some(ReturnCarrier::Register { storage }) => vec![storage],
+                Some(ReturnCarrier::Pair { low, high }) => vec![low, high],
+                _ => continue,
             };
             if let Some(line) = graph.instruction_for_inst(certificate.at) {
-                let kind = AnnotationKind::Returns { storage };
-                self.push(line, kind, Basis::Certified);
+                for storage in storages {
+                    self.push(line, AnnotationKind::Returns { storage }, Basis::Certified);
+                }
             }
         }
     }

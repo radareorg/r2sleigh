@@ -812,6 +812,17 @@ fn call_result_type(
     callee: &r2ssa::SourceFunctionInterface,
     result: r2ssa::SourceCallResult,
 ) -> Option<CTypeLike> {
+    // A pair is one integer as wide as both halves, where the callee names both registers.
+    if let r2ssa::SourceCallResult::Pair { low, high } = result {
+        let named = matches!(callee.return_kind(), r2ssa::SourceFunctionReturn::Pair { low: l, high: h } if (l, h) == (low, high))
+            || callee
+                .result_carriers()
+                .is_some_and(|carriers| carriers.integer == low && carriers.second == Some(high));
+        return named.then_some(CTypeLike::Int {
+            bits: (low.size + high.size).checked_mul(8)?,
+            signedness: crate::Signedness::Unsigned,
+        });
+    }
     let carriers = callee.result_carriers()?;
     let r2ssa::SourceCallResult::Register { storage } = result else {
         return None;
@@ -1446,11 +1457,16 @@ impl FunctionFacts {
             let site_result = source
                 .call_site_interface(arguments.call_site_id)
                 .map(r2ssa::SourceCallSiteInterface::result);
-            let return_type = match signature.signature.return_type {
-                CTypeLike::Unknown => {
+            // A call that takes a pair takes the type of both halves, whatever the callee's own
+            // signature says of its first register.
+            let return_type = match (site_result, &signature.signature.return_type) {
+                (Some(result @ r2ssa::SourceCallResult::Pair { .. }), _) => {
+                    call_result_type(&signature.interface, result)
+                }
+                (_, CTypeLike::Unknown) => {
                     site_result.and_then(|result| call_result_type(&signature.interface, result))
                 }
-                ref declared => Some(declared.clone()),
+                (_, declared) => Some(declared.clone()),
             };
             if same_interface
                 && signature.address() == target
@@ -2702,7 +2718,9 @@ impl FunctionFacts {
         }
         let ret_type = match interface.return_kind() {
             r2ssa::SourceFunctionReturn::Void => Some(CTypeLike::Void),
-            r2ssa::SourceFunctionReturn::Register { .. } => {
+            // A pair's logical value is the one integer of both halves' width.
+            r2ssa::SourceFunctionReturn::Register { .. }
+            | r2ssa::SourceFunctionReturn::Pair { .. } => {
                 interface.return_logical_value().and_then(|value| {
                     crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
                 })

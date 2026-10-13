@@ -204,12 +204,14 @@ fn tail_result(
         .ok_or(ReturnTypeRefusal::UnreadTailCall)?;
     match interface.result() {
         r2ssa::SourceCallResult::Void => Ok(Exit::Typed(CTypeLike::Void)),
-        r2ssa::SourceCallResult::Register { .. } => signatures
-            .get(&call_site)
-            .map(|signature| signature.return_type.clone())
-            .filter(|ty| *ty != CTypeLike::Unknown)
-            .map(Exit::Typed)
-            .ok_or(ReturnTypeRefusal::UntypedTailCall),
+        r2ssa::SourceCallResult::Register { .. } | r2ssa::SourceCallResult::Pair { .. } => {
+            signatures
+                .get(&call_site)
+                .map(|signature| signature.return_type.clone())
+                .filter(|ty| *ty != CTypeLike::Unknown)
+                .map(Exit::Typed)
+                .ok_or(ReturnTypeRefusal::UntypedTailCall)
+        }
     }
 }
 

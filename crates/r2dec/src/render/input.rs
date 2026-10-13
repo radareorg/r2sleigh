@@ -94,6 +94,14 @@ impl<'a> RenderInput<'a> {
     }
 
     /// Who each call site calls, as r2types resolved it.
+    /// Whether the result's second register is open: the body writes it on every return and no
+    /// call read decides whether it holds half of the result (doc/adr-language-profile.md, item 1).
+    pub fn open_second_result(&self) -> bool {
+        (self.artifact().machine_context().function_interface())
+            .and_then(r2source::SourceFunctionInterface::result_carriers)
+            .is_some_and(|carriers| carriers.second.is_some())
+    }
+
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
     pub fn declared_call_prototypes(&self) -> usize {
         self.facts
