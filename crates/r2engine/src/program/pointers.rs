@@ -11,7 +11,7 @@ use std::sync::Arc;
 use r2ssa::CanonicalStorageId;
 
 use super::{OpenProgram, ProgramInputs, Source, View};
-use crate::query::db::{Db, Hold, Query};
+use crate::query::db::{Db, Hold, Query, Retention};
 use crate::query::{Callee, Parameters};
 use r2source::confidence::Basis;
 
@@ -38,6 +38,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for PointerParameters {
     type Key = Callee;
     type Value = Pointed;
     const NAME: &'static str = "pointer-parameters";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, &callee: &Callee) -> Pointed {
         let (found, cut) = derived(&View::new(db, true), callee);

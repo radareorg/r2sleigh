@@ -54,8 +54,8 @@ pub trait Query<I: Inputs>: 'static {
     /// Named in a [`Cycle`].
     const NAME: &'static str;
 
-    /// How long an answer is held once computed.
-    const RETENTION: Retention = Retention::Held;
+    /// How long an answer is held once computed: every query states it.
+    const RETENTION: Retention;
 
     /// The answer, reading the program only through `db`.
     fn compute(db: &Db<I>, key: &Self::Key) -> Self::Value;
@@ -72,8 +72,8 @@ pub trait Query<I: Inputs>: 'static {
 pub enum Retention {
     /// Until something it read moves: a program-wide fact computed once, such as a callee's summary.
     Held,
-    /// Only the newest answer, which the request in flight is reading; a dropped one keeps what it
-    /// read, so what read it stays good, and is computed again when asked.
+    /// Only the newest answer, which the request in flight is reading; a dropped one keeps its
+    /// revisions and what it read only while a held answer read it, so that answer stays good.
     Newest,
 }
 
@@ -155,6 +155,8 @@ struct Frame {
     taken: BTreeSet<*const Dep>,
     /// Whether it read a stopped answer, which makes its own answer the request's too.
     stopped: bool,
+    /// Whether the query running is held: what it reads of a `Newest` query keeps its entry.
+    held: bool,
 }
 
 #[derive(Clone)]
@@ -189,16 +191,17 @@ struct Entry<V> {
     deps: Rc<[Dep]>,
     verified_at: u64,
     changed_at: u64,
-    /// When it was computed or last read, so a table at capacity drops the least recently used.
-    stamp: u64,
+    /// Whether a held answer read it: a dropped value then keeps the entry, so that answer can
+    /// still say it is good after a write.
+    read_by_held: bool,
 }
 
 /// The answers to one query, by key.
 struct Table<Q: Query<I>, I: Inputs> {
     entries: RefCell<BTreeMap<Q::Key, Entry<Q::Value>>>,
     running: RefCell<BTreeSet<Q::Key>>,
-    /// The next entry's stamp.
-    clock: std::cell::Cell<u64>,
+    /// The key computed last, the one value a `Newest` query holds.
+    newest: RefCell<Option<Q::Key>>,
     stats: std::cell::Cell<QueryStats>,
     query: PhantomData<fn(&I) -> Q>,
 }
@@ -302,6 +305,13 @@ impl<I: Inputs + 'static> Db<I> {
         // An answer not held has no entry to depend on: it tainted the asker or handed it its reads.
         if changed_at.is_some() {
             self.record_query::<Q>(key);
+            let held = self.frames.borrow().last().is_some_and(|frame| frame.held);
+            if held
+                && Q::RETENTION == Retention::Newest
+                && let Some(entry) = typed.entries.borrow_mut().get_mut(key)
+            {
+                entry.read_by_held = true;
+            }
         }
         Ok(value)
     }
@@ -363,23 +373,25 @@ impl<I: Inputs + 'static> Db<I> {
             if running.contains(&key) {
                 continue;
             }
-            let changed_at = match entries.get(&key) {
+            let (changed_at, read_by_held) = match entries.get(&key) {
                 Some(held) if held.verified_at == now && held.value.is_some() => continue,
-                Some(held) if held.value.as_deref() == Some(&value) => held.changed_at,
-                _ => now,
+                Some(held) if held.value.as_deref() == Some(&value) => {
+                    (held.changed_at, held.read_by_held)
+                }
+                held => (now, held.is_some_and(|held| held.read_by_held)),
             };
             entries.insert(
-                key,
+                key.clone(),
                 Entry {
                     value: Some(Rc::new(value)),
                     deps: Rc::clone(&deps),
                     verified_at: now,
                     changed_at,
-                    stamp: typed.tick(),
+                    read_by_held,
                 },
             );
+            typed.bound(&mut entries, &key);
         }
-        Table::<Q, I>::bound(&mut entries);
     }
 
     fn table<Q: Query<I>>(&self) -> Rc<dyn AnyTable<I>> {
@@ -388,7 +400,7 @@ impl<I: Inputs + 'static> Db<I> {
             Rc::new(Table::<Q, I> {
                 entries: RefCell::new(BTreeMap::new()),
                 running: RefCell::new(BTreeSet::new()),
-                clock: std::cell::Cell::new(0),
+                newest: RefCell::new(None),
                 stats: std::cell::Cell::default(),
                 query: PhantomData,
             })
@@ -469,11 +481,8 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
                 return Ok(None);
             }
         }
-        let stamp = self.tick();
         if let Some(entry) = self.entries.borrow_mut().get_mut(key) {
             entry.verified_at = now;
-            // A value just read is the last a bound drops: the least recently used goes first.
-            entry.stamp = stamp;
         }
         self.count(|stats| stats.reused += 1);
         db.stats.borrow_mut().reused += 1;
@@ -486,26 +495,22 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         self.stats.set(stats);
     }
 
-    fn tick(&self) -> u64 {
-        let stamp = self.clock.get();
-        self.clock.set(stamp + 1);
-        stamp
-    }
-
-    /// Drop every value but the newest of a query that holds only its newest, keeping what each
-    /// read.
-    fn bound(entries: &mut BTreeMap<Q::Key, Entry<Q::Value>>) {
+    /// `key` is now the newest answer of a query that holds only its newest: the one before loses
+    /// its value, and its entry too unless a held answer read it. O(log n) per compute.
+    fn bound(&self, entries: &mut BTreeMap<Q::Key, Entry<Q::Value>>, key: &Q::Key) {
         if Q::RETENTION == Retention::Held {
             return;
         }
-        let newest = (entries.values())
-            .filter(|entry| entry.value.is_some())
-            .map(|entry| entry.stamp)
-            .max();
-        for entry in entries.values_mut() {
-            if Some(entry.stamp) != newest {
-                entry.value = None;
+        let previous = self.newest.borrow_mut().replace(key.clone());
+        let Some(previous) = previous.filter(|previous| previous != key) else {
+            return;
+        };
+        match entries.get_mut(&previous) {
+            Some(entry) if entry.read_by_held => entry.value = None,
+            Some(_) => {
+                entries.remove(&previous);
             }
+            None => {}
         }
     }
 
@@ -568,7 +573,10 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
                 key: Rc::new(key.clone()),
             });
         }
-        db.frames.borrow_mut().push(Frame::default());
+        db.frames.borrow_mut().push(Frame {
+            held: Q::RETENTION == Retention::Held,
+            ..Frame::default()
+        });
         let frame = Running {
             db,
             running: &self.running,
@@ -592,7 +600,9 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             return Ok((Rc::new(value), None));
         }
         let now = db.inputs.byte_revision();
-        let (value, changed_at) = match entries.remove(key) {
+        let old = entries.remove(key);
+        let read_by_held = old.as_ref().is_some_and(|old| old.read_by_held);
+        let (value, changed_at) = match old {
             Some(Entry {
                 value: Some(old),
                 changed_at,
@@ -610,10 +620,10 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
                 deps: deps.into(),
                 verified_at: now,
                 changed_at,
-                stamp: self.tick(),
+                read_by_held,
             },
         );
-        Self::bound(&mut entries);
+        self.bound(&mut entries, key);
         Ok((value, Some(changed_at)))
     }
 }
@@ -690,6 +700,7 @@ mod tests {
         type Key = (u64, u64);
         type Value = u64;
         const NAME: &'static str = "sum";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, &(start, end): &(u64, u64)) -> u64 {
             read(db, start..end).iter().map(|b| u64::from(*b)).sum()
         }
@@ -702,6 +713,7 @@ mod tests {
         type Key = (u64, u64);
         type Value = bool;
         const NAME: &'static str = "even";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, key: &(u64, u64)) -> bool {
             db.get::<Sum>(key).expect("acyclic").is_multiple_of(2)
         }
@@ -713,6 +725,7 @@ mod tests {
         type Key = u64;
         type Value = u64;
         const NAME: &'static str = "prefix";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
             let held = |shorter| db.held::<Prefix>(&shorter).expect("never computes");
             let start = (0..at)
@@ -758,6 +771,7 @@ mod tests {
         type Key = u64;
         type Value = u8;
         const NAME: &'static str = "halting";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, &at: &u64) -> u8 {
             read(db, at..at + 1)[0]
         }
@@ -809,6 +823,7 @@ mod tests {
         type Key = u64;
         type Value = u16;
         const NAME: &'static str = "quadrupled";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, at: &u64) -> u16 {
             *db.get::<Doubled>(at).expect("acyclic") * 2
         }
@@ -850,6 +865,19 @@ mod tests {
         assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 20);
     }
 
+    /// A newest-only answer nothing held read leaves no entry once dropped; one a held answer read
+    /// keeps its entry, so the held answer stays good after a write it never read.
+    #[test]
+    fn a_dropped_value_keeps_an_entry_only_where_a_held_answer_read_it() {
+        let db = Db::new(Memory::new(vec![1; 16]));
+        assert_eq!(*db.get::<Doubled>(&4).unwrap(), 2);
+        assert_eq!(*db.get::<Doubled>(&5).unwrap(), 2);
+        assert_eq!(db.changed_at::<Doubled>(&4), None, "nothing held read it");
+        assert_eq!(*db.get::<Quadrupled>(&7).unwrap(), 4);
+        assert_eq!(*db.get::<Doubled>(&8).unwrap(), 2);
+        assert!(db.changed_at::<Doubled>(&7).is_some(), "Quadrupled read it");
+    }
+
     /// A query whose dependencies depend on the bytes: the byte at `at` names
     /// how many of the bytes after it to sum, and whether that sum is even
     /// picks one of two ranges to report.
@@ -858,6 +886,7 @@ mod tests {
         type Key = u64;
         type Value = u64;
         const NAME: &'static str = "pointer";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
             let len = u64::from(read(db, at..at + 1)[0] % 4);
             let end = (at + 1 + len).min(16);
@@ -875,6 +904,7 @@ mod tests {
         type Key = u64;
         type Value = Result<u64, Cycle>;
         const NAME: &'static str = "loop";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, key: &u64) -> Result<u64, Cycle> {
             db.get::<Loop>(key).and_then(|inner| inner.as_ref().clone())
         }
@@ -886,6 +916,7 @@ mod tests {
         type Key = (u64, u64);
         type Value = u64;
         const NAME: &'static str = "bytewise";
+        const RETENTION: Retention = Retention::Held;
         fn compute(db: &Db<Memory>, &(start, end): &(u64, u64)) -> u64 {
             let half = start + (end - start) / 2;
             let first = *db.get::<Sum>(&(start, half)).expect("acyclic");

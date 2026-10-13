@@ -133,6 +133,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
     type Key = (u64, bool);
     type Value = Shared<CalleeRead>;
     const NAME: &'static str = "callee-reads";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, &(address, thumb): &(u64, bool)) -> Shared<CalleeRead> {
         Shared(Arc::new(callee_read(db, (address, thumb), &[])))

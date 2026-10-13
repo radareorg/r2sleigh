@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::analysis::{CalleeReads, Shared, callee_read};
 use super::{ProgramInputs, Source, View};
 use crate::native::{CalleeRead, Unreadable};
-use crate::query::db::{Db, Hold, Query};
+use crate::query::db::{Db, Hold, Query, Retention};
 
 /// A function by its entry and whether it is Thumb.
 type Node = (u64, bool);
@@ -18,16 +18,17 @@ type Node = (u64, bool);
 /// The cycle of result demands a function is in.
 pub(super) struct Demand;
 
-/// A component's members in address order.
+/// A component's members in address order, shared by every member's answer: O(k) for k members.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Members {
-    pub(super) members: Vec<Node>,
+    pub(super) members: std::rc::Rc<[Node]>,
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Demand {
     type Key = Node;
     type Value = Members;
     const NAME: &'static str = "demand";
+    const RETENTION: Retention = Retention::Held;
 
     /// Tarjan's algorithm from `root` over result demands, O(V + E) over what it reaches; every component it closes is deposited.
     fn compute(db: &Db<ProgramInputs<S>>, &root: &Node) -> Members {
@@ -70,6 +71,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
     type Key = Node;
     type Value = Shared<CalleeRead>;
     const NAME: &'static str = "resolved";
+    const RETENTION: Retention = Retention::Held;
 
     /// Work: one preparation per function whose result an owner outside its demand cycle could prove.
     fn compute(db: &Db<ProgramInputs<S>>, &node: &Node) -> Shared<CalleeRead> {
@@ -212,7 +214,9 @@ impl Search {
             self.on_stack.remove(member);
             self.of.insert(*member, id);
         }
-        self.closed.push(Members { members });
+        self.closed.push(Members {
+            members: members.into(),
+        });
     }
 }
 

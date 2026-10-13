@@ -8,7 +8,7 @@ use r2source::SourceResultReads;
 
 use super::requests::SurveyQuery;
 use super::{ProgramInputs, Source, View};
-use crate::query::db::{Db, Query};
+use crate::query::db::{Db, Query, Retention};
 
 /// The reads at every call to one function, by its entry; `None` where no call reads either register.
 pub(super) struct ResultReads;
@@ -17,6 +17,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
     type Key = u64;
     type Value = Option<SourceResultReads>;
     const NAME: &'static str = "result-reads";
+    const RETENTION: Retention = Retention::Held;
 
     /// Work: one lift per caller discovery found, each read from each call the walk found to `callee`
     /// to its block's end.
