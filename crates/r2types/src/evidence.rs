@@ -80,17 +80,7 @@ pub fn solve_evidence_types(
     builder.gather_memory_widths();
     builder.gather_allocation_element_widths(callsite_signatures);
 
-    // Refinement rounds: a type learned in one round decides which operand of an
-    // address computation is the pointer, which is new evidence about the width
-    // it points at, which is a constraint the next round solves with. Rounds
-    // stop as soon as one adds nothing, and that is the whole termination
-    // argument: a round continues only by inserting a pair into `asserted`,
-    // and the pairs it can insert are (an operand of a certified access's
-    // address sum, the pointee of that access's width) -- at most two per
-    // certified memory access. So there are at most 2A + 1 rounds for A
-    // accesses, each adding its bounds to the one solver, and the loop stops at
-    // its fixpoint rather than at a count.
-    while builder.gather_indexed_pointer_bases() {}
+    builder.gather_indexed_pointer_bases();
     builder.read_back()
 }
 
@@ -410,17 +400,11 @@ impl<'a> EvidenceBuilder<'a> {
         }
     }
 
-    /// Which operand of an address computation is the pointer, once enough is
-    /// known to tell, and how wide the thing it points at is.
-    ///
-    /// `base + index` reaches an element, so the width of the access made
-    /// through it is the width of that element. Only a non-constant index is
-    /// treated this way: a constant displacement reaches a field of one object,
-    /// which says nothing about an element type and would contradict the struct
-    /// the field belongs to. Returns whether anything new was learned.
-    fn gather_indexed_pointer_bases(&mut self) -> bool {
-        let mut discovered = Vec::new();
+    /// The element each `base + index` access's base points at, once one operand is a pointer: a
+    /// worklist over the accesses (doc/types.md, "Indexed bases").
+    fn gather_indexed_pointer_bases(&mut self) {
         let source = self.source;
+        let mut sums = Vec::new();
         for access in source.certificates().memory_accesses.values() {
             if access.space != r2il::SpaceId::Ram {
                 continue;
@@ -431,11 +415,23 @@ impl<'a> EvidenceBuilder<'a> {
             let Some((left, right)) = self.address_sum_operands(access.address) else {
                 continue;
             };
-            let left_pointer = self.solved_is_pointer(left);
-            let right_pointer = self.solved_is_pointer(right);
+            sums.push((left, right, elem));
+        }
+        let mut readers = HashMap::<usize, Vec<usize>>::new();
+        for (at, (left, right, _)) in sums.iter().enumerate() {
+            for operand in [left, right] {
+                let class = self.solver.class_seeing(&EvidenceNode::Value(*operand));
+                readers.entry(class).or_default().push(at);
+            }
+        }
+        let mut queued = vec![true; sums.len()];
+        let mut queue = (0..sums.len()).collect::<std::collections::VecDeque<_>>();
+        while let Some(at) = queue.pop_front() {
+            queued[at] = false;
+            let (left, right, ref elem) = sums[at];
             // Exactly one side has been shown to be a pointer; the other is the
             // index. Two pointers, or none, decides nothing.
-            let base = match (left_pointer, right_pointer) {
+            let base = match (self.solved_is_pointer(left), self.solved_is_pointer(right)) {
                 (true, false) => left,
                 (false, true) => right,
                 _ => continue,
@@ -444,17 +440,20 @@ impl<'a> EvidenceBuilder<'a> {
             if self.value_is_constant(index) {
                 continue;
             }
-            discovered.push((EvidenceNode::Value(base), elem));
-        }
-
-        let mut added = false;
-        for (node, elem) in discovered {
-            let Some(spelled) = self.intern_spelled(&elem) else {
+            let Some(spelled) = self.intern_spelled(elem) else {
                 continue;
             };
-            added |= self.bound(node, spelled);
+            let node = EvidenceNode::Value(base);
+            if !self.bound(node, spelled) {
+                continue;
+            }
+            let class = self.solver.class_seeing(&node);
+            for &reader in readers.get(&class).into_iter().flatten() {
+                if !std::mem::replace(&mut queued[reader], true) {
+                    queue.push_back(reader);
+                }
+            }
         }
-        added
     }
 
     /// The two operands of an address that is one value plus another.

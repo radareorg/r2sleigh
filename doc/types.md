@@ -51,6 +51,22 @@ the fold has met a bound, the class type lies below it. Cost is
 `O(C α(N))` plus one memoised meet per bound. A node no bound reaches stays
 unresolved.
 
+Indexed bases
+-------------
+
+`base + index` reaches an element, so the width of an access made through it is
+the element's width, and that bounds the base's pointee. Which operand is the
+base is decided only once exactly one of them solves to a pointer; a constant
+index is a field of one object and says nothing of an element type.
+
+A bound types a whole class, and this phase adds bounds, never unions, so
+classes are fixed while it runs. Each access is indexed by its two operands'
+classes; a worklist reads every access once, and again only when a bound
+reaches one of its classes. A bound is a new (node, pointee) pair, at most
+two per access, so the phase is `O(A + E)` for A accesses and E
+(class, access) incidences. It replaced rounds that rescanned every access
+until one added nothing, `O(A²)` (2026-10-13).
+
 Projections
 -----------
 
