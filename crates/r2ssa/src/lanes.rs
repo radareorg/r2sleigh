@@ -435,6 +435,14 @@ pub fn written_width(bytes: &[Byte], storage: CanonicalStorageId) -> Option<u32>
     Some(width.min(storage.size))
 }
 
+/// Whether a byte of `storage` holds what the caller left in that byte, on some path.
+pub fn keeps_callers(bytes: &[Byte], storage: CanonicalStorageId) -> bool {
+    let callers = |at: usize, way: &Fill| matches!(way, Fill::Entry(from) if Some(*from) == home(Some(storage), at as u64));
+    (bytes.iter().enumerate()).any(
+        |(at, byte)| matches!(byte, Byte::Filled(ways) if ways.iter().any(|way| callers(at, way))),
+    )
+}
+
 /// Whether a result of `width` bytes is signed by what wrote it: its top
 /// bytes are a sign extension the instruction stated (`movsx eax, al`), or
 /// the byte above it is the architecture's sign fill on every path.

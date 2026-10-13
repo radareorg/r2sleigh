@@ -932,7 +932,17 @@ fn written_on_every_return(
         && live_out.unresolved_blocks().next().is_none()
         && live_out.clobbered_blocks().next().is_none()
         && !returns_the_callers_value(graph, &live_out, slot);
+    // A half is the body's on every path: `sete dl` over the caller's other seven bytes is none.
+    let written = func.written_or_captured();
+    let whole_width = |value: crate::ValueId| {
+        let Some(storage) = graph.value(value).and_then(|value| value.canonical_storage) else {
+            return false;
+        };
+        let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
+        !crate::lanes::keeps_callers(&bytes, storage)
+    };
     (whole
+        && live_out.iter().all(whole_width)
         && matches!(
             recovered_result(func, graph, facts, &live_out, slot),
             RecoveredFunctionResult::Register(_)
