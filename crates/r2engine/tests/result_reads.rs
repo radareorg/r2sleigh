@@ -318,3 +318,29 @@ fn a_float_result_beside_an_untouched_integer_register_is_the_one_callers_read()
     let unread = rendered(program(&[("f", BASE, 5)]));
     assert!(unread.contains("return r2sleigh_residual_"), "{unread}");
 }
+
+/// AArch64's `uint8_t narrow8(int q) { return q; }` at -O1 is a bare `ret`: x0 is both the argument
+/// and the result, and `caller` is `bl f; str w0, [x1]; ret`.
+const A64_RETURNS_ITS_ARGUMENT: &[u8] = &[
+    0xc0, 0x03, 0x5f, 0xd6, // 1000 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1004 padding
+    0xfc, 0xff, 0xff, 0x97, // 1010 bl 0x1000
+    0x20, 0x00, 0x00, 0xb9, // 1014 str w0, [x1]
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 101c padding
+];
+
+/// An argument register handed back untouched is the result where every reading call reads it, and
+/// the return reads it as the parameter it is. With no call, nothing says so.
+#[test]
+fn an_argument_register_handed_back_untouched_is_the_result_callers_read() {
+    let program = |functions: &[(&'static str, u64, u64)]| {
+        Literal::of_code(A64_RETURNS_ITS_ARGUMENT, functions).in_aarch64()
+    };
+    let text = rendered(program(&[("f", BASE, 4), ("caller", BASE + 0x10, 0x0c)]));
+    assert!(text.contains("return (uint64_t)arg0;"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    let unread = rendered(program(&[("f", BASE, 4)]));
+    assert!(unread.contains("r2sleigh_residual_"), "{unread}");
+}
