@@ -589,11 +589,10 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
                     parameter
                         .register_storage()
                         .is_some_and(|carrier| register_storages_overlap(storage, carrier))
-                }) || matches!(
-                    interface.return_kind(),
-                    SourceFunctionReturn::Register { storage: result }
-                        if register_storages_overlap(storage, result)
-                )
+                }) || interface
+                    .return_kind()
+                    .storages()
+                    .any(|result| register_storages_overlap(storage, result))
             })
         {
             r2il::refusal_evidence!(

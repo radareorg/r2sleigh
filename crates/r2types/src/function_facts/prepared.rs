@@ -209,6 +209,11 @@ pub(crate) fn function_type_matches_source_interface(
                 .or_else(|| Some(u64::from(storage.size) * 8));
             actual_bits == expected_bits
         }
+        // A pair is one integer as wide as both halves.
+        (r2ssa::SourceFunctionReturn::Pair { low, high }, ty) => {
+            declaration_type_width_bits(ty, ptr_bits).map(u64::from)
+                == Some(u64::from(low.size + high.size) * 8)
+        }
         _ => false,
     }
 }
@@ -791,8 +796,12 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
         return None;
     }
     let interface = context.function_interface()?;
-    let r2ssa::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
-        return None;
+    let storage = match interface.return_kind() {
+        r2ssa::SourceFunctionReturn::Register { storage } => storage,
+        r2ssa::SourceFunctionReturn::Pair { low, high } => {
+            return exact_pair_return_type(source, interface, low, high);
+        }
+        _ => return None,
     };
     if storage.space != r2ssa::CanonicalStorageSpace::Register || storage.size == 0 {
         return None;
@@ -878,6 +887,45 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
         return None;
     }
 
+    crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
+}
+
+/// A pair's logical type, one integer of both halves' width, where a pair certificate licenses
+/// every return; a tail transfer states no pair, so a function with one has none.
+fn exact_pair_return_type(
+    source: &r2ssa::SsaArtifact,
+    interface: &r2ssa::SourceFunctionInterface,
+    low: r2ssa::CanonicalStorageId,
+    high: r2ssa::CanonicalStorageId,
+) -> Option<CTypeLike> {
+    let logical = interface.return_logical_value()?;
+    let graph = interface.type_graph()?;
+    let expected = r2ssa::ReturnCarrier::Pair { low, high };
+    let ssa = source.graph();
+    let mut returns = 0usize;
+    for &block_addr in source.function().block_addrs() {
+        let block = ssa.block_id_for_addr(block_addr)?;
+        for &inst in ssa.op_insts(block) {
+            if !matches!(ssa.op(inst), Some(r2ssa::SSAOp::Return { .. })) {
+                continue;
+            }
+            returns = returns.checked_add(1)?;
+            let certificate = source.return_certificate_for_inst(inst)?;
+            if !exact_return_certificate_matches(
+                certificate,
+                logical,
+                low.size + high.size,
+                &expected,
+            ) {
+                return None;
+            }
+        }
+    }
+    let tails = (source.facts().call_sites.by_id.values())
+        .any(|call_site| call_site.transfer == r2ssa::CallSiteTransfer::TailCall);
+    if returns == 0 || tails || source.certificates().returns.len() != returns {
+        return None;
+    }
     crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
 }
 
@@ -1312,9 +1360,10 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
                     Some(_) if function_returns_void => {
                         CallsiteRenderDisposition::TerminalVoidReturn
                     }
-                    Some(r2ssa::SourceCallResult::Register { .. }) => {
-                        CallsiteRenderDisposition::TerminalReturn
-                    }
+                    Some(
+                        r2ssa::SourceCallResult::Register { .. }
+                        | r2ssa::SourceCallResult::Pair { .. },
+                    ) => CallsiteRenderDisposition::TerminalReturn,
                     Some(r2ssa::SourceCallResult::Void) => {
                         CallsiteRenderDisposition::TerminalVoidReturn
                     }

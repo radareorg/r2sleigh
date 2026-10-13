@@ -49,6 +49,11 @@ pub enum ReturnCarrier {
     Register {
         storage: CanonicalStorageId,
     },
+    /// One value in two registers, its low half in `low` (doc/adr-language-profile.md, item 1).
+    Pair {
+        low: CanonicalStorageId,
+        high: CanonicalStorageId,
+    },
     StackSlot {
         object: ObjectId,
         offset: i64,

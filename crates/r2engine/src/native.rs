@@ -2299,9 +2299,13 @@ pub(crate) fn convention_slots(
             .collect::<Result<Vec<_>, _>>()
     };
     let argument_slots = place(registers_of(&prototype.inputs, EntryClass::General))?;
-    let result_slot = place(registers_of(&prototype.outputs, EntryClass::General))?
-        .first()
-        .copied();
+    let result_slots = place(registers_of(&prototype.outputs, EntryClass::General))?;
+    let result_slot = result_slots.first().copied();
+    // The specification's second integer result entry holds a two-register value's high half.
+    let second_result_slot = result_slots
+        .get(1)
+        .copied()
+        .filter(|second| result_slot.is_some_and(|first| first.size == second.size));
     let float_slots = place(registers_of(&prototype.inputs, EntryClass::Float))?;
     let float_result = place(registers_of(&prototype.outputs, EntryClass::Float))?
         .first()
@@ -2316,6 +2320,7 @@ pub(crate) fn convention_slots(
     Ok(
         SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
             .and_then(|slots| slots.with_float_slots(float_slots, float_result))
+            .and_then(|slots| slots.with_second_result_slot(second_result_slot))
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
             .with_shared_positions(prototype.shares_positions())
             .with_stack_arguments(stack_arguments)

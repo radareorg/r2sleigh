@@ -61,7 +61,7 @@ impl Lifted {
     pub(crate) fn prepare<C: SsaWorkControl + ?Sized>(
         mut self,
         config: &crate::optimize::DecompilePrepConfig,
-        return_carrier: Option<r2source::CanonicalStorageId>,
+        return_carriers: &[r2source::CanonicalStorageId],
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         control.poll()?;
@@ -71,7 +71,7 @@ impl Lifted {
         crate::optimize::optimize_function_with_return_and_control(
             &mut self.ir,
             &config,
-            return_carrier,
+            return_carriers,
             control,
         )?;
         self.validate().map_err(super::integrity_refusal)

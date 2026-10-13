@@ -5,7 +5,10 @@ use super::super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnValueCertificate {
     pub at: InstId,
+    /// The value returned, or a pair's low half.
     pub value: ValueId,
+    /// A pair's high half, where `carrier` is a pair.
+    pub high: Option<ValueId>,
     pub width: u32,
     pub carrier: Option<ReturnCarrier>,
     /// Exact logical return projection declared by the immutable source
@@ -255,6 +258,11 @@ pub(crate) fn collect_return_value_certificates(
         if !matches!(inst.payload, InstPayload::Op(SSAOp::Return { .. })) {
             continue;
         }
+        if let Some(certificate) = pair_certificate(boundary, machine_context) {
+            returns_by_inst.insert(boundary.at, returns.len());
+            returns.push(certificate);
+            continue;
+        }
         let certificate = {
             let [boundary_value] = boundary.values.as_slice() else {
                 // A complete void boundary is authoritative, but it owns no value.
@@ -283,6 +291,7 @@ pub(crate) fn collect_return_value_certificates(
             ReturnValueCertificate {
                 at: boundary.at,
                 value,
+                high: None,
                 width,
                 carrier: return_carrier_for_boundary_value(boundary_value, stack_reloads),
                 source_logical_value,
@@ -293,6 +302,41 @@ pub(crate) fn collect_return_value_certificates(
     }
 
     (returns, returns_by_inst)
+}
+
+/// A pair return's certificate: the boundary's value in each of the interface's two registers,
+/// typed by its logical value as one integer of both widths.
+fn pair_certificate(
+    boundary: &crate::semantic::SourceReturnBoundaryFact,
+    machine_context: Option<&SourceMachineContext>,
+) -> Option<ReturnValueCertificate> {
+    let interface = machine_context?.function_interface()?;
+    let SourceFunctionReturn::Pair { low, high } = interface.return_kind() else {
+        return None;
+    };
+    let logical = interface.return_logical_value()?;
+    let bits = u64::from(low.size + high.size).checked_mul(8)?;
+    if logical.carrier().kind() != r2source::SourceCarrierKind::Full
+        || logical.carrier().size_bits() != bits
+    {
+        return None;
+    }
+    let half = |storage: CanonicalStorageId| {
+        (boundary.values.iter()).find_map(|value| match value.slot {
+            CallBoundarySlot::Register { storage: slot, .. } if slot == storage => {
+                Some(value.value)
+            }
+            _ => None,
+        })
+    };
+    Some(ReturnValueCertificate {
+        at: boundary.at,
+        value: half(low)?,
+        high: Some(half(high)?),
+        width: low.size + high.size,
+        carrier: Some(ReturnCarrier::Pair { low, high }),
+        source_logical_value: Some(logical),
+    })
 }
 
 pub(crate) fn exact_logical_return_projection(

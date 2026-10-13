@@ -5,12 +5,14 @@ use r2il::{R2ILBlock, R2ILOp, Varnode};
 use r2source::{CanonicalStorageId, SourceFloatReadWidth, SourceResultReads};
 
 /// The reads after the call at `index`: a result register read before a write, a transfer or the
-/// block's end; none where the call's own instruction may skip it.
+/// block's end; none where the call's own instruction may skip it. The second integer register's
+/// read is counted apart and closes nothing the others decide.
 pub fn reads_after_call(
     block: &R2ILBlock,
     index: usize,
     integer: Option<CanonicalStorageId>,
     float: Option<CanonicalStorageId>,
+    second: Option<CanonicalStorageId>,
 ) -> SourceResultReads {
     let mut reads = SourceResultReads {
         calls: 1,
@@ -24,6 +26,7 @@ pub fn reads_after_call(
         float,
         partial: false,
     };
+    let mut second = second;
     for op in block.ops.iter().skip(index + 1) {
         if op.is_control_flow() {
             break;
@@ -33,13 +36,22 @@ pub fn reads_after_call(
             R2ILOp::IntXor { a, b, .. } | R2ILOp::IntSub { a, b, .. } if a == b => Vec::new(),
             op => op.inputs(),
         };
+        for input in &inputs {
+            if second.is_some_and(|slot| overlaps(input, slot)) {
+                reads.second = 1;
+                second = None;
+            }
+        }
         for input in inputs {
             open.read(input, &mut reads);
         }
         if let Some(output) = op.output() {
             open.write(output);
+            if second.is_some_and(|slot| overlaps(output, slot)) {
+                second = None;
+            }
         }
-        if open.integer.is_none() && open.float.is_none() {
+        if open.integer.is_none() && open.float.is_none() && second.is_none() {
             break;
         }
     }
@@ -158,11 +170,12 @@ mod tests {
             },
         ];
         assert_eq!(
-            reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0)),
+            reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0), None),
             SourceResultReads {
                 integer: 1,
                 float: 0,
                 float_width: SourceFloatReadWidth::Unstated,
+                second: 0,
                 overwritten: 0,
                 calls: 1,
             }
@@ -212,7 +225,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0)),
+            reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0), None),
             SourceResultReads {
                 calls: 1,
                 ..SourceResultReads::default()
@@ -236,11 +249,12 @@ mod tests {
             },
         ];
         assert_eq!(
-            reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0)),
+            reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0), None),
             SourceResultReads {
                 integer: 0,
                 float: 1,
                 float_width: SourceFloatReadWidth::Bytes(8),
+                second: 0,
                 overwritten: 0,
                 calls: 1,
             }
@@ -256,10 +270,10 @@ mod tests {
             src: Varnode::constant(0, size),
         };
         let covered = vec![call(), write(0, 8), write(0x1200, 8)];
-        let reads = reads_after_call(&block(covered), 0, Some(RAX), Some(XMM0));
+        let reads = reads_after_call(&block(covered), 0, Some(RAX), Some(XMM0), None);
         assert_eq!((reads.integer, reads.float, reads.overwritten), (0, 0, 1));
         let partial = vec![call(), write(0, 1), write(0x1200, 8)];
-        let reads = reads_after_call(&block(partial), 0, Some(RAX), Some(XMM0));
+        let reads = reads_after_call(&block(partial), 0, Some(RAX), Some(XMM0), None);
         assert_eq!((reads.integer, reads.float, reads.overwritten), (0, 0, 0));
     }
 }

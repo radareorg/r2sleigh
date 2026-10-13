@@ -275,26 +275,25 @@ impl<'a> InterfaceQuestions<'a> {
             })
             .chain(
                 self.for_return_boundary()
-                    .and_then(|interface| match interface.return_kind() {
-                        crate::SourceFunctionReturn::Register { storage } => Some(storage),
-                        crate::SourceFunctionReturn::Void
-                        | crate::SourceFunctionReturn::Unproven => None,
-                    }),
+                    .into_iter()
+                    .flat_map(|interface| interface.return_kind().storages()),
             )
             .collect()
     }
 
-    /// The register a caller reads the result from, whose merges in a
-    /// returning block keep their sources: the interface's, where it
-    /// describes it coherently, or the convention's.
-    pub(crate) fn return_carrier(self) -> Option<CanonicalStorageId> {
+    /// The registers a caller reads the result from, whose merges in a returning block keep their
+    /// sources: the interface's, where it describes them coherently, or the convention's.
+    pub(crate) fn return_carriers(self) -> Vec<CanonicalStorageId> {
         match self.convention {
             Some(convention) => convention
                 .result_slot()
-                .filter(|slot| slot.space == CanonicalStorageSpace::Register),
+                .filter(|slot| slot.space == CanonicalStorageSpace::Register)
+                .into_iter()
+                .collect(),
             None => self
                 .for_return_boundary()
-                .and_then(crate::optimize::coherent_return_carrier),
+                .map(crate::optimize::coherent_return_carriers)
+                .unwrap_or_default(),
         }
     }
 
@@ -1781,6 +1780,7 @@ fn reads_after(
                     index,
                     Some(carriers.integer),
                     carriers.float,
+                    carriers.second,
                 );
                 reads = Some(reads.map_or(read, |reads| reads.and(read)));
             }
@@ -3504,17 +3504,21 @@ impl CalleeBoundaries {
         let mut results = BTreeMap::new();
         let mut return_addresses = BTreeMap::new();
         for (address, interface) in interfaces {
-            let crate::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
+            // The same boundary cannot both hand a register back untouched and name it as what it
+            // returns: a pair's two registers alike.
+            let returned = interface.return_kind().storages().collect::<Vec<_>>();
+            if let Some(carriers) = preserved.get_mut(address) {
+                carriers.retain(|carrier| {
+                    !(returned.iter()).any(|storage| {
+                        crate::semantic::register_storages_overlap(*carrier, *storage)
+                    })
+                });
+            }
+            // The first register is the result a call defines whatever the convention clobbers; a
+            // pair's second (SysV RDX, AAPCS64 x1) is caller-saved, so every call defines it.
+            let Some(&storage) = returned.first() else {
                 continue;
             };
-            // The same boundary cannot both hand a register back untouched and
-            // name it as what it returns.
-            let overlaps = |carrier: &CanonicalStorageId| {
-                crate::semantic::register_storages_overlap(*carrier, storage)
-            };
-            if let Some(carriers) = preserved.get_mut(address) {
-                carriers.retain(|carrier| !overlaps(carrier));
-            }
             let Some(name) = names
                 .as_ref()
                 .and_then(|names| names.get(&(storage.offset, storage.size)))
@@ -3528,7 +3532,7 @@ impl CalleeBoundaries {
                     size: storage.size,
                 },
             );
-            if interface.body_proven_return_address() {
+            if interface.body_proven_return_address() && returned.len() == 1 {
                 return_addresses.insert(*address, storage);
             }
         }

@@ -2035,8 +2035,9 @@ fn exact_call_result_storage(
         {
             Some(storage)
         }
-        crate::SourceCallResult::Register { .. } => None,
-        crate::SourceCallResult::Void => None,
+        crate::SourceCallResult::Register { .. }
+        | crate::SourceCallResult::Pair { .. }
+        | crate::SourceCallResult::Void => None,
     }
 }
 
@@ -2047,7 +2048,9 @@ fn exact_function_return_storage(prepared: &SsaArtifact) -> Option<crate::Canoni
         .return_kind()
     {
         crate::SourceFunctionReturn::Register { storage } => Some(storage),
-        crate::SourceFunctionReturn::Void | crate::SourceFunctionReturn::Unproven => None,
+        crate::SourceFunctionReturn::Pair { .. }
+        | crate::SourceFunctionReturn::Void
+        | crate::SourceFunctionReturn::Unproven => None,
     }
 }
 

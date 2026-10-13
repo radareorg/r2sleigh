@@ -87,17 +87,15 @@ pub(crate) fn optimize_function_with_control<C: SsaWorkControl + ?Sized>(
     config: &OptimizationConfig,
     control: &C,
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
-    optimize_function_with_return_and_control(func, config, None, control)
+    optimize_function_with_return_and_control(func, config, &[], control)
 }
 
-/// Optimise, keeping every source of a merge of `return_carrier` in a
-/// returning block as it is: what the function hands back is read whole
-/// there, so a constant folded into one source is no longer a value of
-/// the carrier the caller reads.
+/// Optimise, keeping every source of a merge of a `return_carriers` register in a returning block
+/// as it is: what the function hands back is read whole there.
 pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Sized>(
     func: &mut SSAFunction,
     config: &OptimizationConfig,
-    return_carrier: Option<CanonicalStorageId>,
+    return_carriers: &[CanonicalStorageId],
     control: &C,
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
     control.poll()?;
@@ -131,7 +129,13 @@ pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Siz
         if config.enable_sccp {
             let (consts, executable_edges) = sccp_with_control(func, control)?;
             control.poll()?;
-            if apply_sccp_results(func, &consts, &executable_edges, return_carrier, &mut stats) {
+            if apply_sccp_results(
+                func,
+                &consts,
+                &executable_edges,
+                return_carriers,
+                &mut stats,
+            ) {
                 changed = true;
             }
         }
@@ -616,9 +620,24 @@ fn eval_const_op(
 /// The register a source interface states the result in, where its logical
 /// value describes that register coherently: the whole of it, or the low
 /// bits of an integer.
-pub(crate) fn coherent_return_carrier(
+/// The registers an interface's result is read from where its type fits them: one, or a pair's two.
+pub(crate) fn coherent_return_carriers(
     interface: &SourceFunctionInterface,
-) -> Option<CanonicalStorageId> {
+) -> Vec<CanonicalStorageId> {
+    match interface.return_kind() {
+        SourceFunctionReturn::Pair { low, high } => {
+            let fits = interface.return_logical_value().is_some_and(|logical| {
+                logical.carrier().kind() == SourceCarrierKind::Full
+                    && logical.carrier().size_bits()
+                        == u64::from(low.size + high.size).saturating_mul(8)
+            });
+            if fits { vec![low, high] } else { Vec::new() }
+        }
+        _ => coherent_return_carrier(interface).into_iter().collect(),
+    }
+}
+
+fn coherent_return_carrier(interface: &SourceFunctionInterface) -> Option<CanonicalStorageId> {
     let SourceFunctionReturn::Register { storage } = interface.return_kind() else {
         return None;
     };
@@ -660,7 +679,7 @@ pub(crate) fn coherent_return_carrier(
 fn replace_sources_with_constants(
     func: &SSAFunction,
     consts: &IdMap<VarId, u64>,
-    return_storage: Option<CanonicalStorageId>,
+    return_carriers: &[CanonicalStorageId],
     stats: &mut OptimizationStats,
 ) -> EditPlan {
     let mut plan = EditPlan::new();
@@ -677,7 +696,9 @@ fn replace_sources_with_constants(
 
         for (id, phi) in block.sited_phis() {
             let preserve_phi_sources = is_return_block
-                && return_storage.is_some_and(|storage| phi.canonical_storage == Some(storage));
+                && phi
+                    .canonical_storage
+                    .is_some_and(|storage| return_carriers.contains(&storage));
             if preserve_phi_sources {
                 continue;
             }
@@ -725,13 +746,13 @@ fn apply_sccp_results(
     func: &mut SSAFunction,
     consts: &IdMap<VarId, u64>,
     executable_edges: &HashSet<(u64, u64)>,
-    return_carrier: Option<CanonicalStorageId>,
+    return_carriers: &[CanonicalStorageId],
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let mut cfg_changed = false;
 
-    let constants = replace_sources_with_constants(func, consts, return_carrier, stats);
+    let constants = replace_sources_with_constants(func, consts, return_carriers, stats);
     if !constants.is_empty() {
         changed = true;
     }
@@ -2826,7 +2847,7 @@ mod sccp_tests {
 
         let (consts, executable) = sccp(&func);
         let mut stats = OptimizationStats::default();
-        let changed = apply_sccp_results(&mut func, &consts, &executable, None, &mut stats);
+        let changed = apply_sccp_results(&mut func, &consts, &executable, &[], &mut stats);
         assert!(changed);
         assert!(
             func.named_block(0x1004).is_none(),

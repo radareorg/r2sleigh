@@ -1179,6 +1179,20 @@ pub(crate) fn collect_source_boundary_facts(
                             storage,
                         )
                     }
+                    // Each half is the value the call leaves in its register, low first.
+                    (CallSiteTransfer::Call, SourceCallResult::Pair { low, high }) => [low, high]
+                        .into_iter()
+                        .map(|storage| {
+                            call_result_values_after_call(
+                                graph,
+                                machine_context,
+                                block_addr,
+                                op_index,
+                                storage,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .map(|halves| halves.concat()),
                 };
                 boundary.fixed_argument_count = Some(interface.arguments().len());
                 let arguments_complete = if interface.is_variadic() {
@@ -1392,7 +1406,10 @@ pub(crate) fn collect_source_boundary_facts(
                 {
                     // An unproven result claims no value, so the return is as complete as a void one.
                     Some(Void | Unproven) => complete = true,
-                    Some(SourceFunctionReturn::Register { .. }) if abi_is_coherent => {
+                    // A pair's two registers are the return slots, low first.
+                    Some(
+                        SourceFunctionReturn::Register { .. } | SourceFunctionReturn::Pair { .. },
+                    ) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.walk_start(inst.id) {
                             for slot in return_slots {
                                 if let Some(value) = reaching_source_return_register_in_block(

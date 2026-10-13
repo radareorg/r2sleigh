@@ -132,7 +132,10 @@ pub fn render(
         0,
         input.declared_call_prototypes(),
         0,
-        unassigned.as_deref().unwrap_or_default(),
+        (
+            unassigned.as_deref().unwrap_or_default(),
+            input.open_second_result(),
+        ),
     );
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.

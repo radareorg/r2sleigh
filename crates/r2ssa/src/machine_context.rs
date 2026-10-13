@@ -102,12 +102,10 @@ impl MachineAbiModel {
                     })
             })
             .collect::<Vec<_>>();
-        let return_registers = match interface.return_kind() {
-            SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => Vec::new(),
-            SourceFunctionReturn::Register { storage } => {
-                vec![MachineAbiRegisterSlot { index: 0, storage }]
-            }
-        };
+        let return_registers = (interface.return_kind().storages())
+            .zip(0..)
+            .map(|(storage, index)| MachineAbiRegisterSlot { index, storage })
+            .collect::<Vec<_>>();
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             available: true,
@@ -705,10 +703,7 @@ impl SourceMachineContext {
                 .iter()
                 .filter_map(SourceAbiParameterSpec::register_storage)
                 .all(storage_exists);
-            let return_storage_exists = match interface.return_kind() {
-                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => true,
-                SourceFunctionReturn::Register { storage } => storage_exists(storage),
-            };
+            let return_storage_exists = interface.return_kind().storages().all(storage_exists);
             let slot_base_storages_exist = interface
                 .stack_slots()
                 .iter()
@@ -819,10 +814,7 @@ impl SourceMachineContext {
                 .arguments()
                 .iter()
                 .filter_map(|argument| argument.register_storage())
-                .chain(match interface.result() {
-                    SourceCallResult::Void => None,
-                    SourceCallResult::Register { storage } => Some(storage),
-                })
+                .chain(interface.result().storages())
                 .all(storage_exists);
             // A call site the source described badly says nothing about the
             // other call sites in this function. Drop the one that does not
@@ -967,6 +959,8 @@ impl SourceMachineContext {
         match self.function_interface.as_ref().map(|i| i.return_kind()) {
             Some(r2source::SourceFunctionReturn::Void) => None,
             Some(r2source::SourceFunctionReturn::Register { storage }) => Some(storage),
+            // Two registers are no one carrier.
+            Some(r2source::SourceFunctionReturn::Pair { .. }) => None,
             // An unproven result claims nothing, so the convention answers.
             Some(r2source::SourceFunctionReturn::Unproven) | None => self.result_slot(),
         }
@@ -3037,6 +3031,9 @@ impl CalleeStatement {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {
                             Some(crate::SourceCallResult::Register { storage })
+                        }
+                        crate::SourceFunctionReturn::Pair { low, high } => {
+                            Some(crate::SourceCallResult::Pair { low, high })
                         }
                         crate::SourceFunctionReturn::Unproven => None,
                     },

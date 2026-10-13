@@ -295,6 +295,11 @@ pub enum SourceFunctionReturn {
     Register {
         storage: CanonicalStorageId,
     },
+    /// One value in two registers, its low half in the first: SysV's RDX:RAX, AAPCS64's X1:X0.
+    Pair {
+        low: CanonicalStorageId,
+        high: CanonicalStorageId,
+    },
     /// The body proves no result, which is not a claim that it returns nothing.
     ///
     /// A function whose result boundary is owned by a body nobody read -- a
@@ -303,6 +308,38 @@ pub enum SourceFunctionReturn {
     /// claim that displaces the caller's convention, so the caller must read
     /// this as unknown and fall back to what its convention says instead.
     Unproven,
+}
+
+impl SourceFunctionReturn {
+    /// The registers the result occupies: none, one, or a pair's two, low first.
+    pub fn storages(self) -> impl Iterator<Item = CanonicalStorageId> {
+        let (first, second) = match self {
+            Self::Void | Self::Unproven => (None, None),
+            Self::Register { storage } => (Some(storage), None),
+            Self::Pair { low, high } => (Some(low), Some(high)),
+        };
+        first.into_iter().chain(second)
+    }
+}
+
+/// The register a return states, or `fallback` where it states none.
+fn storage_or(kind: SourceFunctionReturn, fallback: CanonicalStorageId) -> CanonicalStorageId {
+    match kind {
+        SourceFunctionReturn::Register { storage } => storage,
+        _ => fallback,
+    }
+}
+
+impl SourceCallResult {
+    /// The registers the call's result occupies, low first.
+    pub fn storages(self) -> impl Iterator<Item = CanonicalStorageId> {
+        let (first, second) = match self {
+            Self::Void => (None, None),
+            Self::Register { storage } => (Some(storage), None),
+            Self::Pair { low, high } => (Some(low), Some(high)),
+        };
+        first.into_iter().chain(second)
+    }
 }
 
 /// Exact source-owned mechanism used to recover the return address and final
@@ -725,12 +762,16 @@ impl SourceRoleRegisterNames {
     }
 }
 
-/// The registers an unproven result may be in: the integer result register, and the float one
-/// where the body writes both on its way out. A call takes the one its caller reads.
+/// The registers a result may be in beyond what is proven: the integer result register and the
+/// float one where the body writes both, and the second integer register where the body also
+/// writes it on every return. A call takes what its caller reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SourceResultCarriers {
     pub integer: CanonicalStorageId,
     pub float: Option<CanonicalStorageId>,
+    /// The high half's register, beside a proven or unproven integer result: a call that reads it
+    /// takes the pair (doc/adr-language-profile.md, item 1).
+    pub second: Option<CanonicalStorageId>,
 }
 
 impl SourceResultCarriers {
@@ -884,8 +925,7 @@ impl LogicalTypes {
         if self.parameters.len() != parameters.len() {
             return refused("one logical value per parameter");
         }
-        let unstated_result =
-            matches!(return_kind, SourceFunctionReturn::Register { .. }) && self.returns.is_none();
+        let unstated_result = return_kind.storages().next().is_some() && self.returns.is_none();
         if exact && (self.parameters.iter().any(Option::is_none) || unstated_result) {
             return refused("an exact interface states every logical value");
         }
@@ -907,6 +947,11 @@ impl LogicalTypes {
                 if !graph.validates_logical_value(value, storage.size) =>
             {
                 return refused("the return's logical value does not fit its carrier");
+            }
+            (SourceFunctionReturn::Pair { low, high }, Some(value))
+                if !graph.validates_logical_value(value, low.size + high.size) =>
+            {
+                return refused("the return's logical value does not fit its two carriers");
             }
             (SourceFunctionReturn::Void | SourceFunctionReturn::Unproven, Some(_)) => {
                 return refused("a return that names no carrier has no logical value");
@@ -1084,11 +1129,11 @@ impl SourceFunctionInterface {
         if parameters
             .iter()
             .any(|parameter| !parameter.location.is_valid())
-            || matches!(
-                return_kind,
-                SourceFunctionReturn::Register { storage }
-                    if !valid_register_storage(storage)
-            )
+            || return_kind
+                .storages()
+                .any(|storage| !valid_register_storage(storage))
+            || matches!(return_kind, SourceFunctionReturn::Pair { low, high }
+                if register_storages_overlap(low, high))
         {
             return Err(SourceFunctionInterfaceError::InvalidRegisterStorage);
         }
@@ -1385,7 +1430,7 @@ impl SourceFunctionInterface {
         mut self,
         storage: CanonicalStorageId,
     ) -> Result<Self, SourceFunctionInterfaceError> {
-        if matches!(self.return_kind, SourceFunctionReturn::Register { .. }) {
+        if self.return_kind.storages().next().is_some() {
             return Ok(self);
         }
         if !valid_register_storage(storage) {
@@ -1536,10 +1581,7 @@ impl SourceFunctionInterface {
                 .parameters
                 .iter()
                 .filter_map(SourceAbiParameterSpec::register_storage)
-                .chain(match self.return_kind {
-                    SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
-                    SourceFunctionReturn::Register { storage } => Some(storage),
-                })
+                .chain(self.return_kind.storages())
                 .chain(self.stack_pointer_storage)
                 .chain(self.frame_pointer_storage)
                 .chain(
@@ -1561,10 +1603,7 @@ impl SourceFunctionInterface {
             .parameters
             .iter()
             .filter_map(SourceAbiParameterSpec::register_storage)
-            .chain(match self.return_kind {
-                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
-                SourceFunctionReturn::Register { storage } => Some(storage),
-            })
+            .chain(self.return_kind.storages())
             .chain(self.return_address_storage)
             .chain(self.frame_pointer_storage)
             .chain(self.stack_slots.iter().filter_map(|slot| match slot.role {
@@ -1599,10 +1638,7 @@ impl SourceFunctionInterface {
             .parameters
             .iter()
             .filter_map(SourceAbiParameterSpec::register_storage)
-            .chain(match self.return_kind {
-                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
-                SourceFunctionReturn::Register { storage } => Some(storage),
-            })
+            .chain(self.return_kind.storages())
             .chain(self.return_address_storage)
             .chain(self.stack_pointer_storage)
             .chain(self.stack_slots.iter().filter_map(|slot| match slot.role {
@@ -1831,10 +1867,7 @@ impl SourceFunctionInterface {
             .parameters
             .iter()
             .filter_map(SourceAbiParameterSpec::register_storage)
-            .chain(match self.return_kind {
-                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
-                SourceFunctionReturn::Register { storage } => Some(storage),
-            })
+            .chain(self.return_kind.storages())
             .chain(Some(return_address))
             .chain(Some(stack_pointer))
             .chain(
@@ -1992,7 +2025,14 @@ impl SourceCallArgumentSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceCallResult {
     Void,
-    Register { storage: CanonicalStorageId },
+    Register {
+        storage: CanonicalStorageId,
+    },
+    /// One value in two registers, its low half in the first.
+    Pair {
+        low: CanonicalStorageId,
+        high: CanonicalStorageId,
+    },
 }
 
 /// A callee that hands back one of its own arguments as a format string.
@@ -2163,10 +2203,9 @@ impl SourceCallSiteInterface {
         if arguments
             .iter()
             .any(|argument| !argument.location.is_valid())
-            || matches!(
-                result,
-                SourceCallResult::Register { storage } if !valid_register_storage(storage)
-            )
+            || result
+                .storages()
+                .any(|storage| !valid_register_storage(storage))
         {
             return Err(SourceCallSiteInterfaceError::InvalidRegisterStorage);
         }
@@ -2212,9 +2251,20 @@ impl SourceCallSiteInterface {
     ) -> Result<Self, SourceCallSiteInterfaceError> {
         let expected_result = match (callee.return_kind(), callee.result_carriers(), self.result) {
             (SourceFunctionReturn::Void, ..) => SourceCallResult::Void,
+            // A call that reads the second register takes the pair the carriers name.
+            (
+                SourceFunctionReturn::Register { .. } | SourceFunctionReturn::Unproven,
+                Some(carriers),
+                SourceCallResult::Pair { low, high },
+            ) if (storage_or(callee.return_kind(), carriers.integer) == low)
+                && carriers.second == Some(high) =>
+            {
+                SourceCallResult::Pair { low, high }
+            }
             (SourceFunctionReturn::Register { storage }, ..) => {
                 SourceCallResult::Register { storage }
             }
+            (SourceFunctionReturn::Pair { low, high }, ..) => SourceCallResult::Pair { low, high },
             // A carrier the unproven result may be in: its parameters are still the call's.
             (
                 SourceFunctionReturn::Unproven,
@@ -3692,6 +3742,9 @@ pub struct SourceConventionSlots {
     shared_positions: bool,
     /// Where a floating-point result is left.
     float_result_slot: Option<CanonicalStorageId>,
+    /// Where the high half of a two-register integer result is left: the compiler
+    /// specification's second integer result entry (SysV RDX, AAPCS64 x1).
+    second_result_slot: Option<CanonicalStorageId>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
@@ -3792,6 +3845,31 @@ impl SourceConventionSlots {
         self.float_result_slot
     }
 
+    /// Record the second integer result register, refusing one that is no register, is the first,
+    /// or is not as wide as it.
+    pub fn with_second_result_slot(
+        mut self,
+        second: Option<CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        if let Some(second) = second {
+            let first = self
+                .result_slot
+                .ok_or(SourceMachineRolesError::InvalidRegisterStorage)?;
+            if !valid_register_storage(second)
+                || register_storages_overlap(first, second)
+                || first.size != second.size
+            {
+                return Err(SourceMachineRolesError::InvalidRegisterStorage);
+            }
+        }
+        self.second_result_slot = second;
+        Ok(self)
+    }
+
+    pub const fn second_result_slot(&self) -> Option<CanonicalStorageId> {
+        self.second_result_slot
+    }
+
     #[must_use]
     pub const fn with_shared_positions(mut self, shared: bool) -> Self {
         self.shared_positions = shared;
@@ -3856,6 +3934,7 @@ impl SourceConventionSlots {
             float_argument_slots: Box::default(),
             shared_positions: false,
             float_result_slot: None,
+            second_result_slot: None,
             stack_arguments: None,
             variadic_tail_on_stack: false,
             entry_stack: None,

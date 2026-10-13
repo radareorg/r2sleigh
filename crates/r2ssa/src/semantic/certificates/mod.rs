@@ -1519,7 +1519,7 @@ fn observed_values(
     let mut observed = vec![false; graph.values.len()];
     let mut pending = returns
         .iter()
-        .map(|certificate| certificate.value)
+        .flat_map(|certificate| std::iter::once(certificate.value).chain(certificate.high))
         .collect::<Vec<_>>();
     for inst in &graph.insts {
         let effect = match &inst.payload {
