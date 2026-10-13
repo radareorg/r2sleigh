@@ -10,7 +10,8 @@ use super::requests::SurveyQuery;
 use super::{ProgramInputs, Source, View};
 use crate::query::db::{Db, Query, Retention};
 
-/// The reads at every call to one function, by its entry; `None` where no call reads either register.
+/// The reads at every call to one function, by its entry: what each read or overwrote of the result
+/// registers; `None` where the program makes no call to it the walk can read.
 pub(super) struct ResultReads;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
@@ -57,6 +58,6 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
                 ));
             }
         }
-        (reads.integer > 0 || reads.float > 0 || reads.second > 0).then_some(reads)
+        (reads.calls > 0).then_some(reads)
     }
 }
