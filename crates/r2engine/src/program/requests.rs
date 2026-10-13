@@ -207,6 +207,18 @@ impl Survey {
         self.callers.get(&callee).map_or(&[], Vec::as_slice)
     }
 
+    /// Every function discovery found, by entry, ascending.
+    pub(super) fn entries(&self) -> Vec<u64> {
+        let mut entries = self
+            .functions
+            .iter()
+            .map(|found| found.address)
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        entries.dedup();
+        entries
+    }
+
     /// Whether the body at `entry` was walked as Thumb, or why it was not walked.
     pub(super) fn walked_in(&self, entry: u64) -> Option<Result<bool, &NativeRefusal>> {
         self.walked

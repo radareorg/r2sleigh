@@ -178,6 +178,7 @@ mod tests {
                 second: 0,
                 overwritten: 0,
                 calls: 1,
+                exhaustive: false,
             }
         );
     }
@@ -257,6 +258,7 @@ mod tests {
                 second: 0,
                 overwritten: 0,
                 calls: 1,
+                exhaustive: false,
             }
         );
     }

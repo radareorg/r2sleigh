@@ -563,3 +563,80 @@ fn a_call_the_walk_folds_is_a_call_whose_reads_count() {
     assert!(caller.contains(">> 64U"), "{caller}");
     assert!(!caller.contains("r2sleigh_residual"), "{caller}");
 }
+
+/// `pxor xmm0, xmm0; mov eax, 7; ret`, then its one caller `call f; xor rax, rax; pxor xmm0, xmm0;
+/// ret`, which writes both result registers before reading either. Eight bytes at 0x1020 and eight
+/// at 0x1028 are left for another way into `f`.
+const CLOSED: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1004 mov eax, 7
+    0xc3, // 1009 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 100a padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x48, 0x31, 0xc0, // 1015 xor rax, rax
+    0x66, 0x0f, 0xef, 0xc0, // 1018 pxor xmm0, xmm0
+    0xc3, // 101c ret
+    0xcc, 0xcc, 0xcc, // 101d padding
+    0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1020 other: ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1028 a word
+];
+
+fn closed() -> Literal {
+    Literal::of_code(
+        CLOSED,
+        &[
+            ("f", BASE, 0x0a),
+            ("caller", BASE + 0x10, 0x0d),
+            ("other", BASE + 0x20, 0x08),
+        ],
+    )
+}
+
+/// Every call writes both result registers before reading either, and the image shows no other way
+/// in: under `aa`'s closed world the result is none (doc/adr-resolved-bodies.md, "Closed world").
+#[test]
+fn a_result_no_call_reads_is_void_in_a_closed_world() {
+    let text = rendered(closed());
+    assert!(text.starts_with("void f("), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(text.contains("closed-world"), "{text}");
+    let before = fresh(OpenProgram::of(closed()));
+    assert!(before.contains("return r2sleigh_residual_"), "{before}");
+}
+
+/// Another way into `f` is a reader the calls do not show: the result stays a residual.
+#[test]
+fn a_result_another_way_in_may_read_stays_a_residual() {
+    let mut handed = closed();
+    // 1020 lea rdi, [rip - 0x27] (0x1000); 1027 ret
+    handed.write(
+        BASE + 0x20,
+        &[0x48, 0x8d, 0x3d, 0xd9, 0xff, 0xff, 0xff, 0xc3],
+    );
+    let mut tailed = closed();
+    // 1020 jmp 0x1000
+    tailed.write(BASE + 0x20, &[0xe9, 0xdb, 0xff, 0xff, 0xff]);
+    let mut stored = closed();
+    stored.write(BASE + 0x28, &0x1000u64.to_le_bytes());
+    let exported = closed().declaring(r2abi::statement::Symbol {
+        name: "f".into(),
+        vaddr: BASE,
+        size: 0x0a,
+        kind: r2abi::statement::SymbolKind::Function,
+        defined: true,
+        origin: r2abi::statement::SymbolOrigin {
+            table: None,
+            dynamic: Some(1),
+        },
+        ..r2abi::statement::Symbol::default()
+    });
+    for (way, program) in [
+        ("handed", handed),
+        ("tail-called", tailed),
+        ("stored", stored),
+        ("exported", exported),
+    ] {
+        let text = rendered(program);
+        assert!(text.contains("return r2sleigh_residual_"), "{way}: {text}");
+    }
+}

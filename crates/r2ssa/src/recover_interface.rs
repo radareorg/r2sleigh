@@ -170,9 +170,16 @@ pub struct RecoveredInterface {
     result_carriers: Option<r2source::SourceResultCarriers>,
     /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
+    /// Whether the result is void because no call reads it, which holds under a closed world only.
+    closed_world: bool,
 }
 
 impl RecoveredInterface {
+    /// Whether the result rests on `Premise::ClosedWorld`: void because no call the image shows reads it.
+    pub const fn assumes_closed_world(&self) -> bool {
+        self.closed_world
+    }
+
     /// The direct callees whose stated result could prove this one's.
     pub const fn result_owners(&self) -> &BTreeSet<u64> {
         &self.result_owners
@@ -1481,6 +1488,17 @@ fn recover_interface_inner(
             live_out = candidate_live_out;
         }
     }
+    // An unproven result no call reads is none, where those calls are every way in
+    // (doc/adr-resolved-bodies.md, "Closed world").
+    let closed_world = result == RecoveredFunctionResult::Unproven
+        && machine_context.is_some_and(|context| context.accepts(r2source::Premise::ClosedWorld))
+        && result_reads.is_some_and(|reads| reads.none_read());
+    if closed_world {
+        result = RecoveredFunctionResult::Void;
+        live_out = crate::liveout::FunctionLiveOut::default();
+        result_carriers = None;
+        result_ambiguous = false;
+    }
     r2il::refusal_evidence!(
         "interface-recovery",
         "observation roots: live_out={} unresolved_blocks={} positive obligations={}",
@@ -1615,6 +1633,7 @@ fn recover_interface_inner(
         result_ambiguous,
         result_carriers,
         reads_past_parameters,
+        closed_world,
     })
 }
 

@@ -98,6 +98,13 @@ impl References {
         &self.facts
     }
 
+    /// Every reference, by source, with the instruction that claims it.
+    pub fn claimed(&self) -> impl Iterator<Item = (&Reference, &Claimant)> {
+        (self.facts.iter())
+            .zip(&self.source_of)
+            .map(|(fact, at)| (fact, &self.sources[*at]))
+    }
+
     /// Every reference to one address, by source, with the instruction it is from: a binary search, then the run.
     pub fn to(&self, target: u64) -> impl Iterator<Item = (&Reference, &Claimant)> {
         let start = self

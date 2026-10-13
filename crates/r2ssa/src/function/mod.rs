@@ -2420,6 +2420,8 @@ impl TrustedSsaArtifact {
         let mut built = None;
         let mut result_owners = BTreeSet::new();
         let mut result_ambiguous = false;
+        // Whether the recovered result is void on the premise that no caller outside the image reads it.
+        let mut closed_world = false;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None if recovery == Recovery::Convention => None,
@@ -2504,6 +2506,7 @@ impl TrustedSsaArtifact {
                 };
                 result_owners.clone_from(recovered.result_owners());
                 result_ambiguous = recovered.result_ambiguous();
+                closed_world = recovered.assumes_closed_world();
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
@@ -2631,7 +2634,10 @@ impl TrustedSsaArtifact {
         if function.entry != source.image().entry_address() {
             return Err(malformed_ssa_input());
         }
-        let function = function.with_assumed_exits(exits);
+        let mut function = function.with_assumed_exits(exits);
+        if closed_world {
+            function = function.assuming(r2source::Premise::ClosedWorld);
+        }
         control.poll()?;
         Ok(Constructed {
             function,

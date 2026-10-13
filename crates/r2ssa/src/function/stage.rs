@@ -149,6 +149,12 @@ impl Prepared {
         self
     }
 
+    /// The same function, one of its facts resting on `premise`.
+    pub(crate) fn assuming(mut self, premise: r2source::Premise) -> Self {
+        self.ir.record_premise(premise);
+        self
+    }
+
     /// The same function, its walk having ended at these calls on a model's word.
     pub(crate) fn with_assumed_exits(mut self, exits: &super::AssumedExits) -> Self {
         self.ir.record_assumed_exits(exits);
