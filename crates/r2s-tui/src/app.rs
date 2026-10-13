@@ -18,7 +18,6 @@ use crate::host::{DecompiledLine, EdgeKind, Entry, Graph, ListKind, ListedLine};
 use crate::worker::{Answer, Fetched, Key, Request, Window};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use std::collections::{BTreeMap, VecDeque};
 
 /// The pane in front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,9 +221,6 @@ impl GraphPane {
     }
 }
 
-/// How many answers are kept by key before the oldest is forgotten.
-const CACHED: usize = 128;
-
 /// How many rows one notch of the wheel moves.
 const WHEEL: isize = 3;
 
@@ -263,10 +259,6 @@ pub struct App {
     /// The decompiler's cursor is put on the seek's line once a rendering
     /// holding the seek is in hand.
     land: bool,
-    /// Answers by key, until the program changes.
-    cache: BTreeMap<Key, Fetched>,
-    /// The cache's keys, oldest first.
-    cached: VecDeque<Key>,
     next_tag: u64,
     /// Commands, seeks by name and writes in flight, the latest named.
     pub(crate) running: usize,
@@ -304,8 +296,6 @@ impl App {
             list: Slot::default(),
             pending_lines: 0,
             land: false,
-            cache: BTreeMap::new(),
-            cached: VecDeque::new(),
             next_tag: 0,
             running: 0,
             running_what: String::new(),
@@ -508,9 +498,8 @@ impl App {
         self.sync_seek(effects);
     }
 
-    /// Ask for the disassembly window at the top. A window from the cache
-    /// may make the moves kept for it, which moves the top to where another
-    /// window is wanted; each pass makes at least one kept move or stops.
+    /// Ask for the disassembly window at the top, unless the held one is it; a request in flight
+    /// ends the pass, and its answer makes the moves kept for it.
     fn sync_lines(&mut self, effects: &mut Vec<Effect>) {
         loop {
             let key = self.wanted_lines();
@@ -533,14 +522,9 @@ impl App {
         }
     }
 
-    /// Install `key`'s answer from the cache, or ask for it unless its slot
-    /// already has a request in flight (whose answer will be weighed, and
-    /// this asked, when it arrives).
+    /// Ask the engine for `key`'s answer, which its query database holds or computes, unless the
+    /// slot already has a request in flight (whose answer is weighed when it arrives).
     fn want(&mut self, key: Key, effects: &mut Vec<Effect>) {
-        if let Some(value) = self.cache.get(&key).cloned() {
-            self.install(key, value);
-            return;
-        }
         let tag = self.next_tag;
         let slot = match key {
             Key::Lines { .. } => &mut self.lines.asked,
@@ -581,7 +565,6 @@ impl App {
                 // An answer for where the user no longer is is dropped: that
                 // is the cancellation, and `sync` asks for what is wanted now.
                 if self.wanted(key, &value) {
-                    self.remember(key, value.clone());
                     self.install(key, value);
                 }
             }
@@ -635,11 +618,9 @@ impl App {
         }
     }
 
-    /// The program changed: every answer held, or kept by key, is out of
-    /// date, and each pane asks again for what it shows.
+    /// The program changed: every answer held is out of date, and each pane asks again for what it
+    /// shows.
     fn invalidate(&mut self) {
-        self.cache.clear();
-        self.cached.clear();
         self.lines.stale = true;
         self.bytes.stale = true;
         self.rendering.stale = true;
@@ -664,17 +645,6 @@ impl App {
             }
             (Key::List(..), _) => Some(key) == self.wanted_list(),
             _ => false,
-        }
-    }
-
-    fn remember(&mut self, key: Key, value: Fetched) {
-        if self.cache.insert(key, value).is_none() {
-            self.cached.push_back(key);
-        }
-        while self.cached.len() > CACHED {
-            if let Some(oldest) = self.cached.pop_front() {
-                self.cache.remove(&oldest);
-            }
         }
     }
 
