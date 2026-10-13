@@ -367,9 +367,8 @@ pub(crate) fn analysed_from(
     analyse(target, program, entry, walk, callers)
 }
 
-/// What a prepared function keeps of its walk once preparation has read the lift: each block's
-/// extent and successors, where the walk stopped, and the callees it reached
-/// (doc/adr-memory-model.md, decision 1).
+/// What a prepared function keeps of its walk once the lift is read: block extents and successors,
+/// stops and callees reached (doc/adr-memory-model.md, decision 1).
 pub struct Outline {
     pub name: String,
     pub blocks: Vec<OutlineBlock>,

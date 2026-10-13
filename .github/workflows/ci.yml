@@ -539,8 +539,8 @@ jobs:
         run: |
           apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
           for attempt in 1 2; do
-            timeout 60 $apt update -qq &&
-              timeout 120 $apt install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user &&
+            timeout -k 10 60 $apt update -qq &&
+              timeout -k 10 120 $apt install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user &&
               exit 0
             echo "apt try $attempt did not finish; trying again"
           done

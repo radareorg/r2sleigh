@@ -951,6 +951,8 @@ mod tests {
             None,
             crate::Pass::Fixture,
         );
+        // Preparation captures what each operation writes before it validates: no panic first.
+        let _ = crate::lanes::Written::capture(&duplicate);
         assert!(matches!(
             validate_ssa_function(&duplicate),
             Err(SsaIntegrityError::DuplicateDefinition { .. })

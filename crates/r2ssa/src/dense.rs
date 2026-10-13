@@ -214,9 +214,8 @@ impl<I: DenseId, T> IdMap<I, T> {
         self.present.iter()
     }
 
-    /// The values, in id order.
-    /// Each value, to update in place, in the order entries were made: the updates must not
-    /// depend on one another.
+    /// Each value, to update in place, in no stated order: the updates must not depend on one
+    /// another (removal swaps entries, so neither id nor insertion order holds).
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.entries.iter_mut().map(|(_, value)| value)
     }
@@ -592,11 +591,8 @@ impl<I: DenseId, T> Csr<I, T> {
     }
 }
 
-/// The rows of a table, open-addressed by each row's hash: a lookup compares against the row where
-/// the table already holds it, so the key is held once (doc/adr-memory-model.md, MM.12).
-///
-/// At most half full, so a probe reads a slot or two; a slot keeps its row's high hash bits, so a
-/// probe past another row reads no row. Growth rehashes every row, `O(rows)`.
+/// A table's rows, open-addressed by hash and at most half full, so each key is held once and a
+/// probe reads a slot or two (doc/adr-memory-model.md, MM.12).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HashIndex {
     /// The row's high hash bits, then one more than the row, so zero is an empty slot.

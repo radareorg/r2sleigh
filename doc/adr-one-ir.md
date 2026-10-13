@@ -4,10 +4,13 @@ Status: in progress (ROADMAP F2, decisions D11–D12)
 
 ## Decision
 
-The sealed function is the IR, and everything about it is an index over its
-ids. Every rebuilt graph, liveness pass or side table answers a question the
-function already determines, and each copy is a place for two answers to
-disagree.
+The sealed IR is the graph, which owns each operation once after the seal;
+the function keeps what is about the function (its CFG and terminators,
+dominators and loops, origins, written lanes, premises), and its blocks are
+the builder's, dropped at the seal (amended 2026-10-12, below). Everything
+else is an index over their ids. Every rebuilt graph, liveness pass or side
+table answers a question the IR already determines, and each copy is a place
+for two answers to disagree.
 
 - **Dense identity.** `OpId`, `InstId`, `ValueId` and `BlockId` are dense
   `u32`s fixed at seal. Facts about them live in `r2ssa::dense`, generic over

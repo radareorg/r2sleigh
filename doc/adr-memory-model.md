@@ -68,23 +68,28 @@ stays alive until the response is built.
    returns, the survey: `Retention::Held`, O(program) in all); a function's
    walk, analysis, sealing and rendering are held only while they are the
    newest (`Retention::Newest`), and asked again they are computed again,
-   whose cost is the algorithm's to lower. Then `R` is the last function's
-   answers, whatever the session's length.
+   whose cost is the algorithm's to lower. A dropped answer takes its key and
+   dependencies with it, and no query is held unless it states so
+   (2026-10-13, approved). Then `R` is the program-wide facts and the last
+   function's answers, whatever the session's length.
 3. **The allocator returns phase garbage at phase boundaries**: one forced
    collect after the analysis and after the render, measured on the four
    large functions, before any change of purge delay (D26).
-4. **Superlinear shapes are replaced when a function shows one.** The audit
-   (2026-10-12) found structures bounded by a product: memory SSA's per-block
-   location maps `O(B·L)`, control-domain guard sets `O(B·D)`, per-call
-   memory facts `O(C·F)`, per-block assumption and call-result maps cloned
-   down the dominator tree, and phi placement before pruning. None dominated
-   a measured peak. Each has a linear replacement: one memory chain with
-   phis at the iterated frontier of all definitions and a memoised clobber
-   walk (LLVM's MemorySSA); dominator pre/post intervals for guard
-   membership; a scoped table with an undo log along the dominator walk;
-   interned location sets for call effects; pruned SSA placed from liveness.
-5. **A budget refuses.** A function whose operations exceed the budget's
-   share refuses before its analysis with the count and the budget.
+4. **No structure grows with a product.** The audit (2026-10-12) found five:
+   memory SSA's per-block location maps `O(B·L)`, control-domain guard sets
+   `O(B·D)`, per-call memory facts `O(C·F)`, per-block assumption and
+   call-result maps cloned down the dominator tree, and phi placement before
+   pruning. None dominated a measured peak, but a hostile function below the
+   budget can grow any of them, so each is replaced as LX work, and the
+   linear claim holds only once all five are: one memory chain with phis at
+   the iterated frontier of all definitions and a memoised clobber walk
+   (LLVM's MemorySSA); dominator pre/post intervals for guard membership; a
+   scoped table with an undo log along the dominator walk; interned location
+   sets for call effects; pruned SSA placed from liveness. Until then the
+   budget (decision 5) bounds them.
+5. **A budget refuses.** A function whose lifted operations (the walk's
+   count, known before SSA is built) exceed the budget's share refuses
+   before its analysis with the count and the budget.
 
 ## Done (2026-10-12, stack #165)
 
@@ -97,11 +102,11 @@ stays alive until the response is built.
 | #171 | Facts nothing reads are not kept | heap peak 193.0 to 183.6 MB, 471 lines deleted |
 | #172 | Each obligation held once, columns by place | heap peak 183.4 to 180.6 MB |
 | #173 | A value's definition, inputs and width are the graph's alone | heap peak 180.6 to 173.8 MB; the peak moves from render to preparation |
-| #174 | The inventory's seeds a bit per whole-instruction kind; one backward pass taints the incomplete returns | heap peak 173.8 to 172.2 MB (the render phase's again), 0pack 199.5 to 189.4 MB; peak RSS 0pack 334 to 298 MB |
+| #174 | The inventory's seeds a bit per whole-instruction kind; one backward pass taints the incomplete returns: a block reached through an edge keeps every definition, a return's own block those before its last | heap peak 173.8 to 172.2 MB (the render phase's again), 0pack 199.5 to 189.4 MB; peak RSS 0pack 334 to 298 MB |
 | #175 | The term arena interns its types (a node 56 to 32 bytes), its side tables dense and shrunk once canonical; root steps as runs; the unread `reads` lists and producer ids deleted | heap peak 172.2 to 166.7 MB (now the type seal's), 0pack 189.4 to 177.6 MB; pumasim 3% faster |
 | #176 | The array inference borrows its operations; the inventory's table sized from its seeds and sorted in place; the import's roots recorded as runs as each completes | heap peak 166.7 to 158.6 MB; peak RSS 4 to 7% lower |
 | #177 | The timing gate reports and holds each case's heap peak (1.05x) and times a 50-function session | gate |
-| #178 | `dense::HashIndex`, slots of row ids and hash bits, owns the value table's and the graph's variable-to-id lookups | heap 1.2 to 2.4% lower, time unchanged |
+| #178 | `dense::HashIndex`, slots of row ids and hash bits, owns the value table's and the graph's variable-to-id lookups: at most half full, a slot's high hash bits let a probe skip another row unread, and growth rehashes every row, `O(rows)` | heap 1.2 to 2.4% lower, time unchanged |
 | #183 | The seal drops the function's operations; the graph holds each once | heap peak 0pack 167.3 to 162.4 MB, pumasim 147.6 to 143.8 |
 | #185 | The machine projection holds one root per instruction; an entity's output and producer are read from the graph and the obligations | heap peak 0pack 162.4 to 159.2 MB, pumasim 143.8 to 141.1 |
 | #186 | The seal drops the value table and the operation origins; the reaching scan groups by the graph's instruction column | heap peak 0pack 159.1 to 158.3 MB, session 187.5 to 179.6 |
