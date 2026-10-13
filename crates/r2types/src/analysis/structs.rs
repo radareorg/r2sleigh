@@ -385,7 +385,11 @@ pub(crate) fn local_struct_profile_score(
         offset_matches,
         typed_matches,
         decl.fields.len(),
-        i32::from(decl.confidence),
+        if std::env::var_os("T3C_A").is_some() {
+            0
+        } else {
+            i32::from(decl.confidence)
+        },
     ))
 }
 
@@ -395,6 +399,9 @@ pub(crate) fn prefer_stronger_local_struct_overrides(
     slot_field_profiles: &HashMap<usize, BTreeMap<u64, String>>,
     ptr_bits: u32,
 ) {
+    if std::env::var_os("T3C_B").is_some() {
+        return;
+    }
     for (slot, ty) in slot_type_overrides.iter_mut() {
         let Some(profile) = slot_field_profiles.get(slot) else {
             continue;
