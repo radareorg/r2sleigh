@@ -59,3 +59,20 @@ fn tbl_with_one_table_selects_each_byte_or_zero() {
     assert_eq!(count(&ops, "Select"), 16, "{ops:?}");
     assert_eq!(count(&ops, "Piece"), 15, "{ops:?}");
 }
+
+/// Clang's AArch64 population count: `cnt` per byte, then `uaddlv` sums the bytes into `h0`, and
+/// the write clears the rest of `z0`, which `fmov w9, s0` then reads.
+#[test]
+fn uaddlv_sums_every_lane_at_twice_its_width_and_clears_the_register_above() {
+    // uaddlv h0, v0.8b
+    let ops = ops([0x00, 0x38, 0x30, 0x2e]);
+    assert!(!ops.iter().any(|op| op.starts_with("CallOther")), "{ops:?}");
+    assert_eq!(count(&ops, "IntZExt"), 9, "{ops:?}");
+    assert_eq!(count(&ops, "IntAdd"), 7, "{ops:?}");
+    let last = ops.last().expect("an expansion");
+    assert!(
+        last.starts_with("IntZExt")
+            && last.contains("space: Register, offset: 20480, size: 32 }, src"),
+        "{last}"
+    );
+}

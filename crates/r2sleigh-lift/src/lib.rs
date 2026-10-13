@@ -364,6 +364,7 @@ mod tests {
             "NEON_umin",
             "NEON_umaxv",
             "NEON_uminv",
+            "NEON_uaddlv",
             "a64_TBL",
         ] {
             let index = spec

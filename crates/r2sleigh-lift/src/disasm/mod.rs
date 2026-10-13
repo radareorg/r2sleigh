@@ -2575,6 +2575,9 @@ impl Disassembler {
             Some(ModelledUserOperation::NeonMinMaxAcross { max }) => {
                 Self::expand_neon_minmax_across(output, inputs, temp_base, max)
             }
+            Some(ModelledUserOperation::NeonAddLongAcross) => {
+                Self::expand_neon_add_long_across(output, inputs, temp_base)
+            }
             Some(ModelledUserOperation::A64Tbl) => Self::expand_neon_tbl(output, inputs, temp_base),
             // A trap, and the pipeline already has one. `R2ILOp::Breakpoint` is
             // seeded as `Kind::Trap` by the obligation ledger, which is exactly
@@ -2602,7 +2605,40 @@ impl Disassembler {
             }
             None => None,
         };
-        expanded.unwrap_or_else(|| vec![op])
+        let Some(mut expanded) = expanded else {
+            return vec![op];
+        };
+        // An Advanced SIMD write clears every bit of the vector register above it (Arm ARM,
+        // "Vector registers"); Ghidra's pseudo-op constructors leave that out.
+        if modelled.is_some_and(ModelledUserOperation::is_neon)
+            && let Some(output) = output
+            && let Some(whole) = self.whole_register_of(output)
+        {
+            expanded.push(R2ILOp::IntZExt {
+                dst: whole,
+                src: output.clone(),
+            });
+        }
+        expanded
+    }
+
+    /// The register `written` is the low bytes of, where it is a strict part of one.
+    fn whole_register_of(&self, written: &Varnode) -> Option<Varnode> {
+        if written.space != SpaceId::Register {
+            return None;
+        }
+        let storage = r2il::serialize::RegisterStorage {
+            offset: written.offset,
+            size: written.size,
+        };
+        match self.spec.arch.register_projection(storage)?.disposition {
+            r2il::serialize::RegisterProjectionDisposition::Bound { carrier, slice }
+                if slice.lsb_bit_offset == 0 && carrier.size > written.size =>
+            {
+                Some(Varnode::register(carrier.offset, carrier.size))
+            }
+            _ => None,
+        }
     }
 
     /// x86 `PMOVSX*` / `PMOVZX*`, in each encoding the specification names.
@@ -2967,6 +3003,53 @@ impl Disassembler {
         ops.push(R2ILOp::Copy {
             dst: output.clone(),
             src: best,
+        });
+        Some(ops)
+    }
+
+    /// `NEON_uaddlv(vector, element_size)` -- AArch64 `UADDLV`: every lane zero-extended to the
+    /// result, twice a lane's width, and summed; the sum of at most 16 lanes cannot wrap it.
+    fn expand_neon_add_long_across(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+    ) -> Option<Vec<R2ILOp>> {
+        let [rn, element_size] = inputs else {
+            return None;
+        };
+        let output = output?;
+        if element_size.space != SpaceId::Const {
+            return None;
+        }
+        let lane_bytes = u32::try_from(element_size.offset).ok()?;
+        if lane_bytes == 0 || output.size != 2 * lane_bytes || rn.size % lane_bytes != 0 {
+            return None;
+        }
+        let mut ops = Vec::new();
+        let mut next = temp_base;
+        let mut sum: Option<Varnode> = None;
+        for lane in Self::split_lanes(&mut ops, &mut next, rn, lane_bytes) {
+            let wide = Self::lane_temp(&mut next, output.size);
+            ops.push(R2ILOp::IntZExt {
+                dst: wide.clone(),
+                src: lane,
+            });
+            sum = Some(match sum {
+                None => wide,
+                Some(total) => {
+                    let added = Self::lane_temp(&mut next, output.size);
+                    ops.push(R2ILOp::IntAdd {
+                        dst: added.clone(),
+                        a: total,
+                        b: wide,
+                    });
+                    added
+                }
+            });
+        }
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: sum?,
         });
         Some(ops)
     }

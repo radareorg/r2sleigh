@@ -28,6 +28,8 @@ pub(crate) enum ModelledUserOperation {
     NeonMinMax { max: bool },
     /// AArch64 `UMAXV` (`max`) and `UMINV`.
     NeonMinMaxAcross { max: bool },
+    /// AArch64 `UADDLV`.
+    NeonAddLongAcross,
     /// AArch64 `TBL` and `TBX` with one table register.
     A64Tbl,
     /// A trap: control leaves for an exception handler and does not come back.
@@ -38,6 +40,23 @@ pub(crate) enum ModelledUserOperation {
     PackedExtension(PackedExtension),
     /// x86 `PSHUFLW`, `PSHUFHW` and `PSHUFW`.
     WordShuffle(WordShuffle),
+}
+
+impl ModelledUserOperation {
+    /// Whether it is an AArch64 Advanced SIMD operation, whose write clears the vector register
+    /// above the destination.
+    pub(crate) const fn is_neon(self) -> bool {
+        matches!(
+            self,
+            Self::NeonExt
+                | Self::NeonUshl
+                | Self::NeonRev64
+                | Self::NeonMinMax { .. }
+                | Self::NeonMinMaxAcross { .. }
+                | Self::NeonAddLongAcross
+                | Self::A64Tbl
+        )
+    }
 }
 
 /// One x86 word shuffle: in each 128-bit lane, four 16-bit elements of one
@@ -343,7 +362,7 @@ const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
 
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
-const NAMED: [(&str, ModelledUserOperation); 11] = [
+const NAMED: [(&str, ModelledUserOperation); 12] = [
     ("NEON_ext", ModelledUserOperation::NeonExt),
     ("NEON_ushl", ModelledUserOperation::NeonUshl),
     ("NEON_rev64", ModelledUserOperation::NeonRev64),
@@ -360,6 +379,7 @@ const NAMED: [(&str, ModelledUserOperation); 11] = [
         "NEON_uminv",
         ModelledUserOperation::NeonMinMaxAcross { max: false },
     ),
+    ("NEON_uaddlv", ModelledUserOperation::NeonAddLongAcross),
     ("a64_TBL", ModelledUserOperation::A64Tbl),
     ("SoftwareBreakpoint", ModelledUserOperation::Trap),
     ("UndefinedInstructionException", ModelledUserOperation::Trap),
