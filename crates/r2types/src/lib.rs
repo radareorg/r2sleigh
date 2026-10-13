@@ -42,8 +42,7 @@ pub use callee::{
 pub use constraint::{Constraint, ConstraintSource, SolverNode};
 pub(crate) use register_identity::RegisterIdentity;
 pub(crate) use signature_infer::{
-    format_signature_prototype, infer_signature_from_prepared_ssa,
-    inferred_signature_from_signature_spec, render_signature_type,
+    format_signature_prototype, infer_signature_from_prepared_ssa, render_signature_type,
 };
 pub use solver::{SolvedTypes, solve_constraints};
 

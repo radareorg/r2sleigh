@@ -5,7 +5,6 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TypeFactSource {
     LocalInferred,
-    CalleeSignature,
     SignatureRegistry,
     DataflowRanked,
 }
@@ -13,7 +12,6 @@ pub(crate) enum TypeFactSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TypeEvidence {
     SsaVarRecovery,
-    CertifiedCallArgument,
     CanonicalStackAccessWidth,
     CanonicalStackSignedness,
     ExternalSignatureCurrent,

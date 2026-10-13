@@ -4,44 +4,6 @@ use super::super::*;
 use super::*;
 
 #[test]
-fn global_field_profiles_refuse_spoofed_constant_names() {
-    let load_from = |addr| {
-        SSABlock::from_parts(
-            0x401000,
-            4,
-            vec![SSAOp::Load {
-                dst: SSAVar::new("value", 1, 4),
-                space: r2il::SpaceId::Ram,
-                addr,
-            }],
-            Vec::new(),
-        )
-    };
-
-    let loaded = crate::ProgramExtents::new([(0x10000, 0x11000)]);
-    let spoofed =
-        infer_global_field_profiles(&[load_from(SSAVar::new("const:10000", 0, 8))], 64, &loaded);
-    let exact =
-        infer_global_field_profiles(&[load_from(SSAVar::constant(0x10000, 8))], 64, &loaded);
-    // The same access, where no section the program loads holds the base, names no global.
-    let outside = infer_global_field_profiles(
-        &[load_from(SSAVar::constant(0x10000, 8))],
-        64,
-        &crate::ProgramExtents::none(),
-    );
-
-    assert!(spoofed.is_empty());
-    assert!(outside.is_empty());
-    assert_eq!(
-        exact
-            .get(&0x10000)
-            .and_then(|fields| fields.get(&0))
-            .map(|field| field.reads),
-        Some(1)
-    );
-}
-
-#[test]
 fn signature_type_parser_preserves_source_width_typedefs() {
     assert_eq!(
         parse_signature_type_preserving_c_typedefs("long", 64),
@@ -184,10 +146,12 @@ fn external_stack_identity_refuses_without_a_structural_root() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert!(analysis.plan.var_rename_candidates.is_empty());
+    // No external stack identity applies: `var_10h` keeps radare2's name and its own type.
+    let binding = &analysis.type_facts.visible_bindings[0];
+    let int32 = parse_test_type("int32_t", 64);
     assert_eq!(
-        analysis.plan.var_type_candidates[0].source,
-        TypeFactSource::LocalInferred
+        (binding.name.as_str(), binding.ty.as_ref()),
+        ("var_10h", Some(&int32))
     );
 }
 
@@ -441,15 +405,6 @@ fn local_generated_struct_replaces_stale_generated_external_layout() {
         "stale generated external layout should be replaced, got {:?}",
         struct_entry.fields
     );
-    assert!(
-        analysis
-            .plan
-            .struct_decls
-            .iter()
-            .find(|decl| decl.name == "sla_struct_420703e08f70f00e")
-            .is_some_and(|decl| decl.source == StructDeclSource::LocalInferred),
-        "expected plan to keep the current local synthetic struct"
-    );
     assert_eq!(
         analysis.type_facts.scalar_array_render_candidates,
         vec![ScalarArrayRenderCandidate {
@@ -571,7 +526,10 @@ fn debug_typedef_alias_beats_generated_local_struct_override() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.params[0].param_type, "DemoStruct*");
+    assert_eq!(
+        spelled_signature(&analysis).params[0].param_type,
+        "DemoStruct*"
+    );
     assert_eq!(
         analysis
             .type_facts
@@ -705,7 +663,10 @@ fn unresolved_named_pointer_materializes_local_struct_layout() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.params[0].param_type, "DemoStruct*");
+    assert_eq!(
+        spelled_signature(&analysis).params[0].param_type,
+        "DemoStruct*"
+    );
     let layout = analysis
         .type_facts
         .external_type_db

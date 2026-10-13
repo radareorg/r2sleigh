@@ -153,9 +153,9 @@ fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     };
     let analysis = build_type_analysis(input);
-    assert_eq!(analysis.signature.ret_type, "void");
+    assert_eq!(spelled_signature(&analysis).ret_type, "void");
     assert!(
-        analysis.signature.params.is_empty(),
+        spelled_signature(&analysis).params.is_empty(),
         "main name alone must not fabricate argc/argv/envp parameters"
     );
     assert!(
@@ -282,7 +282,7 @@ fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "allocation_ptr");
+    assert_eq!(spelled_signature(&analysis).ret_type, "allocation_ptr");
     assert_eq!(
         analysis
             .type_facts
@@ -383,7 +383,7 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "int8_t*");
+    assert_eq!(spelled_signature(&analysis).ret_type, "int8_t*");
     let callee = analysis
         .type_facts
         .callee_facts
@@ -447,11 +447,7 @@ fn local_inferred_scalar_param_narrows_external_wide_signature() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.params[0].param_type, "int32_t");
-    assert_eq!(
-        analysis.plan.var_type_candidates[0].var_type,
-        parse_test_type("int32_t", 64)
-    );
+    assert_eq!(spelled_signature(&analysis).params[0].param_type, "int32_t");
     let merged = analysis
         .type_facts
         .merged_signature
@@ -653,9 +649,9 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "size_t");
-    assert_eq!(analysis.signature.params[1].name, "n");
-    assert_eq!(analysis.signature.params[1].param_type, "size_t");
+    assert_eq!(spelled_signature(&analysis).ret_type, "size_t");
+    assert_eq!(spelled_signature(&analysis).params[1].name, "n");
+    assert_eq!(spelled_signature(&analysis).params[1].param_type, "size_t");
     assert_eq!(
         analysis
             .type_facts
@@ -734,9 +730,9 @@ fn authoritative_external_signature_keeps_param_count_over_longer_local_signatur
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.params.len(), 2);
-    assert_eq!(analysis.signature.params[0].name, "src");
-    assert_eq!(analysis.signature.params[1].name, "len");
+    assert_eq!(spelled_signature(&analysis).params.len(), 2);
+    assert_eq!(spelled_signature(&analysis).params[0].name, "src");
+    assert_eq!(spelled_signature(&analysis).params[1].name, "len");
     assert!(
         analysis
             .type_facts
@@ -1054,7 +1050,7 @@ fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "void");
+    assert_eq!(spelled_signature(&analysis).ret_type, "void");
     assert_eq!(
         analysis
             .type_facts
@@ -1330,11 +1326,13 @@ fn interproc_summary_name_does_not_project_role_signature() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "int64_t");
-    assert_eq!(analysis.signature.params.len(), 3);
-    assert_eq!(analysis.signature.params[0].name, "arg1");
-    assert_eq!(analysis.signature.params[1].name, "arg2");
-    assert_eq!(analysis.signature.params[2].name, "arg3");
+    assert_eq!(spelled_signature(&analysis).ret_type, "int64_t");
+    // The merged signature names parameters from zero, as the rendering declares them.
+    let names = spelled_signature(&analysis)
+        .params
+        .into_iter()
+        .map(|param| param.name);
+    assert_eq!(names.collect::<Vec<_>>(), ["arg0", "arg1", "arg2"]);
 }
 
 #[test]
@@ -1402,10 +1400,10 @@ fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature(
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.params.len(), 3);
-    assert_eq!(analysis.signature.params[0].name, "parser");
-    assert_eq!(analysis.signature.params[1].name, "slot");
-    assert_eq!(analysis.signature.params[2].name, "flags");
+    assert_eq!(spelled_signature(&analysis).params.len(), 3);
+    assert_eq!(spelled_signature(&analysis).params[0].name, "parser");
+    assert_eq!(spelled_signature(&analysis).params[1].name, "slot");
+    assert_eq!(spelled_signature(&analysis).params[2].name, "flags");
 }
 
 #[test]
@@ -1433,10 +1431,10 @@ fn interproc_summary_name_does_not_truncate_weak_entry_signature() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "int64_t");
-    assert_eq!(analysis.signature.params.len(), 1);
-    assert_eq!(analysis.signature.params[0].name, "arg1");
-    assert_eq!(analysis.signature.params[0].param_type, "void *");
+    assert_eq!(spelled_signature(&analysis).ret_type, "int64_t");
+    assert_eq!(spelled_signature(&analysis).params.len(), 1);
+    assert_eq!(spelled_signature(&analysis).params[0].name, "arg0");
+    assert_eq!(spelled_signature(&analysis).params[0].param_type, "void*");
     assert_eq!(
         analysis
             .type_facts
@@ -1507,8 +1505,8 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "int64_t");
-    assert_eq!(analysis.signature.params.len(), 6);
+    assert_eq!(spelled_signature(&analysis).ret_type, "int64_t");
+    assert_eq!(spelled_signature(&analysis).params.len(), 6);
     assert_eq!(
         analysis
             .type_facts
@@ -1934,7 +1932,7 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.params[0].param_type, "void*");
+    assert_eq!(spelled_signature(&analysis).params[0].param_type, "void*");
     assert_eq!(
         analysis
             .type_facts

@@ -1,7 +1,6 @@
 mod arrays;
 mod assumptions;
 mod bindings;
-mod globals;
 mod shared;
 mod signature;
 mod structs;
@@ -9,7 +8,6 @@ mod structs;
 pub(crate) use arrays::*;
 pub(crate) use assumptions::*;
 pub(crate) use bindings::*;
-pub(crate) use globals::*;
 pub(crate) use shared::*;
 pub(crate) use signature::*;
 pub(crate) use structs::*;
@@ -47,33 +45,14 @@ use crate::facts::{
 use crate::function_facts::{
     FunctionFacts, InterprocSummaryView, ProjectedFacts, SourceOwnedFunctionFacts,
 };
-use crate::inferred_signature_from_signature_spec;
 use crate::model::Signedness;
 use crate::prepare::ssa_var_block_key;
 use crate::signedness::ScalarSignednessEvidence;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TypePlan {
-    /// The target's pointer width.
-    ///
-    /// The plan carries types now, and a type only becomes a C spelling
-    /// against a target: `long` and `size_t` are the width of a pointer, and
-    /// which width that is belongs to the function being written back, not to
-    /// whichever renderer happens to run.
-    pub ptr_bits: u32,
-    pub signature: InferredSignature,
-    pub var_type_candidates: Vec<VarTypeCandidate>,
-    pub var_rename_candidates: Vec<VarRenameCandidate>,
-    pub struct_decls: Vec<StructDeclCandidate>,
-    pub global_type_links: Vec<GlobalTypeLinkCandidate>,
-    pub diagnostics: TypeAnalysisDiagnostics,
-}
 
 #[derive(Debug)]
 pub struct TypeAnalysis {
     source: Arc<SsaArtifact>,
     function_facts: ProjectedFacts,
-    plan: TypePlan,
     callee_signatures: BTreeMap<u64, crate::SourceOwnedCalleeSignature>,
 }
 
@@ -206,26 +185,6 @@ impl TypeAnalysis {
         )
     }
 
-    /// The plan after enrichment changed the signature it was derived from.
-    fn refresh_plan_after_enrichment(
-        &mut self,
-        changed_parameters: &BTreeSet<usize>,
-        return_type_changed: bool,
-    ) {
-        let prior_plan = self.plan.clone();
-        if (!changed_parameters.is_empty() || return_type_changed)
-            && !self.refresh_plan_after_source_constraints(changed_parameters)
-        {
-            // A plan refreshed in part would write conflicting types back; the facts, which
-            // rendering reads, stand, and the plan keeps its prior signature.
-            r2il::refusal_evidence!(
-                "signature-refresh",
-                "plan not refreshed: changed slots {changed_parameters:?} return_changed={return_type_changed}; facts enriched, plan kept"
-            );
-            self.plan = prior_plan;
-        }
-    }
-
     pub fn type_facts(&self) -> &FunctionTypeFacts {
         self.function_facts.report().type_facts()
     }
@@ -254,160 +213,6 @@ impl TypeAnalysis {
             facts,
         })
     }
-
-    /// Project the enriched signature into the type plan.
-    ///
-    /// `changed_slots` is the enrichment's own account of which parameter
-    /// declarations changed; nothing is recounted here, and the return type
-    /// arrives with the signature itself. The refresh is
-    /// atomic over the plan's argument bindings: a binding with no register,
-    /// with a register that is no argument slot, or a second binding for one
-    /// slot leaves the plan untouched and returns false, because a plan half
-    /// refreshed would write conflicting types back.
-    fn refresh_plan_after_source_constraints(&mut self, changed_slots: &BTreeSet<usize>) -> bool {
-        let Some(signature) = self
-            .function_facts
-            .report()
-            .type_facts()
-            .render_authorized_signature()
-            .cloned()
-        else {
-            // Nothing is authorized for the plan to carry, so there is
-            // nothing to refresh; the facts changed all the same, and the
-            // rendering reads the facts.
-            r2il::refusal_evidence!(
-                "signature-refresh",
-                "no render-authorized signature; plan not refreshed for changed slots {changed_slots:?}"
-            );
-            return true;
-        };
-        let source = self.source.as_ref();
-        let Some(arch_name) = crate::prepare::prepared_arch_display_name(source) else {
-            return false;
-        };
-        let ptr_bits = source
-            .machine_context()
-            .memory_model()
-            .default_address_bits();
-        if ptr_bits == 0 {
-            return false;
-        }
-        let function_name = source
-            .function()
-            .name
-            .as_deref()
-            .map(str::to_string)
-            .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
-        let mut plan = self.plan.clone();
-        plan.signature = inferred_signature_from_signature_spec(
-            &function_name,
-            arch_name,
-            ptr_bits,
-            self.function_facts
-                .report()
-                .type_facts()
-                .callconv
-                .as_deref(),
-            &signature,
-        );
-        let mut refreshed_slots = BTreeSet::new();
-        for candidate in plan
-            .var_type_candidates
-            .iter_mut()
-            .filter(|candidate| candidate.isarg)
-        {
-            let Some(register) = candidate.reg.as_deref() else {
-                return false;
-            };
-            let Some(slot) =
-                exact_source_argument_slot_for_register(self.source.as_ref(), register)
-            else {
-                return false;
-            };
-            if !changed_slots.contains(&slot) {
-                continue;
-            }
-            if !refreshed_slots.insert(slot) {
-                return false;
-            }
-            let Some(ty) = signature
-                .params
-                .get(slot)
-                .and_then(|parameter| parameter.ty.as_ref())
-            else {
-                return false;
-            };
-            let size =
-                estimate_c_type_size_bytes(&render_signature_type(ty, ptr_bits), ptr_bits) as u32;
-            candidate.var_type = ty.clone();
-            candidate.size = size;
-            candidate.source = TypeFactSource::CalleeSignature;
-            if !candidate
-                .evidence
-                .contains(&TypeEvidence::CertifiedCallArgument)
-            {
-                candidate.evidence.push(TypeEvidence::CertifiedCallArgument);
-            }
-        }
-        // A changed slot with no argument candidate is not an inconsistency:
-        // the plan carries no variable for that parameter, so there is nothing
-        // to refresh for it. Demanding one made every function whose declared
-        // parameter types the source interface supplies -- but whose plan names
-        // no register variable for one of them -- fail its whole analysis, and
-        // with it the decompilation, once the interface began supplying every
-        // parameter's type rather than only the return's.
-        let unrefreshed = changed_slots
-            .difference(&refreshed_slots)
-            .copied()
-            .collect::<Vec<_>>();
-        if !unrefreshed.is_empty() {
-            r2il::refusal_evidence!(
-                "signature-refresh",
-                "slots {unrefreshed:?} changed type with no argument candidate to carry it"
-            );
-        }
-        self.plan = plan;
-        true
-    }
-}
-
-fn exact_source_argument_slot_for_register(source: &SsaArtifact, register: &str) -> Option<usize> {
-    let context = source.machine_context();
-    let register_storage = context.register_storage(register)?;
-    if register_storage.space != r2ssa::CanonicalStorageSpace::Register
-        || register_storage.size == 0
-    {
-        return None;
-    }
-    let interface = context.function_interface()?;
-    let abi = context.abi_model();
-    if !abi.is_available() || !abi.argument_placement_is_coherent() {
-        return None;
-    }
-    let mut matches = interface.parameters().iter().filter(|parameter| {
-        let Some(parameter_storage) = parameter.register_storage() else {
-            return false;
-        };
-        if parameter_storage.space != register_storage.space
-            || parameter_storage.offset != register_storage.offset
-            || register_storage.size > parameter_storage.size
-        {
-            return false;
-        }
-        let mut abi_slots = abi
-            .argument_registers()
-            .iter()
-            .filter(|slot| slot.index() == parameter.index());
-        abi_slots
-            .next()
-            .is_some_and(|slot| slot.storage() == parameter_storage)
-            && abi_slots.next().is_none()
-    });
-    let parameter = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    usize::try_from(parameter.index()).ok()
 }
 
 /// Why finalization refused, and the facts it was handed, which the refusal carries.
@@ -490,10 +295,8 @@ impl TypeAnalysisRequest {
 }
 
 struct DerivedTypeAnalysis {
-    signature: InferredSignature,
     function_facts: FunctionFacts,
     type_facts: FunctionTypeFacts,
-    plan: TypePlan,
 }
 
 struct DerivedTypeAnalysisInput<'a> {
@@ -1172,33 +975,13 @@ fn build_type_analysis_inner(
         diagnostics: diagnostics.solver_warnings.clone(),
     })
     .build();
-    let global_type_links = score_global_type_links(
-        input.ssa_blocks,
-        &struct_decls,
-        &var_type_candidates,
-        input.ptr_bits,
-        &input.parsed_context.program_extents,
-    );
-
-    let plan = TypePlan {
-        ptr_bits: input.ptr_bits,
-        signature: input.inferred_signature.clone(),
-        var_type_candidates,
-        var_rename_candidates,
-        struct_decls: struct_decls.clone(),
-        global_type_links,
-        diagnostics: diagnostics.clone(),
-    };
-
     DerivedTypeAnalysis {
-        signature: input.inferred_signature,
         function_facts: FunctionFacts::new(type_facts.clone())
             .with_assumptions(input.parsed_context.assumptions.clone())
             .with_summary_view(summary_view)
             .with_diagnostics(type_facts.diagnostics.clone())
             .with_assumption_usage(type_assumption_usage),
         type_facts,
-        plan,
     }
 }
 
@@ -1381,9 +1164,6 @@ pub fn build_source_owned_type_analysis(
     if let Some(interproc_summary) = interproc_summary {
         function_facts = function_facts.with_prepared_interproc_summary(interproc_summary);
     }
-    if derived.signature != derived.plan.signature {
-        return Err(TypeAnalysisError::DerivedSignatureMismatch);
-    }
     if derived.type_facts != *function_facts.type_facts() {
         return Err(TypeAnalysisError::DerivedTypeFactsMismatch);
     }
@@ -1401,19 +1181,16 @@ pub fn build_source_owned_type_analysis(
     if crate::prepare::prepared_arch_display_name(source.as_ref()).is_none() {
         return Err(TypeAnalysisError::SourceEnrichmentFailed);
     }
-    let (function_facts, changed_parameters, return_type_changed) =
-        SourceOwnedFunctionFacts::enrich_report_from_source_with_callee_signatures(
-            source.as_ref(),
-            function_facts,
-            &callee_signatures,
-        );
-    let mut analysis = TypeAnalysis {
+    let function_facts = SourceOwnedFunctionFacts::enrich_report_from_source_with_callee_signatures(
+        source.as_ref(),
+        function_facts,
+        &callee_signatures,
+    );
+    let analysis = TypeAnalysis {
         source,
         function_facts,
-        plan: derived.plan,
         callee_signatures,
     };
-    analysis.refresh_plan_after_enrichment(&changed_parameters, return_type_changed);
     Ok(analysis)
 }
 

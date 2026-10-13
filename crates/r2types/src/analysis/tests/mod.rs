@@ -10,6 +10,43 @@ use r2ssa::PhiNode;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The signature the facts carry, spelled: what a test reads where the plan's string copy once stood.
+pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSignature {
+    let Some(signature) = analysis.type_facts.merged_signature.as_ref() else {
+        return InferredSignature {
+            function_name: String::new(),
+            signature: String::new(),
+            ret_type: "void".to_string(),
+            params: Vec::new(),
+            callconv: String::new(),
+            arch: String::new(),
+        };
+    };
+    let spelled = |ty: &CTypeLike| crate::render_signature_type(ty, 64);
+    InferredSignature {
+        function_name: String::new(),
+        signature: String::new(),
+        ret_type: signature
+            .ret_type
+            .as_ref()
+            .map_or_else(|| "void".to_string(), spelled),
+        params: (signature.params.iter().enumerate())
+            .map(|(index, param)| InferredSignatureParam {
+                name: match param.name.trim().is_empty() {
+                    true => format!("arg{}", index + 1),
+                    false => param.name.clone(),
+                },
+                param_type: param
+                    .ty
+                    .as_ref()
+                    .map_or_else(|| "void *".to_string(), spelled),
+            })
+            .collect(),
+        callconv: String::new(),
+        arch: String::new(),
+    }
+}
+
 /// The operation a fixture names by its block and its place in the block.
 /// System V's integer argument registers, in order, as a prepared machine spells them.
 pub(super) fn system_v_argument_registers() -> Vec<String> {
