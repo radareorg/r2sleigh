@@ -8,7 +8,7 @@ use crate::machine::Machine;
 use super::{ProgramInputs, Source, View};
 use crate::discovery::{Return, Transfers, Walker};
 use crate::native::{NativeRefusal, NativeTarget};
-use crate::query::db::{Db, Query};
+use crate::query::db::{Db, Query, Retention};
 
 /// One body being walked, and whether it is walked as Thumb.
 pub(super) struct BodyWalk {
@@ -221,6 +221,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComesBack {
     type Key = u64;
     type Value = Return;
     const NAME: &'static str = "comes-back";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Return {
         let Ok(walker) = Walking::new(View::new(db, true), false) else {

@@ -11,7 +11,7 @@ use super::{OpenProgram, ProgramInputs, Source, SymbolKind, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
-use crate::query::db::{Db, Query};
+use crate::query::db::{Db, Query, Retention};
 use crate::query::references::Indexing;
 use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
@@ -673,6 +673,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ReferenceIndex {
     type Key = ();
     type Value = Result<super::analysis::Shared<References>, String>;
     const NAME: &'static str = "reference-index";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         indexed(&View::new(db, true)).map(|index| super::analysis::Shared(Arc::new(index)))
@@ -773,6 +774,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
     type Key = ();
     type Value = Result<Surveyed, String>;
     const NAME: &'static str = "survey";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         // Discovery decides each body's instruction set itself, so it reads no modes.
@@ -839,6 +841,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
     type Key = ();
     type Value = BTreeMap<u64, bool>;
     const NAME: &'static str = "modes";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         if db

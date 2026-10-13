@@ -35,7 +35,7 @@ use std::rc::Rc;
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
 use crate::query::Decoders;
-use crate::query::db::{Db, Inputs, Query};
+use crate::query::db::{Db, Inputs, Query, Retention};
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
@@ -751,6 +751,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Imports {
     type Key = ();
     type Value = naming::Linkage;
     const NAME: &'static str = "imports";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         // A stub is named by decoding it, so without a decoder there is none.
@@ -769,6 +770,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Names {
     type Key = ();
     type Value = NameDb;
     const NAME: &'static str = "names";
+    const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         let source = Recorded { db };

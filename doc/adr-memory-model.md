@@ -68,10 +68,13 @@ stays alive until the response is built.
    returns, the survey: `Retention::Held`, O(program) in all); a function's
    walk, analysis, sealing and rendering are held only while they are the
    newest (`Retention::Newest`), and asked again they are computed again,
-   whose cost is the algorithm's to lower. A dropped answer takes its key and
-   dependencies with it, and no query is held unless it states so
-   (2026-10-13, approved). Then `R` is the program-wide facts and the last
-   function's answers, whatever the session's length.
+   whose cost is the algorithm's to lower. Every query states its retention.
+   A dropped answer keeps its revisions and dependencies only where a held
+   answer read it (a callee's walk, which its summary reads), so that answer
+   still validates after a write; otherwise its entry goes. That metadata is
+   O(functions asked), and dropping costs O(log n) per compute (2026-10-13).
+   Then `R` is the program-wide facts and the last function's answers,
+   whatever the session's length.
 3. **The allocator returns phase garbage at phase boundaries**: one forced
    collect after the analysis and after the render, measured on the four
    large functions, before any change of purge delay (D26).
