@@ -1357,7 +1357,17 @@ impl SolvedFunction {
         signatures: &BTreeMap<r2ssa::CallSiteId, crate::FunctionType>,
         ptr_bits: u32,
     ) -> Self {
-        let signedness = crate::signedness::scalar_signedness_of(source, false, std::iter::empty());
+        let signedness = if std::env::var_os("T5_S2").is_some() {
+            let params =
+                crate::prepare::recover_signature_params_from_prepared_ssa(source, ptr_bits);
+            crate::signedness::scalar_signedness_of(
+                source,
+                true,
+                crate::signature_infer::signedness_aliases(source, &params),
+            )
+        } else {
+            crate::signedness::scalar_signedness_of(source, false, std::iter::empty())
+        };
         let evidence =
             crate::evidence::solve_evidence_types(source, signatures, &signedness, ptr_bits);
         let returns = ReturnTypeFact::decide(source, signatures, &evidence);

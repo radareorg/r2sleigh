@@ -295,7 +295,7 @@ fn refine_parameter_signedness(
 /// The same-width aliases parameter signedness flows through beside the
 /// merges: a certified reload and the value it reloads, and a parameter's
 /// home and its reload.
-fn signedness_aliases(
+pub(crate) fn signedness_aliases(
     prepared: &SsaArtifact,
     recovered_params: &[RecoveredSignatureParam],
 ) -> Vec<(r2ssa::ValueId, r2ssa::ValueId)> {
