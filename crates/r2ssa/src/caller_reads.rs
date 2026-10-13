@@ -4,9 +4,10 @@
 use r2il::{R2ILBlock, R2ILOp, Varnode};
 use r2source::{CanonicalStorageId, SourceFloatReadWidth, SourceResultReads};
 
-/// The reads after the call at `index`: a result register read before a write, a transfer or the
-/// block's end; none where the call's own instruction may skip it. The second integer register's
-/// read is counted apart and closes nothing the others decide.
+/// The reads after the call at `index`: a result register's byte read before a write, a transfer or
+/// the block's end; none where the call's own instruction may skip it. A register is overwritten
+/// where writes cover every byte of it before any is read. The second integer register's read is
+/// counted apart and closes nothing the others decide.
 pub fn reads_after_call(
     block: &R2ILBlock,
     index: usize,
@@ -21,12 +22,11 @@ pub fn reads_after_call(
     if predicated(block, index) {
         return reads;
     }
-    let mut open = Open {
-        integer,
-        float,
-        partial: false,
-    };
-    let mut second = second;
+    let (mut integer, mut float, mut second) = (
+        integer.map(Lane::new),
+        float.map(Lane::new),
+        second.map(Lane::new),
+    );
     for op in block.ops.iter().skip(index + 1) {
         if op.is_control_flow() {
             break;
@@ -37,61 +37,87 @@ pub fn reads_after_call(
             op => op.inputs(),
         };
         for input in &inputs {
-            if second.is_some_and(|slot| overlaps(input, slot)) {
+            if second.as_ref().is_some_and(|lane| lane.reads(input)) {
                 reads.second = 1;
                 second = None;
             }
-        }
-        for input in inputs {
-            open.read(input, &mut reads);
+            if integer.as_ref().is_some_and(|lane| lane.reads(input)) {
+                reads.integer = 1;
+                integer = None;
+            }
+            if let Some(lane) = float.as_ref().filter(|lane| lane.reads(input)) {
+                reads.float = 1;
+                // A read wider than the result lane (a whole-register move) says nothing of the width.
+                if input.size <= lane.slot.size {
+                    reads.float_width = SourceFloatReadWidth::Bytes(input.size);
+                }
+                float = None;
+            }
         }
         if let Some(output) = op.output() {
-            open.write(output);
-            if second.is_some_and(|slot| overlaps(output, slot)) {
+            if integer.as_mut().is_some_and(|lane| lane.write(output)) {
+                reads.integer_overwritten = 1;
+                integer = None;
+            }
+            if float.as_mut().is_some_and(|lane| lane.write(output)) {
+                reads.float_overwritten = 1;
+                float = None;
+            }
+            if second.as_mut().is_some_and(|lane| lane.write(output)) {
                 second = None;
             }
         }
-        if open.integer.is_none() && open.float.is_none() && second.is_none() {
+        if integer.is_none() && float.is_none() && second.is_none() {
             break;
         }
     }
-    let closed = open.integer.is_none() && open.float.is_none() && !open.partial;
-    reads.overwritten = u32::from(closed && reads.integer == 0 && reads.float == 0);
     reads
 }
 
-/// The result registers no write has covered since the call.
-struct Open {
-    integer: Option<CanonicalStorageId>,
-    float: Option<CanonicalStorageId>,
-    /// Whether a write closed one without covering it, so its other bytes may still be read.
-    partial: bool,
+/// The bytes of one result register that still hold what the call left there, one bit each.
+struct Lane {
+    slot: CanonicalStorageId,
+    open: u128,
 }
 
-impl Open {
-    fn read(&mut self, input: &Varnode, reads: &mut SourceResultReads) {
-        if self.integer.is_some_and(|slot| overlaps(input, slot)) {
-            reads.integer = 1;
-            self.integer = None;
+impl Lane {
+    fn new(slot: CanonicalStorageId) -> Self {
+        Self {
+            slot,
+            open: Self::span(0, u64::from(slot.size)),
         }
-        let Some(slot) = self.float.filter(|slot| overlaps(input, *slot)) else {
-            return;
-        };
-        reads.float = 1;
-        // A read wider than the result lane (a whole-register move) says nothing of the width.
-        if input.size <= slot.size {
-            reads.float_width = SourceFloatReadWidth::Bytes(input.size);
-        }
-        self.float = None;
     }
 
-    fn write(&mut self, output: &Varnode) {
-        for open in [&mut self.integer, &mut self.float] {
-            if let Some(slot) = open.filter(|slot| overlaps(output, *slot)) {
-                self.partial |= !covers(output, slot);
-                *open = None;
-            }
+    /// Bits `from..to`; a register past 128 bytes keeps its last bit open for the rest.
+    fn span(from: u64, to: u64) -> u128 {
+        let (from, to) = (from.min(127), to.min(128));
+        (from..to).fold(0, |mask, byte| mask | 1 << byte)
+    }
+
+    /// The bytes of this register `varnode` touches.
+    fn bytes(&self, varnode: &Varnode) -> u128 {
+        let storage = CanonicalStorageId::from_varnode(varnode);
+        if storage.space != self.slot.space {
+            return 0;
         }
+        let start = self.slot.offset;
+        let end = start.saturating_add(u64::from(self.slot.size));
+        let from = storage.offset.max(start);
+        let to = (storage.offset.saturating_add(u64::from(storage.size))).min(end);
+        match from < to {
+            true => Self::span(from - start, to - start),
+            false => 0,
+        }
+    }
+
+    fn reads(&self, input: &Varnode) -> bool {
+        self.bytes(input) & self.open != 0
+    }
+
+    /// Clear the bytes `output` writes; whether none is left.
+    fn write(&mut self, output: &Varnode) -> bool {
+        self.open &= !self.bytes(output);
+        self.open == 0
     }
 }
 
@@ -106,22 +132,6 @@ fn predicated(block: &R2ILBlock, index: usize) -> bool {
         .rev()
         .take_while(|at| instruction(*at) == Some(call))
         .any(|at| block.ops[at].is_control_flow())
-}
-
-fn overlaps(varnode: &Varnode, slot: CanonicalStorageId) -> bool {
-    let storage = CanonicalStorageId::from_varnode(varnode);
-    storage.space == slot.space
-        && storage.offset < slot.offset.saturating_add(u64::from(slot.size))
-        && slot.offset < storage.offset.saturating_add(u64::from(storage.size))
-}
-
-/// Whether `output` writes every byte of `slot`.
-fn covers(output: &Varnode, slot: CanonicalStorageId) -> bool {
-    let storage = CanonicalStorageId::from_varnode(output);
-    storage.space == slot.space
-        && storage.offset <= slot.offset
-        && storage.offset.saturating_add(u64::from(storage.size))
-            >= slot.offset.saturating_add(u64::from(slot.size))
 }
 
 #[cfg(test)]
@@ -176,7 +186,8 @@ mod tests {
                 float: 0,
                 float_width: SourceFloatReadWidth::Unstated,
                 second: 0,
-                overwritten: 0,
+                integer_overwritten: 0,
+                float_overwritten: 0,
                 calls: 1,
                 exhaustive: false,
             }
@@ -234,6 +245,33 @@ mod tests {
         );
     }
 
+    /// x86-64's `xor eax, eax` lifts to `EAX = EAX ^ EAX; RAX = zext(EAX)`: the extension reads only
+    /// bytes the xor wrote, then covers RAX, so the call's RAX is overwritten unread.
+    #[test]
+    fn a_write_extended_over_the_register_overwrites_it() {
+        let ops = vec![
+            call(),
+            R2ILOp::IntXor {
+                dst: Varnode::register(0, 4),
+                a: Varnode::register(0, 4),
+                b: Varnode::register(0, 4),
+            },
+            R2ILOp::IntZExt {
+                dst: Varnode::register(0, 8),
+                src: Varnode::register(0, 4),
+            },
+        ];
+        let reads = reads_after_call(&block(ops), 0, Some(RAX), Some(XMM0), None);
+        assert_eq!(
+            (
+                reads.integer,
+                reads.integer_overwritten,
+                reads.float_overwritten
+            ),
+            (0, 1, 0)
+        );
+    }
+
     /// `call f; xor eax, eax; movsd [rsi], xmm0`: EAX is written before any read, XMM0 is read as a double.
     #[test]
     fn a_write_before_any_read_is_no_evidence() {
@@ -256,26 +294,35 @@ mod tests {
                 float: 1,
                 float_width: SourceFloatReadWidth::Bytes(8),
                 second: 0,
-                overwritten: 0,
+                integer_overwritten: 0,
+                float_overwritten: 0,
                 calls: 1,
                 exhaustive: false,
             }
         );
     }
 
-    /// `call f; mov rax, 0; mov xmm0, 0`: every result register is written before any read, which
-    /// proves the result unread; writing only `al` would leave the rest of RAX to read later.
+    /// `call f; mov rax, 0; mov xmm0, 0`: each result register is written before any read, which
+    /// proves it unread; writing only `al` leaves the rest of RAX to read later.
     #[test]
     fn writes_covering_every_result_register_prove_it_unread() {
         let write = |offset, size| R2ILOp::Copy {
             dst: Varnode::register(offset, size),
             src: Varnode::constant(0, size),
         };
+        let counts = |reads: SourceResultReads| {
+            (
+                reads.integer,
+                reads.float,
+                reads.integer_overwritten,
+                reads.float_overwritten,
+            )
+        };
         let covered = vec![call(), write(0, 8), write(0x1200, 8)];
         let reads = reads_after_call(&block(covered), 0, Some(RAX), Some(XMM0), None);
-        assert_eq!((reads.integer, reads.float, reads.overwritten), (0, 0, 1));
+        assert_eq!(counts(reads), (0, 0, 1, 1));
         let partial = vec![call(), write(0, 1), write(0x1200, 8)];
         let reads = reads_after_call(&block(partial), 0, Some(RAX), Some(XMM0), None);
-        assert_eq!((reads.integer, reads.float, reads.overwritten), (0, 0, 0));
+        assert_eq!(counts(reads), (0, 0, 0, 1));
     }
 }

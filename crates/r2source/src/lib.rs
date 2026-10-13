@@ -97,8 +97,11 @@ pub struct SourceResultReads {
     pub float: u32,
     /// The width those float reads take.
     pub float_width: SourceFloatReadWidth,
-    /// Calls whose every result register is written before any read, in the call's own block.
-    pub overwritten: u32,
+    /// Calls that write every byte of the integer result register before reading any, in the call's
+    /// own block.
+    pub integer_overwritten: u32,
+    /// Calls that write every byte of the float result register before reading any, likewise.
+    pub float_overwritten: u32,
     /// Calls whose first touch of the second integer result register after the call is a read.
     pub second: u32,
     /// Calls read.
@@ -116,26 +119,32 @@ impl SourceResultReads {
             integer: self.integer.saturating_add(other.integer),
             float: self.float.saturating_add(other.float),
             float_width: self.float_width.and(other.float_width),
-            overwritten: self.overwritten.saturating_add(other.overwritten),
+            integer_overwritten: (self.integer_overwritten)
+                .saturating_add(other.integer_overwritten),
+            float_overwritten: self
+                .float_overwritten
+                .saturating_add(other.float_overwritten),
             second: self.second.saturating_add(other.second),
             calls: self.calls.saturating_add(other.calls),
             exhaustive: self.exhaustive && other.exhaustive,
         }
     }
 
-    /// Whether every call writes each result register before reading any.
-    pub const fn all_overwrite(&self) -> bool {
+    /// Whether no call reads a result register and every call writes the integer one before reading
+    /// it, and the float one too where `float`.
+    pub const fn all_overwrite(&self, float: bool) -> bool {
         self.calls > 0
-            && self.overwritten == self.calls
             && self.integer == 0
             && self.float == 0
             && self.second == 0
+            && self.integer_overwritten == self.calls
+            && (!float || self.float_overwritten == self.calls)
     }
 
     /// Whether, besides, these calls are every way in: under a closed world, the program reads no
     /// result of the function.
-    pub const fn none_read(&self) -> bool {
-        self.exhaustive && self.all_overwrite()
+    pub const fn none_read(&self, float: bool) -> bool {
+        self.exhaustive && self.all_overwrite(float)
     }
 }
 
