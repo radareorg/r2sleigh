@@ -83,7 +83,7 @@ def functions(r2s, binary, timeout):
 
 
 def native_render(r2s, binary, address, timeout):
-    script = f"s {address:#x}; pdd"
+    script = f"aa; s {address:#x}; pdd"
     text, error = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
     return text, error
 

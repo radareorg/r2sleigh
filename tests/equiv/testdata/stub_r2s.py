@@ -165,6 +165,8 @@ class Shell:
             print(statement[3:], flush=True)
         elif statement.startswith("s "):
             self.address = int(statement[2:], 0)
+        elif statement == "aa":
+            pass
         elif statement == "afl":
             # radare2's headerless layout: addr nbbs size name.
             for item in filter(None, os.environ.get("STUB_R2S_AFL", "").split(",")):

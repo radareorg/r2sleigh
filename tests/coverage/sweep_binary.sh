@@ -40,7 +40,8 @@ trap 'rm -f "$functions"' EXIT
 { "$r2s_bin" -q -c 'afl' "$binary" 2>/dev/null || true; } \
     | awk '$1 ~ /^0x/ { print $1, ($NF == "-" ? $1 : $NF) }' > "$functions"
 
-command_text=""
+# `aa` first: each rendering reads its callers, as an analysed session's does.
+command_text="aa; "
 while read -r addr name; do
     # The marker is text: every character the shell's line reads as an
     # operator (SPECIAL in crates/r2s/src/line.rs) is escaped, so a name such

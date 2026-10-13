@@ -20,13 +20,17 @@ const READ_AS_INTEGER: &[u8] = &[
     0xcc, // 1018 padding
 ];
 
+/// `f` rendered after `aa`, which reads its callers.
 fn rendered(program: Literal) -> String {
-    OpenProgram::of(program)
-        .rendered(BASE)
-        .expect("it renders")
-        .response
-        .output
-        .into_text()
+    let mut open = OpenProgram::of(program);
+    open.analyse_program().expect("it surveys");
+    fresh(open)
+}
+
+/// `f` rendered from its own body and callees: a fresh open, or one before `aa`.
+fn fresh(mut open: OpenProgram<Literal>) -> String {
+    let rendering = open.rendered(BASE).expect("it renders");
+    rendering.response.output.into_text()
 }
 
 #[test]
@@ -41,6 +45,26 @@ fn a_caller_reading_the_integer_register_decides_the_result() {
     assert!(text.starts_with("uint64_t f("), "{text}");
     assert!(text.contains("7"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// Before `aa`, the calls are not read: a fresh open renders the body alone, whose result stays
+/// open, and `aa` decides it in the same session.
+#[test]
+fn before_aa_a_function_reads_no_callers() {
+    let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x08)];
+    let mut open = OpenProgram::of(Literal::of_code(READ_AS_INTEGER, &functions));
+    let before = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(before.contains("return r2sleigh_residual_"), "{before}");
+    open.analyse_program().expect("it surveys");
+    assert_eq!(
+        rendered(Literal::of_code(READ_AS_INTEGER, &functions)),
+        fresh(open)
+    );
 }
 
 /// The same body with no call to it: nothing says which register is its result.

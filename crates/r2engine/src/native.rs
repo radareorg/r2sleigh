@@ -352,17 +352,19 @@ pub fn analysed(
     program: &dyn Program,
     entry: u64,
 ) -> Result<Prepared, NativeRefusal> {
-    analyse(target, program, entry, &walk(target, program, entry)?)
+    let walk = walk(target, program, entry)?;
+    analyse(target, program, entry, &walk, crate::program::Callers::Read)
 }
 
-/// Prepare one function from its walk; the query `Analysed` reads the walk from `Walked`.
+/// Prepare one function from its walk, reading its callers where `callers` says; the query
+/// `Analysed` reads the walk from `Walked`.
 pub(crate) fn analysed_from(
     target: &NativeTarget<'_>,
     program: &dyn Program,
-    entry: u64,
-    walk: &Walk,
+    (entry, walk): (u64, &Walk),
+    callers: crate::program::Callers,
 ) -> Result<Prepared, NativeRefusal> {
-    analyse(target, program, entry, walk)
+    analyse(target, program, entry, walk, callers)
 }
 
 /// What a prepared function keeps of its walk once preparation has read the lift: each block's
@@ -1025,6 +1027,7 @@ fn analyse(
     program: &dyn Program,
     entry: u64,
     walk: &Walk,
+    callers: crate::program::Callers,
 ) -> Result<Prepared, NativeRefusal> {
     // A convention whose boundaries carry what none states refuses before anything is read.
     if let Some(reason) = target.convention.refused {
@@ -1046,7 +1049,8 @@ fn analyse(
         unread,
     } = read_callees(&native, target, &walk.root, entry, ptr_bits);
 
-    let (artifact, _) = native.resolve(entry, walk, &callees, true)?;
+    let reads = callers == crate::program::Callers::Read;
+    let (artifact, _) = native.resolve(entry, walk, &callees, reads)?;
     let tables = walk.tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,

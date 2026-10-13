@@ -23,7 +23,11 @@ impl<T> PartialEq for Shared<T> {
     }
 }
 
-/// One function's walk and preparation, by its entry and whether it is Thumb; the most recent only.
+/// One function's analysis, sealing and rendering: its entry, whether it is Thumb, and whether
+/// it reads its callers.
+pub(super) type Key = (u64, bool, super::Callers);
+
+/// One function's walk and preparation, by its key; the most recent only.
 pub(super) struct Analysed;
 
 /// An analysis, or why there is none; a refusal is never equal to another, so it is never backdated.
@@ -37,14 +41,14 @@ impl PartialEq for Analysis {
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
-    type Key = (u64, bool);
+    type Key = Key;
     type Value = Analysis;
     const NAME: &'static str = "analysed";
     /// The function's analysis while its request reads it; asked again, it is computed again
     /// (doc/adr-memory-model.md, "Retention").
     const RETENTION: Retention = Retention::Newest;
 
-    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Analysis {
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb, callers): &Key) -> Analysis {
         let view = View::new(db, true);
         let target = view
             .machine_in(thumb)
@@ -61,7 +65,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
             Err(refusal) => return Analysis(Err(refusal.clone())),
         };
         let analysed = crate::isolation::isolated(|| {
-            crate::native::analysed_from(&target, &view, entry, walk)
+            crate::native::analysed_from(&target, &view, (entry, walk), callers)
         });
         Analysis(
             analysed
@@ -191,13 +195,13 @@ impl PartialEq for Sealing {
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
-    type Key = (u64, bool);
+    type Key = Key;
     type Value = Sealing;
     const NAME: &'static str = "sealed";
     /// The sealing while its request reads it, as the analysis it seals.
     const RETENTION: Retention = Retention::Newest;
 
-    fn compute(db: &Db<ProgramInputs<S>>, key: &(u64, bool)) -> Sealing {
+    fn compute(db: &Db<ProgramInputs<S>>, key: &Key) -> Sealing {
         let analysis = db
             .get::<Analysed>(key)
             .expect("an analysis asks for no sealing");
@@ -258,15 +262,16 @@ impl PartialEq for Render {
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
-    type Key = (u64, bool);
+    type Key = Key;
     type Value = Render;
     const NAME: &'static str = "rendered";
     /// The newest rendering, which a redraw reads; another function's is drawn again.
     const RETENTION: Retention = Retention::Newest;
 
-    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Render {
+    fn compute(db: &Db<ProgramInputs<S>>, key: &Key) -> Render {
+        let entry = key.0;
         let analysis = db
-            .get::<Analysed>(&(entry, thumb))
+            .get::<Analysed>(key)
             .expect("an analysis asks for no rendering");
         let prepared = match &analysis.0 {
             Ok(prepared) => prepared,
@@ -276,7 +281,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
         let definition = r2dec::rendered_name_of(function.name.as_deref(), entry);
         let unread = prepared.unread().to_vec();
         let sealing = db
-            .get::<Sealed>(&(entry, thumb))
+            .get::<Sealed>(key)
             .expect("a sealing asks for no rendering");
         let control = db.inputs().control.clone();
         let response = match &*sealing {

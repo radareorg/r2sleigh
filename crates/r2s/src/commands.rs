@@ -262,6 +262,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(decompile_json)
     ),
     verb!(
+        ["aa"],
+        None,
+        Public,
+        "analyse every function: each rendering then reads its callers too",
+        Some(|session, _| session.program.analyse_program().map(|()| String::new()))
+    ),
+    verb!(
         ["afl"],
         None,
         Public,
