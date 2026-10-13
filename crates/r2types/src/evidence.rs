@@ -20,8 +20,9 @@ use crate::convert::{CTypeLike, to_c_type_like};
 use crate::facts::FunctionType;
 use crate::model::{Signedness, Type, TypeArena, TypeId};
 
-use crate::signedness::{ScalarSignednessEvidence, scalar_signedness_of};
+use crate::signedness::ScalarSignednessEvidence;
 use crate::solver::IncrementalSolver;
+use r2ssa::dense::IdMap;
 
 /// A node of the recovered type graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,11 +72,12 @@ impl EvidenceTypes {
 pub fn solve_evidence_types(
     source: &r2ssa::SsaArtifact,
     callsite_signatures: &BTreeMap<r2ssa::CallSiteId, FunctionType>,
+    signedness: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
     ptr_bits: u32,
 ) -> EvidenceTypes {
     let mut builder = EvidenceBuilder::new(source, ptr_bits);
     builder.gather_ssa_identities();
-    builder.gather_scalar_signedness();
+    builder.gather_scalar_signedness(signedness);
     builder.gather_callee_prototypes(callsite_signatures);
     builder.gather_memory_widths();
     builder.gather_allocation_element_widths(callsite_signatures);
@@ -208,8 +210,10 @@ impl<'a> EvidenceBuilder<'a> {
     /// either side reaches the same solver class without a second alias model.
     /// Conflicting signed and unsigned uses are both asserted: their meet is
     /// `Bottom`, and readback refuses only that value.
-    fn gather_scalar_signedness(&mut self) {
-        let inferred = scalar_signedness_of(self.source, false, std::iter::empty());
+    fn gather_scalar_signedness(
+        &mut self,
+        inferred: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
+    ) {
         for (value, evidence) in inferred {
             let Some(var) = self.source.graph().value(value).map(|value| &value.var) else {
                 continue;
@@ -1005,7 +1009,8 @@ mod tests {
             .expect("certified load")
             .address;
 
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         let expected = CTypeLike::Pointer(Box::new(CTypeLike::Int {
             bits: 32,
             signedness: Signedness::Unknown,
@@ -1081,7 +1086,8 @@ mod tests {
             Some(0)
         );
 
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         let expected = CTypeLike::Pointer(Box::new(CTypeLike::Int {
             bits: 32,
             signedness: Signedness::Unknown,
@@ -1191,7 +1197,8 @@ mod tests {
             "the merge is read only by an increment nothing observes"
         );
         let index = source.facts().boundaries.parameters[&1].value;
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         assert!(
             !matches!(solved.value_type(index), Some(CTypeLike::Pointer(_))),
             "{:?}",
@@ -1255,7 +1262,8 @@ mod tests {
         let signed = source.facts().boundaries.parameters[&0].value;
         let untouched = source.facts().boundaries.parameters[&1].value;
 
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         assert_eq!(
             solved.value_type(signed),
             Some(&CTypeLike::Int {
@@ -1287,7 +1295,8 @@ mod tests {
             merged_signature: Some(signature),
             ..crate::FunctionTypeFacts::default()
         });
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         facts.apply_recovered_evidence_types(&source, &solved, 64);
         let written = facts
             .type_facts()
@@ -1364,7 +1373,8 @@ mod tests {
         )
         .expect("prepared source");
         let parameter = source.facts().boundaries.parameters[&0].value;
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         let unsigned = CTypeLike::Int {
             bits: 64,
             signedness: Signedness::Unsigned,
@@ -1396,7 +1406,8 @@ mod tests {
             merged_signature: Some(signature),
             ..crate::FunctionTypeFacts::default()
         });
-        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        let solved =
+            crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         facts.apply_recovered_evidence_types(&source, &solved, 64);
 
         let type_facts = facts.type_facts();

@@ -17,9 +17,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use r2ssa::{
-    FunctionSemanticSummary, InterprocSummarySet, SSABlock, SSAOp, SSAVar, SsaArtifact,
-    SummaryArgEffect, SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion,
-    SummaryReturnRelation,
+    FunctionSemanticSummary, InterprocSummarySet, SSAOp, SsaArtifact, SummaryArgEffect,
+    SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
 };
 
 use crate::context::{
@@ -47,6 +46,7 @@ use crate::function_facts::{
 };
 use crate::model::Signedness;
 use crate::signedness::ScalarSignednessEvidence;
+use r2ssa::dense::IdMap;
 
 #[derive(Debug)]
 pub struct TypeAnalysis {
@@ -303,10 +303,6 @@ struct DerivedTypeAnalysisInput<'a> {
     ptr_bits: u32,
     inferred_signature: InferredSignature,
     recovered_vars: &'a [RecoveredVariable],
-    ssa_blocks: &'a [SSABlock],
-    /// Which operations, by id, are zero extensions the architecture
-    /// performs (r2ssa's `Written::is_conventional_extension`).
-    conventional_extension: &'a dyn Fn(r2ssa::OpId) -> bool,
     parsed_context: ParsedExternalContext,
     local_structs: LocalStructArtifacts,
     interproc_summary_set: Option<InterprocSummarySet>,
@@ -655,16 +651,10 @@ fn merged_context_and_summary_callee_facts(
     facts
 }
 
-/// Where in the frame a variable of the analysed blocks points, as the prep
-/// facts prove it. The type analysis still reads its blocks by name; this
-/// is the one question it asks of the prep facts, which are keyed by the
-/// sealed graph's values (doc/adr-one-ir.md, F2.3 stage 5).
-pub(crate) type FrameRoots<'a> = &'a dyn Fn(&SSAVar) -> Option<r2ssa::StackAddressRoot>;
-
 fn build_type_analysis_inner(
     mut input: DerivedTypeAnalysisInput<'_>,
     semantic_inputs: Option<DerivedTypeAnalysisSemanticInputs<'_>>,
-    prep_facts: Option<FrameRoots<'_>>,
+    stack: &StackAccesses,
     registers: &crate::RegisterIdentity,
     callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> DerivedTypeAnalysis {
@@ -877,12 +867,6 @@ fn build_type_analysis_inner(
         input.ptr_bits,
         &type_db,
     );
-    let stack_access_widths = canonical_stack_access_widths(input.ssa_blocks, prep_facts);
-    let stack_access_signedness = canonical_stack_access_signedness(
-        input.ssa_blocks,
-        prep_facts,
-        input.conventional_extension,
-    );
     let is_main_signature = merged_signature
         .as_ref()
         .is_some_and(is_canonical_main_signature_spec);
@@ -890,8 +874,8 @@ fn build_type_analysis_inner(
         current_context_maps: &current_context_maps,
         merged_signature: merged_signature.as_ref(),
         slot_type_overrides: &local_structs.slot_type_overrides,
-        stack_access_widths: &stack_access_widths,
-        stack_access_signedness: &stack_access_signedness,
+        stack_access_widths: &stack.widths,
+        stack_access_signedness: &stack.signedness,
         ptr_bits: input.ptr_bits,
         is_main_signature,
     };
@@ -998,19 +982,14 @@ fn x86_64_register_identity() -> crate::RegisterIdentity {
 
 #[cfg(test)]
 fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalysis {
-    let callee_facts = merged_context_and_summary_callee_facts(
-        &input.parsed_context.callee_facts,
-        input.interproc_summary_set.as_ref(),
-    );
-    build_type_analysis_inner(input, None, None, &x86_64_register_identity(), callee_facts)
+    build_type_analysis_with_stack_accesses(input, &StackAccesses::default())
 }
 
 #[cfg(test)]
-fn build_type_analysis_with_prep_facts(
+fn build_type_analysis_with_stack_accesses(
     input: DerivedTypeAnalysisInput<'_>,
-    frame_roots: &BTreeMap<SSAVar, r2ssa::StackAddressRoot>,
+    stack: &StackAccesses,
 ) -> DerivedTypeAnalysis {
-    let prep_facts = &|var: &SSAVar| frame_roots.get(var).copied();
     let callee_facts = merged_context_and_summary_callee_facts(
         &input.parsed_context.callee_facts,
         input.interproc_summary_set.as_ref(),
@@ -1018,7 +997,7 @@ fn build_type_analysis_with_prep_facts(
     build_type_analysis_inner(
         input,
         None,
-        Some(prep_facts),
+        stack,
         &x86_64_register_identity(),
         callee_facts,
     )
@@ -1062,8 +1041,6 @@ pub fn build_source_owned_type_analysis(
         .name
         .clone()
         .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
-    let named_blocks = source.graph().named_blocks();
-    let ssa_blocks = named_blocks.as_slice();
     let interproc_report = interproc_summary
         .as_ref()
         .map(|summary| summary.report().clone());
@@ -1095,15 +1072,11 @@ pub fn build_source_owned_type_analysis(
         })
         .collect();
     let local_field_accesses = local_field_accesses_named(&local_structs, &source_field_names);
-    let written = source.function().written();
-    let conventional_extension = |op| written.is_conventional_extension(op);
     let derived_input = DerivedTypeAnalysisInput {
         function_name: &function_name,
         ptr_bits,
         inferred_signature,
         recovered_vars: &recovered_vars,
-        ssa_blocks,
-        conventional_extension: &conventional_extension,
         parsed_context,
         local_structs,
         interproc_summary_set: interproc_report,
@@ -1112,17 +1085,11 @@ pub fn build_source_owned_type_analysis(
     let semantic_inputs = Some(DerivedTypeAnalysisSemanticInputs {
         local_field_accesses: &local_field_accesses,
     });
-    let frame_roots = |var: &SSAVar| {
-        source
-            .graph()
-            .value_id_for_var(var)
-            .and_then(|value| source.decompile_prep_facts().stack_address_root_of(value))
-            .copied()
-    };
+    let stack = StackAccesses::of(source.as_ref(), &solved.signedness);
     let derived = build_type_analysis_inner(
         derived_input,
         semantic_inputs,
-        Some(&frame_roots),
+        &stack,
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
         callee_facts,
     );
@@ -1655,76 +1622,50 @@ fn profile_minimum_stride(fields: &BTreeMap<u64, String>, ptr_bits: u32) -> Opti
         .max()
 }
 
-fn canonical_stack_access_widths(
-    ssa_blocks: &[SSABlock],
-    prep_facts: Option<FrameRoots<'_>>,
-) -> BTreeMap<StackSlotKey, BTreeSet<u32>> {
-    let Some(prep_facts) = prep_facts else {
-        return BTreeMap::new();
-    };
-    let mut widths = BTreeMap::<StackSlotKey, BTreeSet<u32>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
-        let (addr, size) = match op {
-            SSAOp::Load {
-                dst,
-                space: r2il::SpaceId::Ram,
-                addr,
-            } => (addr, dst.size),
-            SSAOp::Store {
-                space: r2il::SpaceId::Ram,
-                addr,
-                val,
-            } => (addr, val.size),
-            _ => continue,
-        };
-        if size == 0 {
-            continue;
-        }
-        let Some(root) = prep_facts(addr) else {
-            continue;
-        };
-        widths.entry(root).or_default().insert(size);
-    }
-    widths
+/// What the frame's stack slots are accessed as: every width, and the signedness each accessed
+/// value shows, over the graph's memory operations.
+#[derive(Debug, Default)]
+pub(crate) struct StackAccesses {
+    pub(crate) widths: BTreeMap<StackSlotKey, BTreeSet<u32>>,
+    pub(crate) signedness: BTreeMap<StackSlotKey, BTreeSet<ScalarSignednessEvidence>>,
 }
 
-fn canonical_stack_access_signedness(
-    ssa_blocks: &[SSABlock],
-    prep_facts: Option<FrameRoots<'_>>,
-    conventional_extension: &dyn Fn(r2ssa::OpId) -> bool,
-) -> BTreeMap<StackSlotKey, BTreeSet<ScalarSignednessEvidence>> {
-    let Some(prep_facts) = prep_facts else {
-        return BTreeMap::new();
-    };
-    let scalar_signedness =
-        crate::signedness::NamedSignedness::of(ssa_blocks, false, conventional_extension);
-    let mut signedness = BTreeMap::<StackSlotKey, BTreeSet<ScalarSignednessEvidence>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
-        let (addr, value) = match op {
-            SSAOp::Load {
-                dst,
-                space: r2il::SpaceId::Ram,
-                addr,
-            } => (addr, dst),
-            SSAOp::Store {
-                space: r2il::SpaceId::Ram,
-                addr,
-                val,
-            } => (addr, val),
-            _ => continue,
-        };
-        let Some(observed) = scalar_signedness.get(value) else {
-            continue;
-        };
-        let Some(root) = prep_facts(addr) else {
-            continue;
-        };
-        signedness
-            .entry(root)
-            .or_default()
-            .extend(observed.iter().copied());
+impl StackAccesses {
+    pub(crate) fn of(
+        source: &SsaArtifact,
+        signedness: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
+    ) -> Self {
+        let graph = source.graph();
+        let mut out = Self::default();
+        for inst in &graph.insts {
+            let (addr, value) = match &inst.payload {
+                r2ssa::InstPayload::Op(SSAOp::Load {
+                    dst,
+                    space: r2il::SpaceId::Ram,
+                    addr,
+                }) => (*addr, *dst),
+                r2ssa::InstPayload::Op(SSAOp::Store {
+                    space: r2il::SpaceId::Ram,
+                    addr,
+                    val,
+                }) => (*addr, *val),
+                _ => continue,
+            };
+            let Some(root) = source.decompile_prep_facts().stack_address_root_of(addr) else {
+                continue;
+            };
+            if let Some(size) = graph.value(value).map(|value| value.var.size)
+                && size != 0
+            {
+                out.widths.entry(*root).or_default().insert(size);
+            }
+            if let Some(observed) = signedness.get(value) {
+                let slot = out.signedness.entry(*root).or_default();
+                slot.extend(observed.iter().copied());
+            }
+        }
+        out
     }
-    signedness
 }
 
 fn is_canonical_main_signature_spec(signature: &FunctionSignatureSpec) -> bool {

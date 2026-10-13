@@ -218,57 +218,6 @@ pub(crate) fn scalar_signedness_of(
     })
 }
 
-/// Scalar signedness over named blocks, keyed back by name: the same
-/// evidence for the readers that still take named blocks (the local struct
-/// and stack slot analyses; doc/adr-one-ir.md, transitional until they read
-/// graph values). `conventional` says which operations, by id, are zero
-/// extensions the architecture performs.
-pub(crate) struct NamedSignedness {
-    table: r2ssa::ValueTable,
-    by_var: IdMap<r2ssa::VarId, BTreeSet<ScalarSignednessEvidence>>,
-}
-
-impl NamedSignedness {
-    pub(crate) fn of(
-        blocks: &[r2ssa::SSABlock],
-        merges: bool,
-        conventional: &dyn Fn(r2ssa::OpId) -> bool,
-    ) -> Self {
-        let mut table = r2ssa::ValueTable::default();
-        let operations = blocks
-            .iter()
-            .flat_map(|block| block.sited())
-            .map(|(id, op)| (op.map(&mut |var| table.intern(var)), conventional(id)))
-            .collect::<Vec<_>>();
-        let merge_links = blocks
-            .iter()
-            .filter(|_| merges)
-            .flat_map(|block| block.phis())
-            .flat_map(|phi| {
-                phi.sources
-                    .iter()
-                    .map(move |(_, source)| (source, &phi.dst))
-            })
-            .map(|(source, dst)| (table.intern(source), table.intern(dst)))
-            .collect::<Vec<_>>();
-        let by_var = infer_scalar_signedness(
-            operations
-                .iter()
-                .map(|(op, conventional)| (op, *conventional)),
-            merge_links,
-            |id| {
-                let var = table.var(id);
-                (var.size, var.is_const())
-            },
-        );
-        Self { table, by_var }
-    }
-
-    pub(crate) fn get(&self, var: &r2ssa::SSAVar) -> Option<&BTreeSet<ScalarSignednessEvidence>> {
-        self.by_var.get(self.table.id_of(var)?)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

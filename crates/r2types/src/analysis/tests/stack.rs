@@ -3,82 +3,86 @@
 use super::super::*;
 use super::*;
 
+/// A slot's widths and signedness are what the graph's RAM accesses through it show.
 #[test]
-fn stack_width_evidence_requires_exact_ram_space() {
-    let ram_addr = SSAVar::new("ram_addr", 1, 8);
-    let custom_addr = SSAVar::new("custom_addr", 1, 8);
-    let blocks = [SSABlock::from_parts(
-        0x1000,
-        8,
-        vec![
-            SSAOp::Load {
-                dst: SSAVar::new("ram_value", 1, 4),
-                space: r2il::SpaceId::Ram,
-                addr: ram_addr.clone(),
-            },
-            SSAOp::Load {
-                dst: SSAVar::new("custom_value", 1, 8),
-                space: r2il::SpaceId::Custom(7),
-                addr: custom_addr.clone(),
-            },
-        ],
-        Vec::new(),
-    )];
-    let ram_slot = StackSlotKey {
-        base: ExternalStackBase::StackPointer,
-        offset: -8,
+fn stack_accesses_read_the_graph_s_ram_accesses() {
+    let mut arch = r2il::ArchSpec::new("x86-64");
+    arch.add_register(r2il::RegisterDef::new("rdi", 0, 8));
+    arch.add_register(r2il::RegisterDef::new("rsp", 8, 8));
+    arch.add_register(r2il::RegisterDef::new("rip", 16, 8));
+    let register = |offset| r2ssa::CanonicalStorageId {
+        space: r2ssa::CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
     };
-    let custom_slot = StackSlotKey {
-        base: ExternalStackBase::StackPointer,
-        offset: -16,
-    };
-    let prep_facts = [
-        (
-            ram_addr,
-            r2ssa::StackAddressRoot {
-                base: r2ssa::StackAddressBase::StackPointer,
-                offset: ram_slot.offset,
-            },
-        ),
-        (
-            custom_addr,
-            r2ssa::StackAddressRoot {
-                base: r2ssa::StackAddressBase::StackPointer,
-                offset: custom_slot.offset,
-            },
-        ),
-    ]
-    .into_iter()
-    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
+    let interface = r2ssa::SourceFunctionInterface::new_exact(
+        b"stack-accesses".to_vec(),
+        "sysv64",
+        [],
+        r2ssa::SourceFunctionReturn::Void,
+        [r2ssa::SourceStackSlotSpec::new_local(
+            r2ssa::StackAddressBase::StackPointer,
+            register(8),
+            -15,
+            1,
+        )],
+    )
+    .and_then(|interface| interface.with_stack_pointer_storage(register(8)))
+    .and_then(|interface| interface.with_return_address_storage(register(16)))
+    .expect("exact source interface");
+    let mut block = r2il::R2ILBlock::new(0x1000, 4);
+    block.push(r2il::R2ILOp::IntAdd {
+        dst: r2il::Varnode::unique(0x100, 8),
+        a: r2il::Varnode::register(8, 8),
+        b: r2il::Varnode::constant((-15i64) as u64, 8),
+    });
+    block.push(r2il::R2ILOp::Load {
+        dst: r2il::Varnode::unique(0x200, 1),
+        space: r2il::SpaceId::Ram,
+        addr: r2il::Varnode::unique(0x100, 8),
+    });
+    block.push(r2il::R2ILOp::IntZExt {
+        dst: r2il::Varnode::unique(0x300, 4),
+        src: r2il::Varnode::unique(0x200, 1),
+    });
+    block.push(r2il::R2ILOp::Store {
+        space: r2il::SpaceId::Ram,
+        addr: r2il::Varnode::constant(0x5000, 8),
+        val: r2il::Varnode::unique(0x300, 4),
+    });
+    block.push(r2il::R2ILOp::Return {
+        target: r2il::Varnode::register(16, 8),
+    });
+    let source = SsaArtifact::for_decompile_with_interface(
+        &[block],
+        Some(&r2ssa::Arch::from(arch)),
+        interface,
+    )
+    .expect("prepared source");
 
-    let widths =
-        canonical_stack_access_widths(&blocks, Some(&|var: &SSAVar| prep_facts.get(var).copied()));
-    assert_eq!(widths.get(&ram_slot), Some(&BTreeSet::from([4])));
-    assert!(!widths.contains_key(&custom_slot));
+    let signedness = crate::signedness::scalar_signedness_of(&source, false, std::iter::empty());
+    let stack = StackAccesses::of(&source, &signedness);
+    let slot = StackSlotKey {
+        base: ExternalStackBase::StackPointer,
+        offset: -15,
+    };
+    assert_eq!(stack.widths, BTreeMap::from([(slot, BTreeSet::from([1]))]));
+    assert_eq!(
+        stack.signedness,
+        BTreeMap::from([(slot, BTreeSet::from([ScalarSignednessEvidence::Unsigned]))])
+    );
 }
 
 #[test]
 fn canonical_stack_access_width_overrides_generic_host_integer_width() {
-    let addr = SSAVar::new("tmp:sum", 1, 8);
-    let blocks = [SSABlock::from_parts(
-        0x1000,
-        4,
-        vec![SSAOp::Store {
-            space: r2il::SpaceId::Ram,
-            addr: addr.clone(),
-            val: SSAVar::new("w8", 1, 4),
-        }],
-        Vec::new(),
-    )];
-    let prep_facts = [(
-        addr,
-        r2ssa::StackAddressRoot {
-            base: r2ssa::StackAddressBase::StackPointer,
-            offset: -16,
-        },
-    )]
-    .into_iter()
-    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
+    let slot = StackSlotKey {
+        base: ExternalStackBase::StackPointer,
+        offset: -16,
+    };
+    let stack = StackAccesses {
+        widths: BTreeMap::from([(slot, BTreeSet::from([4]))]),
+        signedness: BTreeMap::new(),
+    };
     let vars = [RecoveredVariable {
         name: "var_10h".to_string(),
         kind: "s".to_string(),
@@ -88,7 +92,7 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
         reg: None,
     }];
 
-    let analysis = build_type_analysis_with_prep_facts(
+    let analysis = build_type_analysis_with_stack_accesses(
         TypeAnalysisInput {
             function_name: "sym._sum_array",
             ptr_bits: 64,
@@ -101,14 +105,12 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
                 arch: "aarch64".to_string(),
             },
             recovered_vars: &vars,
-            ssa_blocks: &blocks,
-            conventional_extension: &|_| false,
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
             diagnostics: TypeAnalysisDiagnostics::default(),
         },
-        &prep_facts,
+        &stack,
     );
 
     let int32 = Some(CTypeLike::Int {
@@ -128,33 +130,14 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
 
 #[test]
 fn canonical_stack_zero_extension_recovers_unsigned_local() {
-    let addr = SSAVar::new("tmp:byte", 1, 8);
-    let loaded = SSAVar::new("tmp:loaded", 1, 1);
-    let blocks = [SSABlock::from_parts(
-        0x1000,
-        4,
-        vec![
-            SSAOp::Load {
-                dst: loaded.clone(),
-                space: r2il::SpaceId::Ram,
-                addr: addr.clone(),
-            },
-            SSAOp::IntZExt {
-                dst: SSAVar::new("w8", 1, 4),
-                src: loaded,
-            },
-        ],
-        Vec::new(),
-    )];
-    let prep_facts = [(
-        addr,
-        r2ssa::StackAddressRoot {
-            base: r2ssa::StackAddressBase::StackPointer,
-            offset: -15,
-        },
-    )]
-    .into_iter()
-    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
+    let slot = StackSlotKey {
+        base: ExternalStackBase::StackPointer,
+        offset: -15,
+    };
+    let stack = StackAccesses {
+        widths: BTreeMap::from([(slot, BTreeSet::from([1]))]),
+        signedness: BTreeMap::from([(slot, BTreeSet::from([ScalarSignednessEvidence::Unsigned]))]),
+    };
     let vars = [RecoveredVariable {
         name: "var_fh".to_string(),
         kind: "s".to_string(),
@@ -164,7 +147,7 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
         reg: None,
     }];
 
-    let analysis = build_type_analysis_with_prep_facts(
+    let analysis = build_type_analysis_with_stack_accesses(
         TypeAnalysisInput {
             function_name: "sym._fnv_fold",
             ptr_bits: 64,
@@ -177,14 +160,12 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
                 arch: "aarch64".to_string(),
             },
             recovered_vars: &vars,
-            ssa_blocks: &blocks,
-            conventional_extension: &|_| false,
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
             diagnostics: TypeAnalysisDiagnostics::default(),
         },
-        &prep_facts,
+        &stack,
     );
 
     // A byte loaded only to be zero-extended is unsigned, whatever radare2 named its type.
@@ -221,8 +202,6 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
             arch: "x86-64".to_string(),
         },
         recovered_vars: &[],
-        ssa_blocks: &[],
-        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts {
             slot_type_overrides: HashMap::from([(
@@ -237,277 +216,4 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
 
     assert_eq!(spelled_signature(&analysis).ret_type, "bool");
     assert_eq!(spelled_signature(&analysis).params.len(), 2);
-}
-
-#[test]
-fn legacy_same_block_spill_reload_requires_memory_ssa() {
-    let argv_ty = CTypeLike::Pointer(Box::new(CTypeLike::Pointer(Box::new(CTypeLike::Int {
-        bits: 8,
-        signedness: Signedness::Signed,
-    }))));
-    let parsed_context = ParsedExternalContext {
-        register_params: vec![
-            crate::context::ExternalRegisterParamSpec {
-                name: "arg1".to_string(),
-                ty: Some(CTypeLike::Int {
-                    bits: 32,
-                    signedness: Signedness::Signed,
-                }),
-                reg: "x0".to_string(),
-            },
-            crate::context::ExternalRegisterParamSpec {
-                name: "arg2".to_string(),
-                ty: Some(argv_ty.clone()),
-                reg: "x1".to_string(),
-            },
-        ],
-        merged_signature: Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::Int {
-                bits: 64,
-                signedness: Signedness::Signed,
-            }),
-            params: vec![
-                FunctionParamSpec {
-                    name: "arg1".to_string(),
-                    ty: Some(CTypeLike::Int {
-                        bits: 32,
-                        signedness: Signedness::Signed,
-                    }),
-                },
-                FunctionParamSpec {
-                    name: "arg2".to_string(),
-                    ty: Some(argv_ty),
-                },
-            ],
-        }),
-        ..ParsedExternalContext::default()
-    };
-    let ssa_blocks = [SSABlock::from_parts(
-        0x100001000,
-        40,
-        vec![
-            SSAOp::IntSub {
-                dst: SSAVar::new("sp", 1, 8),
-                a: SSAVar::new("sp", 0, 8),
-                b: SSAVar::constant(0x200, 8),
-            },
-            SSAOp::IntAdd {
-                dst: SSAVar::new("slot", 1, 8),
-                a: SSAVar::new("sp", 1, 8),
-                b: SSAVar::constant(0x178, 8),
-            },
-            SSAOp::Store {
-                space: r2il::SpaceId::Ram,
-                addr: SSAVar::new("slot", 1, 8),
-                val: SSAVar::new("x1", 0, 8),
-            },
-            SSAOp::IntAdd {
-                dst: SSAVar::new("slot", 2, 8),
-                a: SSAVar::new("sp", 1, 8),
-                b: SSAVar::constant(0x178, 8),
-            },
-            SSAOp::Load {
-                dst: SSAVar::new("x8", 1, 8),
-                space: r2il::SpaceId::Ram,
-                addr: SSAVar::new("slot", 2, 8),
-            },
-            SSAOp::IntAdd {
-                dst: SSAVar::new("arg_addr", 1, 8),
-                a: SSAVar::new("x8", 1, 8),
-                b: SSAVar::constant(8, 8),
-            },
-            SSAOp::Load {
-                dst: SSAVar::new("x0", 1, 8),
-                space: r2il::SpaceId::Ram,
-                addr: SSAVar::new("arg_addr", 1, 8),
-            },
-        ],
-        Vec::new(),
-    )];
-
-    let analysis = build_type_analysis(TypeAnalysisInput {
-        function_name: "sym._main",
-        ptr_bits: 64,
-        inferred_signature: InferredSignature {
-            function_name: "sym._main".to_string(),
-            signature: "int64_t sym._main(int32_t arg1, int8_t **arg2)".to_string(),
-            ret_type: "int64_t".to_string(),
-            params: vec![
-                InferredSignatureParam {
-                    name: "arg1".to_string(),
-                    param_type: "int32_t".to_string(),
-                },
-                InferredSignatureParam {
-                    name: "arg2".to_string(),
-                    param_type: "int8_t **".to_string(),
-                },
-            ],
-            callconv: "aarch64".to_string(),
-            arch: "aarch64".to_string(),
-        },
-        recovered_vars: &[],
-        ssa_blocks: &ssa_blocks,
-        conventional_extension: &|_| false,
-        parsed_context,
-        local_structs: LocalStructArtifacts::default(),
-        interproc_summary_set: None,
-        diagnostics: TypeAnalysisDiagnostics::default(),
-    });
-
-    assert!(
-        !analysis
-            .type_facts
-            .array_index_certificates
-            .iter()
-            .any(|cert| matches!(cert.base, Some(ArrayIndexBase::Param { index: 1 }))),
-        "fixed-point block scans cannot prove store-before-load memory order: {:?}",
-        analysis.type_facts.array_index_certificates
-    );
-}
-
-#[test]
-fn legacy_cross_block_spill_reload_requires_memory_ssa() {
-    let arr_ty = CTypeLike::Pointer(Box::new(CTypeLike::Int {
-        bits: 32,
-        signedness: Signedness::Signed,
-    }));
-    let parsed_context = ParsedExternalContext {
-        register_params: vec![
-            crate::context::ExternalRegisterParamSpec {
-                name: "arg1".to_string(),
-                ty: Some(CTypeLike::Int {
-                    bits: 64,
-                    signedness: Signedness::Signed,
-                }),
-                reg: "RDI".to_string(),
-            },
-            crate::context::ExternalRegisterParamSpec {
-                name: "idx".to_string(),
-                ty: Some(CTypeLike::Int {
-                    bits: 32,
-                    signedness: Signedness::Signed,
-                }),
-                reg: "RSI".to_string(),
-            },
-        ],
-        merged_signature: Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed,
-            }),
-            params: vec![
-                FunctionParamSpec {
-                    name: "arr".to_string(),
-                    ty: Some(arr_ty),
-                },
-                FunctionParamSpec {
-                    name: "idx".to_string(),
-                    ty: Some(CTypeLike::Int {
-                        bits: 32,
-                        signedness: Signedness::Signed,
-                    }),
-                },
-            ],
-        }),
-        ..ParsedExternalContext::default()
-    };
-    let ssa_blocks = [
-        SSABlock::from_parts(
-            0x401000,
-            16,
-            vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("slot", 1, 8),
-                    a: SSAVar::new("RBP", 0, 8),
-                    b: SSAVar::constant(0xffff_ffff_ffff_ffe8, 8),
-                },
-                SSAOp::Store {
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("slot", 1, 8),
-                    val: SSAVar::new("RDI", 0, 8),
-                },
-            ],
-            Vec::new(),
-        ),
-        SSABlock::from_parts(
-            0x401020,
-            24,
-            vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("slot", 2, 8),
-                    a: SSAVar::new("RBP", 0, 8),
-                    b: SSAVar::constant(0xffff_ffff_ffff_ffe8, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("ptr", 1, 8),
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("slot", 2, 8),
-                },
-                SSAOp::IntLeft {
-                    dst: SSAVar::new("idx_scaled", 1, 8),
-                    a: SSAVar::new("RSI", 0, 8),
-                    b: SSAVar::constant(2, 8),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("elem", 1, 8),
-                    a: SSAVar::new("ptr", 1, 8),
-                    b: SSAVar::new("idx_scaled", 1, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("EAX", 1, 4),
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("elem", 1, 8),
-                },
-            ],
-            Vec::new(),
-        ),
-    ];
-
-    let analysis = build_type_analysis(TypeAnalysisInput {
-        function_name: "sym.sum_array",
-        ptr_bits: 64,
-        inferred_signature: InferredSignature {
-            function_name: "sym.sum_array".to_string(),
-            signature: "int32_t sym.sum_array(int32_t *arr, int32_t idx)".to_string(),
-            ret_type: "int32_t".to_string(),
-            params: vec![
-                InferredSignatureParam {
-                    name: "arr".to_string(),
-                    param_type: "int32_t *".to_string(),
-                },
-                InferredSignatureParam {
-                    name: "idx".to_string(),
-                    param_type: "int32_t".to_string(),
-                },
-            ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
-        },
-        recovered_vars: &[],
-        ssa_blocks: &ssa_blocks,
-        conventional_extension: &|_| false,
-        parsed_context,
-        local_structs: LocalStructArtifacts::default(),
-        interproc_summary_set: None,
-        diagnostics: TypeAnalysisDiagnostics::default(),
-    });
-
-    assert!(
-        !analysis
-            .type_facts
-            .array_index_certificates
-            .iter()
-            .any(|cert| matches!(cert.base, Some(ArrayIndexBase::Param { index: 0 }))),
-        "raw block coordinates cannot prove that a reload observes a store in another block: {:?}",
-        analysis.type_facts.array_index_certificates
-    );
-    assert!(
-        !analysis
-            .type_facts
-            .scalar_array_render_candidates
-            .iter()
-            .any(|candidate| candidate.slot == 0),
-        "legacy inference must not mint parameter render evidence across blocks without memory SSA: {:?}",
-        analysis.type_facts.scalar_array_render_candidates
-    );
 }

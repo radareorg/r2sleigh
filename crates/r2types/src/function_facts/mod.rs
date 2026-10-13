@@ -1342,9 +1342,11 @@ impl CallFacts {
     }
 }
 
-/// A function's solved types and the return decided from them, once for signature inference and
-/// enrichment both.
+/// A function's scalar signedness, its types solved from it, and the return decided from them: once
+/// for signature inference, the stack slots and enrichment.
 pub(crate) struct SolvedFunction {
+    pub(crate) signedness:
+        IdMap<r2ssa::ValueId, BTreeSet<crate::signedness::ScalarSignednessEvidence>>,
     pub(crate) evidence: crate::EvidenceTypes,
     pub(crate) returns: ReturnTypeFact,
 }
@@ -1355,9 +1357,15 @@ impl SolvedFunction {
         signatures: &BTreeMap<r2ssa::CallSiteId, crate::FunctionType>,
         ptr_bits: u32,
     ) -> Self {
-        let evidence = crate::evidence::solve_evidence_types(source, signatures, ptr_bits);
+        let signedness = crate::signedness::scalar_signedness_of(source, false, std::iter::empty());
+        let evidence =
+            crate::evidence::solve_evidence_types(source, signatures, &signedness, ptr_bits);
         let returns = ReturnTypeFact::decide(source, signatures, &evidence);
-        Self { evidence, returns }
+        Self {
+            signedness,
+            evidence,
+            returns,
+        }
     }
 }
 
