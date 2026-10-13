@@ -1703,14 +1703,15 @@ impl SsaArtifact {
 /// call, if exactly one does.
 fn unique_call_site_identity(
     blocks: &[R2ILBlock],
+    calls: &CallOperations,
     call: &r2source::AdvisoryCallSite,
 ) -> Option<SourceCallSiteIdentity> {
-    let mut matches = blocks.iter().flat_map(|block| {
-        block
-            .ops
-            .iter()
-            .enumerate()
-            .filter_map(move |(op_index, op)| {
+    let at = calls.at(call.instruction_address()).iter();
+    let mut matches = at.filter_map(|&(block, op_index)| {
+        let block = &blocks[block];
+        let op = &block.ops[op_index];
+        {
+            {
                 let instruction = || {
                     block
                         .instruction_of(op_index)
@@ -1749,7 +1750,8 @@ fn unique_call_site_identity(
                 let instruction = instruction()?;
                 (reaches == call.target_address())
                     .then(|| SourceCallSiteIdentity::new(instruction, target))
-            })
+            }
+        }
     });
     let identity = matches.next()?;
     matches.next().is_none().then_some(identity)
@@ -1758,35 +1760,95 @@ fn unique_call_site_identity(
 /// What the code after every call to `identity`'s callee in this body reads of the result
 /// registers `callee` leaves, so one prototype holds at each (doc/adr-resolved-bodies.md, "Caller reads").
 fn reads_after(
-    blocks: &[R2ILBlock],
+    (blocks, calls): (&[R2ILBlock], &CallOperations),
     identity: SourceCallSiteIdentity,
     callee: &SourceFunctionInterface,
     entry: u64,
 ) -> Option<r2source::SourceResultReads> {
     let carriers = callee.result_carriers()?;
-    let mut reads = None::<r2source::SourceResultReads>;
-    for block in blocks {
-        for (index, op) in block.ops.iter().enumerate() {
-            let this = match op {
-                R2ILOp::Call { target } => target.offset == entry,
-                R2ILOp::CallInd { .. } => {
-                    block.instruction_of(index) == Some(identity.instruction())
+    let read = |&(block, op): &(usize, usize)| {
+        let (integer, float, second) = (Some(carriers.integer), carriers.float, carriers.second);
+        crate::caller_reads::reads_after_call(&blocks[block], op, integer, float, second)
+    };
+    // Every direct call to `entry` is read once per body and carrier set, however many sites ask.
+    let key = (entry, carriers.integer, carriers.float, carriers.second);
+    let direct = *calls
+        .direct_reads
+        .borrow_mut()
+        .entry(key)
+        .or_insert_with(|| {
+            calls
+                .calling(entry)
+                .iter()
+                .map(read)
+                .reduce(r2source::SourceResultReads::and)
+        });
+    let indirect = (calls.at(identity.instruction()).iter())
+        .filter(|&&(block, op)| matches!(blocks[block].ops[op], R2ILOp::CallInd { .. }))
+        .map(read);
+    direct
+        .into_iter()
+        .chain(indirect)
+        .reduce(r2source::SourceResultReads::and)
+}
+
+/// A callee's entry and the integer, float and second carriers its calls are read for.
+type DirectReadsKey = (
+    u64,
+    CanonicalStorageId,
+    Option<CanonicalStorageId>,
+    Option<CanonicalStorageId>,
+);
+
+/// Each control-flow operation of the lifted body by the instruction holding it, and each direct
+/// call by its target: built once, so finding a site is O(log n) and no site rescans the body.
+struct CallOperations {
+    by_instruction: BTreeMap<u64, Vec<(usize, usize)>>,
+    by_target: BTreeMap<u64, Vec<(usize, usize)>>,
+    /// What the direct calls to each callee read of its carriers, once asked.
+    direct_reads: std::cell::RefCell<BTreeMap<DirectReadsKey, Option<r2source::SourceResultReads>>>,
+}
+
+impl CallOperations {
+    fn of(blocks: &[R2ILBlock]) -> Self {
+        let mut index = Self {
+            by_instruction: BTreeMap::new(),
+            by_target: BTreeMap::new(),
+            direct_reads: std::cell::RefCell::default(),
+        };
+        for (at, block) in blocks.iter().enumerate() {
+            for (op, operation) in block.ops.iter().enumerate() {
+                if !operation.is_control_flow() {
+                    continue;
                 }
-                _ => false,
-            };
-            if this {
-                let read = crate::caller_reads::reads_after_call(
-                    block,
-                    index,
-                    Some(carriers.integer),
-                    carriers.float,
-                    carriers.second,
-                );
-                reads = Some(reads.map_or(read, |reads| reads.and(read)));
+                if let Some(instruction) = block.instruction_of(op) {
+                    index
+                        .by_instruction
+                        .entry(instruction)
+                        .or_default()
+                        .push((at, op));
+                }
+                if let R2ILOp::Call { target } = operation {
+                    index
+                        .by_target
+                        .entry(target.offset)
+                        .or_default()
+                        .push((at, op));
+                }
             }
         }
+        index
     }
-    reads
+
+    /// The control-flow operations of the instruction at `address`, in order.
+    fn at(&self, address: u64) -> &[(usize, usize)] {
+        self.by_instruction.get(&address).map_or(&[], Vec::as_slice)
+    }
+
+    /// The direct calls to `target`, in order.
+    fn calling(&self, target: u64) -> &[(usize, usize)] {
+        self.by_target.get(&target).map_or(&[], Vec::as_slice)
+    }
 }
 
 #[derive(Clone)]
@@ -1801,7 +1863,7 @@ struct CorrelatedCallSites {
 
 fn correlate_call_site_interfaces(
     source: &OwnedFunctionSnapshot,
-    blocks: &[R2ILBlock],
+    (blocks, calls): (&[R2ILBlock], &CallOperations),
     callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
 ) -> CorrelatedCallSites {
     let mut tail_calls = Vec::new();
@@ -1809,7 +1871,7 @@ fn correlate_call_site_interfaces(
     let mut callee_linkages = BTreeMap::new();
     let mut callee_names = BTreeMap::new();
     for call in source.advisory_calls() {
-        let Some(identity) = unique_call_site_identity(blocks, call) else {
+        let Some(identity) = unique_call_site_identity(blocks, calls, call) else {
             // The source named a call the lift does not have exactly one
             // operation for, so nothing here can carry its prototype.
             r2il::refusal_evidence!(
@@ -1857,7 +1919,7 @@ fn correlate_call_site_interfaces(
                     callee,
                     identity,
                     source.source_revision_identity(),
-                    reads_after(blocks, identity, callee, call.target_address()),
+                    reads_after((blocks, calls), identity, callee, call.target_address()),
                 )
             {
                 // The gettext family is named, not prototyped, so the rule
@@ -2293,8 +2355,9 @@ impl TrustedSsaArtifact {
         // unavailable, incoherent ABI model, and every consumer filters on
         // coherence. Refusing here instead would suppress the whole function
         // for a fact the pipeline is built to carry.
+        let calls = CallOperations::of(&blocks);
         let correlated_call_sites =
-            correlate_call_site_interfaces(&source, &blocks, callee_interfaces);
+            correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces);
         // What each callee said about its own boundary, read once for every
         // pass that asks what a call to it does to the registers.
         let callees = CalleeBoundaries::from_interfaces(
@@ -2465,7 +2528,7 @@ impl TrustedSsaArtifact {
                 if call.target_address() != source.image().entry_address() {
                     continue;
                 }
-                let Some(identity) = unique_call_site_identity(&blocks, call) else {
+                let Some(identity) = unique_call_site_identity(&blocks, &calls, call) else {
                     continue;
                 };
                 if call_interfaces
@@ -2479,7 +2542,7 @@ impl TrustedSsaArtifact {
                         own,
                         identity,
                         source.source_revision_identity(),
-                        reads_after(&blocks, identity, own, call.target_address()),
+                        reads_after((&blocks, &calls), identity, own, call.target_address()),
                     )
                 {
                     call_interfaces.push(interface);
