@@ -1175,55 +1175,51 @@ impl SourceOwnedFunctionFacts {
         source: &r2ssa::SsaArtifact,
         report: &mut FunctionFacts,
     ) {
-        let projected = Self::enrich_report_from_source_with_callee_signatures(
+        let mut names = report.display_names.clone();
+        names.absorb(source.display_names());
+        let calls = CallFacts::project(
             source,
-            std::mem::take(report),
+            &names,
+            &report.types.known_function_signatures,
+            &report.types.callee_facts,
             &BTreeMap::new(),
         );
+        let evidence = calls.solve(source);
+        let projected =
+            Self::enrich_report_from_source(source, std::mem::take(report), calls, &evidence);
         *report = projected.into_report();
     }
 
-    /// The report enriched from the source: its assumptions, the call evidence's types, the exact
+    /// The report enriched from the source: its assumptions, its calls, the solved types, the exact
     /// interface, and the projection under the final types.
-    pub(crate) fn enrich_report_from_source_with_callee_signatures(
+    pub(crate) fn enrich_report_from_source(
         source: &r2ssa::SsaArtifact,
         mut enriched: FunctionFacts,
-        callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
+        calls: CallFacts,
+        evidence: &crate::EvidenceTypes,
     ) -> ProjectedFacts {
         let mut usage = source.facts().assumption_usage.clone();
         usage.extend(enriched.assumption_usage());
         enriched.assumption_usage = usage;
         enriched.display_names.absorb(source.display_names());
         enriched.normalize_field_certificates_from_external_layout();
-        Self::project_calls(source, &mut enriched, callee_signatures);
+        enriched.install_calls(calls);
         let ptr_bits = source
             .machine_context()
             .memory_model()
             .default_address_bits();
         enriched.apply_certified_call_argument_type_constraints(source.graph(), ptr_bits);
-        let evidence = enriched.apply_recovered_evidence_types(source, ptr_bits);
+        enriched.apply_recovered_evidence_types(source, evidence, ptr_bits);
         // Exact immutable interface evidence outranks advisory propagation.
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
         enriched.apply_exact_source_signature(source);
-        enriched.apply_return_type_fact(source, &evidence);
+        enriched.apply_return_type_fact(source, evidence);
         // The types are final here; the projection the seal holds is built from them once.
         enriched.normalize_field_certificates_from_external_layout();
         enriched.canonicalize_type_facts();
         Self::project_render(source, &mut enriched);
         ProjectedFacts { report: enriched }
-    }
-
-    /// The call facts enrichment reads, once: a code pointer table's callees named first, so
-    /// resolution sees them, then resolution, the call sites and each site's callee signature.
-    fn project_calls(
-        source: &r2ssa::SsaArtifact,
-        report: &mut FunctionFacts,
-        callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
-    ) {
-        report.name_code_pointer_callees(source, callee_signatures);
-        report.attach_prepared_call_facts(source);
-        report.apply_callsite_callee_signatures(source, callee_signatures);
     }
 
     /// The projection under the final types, once: results, control, render facts and the overlays
@@ -1287,6 +1283,81 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
         }
     }
     Some(resolver)
+}
+
+/// What a function's calls are, projected once before the type solve reads their prototypes
+/// (ROADMAP T step 4): a code pointer table's callees, resolution, and each site's callee signature.
+pub(crate) struct CallFacts {
+    code_pointer_callees: BTreeMap<u64, CalleeFact>,
+    resolution: CalleeResolutionFacts,
+    callsites: FunctionCallsiteFacts,
+}
+
+impl CallFacts {
+    pub(crate) fn project(
+        source: &r2ssa::SsaArtifact,
+        names: &crate::DisplayNames,
+        known_function_signatures: &HashMap<String, crate::FunctionType>,
+        callee_facts: &BTreeMap<u64, CalleeFact>,
+        callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
+    ) -> Self {
+        // A code pointer table names its target outright, so no call site has to agree about an
+        // interface before the target's own body says what its prototype is.
+        let mut code_pointer_callees = BTreeMap::new();
+        for (_, target) in source.machine_context().code_pointer_entries() {
+            let Some(signature) = callee_signatures
+                .get(&target)
+                .filter(|signature| signature.signature.return_type != CTypeLike::Unknown)
+            else {
+                continue;
+            };
+            let mut fact = callee_facts.get(&target).cloned().unwrap_or_else(|| {
+                let name = names.functions().get(&target).cloned();
+                CalleeFact::named(target, name, CalleeLinkage::Internal)
+            });
+            fact.signature = Some(signature.signature.clone());
+            code_pointer_callees.insert(target, fact);
+        }
+        let mut resolved = callee_facts.clone();
+        resolved.extend(code_pointer_callees.clone());
+        let resolution =
+            prepared_callee_resolution_facts(source, names, known_function_signatures, resolved);
+        let mut callsites = prepared_callsite_argument_facts(source);
+        FunctionFacts::apply_callsite_callee_signatures(source, &mut callsites, callee_signatures);
+        Self {
+            code_pointer_callees,
+            resolution,
+            callsites,
+        }
+    }
+
+    /// The function's types, solved once with every callee prototype its calls reach.
+    pub(crate) fn solve(&self, source: &r2ssa::SsaArtifact) -> crate::EvidenceTypes {
+        let ptr_bits = source
+            .machine_context()
+            .memory_model()
+            .default_address_bits();
+        let signatures = callsite_signatures(&self.callsites, &self.resolution);
+        crate::evidence::solve_evidence_types(source, &signatures, ptr_bits)
+    }
+}
+
+fn callsite_signatures(
+    callsites: &FunctionCallsiteFacts,
+    resolution: &CalleeResolutionFacts,
+) -> BTreeMap<r2ssa::CallSiteId, crate::FunctionType> {
+    let mut signatures = BTreeMap::new();
+    for (callsite, arguments) in &callsites.by_callsite {
+        let Some(signature) = arguments.callee_signature.as_ref().or_else(|| {
+            resolution
+                .identity_for_callsite(callsite)
+                .and_then(crate::CalleeIdentity::known_signature)
+        }) else {
+            continue;
+        };
+        signatures.insert(arguments.call_site_id, signature.clone());
+    }
+    signatures
 }
 
 impl FunctionFacts {
@@ -1396,11 +1467,11 @@ impl FunctionFacts {
 
     /// Each direct call site's callee signature, where the callee's own interface is the site's.
     fn apply_callsite_callee_signatures(
-        &mut self,
         source: &r2ssa::SsaArtifact,
+        callsites: &mut FunctionCallsiteFacts,
         signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
     ) {
-        for arguments in self.callsites.by_callsite.values_mut() {
+        for arguments in callsites.by_callsite.values_mut() {
             let Some(target) = arguments.direct_target else {
                 continue;
             };
@@ -1456,30 +1527,6 @@ impl FunctionFacts {
                     )
                 );
             }
-        }
-    }
-
-    /// A code pointer table names its target outright, so no call site has to agree about an
-    /// interface before the target's own body says what its prototype is.
-    fn name_code_pointer_callees(
-        &mut self,
-        source: &r2ssa::SsaArtifact,
-        signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
-    ) {
-        for (_, target) in source.machine_context().code_pointer_entries() {
-            let Some(signature) = signatures
-                .get(&target)
-                .filter(|signature| signature.signature.return_type != CTypeLike::Unknown)
-            else {
-                continue;
-            };
-            let name = self.display_names.functions().get(&target).cloned();
-            let fact = self
-                .types
-                .callee_facts
-                .entry(target)
-                .or_insert_with(|| CalleeFact::named(target, name, CalleeLinkage::Internal));
-            fact.signature = Some(signature.signature.clone());
         }
     }
 
@@ -2095,9 +2142,17 @@ impl FunctionFacts {
     }
 
     /// Callee resolution and the call sites, replaced whole: detached rows never win.
+    #[cfg(test)]
     fn attach_prepared_call_facts(&mut self, prepared: &r2ssa::SsaArtifact) {
-        self.callee_resolution = prepared_callee_resolution_facts(prepared, self);
-        self.callsites = prepared_callsite_argument_facts(prepared);
+        let calls = CallFacts::project(
+            prepared,
+            &self.display_names,
+            &self.types.known_function_signatures,
+            &self.types.callee_facts,
+            &BTreeMap::new(),
+        );
+        self.callee_resolution = calls.resolution;
+        self.callsites = calls.callsites;
     }
 
     /// Call results, control and render facts, replaced whole from the one prepared artifact.
@@ -2757,18 +2812,13 @@ impl FunctionFacts {
 
     /// The prototype each call site reaches, keyed the way the solver needs it.
     pub(crate) fn callsite_signatures(&self) -> BTreeMap<r2ssa::CallSiteId, crate::FunctionType> {
-        let mut signatures = BTreeMap::new();
-        for (callsite, arguments) in &self.callsites.by_callsite {
-            let Some(signature) = arguments.callee_signature.as_ref().or_else(|| {
-                self.callee_resolution
-                    .identity_for_callsite(callsite)
-                    .and_then(crate::CalleeIdentity::known_signature)
-            }) else {
-                continue;
-            };
-            signatures.insert(arguments.call_site_id, signature.clone());
-        }
-        signatures
+        callsite_signatures(&self.callsites, &self.callee_resolution)
+    }
+
+    fn install_calls(&mut self, calls: CallFacts) {
+        self.types.callee_facts.extend(calls.code_pointer_callees);
+        self.callee_resolution = calls.resolution;
+        self.callsites = calls.callsites;
     }
 
     /// Type what the code proves, for a function that carries no declared types.
@@ -2781,14 +2831,12 @@ impl FunctionFacts {
     pub fn apply_recovered_evidence_types(
         &mut self,
         source: &r2ssa::SsaArtifact,
+        recovered: &crate::EvidenceTypes,
         ptr_bits: u32,
-    ) -> crate::EvidenceTypes {
-        let signatures = self.callsite_signatures();
-        let recovered = crate::evidence::solve_evidence_types(source, &signatures, ptr_bits);
+    ) {
         if !recovered.is_empty() {
-            self.apply_recovered_parameter_types(source, &recovered, ptr_bits);
+            self.apply_recovered_parameter_types(source, recovered, ptr_bits);
         }
-        recovered
     }
 
     /// The type of each exact source parameter value the solver reached.

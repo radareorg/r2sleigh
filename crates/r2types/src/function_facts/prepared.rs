@@ -1141,31 +1141,28 @@ pub(crate) fn struct_name_from_pointer_type(ty: Option<&CTypeLike>) -> Option<&s
 
 pub(crate) fn prepared_callee_resolution_facts(
     prepared: &r2ssa::SsaArtifact,
-    function_facts: &FunctionFacts,
+    names: &crate::DisplayNames,
+    known_function_signatures: &HashMap<String, crate::FunctionType>,
+    mut callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> CalleeResolutionFacts {
-    let type_facts = &function_facts.types;
     // These were empty maps, so every direct call resolved to nothing and
     // rendered as `sub_<addr>` even when radare2 had the name all along.
-    let function_names = function_facts
-        .display_names
+    let function_names = names
         .functions()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
         .collect::<HashMap<_, _>>();
-    let symbols = function_facts
-        .display_names
+    let symbols = names
         .symbols()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
         .collect::<HashMap<_, _>>();
-    let known_function_signatures = type_facts
-        .known_function_signatures
+    let known_function_signatures = known_function_signatures
         .iter()
         .map(|(name, ty)| (crate::normalize_callee_name(name), ty.clone()))
         .collect::<HashMap<_, _>>();
     // The linkage radare2 read off the symbol or relocation that named each
     // call target is the fact import policy rests on; a name's shape is not.
-    let mut callee_facts = type_facts.callee_facts.clone();
     for cert in prepared.certificates().callsites.values() {
         let linkage = match cert.callee_linkage {
             r2source::AdvisoryCalleeLinkage::Unknown => continue,

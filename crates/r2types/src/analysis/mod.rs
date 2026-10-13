@@ -666,6 +666,7 @@ fn build_type_analysis_inner(
     semantic_inputs: Option<DerivedTypeAnalysisSemanticInputs<'_>>,
     prep_facts: Option<FrameRoots<'_>>,
     registers: &crate::RegisterIdentity,
+    callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
     // tests. Invalid advisory reports lose all interprocedural evidence here;
@@ -913,10 +914,7 @@ fn build_type_analysis_inner(
         known_function_signatures: input.parsed_context.known_function_signatures.clone(),
         register_params: input.parsed_context.register_params.clone(),
         visible_bindings,
-        callee_facts: merged_context_and_summary_callee_facts(
-            &input.parsed_context.callee_facts,
-            input.interproc_summary_set.as_ref(),
-        ),
+        callee_facts,
         external_type_db: type_db,
         program_data_objects: input.parsed_context.program_data_objects.clone(),
         slot_type_overrides: local_structs.slot_type_overrides.clone(),
@@ -1000,7 +998,11 @@ fn x86_64_register_identity() -> crate::RegisterIdentity {
 
 #[cfg(test)]
 fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalysis {
-    build_type_analysis_inner(input, None, None, &x86_64_register_identity())
+    let callee_facts = merged_context_and_summary_callee_facts(
+        &input.parsed_context.callee_facts,
+        input.interproc_summary_set.as_ref(),
+    );
+    build_type_analysis_inner(input, None, None, &x86_64_register_identity(), callee_facts)
 }
 
 #[cfg(test)]
@@ -1009,7 +1011,17 @@ fn build_type_analysis_with_prep_facts(
     frame_roots: &BTreeMap<SSAVar, r2ssa::StackAddressRoot>,
 ) -> DerivedTypeAnalysis {
     let prep_facts = &|var: &SSAVar| frame_roots.get(var).copied();
-    build_type_analysis_inner(input, None, Some(prep_facts), &x86_64_register_identity())
+    let callee_facts = merged_context_and_summary_callee_facts(
+        &input.parsed_context.callee_facts,
+        input.interproc_summary_set.as_ref(),
+    );
+    build_type_analysis_inner(
+        input,
+        None,
+        Some(prep_facts),
+        &x86_64_register_identity(),
+        callee_facts,
+    )
 }
 
 #[cfg(test)]
@@ -1052,7 +1064,24 @@ pub fn build_source_owned_type_analysis(
         .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
     let named_blocks = source.graph().named_blocks();
     let ssa_blocks = named_blocks.as_slice();
-    let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
+    let interproc_report = interproc_summary
+        .as_ref()
+        .map(|summary| summary.report().clone());
+    require_current_interproc_report_for_source_owned(interproc_report.as_ref())?;
+    let callee_facts = merged_context_and_summary_callee_facts(
+        &parsed_context.callee_facts,
+        interproc_report.as_ref(),
+    );
+    // One solve per function: the calls are projected first, so it sees every callee prototype.
+    let calls = crate::function_facts::CallFacts::project(
+        source.as_ref(),
+        source.display_names(),
+        &parsed_context.known_function_signatures,
+        &callee_facts,
+        &callee_signatures,
+    );
+    let evidence = calls.solve(source.as_ref());
+    let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref(), &evidence);
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
     let diagnostics = TypeAnalysisDiagnostics::default();
     let local_structs = infer_local_struct_artifacts_from_prepared_ssa(source.as_ref());
@@ -1066,10 +1095,6 @@ pub fn build_source_owned_type_analysis(
         })
         .collect();
     let local_field_accesses = local_field_accesses_named(&local_structs, &source_field_names);
-    let interproc_report = interproc_summary
-        .as_ref()
-        .map(|summary| summary.report().clone());
-    require_current_interproc_report_for_source_owned(interproc_report.as_ref())?;
     let written = source.function().written();
     let conventional_extension = |op| written.is_conventional_extension(op);
     let derived_input = DerivedTypeAnalysisInput {
@@ -1099,6 +1124,7 @@ pub fn build_source_owned_type_analysis(
         semantic_inputs,
         Some(&frame_roots),
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
+        callee_facts,
     );
     let mut function_facts = derived.function_facts;
     if let Some(interproc_summary) = interproc_summary {
@@ -1121,10 +1147,11 @@ pub fn build_source_owned_type_analysis(
     if crate::prepare::prepared_arch_display_name(source.as_ref()).is_none() {
         return Err(TypeAnalysisError::SourceEnrichmentFailed);
     }
-    let function_facts = SourceOwnedFunctionFacts::enrich_report_from_source_with_callee_signatures(
+    let function_facts = SourceOwnedFunctionFacts::enrich_report_from_source(
         source.as_ref(),
         function_facts,
-        &callee_signatures,
+        calls,
+        &evidence,
     );
     let analysis = TypeAnalysis {
         source,

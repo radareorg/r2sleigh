@@ -60,7 +60,11 @@ pub struct RecoveredSignatureParam {
     pub initial_ty: CTypeLike,
 }
 
-pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSignature {
+/// The signature the prepared function shows, its parameters typed by the function's one solve.
+pub(crate) fn infer_signature_from_prepared_ssa(
+    prepared: &SsaArtifact,
+    evidence_types: &crate::EvidenceTypes,
+) -> InferredSignature {
     let function_name = prepared
         .function()
         .name
@@ -72,7 +76,6 @@ pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> Infer
         .default_address_bits();
     let recovered_params = recover_signature_params_from_prepared_ssa(prepared, ptr_bits);
     let arch_name = prepared_arch_display_name(prepared).unwrap_or("");
-    let evidence_types = crate::solve_evidence_types(prepared, &BTreeMap::new(), ptr_bits);
     let certified_parameter_widths = certified_parameter_memory_widths(prepared);
 
     let mut canonical_params = recovered_params
@@ -118,7 +121,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> Infer
     }
     refine_parameter_signedness(prepared, &recovered_params, &mut canonical_params);
 
-    let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), &evidence_types);
+    let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), evidence_types);
     let callconv = prepared.machine_context().function_interface().map_or_else(
         || "unknown".to_string(),
         |interface| interface.calling_convention().to_string(),
@@ -953,6 +956,16 @@ pub(crate) fn build_inferred_signature(
 mod tests {
     use super::*;
 
+    /// The signature with the function solved alone, no callee prototype supplied.
+    fn inferred(prepared: &SsaArtifact) -> InferredSignature {
+        let ptr_bits = prepared
+            .machine_context()
+            .memory_model()
+            .default_address_bits();
+        let evidence = crate::solve_evidence_types(prepared, &BTreeMap::new(), ptr_bits);
+        infer_signature_from_prepared_ssa(prepared, &evidence)
+    }
+
     #[test]
     fn rendered_machine_bitvectors_parse_back_to_the_same_type() {
         for bits in [1, 24, 129, 256] {
@@ -1175,7 +1188,7 @@ mod tests {
                 1,
             ),
         );
-        let inferred = infer_signature_from_prepared_ssa(&prepared);
+        let inferred = inferred(&prepared);
 
         assert_eq!(inferred.arch, "aarch64");
         assert_eq!(inferred.params[0].param_type, "uint8_t*");
@@ -1229,7 +1242,7 @@ mod tests {
                 parameter,
             ),
         );
-        let inferred = infer_signature_from_prepared_ssa(&prepared);
+        let inferred = inferred(&prepared);
 
         assert_eq!(inferred.params[0].param_type, "uint64_t");
     }
@@ -1338,7 +1351,7 @@ mod tests {
             1,
             "source-owned return fixture must certify one value"
         );
-        let inferred = infer_signature_from_prepared_ssa(&prepared);
+        let inferred = inferred(&prepared);
 
         // The certified value is untyped, so no return is claimed, least of all the control target's.
         assert_eq!(inferred.ret_type, "");
@@ -1347,12 +1360,8 @@ mod tests {
     #[test]
     fn prepared_signature_callconv_is_source_owned_and_rename_invariant() {
         let expected = "source-owned-test-cc";
-        let ordinary =
-            infer_signature_from_prepared_ssa(&prepared_x86_scalar_return("rax", expected));
-        let renamed = infer_signature_from_prepared_ssa(&prepared_x86_scalar_return(
-            "xmm0_misleading",
-            expected,
-        ));
+        let ordinary = inferred(&prepared_x86_scalar_return("rax", expected));
+        let renamed = inferred(&prepared_x86_scalar_return("xmm0_misleading", expected));
 
         assert_eq!(ordinary.callconv, expected);
         assert_eq!(renamed.callconv, expected);
@@ -1360,7 +1369,7 @@ mod tests {
 
     #[test]
     fn misleading_xmm0_spelling_does_not_manufacture_a_float_return() {
-        let inferred = infer_signature_from_prepared_ssa(&prepared_x86_scalar_return(
+        let inferred = inferred(&prepared_x86_scalar_return(
             "xmm0_misleading",
             "source-owned-test-cc",
         ));
@@ -1383,7 +1392,7 @@ mod tests {
         };
         let unstated =
             SsaArtifact::for_patterns(&[returning()], Some(&arch)).expect("prepared SSA");
-        assert_eq!(infer_signature_from_prepared_ssa(&unstated).ret_type, "");
+        assert_eq!(inferred(&unstated).ret_type, "");
         let register = |offset| r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
             offset,
@@ -1401,7 +1410,7 @@ mod tests {
         .expect("void interface");
         let stated = SsaArtifact::for_decompile_with_interface(&[returning()], Some(&arch), void)
             .expect("prepared void source");
-        assert_eq!(infer_signature_from_prepared_ssa(&stated).ret_type, "void");
+        assert_eq!(inferred(&stated).ret_type, "void");
     }
 
     #[test]

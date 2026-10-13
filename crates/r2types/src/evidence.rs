@@ -1287,7 +1287,8 @@ mod tests {
             merged_signature: Some(signature),
             ..crate::FunctionTypeFacts::default()
         });
-        facts.apply_recovered_evidence_types(&source, 64);
+        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        facts.apply_recovered_evidence_types(&source, &solved, 64);
         let written = facts
             .type_facts()
             .render_authorized_signature()
@@ -1395,7 +1396,8 @@ mod tests {
             merged_signature: Some(signature),
             ..crate::FunctionTypeFacts::default()
         });
-        facts.apply_recovered_evidence_types(&source, 64);
+        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        facts.apply_recovered_evidence_types(&source, &solved, 64);
 
         let type_facts = facts.type_facts();
         assert_eq!(
