@@ -533,3 +533,33 @@ fn a_byte_written_over_the_callers_register_is_no_half_of_the_result() {
     assert!(f.starts_with("uint64_t f(uint64_t arg0)"), "{f}");
     assert!(!f.contains("second register is open"), "{f}");
 }
+
+/// `f` returns in RDX:RAX, and `caller` reaches it through a register the instruction before loads:
+/// `lea rax, [rip + f]; call rax; mov rax, rdx; ret`.
+const FOLDED_PAIR: &[u8] = &[
+    0x48, 0x89, 0xf8, // 1000 mov rax, rdi
+    0x48, 0x89, 0xf2, // 1003 mov rdx, rsi
+    0xc3, // 1006 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1007 padding
+    0x48, 0x8d, 0x05, 0xe9, 0xff, 0xff, 0xff, // 1010 lea rax, [rip - 0x17]
+    0xff, 0xd0, // 1017 call rax
+    0x48, 0x89, 0xd0, // 1019 mov rax, rdx
+    0xc3, // 101c ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 101d padding
+];
+
+#[test]
+fn a_call_the_walk_folds_is_a_call_whose_reads_count() {
+    let functions = [("f", BASE, 7), ("caller", BASE + 0x10, 0x0d)];
+    let f = rendered(Literal::of_code(FOLDED_PAIR, &functions));
+    assert!(f.starts_with("__uint128_t f("), "{f}");
+    let caller = OpenProgram::of(Literal::of_code(FOLDED_PAIR, &functions))
+        .rendered(BASE + 0x10)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(caller.contains(">> 64U"), "{caller}");
+    assert!(!caller.contains("r2sleigh_residual"), "{caller}");
+}

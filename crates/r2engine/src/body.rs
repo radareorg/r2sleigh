@@ -143,6 +143,19 @@ pub struct BodyBlock {
     pub bytes: Vec<u8>,
     /// Where control continues from this block.
     pub successors: Vec<(AdvisorySuccessorKind, u64)>,
+    /// Each transfer to another function the walk read in this block, in operation order.
+    pub transfers: Vec<Transfer>,
+}
+
+/// One operation that leaves for another function, as the walk read it: a call it folded to its
+/// target stays the call it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transfer {
+    /// The operation's index in its block.
+    pub op: usize,
+    /// The function's entry, or the slot a tail transfer loads it from.
+    pub target: u64,
+    pub kind: r2source::AdvisoryCallTransfer,
 }
 
 /// One place the walk could not continue, and why.
@@ -774,22 +787,27 @@ impl Walk {
         let mut blocks: Vec<BodyBlock> = Vec::new();
         let mut parts: Vec<Instruction> = Vec::new();
 
+        let ending = Ending {
+            link,
+            dispatched: &self.dispatched,
+            tail_calls: &self.tail_calls,
+        };
         for (addr, instruction) in self.lifted.unwrap_or_default() {
             let broken = parts
                 .last()
                 .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
             if broken {
-                blocks.push(finish(&mut parts, link, &self.dispatched, false));
+                blocks.push(finish(&mut parts, &ending, false));
             }
             let ends = closed.contains(&addr);
             let ends_block = ends || ends_block(&instruction.terminator);
             parts.push(instruction);
             if ends_block {
-                blocks.push(finish(&mut parts, link, &self.dispatched, ends));
+                blocks.push(finish(&mut parts, &ending, ends));
             }
         }
         if !parts.is_empty() {
-            blocks.push(finish(&mut parts, link, &self.dispatched, false));
+            blocks.push(finish(&mut parts, &ending, false));
         }
 
         // A call still closed ends its block; one a model closed takes the model's premises.
@@ -852,13 +870,42 @@ fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
     })
 }
 
+/// What ending a block reads of the walk.
+struct Ending<'a> {
+    link: Option<&'a r2il::Varnode>,
+    dispatched: &'a BTreeMap<u64, Vec<u64>>,
+    tail_calls: &'a BTreeSet<u64>,
+}
+
+/// The transfer to another function an instruction ends in, at `base`, its first operation's
+/// index in the block: a call (folded or not) or a branch to an entry.
+fn transfer_of(
+    instruction: &Instruction,
+    base: usize,
+    tail_calls: &BTreeSet<u64>,
+) -> Option<Transfer> {
+    let (target, kind) = match instruction.terminator {
+        BlockTerminator::Call { target, .. } => (target, r2source::AdvisoryCallTransfer::Call),
+        BlockTerminator::Branch { target } if tail_calls.contains(&target) => {
+            (target, r2source::AdvisoryCallTransfer::TailJump)
+        }
+        _ => return None,
+    };
+    let at = instruction
+        .lifted
+        .ops
+        .iter()
+        .position(r2il::R2ILOp::is_control_flow)?;
+    Some(Transfer {
+        op: base + at,
+        target,
+        kind,
+    })
+}
+
 /// One block from the instructions collected for it, with its last instruction's successors, or none where that call is `closed`.
-fn finish(
-    parts: &mut Vec<Instruction>,
-    link: Option<&r2il::Varnode>,
-    dispatched: &BTreeMap<u64, Vec<u64>>,
-    closed: bool,
-) -> BodyBlock {
+fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> BodyBlock {
+    let (link, dispatched) = (ending.link, ending.dispatched);
     let start = parts[0].lifted.addr;
     let last = parts
         .last()
@@ -887,11 +934,28 @@ fn finish(
     for part in parts.iter() {
         bytes.extend_from_slice(&part.bytes);
     }
+    let mut transfers = Vec::new();
+    let mut base = 0;
+    for part in parts.iter() {
+        transfers.extend(transfer_of(part, base, ending.tail_calls));
+        base += part.lifted.ops.len();
+    }
     let lifted = R2ILBlock::join(start, size, parts.drain(..).map(|part| part.lifted));
+    // A tail transfer through a loaded slot leaves by what the slot holds: the slot is its target.
+    if let Some(last) = lifted.ops.len().checked_sub(1)
+        && let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&lifted, last)
+    {
+        transfers.push(Transfer {
+            op: last,
+            target: slot.offset,
+            kind: r2source::AdvisoryCallTransfer::TailSlot,
+        });
+    }
     BodyBlock {
         lifted,
         bytes,
         successors,
+        transfers,
     }
 }
 
