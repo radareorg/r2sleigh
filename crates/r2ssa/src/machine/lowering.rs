@@ -282,7 +282,7 @@ impl MachineBuilder {
                     },
                 ))
             }
-            SSAOp::PopCount { .. } => {
+            SSAOp::PopCount { .. } | SSAOp::Lzcount { .. } => {
                 if inputs.len() != 1 {
                     return Err(MachineBuildError::WrongOperandCount {
                         inst: inst.id,
@@ -304,7 +304,11 @@ impl MachineBuilder {
                 }
                 let input = self.intern_value(input_value)?;
                 self.record_whole_use(graph, inst, 0)?;
-                Ok((unsigned, MachineExprKind::PopulationCount { input }))
+                let count = match op {
+                    SSAOp::Lzcount { .. } => MachineExprKind::LeadingZeros { input },
+                    _ => MachineExprKind::PopulationCount { input },
+                };
+                Ok((unsigned, count))
             }
             SSAOp::IntCarry { .. } | SSAOp::IntSCarry { .. } | SSAOp::IntSBorrow { .. } => {
                 let inputs = self.operand_nodes(graph, inst, 2)?;

@@ -948,6 +948,10 @@ pub enum MachineExprKind {
     PopulationCount {
         input: MachineExprId,
     },
+    /// `LZCOUNT`: the zeros above the highest set bit, the input's width at zero.
+    LeadingZeros {
+        input: MachineExprId,
+    },
     Bitwise {
         op: MachineBitwiseOp,
         left: MachineExprId,
@@ -1070,6 +1074,7 @@ impl MachineExprKind {
             | Self::BooleanNot { input }
             | Self::Negate { input, .. }
             | Self::PopulationCount { input }
+            | Self::LeadingZeros { input }
             | Self::Cast { input, .. }
             | Self::FloatUnary { input, .. }
             | Self::Extract { input, .. } => vec![*input],
@@ -2817,7 +2822,8 @@ impl MachineFunction {
                     )
                     && child(*input)?.ty == expr.ty
             }
-            MachineExprKind::PopulationCount { input } => {
+            MachineExprKind::PopulationCount { input }
+            | MachineExprKind::LeadingZeros { input } => {
                 let input_bits = child(*input)?.ty.width_bits();
                 let required_output_bits = u32::BITS - input_bits.leading_zeros();
                 matches!(
@@ -3951,6 +3957,7 @@ fn machine_kind_matches_op<V>(op: &SSAOp<V>, kind: &MachineExprKind) -> bool {
                 SSAOp::PopCount { .. },
                 MachineExprKind::PopulationCount { .. }
             )
+            | (SSAOp::Lzcount { .. }, MachineExprKind::LeadingZeros { .. })
             | (
                 SSAOp::IntCarry { .. },
                 MachineExprKind::ArithmeticFlag {
@@ -4304,6 +4311,7 @@ fn machine_type_matches_op<V>(op: &SSAOp<V>, ty: &MachineType, output_bits: u32)
         | SSAOp::IntRem { .. }
         | SSAOp::IntNegate { .. }
         | SSAOp::PopCount { .. }
+        | SSAOp::Lzcount { .. }
         | SSAOp::IntAnd { .. }
         | SSAOp::IntOr { .. }
         | SSAOp::IntXor { .. }

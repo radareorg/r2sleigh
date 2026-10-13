@@ -961,6 +961,12 @@ impl Spell<'_> {
                 );
                 Some(cast(integer(bits)?, counted))
             }
+            MachineExprKind::LeadingZeros { input } => {
+                let input_bits = child_bits(*input)?;
+                let counted = crate::prelude::Helper::leading_zeros(input_bits)?
+                    .call(vec![cast(integer(input_bits)?, child(*input)?)]);
+                Some(cast(integer(bits)?, counted))
+            }
             // A merge is its variable, which the edges assign; the rest has no single C operator.
             MachineExprKind::Phi { .. }
             | MachineExprKind::PopulationCount { .. }

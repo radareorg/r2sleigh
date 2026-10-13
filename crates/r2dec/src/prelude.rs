@@ -167,6 +167,8 @@ pub enum Helper {
     FloatFromBits { bits: u32 },
     /// The integer whose bits are this float.
     FloatToBits { bits: u32 },
+    /// `LZCOUNT` of an unsigned integer of `bits`: 8, 16, 32 or 64.
+    LeadingZeros { bits: u32 },
     /// A construct the rendering could not prove: it traps if executed.
     Residual(ResidualType),
     /// A read of a scalar of this type from memory whose declared type is not
@@ -198,6 +200,11 @@ impl Helper {
         matches!(bits, 32 | 64).then_some(Self::FloatToBits { bits })
     }
 
+    /// The count of leading zeros of an integer of `bits`.
+    pub fn leading_zeros(bits: u32) -> Option<Self> {
+        matches!(bits, 8 | 16 | 32 | 64).then_some(Self::LeadingZeros { bits })
+    }
+
     /// The helper's name.
     pub fn name(self) -> String {
         match self {
@@ -205,6 +212,7 @@ impl Helper {
             Self::Float { op, bits } => format!("r2sleigh_float_{}_{bits}", op.spelling()),
             Self::FloatFromBits { bits } => format!("r2sleigh_float_from_bits_{bits}"),
             Self::FloatToBits { bits } => format!("r2sleigh_float_to_bits_{bits}"),
+            Self::LeadingZeros { bits } => format!("r2sleigh_lzcount_{bits}"),
             Self::Residual(ty) => format!("r2sleigh_residual_{}", ty.tag()),
             Self::Load(ty) => format!("r2sleigh_load_{}", ty.tag()),
             Self::Store(ty) => format!("r2sleigh_store_{}", ty.tag()),
@@ -252,6 +260,14 @@ impl Helper {
                      }}\n"
                 )
             }
+            // `__builtin_clzll` of zero is undefined, so zero is the width, as P-code defines it.
+            Self::LeadingZeros { bits } => format!(
+                "static inline uint32_t {name}(uint{bits}_t x)\n\
+                 {{\n\
+                 \x20   return x == 0 ? {bits}u : (uint32_t)__builtin_clzll(x) - {}u;\n\
+                 }}\n",
+                64 - bits
+            ),
             Self::Residual(ty) => format!(
                 "static inline {} {name}(uint32_t site)\n\
                  {{\n\
@@ -666,6 +682,9 @@ pub(crate) mod tests {
             helpers.insert(Helper::float_from_bits(bits).expect("float width"));
             helpers.insert(Helper::float_to_bits(bits).expect("float width"));
         }
+        for bits in [8, 16, 32, 64] {
+            helpers.insert(Helper::leading_zeros(bits).expect("integer width"));
+        }
         for ty in [
             ResidualType::Void,
             ResidualType::Bool,
@@ -718,6 +737,10 @@ int main(void)
     CHECK(r2sleigh_float_round_32(0.49999997f) == 0.0f && r2sleigh_float_round_32(-2.5f) == -2.0f);
     CHECK(r2sleigh_float_isnan_64(r2sleigh_float_from_bits_64(0x7ff8000000000000ull)) == 1);
     CHECK(r2sleigh_float_isnan_32(1.0f) == 0);
+    CHECK(r2sleigh_lzcount_8(0) == 8 && r2sleigh_lzcount_8(1) == 7 && r2sleigh_lzcount_8(0x80) == 0);
+    CHECK(r2sleigh_lzcount_16(0) == 16 && r2sleigh_lzcount_16(0x00ff) == 8);
+    CHECK(r2sleigh_lzcount_32(0) == 32 && r2sleigh_lzcount_32(1) == 31 && r2sleigh_lzcount_32(0x80000000u) == 0);
+    CHECK(r2sleigh_lzcount_64(0) == 64 && r2sleigh_lzcount_64(1) == 63 && r2sleigh_lzcount_64(~(uint64_t)0) == 0);
     return 0;
 }
 "#;

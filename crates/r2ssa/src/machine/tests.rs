@@ -696,6 +696,28 @@ fn arithmetic_flags_remain_distinct_typed_boolean_operations() {
     ));
 }
 
+/// `LZCOUNT` is a machine operation of its own, so a renderer that spells it never sees a gap.
+#[test]
+fn leading_zero_count_is_an_exact_typed_machine_operation() {
+    let artifact = artifact_with_ops([R2ILOp::Lzcount {
+        dst: Varnode::unique(0x10, 1),
+        src: Varnode::constant(0xf0f0, 8),
+    }]);
+    let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
+    projection
+        .validate_against(&artifact)
+        .expect("leading-zero-count projection validation");
+    assert!(projection.failures().is_empty());
+    let entity = projection
+        .entities(artifact.graph())
+        .next()
+        .expect("leading-zero-count entity");
+    let root = projection
+        .expr(entity.root())
+        .expect("leading-zero-count root");
+    assert!(matches!(root.kind(), MachineExprKind::LeadingZeros { .. }));
+}
+
 #[test]
 fn population_count_is_an_exact_typed_machine_operation() {
     let artifact = artifact_with_ops([R2ILOp::PopCount {
