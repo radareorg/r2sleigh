@@ -125,7 +125,7 @@ pub(crate) fn infer_signature_with_callsites(
     }
     refine_parameter_signedness(prepared, &recovered_params, &mut canonical_params);
 
-    let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), &evidence_types);
+    let returns = crate::ReturnTypeFact::decide(prepared, callsites, &evidence_types);
     let callconv = prepared.machine_context().function_interface().map_or_else(
         || "unknown".to_string(),
         |interface| interface.calling_convention().to_string(),
