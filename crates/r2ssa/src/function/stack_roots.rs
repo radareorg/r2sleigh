@@ -212,7 +212,7 @@ fn rooted(
                     .fold(Rooted::Pending, |held, source| held.meet(of(*source))),
                 Rule::Copy(src) if fits(*src) => of(*src),
                 Rule::Add(a, b) if fits(*a) && fits(*b) => displaced(of(*a), delta(*b, views), 1)
-                    .meet_either(displaced(of(*b), delta(*a, views), 1)),
+                    .either(displaced(of(*b), delta(*a, views), 1)),
                 Rule::Sub(a, b) if fits(*a) && fits(*b) => displaced(of(*a), delta(*b, views), -1),
                 _ => Rooted::Not,
             }
@@ -248,12 +248,15 @@ fn displaced(base: Rooted, delta: Option<i64>, sign: i64) -> Rooted {
 }
 
 impl Rooted {
-    /// A sum is rooted by whichever operand is a root plus a constant: a
-    /// root from either side, pending while either may still be one.
-    fn meet_either(self, other: Self) -> Self {
+    /// A root from either of two answers about one value: pending while either is, a root one
+    /// states over the other's `Not`, and none where they name two roots. Monotone in both, so a
+    /// cell never climbs back once an answer falls (an `At` over a pending answer that later
+    /// fell to `Not` had moved a merge back up past its height).
+    fn either(self, other: Self) -> Self {
         match (self, other) {
-            (Self::At(root), _) | (_, Self::At(root)) => Self::At(root),
             (Self::Pending, _) | (_, Self::Pending) => Self::Pending,
+            (Self::At(one), Self::At(two)) if one != two => Self::Pending,
+            (Self::At(root), _) | (_, Self::At(root)) => Self::At(root),
             (Self::Not, Self::Not) => Self::Not,
         }
     }
@@ -276,11 +279,7 @@ fn value_of(
         Representative::Value(representative) => own(representative),
         Representative::Literal { .. } => Rooted::Not,
     };
-    match (own(id), representative) {
-        (Rooted::At(root), _) | (_, Rooted::At(root)) => Rooted::At(root),
-        (Rooted::Pending, _) | (_, Rooted::Pending) => Rooted::Pending,
-        (Rooted::Not, Rooted::Not) => Rooted::Not,
-    }
+    own(id).either(representative)
 }
 
 /// The constant a value displaces an address by, read through a copy: an
@@ -386,7 +385,7 @@ fn indexed(
             let indexed_of = |id: ValueId| {
                 let own = |id: ValueId| cells.get(id).copied().unwrap_or(Rooted::Not);
                 let representative = views.representative_value(id).map_or(Rooted::Not, own);
-                own(id).meet_either(representative)
+                own(id).either(representative)
             };
             // Inside an object: exactly placed in it, or already indexed.
             let inside = |id: ValueId| match exact_of(id) {
@@ -411,9 +410,9 @@ fn indexed(
                             None => Rooted::Not,
                         };
                     by_index(*a, *b)
-                        .meet_either(by_index(*b, *a))
-                        .meet_either(by_constant(*a, *b))
-                        .meet_either(by_constant(*b, *a))
+                        .either(by_index(*b, *a))
+                        .either(by_constant(*a, *b))
+                        .either(by_constant(*b, *a))
                 }
                 Rule::Sub(a, b) => match delta(*b, views) {
                     Some(_) => indexed_of(*a),
@@ -430,4 +429,50 @@ fn indexed(
         }
     }
     Ok(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether `low` is at or below `high`: `Pending` above every root, every root above `Not`.
+    fn below(low: Rooted, high: Rooted) -> bool {
+        match (low, high) {
+            (_, Rooted::Pending) | (Rooted::Not, _) => true,
+            (Rooted::At(one), Rooted::At(two)) => one == two,
+            _ => false,
+        }
+    }
+
+    /// A solve terminates within its height only where every combination is monotone: a cell
+    /// that fell must never climb. `either` once read an `At` over a pending answer, which a
+    /// later `Not` turned back to pending (0pack `0x58e3d0`'s stack-roots).
+    #[test]
+    fn either_answer_is_monotone_in_both() {
+        let root = |offset| {
+            Rooted::At(StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset,
+            })
+        };
+        let all = [Rooted::Pending, root(-96), root(-136), Rooted::Not];
+        for (low, high) in all
+            .iter()
+            .flat_map(|low| all.iter().map(move |high| (*low, *high)))
+        {
+            if !below(low, high) {
+                continue;
+            }
+            for other in all {
+                assert!(
+                    below(low.either(other), high.either(other)),
+                    "{low:?} {high:?} {other:?}"
+                );
+                assert!(
+                    below(other.either(low), other.either(high)),
+                    "{other:?} {low:?} {high:?}"
+                );
+            }
+        }
+    }
 }
