@@ -678,6 +678,17 @@ impl Image {
             }
         }
         entries.extend(initialisers(&sections, &loader_writes, &data[..], &arch));
+        for (kind, raw, stated) in loader::hooks(&file) {
+            let vaddr = code_address(&arch, raw);
+            if vaddr != 0 && executable(vaddr) {
+                entries.push(Entry {
+                    vaddr,
+                    kind,
+                    thumb: is_arm32(&arch) && raw & 1 == 1,
+                    stated_at: Some(stated),
+                });
+            }
+        }
         if let Some((vaddr, field)) = c_main
             && executable(vaddr)
         {

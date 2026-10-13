@@ -714,6 +714,10 @@ pub enum EntryKind {
     Fini,
     /// Listed in the array run before any shared object's initialisers.
     Preinit,
+    /// Named by ELF's `DT_INIT`: the loader calls it itself, before the initialiser arrays.
+    InitHook,
+    /// Named by ELF's `DT_FINI`: the loader calls it itself, after the terminator arrays.
+    FiniHook,
     /// Named by a symbol typed as a function.
     Symbol,
     /// The C `main` the format names outright.

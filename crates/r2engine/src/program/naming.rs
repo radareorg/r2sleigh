@@ -107,9 +107,11 @@ pub fn of(source: &impl Source) -> NameDb {
                 preinits += 1;
                 format!("entry.preinit{}", preinits - 1)
             }
-            // The symbol table names one of these already, and a stated
-            // function start is a position rather than a name.
-            EntryKind::Symbol | EntryKind::Declared => continue,
+            // The symbol table names one of these already, a stated function start is a position
+            // rather than a name, and radare2 names no loader hook.
+            EntryKind::Symbol | EntryKind::Declared | EntryKind::InitHook | EntryKind::FiniHook => {
+                continue;
+            }
         };
         db.insert(
             entry.vaddr,

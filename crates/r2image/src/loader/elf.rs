@@ -17,7 +17,8 @@ use object::read::elf::{
 use object::{Object, elf};
 
 use r2abi::statement::{
-    Applies, Binding, LoaderWrite, Record, Relocation, RelocationSymbol, Visibility, WriteKind,
+    Applies, Binding, EntryKind, LoaderWrite, Record, Relocation, RelocationSymbol, StatedAt,
+    Visibility, WriteKind,
 };
 
 use super::written;
@@ -510,6 +511,47 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
 }
 
 /// The dynamic table's entries, read through `PT_DYNAMIC` to the terminating one.
+/// The functions the dynamic table names for the loader to call itself, `DT_INIT` and `DT_FINI`,
+/// each with where the table states it: its entry's value field.
+pub(crate) fn hooks(file: &object::File<'_>) -> Vec<(EntryKind, u64, StatedAt)> {
+    match file {
+        object::File::Elf32(elf) => hooks_of(elf),
+        object::File::Elf64(elf) => hooks_of(elf),
+        _ => Vec::new(),
+    }
+}
+
+fn hooks_of<'data, E: FileHeader, R: object::ReadRef<'data>>(
+    file: &ElfFile<'data, E, R>,
+) -> Vec<(EntryKind, u64, StatedAt)> {
+    let endian = file.endian();
+    let mut headers = file.elf_program_headers().iter();
+    let Some(header) = headers.find(|header| header.p_type(endian) == elf::PT_DYNAMIC) else {
+        return Vec::new();
+    };
+    let (offset, vaddr): (u64, u64) = (
+        header.p_offset(endian).into(),
+        header.p_vaddr(endian).into(),
+    );
+    // `d_val` is the second of an entry's two words.
+    let size = std::mem::size_of::<E::Dyn>() as u64;
+    let entries = dynamic_entries(file).unwrap_or_default();
+    let named = entries.iter().enumerate().filter_map(|(at, entry)| {
+        let kind = match entry.tag32(endian)? {
+            elf::DT_INIT => EntryKind::InitHook,
+            elf::DT_FINI => EntryKind::FiniHook,
+            _ => return None,
+        };
+        let place = at as u64 * size + size / 2;
+        let stated = StatedAt {
+            offset: offset + place,
+            vaddr: Some(vaddr + place),
+        };
+        Some((kind, entry.d_val(endian).into(), stated))
+    });
+    named.collect()
+}
+
 fn dynamic_entries<'data, E: FileHeader, R: object::ReadRef<'data>>(
     file: &ElfFile<'data, E, R>,
 ) -> Option<&'data [E::Dyn]> {

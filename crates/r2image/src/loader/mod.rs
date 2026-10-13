@@ -10,6 +10,8 @@ use r2abi::statement::{ImportStub, LoaderWrite, Relocation, WriteKind};
 mod elf;
 mod macho;
 
+pub(crate) use elf::hooks;
+
 /// What the loader applies to one image.
 pub(crate) struct Loaded {
     /// Every relocation record, each once, in the order it is applied.
