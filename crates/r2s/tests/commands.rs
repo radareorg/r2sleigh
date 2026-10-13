@@ -580,6 +580,80 @@ fn a_call_taking_a_pair_assigns_the_half_its_caller_reads() {
     assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
 }
 
+/// zig's `main` truncates a double to `int32_t` (`cvttsd2si`): in range it is the cast, out of
+/// range C leaves it undefined, so that arm is a residual.
+#[test]
+fn a_staged_float_truncation_is_guarded_by_its_range() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let staged = on(
+        fixtures.join("float_moves_zig_x86_64_O2g"),
+        "pdd @ 0x01001510",
+    );
+    assert!(staged.out.contains("> -2147483649.0 && "), "{}", staged.out);
+    assert!(
+        staged.out.contains(" < 2147483648.0 ? (int32_t)"),
+        "{}",
+        staged.out
+    );
+    assert!(
+        staged.out.contains(" : r2sleigh_residual_i32("),
+        "{}",
+        staged.out
+    );
+    // The return's obligations are residual on the proof line, as its text is.
+    assert!(
+        staged
+            .out
+            .contains("8 rendered, 9 elided, 0 refused, 2 residual"),
+        "{}",
+        staged.out
+    );
+}
+
+/// A tail call returns what its callee leaves in the function's own result register: RAX for
+/// `frame_dummy`, XMM0 for `swap_call`, whose arguments it swaps first.
+#[test]
+fn a_staged_tail_call_returns_its_callee_s_result() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    for (binary, function, line) in [
+        ("rv_O0g", "sym.frame_dummy", "return register_tm_clones();"),
+        (
+            "float_moves_zig_x86_64_O2g",
+            "sym.swap_call",
+            "return scale(b, a);",
+        ),
+    ] {
+        let staged = on(fixtures.join(binary), &format!("pdd @ {function}"));
+        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+        assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
+    }
+}
+
+/// A staged control residual says why in `pddj` (an untargeted `jmp rax`, an unproven return),
+/// and the proof counts no residual the text does not hold.
+#[test]
+fn a_staged_control_residual_states_its_cause() {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
+    for (function, cause, gap) in [
+        (
+            "sym.deregister_tm_clones",
+            "gap",
+            Some("UnresolvedIndirectBranch"),
+        ),
+        ("sym.__do_global_dtors_aux", "unproven-return", None),
+    ] {
+        let staged = on(binary.clone(), &format!("pddj @ {function}"));
+        let answer: serde_json::Value =
+            serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
+        let residuals = answer["residuals"].as_array().expect("residuals");
+        assert!(!residuals.is_empty(), "{function}: {answer}");
+        for residual in residuals {
+            assert_eq!(residual["cause"], cause, "{function}: {residual}");
+            assert_eq!(residual["gap"].as_str(), gap, "{function}: {residual}");
+        }
+    }
+}
+
 /// A staged constant a prototyped parameter holds passes as itself: `main`'s calls in the review
 /// fixture, where only `printf`'s variadic tail keeps its conversions.
 #[test]
