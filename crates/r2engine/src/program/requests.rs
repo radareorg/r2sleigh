@@ -207,6 +207,11 @@ impl Survey {
         self.callers.get(&callee).map_or(&[], Vec::as_slice)
     }
 
+    /// Every range a walked body holds, in address order.
+    pub(super) fn held(&self) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
+        self.holders.ranges()
+    }
+
     /// Every function discovery found, by entry, ascending.
     pub(super) fn entries(&self) -> Vec<u64> {
         let mut entries = self

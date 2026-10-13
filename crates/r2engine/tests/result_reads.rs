@@ -576,9 +576,9 @@ const CLOSED: &[u8] = &[
     0x48, 0x31, 0xc0, // 1015 xor rax, rax
     0x66, 0x0f, 0xef, 0xc0, // 1018 pxor xmm0, xmm0
     0xc3, // 101c ret
-    0xcc, 0xcc, 0xcc, // 101d padding
-    0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1020 other: ret
-    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1028 a word
+    0x90, 0x90, 0x90, // 101d padding, as GNU ld lays it
+    0xc3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1020 other: ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1028 a word
 ];
 
 fn closed() -> Literal {
@@ -618,6 +618,12 @@ fn a_result_another_way_in_may_read_stays_a_residual() {
     tailed.write(BASE + 0x20, &[0xe9, 0xdb, 0xff, 0xff, 0xff]);
     let mut stored = closed();
     stored.write(BASE + 0x28, &0x1000u64.to_le_bytes());
+    let mut unread = closed();
+    // 1028 mov eax, 1; 102d ret: code in no function, which may call or name anything.
+    unread.write(
+        BASE + 0x28,
+        &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x90, 0x90],
+    );
     let exported = closed().declaring(r2abi::statement::Symbol {
         name: "f".into(),
         vaddr: BASE,
@@ -634,6 +640,7 @@ fn a_result_another_way_in_may_read_stays_a_residual() {
         ("handed", handed),
         ("tail-called", tailed),
         ("stored", stored),
+        ("in code no body holds", unread),
         ("exported", exported),
     ] {
         let text = rendered(program);

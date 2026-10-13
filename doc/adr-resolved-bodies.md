@@ -128,8 +128,16 @@ r2engine sets it where all of these hold:
    on a 64-bit machine every 32-bit one (`imm32`, `.long`), with bit 0
    cleared. This catches a non-PIE vtable or function table, which holds
    absolute words with no relocation and no code reference.
-5. The index read every body and no walk stopped at an unresolved transfer,
-   since code past one is in no body and may call or name anything.
+5. The index read every body, and every code byte the file holds is in a
+   walked body, a linkage section, or filler: zeros, instructions that lift
+   to no operation, traps, or direct transfers to code discovery knows (the
+   `bl abort` after a call that never returns). Code no walk decoded, past an
+   unresolved transfer or never reached, may call or name anything, so any
+   other byte refuses, named on the refusal. The sections the container
+   states as code are read, else its executable segments: AArch64's R-X
+   segment also holds the headers, `.rodata` and `.eh_frame`. This replaced
+   refusing on any unresolved transfer, which crt's `br x16` tail calls
+   through the GOT made true of every program (2026-10-13).
 6. The machine is x86-64 or AArch64, whose addresses an index claim or a
    word holds whole. `movw`/`movt` and `lui`+`addi` split one across
    immediates and hide it from both. The format is ELF or Mach-O, and the
@@ -138,13 +146,11 @@ r2engine sets it where all of these hold:
 
 AArch64's large code model builds an address with `movz`/`movk`, which item
 6 does not catch. No compiler in the corpus emits it.
-Code discovery never reached is in no body and is not past an unresolved
-transfer, so item 5 does not see it either. ELF compilers state a frame (CFI)
-for every function they emit and Mach-O linkers list each in the
-function-starts table (`EntryKind::Declared`); both seed discovery (ROADMAP
-I), so this is hand-written code with neither. A check that every
-executable byte is in a body or padding would close it. It needs padding
-decoded per machine and is a follow-up.
+x86 `int3` lifts to a software interrupt, an indirect call and a return, so
+lld's `int3` padding between functions refuses the closed world; GNU ld pads
+with no-operation instructions. Code in a gap is read instruction by
+instruction, so an `adrp`+`add` there that names a function is missed, the
+large-code-model limit of item 6 in unreachable code.
 
 Cost: `Escapes` is computed once per program under `aa`: one pass over the
 references, symbols and entries, and one over the mapped file bytes, with a

@@ -497,6 +497,7 @@ impl Literal {
         program.code = code;
         program.container.segments = vec![code_segment(BASE, code.len() as u64)];
         program.container.sections[0].vsize = code.len() as u64;
+        program.container.sections[0].file_size = code.len() as u64;
         program.container.symbols = functions
             .iter()
             .map(|(name, vaddr, size)| Symbol {

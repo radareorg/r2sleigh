@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use r2abi::statement::{Binding, EntryKind, Format, SourceLanguage, Symbol};
+use r2abi::statement::{Binding, EntryKind, Format, SectionRole, SourceLanguage, Symbol};
 use r2source::SourceResultReads;
 
 use super::requests::{ReferenceIndex, SurveyQuery};
@@ -139,14 +139,19 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
         let index = db.get::<ReferenceIndex>(&()).ok()?;
         let index = Arc::clone(&index.as_ref().as_ref().ok()?.0);
-        // A body not read, or code past a transfer no walk resolved, may hold any reference.
-        if !index.coverage.unread.is_empty() || !index.coverage.unresolved.is_empty() {
+        // A body not read may hold any reference.
+        if !index.coverage.unread.is_empty() {
             r2il::refusal_evidence!(
                 "closed-world",
-                "{} bodies unread, {} with unresolved transfers: not every way in is known",
-                index.coverage.unread.len(),
-                index.coverage.unresolved.len()
+                "{} bodies unread: not every way in is known",
+                index.coverage.unread.len()
             );
+            return None;
+        }
+        // Code no walk decoded (past an unresolved transfer, or never reached) may call or name
+        // anything; a code byte no body, stub section or padding accounts for refuses.
+        if let Some(at) = unaccounted_code(db, &survey) {
+            r2il::refusal_evidence!("closed-world", "{at:#x}: code no body holds");
             return None;
         }
         let mut escaped = Vec::new();
@@ -172,6 +177,102 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         escaped.dedup();
         Some(escaped.into())
     }
+}
+
+/// The first code byte the file holds that no walked body, linkage section or padding accounts
+/// for: the sections the container states as code, else its executable segments.
+fn unaccounted_code<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    survey: &super::requests::Survey,
+) -> Option<u64> {
+    let view = View::new(db, true);
+    let container = view.source().container();
+    let sections = (container.sections.iter())
+        .filter(|section| section.role == SectionRole::Code && section.loaded)
+        .map(|section| section.vaddr..section.vaddr + section.file_size.min(section.vsize))
+        .collect::<Vec<_>>();
+    let code = match sections.is_empty() {
+        true => (container.segments.iter())
+            .filter(|segment| segment.permissions.execute)
+            .map(|segment| segment.vaddr..segment.vaddr + segment.file_size.min(segment.vsize))
+            .collect(),
+        false => sections,
+    };
+    let mut covered = survey.held().collect::<Vec<_>>();
+    covered.extend((view.linkage().sections.iter()).map(|(start, end)| *start..*end));
+    covered.sort_by_key(|range| range.start);
+    let entries = survey.entries();
+    let known = |address: u64| {
+        entries.binary_search(&address).is_ok()
+            || covered.iter().any(|held| held.contains(&address))
+    };
+    let walker = super::returns::Walking::new(view.clone(), true).ok()?;
+    let disasm = walker.target(false).disasm;
+    for range in code.into_iter().filter(|range| range.start < range.end) {
+        let mut at = range.start;
+        for held in covered
+            .iter()
+            .filter(|held| held.end > range.start && held.start < range.end)
+        {
+            if held.start > at && !padding(&view, disasm, &known, at..held.start) {
+                return Some(at);
+            }
+            at = at.max(held.end);
+        }
+        if at < range.end && !padding(&view, disasm, &known, at..range.end) {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// Whether these bytes hold no code that could reach or name a function discovery does not know:
+/// zeros, instructions that lift to no operation, traps, or direct transfers to known code (a call
+/// to `abort` after one that never returns). An indirect transfer is unknown code.
+fn padding<S: Source + 'static>(
+    view: &View<'_, S>,
+    disasm: &r2sleigh_lift::Disassembler,
+    known: &dyn Fn(u64) -> bool,
+    bytes: std::ops::Range<u64>,
+) -> bool {
+    let Some(held) = usize::try_from(bytes.end - bytes.start)
+        .ok()
+        .and_then(|size| view.source().read(bytes.start, size))
+    else {
+        return false;
+    };
+    let mut at = 0;
+    while at < held.len() {
+        if held[at] == 0 {
+            at += 1;
+            continue;
+        }
+        let mut window = held[at..].to_vec();
+        window.resize(crate::body::WINDOW.max(window.len()), 0);
+        let address = bytes.start + at as u64;
+        let inert = |lifted: &r2il::R2ILBlock| {
+            let mut transfers = lifted
+                .ops
+                .iter()
+                .filter(|op| op.is_control_flow())
+                .peekable();
+            lifted.ops.is_empty()
+                || (transfers.peek().is_some()
+                    && transfers.all(|op| {
+                        matches!(op, r2il::R2ILOp::Breakpoint)
+                            || (op.transfer()).is_some_and(|transfer| {
+                                transfer.direct && known(transfer.target.offset)
+                            })
+                    }))
+        };
+        match disasm.lift_after(&window, address, None) {
+            Ok((lifted, _)) if lifted.size > 0 && inert(&lifted) => {
+                at += lifted.size as usize;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Whether another image may call the function `symbol` names: ELF's dynamic table, or any Mach-O

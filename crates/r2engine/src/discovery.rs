@@ -143,6 +143,11 @@ impl Holders {
         Self { pieces }
     }
 
+    /// Every range some body holds, in address order.
+    pub fn ranges(&self) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
+        (self.pieces.iter()).map(|(start, (end, _))| *start..*end)
+    }
+
     /// The entries whose bodies hold this address, in address order.
     pub fn at(&self, address: u64) -> &[u64] {
         self.pieces
