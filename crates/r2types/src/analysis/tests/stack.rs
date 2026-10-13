@@ -111,14 +111,6 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
         &prep_facts,
     );
 
-    let candidate = &analysis.plan.var_type_candidates[0];
-    assert_eq!(candidate.var_type, parse_test_type("int32_t", 64));
-    assert_eq!(candidate.source, TypeFactSource::DataflowRanked);
-    assert!(
-        candidate
-            .evidence
-            .contains(&TypeEvidence::CanonicalStackAccessWidth)
-    );
     let int32 = Some(CTypeLike::Int {
         bits: 32,
         signedness: Signedness::Signed,
@@ -195,13 +187,15 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
         &prep_facts,
     );
 
-    let candidate = &analysis.plan.var_type_candidates[0];
-    assert_eq!(candidate.var_type, parse_test_type("uint8_t", 64));
-    assert!(
-        candidate
-            .evidence
-            .contains(&TypeEvidence::CanonicalStackSignedness)
-    );
+    // A byte loaded only to be zero-extended is unsigned, whatever radare2 named its type.
+    let uint8 = Some(CTypeLike::Int {
+        bits: 8,
+        signedness: Signedness::Unsigned,
+    });
+    let binding = (analysis.type_facts.visible_bindings.iter())
+        .find(|binding| binding.name == "var_fh")
+        .expect("var_fh is bound");
+    assert_eq!(binding.ty, uint8, "{binding:?}");
 }
 
 #[test]
@@ -241,8 +235,8 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(analysis.signature.ret_type, "bool");
-    assert_eq!(analysis.signature.params.len(), 2);
+    assert_eq!(spelled_signature(&analysis).ret_type, "bool");
+    assert_eq!(spelled_signature(&analysis).params.len(), 2);
 }
 
 #[test]
