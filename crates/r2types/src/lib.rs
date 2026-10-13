@@ -24,8 +24,6 @@ pub fn parse_external_type_like_spec(spec: &str, ptr_bits: u32) -> Option<CTypeL
     convert::parse_c_type_like(spec, ptr_bits)
 }
 
-#[cfg(test)]
-pub(crate) use evidence::solve_evidence_types;
 pub(crate) use external::ExternalAggregateKind;
 pub(crate) use facts::{
     SignatureCertificate, is_generic_signature_type, signature_hint_can_replace_existing,

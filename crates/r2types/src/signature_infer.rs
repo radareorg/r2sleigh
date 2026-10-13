@@ -60,11 +60,12 @@ pub struct RecoveredSignatureParam {
     pub initial_ty: CTypeLike,
 }
 
-/// The signature the prepared function shows, its parameters typed by the function's one solve.
+/// The signature the prepared function shows, typed by the function's one solve and return decision.
 pub(crate) fn infer_signature_from_prepared_ssa(
     prepared: &SsaArtifact,
-    evidence_types: &crate::EvidenceTypes,
+    solved: &crate::function_facts::SolvedFunction,
 ) -> InferredSignature {
+    let evidence_types = &solved.evidence;
     let function_name = prepared
         .function()
         .name
@@ -121,7 +122,6 @@ pub(crate) fn infer_signature_from_prepared_ssa(
     }
     refine_parameter_signedness(prepared, &recovered_params, &mut canonical_params);
 
-    let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), evidence_types);
     let callconv = prepared.machine_context().function_interface().map_or_else(
         || "unknown".to_string(),
         |interface| interface.calling_convention().to_string(),
@@ -131,7 +131,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(
         arch_name,
         ptr_bits,
         &canonical_params,
-        returns.decided(),
+        solved.returns.decided(),
         callconv,
     )
 }
@@ -962,8 +962,9 @@ mod tests {
             .machine_context()
             .memory_model()
             .default_address_bits();
-        let evidence = crate::solve_evidence_types(prepared, &BTreeMap::new(), ptr_bits);
-        infer_signature_from_prepared_ssa(prepared, &evidence)
+        let solved =
+            crate::function_facts::SolvedFunction::of(prepared, &BTreeMap::new(), ptr_bits);
+        infer_signature_from_prepared_ssa(prepared, &solved)
     }
 
     #[test]

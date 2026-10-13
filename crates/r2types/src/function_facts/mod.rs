@@ -1184,9 +1184,9 @@ impl SourceOwnedFunctionFacts {
             &report.types.callee_facts,
             &BTreeMap::new(),
         );
-        let evidence = calls.solve(source);
+        let solved = calls.solve(source);
         let projected =
-            Self::enrich_report_from_source(source, std::mem::take(report), calls, &evidence);
+            Self::enrich_report_from_source(source, std::mem::take(report), calls, &solved);
         *report = projected.into_report();
     }
 
@@ -1196,7 +1196,7 @@ impl SourceOwnedFunctionFacts {
         source: &r2ssa::SsaArtifact,
         mut enriched: FunctionFacts,
         calls: CallFacts,
-        evidence: &crate::EvidenceTypes,
+        solved: &SolvedFunction,
     ) -> ProjectedFacts {
         let mut usage = source.facts().assumption_usage.clone();
         usage.extend(enriched.assumption_usage());
@@ -1209,12 +1209,12 @@ impl SourceOwnedFunctionFacts {
             .memory_model()
             .default_address_bits();
         enriched.apply_certified_call_argument_type_constraints(source.graph(), ptr_bits);
-        enriched.apply_recovered_evidence_types(source, evidence, ptr_bits);
+        enriched.apply_recovered_evidence_types(source, &solved.evidence, ptr_bits);
         // Exact immutable interface evidence outranks advisory propagation.
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
         enriched.apply_exact_source_signature(source);
-        enriched.apply_return_type_fact(source, evidence);
+        enriched.apply_return_type_fact(solved.returns.clone());
         // The types are final here; the projection the seal holds is built from them once.
         enriched.normalize_field_certificates_from_external_layout();
         enriched.canonicalize_type_facts();
@@ -1332,13 +1332,32 @@ impl CallFacts {
     }
 
     /// The function's types, solved once with every callee prototype its calls reach.
-    pub(crate) fn solve(&self, source: &r2ssa::SsaArtifact) -> crate::EvidenceTypes {
+    pub(crate) fn solve(&self, source: &r2ssa::SsaArtifact) -> SolvedFunction {
         let ptr_bits = source
             .machine_context()
             .memory_model()
             .default_address_bits();
         let signatures = callsite_signatures(&self.callsites, &self.resolution);
-        crate::evidence::solve_evidence_types(source, &signatures, ptr_bits)
+        SolvedFunction::of(source, &signatures, ptr_bits)
+    }
+}
+
+/// A function's solved types and the return decided from them, once for signature inference and
+/// enrichment both.
+pub(crate) struct SolvedFunction {
+    pub(crate) evidence: crate::EvidenceTypes,
+    pub(crate) returns: ReturnTypeFact,
+}
+
+impl SolvedFunction {
+    pub(crate) fn of(
+        source: &r2ssa::SsaArtifact,
+        signatures: &BTreeMap<r2ssa::CallSiteId, crate::FunctionType>,
+        ptr_bits: u32,
+    ) -> Self {
+        let evidence = crate::evidence::solve_evidence_types(source, signatures, ptr_bits);
+        let returns = ReturnTypeFact::decide(source, signatures, &evidence);
+        Self { evidence, returns }
     }
 }
 
@@ -2770,12 +2789,7 @@ impl FunctionFacts {
     }
 
     /// Decide the return type once and make the signature state it, or state none where it is refused.
-    fn apply_return_type_fact(
-        &mut self,
-        source: &r2ssa::SsaArtifact,
-        evidence: &crate::EvidenceTypes,
-    ) {
-        let fact = ReturnTypeFact::decide(source, &self.callsite_signatures(), evidence);
+    fn apply_return_type_fact(&mut self, fact: ReturnTypeFact) {
         let exact = matches!(
             fact,
             ReturnTypeFact::Decided {
@@ -2811,6 +2825,7 @@ impl FunctionFacts {
     }
 
     /// The prototype each call site reaches, keyed the way the solver needs it.
+    #[cfg(test)]
     pub(crate) fn callsite_signatures(&self) -> BTreeMap<r2ssa::CallSiteId, crate::FunctionType> {
         callsite_signatures(&self.callsites, &self.callee_resolution)
     }

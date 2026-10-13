@@ -480,7 +480,12 @@ fn exact_source_return_type_preserves_signed_i32_with_matching_certificate() {
         ),
         ..FunctionTypeFacts::default()
     });
-    facts.apply_return_type_fact(&source, &crate::EvidenceTypes::default());
+    let returns = ReturnTypeFact::decide(
+        &source,
+        &facts.callsite_signatures(),
+        &crate::EvidenceTypes::default(),
+    );
+    facts.apply_return_type_fact(returns);
     assert_eq!(
         facts.return_type(),
         Some(&ReturnTypeFact::Decided {
@@ -3496,7 +3501,12 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
         ),
         ..FunctionTypeFacts::default()
     });
-    facts.apply_return_type_fact(&source, &crate::EvidenceTypes::default());
+    let returns = ReturnTypeFact::decide(
+        &source,
+        &facts.callsite_signatures(),
+        &crate::EvidenceTypes::default(),
+    );
+    facts.apply_return_type_fact(returns);
     assert_eq!(
         facts.return_type(),
         Some(&ReturnTypeFact::Refused(ReturnTypeRefusal::UntypedReturn))
