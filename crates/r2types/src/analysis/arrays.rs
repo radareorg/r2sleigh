@@ -67,6 +67,9 @@ pub(crate) fn scalar_array_access_certificates_from_ssa(
     local_element_strides: &HashMap<usize, u64>,
     machine: ScalarArrayMachineProfile<'_>,
 ) -> ScalarArrayAccessCertificates {
+    if std::env::var_os("T3_EMPTY").is_some() {
+        return ScalarArrayAccessCertificates::default();
+    }
     let no_slots = HashMap::new();
     let pointer_arg_slot_map = machine.pointer_arg_slots.unwrap_or(&no_slots);
     let stack_roots = machine.stack_roots;

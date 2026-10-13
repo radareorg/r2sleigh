@@ -680,6 +680,9 @@ pub(crate) fn infer_local_struct_artifacts_from_prepared_ssa(
     ptr_bits: u32,
     diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
+    if std::env::var_os("T3_EMPTY").is_some() {
+        return LocalStructArtifacts::default();
+    }
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
     let pointer_arg_slots = collect_prepared_pointer_arg_slot_map(prepared);
     let stack_roots = |var: &SSAVar| {
