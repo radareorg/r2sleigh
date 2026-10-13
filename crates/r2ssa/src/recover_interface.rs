@@ -977,7 +977,7 @@ fn read_of(
     float: Option<CanonicalStorageId>,
 ) -> Option<ResultRead> {
     match (reads.integer, reads.float, float) {
-        (0, 0, _) if reads.calls > 0 && reads.overwritten == reads.calls => Some(ResultRead::None),
+        (0, 0, _) if reads.all_overwrite(float.is_some()) => Some(ResultRead::None),
         // A read past the call's block (the next call's argument, under IPA-RA) is still the
         // integer register the call leaves.
         (_, 0, None) => Some(ResultRead::Carrier(CarrierRead::Integer)),
@@ -1492,7 +1492,10 @@ fn recover_interface_inner(
     // (doc/adr-resolved-bodies.md, "Closed world").
     let closed_world = result == RecoveredFunctionResult::Unproven
         && machine_context.is_some_and(|context| context.accepts(r2source::Premise::ClosedWorld))
-        && result_reads.is_some_and(|reads| reads.none_read());
+        && result_reads.is_some_and(|reads| {
+            // The float register is a result only where the body writes it.
+            reads.none_read(float_result_written(func, graph, slots).is_some())
+        });
     if closed_world {
         result = RecoveredFunctionResult::Void;
         live_out = crate::liveout::FunctionLiveOut::default();

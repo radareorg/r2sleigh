@@ -108,6 +108,11 @@ which r2engine grants only under `aa` and r2dec spells on the proof line
 ("no call reads the result (assuming closed-world)"). A proven result is
 never made void this way: a helper whose callers ignore its value keeps it.
 
+A call overwrites a result register when its writes cover every byte of it
+before any byte is read: `xor eax, eax` lifts to a 4-byte write and a
+zero-extension that covers RAX. The float register must be overwritten only
+where the body writes it.
+
 `SourceResultReads.exhaustive` states that the calls read are every way in.
 r2engine sets it where all of these hold:
 
@@ -134,9 +139,10 @@ r2engine sets it where all of these hold:
 AArch64's large code model builds an address with `movz`/`movk`, which item
 6 does not catch. No compiler in the corpus emits it.
 Code discovery never reached is in no body and is not past an unresolved
-transfer, so item 5 does not see it either. ELF and Mach-O compilers state a
-frame (CFI) for every function they emit, and each frame seeds discovery
-(ROADMAP I), so this is hand-written code without CFI. A check that every
+transfer, so item 5 does not see it either. ELF compilers state a frame (CFI)
+for every function they emit and Mach-O linkers list each in the
+function-starts table (`EntryKind::Declared`); both seed discovery (ROADMAP
+I), so this is hand-written code with neither. A check that every
 executable byte is in a body or padding would close it. It needs padding
 decoded per machine and is a follow-up.
 

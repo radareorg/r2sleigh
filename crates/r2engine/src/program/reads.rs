@@ -67,7 +67,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
         }
         // Only a result no call reads asks whether the calls are every way in: the reference index
         // that answers reads every body.
-        reads.exhaustive = !unread && reads.all_overwrite() && only_called(db, callee, reads.calls);
+        reads.exhaustive =
+            !unread && reads.all_overwrite(false) && only_called(db, callee, reads.calls);
         (reads.calls > 0).then_some(reads)
     }
 }
@@ -90,6 +91,7 @@ fn only_called<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64, call
         return false;
     };
     if escaped.binary_search(&callee).is_ok() {
+        r2il::refusal_evidence!("closed-world", "{callee:#x}: a way in other than a call");
         return false;
     }
     let Ok(index) = db.get::<ReferenceIndex>(&()) else {
@@ -101,7 +103,14 @@ fn only_called<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64, call
     let claimed = (index.0.to(callee))
         .filter(|(fact, _)| fact.role == Role::Call)
         .count();
-    usize::try_from(calls).is_ok_and(|calls| calls == claimed)
+    let all = usize::try_from(calls).is_ok_and(|calls| calls == claimed);
+    if !all {
+        r2il::refusal_evidence!(
+            "closed-world",
+            "{callee:#x}: {calls} calls read, {claimed} claimed by the index"
+        );
+    }
+    all
 }
 
 /// The functions the program enters other than by a direct call, by entry, ascending; `None` where
@@ -132,6 +141,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         let index = Arc::clone(&index.as_ref().as_ref().ok()?.0);
         // A body not read, or code past a transfer no walk resolved, may hold any reference.
         if !index.coverage.unread.is_empty() || !index.coverage.unresolved.is_empty() {
+            r2il::refusal_evidence!(
+                "closed-world",
+                "{} bodies unread, {} with unresolved transfers: not every way in is known",
+                index.coverage.unread.len(),
+                index.coverage.unresolved.len()
+            );
             return None;
         }
         let mut escaped = Vec::new();
