@@ -47,6 +47,11 @@ pub trait Program {
     /// most machines, and only the mapping says which one control can reach.
     fn region(&self, vaddr: u64) -> Option<Region>;
 
+    /// Whether a patch holds the byte at `vaddr`: it backs zero fill as the file does.
+    fn patched(&self, _vaddr: u64) -> bool {
+        false
+    }
+
     /// Whether another function begins here.
     ///
     /// This is what bounds a body. The walk can see that control transfers; it
@@ -497,11 +502,15 @@ impl Walk {
         let Some(region) = program.region(addr).filter(|region| region.execute) else {
             return self.stop(addr, UnresolvedReason::NotExecutable);
         };
-        if addr >= region.file_end {
+        // An instruction reaching into the zero fill reads only bytes the file or a patch holds.
+        let backed = |at: u64| at < region.file_end || program.patched(at);
+        let held = (0..window.len() as u64)
+            .take_while(|offset| backed(addr + offset))
+            .count();
+        if held == 0 {
             return self.stop(addr, UnresolvedReason::Unbacked);
         }
-        // An instruction reaching into the zero fill reads only what the file holds, so it is short.
-        window.truncate(usize::try_from(region.file_end - addr).unwrap_or(usize::MAX));
+        window.truncate(held);
         let available = window.len();
         // Sleigh fetches a whole window whatever the instruction needs, so a
         // short one is padded and the decoded size checked against what is real.

@@ -256,6 +256,9 @@ def time_cases(args):
         elif counts.get("head"):
             allocations = f"{counts['head']:,}"
         heap = ["", "", ""]
+        # A base from before the count may print none; the head's counting build must print its peak.
+        if len(args.count_r2s or ()) == 2 and Path(args.count_r2s[1]).exists() and not heaps.get("head"):
+            failed.append(f"{case}: the head's counting run printed no heap peak")
         if heaps.get("head"):
             heap[1] = f"{heaps['head']:.1f}"
         if heaps.get("base") and heaps.get("head"):

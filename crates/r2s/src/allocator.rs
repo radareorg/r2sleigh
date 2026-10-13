@@ -32,9 +32,13 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
-        r2engine::allocation::freed(layout.size());
-        r2engine::allocation::allocated(size);
-        unsafe { mimalloc::MiMalloc.realloc(ptr, layout, size) }
+        let moved = unsafe { mimalloc::MiMalloc.realloc(ptr, layout, size) };
+        // A failed realloc leaves the old block allocated, so it counts nothing.
+        if !moved.is_null() {
+            r2engine::allocation::freed(layout.size());
+            r2engine::allocation::allocated(size);
+        }
+        moved
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {

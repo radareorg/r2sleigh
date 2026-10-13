@@ -2245,9 +2245,7 @@ impl FunctionFacts {
             parameter_slot_by_value.insert(reload.value, slot);
         }
 
-        // Preserve exact parameter identity through same-width copies. This is
-        // an alias relation, unlike the broader expression dependency walk:
-        // arithmetic, loads, casts, and phi nodes never inherit the binding.
+        // Same-width copies alias the parameter; arithmetic, loads, casts and phis never inherit it.
         // A copy has one source, so one walk forward from the bound values, `O(V + E)`.
         let graph = prepared.graph();
         let mut ready = parameter_slot_by_value.keys().collect::<Vec<_>>();

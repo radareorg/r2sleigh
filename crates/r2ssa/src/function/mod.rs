@@ -310,9 +310,8 @@ impl<'a> InterfaceQuestions<'a> {
     }
 }
 
-/// What the sealed artifact keeps of its liveness: where values leave the function, and the
-/// reads the text never performs. The value liveness and storage spans the build read are not
-/// kept (doc/adr-memory-model.md, decision 1).
+/// The sealed artifact's liveness: where values leave the function and the reads the text never
+/// performs; the build's value liveness and spans are dropped (doc/adr-memory-model.md, decision 1).
 #[derive(Debug, Clone)]
 pub struct ArtifactLiveness {
     live_out: crate::liveout::FunctionLiveOut,
@@ -2992,11 +2991,10 @@ impl SSAFunction {
         &self.written
     }
 
-    /// The record, or for a function no preparation recorded -- one built
-    /// raw, which nothing has optimised -- the record taken from it as it
-    /// stands, which is as lifted.
+    /// The record; for a raw function no preparation recorded, the record as it stands. A sealed
+    /// function keeps only its conventional extensions, so it is never captured again.
     pub fn written_or_captured(&self) -> std::borrow::Cow<'_, crate::lanes::Written> {
-        match self.written.is_empty() {
+        match self.written.is_empty() && !self.blocks.is_sealed() {
             false => std::borrow::Cow::Borrowed(&self.written),
             true => std::borrow::Cow::Owned(crate::lanes::Written::capture(self)),
         }

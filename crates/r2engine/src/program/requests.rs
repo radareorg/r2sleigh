@@ -145,9 +145,8 @@ pub struct AnalysisRefused {
     pub unresolved: Vec<u64>,
 }
 
-/// What a held rendering keeps of the response it was drawn from: the text, the ledger and the
-/// premises its readers ask for. The facts behind them stay with the analysis, which a session
-/// drops by its own budget (doc/adr-memory-model.md).
+/// A held rendering's text, ledger and premises; the facts behind them stay with the analysis,
+/// which the session drops by its budget (doc/adr-memory-model.md).
 #[derive(Clone)]
 pub struct RenderedResponse {
     pub output: crate::EngineRendering,

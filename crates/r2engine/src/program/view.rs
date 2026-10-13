@@ -201,6 +201,10 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         })
     }
 
+    fn patched(&self, vaddr: u64) -> bool {
+        self.source().patched(vaddr)
+    }
+
     fn is_entry(&self, vaddr: u64) -> bool {
         // A stub is a function of the program's as much as a body is.
         self.imports.stubs.contains_key(&vaddr)

@@ -105,6 +105,18 @@ fn a_stated_frame_begins_a_function_and_the_stub_table_s_does_not() {
     assert_eq!(framed_plt, plt);
 }
 
+/// A program with an import slot elsewhere, whose frame over a section holding only an indirect
+/// jump begins a function: no jump there is shown to read a loader word, so it is no linkage code.
+#[test]
+fn a_frame_over_an_unplaced_indirect_jump_begins_a_function() {
+    let program = Literal::tail_section().unwinding(BASE..BASE + 2);
+    let found = believed(&mut OpenProgram::of(program));
+    assert!(
+        found.iter().any(|(address, _)| *address == BASE),
+        "{found:x?}"
+    );
+}
+
 #[test]
 fn a_frame_over_a_cet_plt_begins_no_function_though_the_plt_names_no_stub() {
     let mut unframed = OpenProgram::of(Literal::plt_cet());

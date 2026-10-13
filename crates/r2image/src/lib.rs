@@ -960,6 +960,11 @@ impl Image {
         })
     }
 
+    /// Whether a patch now holds the byte at `vaddr`.
+    pub fn patched(&self, vaddr: u64) -> bool {
+        self.patches.contains_key(&vaddr)
+    }
+
     /// Which open program this is.
     pub const fn identity(&self) -> u64 {
         self.identity

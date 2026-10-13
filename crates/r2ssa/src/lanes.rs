@@ -307,10 +307,7 @@ impl Writes {
 /// Record what `id` wrote to `dst`, joined with what it was recorded as
 /// writing before; whether that moved anything.
 fn settle(records: &mut Records, id: OpId, dst: VarId, bytes: Bytes) -> bool {
-    debug_assert!(
-        records.defs.get(dst).is_none_or(|op| *op == id),
-        "one definition per variable"
-    );
+    // A second definition of `dst` is the validator's typed refusal, which runs after capture.
     records.defs.insert(dst, id);
     let joined = match records.by_op.get(id) {
         // Data joined with anything is data.

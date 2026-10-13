@@ -259,6 +259,34 @@ impl r2engine::body::Program for ZeroFilledTail {
     }
 }
 
+/// `ZeroFilledTail` with a patch holding 0x1002: `ret`, which a patch states as the file would.
+struct PatchedZeroFill;
+
+impl r2engine::body::Program for PatchedZeroFill {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        ZeroFilledTail.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        ZeroFilledTail.region(vaddr)
+    }
+
+    fn patched(&self, vaddr: u64) -> bool {
+        vaddr == 0x1002
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_patch_over_the_zero_fill_is_code() {
+    let body = lift_body(BASE, &x86_64(), &PatchedZeroFill, &BTreeMap::new()).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000, 0x1002]);
+    assert!(body.unresolved.is_empty(), "{:?}", body.unresolved);
+}
+
 #[test]
 fn no_instruction_is_lifted_from_the_loaders_zero_fill() {
     // The zero fill decodes (`00 00` is `add [rax], al`), but the file states no byte there, so

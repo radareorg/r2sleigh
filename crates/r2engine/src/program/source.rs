@@ -27,6 +27,11 @@ pub trait Source {
 
     /// Whether anything in this range has been written since that revision.
     fn written_since(&self, revision: u64, range: &Range<u64>) -> bool;
+
+    /// Whether a patch now holds the byte at `vaddr`; a source that takes none holds none.
+    fn patched(&self, _vaddr: u64) -> bool {
+        false
+    }
 }
 
 /// What a container states, as the image loader states it.

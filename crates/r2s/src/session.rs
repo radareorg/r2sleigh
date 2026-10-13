@@ -87,4 +87,8 @@ impl Source for Opened {
     fn written_since(&self, revision: u64, range: &std::ops::Range<u64>) -> bool {
         self.image.written_since(revision, range)
     }
+
+    fn patched(&self, vaddr: u64) -> bool {
+        self.image.patched(vaddr)
+    }
 }

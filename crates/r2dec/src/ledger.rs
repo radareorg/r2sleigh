@@ -212,6 +212,7 @@ impl LedgerClosure {
 
 /// Every obligation the inventory recorded, and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LedgerColumns")]
 pub struct ObligationLedger {
     /// Every obligation as it is spelled, in the order the spelling reads:
     /// by block, then by an operation's place in it, each identity once. An
@@ -236,6 +237,65 @@ pub struct ObligationLedger {
     exits: usize,
     #[serde(default)]
     exit_premises: BTreeSet<r2source::Premise>,
+}
+
+/// A ledger as read back, before its columns are checked against one another.
+#[derive(Deserialize)]
+struct LedgerColumns {
+    reading_order: Vec<SpelledObligation>,
+    outcomes: Vec<Outcome>,
+    by_id: Vec<u32>,
+    conflicts: BTreeMap<u32, usize>,
+    split: BTreeSet<u32>,
+    premises: BTreeSet<r2source::Premise>,
+    #[serde(default)]
+    exits: usize,
+    #[serde(default)]
+    exit_premises: BTreeSet<r2source::Premise>,
+}
+
+impl TryFrom<LedgerColumns> for ObligationLedger {
+    type Error = String;
+
+    /// Every column is by place: one length, places in range, and `by_id` the places in identity
+    /// order, so no lookup or count reads past or around them.
+    fn try_from(columns: LedgerColumns) -> Result<Self, String> {
+        let places = columns.reading_order.len();
+        if columns.outcomes.len() != places || columns.by_id.len() != places {
+            return Err(format!("columns of {places} places disagree in length"));
+        }
+        let mut sorted = columns.by_id.clone();
+        sorted.sort_unstable();
+        if sorted
+            .iter()
+            .enumerate()
+            .any(|(at, place)| *place as usize != at)
+        {
+            return Err("`by_id` is no permutation of the places".to_owned());
+        }
+        let id = |place: &u32| columns.reading_order[*place as usize].id();
+        if columns
+            .by_id
+            .windows(2)
+            .any(|pair| id(&pair[0]) >= id(&pair[1]))
+        {
+            return Err("`by_id` is not in identity order".to_owned());
+        }
+        let outside = |place: &u32| *place as usize >= places;
+        if columns.conflicts.keys().any(outside) || columns.split.iter().any(outside) {
+            return Err("a conflict or split names no place".to_owned());
+        }
+        Ok(Self {
+            reading_order: columns.reading_order,
+            outcomes: columns.outcomes,
+            by_id: columns.by_id,
+            conflicts: columns.conflicts,
+            split: columns.split,
+            premises: columns.premises,
+            exits: columns.exits,
+            exit_premises: columns.exit_premises,
+        })
+    }
 }
 
 impl ObligationLedger {
@@ -680,6 +740,24 @@ mod tests {
         assert!(serde_json::from_str::<ObligationLedger>(without).is_err());
         let with = r#"{"reading_order":[],"outcomes":[],"by_id":[],"conflicts":{},"split":[],"premises":[]}"#;
         assert!(serde_json::from_str::<ObligationLedger>(with).is_ok());
+    }
+
+    /// Columns read back must agree: a ledger whose outcomes are shorter than its reading order, or
+    /// whose conflicts name no place, is rejected where it would close as fully proven or panic.
+    #[test]
+    fn a_ledger_whose_columns_disagree_is_rejected() {
+        let ledger = ledger_of(&[obligation(0, SemanticObligationKind::LiveValueProducer)]);
+        let text = serde_json::to_string(&ledger).expect("it serializes");
+        assert_eq!(
+            serde_json::from_str::<ObligationLedger>(&text).ok(),
+            Some(ledger)
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        value["outcomes"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<ObligationLedger>(value.clone()).is_err());
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        value["conflicts"] = serde_json::json!({"7": 1});
+        assert!(serde_json::from_value::<ObligationLedger>(value).is_err());
     }
 
     #[test]

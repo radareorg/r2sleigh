@@ -1488,7 +1488,7 @@ rustc_session::declare_lint!(
     /// let certificates = prepared.certificates();
     /// prepared.memory_certificate_for_op_site(block, op, is_write);
     /// prepared.return_certificate_for_op(block, op);
-    /// certificates.expressions.get(&value);
+    /// certificates.renderable_expressions.contains(value);
     /// ```
     ///
     /// Use `FunctionRenderFacts` carried by `FunctionFacts`.
@@ -4314,6 +4314,7 @@ fn r2dec_direct_prepared_render_certificates_item(cx: &LateContext<'_>, item: &I
                     || snippet.contains("return_certificate_for_op")
                     || snippet.contains("callsite_certificate_for_op")
                     || snippet.contains("certificates.expressions")
+                    || snippet.contains("certificates.renderable_expressions")
                     || snippet.contains("certificates.stack_slots")
                     || snippet.contains("certificates.memory_accesses")
                     || snippet.contains("certificates.returns")
