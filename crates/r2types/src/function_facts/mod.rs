@@ -1195,7 +1195,7 @@ impl SourceOwnedFunctionFacts {
         enriched.assumption_usage = usage;
         enriched.display_names.absorb(source.display_names());
         enriched.normalize_field_certificates_from_external_layout();
-        Self::project(source, &mut enriched, callee_signatures);
+        Self::project_calls(source, &mut enriched, callee_signatures);
         let ptr_bits = source
             .machine_context()
             .memory_model()
@@ -1210,19 +1210,27 @@ impl SourceOwnedFunctionFacts {
         // The types are final here; the projection the seal holds is built from them once.
         enriched.normalize_field_certificates_from_external_layout();
         enriched.canonicalize_type_facts();
-        Self::project(source, &mut enriched, callee_signatures);
+        Self::project_render(source, &mut enriched);
         ProjectedFacts { report: enriched }
     }
 
-    /// The source's projection under the report's types: call, control and render facts.
-    /// It writes no type fact, so it is a function of the source, the types and the callees.
-    fn project(
+    /// The call facts enrichment reads, once: a code pointer table's callees named first, so
+    /// resolution sees them, then resolution, the call sites and each site's callee signature.
+    fn project_calls(
         source: &r2ssa::SsaArtifact,
         report: &mut FunctionFacts,
         callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
     ) {
+        report.name_code_pointer_callees(source, callee_signatures);
+        report.attach_prepared_call_facts(source);
+        report.apply_callsite_callee_signatures(source, callee_signatures);
+    }
+
+    /// The projection under the final types, once: results, control, render facts and the overlays
+    /// the types decide. It writes no type fact.
+    fn project_render(source: &r2ssa::SsaArtifact, report: &mut FunctionFacts) {
         let param_slots = exact_source_param_slot_resolver(source);
-        report.attach_prepared_decompile_evidence(source);
+        report.attach_prepared_render_facts(source);
         if let Some(param_slots) = param_slots.as_ref() {
             report.populate_certified_parameter_exprs(source, param_slots);
         }
@@ -1235,7 +1243,6 @@ impl SourceOwnedFunctionFacts {
             report.populate_member_access_render_facts_from_declared_slots(source, param_slots);
         }
         report.populate_certified_loop_carrier_types();
-        report.apply_source_owned_callee_signatures(source, callee_signatures);
     }
 }
 
@@ -1387,7 +1394,8 @@ impl FunctionFacts {
         (!self.callsites.is_empty()).then_some(&self.callsites)
     }
 
-    fn apply_source_owned_callee_signatures(
+    /// Each direct call site's callee signature, where the callee's own interface is the site's.
+    fn apply_callsite_callee_signatures(
         &mut self,
         source: &r2ssa::SsaArtifact,
         signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
@@ -1449,9 +1457,15 @@ impl FunctionFacts {
                 );
             }
         }
-        // A code pointer table names its target outright, so no call site has
-        // to agree about an interface before the target's own body says what
-        // its prototype is.
+    }
+
+    /// A code pointer table names its target outright, so no call site has to agree about an
+    /// interface before the target's own body says what its prototype is.
+    fn name_code_pointer_callees(
+        &mut self,
+        source: &r2ssa::SsaArtifact,
+        signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
+    ) {
         for (_, target) in source.machine_context().code_pointer_entries() {
             let Some(signature) = signatures
                 .get(&target)
@@ -2074,25 +2088,24 @@ impl FunctionFacts {
         true
     }
 
+    #[cfg(test)]
     fn attach_prepared_decompile_evidence(&mut self, prepared: &r2ssa::SsaArtifact) {
-        let prepared_callee_resolution = prepared_callee_resolution_facts(prepared, self);
-        let prepared_callsites = prepared_callsite_argument_facts(prepared);
-        let prepared_call_results = prepared_call_result_facts(prepared);
-        let prepared_call_render = prepared_call_render_facts(prepared);
-        let prepared_control = prepared_control_facts(prepared);
-        let prepared_render = FunctionRenderFacts::from_prepared(prepared);
+        self.attach_prepared_call_facts(prepared);
+        self.attach_prepared_render_facts(prepared);
+    }
 
-        // These fields are projections of one exact prepared artifact, not
-        // extension points. Letting detached rows win with `or_insert` gave the
-        // report and its validator the same stale answer. Advisory type and
-        // presentation inputs are consumed while rebuilding, but the resulting
-        // source-owned maps are replaced atomically.
-        self.callee_resolution = prepared_callee_resolution;
-        self.callsites = prepared_callsites;
-        self.call_results = prepared_call_results;
-        self.call_render = prepared_call_render;
-        self.control = prepared_control;
-        self.render = prepared_render;
+    /// Callee resolution and the call sites, replaced whole: detached rows never win.
+    fn attach_prepared_call_facts(&mut self, prepared: &r2ssa::SsaArtifact) {
+        self.callee_resolution = prepared_callee_resolution_facts(prepared, self);
+        self.callsites = prepared_callsite_argument_facts(prepared);
+    }
+
+    /// Call results, control and render facts, replaced whole from the one prepared artifact.
+    fn attach_prepared_render_facts(&mut self, prepared: &r2ssa::SsaArtifact) {
+        self.call_results = prepared_call_result_facts(prepared);
+        self.call_render = prepared_call_render_facts(prepared);
+        self.control = prepared_control_facts(prepared);
+        self.render = FunctionRenderFacts::from_prepared(prepared);
         self.user_operations = Some(prepared.user_operations());
     }
 

@@ -1523,7 +1523,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let source_owned_signature =
         SourceOwnedCalleeSignature::new(&callee_source, signed_signature.clone())
             .expect("logical type fits the exact low-bit carrier");
-    facts.apply_source_owned_callee_signatures(
+    facts.apply_callsite_callee_signatures(
         &prepared,
         &BTreeMap::from([(0x402000, source_owned_signature)]),
     );
@@ -1687,7 +1687,8 @@ fn the_enriched_report_holds_the_projection_of_its_final_types() {
     assert!(!report.call_render.by_callsite.is_empty());
     assert!(!report.control.control_domains.by_block.is_empty());
     let mut again = report.clone();
-    SourceOwnedFunctionFacts::project(source.as_ref(), &mut again, &BTreeMap::new());
+    SourceOwnedFunctionFacts::project_calls(source.as_ref(), &mut again, &BTreeMap::new());
+    SourceOwnedFunctionFacts::project_render(source.as_ref(), &mut again);
     assert_eq!(again.types, report.types);
     assert_eq!(again.callee_resolution, report.callee_resolution);
     assert_eq!(again.callsites, report.callsites);
