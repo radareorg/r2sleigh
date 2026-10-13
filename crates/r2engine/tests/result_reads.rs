@@ -510,3 +510,26 @@ fn a_register_a_callee_left_is_no_half_of_the_result() {
     assert!(!f.contains("__uint128_t"), "{f}");
     assert!(!f.contains("second register is open"), "{f}");
 }
+
+/// `test rdi, rdi; sete dl; mov rax, rdi; ret`: DL over the caller's other seven bytes of RDX, as
+/// clang -O1's `table_walk` leaves it. A caller reading RDX after `f` makes no half of it.
+const BYTE_OVER_THE_CALLERS: &[u8] = &[
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x0f, 0x94, 0xc2, // 1003 sete dl
+    0x48, 0x89, 0xf8, // 1006 mov rax, rdi
+    0xc3, // 1009 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 100a padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x48, 0x89, 0xd0, // 1015 mov rax, rdx
+    0xc3, // 1018 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1019 padding
+];
+
+#[test]
+fn a_byte_written_over_the_callers_register_is_no_half_of_the_result() {
+    let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 9)];
+    let f = rendered(Literal::of_code(BYTE_OVER_THE_CALLERS, &functions));
+    assert!(f.starts_with("uint64_t f(uint64_t arg0)"), "{f}");
+    assert!(!f.contains("second register is open"), "{f}");
+}
