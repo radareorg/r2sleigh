@@ -32,6 +32,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
         let mut reads = SourceResultReads::default();
         // A caller that is not read may read the result: the calls read are then not every call.
         let mut unread = false;
+        // A call two bodies hold (one walk enters the other's tail) is one call, read once.
+        let mut read = std::collections::BTreeSet::new();
         for &caller in survey.callers_of(callee) {
             let Some(Ok(thumb)) = survey.walked_in(caller) else {
                 unread = true;
@@ -56,6 +58,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
                     .map(move |transfer| (&block.lifted, transfer.op))
             });
             for (lifted, index) in calls {
+                if !read.insert(lifted.instruction_of(index)) {
+                    continue;
+                }
                 reads = reads.and(r2ssa::caller_reads::reads_after_call(
                     lifted,
                     index,
