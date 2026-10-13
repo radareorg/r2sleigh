@@ -5,10 +5,8 @@ mod signature;
 mod stack;
 mod structs;
 
-use r2ssa::PhiNode;
-
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The signature the facts carry, spelled: what a test reads where the plan's string copy once stood.
 pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSignature {
@@ -55,28 +53,6 @@ pub(super) fn system_v_argument_registers() -> Vec<String> {
         .to_vec()
 }
 
-/// System V's integer argument registers, by slot.
-pub(super) fn system_v_argument_slots() -> HashMap<String, usize> {
-    system_v_argument_registers()
-        .into_iter()
-        .enumerate()
-        .map(|(slot, name)| (name, slot))
-        .collect()
-}
-
-/// AAPCS64's integer argument registers, by slot.
-pub(super) fn aapcs64_argument_slots() -> HashMap<String, usize> {
-    (0..8).map(|slot| (format!("x{slot}"), slot)).collect()
-}
-
-fn op_at(blocks: &[SSABlock], block_addr: u64, index: usize) -> r2ssa::OpId {
-    blocks
-        .iter()
-        .find(|block| block.addr == block_addr)
-        .and_then(|block| block.op_id(index))
-        .expect("the fixture's operation")
-}
-
 fn parse_test_type(spelling: &str, ptr_bits: u32) -> CTypeLike {
     parse_c_type_like(spelling, ptr_bits).expect("test type spelling should parse")
 }
@@ -113,15 +89,6 @@ fn unplaceable_recovered_type_produces_no_candidate() {
         diagnostics.warnings,
         ["var `var_8h` type `not a type` was not a placeable C type"]
     );
-}
-
-#[test]
-fn constant_offsets_require_exact_ssa_evidence() {
-    let spoofed = SSAVar::new("const:20", 0, 8);
-    let exact = SSAVar::constant(0x20, 8);
-
-    assert_eq!(exact_ssa_const_offset(&spoofed, 64), None);
-    assert_eq!(exact_ssa_const_offset(&exact, 64), Some(0x20));
 }
 
 #[test]
@@ -170,40 +137,6 @@ fn detached_advisory_analysis_drops_invalid_interproc_schema() {
     assert!(view.pointer_param_indices().is_empty());
 }
 
-#[test]
-fn local_pointee_type_evidence_requires_exact_ram_space() {
-    let ram_addr = SSAVar::new("ram_addr", 1, 8);
-    let custom_addr = SSAVar::new("custom_addr", 1, 8);
-    let blocks = [SSABlock::from_parts(
-        0x1000,
-        0,
-        vec![
-            SSAOp::Store {
-                space: r2il::SpaceId::Ram,
-                addr: ram_addr.clone(),
-                val: SSAVar::new("ram_value", 1, 4),
-            },
-            SSAOp::Store {
-                space: r2il::SpaceId::Custom(7),
-                addr: custom_addr.clone(),
-                val: SSAVar::new("custom_value", 1, 8),
-            },
-        ],
-        Vec::new(),
-    )];
-
-    let types = local_pointer_pointee_types(
-        &blocks,
-        64,
-        &crate::signedness::NamedSignedness::of(&[], false, &|_| false),
-    );
-    assert_eq!(
-        types.get(&ram_addr),
-        Some(&BTreeSet::from(["int32_t".to_string()]))
-    );
-    assert!(!types.contains_key(&custom_addr));
-}
-
 /// Storage that an access states only the width of is a type C spells at
 /// every width: an integer where C has one, the carrier past that, and no
 /// type for no bytes. Both renderers spell it one way, and it reads back as
@@ -244,56 +177,6 @@ fn type_name_policy_matches_planner_guard() {
         );
     }
     assert!(!type_name_is_generic("struct real_type *"));
-}
-
-#[test]
-fn phi_scalar_pointer_value_preserves_max_confidence() {
-    let block_addr = 0x401000;
-    let dst = SSAVar::new("phi_ptr", 1, 8);
-    let left = SSAVar::new("left_ptr", 1, 8);
-    let right = SSAVar::new("right_ptr", 1, 8);
-    let parsed_context = ParsedExternalContext::default();
-    let pointer_arg_slot_map = HashMap::new();
-    let local_element_strides = HashMap::new();
-    let mut pointer_values = HashMap::new();
-    let pointer_value_names = HashMap::new();
-    let array_addr_exprs = HashMap::new();
-    let array_addr_expr_names = HashMap::new();
-    let block_ops = HashMap::new();
-    let value_ops = HashMap::new();
-
-    let low = ScalarPointerValue {
-        slot: 0,
-        base: ArrayIndexBase::Param { index: 0 },
-        element_stride: 8,
-        confidence: 20,
-    };
-    let high = ScalarPointerValue {
-        confidence: 88,
-        ..low.clone()
-    };
-    pointer_values.insert(ssa_var_block_key(block_addr, &left), low);
-    pointer_values.insert(ssa_var_block_key(block_addr, &right), high);
-    let ctx = ScalarArrayInferenceCtx {
-        parsed_context: &parsed_context,
-        type_db: &parsed_context.external_type_db,
-        merged_signature: None,
-        ptr_bits: 64,
-        pointer_arg_slot_map: &pointer_arg_slot_map,
-        local_element_strides: &local_element_strides,
-        pointer_values: &pointer_values,
-        pointer_value_names: &pointer_value_names,
-        array_addr_exprs: &array_addr_exprs,
-        array_addr_expr_names: &array_addr_expr_names,
-        stack_roots: None,
-        block_ops: &block_ops,
-        value_ops: &value_ops,
-    };
-
-    let selected = phi_scalar_pointer_value(block_addr, &dst, &[left, right], &ctx)
-        .expect("same-base phi should preserve pointer value");
-
-    assert_eq!(selected.confidence, 88);
 }
 
 #[test]

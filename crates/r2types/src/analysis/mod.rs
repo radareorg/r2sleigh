@@ -12,14 +12,14 @@ pub(crate) use shared::*;
 pub(crate) use signature::*;
 pub(crate) use structs::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use r2ssa::{
-    FunctionSemanticSummary, InterprocSummarySet, MemoryVersion, ObjectKind, SSABlock, SSAOp,
-    SSAVar, SsaArtifact, SummaryArgEffect, SummaryMemoryEffect, SummaryMemoryEffectKind,
-    SummaryMemoryRegion, SummaryReturnRelation,
+    FunctionSemanticSummary, InterprocSummarySet, SSABlock, SSAOp, SSAVar, SsaArtifact,
+    SummaryArgEffect, SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion,
+    SummaryReturnRelation,
 };
 
 use crate::context::{
@@ -46,7 +46,6 @@ use crate::function_facts::{
     FunctionFacts, InterprocSummaryView, ProjectedFacts, SourceOwnedFunctionFacts,
 };
 use crate::model::Signedness;
-use crate::prepare::ssa_var_block_key;
 use crate::signedness::ScalarSignednessEvidence;
 
 #[derive(Debug)]
@@ -316,10 +315,6 @@ struct DerivedTypeAnalysisInput<'a> {
 
 struct DerivedTypeAnalysisSemanticInputs<'a> {
     local_field_accesses: &'a [LocalFieldAccessFact],
-}
-
-struct PreparedMachineVarProfile {
-    pointer_arg_slots: HashMap<String, usize>,
 }
 
 #[cfg(test)]
@@ -670,7 +665,6 @@ fn build_type_analysis_inner(
     mut input: DerivedTypeAnalysisInput<'_>,
     semantic_inputs: Option<DerivedTypeAnalysisSemanticInputs<'_>>,
     prep_facts: Option<FrameRoots<'_>>,
-    machine_profile: Option<&PreparedMachineVarProfile>,
     registers: &crate::RegisterIdentity,
 ) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
@@ -857,36 +851,12 @@ fn build_type_analysis_inner(
             input.ptr_bits,
         );
     array_index_certificates.append(&mut exact_indexed_access_certificates.array_index);
-    let scalar_array_access_certificates = scalar_array_access_certificates_from_ssa(
-        input.ssa_blocks,
-        &input.parsed_context,
-        &type_db,
-        merged_signature.as_ref(),
-        &local_structs.slot_element_strides,
-        ScalarArrayMachineProfile {
-            stack_roots: prep_facts,
-            pointer_arg_slots: machine_profile.map(|profile| &profile.pointer_arg_slots),
-            ptr_bits: input.ptr_bits,
-        },
-    );
-    array_index_certificates.extend(scalar_array_access_certificates.array_index);
     let mut scalar_array_render_candidates = exact_indexed_access_certificates.render_candidates;
-    let local_indexed_slots = scalar_array_render_candidates
-        .iter()
-        .map(|candidate| candidate.slot)
-        .collect::<HashSet<_>>();
-    scalar_array_render_candidates.extend(
-        scalar_array_access_certificates
-            .render_candidates
-            .into_iter()
-            .filter(|candidate| !local_indexed_slots.contains(&candidate.slot)),
-    );
     scalar_array_render_candidates.sort();
     scalar_array_render_candidates.dedup();
     let mut field_access_certificates =
         field_access_certificates_from_struct_artifacts(&local_structs);
     field_access_certificates.append(&mut exact_indexed_access_certificates.field_access);
-    field_access_certificates.extend(scalar_array_access_certificates.field_access);
     field_access_certificates.sort();
     field_access_certificates.dedup();
     let signature_certificate = signature_certificate_from_merged(
@@ -1030,14 +1000,7 @@ fn x86_64_register_identity() -> crate::RegisterIdentity {
 
 #[cfg(test)]
 fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalysis {
-    let machine = detached_x86_64_test_machine_profile();
-    build_type_analysis_inner(
-        input,
-        None,
-        None,
-        Some(&machine),
-        &x86_64_register_identity(),
-    )
+    build_type_analysis_inner(input, None, None, &x86_64_register_identity())
 }
 
 #[cfg(test)]
@@ -1046,21 +1009,7 @@ fn build_type_analysis_with_prep_facts(
     frame_roots: &BTreeMap<SSAVar, r2ssa::StackAddressRoot>,
 ) -> DerivedTypeAnalysis {
     let prep_facts = &|var: &SSAVar| frame_roots.get(var).copied();
-    let machine = detached_x86_64_test_machine_profile();
-    build_type_analysis_inner(
-        input,
-        None,
-        Some(prep_facts),
-        Some(&machine),
-        &x86_64_register_identity(),
-    )
-}
-
-#[cfg(test)]
-fn detached_x86_64_test_machine_profile() -> PreparedMachineVarProfile {
-    PreparedMachineVarProfile {
-        pointer_arg_slots: tests::system_v_argument_slots(),
-    }
+    build_type_analysis_inner(input, None, Some(prep_facts), &x86_64_register_identity())
 }
 
 #[cfg(test)]
@@ -1105,16 +1054,8 @@ pub fn build_source_owned_type_analysis(
     let ssa_blocks = named_blocks.as_slice();
     let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
-    let mut diagnostics = TypeAnalysisDiagnostics::default();
-    let machine_profile = PreparedMachineVarProfile {
-        pointer_arg_slots: collect_prepared_pointer_arg_slot_map(source.as_ref()),
-    };
-    let local_structs = infer_local_struct_artifacts_from_prepared_ssa(
-        source.as_ref(),
-        ssa_blocks,
-        ptr_bits,
-        &mut diagnostics,
-    );
+    let diagnostics = TypeAnalysisDiagnostics::default();
+    let local_structs = infer_local_struct_artifacts_from_prepared_ssa(source.as_ref());
     // The exact certificates own member naming: one name per (parameter, offset) they certify.
     let exact_source_fields = field_access_certificates_from_source_aggregate_accesses(&source);
     let source_field_names = exact_source_fields
@@ -1157,7 +1098,6 @@ pub fn build_source_owned_type_analysis(
         derived_input,
         semantic_inputs,
         Some(&frame_roots),
-        Some(&machine_profile),
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
     );
     let mut function_facts = derived.function_facts;

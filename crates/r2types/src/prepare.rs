@@ -27,32 +27,6 @@ impl TypeHint {
     }
 }
 
-/// A key that identifies one SSA variable across its width views.
-///
-/// This deliberately does *not* include `size`. The maps it keys pool the
-/// register's width views on purpose -- arm64 evidence has to flow between
-/// `x0` and `w0`, and the x86 low-carrier tests fail immediately if it cannot.
-///
-/// It does now include `rename_disambiguator`, which it dropped before. That
-/// field exists, by its own documentation, to separate "two exact source
-/// storages that project to the same display name and width", so leaving it out
-/// made the key collide on precisely the case it had been added to prevent, and
-/// `DefUseInfo` carried the resulting ambiguity at runtime as an
-/// `Option<usize>` meaning "the key collided". Width views of one register
-/// share a disambiguator, so pooling still works.
-pub fn ssa_var_key(var: &SSAVar) -> String {
-    format!(
-        "{}_{}_{}",
-        var.name().to_ascii_lowercase(),
-        var.version,
-        var.rename_disambiguator()
-    )
-}
-
-pub fn ssa_var_block_key(block_addr: u64, var: &SSAVar) -> String {
-    format!("{}@{block_addr:x}", ssa_var_key(var))
-}
-
 pub fn merge_type_hint(hints: &mut HashMap<String, TypeHint>, key: String, incoming: TypeHint) {
     match hints.get(&key) {
         Some(current) if !incoming_hint_should_replace(current, &incoming) => {}

@@ -364,10 +364,6 @@ pub(crate) fn summary_suggests_pointer_param(
         || summary.sync_effects.iter().any(|effect| effect.arg == idx)
 }
 
-pub(crate) fn exact_ssa_const_offset(var: &SSAVar, ptr_bits: u32) -> Option<i64> {
-    Some(signed_offset_from_const(var.constant_bits()?, ptr_bits))
-}
-
 pub(crate) fn aggregate_lookup_keys(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut push = |candidate: &str| {
@@ -739,19 +735,4 @@ pub(crate) fn storage_type(bytes: u32, signedness: Signedness) -> Option<CTypeLi
 /// [`storage_type`] spelled, where the analysis still keeps a type as text.
 pub(crate) fn storage_type_spelling(bytes: u32, signedness: Signedness) -> Option<String> {
     storage_type(bytes, signedness).map(|ty| render_c_type_like(&ty))
-}
-
-pub(crate) fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
-    let bits = ptr_bits.clamp(8, 64);
-    if bits == 64 {
-        return raw as i64;
-    }
-    let mask = (1u64 << bits) - 1;
-    let sign = 1u64 << (bits - 1);
-    let v = raw & mask;
-    if (v & sign) != 0 {
-        (v | (!mask)) as i64
-    } else {
-        v as i64
-    }
 }

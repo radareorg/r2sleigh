@@ -566,31 +566,6 @@ pub fn materialize_signature_type_like(ty: CTypeLike, ptr_bits: u32) -> CTypeLik
     }
 }
 
-/// Spell a type the way radare2's type database expects it applied.
-///
-/// This differs from `render_signature_type` in exactly one respect: radare2
-/// writes a pointer with a space before the star, `struct Foo *`, and the
-/// signature renderer writes `struct Foo*`. That difference was previously
-/// applied by byte surgery on an already-rendered string --
-/// `canonical type spelling` searching for the first `*` and
-/// inserting a space in front of it -- which made three components normalize
-/// the same star three different ways. Rendering from the type instead means
-/// the spelling is decided once, by the code that knows which sink it is for.
-pub fn render_type_spelling(ty: &CTypeLike, _ptr_bits: u32) -> String {
-    match ty {
-        CTypeLike::Pointer(inner) => {
-            format!("{} *", render_type_spelling(inner, _ptr_bits))
-        }
-        // `render_c_type_like`, not `render_signature_type`: the latter
-        // materializes first, which turns a pointer to an unmaterialized
-        // aggregate into `void *`. That is the right answer for a rendered
-        // signature and the wrong one here, because radare2 needs the name it
-        // was given so the caller can require the type be materialized and
-        // fail closed when it is not.
-        other => crate::convert::render_c_type_like(other),
-    }
-}
-
 /// Whether two signature types are the same type for signature purposes.
 ///
 /// Both operands are already `CTypeLike`. This was written at six sites as
