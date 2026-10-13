@@ -109,7 +109,7 @@ impl TypeAnalysis {
                     .type_facts()
                     .signature_certificate
                     .as_ref()
-                    .map(|c| c.confidence)
+                    .map(|c| &c.sources)
             );
             return None;
         };

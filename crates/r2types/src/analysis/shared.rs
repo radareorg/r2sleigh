@@ -54,25 +54,12 @@ pub(crate) struct RecoveredVariable {
     pub reg: Option<String>,
 }
 
-impl RecoveredVariable {
-    /// The recovered type, parsed once with the canonical parser.
-    ///
-    /// The spelling is radare2's, so it stays a `String` on the wire -- this is
-    /// what radare2 told us, not something we decided. What should not happen
-    /// is each consumer taking the spelling apart its own way, which is how one
-    /// of them came to test for a pointer with `contains('*')`.
-    pub fn recovered_type(&self, ptr_bits: u32) -> Option<CTypeLike> {
-        parse_c_type_like(&self.var_type, ptr_bits)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StructFieldCandidate {
     pub name: String,
     pub offset: u64,
     /// The field's type, as a type.
     pub field_type: CTypeLike,
-    pub confidence: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +83,6 @@ pub(crate) struct VarTypeCandidate {
     pub isarg: bool,
     pub reg: Option<String>,
     pub size: u32,
-    pub confidence: u8,
     pub source: TypeFactSource,
     pub evidence: Vec<TypeEvidence>,
 }

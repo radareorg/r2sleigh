@@ -7,8 +7,6 @@ use crate::convert::CTypeLike;
 use crate::external::ExternalTypeDb;
 use crate::model::Signedness;
 
-pub const SIGNATURE_PROJECTION_STRONG_CONFIDENCE: u8 = 96;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionType {
     pub return_type: CTypeLike,
@@ -107,7 +105,6 @@ impl OutParamCertificate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureCertificate {
     pub signature: FunctionSignatureSpec,
-    pub confidence: u8,
     pub sources: Vec<SignatureCertificateSource>,
 }
 
@@ -147,13 +144,12 @@ impl SignatureCertificate {
 
         Some(Self {
             signature: signature.clone(),
-            confidence: signature_strength(signature),
             sources,
         })
     }
 
     pub fn certifies_signature(&self) -> bool {
-        self.confidence >= SIGNATURE_PROJECTION_STRONG_CONFIDENCE
+        signature_is_specific(&self.signature)
             && self
                 .sources
                 .iter()
@@ -173,7 +169,7 @@ impl SignatureCertificate {
     }
 
     pub fn authorizes_signature_render(&self) -> bool {
-        self.confidence >= SIGNATURE_PROJECTION_STRONG_CONFIDENCE
+        signature_is_specific(&self.signature)
     }
 }
 
@@ -676,18 +672,13 @@ pub fn signature_param_name_is_weak(name: &str) -> bool {
         )
 }
 
-pub fn signature_strength(signature: &FunctionSignatureSpec) -> u8 {
-    let has_type_info =
-        signature.ret_type.is_some() || signature.params.iter().any(|param| param.ty.is_some());
-    let has_named_params = signature
-        .params
-        .iter()
-        .any(|param| !crate::context::is_generic_arg_name(&param.name));
-    if has_type_info || has_named_params {
-        SIGNATURE_PROJECTION_STRONG_CONFIDENCE
-    } else {
-        80
-    }
+/// The signature states a type, or names a parameter beyond its `argN` placeholder.
+pub fn signature_is_specific(signature: &FunctionSignatureSpec) -> bool {
+    signature.ret_type.is_some()
+        || signature
+            .params
+            .iter()
+            .any(|param| param.ty.is_some() || !crate::context::is_generic_arg_name(&param.name))
 }
 
 pub fn signature_param_count_is_authoritative(signature: &FunctionSignatureSpec) -> bool {
@@ -698,7 +689,6 @@ pub fn signature_param_count_is_authoritative(signature: &FunctionSignatureSpec)
         .params
         .iter()
         .any(|param| !crate::context::is_generic_arg_name(&param.name))
-        && signature_strength(signature) >= SIGNATURE_PROJECTION_STRONG_CONFIDENCE
 }
 
 pub fn is_generic_signature_type(ty: Option<&CTypeLike>) -> bool {

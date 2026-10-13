@@ -746,17 +746,12 @@ pub(crate) fn apply_signature_context_overrides(
     );
 }
 
-pub(crate) fn signature_strength(signature: &FunctionSignatureSpec) -> u8 {
-    crate::signature_strength(signature)
-}
-
 pub(crate) fn signature_param_count_is_authoritative(signature: &FunctionSignatureSpec) -> bool {
     crate::signature_param_count_is_authoritative(signature)
 }
 
 pub(crate) fn signature_has_typed_param_count_evidence(signature: &FunctionSignatureSpec) -> bool {
-    !signature.params.is_empty()
-        && signature_strength(signature) >= crate::SIGNATURE_PROJECTION_STRONG_CONFIDENCE
+    !signature.params.is_empty() && crate::signature_is_specific(signature)
 }
 
 pub(crate) fn signature_param_allows_local_struct_override(

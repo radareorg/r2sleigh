@@ -6,7 +6,6 @@ use super::*;
 pub(crate) struct VarRenameCandidate {
     pub name: String,
     pub target_name: String,
-    pub confidence: u8,
     pub source: TypeFactSource,
     pub evidence: Vec<TypeEvidence>,
 }
@@ -280,16 +279,6 @@ pub(crate) fn build_var_type_candidates(
     let mut out = Vec::with_capacity(vars.len());
     for var in vars {
         let mut source = TypeFactSource::LocalInferred;
-        let mut confidence = if var
-            .recovered_type(ctx.ptr_bits)
-            .is_some_and(|ty| ty.is_pointer())
-        {
-            92
-        } else if var.isarg {
-            88
-        } else {
-            84
-        };
         let mut evidence = vec![TypeEvidence::SsaVarRecovery];
         let mut chosen_type = var.var_type.clone();
         let arg_slot = var
@@ -302,7 +291,6 @@ pub(crate) fn build_var_type_candidates(
             && !type_name_is_generic(sig_ty)
         {
             chosen_type = sig_ty.clone();
-            confidence = 96;
             source = TypeFactSource::SignatureRegistry;
             evidence.push(TypeEvidence::ExternalSignatureCurrent);
         } else if let Some(slot) = arg_slot
@@ -314,7 +302,6 @@ pub(crate) fn build_var_type_candidates(
             && !type_name_is_generic(&sig_ty)
         {
             chosen_type = sig_ty;
-            confidence = 96;
             source = TypeFactSource::SignatureRegistry;
             if ctx.is_main_signature {
                 evidence.push(TypeEvidence::CanonicalMainSignature);
@@ -326,7 +313,6 @@ pub(crate) fn build_var_type_candidates(
             && type_name_is_generic(&chosen_type)
         {
             chosen_type = struct_ty.clone();
-            confidence = 90;
             source = TypeFactSource::LocalInferred;
             evidence.push(TypeEvidence::SsaFieldOffsetPattern);
         }
@@ -335,7 +321,6 @@ pub(crate) fn build_var_type_candidates(
         if exact_access_bits
             .is_some_and(|bits| integer_type_bits(&chosen_type, ctx.ptr_bits) == Some(bits))
         {
-            confidence = confidence.max(96);
             source = TypeFactSource::DataflowRanked;
             evidence.push(TypeEvidence::CanonicalStackAccessWidth);
         }
@@ -346,7 +331,6 @@ pub(crate) fn build_var_type_candidates(
             if let Some(signed_type) = storage_type_spelling(bits / 8, signedness.signedness()) {
                 chosen_type = signed_type;
             }
-            confidence = confidence.max(97);
             source = TypeFactSource::DataflowRanked;
             evidence.push(TypeEvidence::CanonicalStackSignedness);
         }
@@ -368,7 +352,6 @@ pub(crate) fn build_var_type_candidates(
             isarg: var.isarg,
             reg: var.reg.clone(),
             size,
-            confidence,
             source,
             evidence,
         });
@@ -399,7 +382,6 @@ pub(crate) fn build_var_rename_candidates(
                 out.push(VarRenameCandidate {
                     name: var.name.clone(),
                     target_name,
-                    confidence: 95,
                     source: TypeFactSource::SignatureRegistry,
                     evidence: vec![TypeEvidence::ExternalParamName],
                 });

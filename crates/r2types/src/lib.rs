@@ -27,10 +27,9 @@ pub fn parse_external_type_like_spec(spec: &str, ptr_bits: u32) -> Option<CTypeL
 pub(crate) use evidence::solve_evidence_types;
 pub(crate) use external::ExternalAggregateKind;
 pub(crate) use facts::{
-    SIGNATURE_PROJECTION_STRONG_CONFIDENCE, SignatureCertificate, is_generic_signature_type,
-    signature_hint_can_replace_existing, signature_param_count_is_authoritative,
-    signature_param_name_is_weak, signature_projection_is_exact,
-    signature_return_hint_can_replace_existing, signature_strength,
+    SignatureCertificate, is_generic_signature_type, signature_hint_can_replace_existing,
+    signature_is_specific, signature_param_count_is_authoritative, signature_param_name_is_weak,
+    signature_projection_is_exact, signature_return_hint_can_replace_existing,
     summary_hint_can_replace_weak_existing,
 };
 

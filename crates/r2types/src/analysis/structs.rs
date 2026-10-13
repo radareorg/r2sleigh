@@ -82,7 +82,6 @@ pub(crate) fn augment_local_struct_artifacts_with_projection(
                     name: format!("f_{offset:x}"),
                     offset: *offset,
                     field_type: parse_c_type_like(field_type, ptr_bits)?,
-                    confidence: 84,
                 })
             })
             .collect::<Option<Vec<_>>>()
@@ -151,7 +150,6 @@ pub(crate) fn augment_local_struct_artifacts_with_local_field_accesses(
                     name: format!("f_{offset:x}"),
                     offset: *offset,
                     field_type: parse_c_type_like(field_type, ptr_bits)?,
-                    confidence: 90,
                 })
             })
             .collect::<Option<Vec<_>>>()
@@ -271,7 +269,6 @@ pub(crate) fn collect_external_struct_candidates_from_db(
                 name: field.name.clone(),
                 offset: *offset,
                 field_type,
-                confidence: 95,
             });
         }
         let Some(decl) = build_struct_decl(&st.name, &fields, ptr_bits) else {
