@@ -1,0 +1,23 @@
+- [User-facing impact table](feedback-user-facing-impact-table.md) — every update ends with measured speed/complexity/correctness/CI table
+- [Large-function perf check](large-function-perf-check.md) — census hides big-function regressions; time release pdd on 0pack/pumasim hot functions
+- [CI ratchet check](ci-ratchet-check.md) — read CI after each push; ratchet compares failure reasons too
+- [Short comments](short-comments.md) — comments 1-2 lines; design goes to ADRs; long_comments ratchet
+- [Bless only falls](structure-bless-only-falls.md) — check structure-report exit code; never --bless a rise
+- [Item branch gate policy](item-branch-gate-policy.md) — structure/long_comments ratchets suspended inside a roadmap item, re-armed at exit
+- [Arch scope](arch-scope.md) — x86-64/aarch64 graded; other arches pluggable, not end to end
+- [Profile, not print](profile-not-print.md) — samply + flamegraph + lldb before eprintln debugging
+- [Worktree stash is shared](worktree-stash-shared.md) — stash list holds the user's WIP; never stash/pop blindly in a worktree
+- [Memory footprint priority](memory-footprint-priority.md) — 16 GB Mac swaps; peak RSS first-class; dhat recipe; one heavy job at a time
+- [Stacked PRs](stacked-prs.md) — every PR joins one gh native stack; restack recipe after user rebases
+- [Resolve review threads](resolve-review-threads.md) — ready-to-merge PR has every GH review conversation addressed and resolved
+- [Contabo build host](contabo-build-host.md) — heavy builds, workspace suite, Linux equivalence run on `ssh contabo` in /root/r2s-stack
+- [Rate every fix](rate-every-fix.md) — rate each fix /10; under 8-9 rethink the owner and rewrite before landing
+- [Mac disk full](mac-disk-full.md) — 228 GB disk near full; worktree targets 7-11 GB each; df before builds, cargo clean pushed worktrees
+- [Loop never idles on merge questions](loop-never-idles-on-merge-questions.md) — open merge/D27 answers block only the merge; keep stacking roadmap items
+- [Worktree target collision](worktree-target-dir-collision.md) — worktrees sharing CARGO_TARGET_DIR overwrite path-crate builds; separate dirs or touch sources
+- [Cache is a last resort](cache-last-resort.md) — hold only program-wide facts computed once; per-function answers Newest; never cache to hide a slow algorithm
+- [Advisor for design](advisor-for-design.md) — research, then ask advisor for long-term design; no patches; radare2 defects go upstream as PRs
+- [Questions never stop work](questions-never-stop-work.md) — a user question adds a task; answer briefly and keep working, never end the turn with queued work
+- [Watch radare2 PRs](radare2-pr-watch.md) — address upstream review comments on our r2 PRs: verify, fix, test, reply, amend one commit
+- [CI runner queue](ci-runner-queue.md) — few runners; cancel runs above the merging stack; cancelled lower runs skip timing+Dylint, run them on contabo
+- [Check consumers before refactor](check-consumers-before-refactor.md) — grep a fact's readers first; dead r2types outputs get deleted, not typed

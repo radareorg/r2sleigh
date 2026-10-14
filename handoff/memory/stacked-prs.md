@@ -1,0 +1,26 @@
+---
+name: stacked-prs
+description: "every roadmap PR joins one GitHub native stack (gh stack link), bottom merges first; how to restack after the user rebases"
+metadata:
+  node_type: memory
+  type: feedback
+  originSessionId: cf9e98c3-7781-4316-8fad-7694098f271e
+  modified: 2026-10-13T06:03:05.725Z
+---
+
+From 2026-10-08 the user wants every PR in a GitHub native stack so merging needs no tracking: "followup PRS should be using github stacked PR concept it would be easier to merge in that way and we won't have to keep track of what to merge next".
+
+**Why:** the user merges bottom-first; a chain of base branches plus GitHub's stack object (`gh stack`, official extension `github/gh-stack`) shows the order and merges atomically.
+
+**How to apply:**
+- A new item's branch starts from the top of the stack; open its PR with the previous branch as base, then `gh stack link <stack-number> <branch>` (a stack only grows at the top; to insert lower, `gh stack unstack N` then relink all bottom to top). List stacks: `gh api repos/radareorg/r2sleigh/stacks`. Stack numbers change as stacks merge (82 and 97 merged into `rebuild` 2026-10-10; #122–#124 are stack 125), so list before linking. `gh stack link A B C` with PR numbers creates a new stack when none holds them.
+- `gh stack link` with PR numbers creates a stack whose bottom targets the repo default branch (master) and retargets the bottom PR there; always pass `--base rebuild`. A stacked PR's base cannot be edited: `gh stack unstack N`, `gh pr edit --base`, relink. While a stack's bottom conflicts, GitHub drops `pull_request` synchronize events (CI silently never runs; mergeable stays UNKNOWN); after fixing, push a fresh commit (history rewrites are denied; an empty commit works). Happened 2026-10-10 (stack 125 → 128). The user merged stack 128 (#122–#131) into `rebuild` on 2026-10-11; a stack needs two PRs, so a lone PR on `rebuild` links once the next one opens.
+- The user merged `rebuild` into master on 2026-10-11 (#142, D27 at the switch) and deleted `rebuild`; GitHub retargeted stack #134 to master and rebased its branches (same trees plus master's docs), so local branches were reset to the remote heads. New work stacks on master.
+- The user (or GitHub) may rebase lower branches onto master after a merge. Check `git range-diff` for `=` patches, `reset --hard` clean worktrees to the remote, `rebase --onto` each upper branch, then one `git push --atomic --force-with-lease=<branch>:<old-sha>` for all.
+- CI runs on PRs of any base since #78; census and timing compare against `pull_request.base.sha`. A cancelled duplicate run (push and base edit at once) shows as failures; read `gh run list --branch` before reacting.
+- 2026-10-12 the user said stack #134 (27 PRs) had grown too big: "create a new stack then adding to current one and fix ci issues of current ones so that i can merge it up". Cap a stack near that size; start the next stack on the old top branch (#163 on `f2-inputs-csr`, linked with `gh stack link --base f2-inputs-csr 163 <next>` once a second PR exists) and keep the old stack green for merging.
+- 2026-10-12: the user merged #132–#148 and GitHub rebased the rest of stack #134 (linearised, its merge commits dropped), leaving stack #165 on the old `f2-inputs-csr`. Fix that worked: confirm `git diff old-base new-base` is empty, `git rebase --onto origin/<base> <old base commit> <top> --update-refs` in the worktree holding the top, `git branch -f` the branches whose heads were merge commits (update-refs skips them), check each branch's tree equals `origin/<branch>`, then one `git push --atomic` with a lease per branch. In zsh, loop over branch names literally; `$B` does not word-split.
+- 2026-10-13: stack #165 reached 24 PRs (163 to 187, top `mm-lanes-record`), so stack #190 starts on `mm-lanes-record` with #188, #189, #191, #192 (`gh stack link --base mm-lanes-record 188 189`, then `gh stack link 190 <next>`). Stacks and PRs share one number space: a new stack takes the next number.
+- 2026-10-13 07:08: the user merged #162 and rebased stack #165, so `mm-lanes-record` moved (6b4d4be1 to b81e5227, the same tree). Stack #190 was restacked with `git rebase --onto origin/mm-lanes-record <old sha> <top> --update-refs`, each branch's tree was checked unchanged, and all 16 branches went up in one `git push --atomic` with a lease per branch. Then cancel the queued CI runs of the replaced shas (`gh run cancel`): CI was already about 40 runs deep.
+- Worktrees hold the branches, so `gh stack rebase` and `checkout` cannot move them; use plain git there and `gh stack link` for the GitHub side. Related: [[worktree-stash-shared]].
+- Merging (2026-10-13): `gh pr merge` and `PUT pulls/N/merge` refuse a stacked PR; use `gh api -X PUT repos/radareorg/r2sleigh/pulls/N/merge-async -f merge_method=merge -f sha=<head>`, which also merges every open PR below N. The "Production Safety" ruleset requires every review thread resolved (Codex threads included), so answer and resolve them first; a push voids a pending merge-async request. After #216 (CI tiers), only a PR whose base is master, or one labeled `full-ci` (`ci-on-request.yml`), runs equivalence; label the PRs whose CI baseline blesses are needed.
