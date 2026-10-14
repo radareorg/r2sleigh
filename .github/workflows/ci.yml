@@ -170,7 +170,7 @@ jobs:
           shared-key: ci-shell
       - name: Build
         run: cargo build --profile ci -p r2s --features sleigh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: r2s
           path: target/ci/r2s
@@ -182,7 +182,7 @@ jobs:
           mkdir -p target/count
           cargo build --profile ci -p r2s --features sleigh,alloc-count
           cp target/ci/r2s target/count/r2s
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: r2s-count
           path: target/count/r2s
@@ -374,7 +374,7 @@ jobs:
             --json target/source-gold/report.json
       - name: Archive the source-gold report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: source-gold-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/source-gold/report.json
@@ -452,7 +452,7 @@ jobs:
             --opts ${{ matrix.opt }} \
             --jobs 4 \
             --out "$RUNNER_TEMP/equiv"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
@@ -483,7 +483,7 @@ jobs:
             "$RUNNER_TEMP"/shards/*/records.json
       - name: Archive the records and the proposed baseline
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: equivalence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -547,7 +547,7 @@ jobs:
             --opts ${{ matrix.opt }} \
             --jobs 4 \
             --out "$RUNNER_TEMP/equiv"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: equiv-aarch64-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
@@ -578,7 +578,7 @@ jobs:
             "$RUNNER_TEMP"/shards/*/records.json
       - name: Archive the records and the proposed baseline
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: equivalence-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -617,7 +617,7 @@ jobs:
         run: ./tests/coverage/run_coverage.sh
       - name: Archive coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: tests/coverage/artifacts/coverage.json
