@@ -45,6 +45,22 @@ negative through `int2float`), and H scales in float32 (2^16 is past float16's
 range): `fcvtzu d0, d1, #64` of 0.5 gives 0x8000000000000000, `fcvtzu h0, h1, #16`
 0x8000.
 
+The general-register fixed-point forms get the same: `fcvtzu` into W and X saturates
+(`fcvtzu x0, d1, #64` of 0.5 gives 0x8000000000000000, of 1.0 all ones, `fcvtzu w0, d1, #32`
+of 1.0 0xffffffff). `FBits64` and `FBits32` state 2^fbits, fbits 1 to 64, as the IEEE
+constant (`AARCH64instructions.sinc`), where `1 << (64 - Scale)` is 0 at 64 and negative
+through `int2float` at 63, so `fcvtzs`, `fcvtzu`, `scvtf` and `ucvtf` of an X register at
+`#63` and `#64` were wrong. The H sources (`fcvtzs` and `fcvtzu` into W and X) are widened and
+scaled in float32: Ghidra multiplied by `FBitsOp`, the fraction-bit count read as a float16 bit
+pattern, in three of the four, and in float16, where 2^fbits is infinite from 16 bits, in the
+fourth. 19 oracle cases (Apple M5) pin them (a sleigh-config pull request is owed, and a Ghidra
+issue for the scale constants and the H operand). Left, each a gap: the fixed-point `fcvtzs` still converts by `trunc`, so it stops
+past the signed range (the signed family, ROADMAP VC); `scvtf` and `ucvtf` into H divide by
+`FBits16`, float16's 2^fbits, infinite from 16 bits, and `r2il::eval` cannot narrow into
+binary16, so no oracle grades them; `fmov` between H and W or X converts the value with
+`float2float` where the Arm ARM moves the bits (four forms). `fcvta*`, `fcvtm*`, `fcvtn*` and
+`fcvtp*` have no fixed-point form.
+
 A 32-bit register destination zero-extends into its 64-bit register in 64-bit
 mode (Intel SDM Vol. 1, 3.4.1.1): Ghidra's GP-7027 (`1735e73f4e`) states it
 with `check_*_dest`, and 918acd744d's text is taken whole, MOVBE written byte by

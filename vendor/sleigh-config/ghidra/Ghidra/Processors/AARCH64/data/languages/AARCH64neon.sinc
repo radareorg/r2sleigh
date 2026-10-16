@@ -6976,9 +6976,11 @@ is b_31=0 & b_30=1 & b_2329=0b0011110 & b_2022=0b001 & b_1015=0b111111 & Rd_VPR1
 # Half-precision to 32-bit variant when sf == 0 && type == 11 G=GPR32 V=FPR16 size=2 fbits=FBits16
 
 :fcvtzs Rd_GPR32, Rn_FPR16, FBitsOp
-is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & b_15=1 & Rd_GPR32 & Rn_FPR16 & FBitsOp & FBits16 & Rd_GPR64
+is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & b_15=1 & Rd_GPR32 & Rn_FPR16 & FBitsOp & FBits32 & Rd_GPR64
 {
-	local tmp1:2 = Rn_FPR16 f* FBits16;
+	# x * 2^fbits passes float16's range, so the product is taken in float32, where it is exact.
+	local x:4 = float2float(Rn_FPR16);
+	local tmp1:4 = x f* FBits32;
 	Rd_GPR32 = trunc(tmp1);
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
@@ -6991,9 +6993,10 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & b_15=1 & Rd_GPR32
 # Half-precision to 64-bit variant when sf == 1 && type == 11 G=GPR64 V=FPR16 size=2 fbits=FBits16
 
 :fcvtzs Rd_GPR64, Rn_FPR16, FBitsOp
-is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR16 & FBitsOp & FBits16
+is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR16 & FBitsOp & FBits32
 {
-	local tmp1:2 = Rn_FPR16 f* FBitsOp;
+	local x:4 = float2float(Rn_FPR16);
+	local tmp1:4 = x f* FBits32;
 	Rd_GPR64 = trunc(tmp1);
 }
 
@@ -7180,12 +7183,15 @@ is b_2331=0b011111110 & b_22=1 & b_1015=0b111111 & Imm_shr_imm64 & Rn_FPR64 & Rd
 # SMACRO(pseudo) ARG1 ARG2 ARG3 =NEON_fcvtzu/2
 # AUNIT --inst x1ed98000/mask=xffff8000 --rand hfp --status noqemu --comment "nofpround"
 
+# Unsigned saturates as FPToFixed states; float16 is scaled in float32, where 2^fbits is exact.
 :fcvtzu Rd_GPR32, Rn_FPR16, FBitsOp
-is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=3 & fpOpcode=1 & b_15=1 & FBitsOp & FBits16 & Rn_FPR16 & Rd_GPR32 & Rd_GPR64
+is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=3 & fpOpcode=1 & b_15=1 & FBitsOp & FBits32 & Rn_FPR16 & Rd_GPR32 & Rd_GPR64
 {
-	local tmp1:2 = Rn_FPR16 f* FBitsOp;
-	Rd_GPR32 = trunc(tmp1);
-	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
+	local x:4 = float2float(Rn_FPR16);
+	local tmp1:4 = x f* FBits32;
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x100000000:8);
+	fp_to_unsigned(tmp1, zero, lim, 0xffffffff:8, Rd_GPR64);
 }
 
 # C7.2.95 FCVTZU (scalar, fixed-point) page C7-2237 line 130769 MATCH x1e190000/mask=x7f3f0000
@@ -7194,11 +7200,15 @@ is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=3 & fpOpcode=
 # SMACRO(pseudo) ARG1 ARG2 ARG3 =NEON_fcvtzu/2
 # AUNIT --inst x9ed90000/mask=xffff0000 --rand hfp --status noqemu --comment "nofpround"
 
+# Unsigned saturates as FPToFixed states
 :fcvtzu Rd_GPR64, Rn_FPR16, FBitsOp
-is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=3 & fpOpcode=1 & FBitsOp & FBits16 & Rn_FPR16 & Rd_GPR64
+is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=3 & fpOpcode=1 & FBitsOp & FBits32 & Rn_FPR16 & Rd_GPR64
 {
-	local tmp1:2 = Rn_FPR16 f* FBitsOp;
-	Rd_GPR64 = trunc(tmp1);
+	local x:4 = float2float(Rn_FPR16);
+	local tmp1:4 = x f* FBits32;
+	local zero:4 = int2float(0:4);
+	local two63:4 = int2float(0x4000000000000000:8) f* int2float(2:4);
+	fp_to_unsigned64(tmp1, zero, two63, Rd_GPR64);
 }
 
 # C7.2.95 FCVTZU (scalar, fixed-point) page C7-2237 line 130769 MATCH x1e190000/mask=x7f3f0000
@@ -7207,12 +7217,14 @@ is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=3 & fpOpcode=
 # SMACRO(pseudo) ARG1 ARG2 ARG3 =NEON_fcvtzu/2
 # AUNIT --inst x1e598000/mask=xffff8000 --rand dfp --status fail --comment "nofpround"
 
+# Unsigned saturates as FPToFixed states
 :fcvtzu Rd_GPR32, Rn_FPR64, FBitsOp
 is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=0 & mode=3 & fpOpcode=1 & b_15=1 & FBitsOp & FBits64 & Rn_FPR64 & Rd_GPR32 & Rd_GPR64
 {
 	local tmp1:8 = Rn_FPR64 f* FBits64;
-	Rd_GPR32 = trunc(tmp1);
-	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
+	local zero:8 = int2float(0:8);
+	local lim:8 = int2float(0x100000000:8);
+	fp_to_unsigned(tmp1, zero, lim, 0xffffffff:8, Rd_GPR64);
 }
 
 # C7.2.95 FCVTZU (scalar, fixed-point) page C7-2237 line 130769 MATCH x1e190000/mask=x7f3f0000
@@ -7221,12 +7233,14 @@ is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=0 & mode=3 & fpOpcode=
 # SMACRO(pseudo) ARG1 ARG2 FBits32 =NEON_fcvtzu/2
 # AUNIT --inst x1e198000/mask=xffff8000 --rand sfp --status fail --comment "nofpround"
 
+# Unsigned saturates as FPToFixed states
 :fcvtzu Rd_GPR32, Rn_FPR32, FBitsOp
 is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=0 & mode=3 & fpOpcode=1 & b_15=1 & FBitsOp & FBits32 & Rn_FPR32 & Rd_GPR32 & Rd_GPR64
 {
 	local tmp1:4 = Rn_FPR32 f* FBits32;
-	Rd_GPR32 = trunc(tmp1);
-	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x100000000:8);
+	fp_to_unsigned(tmp1, zero, lim, 0xffffffff:8, Rd_GPR64);
 }
 
 # C7.2.95 FCVTZU (scalar, fixed-point) page C7-2237 line 130769 MATCH x1e190000/mask=x7f3f0000
@@ -7235,11 +7249,14 @@ is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=0 & mode=3 & fpOpcode=
 # SMACRO(pseudo) ARG1 ARG2 FBits64 =NEON_fcvtzu/2
 # AUNIT --inst x9e590000/mask=xffff0000 --rand dfp --status fail --comment "nofpround"
 
+# Unsigned saturates as FPToFixed states
 :fcvtzu Rd_GPR64, Rn_FPR64, FBitsOp
 is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=0 & mode=3 & fpOpcode=1 & FBitsOp & FBits64 & Rn_FPR64 & Rd_GPR64
 {
 	local tmp1:8 = Rn_FPR64 f* FBits64;
-	Rd_GPR64 = trunc(tmp1);
+	local zero:8 = int2float(0:8);
+	local two63:8 = int2float(0x4000000000000000:8) f* int2float(2:8);
+	fp_to_unsigned64(tmp1, zero, two63, Rd_GPR64);
 }
 
 # C7.2.95 FCVTZU (scalar, fixed-point) page C7-2237 line 130769 MATCH x1e190000/mask=x7f3f0000
@@ -7248,11 +7265,14 @@ is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=0 & mode=3 & fpOpcode=
 # SMACRO(pseudo) ARG1 ARG2 FBits32 =NEON_fcvtzu/2
 # AUNIT --inst x9e190000/mask=xffff0000 --rand sfp --status fail --comment "nofpround"
 
+# Unsigned saturates as FPToFixed states
 :fcvtzu Rd_GPR64, Rn_FPR32, FBitsOp
 is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=0 & mode=3 & fpOpcode=1 & FBitsOp & FBits32 & Rn_FPR32 & Rd_GPR64
 {
 	local tmp1:4 = Rn_FPR32 f* FBits32;
-	Rd_GPR64 = trunc(tmp1);
+	local zero:4 = int2float(0:4);
+	local two63:4 = int2float(0x4000000000000000:8) f* int2float(2:4);
+	fp_to_unsigned64(tmp1, zero, two63, Rd_GPR64);
 }
 
 # C7.2.97 FDIV (vector) page C7-2241 line 131035 MATCH x2e20fc00/mask=xbfa0fc00

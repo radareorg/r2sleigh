@@ -457,3 +457,22 @@ adds_ext_sxtw|-|adds x0, x1, w2, sxtw
 cnt_w|-|cnt w0, w1
 smax_w_imm|-|smax w0, w1, #-5
 umin_w_reg|-|umin w0, w1, w2
+fcvtzu_xd_64|F|fmov d1, #0.5; fcvtzu x0, d1, #64; fmov d2, #1.0; fcvtzu x3, d2, #64; fmov d4, #-1.0; fcvtzu x5, d4, #64; movz x6, #0x7ff8, lsl #48; fmov d7, x6; fcvtzu x8, d7, #64; movz x12, #0x7ff0, lsl #48; fmov d13, x12; fcvtzu x14, d13, #64
+fcvtzu_xd_63|F|fmov d1, #1.0; fcvtzu x0, d1, #63; fmov d2, #0.5; fcvtzu x3, d2, #63; fmov d4, #0.75; fcvtzu x5, d4, #62; fmov d6, #3.0; fcvtzu x7, d6, #1; fmov d8, #-0.5; fcvtzu x9, d8, #63
+fcvtzu_xs_64|F|fmov s1, #0.5; fcvtzu x0, s1, #64; fmov s2, #1.0; fcvtzu x3, s2, #64; fmov s4, #-1.0; fcvtzu x5, s4, #64; movz w6, #0x7fc0, lsl #16; fmov s7, w6; fcvtzu x8, s7, #64; fmov s9, #0.25; fcvtzu x10, s9, #63
+fcvtzu_wd_32|F|fmov d1, #0.5; fcvtzu w0, d1, #32; fmov d2, #1.0; fcvtzu w3, d2, #32; fmov d4, #-1.0; fcvtzu w5, d4, #32; fmov d6, #0.75; fcvtzu w7, d6, #1; fmov d8, #0.75; fcvtzu w9, d8, #31
+fcvtzu_ws_32|F|fmov s1, #0.5; fcvtzu w0, s1, #32; fmov s2, #1.0; fcvtzu w3, s2, #32; fmov s4, #-1.0; fcvtzu w5, s4, #32; fmov s6, #0.75; fcvtzu w7, s6, #1; movz w8, #0x7fc0, lsl #16; fmov s9, w8; fcvtzu w10, s9, #32
+fcvtzu_xh_64|F|fmov h1, #0.5; fcvtzu x0, h1, #64; fmov h2, #1.0; fcvtzu x3, h2, #64; fmov h4, #-1.0; fcvtzu x5, h4, #64; fmov h6, #0.25; fcvtzu x7, h6, #8; movz w8, #0x7c00; mov v9.h[0], w8; fcvtzu x10, h9, #64; movz w11, #0x7e00; mov v12.h[0], w11; fcvtzu x13, h12, #64
+fcvtzu_wh_32|F|fmov h1, #1.0; fcvtzu w0, h1, #16; fmov h2, #0.5; fcvtzu w3, h2, #32; fmov h4, #1.0; fcvtzu w5, h4, #32; fmov h6, #-1.0; fcvtzu w7, h6, #32; fmov h8, #3.0; fcvtzu w9, h8, #1
+fcvtzs_xd_64|F|fmov d1, #0.25; fcvtzs x0, d1, #64; fmov d2, #-0.25; fcvtzs x3, d2, #64; fmov d4, #0.5; fcvtzs x5, d4, #63; fmov d6, #-0.5; fcvtzs x7, d6, #63; fmov d8, #0.125; fcvtzs x9, d8, #64
+fcvtzs_xs_64|F|fmov s1, #0.25; fcvtzs x0, s1, #64; fmov s2, #-0.25; fcvtzs x3, s2, #64; fmov s4, #0.5; fcvtzs x5, s4, #63; fmov s6, #-0.5; fcvtzs x7, s6, #63; fmov s8, #-0.75; fcvtzs x9, s8, #1
+fcvtzs_wd_32|F|fmov d1, #0.25; fcvtzs w0, d1, #32; fmov d2, #-0.25; fcvtzs w3, d2, #32; fmov d4, #-0.5; fcvtzs w5, d4, #32; fmov d6, #0.75; fcvtzs w7, d6, #1; fmov d8, #-3.0; fcvtzs w9, d8, #2
+fcvtzs_ws_32|F|fmov s1, #0.25; fcvtzs w0, s1, #32; fmov s2, #-0.25; fcvtzs w3, s2, #32; fmov s4, #-0.5; fcvtzs w5, s4, #32; fmov s6, #0.75; fcvtzs w7, s6, #1; fmov s8, #-3.0; fcvtzs w9, s8, #2
+fcvtzs_xh_64|F|fmov h1, #0.25; fcvtzs x0, h1, #64; fmov h2, #-0.25; fcvtzs x3, h2, #64; fmov h4, #0.5; fcvtzs x5, h4, #63; fmov h6, #1.0; fcvtzs x7, h6, #16; fmov h8, #-0.75; fcvtzs x9, h8, #1
+fcvtzs_wh_32|F|fmov h1, #1.0; fcvtzs w0, h1, #16; fmov h2, #-1.0; fcvtzs w3, h2, #16; fmov h4, #0.25; fcvtzs w5, h4, #32; fmov h6, #-0.5; fcvtzs w7, h6, #32; fmov h8, #3.0; fcvtzs w9, h8, #1
+scvtf_dx_64|F|movz x1, #1; scvtf d0, x1, #64; movn x2, #0; scvtf d3, x2, #64; scvtf d4, x1, #63; movz x5, #3; scvtf d6, x5, #1; movz x7, #0x8000, lsl #48; scvtf d8, x7, #64
+scvtf_sx_64|F|movz x1, #1; scvtf s0, x1, #64; movn x2, #0; scvtf s3, x2, #64; scvtf s4, x1, #63; movz x5, #3; scvtf s6, x5, #1; movz x7, #0x8000, lsl #48; scvtf s8, x7, #64
+scvtf_dw_32|F|movz w1, #5; scvtf d0, w1, #32; scvtf s2, w1, #32; movn w3, #0; scvtf d4, w3, #32; scvtf s5, w3, #1; movz w6, #1, lsl #16; scvtf d7, w6, #16
+ucvtf_dx_64|F|movn x1, #0; ucvtf d0, x1, #64; ucvtf d2, x1, #63; movz x3, #1; ucvtf d4, x3, #64; ucvtf d5, x3, #63; movz x6, #0x8000, lsl #48; ucvtf d7, x6, #64
+ucvtf_sx_64|F|movn x1, #0; ucvtf s0, x1, #64; ucvtf s2, x1, #63; movz x3, #1; ucvtf s4, x3, #64; ucvtf s5, x3, #63; movz x6, #0x8000, lsl #48; ucvtf s7, x6, #64
+ucvtf_sw_32|F|movn w1, #0; ucvtf s0, w1, #32; ucvtf d2, w1, #32; movz w3, #1; ucvtf s4, w3, #32; ucvtf d5, w3, #1; movz w6, #1, lsl #16; ucvtf s7, w6, #16

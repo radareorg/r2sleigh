@@ -1738,6 +1738,89 @@ fn an_atomic_access_with_no_typed_statement_prints_no_plain_store() {
     assert!(!output.contains("r2sleigh_atomic"), "{output}");
 }
 
+/// A general-register fixed-point conversion scales by 2^fbits as an IEEE constant, 2^63 and 2^64
+/// too, and `fcvtzu` saturates to its destination instead of range-checking as a signed value.
+#[test]
+fn a_general_register_fixed_point_conversion_scales_by_its_full_fraction_width() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let ret = [0xc0, 0x03, 0x5f, 0xd6];
+    let f64_scale = |bits: &str| format!("r2sleigh_float_from_bits_64((uint64_t)0x{bits}U)");
+    let mut failures = Vec::new();
+    for (name, bytes, scale, present, absent) in [
+        // fcvtzs x0, d0, #64; ret
+        (
+            "fcvtzs_x_64",
+            vec![0x00, 0x00, 0x58, 0x9e],
+            f64_scale("43f0000000000000"),
+            "",
+            "",
+        ),
+        // fcvtzu w0, d0, #32; ret: all ones past 2^32, not the signed 32-bit range guard
+        (
+            "fcvtzu_w_32",
+            vec![0x00, 0x80, 0x59, 0x1e],
+            f64_scale("41f0000000000000"),
+            "* (uint64_t)0xffffffffU",
+            "2147483648.0",
+        ),
+        // fcvtzu x0, d0, #64; ret: all ones past 2^64
+        (
+            "fcvtzu_x_64",
+            vec![0x00, 0x00, 0x59, 0x9e],
+            f64_scale("43f0000000000000"),
+            "* (uint64_t)-0x1",
+            "",
+        ),
+        // scvtf d0, x0, #63; str d0, [x1]; ret
+        (
+            "scvtf_d_63",
+            vec![0x00, 0x04, 0x42, 0x9e, 0x20, 0x00, 0x00, 0xfd],
+            f64_scale("43e0000000000000"),
+            "",
+            "",
+        ),
+        // ucvtf d0, x0, #64; str d0, [x1]; ret
+        (
+            "ucvtf_d_64",
+            vec![0x00, 0x00, 0x43, 0x9e, 0x20, 0x00, 0x00, 0xfd],
+            f64_scale("43f0000000000000"),
+            "",
+            "",
+        ),
+        // scvtf s0, w0, #32; str s0, [x1]; ret
+        (
+            "scvtf_s_32",
+            vec![0x00, 0x80, 0x02, 0x1e, 0x20, 0x00, 0x00, 0xbd],
+            "r2sleigh_float_from_bits_32((uint32_t)0x4f800000U)".to_string(),
+            "",
+            "",
+        ),
+        // fcvtzs w0, d0, #16; ret: right before, only its scale was an `int2float` of an integer
+        (
+            "fcvtzs_w_16",
+            vec![0x00, 0xc0, 0x58, 0x1e],
+            f64_scale("40f0000000000000"),
+            "",
+            "",
+        ),
+    ] {
+        let program = Fixture {
+            bytes: [&bytes[..], &ret].concat(),
+            name,
+        };
+        let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+        let output = response.output.text();
+        let missing = [&scale[..], present]
+            .into_iter()
+            .find(|text| !output.contains(text));
+        let found = (!absent.is_empty() && output.contains(absent)).then_some(absent);
+        if missing.is_some() || found.is_some() {
+            failures.push(format!("{name}: missing {missing:?}, found {found:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// `dmb` is a user operation with no output, and p-code says it writes nothing else: the value
 /// before it is returned, and the barrier itself is a gap by its name.
 #[test]

@@ -2742,8 +2742,9 @@ Re_VPR128Lo.H.vIndexHLM: Re_VPR128Lo.H^"["^vIndexHLM^"]" is Re_VPR128Lo.H & vInd
 
 FBitsOp: "#"^fbits is Scale [ fbits = 64 - Scale; ] { export *[const]:2 fbits; }
 
-FBits64: factor is FBitsOp & Scale [ factor = 1 << (64 - Scale); ] { fval:8 = int2float(factor:8); export fval; }
-FBits32: factor is FBitsOp & Scale [ factor = 1 << (64 - Scale); ] { fval:4 = int2float(factor:8); export fval; }
+# 2^fbits for fbits 1 to 64 as an IEEE constant: 1 << fbits is 0 at 64 and negative through int2float at 63.
+FBits64: factor is FBitsOp & Scale [ factor = (1023 + 64 - Scale) << 52; ] { export *[const]:8 factor; }
+FBits32: factor is FBitsOp & Scale [ factor = (127 + 64 - Scale) << 23; ] { export *[const]:4 factor; }
 FBits16: factor is FBitsOp & Scale [ factor = 1 << (64 - Scale); ] { fval:2 = int2float(factor:8); export fval; }
 
 # float
