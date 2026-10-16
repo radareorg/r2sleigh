@@ -651,13 +651,7 @@ fn local_branch(
 }
 
 fn relative_target_index(branch_index: usize, target: &Varnode) -> Option<usize> {
-    let bit_width = target.size.checked_mul(8)?;
-    if bit_width == 0 || bit_width > 64 {
-        return None;
-    }
-    let shift = 64u32.checked_sub(bit_width)?;
-    let relative = ((target.offset << shift) as i64) >> shift;
-    branch_index.checked_add_signed(isize::try_from(relative).ok()?)
+    branch_index.checked_add_signed(isize::try_from(target.signed_label()?).ok()?)
 }
 
 struct InstructionTempAllocator {

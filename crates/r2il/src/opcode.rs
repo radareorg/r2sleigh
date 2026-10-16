@@ -999,6 +999,26 @@ impl R2ILOp {
         })
     }
 
+    /// How many operations from this one a local branch names, as Sleigh's signed label at the
+    /// target's width; `None` for any other operation.
+    pub fn local_offset(&self) -> Option<i64> {
+        let (R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }) = self else {
+            return None;
+        };
+        target.signed_label()
+    }
+
+    /// Name the operation `offset` operations from this local branch, wrapped to the target's width.
+    pub fn set_local_offset(&mut self, offset: i64) {
+        if self.local_offset().is_none() {
+            return;
+        }
+        let (R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }) = self else {
+            return;
+        };
+        target.offset = (offset as u64) & (u64::MAX >> (64 - 8 * target.size));
+    }
+
     /// The inputs through which this operation can name data: every one but
     /// the operand that says where control goes.
     ///
@@ -2024,5 +2044,35 @@ mod tests {
                 (None, vec![0x1000]),
             ]
         );
+    }
+
+    /// A local label is signed at the target's width, and a branch names no label of another kind.
+    #[test]
+    fn a_local_label_is_signed_at_its_targets_width() {
+        for (size, offset) in [(1, -3), (4, -1), (4, 7), (8, -2), (2, 100)] {
+            let mut branch = R2ILOp::CBranch {
+                target: Varnode::constant(0, size),
+                cond: Varnode::register(0, 1),
+            };
+            branch.set_local_offset(offset);
+            assert_eq!(branch.local_offset(), Some(offset), "{size}");
+        }
+        let wrapped = R2ILOp::Branch {
+            target: Varnode::constant(0xff, 1),
+        };
+        assert_eq!(wrapped.local_offset(), Some(-1));
+        for other in [
+            R2ILOp::Branch {
+                target: Varnode::ram(0x1000, 8),
+            },
+            R2ILOp::Call {
+                target: Varnode::constant(1, 4),
+            },
+            R2ILOp::Nop,
+        ] {
+            let mut same = other.clone();
+            same.set_local_offset(5);
+            assert_eq!((other.local_offset(), same), (None, other));
+        }
     }
 }

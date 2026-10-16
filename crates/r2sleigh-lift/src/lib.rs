@@ -28,6 +28,7 @@ pub mod context;
 pub mod disasm;
 pub mod flow;
 mod internal_control;
+mod plan;
 pub mod profile;
 pub mod sleigh;
 mod temporary_move;
@@ -45,7 +46,7 @@ pub use disasm::{
 pub use disasm::{
     Continuation, Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION,
     GenuineInstructionSpan, GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
-    GenuineLiftedFunctionAuthority, Lifted, TargetContext, TrustedLiftedFunction,
+    GenuineLiftedFunctionAuthority, Lifted, PassRun, TargetContext, TrustedLiftedFunction,
     TrustedSleighProfile,
 };
 use r2il::ArchSpec;

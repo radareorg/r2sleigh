@@ -1,10 +1,10 @@
 too_many_arguments 72
 too_many_lines 249
 cognitive_complexity 18
-excessive_nesting 459
+excessive_nesting 458
 redundant_clone 0
 assigning_clones 5
 needless_pass_by_ref_mut 0
 clone_on_ref_ptr 2
 mut_mut 0
-long_comments 2579
+long_comments 2577

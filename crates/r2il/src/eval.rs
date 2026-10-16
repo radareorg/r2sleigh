@@ -668,6 +668,28 @@ pub fn step<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Flow {
     executed(op, state).unwrap_or_else(Flow::Stop)
 }
 
+/// Execute one instruction's operations, following the local labels its branches name: `Flow::Next`
+/// when control falls past the last, else the transfer or stop that ended the run.
+pub fn run<M: Mapped>(ops: &[R2ILOp], state: &mut State<M>) -> Flow {
+    let mut at = 0usize;
+    while let Some(op) = ops.get(at) {
+        at = match (step(op, state), op.local_offset()) {
+            (Flow::Next, _) => at + 1,
+            (Flow::Transfer(_), Some(offset)) => {
+                let named = isize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| at.checked_add_signed(offset));
+                match named {
+                    Some(named) if named <= ops.len() => named,
+                    _ => return Flow::Stop(Stop::Unmodelled),
+                }
+            }
+            (flow, _) => return flow,
+        };
+    }
+    Flow::Next
+}
+
 fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> {
     state.spend()?;
     if let Some(flow) = transfer(op, state)? {
@@ -1723,5 +1745,40 @@ mod tests {
         let mut short = State::new(Endianness::Little, nothing_mapped, 1).expect("little-endian");
         assert_eq!(step(&R2ILOp::Nop, &mut short), Flow::Next);
         assert_eq!(step(&R2ILOp::Nop, &mut short), Flow::Stop(Stop::Exhausted));
+    }
+
+    /// A run follows the label a taken branch names and skips what it jumps over; a label outside
+    /// the instruction stops it.
+    #[test]
+    fn a_run_follows_the_local_labels_its_branches_name() {
+        let label = |offset: i64| Varnode::constant(offset as u64 & 0xffff_ffff, 4);
+        let set = |at: u64, value: u64| R2ILOp::Copy {
+            dst: register(at, 1),
+            src: Varnode::constant(value, 1),
+        };
+        let ops = [
+            R2ILOp::CBranch {
+                target: label(3),
+                cond: register(0, 1),
+            },
+            set(8, 1),
+            R2ILOp::Branch { target: label(2) },
+            set(8, 2),
+            set(16, 3),
+        ];
+        for (cond, written) in [(0, 1), (1, 2)] {
+            let mut machine = state();
+            machine.set_register(0, 1, cond).expect("a flag");
+            assert_eq!(run(&ops, &mut machine), Flow::Next);
+            assert_eq!(machine.register(8, 1), Some(written));
+            assert_eq!(machine.register(16, 1), Some(3));
+        }
+        let mut machine = state();
+        for outside in [label(2), label(-1)] {
+            let branch = [R2ILOp::Branch { target: outside }];
+            assert_eq!(run(&branch, &mut machine), Flow::Stop(Stop::Unmodelled));
+        }
+        let end = [R2ILOp::Branch { target: label(1) }];
+        assert_eq!(run(&end, &mut machine), Flow::Next);
     }
 }

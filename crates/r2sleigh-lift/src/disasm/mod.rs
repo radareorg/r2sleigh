@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::plan::Plan;
 use crate::translate::{self, PcodeSource};
 use crate::{LiftError, Result};
 use user_operation::{
@@ -1546,6 +1547,33 @@ impl<'a> PcodeSource for DisasmInstructionWrapper<'a> {
     }
 }
 
+/// One lift pass over an instruction's operations: what it was given and what it returned.
+#[derive(Debug, Clone)]
+pub struct PassRun {
+    pub pass: &'static str,
+    pub before: Vec<R2ILOp>,
+    pub after: Vec<R2ILOp>,
+}
+
+/// Run one pass, recording its input and output where a trace is asked for.
+fn passed(
+    trace: &mut Option<&mut Vec<PassRun>>,
+    pass: &'static str,
+    ops: Vec<R2ILOp>,
+    run: impl FnOnce(Vec<R2ILOp>) -> Result<Vec<R2ILOp>>,
+) -> Result<Vec<R2ILOp>> {
+    let before = trace.is_some().then(|| ops.clone());
+    let after = run(ops)?;
+    if let (Some(trace), Some(before)) = (trace.as_deref_mut(), before) {
+        trace.push(PassRun {
+            pass,
+            before,
+            after: after.clone(),
+        });
+    }
+    Ok(after)
+}
+
 fn translate_err(e: translate::TranslateError) -> LiftError {
     match e {
         translate::TranslateError::MissingOutput(op) => {
@@ -2674,6 +2702,25 @@ impl Disassembler {
 
     /// Translate a P-code disassembly to an r2il block.
     fn translate_pcode(&self, pcode: PcodeDisassembly, addr: u64) -> Result<R2ILBlock> {
+        self.translate_traced(pcode, addr, None)
+    }
+
+    /// One instruction's operations as each lift pass leaves them, for the gate that runs a pass's
+    /// input and output through `r2il::eval` from one state (`decode_sweep`, ROADMAP D34).
+    pub fn lift_passes(&self, bytes: &[u8], addr: u64) -> Result<Vec<PassRun>> {
+        self.clear_decode_cache()?;
+        let pcode = self.pcode(bytes, addr)?;
+        let mut runs = Vec::new();
+        self.translate_traced(pcode, addr, Some(&mut runs))?;
+        Ok(runs)
+    }
+
+    fn translate_traced(
+        &self,
+        pcode: PcodeDisassembly,
+        addr: u64,
+        mut trace: Option<&mut Vec<PassRun>>,
+    ) -> Result<R2ILBlock> {
         let instr_size = pcode.origin.size as u32;
         let mut block = R2ILBlock::new(addr, instr_size);
 
@@ -2687,11 +2734,8 @@ impl Disassembler {
             crate::temporary_move::move_temporaries(&mut ops, how);
         }
 
-        // Where an expansion's own temporaries may live: above every temporary
-        // this instruction already uses. Sleigh scopes the unique space to the
-        // instruction, so that is the whole extent an expansion has to stay
-        // clear of, and taking it from the instruction itself means there is no
-        // offset to guess and nothing to collide with.
+        // An expansion's own temporaries live above every one the instruction uses (Sleigh scopes
+        // the unique space to the instruction), so none collides.
         let mut temp_base = ops
             .iter()
             .flat_map(|op| op.output().into_iter().chain(op.inputs()))
@@ -2701,31 +2745,49 @@ impl Disassembler {
             .unwrap_or(0);
         let address_size = u32::try_from(self.default_code_space().address_size)
             .map_err(|_| LiftError::Parse("default code space address size".into()))?;
-        let ops = translate::whole_unique_reads(ops, self.spec.unique_big_endian, &mut temp_base)
-            .map_err(translate_err)?;
-        let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
-        let ops = translate::split_odd_register_zeroes(ops);
-        let ops = translate::forward_repeated_loads(ops);
+        let big_endian = self.spec.unique_big_endian;
+        let ops = passed(&mut trace, "whole_unique_reads", ops, |ops| {
+            translate::whole_unique_reads(ops, big_endian, &mut temp_base).map_err(translate_err)
+        })?;
+        let ops = passed(&mut trace, "canonicalize_memory_operands", ops, |ops| {
+            Ok(translate::canonicalize_memory_operands(
+                ops,
+                address_size,
+                &mut temp_base,
+            ))
+        })?;
+        let ops = passed(&mut trace, "split_odd_register_zeroes", ops, |ops| {
+            Ok(translate::split_odd_register_zeroes(ops))
+        })?;
+        let ops = passed(&mut trace, "forward_repeated_loads", ops, |ops| {
+            Ok(translate::forward_repeated_loads(ops))
+        })?;
+        let ops = passed(&mut trace, "expand_user_operations", ops, |ops| {
+            Ok(self.expand_user_operations(ops, temp_base))
+        })?;
 
-        // A trap ends the instruction. Sleigh writes `brk` as a user operation
-        // that produces `pc` followed by a branch through it, so the branch's
-        // only definition of its target is the trap itself; expanding the trap
-        // into `Breakpoint`, which produces nothing, would leave that branch
-        // reading a `pc` nothing defines. Control does not reach it either way
-        // -- the exception is taken at the trap and does not come back -- so
-        // the operations Sleigh writes after it in the same instruction are not
-        // executed, and dropping them is what the machine does.
+        // A trap ends the instruction: the exception is taken and does not come back, so the
+        // operations Sleigh writes after it (a branch through the `pc` the trap produced) never run.
         for op in ops {
-            for expanded in self.expand_user_operation(op, temp_base) {
-                let traps = matches!(expanded, R2ILOp::Breakpoint);
-                block.push(expanded);
-                if traps {
-                    return Ok(block);
-                }
+            let traps = matches!(op, R2ILOp::Breakpoint);
+            block.push(op);
+            if traps {
+                break;
             }
         }
 
         Ok(block)
+    }
+
+    /// Each modelled user operation as the operations it stands for, the others left as they are.
+    fn expand_user_operations(&self, ops: Vec<R2ILOp>, temp_base: u64) -> Vec<R2ILOp> {
+        let mut plan = Plan::new();
+        for (index, op) in ops.iter().enumerate() {
+            if let Some(expanded) = self.expand_user_operation(op, temp_base) {
+                plan.expand(index, expanded);
+            }
+        }
+        plan.apply(ops)
     }
 
     /// The name the architecture gives the user-defined operation at `index`.
@@ -2754,14 +2816,14 @@ impl Disassembler {
     ///
     /// Which operation an index names was resolved once, when the
     /// specification was loaded; this is one lookup.
-    fn expand_user_operation(&self, op: R2ILOp, temp_base: u64) -> Vec<R2ILOp> {
+    fn expand_user_operation(&self, op: &R2ILOp, temp_base: u64) -> Option<Vec<R2ILOp>> {
         let R2ILOp::CallOther {
             userop,
             output,
             inputs,
-        } = &op
+        } = op
         else {
-            return vec![op];
+            return None;
         };
         let modelled = usize::try_from(*userop)
             .ok()
@@ -2819,9 +2881,7 @@ impl Disassembler {
             }
             None => None,
         };
-        let Some(mut expanded) = expanded else {
-            return vec![op];
-        };
+        let mut expanded = expanded?;
         // An Advanced SIMD write clears every bit of the vector register above it (Arm ARM,
         // "Vector registers"); Ghidra's pseudo-op constructors leave that out.
         if modelled.is_some_and(ModelledUserOperation::is_neon)
@@ -2833,7 +2893,7 @@ impl Disassembler {
                 src: output.clone(),
             });
         }
-        expanded
+        Some(expanded)
     }
 
     /// The register `written` is the low bytes of, where it is a strict part of one.

@@ -17,7 +17,7 @@
 
 use super::*;
 use r2il::Endianness;
-use r2il::eval::{AccessKind, Flow, Mapped, State, step};
+use r2il::eval::{AccessKind, Flow, Mapped, State};
 
 /// Where the instruction sits in every run.
 const AT: u64 = 0x1000;
@@ -80,9 +80,7 @@ fn machine(inputs: &[(Varnode, u128)], frame: u128) -> State<impl Mapped> {
 
 /// Where a local branch at `at` goes when taken, or `None` for a machine one.
 fn local_target(block: &R2ILBlock, at: usize, target: &Varnode) -> Option<usize> {
-    if target.space == SpaceId::Const {
-        let shift = 64 - 8 * target.size;
-        let relative = ((target.offset << shift) as i64) >> shift;
+    if let Some(relative) = target.signed_label() {
         return at.checked_add_signed(relative as isize);
     }
     (target.offset == block.addr + u64::from(block.size)).then_some(block.ops.len())
@@ -90,23 +88,11 @@ fn local_target(block: &R2ILBlock, at: usize, target: &Varnode) -> Option<usize>
 
 /// Run one instruction's operations, following its local branches.
 fn run<M: Mapped>(block: &R2ILBlock, state: &mut State<M>) {
-    let mut at = 0;
-    while at < block.ops.len() {
-        let op = &block.ops[at];
-        let branch = match op {
-            R2ILOp::Branch { target } => local_target(block, at, target).map(|to| (to, true)),
-            R2ILOp::CBranch { target, cond } => local_target(block, at, target)
-                .map(|to| (to, state.value(cond).expect("condition") != 0)),
-            _ => None,
-        };
-        at = match branch {
-            Some((to, true)) => to,
-            Some((_, false)) => at + 1,
-            None => match step(op, state) {
-                Flow::Next => at + 1,
-                other => panic!("{op:?} at {at} of {:#x}: {other:?}", block.addr),
-            },
-        };
+    match r2il::eval::run(&block.ops, state) {
+        Flow::Next => {}
+        // A skip Sleigh spells as the next instruction's address ends the instruction.
+        Flow::Transfer(transfer) if transfer.to == block.addr + u64::from(block.size) => {}
+        other => panic!("{:#x}: {other:?}", block.addr),
     }
 }
 

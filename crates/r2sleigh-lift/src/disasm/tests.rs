@@ -993,14 +993,14 @@ fn a_packed_extension_of_any_other_shape_keeps_its_call_other() {
     let xmm1 = register_varnode(declared_register_storage(disassembler.arch_spec(), "XMM1"));
     let four = Varnode::unique(0x40, 4);
     let expanded = |userop: u32, output: &Varnode, inputs: &[Varnode]| {
-        disassembler.expand_user_operation(
-            R2ILOp::CallOther {
-                userop,
-                output: Some(output.clone()),
-                inputs: inputs.to_vec(),
-            },
-            0x1000,
-        )
+        let op = R2ILOp::CallOther {
+            userop,
+            output: Some(output.clone()),
+            inputs: inputs.to_vec(),
+        };
+        disassembler
+            .expand_user_operation(&op, 0x1000)
+            .unwrap_or_else(|| vec![op])
     };
     let keeps_call_other =
         |ops: &[R2ILOp]| ops.len() == 1 && matches!(ops[0], R2ILOp::CallOther { .. });

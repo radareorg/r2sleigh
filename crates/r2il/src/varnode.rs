@@ -70,6 +70,15 @@ impl Varnode {
         }
     }
 
+    /// A constant read as the signed label of its width, which is how Sleigh states a local branch's target.
+    pub fn signed_label(&self) -> Option<i64> {
+        if self.space != SpaceId::Const || !(1..=8).contains(&self.size) {
+            return None;
+        }
+        let shift = 64 - 8 * self.size;
+        Some(((self.offset << shift) as i64) >> shift)
+    }
+
     /// Returns true if this is a constant.
     pub fn is_const(&self) -> bool {
         self.space.is_const()
