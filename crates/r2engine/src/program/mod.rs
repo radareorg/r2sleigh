@@ -161,14 +161,17 @@ fn assemble(
     // fact, so a static ELF that names no C library has it too; which
     // library's declarations apply is `platform`'s question.
     let psabi = kernel(container);
-    // A convention that names its compiler's prototype runs under it; a PE under the Windows
-    // toolchain's where the language names one; anything else under the usual toolchain's.
+    // A convention naming its compiler's prototype runs under it; a PE under Windows', a Mach-O
+    // under Apple's where the language names one; the rest under the usual toolchain's.
     let specification = match (convention.prototype, container.format) {
         (Some((compiler, _)), _) => machine
             .compiler_spec_of(compiler)
             .ok_or(Unassembled::NoCompiler(compiler))?,
         (None, Format::Pe) => machine
             .compiler_spec_of("windows")
+            .unwrap_or(machine.compiler_spec),
+        (None, Format::MachO) => machine
+            .compiler_spec_of("apple")
             .unwrap_or(machine.compiler_spec),
         (None, _) => machine.compiler_spec,
     };

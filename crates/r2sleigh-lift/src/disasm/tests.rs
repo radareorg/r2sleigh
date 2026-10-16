@@ -1490,6 +1490,13 @@ fn an_aarch64_machine_carries_the_v8a_compiler_specifications() {
         sleigh_config::processor_aarch64::CSPEC_AARCH64_APPLE
     );
     assert!(usual.compiler_spec_of("golang").is_some());
+    // Apple's is there for a Mach-O to choose; v8A, a PE's language, names none.
+    assert_eq!(
+        usual.compiler_spec_of("apple"),
+        Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_APPLE)
+    );
+    let v8a = embedded_program_machine("aarch64", ByteOrder::LITTLE, true).expect("v8A");
+    assert_eq!(v8a.compiler_spec_of("apple"), None);
 }
 
 /// The walk's machine and the trusted lift read one parse of the specification on a thread.

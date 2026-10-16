@@ -138,6 +138,13 @@ Where radare2 scopes differently:
   (`dyld_info -exports` on both), so it is `bzero` under a second name, and
   clang emits calls to it for `bzero` and zeroing `memset` on x86-64.
 
+- `types-darwin.sdb.txt` declares libSystem's own imports `ls` calls, each block
+  citing the SDK header it reads (`__assert_rtn`, `__maskrune`, `__tolower`, `__error`,
+  `wcwidth`, `fts_*`, `acl_get_*`, `getxattr`, `fflagstostr`, `uuid_unparse_upper`), and
+  `__assert_rtn` replaces radare2's `assert_rtn`, whose key no Mach-O binds and whose
+  arguments were glibc's order. `mbr_identifier_translate` is in no public SDK header, so
+  it stays undeclared.
+
 - The portable table declares POSIX `<dlfcn.h>`'s `dlopen`, `dlsym`,
   `dlclose` and `dlerror`, which radare2 does not; glibc, bionic and
   libSystem declare them alike. Without them a call to one has no arity

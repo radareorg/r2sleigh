@@ -76,6 +76,9 @@ pub struct Prototype {
     /// Where its first stack argument sits, from the stack pointer entering the call, and the
     /// step to the next.
     pub stack_arguments: Option<(i64, u32)>,
+    /// Whether a `<varargs first="0">` rule sends every variadic argument to the stack, whatever
+    /// registers the fixed ones leave free (Apple's arm64).
+    pub variadic_on_stack: bool,
 }
 
 impl Prototype {
@@ -391,7 +394,23 @@ fn prototype(node: roxmltree::Node<'_, '_>) -> Prototype {
         killed_by_call: storages("killedbycall"),
         unaffected: storages("unaffected"),
         stack_arguments: stack_arguments(node),
+        variadic_on_stack: variadic_on_stack(node),
     }
+}
+
+fn variadic_on_stack(prototype: roxmltree::Node<'_, '_>) -> bool {
+    let child = |node: roxmltree::Node<'_, '_>, name: &str| {
+        node.children().any(|child| child.has_tag_name(name))
+    };
+    let from_first = |rule: roxmltree::Node<'_, '_>| {
+        (rule.children())
+            .any(|node| node.has_tag_name("varargs") && node.attribute("first") == Some("0"))
+    };
+    prototype
+        .children()
+        .filter(|node| node.has_tag_name("input"))
+        .flat_map(|input| input.children().filter(|node| node.has_tag_name("rule")))
+        .any(|rule| from_first(rule) && child(rule, "goto_stack"))
 }
 
 fn pentry(node: roxmltree::Node<'_, '_>, position: u32) -> Option<PrototypeEntry> {
@@ -592,6 +611,19 @@ mod tests {
             ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
         );
         assert!(!default.shares_positions());
+    }
+
+    /// Apple's arm64 sends every variadic argument to the stack; the usual AAPCS64 does not.
+    #[cfg(feature = "arm")]
+    #[test]
+    fn the_apple_aarch64_specification_sends_variadic_arguments_to_the_stack() {
+        let apple = parse(sleigh_config::processor_aarch64::CSPEC_AARCH64_APPLE);
+        let usual = parse(sleigh_config::processor_aarch64::CSPEC_AARCH64);
+        assert!(apple.default_prototype().unwrap().variadic_on_stack);
+        assert!(!usual.default_prototype().unwrap().variadic_on_stack);
+        // Both name x30 the return address: Ghidra's Apple text left it out.
+        assert_eq!(apple.return_address.as_deref(), Some("x30"));
+        assert_eq!(apple.stack_arguments(), usual.stack_arguments());
     }
 
     /// Microsoft x64 states its four register positions as `<group>`s: the nth integer and

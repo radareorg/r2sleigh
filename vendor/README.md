@@ -13,7 +13,7 @@ specifications do (ROADMAP D33). Each pin is in the table under Upstream pins.
 |---|---|---|
 | x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; the Go cspec's RDX (fork #2) |
 | ARM | master `918acd744d` | the hidden scratch marks; `ARM.cspec`'s `<returnaddress>` (fork #1) |
-| AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks |
+| AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks; `AARCH64_apple.cspec`'s `<returnaddress>` x30, which Ghidra master omits (fork pull request owed) |
 | MIPS | master `918acd744d` | none |
 | RISCV | master `918acd744d` | none; `languages/old` (the deprecated variants) not vendored |
 
@@ -23,7 +23,7 @@ sleigh-config #4 had ported AArch64's fixed constructors, not its files; the
 rest of 918acd744d's AArch64 text (GP-6448's CSSC, 611201b673's register
 extend, the sha1h rotate, GP-5816, GP-3139's `AARCH64_apple.cspec`) came with
 this resync. AppleSilicon's own compiler is now Apple's variadic convention,
-so the lift runs its decoder under v8A's compilers (`disasm::selection`).
+so the lift runs its decoder under v8A's compilers and offers Apple's as `apple` for a Mach-O to choose (`disasm::selection`, r2engine's `assemble`).
 
 | Crate | Fork `main` | Upstream | Carried by the fork | Vendoring trims |
 |---|---|---|---|---|

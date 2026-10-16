@@ -2,6 +2,7 @@
 
 mod common;
 
+mod apple;
 mod architecture;
 mod arity;
 mod arm;

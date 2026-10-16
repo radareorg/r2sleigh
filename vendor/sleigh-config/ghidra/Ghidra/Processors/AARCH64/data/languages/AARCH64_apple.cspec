@@ -29,6 +29,9 @@
   </global>
   
   <stackpointer register="sp" space="ram"/>
+  <returnaddress>
+    <register name="x30"/>
+  </returnaddress>
   <funcptr align="4"/>     <!-- Function pointers are word aligned and leastsig bit may encode otherstuff -->
   
   <prefersplit style="inhalf">

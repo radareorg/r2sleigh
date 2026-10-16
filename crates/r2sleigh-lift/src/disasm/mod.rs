@@ -1742,8 +1742,8 @@ pub struct EmbeddedMachine {
     /// The compiler specification of the platform's usual toolchain: the
     /// stack pointer, the return address and the prototype models.
     pub compiler_spec: &'static str,
-    /// Every compiler the language's definitions (`.ldefs`) name, by id, with its
-    /// specification: `windows` for a PE's toolchain, `golang` for Go's.
+    /// Every compiler the language's definitions (`.ldefs`) name, by id, with its specification:
+    /// `windows` for a PE's, `golang` for Go's, `apple` for a Mach-O's AArch64 (GP-3139).
     pub compilers: Vec<(String, &'static str)>,
     /// The language's DWARF register numbering.
     pub dwarf: crate::profile::DwarfRegisters,
@@ -2019,6 +2019,13 @@ fn embedded_specification(
             .compilers
             .iter()
             .filter_map(|(id, spec)| Some((id.clone(), file(spec)?)))
+            // The decoder's own default, where the platform's compilers are borrowed from v8A.
+            .chain(
+                chosen
+                    .compilers
+                    .and(definition.compiler("default").and_then(file))
+                    .map(|spec| ("apple".to_owned(), spec)),
+            )
             .collect(),
         dwarf: definition
             .dwarf

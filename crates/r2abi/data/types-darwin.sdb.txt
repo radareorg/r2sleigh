@@ -7,16 +7,6 @@ func.assert_fail.arg.3=const char *,function
 func.assert_fail.noreturn=true
 func.assert_fail.ret=void
 
-assert_rtn=func
-func.assert_rtn.args=4
-func.assert_rtn.arg.0=const char *,assertion
-func.assert_rtn.arg.1=const char *,file
-func.assert_rtn.arg.2=unsigned int,line
-func.assert_rtn.arg.3=const char *,function
-func.assert_rtn.noreturn=true
-func.assert_rtn.ret=void
-func.assert_rtn.cc=amd64
-
 tputs=func
 func.tputs.args=3
 func.tputs.arg.0=const char *,str
@@ -249,3 +239,154 @@ objc_enumerationMutation=func
 func.objc_enumerationMutation.args=1
 func.objc_enumerationMutation.arg.0=void *,instance
 func.objc_enumerationMutation.ret=void
+
+# assert.h: `assert` calls `__assert_rtn(__func__, __FILE__, __LINE__, #e)`, declared in
+# _assert.h as `void __assert_rtn(const char *, const char *, int, const char *) __dead2`.
+# (SDK usr/include; radare2's `assert_rtn` named the arguments in glibc's order.)
+
+__assert_rtn=func
+func.__assert_rtn.args=4
+func.__assert_rtn.arg.0=const char *,function
+func.__assert_rtn.arg.1=const char *,file
+func.__assert_rtn.arg.2=int,line
+func.__assert_rtn.arg.3=const char *,assertion
+func.__assert_rtn.noreturn=true
+func.__assert_rtn.ret=void
+
+# _ctype.h (SDK usr/include): `int __maskrune(__darwin_ct_rune_t, unsigned long)` and
+# `__darwin_ct_rune_t __tolower(__darwin_ct_rune_t)`, where __darwin_ct_rune_t is `int`
+# (i386/_types.h, arm/_types.h); sys/errno.h: `extern int * __error(void)`, errno's address;
+# _wchar.h: `int wcwidth(wchar_t)`.
+
+__maskrune=func
+func.__maskrune.args=2
+func.__maskrune.arg.0=int,c
+func.__maskrune.arg.1=unsigned long,f
+func.__maskrune.ret=int
+
+__tolower=func
+func.__tolower.args=1
+func.__tolower.arg.0=int,c
+func.__tolower.ret=int
+
+__error=func
+func.__error.args=0
+func.__error.ret=int *
+
+wcwidth=func
+func.wcwidth.args=1
+func.wcwidth.arg.0=wchar_t,c
+func.wcwidth.ret=int
+
+# fts_new.h, reached through fts.h (SDK usr/include; fts(3)). FTS and FTSENT are the
+# header's typedef names, laid out nowhere here; `compar` is the header's function pointer,
+# passed as `void *` as `tputs` does, since the table spells no function pointer.
+
+fts_open=func
+func.fts_open.args=3
+func.fts_open.arg.0=char * const *,path_argv
+func.fts_open.arg.1=int,options
+func.fts_open.arg.2=void *,compar
+func.fts_open.ret=FTS *
+
+fts_read=func
+func.fts_read.args=1
+func.fts_read.arg.0=FTS *,ftsp
+func.fts_read.ret=FTSENT *
+
+fts_children=func
+func.fts_children.args=2
+func.fts_children.arg.0=FTS *,ftsp
+func.fts_children.arg.1=int,options
+func.fts_children.ret=FTSENT *
+
+fts_set=func
+func.fts_set.args=3
+func.fts_set.arg.0=FTS *,ftsp
+func.fts_set.arg.1=FTSENT *,f
+func.fts_set.arg.2=int,options
+func.fts_set.ret=int
+
+fts_close=func
+func.fts_close.args=1
+func.fts_close.arg.0=FTS *,ftsp
+func.fts_close.ret=int
+
+# sys/acl.h (SDK usr/include; acl(3)): acl_t, acl_entry_t, acl_permset_t and acl_flagset_t
+# are pointers to `struct _acl`, `_acl_entry`, `_acl_permset` and `_acl_flagset`; acl_type_t,
+# acl_tag_t, acl_perm_t and acl_flag_t are enums, passed as 32-bit integers.
+
+acl_get_entry=func
+func.acl_get_entry.args=3
+func.acl_get_entry.arg.0=struct _acl *,acl
+func.acl_get_entry.arg.1=int,entry_id
+func.acl_get_entry.arg.2=struct _acl_entry **,entry_p
+func.acl_get_entry.ret=int
+
+acl_get_link_np=func
+func.acl_get_link_np.args=2
+func.acl_get_link_np.arg.0=const char *,path_p
+func.acl_get_link_np.arg.1=unsigned int,type
+func.acl_get_link_np.ret=struct _acl *
+
+acl_get_tag_type=func
+func.acl_get_tag_type.args=2
+func.acl_get_tag_type.arg.0=struct _acl_entry *,entry_d
+func.acl_get_tag_type.arg.1=unsigned int *,tag_type_p
+func.acl_get_tag_type.ret=int
+
+acl_get_qualifier=func
+func.acl_get_qualifier.args=1
+func.acl_get_qualifier.arg.0=struct _acl_entry *,entry_d
+func.acl_get_qualifier.ret=void *
+
+acl_get_permset=func
+func.acl_get_permset.args=2
+func.acl_get_permset.arg.0=struct _acl_entry *,entry_d
+func.acl_get_permset.arg.1=struct _acl_permset **,permset_p
+func.acl_get_permset.ret=int
+
+acl_get_perm_np=func
+func.acl_get_perm_np.args=2
+func.acl_get_perm_np.arg.0=struct _acl_permset *,permset_d
+func.acl_get_perm_np.arg.1=unsigned int,perm
+func.acl_get_perm_np.ret=int
+
+acl_get_flagset_np=func
+func.acl_get_flagset_np.args=2
+func.acl_get_flagset_np.arg.0=void *,obj_p
+func.acl_get_flagset_np.arg.1=struct _acl_flagset **,flagset_p
+func.acl_get_flagset_np.ret=int
+
+acl_get_flag_np=func
+func.acl_get_flag_np.args=2
+func.acl_get_flag_np.arg.0=struct _acl_flagset *,flagset_d
+func.acl_get_flag_np.arg.1=unsigned int,flag
+func.acl_get_flag_np.ret=int
+
+# sys/xattr.h (SDK usr/include; getxattr(2)): `u_int32_t position` is unsigned int.
+
+getxattr=func
+func.getxattr.args=6
+func.getxattr.arg.0=const char *,path
+func.getxattr.arg.1=const char *,name
+func.getxattr.arg.2=void *,value
+func.getxattr.arg.3=size_t,size
+func.getxattr.arg.4=unsigned int,position
+func.getxattr.arg.5=int,options
+func.getxattr.ret=ssize_t
+
+# unistd.h (SDK usr/include; strtofflags(3)): `char *fflagstostr(unsigned long)`;
+# uuid/uuid.h (uuid(3)): `void uuid_unparse_upper(const uuid_t uu, uuid_string_t out)`, a
+# uuid_t being `unsigned char[16]` and a uuid_string_t `char[37]`.
+
+fflagstostr=func
+func.fflagstostr.args=1
+func.fflagstostr.arg.0=unsigned long,flags
+func.fflagstostr.ret=char *
+
+uuid_unparse_upper=func
+func.uuid_unparse_upper.args=2
+func.uuid_unparse_upper.arg.0=const unsigned char *,uu
+func.uuid_unparse_upper.arg.1=char *,out
+func.uuid_unparse_upper.ret=void

@@ -1286,8 +1286,8 @@ impl<'a> Values<'a> {
                 }
                 Some(SemanticInstructionState::UnsupportedUnknown) => Err(match op {
                     SSAOp::CallOther { userop, .. } => Gap::UserOperation(*userop),
-                    // A call r2ssa's boundary leaves unproven is a call gap, by that refusal.
-                    op if op.is_call() => (self.unplanned.get(inst.id))
+                    // A call or tail jump r2ssa's boundary leaves unproven is a call gap, by that refusal.
+                    op if calls::plans_a_call(op) => (self.unplanned.get(inst.id))
                         .map_or(Gap::Unsupported, |gap| Gap::Call(gap.reason)),
                     _ => Gap::Unsupported,
                 }),

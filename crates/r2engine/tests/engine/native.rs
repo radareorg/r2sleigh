@@ -95,7 +95,14 @@ impl Machine {
                 compiler,
             }
         };
-        let default = under(platform, embedded.compiler_spec);
+        // A Mach-O runs under the language's Apple compiler where it names one, as the engine picks it.
+        let toolchain = match platform {
+            Platform::Darwin => embedded
+                .compiler_spec_of("apple")
+                .unwrap_or(embedded.compiler_spec),
+            _ => embedded.compiler_spec,
+        };
+        let default = under(platform, toolchain);
         let name = default.convention.name;
         let mut conventions = BTreeMap::from([(name, default)]);
         if let Some(windows) = embedded.compiler_spec_of("windows") {
@@ -6042,6 +6049,24 @@ fn microsoft_x64_states_four_positional_register_pairs() {
         r2engine::native::prepared(&machine.under("amd64"), &program, BASE).expect("prepared");
     let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
     assert!(!slots.shared_positions());
+}
+
+/// Apple's arm64 sends every variadic argument to the stack because its compiler specification
+/// says so; the usual AAPCS64 specification does not, and the platform's convention is no owner.
+#[test]
+fn an_arm64_variadic_tail_is_on_the_stack_where_the_compiler_specification_says() {
+    let ret = Fixture {
+        bytes: 0xd65f_03c0u32.to_le_bytes().to_vec(),
+        name: "f",
+    };
+    let on_stack = |platform| {
+        let machine = Machine::on("aarch64", "aarch64", 64, platform);
+        let prepared = r2engine::native::prepared(&machine.target(), &ret, BASE).expect("prepared");
+        let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+        slots.variadic_tail_on_stack()
+    };
+    assert!(on_stack(Platform::Darwin));
+    assert!(!on_stack(Platform::Linux));
 }
 
 /// `ldexpf(0.0f, 3)` under Microsoft x64, the stub at 0x1010.

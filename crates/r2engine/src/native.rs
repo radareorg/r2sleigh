@@ -2516,7 +2516,7 @@ pub(crate) fn convention_slots(
             .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
             .with_shared_positions(prototype.shares_positions())
             .with_stack_arguments(stack_arguments)
-            .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack)
+            .with_variadic_tail_on_stack(prototype.variadic_on_stack)
             .with_register_save_area(target.convention.register_save_area.map(|area| {
                 r2source::SourceRegisterSaveArea {
                     anchor: match area.anchor {

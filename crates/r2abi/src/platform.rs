@@ -163,9 +163,6 @@ pub struct CallingConvention {
     /// How many bytes past the stack pointer a function may use without
     /// moving it.
     pub red_zone_bytes: u32,
-    /// Whether every variadic argument travels on the stack from the first
-    /// slot, whatever registers the fixed arguments leave free.
-    pub variadic_tail_on_stack: bool,
     /// The register a call passes a variadic callee's count of vector
     /// arguments in, which every call may therefore read.
     pub variadic_count_register: Option<&'static str>,
@@ -220,7 +217,6 @@ pub struct EntryStack {
 const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     name: "amd64",
     red_zone_bytes: 128,
-    variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: Some("al"),
     register_save_area: Some(RegisterSaveArea {
@@ -244,7 +240,6 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
 const MICROSOFT_X64: CallingConvention = CallingConvention {
     name: "ms",
     red_zone_bytes: 0,
-    variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: None,
     register_save_area: None,
@@ -262,7 +257,6 @@ const MICROSOFT_X64: CallingConvention = CallingConvention {
 const I386_CDECL: CallingConvention = CallingConvention {
     name: "cdecl",
     red_zone_bytes: 0,
-    variadic_tail_on_stack: false,
     frame_pointer: Some("ebp"),
     variadic_count_register: None,
     register_save_area: None,
@@ -280,7 +274,6 @@ const I386_CDECL: CallingConvention = CallingConvention {
 const AAPCS64: CallingConvention = CallingConvention {
     name: "arm64",
     red_zone_bytes: 0,
-    variadic_tail_on_stack: false,
     frame_pointer: Some("x29"),
     variadic_count_register: None,
     register_save_area: Some(RegisterSaveArea {
@@ -301,18 +294,17 @@ const AAPCS64: CallingConvention = CallingConvention {
 };
 
 const AAPCS64_DARWIN: CallingConvention = CallingConvention {
-    variadic_tail_on_stack: true,
     variadic_count_register: None,
     register_save_area: None,
     citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"the caller places \
-               the arguments for the variadic portion of a function on the stack\"",
+               the arguments for the variadic portion of a function on the stack\", so the \
+               prologue saves no register area; where the tail goes is AARCH64_apple.cspec's",
     ..AAPCS64
 };
 
 const AAPCS32: CallingConvention = CallingConvention {
     name: "arm32",
     red_zone_bytes: 0,
-    variadic_tail_on_stack: false,
     frame_pointer: Some("r11"),
     variadic_count_register: None,
     register_save_area: None,
@@ -331,7 +323,6 @@ const AAPCS32: CallingConvention = CallingConvention {
 const RISCV_LP64: CallingConvention = CallingConvention {
     name: "rvg",
     red_zone_bytes: 0,
-    variadic_tail_on_stack: false,
     frame_pointer: Some("s0"),
     variadic_count_register: None,
     register_save_area: None,
@@ -349,7 +340,6 @@ const RISCV_LP64: CallingConvention = CallingConvention {
 const GO_AMD64: CallingConvention = CallingConvention {
     name: "golang",
     red_zone_bytes: 0,
-    variadic_tail_on_stack: false,
     variadic_count_register: None,
     register_save_area: None,
     frame_pointer: Some("rbp"),
@@ -599,8 +589,6 @@ mod tests {
         assert_eq!(x64(Platform::Windows).name, "ms");
         assert_eq!(x64(Platform::Windows).red_zone_bytes, 0);
         let arm64 = |platform| calling_convention("aarch64", 64, platform).expect("a convention");
-        assert!(arm64(Platform::Darwin).variadic_tail_on_stack);
-        assert!(!arm64(Platform::Linux).variadic_tail_on_stack);
         assert_eq!(
             arm64(Platform::Linux).register_save_area,
             Some(RegisterSaveArea {

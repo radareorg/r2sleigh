@@ -51,6 +51,43 @@ fn darwin_declares_its_own() {
     assert_eq!(parameters(Platform::Linux, "__bzero"), None);
 }
 
+/// The libSystem imports `ls` calls that no declaration stated (ROADMAP B2), each as the SDK's
+/// header declares it, and none of them on a platform whose C library is another.
+#[test]
+fn darwin_declares_the_libsystem_imports_ls_calls() {
+    let declared = |name: &str| parameters(Platform::Darwin, name);
+    assert_eq!(
+        declared("__assert_rtn"),
+        Some(vec![
+            "const char *".into(),
+            "const char *".into(),
+            "int".into(),
+            "const char *".into()
+        ])
+    );
+    assert!(
+        Prototypes::embedded_for(Platform::Darwin)
+            .get("__assert_rtn")
+            .is_some_and(|prototype| prototype.noreturn)
+    );
+    assert_eq!(declared("__maskrune").map(|types| types.len()), Some(2));
+    assert_eq!(declared("__error"), Some(vec![]));
+    assert_eq!(
+        declared("fts_open"),
+        Some(vec!["char * const *".into(), "int".into(), "void *".into()])
+    );
+    assert_eq!(declared("fts_read"), Some(vec!["FTS *".into()]));
+    assert_eq!(declared("fts_set").map(|types| types.len()), Some(3));
+    assert_eq!(declared("acl_get_entry").map(|types| types.len()), Some(3));
+    assert_eq!(declared("getxattr").map(|types| types.len()), Some(6));
+    assert_eq!(declared("fflagstostr"), Some(vec!["unsigned long".into()]));
+    for name in ["__assert_rtn", "fts_read", "acl_get_entry", "getxattr"] {
+        assert_eq!(parameters(Platform::Linux, name), None, "{name}");
+    }
+    // radare2's undecorated key names no symbol a Mach-O binds.
+    assert_eq!(declared("assert_rtn"), None);
+}
+
 #[test]
 fn each_c_library_declares_its_own_fgets_chk_and_no_other_library_does() {
     // glibc puts the buffer's size second and the stream last; bionic takes
