@@ -65,6 +65,10 @@ pub enum LiftError {
 
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
+
+    /// The lift produced operations `r2il::validate_block` rejects.
+    #[error("Invalid IL: {0}")]
+    Invalid(String),
 }
 
 /// Result type for lifting operations.

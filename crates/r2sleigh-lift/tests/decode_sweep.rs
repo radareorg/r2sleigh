@@ -481,7 +481,7 @@ fn rebuilds_holders(name: &str, words: &[&[u8]]) {
     }
 }
 
-// MOVBE byte by byte (GP-7027), VPADDW and VPADDD lane by lane (GP-6061); no ARM word is judged
+// MOVBE byte by byte (GP-7027), VPADDW and VPADDD lane by lane (GP-6061); the ARM words are judged too
 // (doc/adr-verified-layers.md, D34).
 #[cfg(feature = "x86")]
 #[test]
@@ -500,5 +500,79 @@ fn x86_pieces_written_into_a_live_temporary_rebuild_their_holder() {
             &[0xc5, 0xc1, 0xfd, 0xc4],
             &[0xc5, 0xc9, 0xfe, 0x08],
         ],
+    );
+}
+
+// Immediate `vmov.i32 q0, #0x12`, `vorr.i32` and `vbic.i32` write their local in pieces and read it
+// back as a whole; the const-space read is a copy (`translate_load`), so `eval` runs them.
+#[cfg(feature = "arm")]
+#[test]
+fn arm_immediates_written_into_a_live_temporary_rebuild_their_holder() {
+    let big: &[&[u8]] = &[
+        &[0xf2, 0x81, 0x00, 0x52],
+        &[0xf2, 0x81, 0x01, 0x52],
+        &[0xf2, 0x81, 0x01, 0x72],
+    ];
+    let little: Vec<Vec<u8>> = big
+        .iter()
+        .map(|w| w.iter().rev().copied().collect())
+        .collect();
+    let little: Vec<&[u8]> = little.iter().map(Vec::as_slice).collect();
+    rebuilds_holders("arm", &little);
+    rebuilds_holders("arm-be", big);
+    // Thumb-2 halfwords, each in the machine's byte order.
+    let thumb = |swap: bool| -> Vec<Vec<u8>> {
+        [
+            [0xef, 0x81, 0x00, 0x52],
+            [0xef, 0x81, 0x01, 0x52],
+            [0xef, 0x81, 0x01, 0x72],
+        ]
+        .iter()
+        .map(|w| match swap {
+            true => vec![w[1], w[0], w[3], w[2]],
+            false => w.to_vec(),
+        })
+        .collect()
+    };
+    for (name, words) in [("arm-thumb", thumb(true)), ("arm-thumb-be", thumb(false))] {
+        let words: Vec<&[u8]> = words.iter().map(Vec::as_slice).collect();
+        rebuilds_holders(name, &words);
+    }
+}
+
+/// Pieces written into a big-endian temporary count from its low end: the rebuilt holder evaluates
+/// as the input did, and the little-endian rebuild of the same ops does not.
+#[test]
+fn a_big_endian_holder_insert_evaluates_as_its_input() {
+    let copy = |dst: Varnode, size: u32, from: u64| R2ILOp::Copy {
+        dst,
+        src: Varnode::register(from, size),
+    };
+    let ops = vec![
+        copy(Varnode::unique(0x80, 8), 8, 0x20),
+        copy(Varnode::unique(0x82, 2), 2, 0x30),
+        copy(Varnode::unique(0x84, 4), 4, 0x38),
+        copy(Varnode::register(0x100, 8), 8, 0x20),
+        R2ILOp::Copy {
+            dst: Varnode::register(0x108, 8),
+            src: Varnode::unique(0x80, 8),
+        },
+    ];
+    let run = |big_endian: bool| PassRun {
+        pass: "whole_unique_reads",
+        before: ops.clone(),
+        after: r2sleigh_lift::translate::whole_unique_reads(ops.clone(), big_endian, &mut 0x1000)
+            .expect("pieces of one write"),
+    };
+    let right = run(true);
+    assert_ne!(right.before, right.after, "a holder was rebuilt");
+    let verdict = judge(&right, Endianness::Big);
+    assert!(
+        verdict.differs.is_none() && verdict.agreed > 0,
+        "{verdict:?}"
+    );
+    assert!(
+        judge(&run(false), Endianness::Big).differs.is_some(),
+        "counting from the high end reads the wrong bytes"
     );
 }

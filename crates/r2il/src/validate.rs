@@ -628,7 +628,7 @@ pub fn validate_op(op: &R2ILOp, op_index: usize) -> Result<(), ValidationError> 
         validate_varnode(
             &mut issues,
             input,
-            format!("block.ops[{op_index}].inputs[{input_index}]"),
+            || format!("block.ops[{op_index}].inputs[{input_index}]"),
             false,
         );
     }
@@ -637,7 +637,7 @@ pub fn validate_op(op: &R2ILOp, op_index: usize) -> Result<(), ValidationError> 
         validate_varnode(
             &mut issues,
             output,
-            format!("block.ops[{op_index}].output"),
+            || format!("block.ops[{op_index}].output"),
             true,
         );
     }
@@ -1426,20 +1426,21 @@ pub fn validate_block_full(block: &R2ILBlock, arch: &ArchSpec) -> Result<(), Val
 fn validate_varnode(
     issues: &mut Vec<ValidationIssue>,
     vn: &Varnode,
-    path: String,
+    path: impl Fn() -> String,
     is_output: bool,
 ) {
+    // The path is built only for an issue: the lift validates every instruction it emits.
     if vn.size == 0 {
         issues.push(ValidationIssue::new(
             "varnode.size.zero",
-            format!("{path}.size"),
+            format!("{}.size", path()),
             "varnode size must be > 0",
         ));
     }
     if is_output && vn.space == SpaceId::Const {
         issues.push(ValidationIssue::new(
             "varnode.output_const_space",
-            format!("{path}.space"),
+            format!("{}.space", path()),
             "output/destination varnode must not be const space",
         ));
     }

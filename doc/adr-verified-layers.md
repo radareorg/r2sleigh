@@ -97,8 +97,15 @@ structural decisions that close each gap.
   (`x86_pieces_written_into_a_live_temporary_rebuild_their_holder`: each must
   rebuild a holder and evaluate equal) and live mutants (a dropped write-back,
   the rebuild before the write) failed it. ARM's immediate `vmov`/`vorr`/`vbic`
-  read the local back through a `Load` from the const space, which
-  `r2il::validate` rejects and `eval` does not run, so no ARM word is judged.
+  read the local back through a `Load` from the const space (Sleigh's
+  `export *[const]:n local`), whose value is its address: `translate_load`
+  states it as a `Copy` (a width change refuses), so `eval` runs those words
+  on `arm`, `arm-be`, `arm-thumb` and `arm-thumb-be`, and a direct
+  big-endian `whole_unique_reads` test judges the holder insert from the
+  high end. The lift ends in `r2il::validate_block` (`O(ops)`), so IL it
+  rejects is `LiftError::Invalid`. The ARM words write over a zero holder, so
+  they miss an off-by-one in the bytes above the piece; the direct test does
+  not.
   The gate skips a pass that changed nothing (identical operations evaluate
   identically), which cut its debug time from 72 s to 3 s.
 - A label crosses an inserted op in few real instructions (a skip over a

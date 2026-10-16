@@ -35,6 +35,8 @@ pub enum TranslateError {
     InvalidSpace(u64),
     /// A unique read or written across the bytes of more than one write.
     UniqueStraddles(Varnode),
+    /// A load from the const space, whose value is its address, into a different width.
+    ConstLoadWidth(Varnode, Varnode),
 }
 
 impl std::fmt::Display for TranslateError {
@@ -49,6 +51,11 @@ impl std::fmt::Display for TranslateError {
                 f,
                 "unique {:#x}:{} straddles the temporaries the instruction wrote",
                 node.offset, node.size
+            ),
+            TranslateError::ConstLoadWidth(dst, addr) => write!(
+                f,
+                "load of {} bytes from const space at an address of {} bytes",
+                dst.size, addr.size
             ),
         }
     }
@@ -106,6 +113,14 @@ pub fn translate_load<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     let space = source
         .space_from_index(space_idx)
         .ok_or(TranslateError::InvalidSpace(space_idx))?;
+    // The const space holds each address as its own value (Sleigh's `export *[const]:n local`), so
+    // reading it is a copy; a width the copy cannot state is refused.
+    if space == SpaceId::Const {
+        return match dst.size == addr.size {
+            true => Ok(R2ILOp::Copy { dst, src: addr }),
+            false => Err(TranslateError::ConstLoadWidth(dst, addr)),
+        };
+    }
     Ok(R2ILOp::Load { dst, space, addr })
 }
 

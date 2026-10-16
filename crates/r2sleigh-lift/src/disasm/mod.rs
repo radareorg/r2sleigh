@@ -1585,7 +1585,8 @@ fn translate_err(e: translate::TranslateError) -> LiftError {
         translate::TranslateError::InvalidSpace(idx) => {
             LiftError::Parse(format!("Invalid space index: {}", idx))
         }
-        error @ translate::TranslateError::UniqueStraddles(_) => {
+        error @ (translate::TranslateError::UniqueStraddles(_)
+        | translate::TranslateError::ConstLoadWidth(..)) => {
             LiftError::Unsupported(error.to_string())
         }
     }
@@ -2775,6 +2776,8 @@ impl Disassembler {
                 break;
             }
         }
+        // O(ops): a lift that states IL `r2il` rejects is a refusal, not a block (D34).
+        r2il::validate_block(&block).map_err(|error| LiftError::Invalid(error.to_string()))?;
 
         Ok(block)
     }
