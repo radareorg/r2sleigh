@@ -374,12 +374,15 @@ fn equality(func: &SSAFunction, defs: &Definitions, cond: VarId) -> Option<(VarI
     Some((left, right, equal))
 }
 
-/// Whether a block leaves the function only through a call that does not come back.
+/// Whether the block ends in a call that does not come back, by the CFG terminator.
 fn fails_without_return(func: &SSAFunction, block: u64) -> bool {
-    func.successors(block).is_empty()
-        && func.get_block(block).is_some_and(|block| {
-            let ops = block.ops();
-            ops.iter().any(|op| matches!(op, SSAOp::Call { .. }))
-                && !ops.iter().any(|op| matches!(op, SSAOp::Return { .. }))
-        })
+    matches!(
+        func.cfg().get_block(block).map(|block| &block.terminator),
+        Some(
+            BlockTerminator::Call {
+                fallthrough: None,
+                ..
+            } | BlockTerminator::IndirectCall { fallthrough: None }
+        )
+    )
 }

@@ -141,7 +141,7 @@ pub(crate) fn process_call_result_flow_block(
             continue;
         };
         match op {
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
+            op if op.is_call() => {
                 kill_return_register_flow_values(&mut state);
                 active_call = callsites_by_inst.get(inst).copied();
             }

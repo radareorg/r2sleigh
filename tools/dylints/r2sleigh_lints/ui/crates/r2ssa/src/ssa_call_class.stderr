@@ -1,0 +1,58 @@
+error: this pattern names `SSAOp::Call`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:24:18
+   |
+LL |     matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(ssa_call_class_outside_op)]` on by default
+
+error: this pattern names `SSAOp::Call`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:29:18
+   |
+LL |     matches!(op, SSAOp::Call { .. })
+   |                  ^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::Call`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:35:9
+   |
+LL |         SSAOp::Call { target, .. } | SSAOp::CallInd { target, .. } => Some(target),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::Call`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:43:9
+   |
+LL |         SSAOp::Call { .. } => None,
+   |         ^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::CallInd`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:44:9
+   |
+LL |         SSAOp::CallInd { target, .. } => Some(target),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::CallInd`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:51:10
+   |
+LL |     let (SSAOp::CallInd { instruction, .. } | SSAOp::BranchInd { instruction, .. }) = op else {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::CallInd`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:59:12
+   |
+LL |     if let SSAOp::CallInd { .. } = op {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::Call`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:67:18
+   |
+LL |     matches!(op, SSAOp::Nop | SSAOp::Call { .. } | SSAOp::CallOther { .. })
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this pattern names `SSAOp::CallInd`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:72:18
+   |
+LL |     matches!(op, Some(SSAOp::CallInd { .. }))
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 9 previous errors
+

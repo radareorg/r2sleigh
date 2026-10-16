@@ -32,54 +32,36 @@ pub(crate) fn collect_call_sites(
                 continue;
             };
             let id = CallSiteId(next_id);
-            // The transfer names the instruction it was lifted from, and the
-            // raw input names which of its instructions are call sites; that
-            // is the whole correlation. A transfer with no instruction is
-            // synthetic and belongs to no source-described site.
-            let instruction = match op {
-                SSAOp::Call { instruction, .. }
-                | SSAOp::CallInd { instruction, .. }
-                | SSAOp::Branch { instruction, .. }
-                | SSAOp::BranchInd { instruction, .. } => *instruction,
-                _ => None,
+            // The raw input names which instructions are call sites; a transfer with no
+            // instruction is synthetic and belongs to no source-described site.
+            let Some(flow) = op.transfer() else {
+                continue;
             };
+            let target = *flow.target;
             let raw_identity = machine_context
-                .zip(instruction)
+                .zip(flow.instruction)
                 .and_then(|(context, instruction)| context.raw_call_site_at(instruction));
-            let (target, transfer) = match op {
-                SSAOp::Call { target, .. } | SSAOp::CallInd { target, .. } => {
-                    (*target, CallSiteTransfer::Call)
-                }
-                SSAOp::Branch { target, .. } | SSAOp::BranchInd { target, .. }
-                    if machine_context.is_some_and(|context| {
-                        raw_identity.is_some_and(|identity| {
-                            context.is_tail_call_site(identity)
-                                && match op {
-                                    SSAOp::Branch { .. } => {
-                                        graph.value(*target).is_some_and(|value| {
-                                            value.canonical_storage == Some(identity.target())
-                                        })
-                                    }
-                                    // A slot in memory, or the register the
-                                    // jump goes through: both are targets a
-                                    // tail transfer can name, and the register
-                                    // case is checked the same way the direct
-                                    // tail jump is, against the value the
-                                    // branch actually reads.
-                                    SSAOp::BranchInd { .. } => {
-                                        identity.target().space == crate::CanonicalStorageSpace::Ram
-                                            || graph.value(*target).is_some_and(|value| {
-                                                value.canonical_storage == Some(identity.target())
-                                            })
-                                    }
-                                    _ => false,
-                                }
-                        })
-                    }) =>
-                {
-                    (*target, CallSiteTransfer::TailCall)
-                }
-                _ => continue,
+            let transfer = if flow.call {
+                CallSiteTransfer::Call
+            } else if machine_context.is_some_and(|context| {
+                raw_identity.is_some_and(|identity| {
+                    context.is_tail_call_site(identity)
+                        && if flow.direct {
+                            graph.value(target).is_some_and(|value| {
+                                value.canonical_storage == Some(identity.target())
+                            })
+                        } else {
+                            // A slot in memory or the register the jump goes through.
+                            identity.target().space == crate::CanonicalStorageSpace::Ram
+                                || graph.value(target).is_some_and(|value| {
+                                    value.canonical_storage == Some(identity.target())
+                                })
+                        }
+                })
+            }) {
+                CallSiteTransfer::TailCall
+            } else {
+                continue;
             };
             let target_id = target;
             next_id = next_id.saturating_add(1);

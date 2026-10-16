@@ -554,11 +554,14 @@ fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry 
     let access = || if placed { Carry::Stops } else { Carry::Escapes };
     match op {
         SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => Carry::Escapes,
-        SSAOp::Call { .. }
-        | SSAOp::CallInd { .. }
-        | SSAOp::Branch { .. }
-        | SSAOp::BranchInd { .. }
-        | SSAOp::Switch { .. } => Carry::Everything,
+        _ if op.is_call()
+            || matches!(
+                op,
+                SSAOp::Branch { .. } | SSAOp::BranchInd { .. } | SSAOp::Switch { .. }
+            ) =>
+        {
+            Carry::Everything
+        }
         // A conditional branch reads its condition; an address there is a truth value.
         SSAOp::CBranch { .. } | SSAOp::Return { .. } => Carry::Stops,
         // Input 0 is the address; anything else stored is the value.
@@ -617,12 +620,10 @@ fn call_reaches(
             let Some(op) = graph.op(call) else {
                 continue;
             };
-            let instruction = match op {
-                SSAOp::Call { instruction, .. } | SSAOp::CallInd { instruction, .. } => {
-                    *instruction
-                }
-                _ => continue,
+            let Some(transfer) = op.call() else {
+                continue;
             };
+            let instruction = transfer.instruction;
             let sp = match states.before(call) {
                 Some(ReachingStorageState::Value(value)) => graph
                     .value(value)

@@ -267,16 +267,16 @@ fn evaluate_op_sccp(
     values: &Minting<'_>,
     lattice: &IdVec<VarId, LatticeValue>,
 ) -> LatticeValue {
-    if matches!(
-        op,
-        SSAOp::Load { .. }
-            | SSAOp::Store { .. }
-            | SSAOp::Call { .. }
-            | SSAOp::CallInd { .. }
-            | SSAOp::CallOther { .. }
-            | SSAOp::CpuId { .. }
-            | SSAOp::New { .. }
-    ) {
+    if op.is_call()
+        || matches!(
+            op,
+            SSAOp::Load { .. }
+                | SSAOp::Store { .. }
+                | SSAOp::CallOther { .. }
+                | SSAOp::CpuId { .. }
+                | SSAOp::New { .. }
+        )
+    {
         return LatticeValue::Bottom;
     }
 

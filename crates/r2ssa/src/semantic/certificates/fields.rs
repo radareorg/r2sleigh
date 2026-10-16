@@ -118,13 +118,12 @@ fn reached_memory_operations(
                 }
                 // A spilled value comes back through its home's reloads; anything else a load,
                 // store or call does with it leaves the pointee alone.
-                InstPayload::Op(
-                    SSAOp::Load { .. }
-                    | SSAOp::Store { .. }
-                    | SSAOp::Call { .. }
-                    | SSAOp::CallInd { .. }
-                    | SSAOp::CallOther { .. },
-                ) => {}
+                InstPayload::Op(op)
+                    if op.is_call()
+                        || matches!(
+                            op,
+                            SSAOp::Load { .. } | SSAOp::Store { .. } | SSAOp::CallOther { .. }
+                        ) => {}
                 // What a linked, guarded or atomic load returns is memory's, never the parameter.
                 InstPayload::Op(op) if op.is_memory_read() || op.is_memory_write() => {
                     operations.push((inst.id, Reached::Unmodelled));

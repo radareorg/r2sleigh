@@ -46,5 +46,5 @@ use crate::op::SSAOp;
 /// the definition a walk is looking for. Stopping on it refuses to see the
 /// value a function returning `f(x)` hands back.
 pub(crate) fn op_ends_reaching_walk<V>(function: &SSAFunction, op: &SSAOp<V>) -> bool {
-    matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) || function.enters_supervisor(op)
+    op.is_call() || function.enters_supervisor(op)
 }

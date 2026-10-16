@@ -2386,8 +2386,7 @@ fn apply_call_carrier_transfer(
 ) {
     // A user operation writes only its named output.
     let clobbers_every_carrier = !matches!(op, SSAOp::CallOther { .. })
-        && (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
-            || has_volatile_or_unknown_effect(op));
+        && (op.is_call() || has_volatile_or_unknown_effect(op));
     if clobbers_every_carrier {
         state
             .values_mut()
@@ -3179,17 +3178,16 @@ fn return_call_site_for_value(
         let InstPayload::Op(op) = &scan_inst.payload else {
             continue;
         };
-        match op {
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                return prepared
-                    .call_sites()
-                    .by_inst
-                    .get(scan_inst_id)
-                    .copied()
-                    .and_then(exact_result_matches);
-            }
-            SSAOp::CallDefine { .. } => continue,
-            _ => break,
+        if op.is_call() {
+            return prepared
+                .call_sites()
+                .by_inst
+                .get(scan_inst_id)
+                .copied()
+                .and_then(exact_result_matches);
+        }
+        if !matches!(op, SSAOp::CallDefine { .. }) {
+            break;
         }
     }
 

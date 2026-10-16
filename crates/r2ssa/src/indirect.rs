@@ -16,9 +16,9 @@
 //! Failing closed is the point. An unproven target set would be a guess about
 //! control flow, and a wrong edge is worse than a missing one.
 
-use crate::SSAOp;
 use crate::function::{SSAFunction, SsaArtifact};
 use crate::graph::{GraphInst, InstId, InstPayload, SsaGraph, UseSite, ValueId};
+use crate::{OpTransfer, SSAOp};
 
 pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) -> Option<ValueId> {
     let value = *graph.inputs(inst.id).get(input_idx)?;
@@ -320,6 +320,11 @@ fn index_operand(
     }
 }
 
+/// An indirect call or branch: a transfer through a value, not to an address.
+fn indirect_transfer(op: &SSAOp<ValueId>) -> Option<OpTransfer<'_, ValueId>> {
+    op.transfer().filter(|transfer| !transfer.direct)
+}
+
 /// The load one indirect transfer takes its target from, and how.
 fn dispatch_load<'a>(
     graph: &'a SsaGraph,
@@ -329,9 +334,7 @@ fn dispatch_load<'a>(
 ) -> Option<(Option<&'a GraphInst>, Option<EntryTransform>, ValueId)> {
     // A tail call through a table is a branch, not a call, and it reaches the
     // same set of functions either way.
-    let (SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. }) = op else {
-        return None;
-    };
+    let OpTransfer { target, .. } = indirect_transfer(op)?;
     let call_inst = graph.inst(inst)?;
     let target_value = exact_input(graph, call_inst, 0)?;
     if *target != target_value {
@@ -355,9 +358,7 @@ fn dispatch_table_read(
     inst: InstId,
     op: &SSAOp<ValueId>,
 ) -> Option<DispatchTableRead> {
-    let (SSAOp::CallInd { instruction, .. } | SSAOp::BranchInd { instruction, .. }) = op else {
-        return None;
-    };
+    let OpTransfer { instruction, .. } = indirect_transfer(op)?;
     // What stopped a dispatch resolving is the one thing worth saying about
     // it: either the target is not read out of memory, or what it reads is
     // not a bounded walk of one table.
@@ -419,7 +420,7 @@ fn dispatch_table_read(
     );
     Some(DispatchTableRead {
         block_addr,
-        instruction: *instruction,
+        instruction,
         address: base,
         stride,
         size: graph.var(*dst).size,
@@ -444,7 +445,7 @@ pub(crate) fn dispatch_selectors(
         .filter_map(|block| {
             let (inst, op) = (graph.op_insts(block.id).iter().rev())
                 .filter_map(|inst| Some((*inst, graph.op(*inst)?)))
-                .find(|(_, op)| matches!(op, SSAOp::CallInd { .. } | SSAOp::BranchInd { .. }))?;
+                .find(|(_, op)| indirect_transfer(op).is_some())?;
             let (_, _, address) = dispatch_load(graph, values, inst, op)?;
             Some((block.addr, selector_of(graph, values, address).0))
         })

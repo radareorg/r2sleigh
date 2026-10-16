@@ -588,7 +588,173 @@ pub(crate) const fn block_transfer_spelling(
     }
 }
 
+/// Where an operation sends control, as the SSA operation states it (`r2il::ControlTransfer`).
+#[derive(Debug)]
+pub struct OpTransfer<'a, V> {
+    /// Where control goes: the destination itself where `direct`, else the value that holds it.
+    pub target: &'a V,
+    /// Whether the operation encodes its destination, as a direct branch or call does.
+    pub direct: bool,
+    /// Whether control comes back after it, as it does from a call.
+    pub call: bool,
+    /// The native instruction it was lifted from; none for a conditional or synthetic transfer.
+    pub instruction: Option<u64>,
+}
+
+/// The operations that compute a value from their operands and touch nothing else.
+macro_rules! value_operation {
+    () => {
+        SSAOp::Phi { .. }
+            | SSAOp::Copy { .. }
+            | SSAOp::IntAdd { .. }
+            | SSAOp::IntSub { .. }
+            | SSAOp::IntMult { .. }
+            | SSAOp::IntDiv { .. }
+            | SSAOp::IntSDiv { .. }
+            | SSAOp::IntRem { .. }
+            | SSAOp::IntSRem { .. }
+            | SSAOp::IntNegate { .. }
+            | SSAOp::IntCarry { .. }
+            | SSAOp::IntSCarry { .. }
+            | SSAOp::IntSBorrow { .. }
+            | SSAOp::IntAnd { .. }
+            | SSAOp::IntOr { .. }
+            | SSAOp::IntXor { .. }
+            | SSAOp::IntNot { .. }
+            | SSAOp::IntLeft { .. }
+            | SSAOp::IntRight { .. }
+            | SSAOp::IntSRight { .. }
+            | SSAOp::IntEqual { .. }
+            | SSAOp::IntNotEqual { .. }
+            | SSAOp::IntLess { .. }
+            | SSAOp::IntSLess { .. }
+            | SSAOp::IntLessEqual { .. }
+            | SSAOp::IntSLessEqual { .. }
+            | SSAOp::IntZExt { .. }
+            | SSAOp::IntSExt { .. }
+            | SSAOp::BoolNot { .. }
+            | SSAOp::BoolAnd { .. }
+            | SSAOp::BoolOr { .. }
+            | SSAOp::BoolXor { .. }
+            | SSAOp::Piece { .. }
+            | SSAOp::Subpiece { .. }
+            | SSAOp::PopCount { .. }
+            | SSAOp::Lzcount { .. }
+            | SSAOp::FloatAdd { .. }
+            | SSAOp::FloatSub { .. }
+            | SSAOp::FloatMult { .. }
+            | SSAOp::FloatDiv { .. }
+            | SSAOp::FloatNeg { .. }
+            | SSAOp::FloatAbs { .. }
+            | SSAOp::FloatSqrt { .. }
+            | SSAOp::FloatCeil { .. }
+            | SSAOp::FloatFloor { .. }
+            | SSAOp::FloatRound { .. }
+            | SSAOp::FloatNaN { .. }
+            | SSAOp::FloatEqual { .. }
+            | SSAOp::FloatNotEqual { .. }
+            | SSAOp::FloatLess { .. }
+            | SSAOp::FloatLessEqual { .. }
+            | SSAOp::Int2Float { .. }
+            | SSAOp::Float2Int { .. }
+            | SSAOp::FloatFloat { .. }
+            | SSAOp::Trunc { .. }
+            | SSAOp::PtrAdd { .. }
+            | SSAOp::PtrSub { .. }
+            | SSAOp::SegmentOp { .. }
+            | SSAOp::Cast { .. }
+            | SSAOp::Extract { .. }
+            | SSAOp::Insert(_)
+            | SSAOp::Select(_)
+    };
+}
+
+/// The operations that read or write memory, or order its accesses.
+macro_rules! memory_operation {
+    () => {
+        SSAOp::Load { .. }
+            | SSAOp::Store { .. }
+            | SSAOp::BlockTransfer(_)
+            | SSAOp::Fence { .. }
+            | SSAOp::ClearExclusive
+            | SSAOp::IndivisibleAccess
+            | SSAOp::LoadLinked { .. }
+            | SSAOp::StoreConditional { .. }
+            | SSAOp::Atomic(_)
+            | SSAOp::LoadGuarded { .. }
+            | SSAOp::StoreGuarded { .. }
+    };
+}
+
+/// What a call boundary states about a carrier: a definition, a restore or a read.
+macro_rules! call_boundary_operation {
+    () => {
+        SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. } | SSAOp::CallUse { .. }
+    };
+}
+
+/// The rest: machine state, allocation, user operations, and no operation.
+macro_rules! state_operation {
+    () => {
+        SSAOp::CallOther { .. }
+            | SSAOp::Nop
+            | SSAOp::Unimplemented
+            | SSAOp::CpuId { .. }
+            | SSAOp::New { .. }
+    };
+}
+
 impl<V> SSAOp<V> {
+    /// Where this operation sends control, where it names a place to send it.
+    ///
+    /// A return and a trap name none, and a call boundary's operations are no transfer: the
+    /// call before them is. Every operation is named, so one added to the enum fails to compile
+    /// until it joins a class (ROADMAP D41).
+    pub fn transfer(&self) -> Option<OpTransfer<'_, V>> {
+        let (target, direct, call, instruction) = match self {
+            SSAOp::Branch {
+                target,
+                instruction,
+            } => (target, true, false, *instruction),
+            SSAOp::CBranch { target, .. } => (target, true, false, None),
+            SSAOp::BranchInd {
+                target,
+                instruction,
+            } => (target, false, false, *instruction),
+            SSAOp::Call {
+                target,
+                instruction,
+            } => (target, true, true, *instruction),
+            SSAOp::CallInd {
+                target,
+                instruction,
+            } => (target, false, true, *instruction),
+            SSAOp::Switch { .. }
+            | SSAOp::Return { .. }
+            | SSAOp::Breakpoint
+            | memory_operation!()
+            | call_boundary_operation!()
+            | state_operation!()
+            | value_operation!() => return None,
+        };
+        Some(OpTransfer {
+            target,
+            direct,
+            call,
+            instruction,
+        })
+    }
+
+    /// Whether control comes back after this operation's transfer, as it does from a call.
+    pub fn is_call(&self) -> bool {
+        self.call().is_some()
+    }
+
+    /// This operation's transfer, when it is a call.
+    pub fn call(&self) -> Option<OpTransfer<'_, V>> {
+        self.transfer().filter(|transfer| transfer.call)
+    }
+
     /// The same operation with each source mapped by `f` and its
     /// destination kept. The destination is told apart by where it is held,
     /// not by its value.
@@ -1941,6 +2107,58 @@ mod tests {
                 "for_each_source must preserve order and membership for {:?}",
                 op
             );
+        }
+    }
+
+    /// A call is the transfer that comes back; a tail jump is a transfer that does not, and the
+    /// boundary operations around a call are no transfer at all.
+    #[test]
+    fn a_call_is_the_transfer_that_comes_back() {
+        let v = |name: &str| SSAVar::new(name, 0, 8);
+        let at = Some(0x1000);
+        let direct = SSAOp::Call {
+            target: v("t"),
+            instruction: at,
+        };
+        let indirect = SSAOp::CallInd {
+            target: v("t"),
+            instruction: None,
+        };
+        let jump = SSAOp::BranchInd {
+            target: v("t"),
+            instruction: at,
+        };
+        let conditional = SSAOp::CBranch {
+            target: v("t"),
+            cond: v("c"),
+        };
+        let facts = |op: &SSAOp| {
+            op.transfer()
+                .map(|transfer| (transfer.direct, transfer.call, transfer.instruction))
+        };
+        assert_eq!(facts(&direct), Some((true, true, at)));
+        assert_eq!(facts(&indirect), Some((false, true, None)));
+        assert_eq!(facts(&jump), Some((false, false, at)));
+        assert_eq!(facts(&conditional), Some((true, false, None)));
+        assert!(direct.is_call() && indirect.is_call());
+        assert!(!jump.is_call() && !conditional.is_call());
+        for op in [
+            SSAOp::CallDefine { dst: v("d") },
+            SSAOp::CallUse { src: v("s") },
+            SSAOp::CallRestore {
+                dst: v("d"),
+                src: v("s"),
+            },
+            SSAOp::CallOther {
+                output: None,
+                userop: 1,
+                inputs: Vec::new(),
+            },
+            SSAOp::Return { target: v("t") },
+            SSAOp::Switch { selector: v("s") },
+            SSAOp::Breakpoint,
+        ] {
+            assert!(op.transfer().is_none() && !op.is_call(), "{op:?}");
         }
     }
 }

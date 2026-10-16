@@ -19,7 +19,7 @@ were found by chance.
 | 1,477 census lines renamed by a resync | temporary names | every spec change |
 | a recursive function's arity left a floor (#279) | r2ssa's arity evidence | equivalence |
 | a register only a conditional write defines never merging, so a `cmpxchg` retry or a 64-bit `cmovcc` loop reads its pre-loop value on every pass | SSA construction's def sites, a stale copy of `R2ILOp::output()` | reading the atomic item's output, once a LOCK residual stopped hiding it |
-| an op property restated outside r2il behind a wildcard arm, which drops each operation added later: phi placement's `output()` (#287), and the trap, store and read-only lists D41's audit found | each crate's own op classes | #287, then the `r2il_op_property_outside_r2il` Dylint (D41) |
+| an op property restated outside r2il behind a wildcard arm, which drops each operation added later: phi placement's `output()` (#287), and the trap, store and read-only lists D41's audit found; the same for `SSAOp`'s calls, where the stack-protector check matched a direct `Call` only and missed a `-fno-plt` `CallInd` | each crate's own op classes | #287, then the `r2il_op_property_outside_r2il` and `ssa_call_class_outside_op` Dylints (D41) |
 
 Every fix that held came with a gate: the CPU oracle, `diff_r2`, AO's register
 sets, `decode_sweep`. D31 already states the rule ("every layer has an

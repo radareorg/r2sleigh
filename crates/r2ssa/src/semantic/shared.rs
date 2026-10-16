@@ -787,7 +787,7 @@ pub(crate) fn preserved_call_carriers(
             .filter_map(|inst| graph.op(*inst));
         match terminal_past_call_boundary(ops) {
             Some(SSAOp::Return { .. }) => saw_return = true,
-            Some(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {}
+            Some(op) if op.is_call() => {}
             _ => return BTreeSet::new(),
         }
     }
@@ -803,14 +803,16 @@ pub(crate) fn preserved_call_carriers(
         .flat_map(|block| graph.op_insts(block.id))
         .filter_map(|inst| graph.op(*inst));
     for op in ops {
-        let inner = match op {
-            SSAOp::Call { target, .. } => graph
-                .value(*target)
+        let Some(call) = op.call() else {
+            continue;
+        };
+        let inner = if call.direct {
+            (graph.value(*call.target))
                 .and_then(|value| value.canonical_storage)
                 .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
-                .and_then(|storage| machine_context.callee_preserved(storage.offset)),
-            SSAOp::CallInd { .. } => None,
-            _ => continue,
+                .and_then(|storage| machine_context.callee_preserved(storage.offset))
+        } else {
+            None
         };
         preserved.retain(|storage| inner.is_some_and(|kept| covers(kept, *storage)));
         if preserved.is_empty() {
@@ -1063,7 +1065,7 @@ pub(crate) fn reaching_abi_value_before(
         // A user operation writes only its named output, which the overlap check below sees.
         if policy.calls_are_barriers
             && (matches!(op, SSAOp::Return { .. })
-                || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+                || (op.is_call()
                     && policy
                         .transfer_carrier
                         .is_some_and(|carrier| register_storages_overlap(carrier, storage))))
@@ -1431,20 +1433,14 @@ pub(crate) fn callee_write_spans(
             let Some(op) = graph.op(call) else {
                 continue;
             };
-            let (target, instruction) = match op {
-                SSAOp::Call {
-                    target,
-                    instruction: Some(instruction),
-                } => (Some(target), *instruction),
-                // An indirect call names no callee here: nothing describes
-                // what it reaches through the frame addresses it is handed.
-                SSAOp::CallInd {
-                    instruction: Some(instruction),
-                    ..
-                } => (None, *instruction),
-                _ => continue,
+            let Some(transfer) = op.call() else {
+                continue;
             };
-            let instruction = &instruction;
+            let Some(instruction) = &transfer.instruction else {
+                continue;
+            };
+            // An indirect call names no callee: nothing describes what it reaches through its frame addresses.
+            let target = transfer.direct.then_some(transfer.target);
             // The callee's name is only the key of an import's modelled
             // effects below; what a body the capture read reaches is a fact
             // about that body, whatever the symbol table calls it.

@@ -118,8 +118,11 @@ pub(crate) fn promote(
         };
         let target = ops[index + 1..].iter().find_map(|op| match op {
             SSAOp::CallUse { .. } => None,
-            SSAOp::Call { target, .. } => Some(func.var(*target).constant_bits()),
-            _ => Some(None),
+            op => Some(
+                op.call()
+                    .filter(|call| call.direct)
+                    .and_then(|call| func.var(*call.target).constant_bits()),
+            ),
         });
         let Some(Some(target)) = target else {
             return false;
@@ -425,12 +428,17 @@ impl<'a> Classifier<'a> {
             }
             SSAOp::CallUse { .. } => self.escape(point),
             // A frame address used as code, or as a value an unmodelled operation reads.
-            SSAOp::Call { .. }
-            | SSAOp::CallInd { .. }
-            | SSAOp::Branch { .. }
-            | SSAOp::BranchInd { .. }
-            | SSAOp::Return { .. }
-            | SSAOp::CallOther { .. } => self.reach.whole = true,
+            _ if op.is_call()
+                || matches!(
+                    op,
+                    SSAOp::Branch { .. }
+                        | SSAOp::BranchInd { .. }
+                        | SSAOp::Return { .. }
+                        | SSAOp::CallOther { .. }
+                ) =>
+            {
+                self.reach.whole = true
+            }
             // Compared, masked or measured, it is a number: it is an address again only if what
             // it makes reaches an access or a sink, which its own uses decide.
             _ => {
@@ -568,7 +576,7 @@ fn call_push(func: &SSAFunction, block: u64, index: usize, val: VarId, refunds: 
             block.ops()[index + 1..]
                 .iter()
                 .find(|op| !matches!(op, SSAOp::CallUse { .. }))
-                .is_some_and(|op| matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }))
+                .is_some_and(SSAOp::is_call)
         })
 }
 
@@ -1025,12 +1033,9 @@ fn entry_value(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
 }
 
 fn has_call(func: &SSAFunction) -> bool {
-    func.blocks().iter().any(|block| {
-        block
-            .ops()
-            .iter()
-            .any(|op| matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }))
-    })
+    func.blocks()
+        .iter()
+        .any(|block| block.ops().iter().any(SSAOp::is_call))
 }
 
 #[cfg(test)]

@@ -315,10 +315,9 @@ fn reenters(
     let Some(block) = func.get_block(block) else {
         return false;
     };
-    let mut calls = block.ops().iter().filter_map(|op| match op {
-        SSAOp::Call { target, .. } => Some(*target),
-        _ => None,
-    });
+    let mut calls = (block.ops().iter())
+        .filter_map(|op| op.call().filter(|call| call.direct))
+        .map(|call| *call.target);
     let (Some(target), None) = (calls.next(), calls.next()) else {
         return false;
     };
@@ -335,8 +334,8 @@ fn reenters(
                 func.var(root).version == 0 && func.storage_of(root) == Some(stack_pointer)
             }
             // The one modelled call and the boundary it states, the jump back, and values.
-            SSAOp::Call { .. }
-            | SSAOp::CallDefine { .. }
+            op if op.call().is_some_and(|call| call.direct) => true,
+            SSAOp::CallDefine { .. }
             | SSAOp::CallUse { .. }
             | SSAOp::CallRestore { .. }
             | SSAOp::Branch { .. }

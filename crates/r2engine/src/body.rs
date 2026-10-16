@@ -429,6 +429,8 @@ struct Walk {
     tail_calls: BTreeSet<u64>,
     /// Each call through a slot the loader binds to an import and seals, by instruction: the slot.
     slot_calls: BTreeMap<u64, u64>,
+    /// The calls through a slot the program states never returns, by instruction.
+    halting: BTreeSet<u64>,
     falls_into: BTreeSet<u64>,
     /// Whether each address the lift states context for decodes in another context than this walk's.
     target_contexts: BTreeMap<u64, bool>,
@@ -467,6 +469,7 @@ impl Walk {
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
             slot_calls: BTreeMap::new(),
+            halting: BTreeSet::new(),
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
@@ -724,6 +727,8 @@ impl Walk {
                 }
                 if through.is_none_or(|slot| program.returns_through(slot)) {
                     self.continues(fallthrough, &mut successors, program)
+                } else {
+                    self.halting.insert(addr);
                 }
             }
             // A switch is an indirect branch through a table, so it is one
@@ -829,11 +834,9 @@ impl Walk {
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
     fn into_body(self) -> Body {
-        let closed = self
-            .gated
-            .values()
-            .flatten()
+        let closed = (self.gated.values().flatten())
             .map(|(call, _)| *call)
+            .chain(self.halting.iter().copied())
             .collect::<BTreeSet<_>>();
         let link = self.link.as_ref();
         let mut blocks: Vec<BodyBlock> = Vec::new();

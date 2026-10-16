@@ -191,10 +191,9 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
     };
     let contains_call = graph.blocks.iter().any(|block| {
         graph.op_insts(block.id).iter().any(|inst| {
-            matches!(
-                graph.op(*inst),
-                Some(SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. })
-            )
+            graph
+                .op(*inst)
+                .is_some_and(|op| op.is_call() || matches!(op, SSAOp::CallOther { .. }))
         })
     });
     let explicit_contract = SourceStackAllocationContract::new(contract.growth());
@@ -1529,10 +1528,7 @@ pub(crate) fn collect_stack_call_argument_values(
         let Some(op) = graph.op(producer) else {
             continue;
         };
-        if matches!(
-            op,
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Return { .. }
-        ) {
+        if op.is_call() || matches!(op, SSAOp::Return { .. }) {
             break;
         }
         let SSAOp::Store {

@@ -547,10 +547,11 @@ impl SSAFunction {
         };
         let entry_stack_roots_are_stable = self.blocks().iter().all(|block| {
             block.ops().iter().all(|op| match op {
-                SSAOp::Call { .. }
-                | SSAOp::CallInd { .. }
-                | SSAOp::CallDefine { .. }
-                | SSAOp::CallRestore { .. } => call_carriers_are_restored,
+                op if op.is_call()
+                    || matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }) =>
+                {
+                    call_carriers_are_restored
+                }
                 SSAOp::CallOther { output, .. } => writes_no_frame_carrier(output),
                 SSAOp::Unimplemented | SSAOp::CpuId { .. } | SSAOp::New { .. } => false,
                 _ => true,

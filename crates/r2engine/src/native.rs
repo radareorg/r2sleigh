@@ -2223,19 +2223,9 @@ impl Native<'_> {
         sites: &[NativeCall],
         op: &r2ssa::SSAOp<r2ssa::ValueId>,
     ) -> Option<(u64, String)> {
-        let (r2ssa::SSAOp::Call {
-            instruction: Some(instruction),
-            ..
-        }
-        | r2ssa::SSAOp::CallInd {
-            instruction: Some(instruction),
-            ..
-        }) = op
-        else {
-            return None;
-        };
-        let site = sites.iter().find(|site| site.instruction == *instruction)?;
-        Some((*instruction, self.program.name_at(site.target)?))
+        let instruction = op.call()?.instruction?;
+        let site = sites.iter().find(|site| site.instruction == instruction)?;
+        Some((instruction, self.program.name_at(site.target)?))
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.

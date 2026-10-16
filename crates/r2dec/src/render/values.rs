@@ -374,7 +374,7 @@ impl Demand<'_> {
                 }
                 self.operand(*val, inst.id);
             }
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Branch { .. } => {
+            _ if op.is_call() || matches!(op, SSAOp::Branch { .. }) => {
                 let plan = planned.get(inst.id);
                 for (argument, _) in plan.map_or(&[][..], |plan| &plan.arguments[..]) {
                     self.operand(*argument, inst.id);
@@ -460,12 +460,7 @@ fn call_uses(
     for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
         match &inst.payload {
             InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
-            InstPayload::Op(
-                SSAOp::Call { .. }
-                | SSAOp::CallInd { .. }
-                | SSAOp::Branch { .. }
-                | SSAOp::BranchInd { .. },
-            ) => {
+            InstPayload::Op(op) if calls::plans_a_call(op) => {
                 for using in pending.drain(..) {
                     used_by.insert(using, inst.id);
                 }
@@ -524,15 +519,7 @@ fn plan_calls(
     let mut unplanned = r2ssa::dense::IdMap::new(graph.insts.len());
     let mut results = r2ssa::dense::IdSet::new(graph.values.len());
     for inst in &graph.insts {
-        let call = matches!(
-            inst.payload,
-            InstPayload::Op(
-                SSAOp::Call { .. }
-                    | SSAOp::CallInd { .. }
-                    | SSAOp::Branch { .. }
-                    | SSAOp::BranchInd { .. }
-            )
-        );
+        let call = matches!(&inst.payload, InstPayload::Op(op) if calls::plans_a_call(op));
         let mut plan = match call
             .then(|| calls::plan(artifact, input.callee_resolution(), inventory, inst.id))
             .flatten()
@@ -542,11 +529,7 @@ fn plan_calls(
                 unplanned.insert(inst.id, gap);
                 continue;
             }
-            None if matches!(
-                inst.payload,
-                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. })
-            ) =>
-            {
+            None if matches!(&inst.payload, InstPayload::Op(op) if op.is_call()) => {
                 let callee = calls::gap_callee(artifact, input.callee_resolution(), inst.id);
                 let reason = CallRefusal::NoCallSite;
                 unplanned.insert(inst.id, CallGap { callee, reason });
@@ -1304,7 +1287,7 @@ impl<'a> Values<'a> {
                 Some(SemanticInstructionState::UnsupportedUnknown) => Err(match op {
                     SSAOp::CallOther { userop, .. } => Gap::UserOperation(*userop),
                     // A call r2ssa's boundary leaves unproven is a call gap, by that refusal.
-                    SSAOp::Call { .. } | SSAOp::CallInd { .. } => (self.unplanned.get(inst.id))
+                    op if op.is_call() => (self.unplanned.get(inst.id))
                         .map_or(Gap::Unsupported, |gap| Gap::Call(gap.reason)),
                     _ => Gap::Unsupported,
                 }),
@@ -1411,7 +1394,7 @@ impl<'a> Values<'a> {
                 .atomic(inst, access, output)
                 .map(|stmt| vec![stmt])
                 .ok_or(Gap::Effect),
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } => self.call(inst).map_err(Gap::Call),
+            _ if op.is_call() => self.call(inst).map_err(Gap::Call),
             SSAOp::BlockTransfer(transfer) => self
                 .block_transfer(inst, transfer)
                 .map(|stmt| vec![stmt])
@@ -1931,12 +1914,7 @@ impl<'a> Values<'a> {
         else {
             return false;
         };
-        let last_call = block.insts.iter().rev().copied().find(|id| {
-            matches!(
-                self.graph.inst(*id).map(|at| &at.payload),
-                Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
-            )
-        });
+        let last_call = calls::last_call(self.graph, block);
         // Only a named callee's declaration says so to C: a call through a pointer, or the
         // function's own entry, declares nothing, so the trap still ends its block.
         last_call.is_some_and(|inst| {
@@ -2410,10 +2388,8 @@ impl<'a> Values<'a> {
                         .is_none()
             };
             // A call the text could not write also stands for the carriers it reads.
-            let reads = match inst.payload {
-                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {
-                    self.graph.call_boundary_reads(inst.id)
-                }
+            let reads = match &inst.payload {
+                InstPayload::Op(op) if op.is_call() => self.graph.call_boundary_reads(inst.id),
                 _ => Vec::new(),
             };
             let producers = (inputs.filter_map(|v| self.graph.def_inst(*v)))
@@ -2671,27 +2647,27 @@ fn reads_beside_effect(op: &SSAOp<ValueId>) -> bool {
 
 /// Whether an operation's effect is its output alone, so a local assigned its term states it.
 fn writes_value(op: &SSAOp<ValueId>) -> bool {
-    !matches!(
-        op,
-        SSAOp::Store { .. }
-            | SSAOp::Call { .. }
-            | SSAOp::CallInd { .. }
-            | SSAOp::CallDefine { .. }
-            | SSAOp::CallUse { .. }
-            | SSAOp::CallOther { .. }
-            | SSAOp::Fence { .. }
-            | SSAOp::LoadLinked { .. }
-            | SSAOp::LoadGuarded { .. }
-            | SSAOp::StoreConditional { .. }
-            | SSAOp::StoreGuarded { .. }
-            | SSAOp::Atomic(_)
-            | SSAOp::IndivisibleAccess
-            | SSAOp::BlockTransfer(_)
-            | SSAOp::Breakpoint
-            | SSAOp::Unimplemented
-            | SSAOp::CpuId { .. }
-            | SSAOp::New { .. }
-    ) && op.dst().is_some()
+    !op.is_call()
+        && !matches!(
+            op,
+            SSAOp::Store { .. }
+                | SSAOp::CallDefine { .. }
+                | SSAOp::CallUse { .. }
+                | SSAOp::CallOther { .. }
+                | SSAOp::Fence { .. }
+                | SSAOp::LoadLinked { .. }
+                | SSAOp::LoadGuarded { .. }
+                | SSAOp::StoreConditional { .. }
+                | SSAOp::StoreGuarded { .. }
+                | SSAOp::Atomic(_)
+                | SSAOp::IndivisibleAccess
+                | SSAOp::BlockTransfer(_)
+                | SSAOp::Breakpoint
+                | SSAOp::Unimplemented
+                | SSAOp::CpuId { .. }
+                | SSAOp::New { .. }
+        )
+        && op.dst().is_some()
 }
 
 #[cfg(test)]

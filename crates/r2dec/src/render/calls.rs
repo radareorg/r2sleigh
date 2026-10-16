@@ -440,13 +440,17 @@ fn never_comes_back(artifact: &SsaArtifact, inst: InstId) -> bool {
             } | r2ssa::BlockTerminator::IndirectCall { fallthrough: None }
         )
     );
-    let last_call = block.insts.iter().rev().copied().find(|id| {
-        matches!(
-            graph.inst(*id).map(|at| &at.payload),
-            Some(InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. }))
-        )
-    });
-    ends && last_call == Some(inst)
+    ends && last_call(graph, block) == Some(inst)
+}
+
+/// The last call a block makes.
+pub(super) fn last_call(graph: &r2ssa::SsaGraph, block: &r2ssa::GraphBlock) -> Option<InstId> {
+    (block.insts.iter().rev().copied()).find(|id| graph.op(*id).is_some_and(SSAOp::is_call))
+}
+
+/// Whether an operation may carry a call plan: a call, or the jump a tail call is.
+pub(super) fn plans_a_call(op: &SSAOp<ValueId>) -> bool {
+    op.is_call() || matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. })
 }
 
 fn check(holds: bool, otherwise: CallRefusal) -> Result<(), CallRefusal> {
@@ -522,12 +526,9 @@ fn callee(
                 .or(identity.and_then(|i| i.target_addr)),
         }),
         // An indirect call no identity names goes where its target value points.
-        _ => match graph.inst(inst).map(|i| &i.payload) {
-            Some(InstPayload::Op(
-                SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. },
-            )) => Some(Callee::Through(*target)),
-            _ => None,
-        },
+        _ => (graph.op(inst).and_then(SSAOp::transfer))
+            .filter(|transfer| !transfer.direct)
+            .map(|transfer| Callee::Through(*transfer.target)),
     }
 }
 

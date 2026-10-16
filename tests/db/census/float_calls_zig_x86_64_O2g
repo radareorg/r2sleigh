@@ -31,7 +31,7 @@ void _start(void)
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10014e0:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x10014e0:32 covering 1 op (render::values) */
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014e0:46 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
-        r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x10014e0 (render::control) */
+        r2sleigh_residual_void(5); /* r2dec gap: TransferNotFollowed at 0x10014e0 (render::control) */
     }
 }
 

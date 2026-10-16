@@ -2136,6 +2136,14 @@ rustc_lint::declare_lint!(
     "a property of an R2ILOp has one owner in r2il, stated as an exhaustive list"
 );
 
+rustc_lint::declare_lint!(
+    /// A pattern outside `r2ssa`'s `op.rs` that names `SSAOp::Call` or `SSAOp::CallInd` restates the call
+    /// class that `SSAOp::transfer` and `is_call` own (D41).
+    pub SSA_CALL_CLASS_OUTSIDE_OP,
+    Deny,
+    "an SSAOp's call class has one owner in r2ssa, stated as an exhaustive list"
+);
+
 rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2214,7 +2222,8 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
     R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
     ENTITY_KEYED_MAP,
-    R2IL_OP_PROPERTY_OUTSIDE_R2IL
+    R2IL_OP_PROPERTY_OUTSIDE_R2IL,
+    SSA_CALL_CLASS_OUTSIDE_OP
 ]);
 
 #[unsafe(no_mangle)]
@@ -2301,6 +2310,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         ENTITY_KEYED_MAP,
         CACHE_OUTSIDE_QUERY_DATABASE,
         R2IL_OP_PROPERTY_OUTSIDE_R2IL,
+        SSA_CALL_CLASS_OUTSIDE_OP,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
 }
@@ -2344,6 +2354,7 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     }
 
     fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx rustc_hir::LetStmt<'tcx>) {
+        ssa_call_class_pattern(cx, local.pat, local.hir_id);
         // `let _ = ...` binds nothing: the map it reads is someone else's.
         if !matches!(local.pat.kind, rustc_hir::PatKind::Wild)
             && is_entity_index_owner_span(cx, local.pat.span)
@@ -3209,6 +3220,16 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        match expr.kind {
+            ExprKind::Let(condition) => ssa_call_class_pattern(cx, condition.pat, expr.hir_id),
+            ExprKind::Match(_, arms, _) if arms.iter().any(is_catch_all) => {
+                for arm in arms {
+                    ssa_call_class_pattern(cx, arm.pat, arm.hir_id);
+                }
+            }
+            _ => {}
+        }
+
         if let Some(answer) = r2il_op_property_match(cx, expr) {
             span_lint(
                 cx,
@@ -5687,6 +5708,61 @@ fn r2il_op_property_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) 
     (named.len() >= 2 && drops).then(|| answer.to_string())
 }
 
+/// Lints a pattern outside `r2ssa`'s `op.rs` that names `SSAOp::Call` or `SSAOp::CallInd` where a
+/// default arm takes every other operation: a `matches!`, a wildcard `match`, an `if let` (D41).
+fn ssa_call_class_pattern(cx: &LateContext<'_>, pat: &rustc_hir::Pat<'_>, at: rustc_hir::HirId) {
+    let site = pat.span.source_callsite();
+    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(site));
+    if !filename.contains("crates/") || filename.contains("crates/r2ssa/src/op.rs") {
+        return;
+    }
+    let Some(name) = named_ssa_call_variant(cx, pat) else {
+        return;
+    };
+    if clippy_utils::is_in_test(cx.tcx, at) {
+        return;
+    }
+    span_lint(
+        cx,
+        SSA_CALL_CLASS_OUTSIDE_OP,
+        site,
+        format!(
+            "this pattern names `SSAOp::{name}`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list"
+        ),
+    );
+}
+
+/// The first `SSAOp` call variant a pattern names, at any depth.
+fn named_ssa_call_variant(cx: &LateContext<'_>, pat: &rustc_hir::Pat<'_>) -> Option<String> {
+    use rustc_hir::def::{CtorOf, DefKind, Res};
+    let mut named = None;
+    pat.walk_always(|pat| {
+        let qpath = match &pat.kind {
+            rustc_hir::PatKind::Struct(qpath, ..) | rustc_hir::PatKind::TupleStruct(qpath, ..) => {
+                qpath
+            }
+            rustc_hir::PatKind::Expr(rustc_hir::PatExpr {
+                kind: rustc_hir::PatExprKind::Path(qpath),
+                ..
+            }) => qpath,
+            _ => return,
+        };
+        let variant = match cx.qpath_res(qpath, pat.hir_id) {
+            Res::Def(DefKind::Variant, variant) => variant,
+            Res::Def(DefKind::Ctor(CtorOf::Variant, _), ctor) => cx.tcx.parent(ctor),
+            _ => return,
+        };
+        let name = cx.tcx.item_name(variant);
+        if named.is_none()
+            && matches!(name.as_str(), "Call" | "CallInd")
+            && cx.tcx.item_name(cx.tcx.parent(variant)).as_str() == "SSAOp"
+        {
+            named = Some(name.to_string());
+        }
+    });
+    named
+}
+
 fn is_r2il_op(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
     matches!(ty.peel_refs().kind(), rustc_middle::ty::Adt(op, _) if cx.tcx.item_name(op.did()).as_str() == "R2ILOp")
 }
@@ -5705,7 +5781,9 @@ fn answers_an_op_property(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) ->
     match ty.peel_refs().kind() {
         Bool => true,
         Slice(element) | Array(element, _) => is_property(*element),
-        Adt(holder, args) if matches!(cx.tcx.item_name(holder.did()).as_str(), "Option" | "Vec") => {
+        Adt(holder, args)
+            if matches!(cx.tcx.item_name(holder.did()).as_str(), "Option" | "Vec") =>
+        {
             args.types().next().is_some_and(is_property)
         }
         _ => is_property(ty),
@@ -5713,7 +5791,8 @@ fn answers_an_op_property(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) ->
 }
 
 /// The types `R2ILOp`'s own property methods answer in (`output`, `value_use`, `transfer`, `memory_accesses`).
-const R2IL_OP_PROPERTY_TYPES: [&str; 4] = ["Varnode", "ValueUse", "ControlTransfer", "MemoryAccess"];
+const R2IL_OP_PROPERTY_TYPES: [&str; 4] =
+    ["Varnode", "ValueUse", "ControlTransfer", "MemoryAccess"];
 
 /// The `R2ILOp` variants a pattern names, at any depth.
 fn named_r2il_variants(

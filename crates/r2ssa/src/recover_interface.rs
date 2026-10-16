@@ -681,16 +681,7 @@ fn returned_by_call(
         .insts
         .iter()
         .take_while(|candidate| **candidate != inst)
-        .filter(|candidate| {
-            graph.inst(**candidate).is_some_and(|candidate| {
-                matches!(
-                    candidate.payload,
-                    crate::graph::InstPayload::Op(
-                        crate::op::SSAOp::Call { .. } | crate::op::SSAOp::CallInd { .. }
-                    )
-                )
-            })
-        })
+        .filter(|candidate| graph.op(**candidate).is_some_and(crate::op::SSAOp::is_call))
         .last()
         .and_then(|call| facts.call_sites.by_inst.get(*call))
     else {

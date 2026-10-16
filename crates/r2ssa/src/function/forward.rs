@@ -114,17 +114,18 @@ impl SSAFunction {
             let mut pushed: Option<VarId> = None;
             let mut carrier = None;
             for op in block.ops() {
+                if let Some(call) = op.call().filter(|call| call.direct) {
+                    carrier = storage(*call.target)
+                        .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
+                        .and_then(|storage| callees.return_addresses().get(&storage.offset))
+                        .copied();
+                    continue;
+                }
                 match op {
                     SSAOp::Store { addr, val, .. } if self.var(*val).is_const() => {
                         pushed = storage(*addr)
                             .filter(|storage| Some(*storage) == self.stack_pointer_carrier)
                             .map(|_| *val);
-                    }
-                    SSAOp::Call { target, .. } => {
-                        carrier = storage(*target)
-                            .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
-                            .and_then(|storage| callees.return_addresses().get(&storage.offset))
-                            .copied();
                     }
                     SSAOp::CallDefine { dst } if carrier.is_some() => {
                         r2il::refusal_evidence!(

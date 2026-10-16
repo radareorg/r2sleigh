@@ -278,7 +278,7 @@ impl FormalDependence {
             let Some(op) = graph.op(inst) else {
                 continue;
             };
-            if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+            if op.is_call() {
                 last_call = (prepared.call_sites().by_inst.get(inst))
                     .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
                 let unseen = self.unseen | last_call;

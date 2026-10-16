@@ -144,7 +144,7 @@ fn effect(payload: &r2ssa::InstPayload) -> bool {
         return false;
     };
     match op {
-        r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. } => true,
+        op if op.is_call() => true,
         r2ssa::SSAOp::CallUse { .. } => false,
         _ => !op.is_control_flow() && op.has_observable_effects(false),
     }

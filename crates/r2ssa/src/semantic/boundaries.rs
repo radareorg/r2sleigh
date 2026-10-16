@@ -684,9 +684,7 @@ pub(crate) fn reaching_stack_slot_value(
                 }
                 return Some(src);
             }
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
-                if !query.promoted =>
-            {
+            _ if (op.is_call() || matches!(op, SSAOp::CallOther { .. })) && !query.promoted => {
                 r2il::refusal_evidence!(
                     "call-argument-stack-store",
                     "({block_addr:#x}) an earlier call stands between the argument slot at {} and the call",
@@ -2206,7 +2204,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
             // definition checked for overlap below; the call itself touches
             // only the carrier the transfer moves. A user operation writes only its named output.
             if matches!(op, SSAOp::Return { .. })
-                || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+                || (op.is_call()
                     && transfer_carrier
                         .is_some_and(|carrier| register_storages_overlap(carrier, storage)))
             {

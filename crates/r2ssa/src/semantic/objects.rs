@@ -121,7 +121,7 @@ pub(crate) fn collect_access_summaries(
                 // not a call site certifies it: a call the site facts do not
                 // know is no less a call. Leaving it out made two reads of an
                 // escaped object on either side of it one memory version.
-                SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
+                op if op.is_call() => {
                     let locations = call_locations(object_model, inst_id);
                     uses.extend(locations.iter().cloned());
                     defs.extend(locations);

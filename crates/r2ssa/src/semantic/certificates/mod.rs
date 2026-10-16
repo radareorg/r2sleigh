@@ -1551,12 +1551,8 @@ fn observed_values(
         let effect = match &inst.payload {
             crate::graph::InstPayload::Op(op) => {
                 inst.output.is_none()
-                    || matches!(
-                        op,
-                        crate::SSAOp::Call { .. }
-                            | crate::SSAOp::CallInd { .. }
-                            | crate::SSAOp::CallOther { .. }
-                    )
+                    || op.is_call()
+                    || matches!(op, crate::SSAOp::CallOther { .. })
             }
             _ => false,
         };
