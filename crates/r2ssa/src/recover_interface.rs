@@ -17,8 +17,9 @@ use r2source::{
     SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
     SourceCarrierKind, SourceCarrierProjection, SourceConventionSlots, SourceFloorCause,
     SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
-    SourceParameterLocation, SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeKind,
-    SourceUnprovenCall, StackAddressBase,
+    SourceParameterLocation, SourceResultCause, SourceResultSeed, SourceStackSlotSpec, SourceType,
+    SourceTypeGraph, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall,
+    StackAddressBase,
 };
 
 use crate::function::SSAFunction;
@@ -163,8 +164,8 @@ pub struct RecoveredInterface {
     /// Whether that result is the return address the caller pushed.
     result_is_return_address: bool,
     return_mechanism: Option<RecoveredReturnMechanism>,
-    /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
-    result_owners: BTreeSet<u64>,
+    /// Why the result is unproven, where it is (doc/adr-verified-layers.md, D37).
+    unproven_result: Option<SourceUnprovenResult>,
     /// Whether the result is unproven because the body writes both result registers on its way out.
     result_ambiguous: bool,
     /// The registers an unproven result may be in, where a caller's read can say which.
@@ -192,9 +193,9 @@ impl RecoveredInterface {
         self.closed_world
     }
 
-    /// The direct callees whose stated result could prove this one's.
-    pub const fn result_owners(&self) -> &BTreeSet<u64> {
-        &self.result_owners
+    /// Why the result is unproven, where it is.
+    pub const fn unproven_result(&self) -> Option<&SourceUnprovenResult> {
+        self.unproven_result.as_ref()
     }
 
     /// Whether the body writes both result registers and nothing said which a caller reads.
@@ -1036,12 +1037,42 @@ fn recovered_result(
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
 ) -> RecoveredFunctionResult {
+    let returns = Returns {
+        func,
+        graph,
+        facts,
+        live_out,
+    };
+    recovered_result_over(&returns, slot, false)
+}
+
+/// A body, its facts, and the values its returns hand back.
+struct Returns<'a> {
+    func: &'a SSAFunction,
+    graph: &'a SsaGraph,
+    facts: &'a crate::semantic::PreparedFunctionFacts,
+    live_out: &'a crate::liveout::FunctionLiveOut,
+}
+
+/// `recovered_result`, where `skip_unstated` sets aside the values a call defines and nothing states.
+fn recovered_result_over(
+    returns: &Returns<'_>,
+    slot: CanonicalStorageId,
+    skip_unstated: bool,
+) -> RecoveredFunctionResult {
+    let Returns {
+        func,
+        graph,
+        facts,
+        live_out,
+    } = *returns;
     let written = func.written_or_captured();
     let mut observed = None;
     let mut signed = true;
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
             ReturnedByCall::Void => continue,
+            ReturnedByCall::Unstated(_) if skip_unstated => continue,
             ReturnedByCall::Unstated(_) => return RecoveredFunctionResult::Unproven,
             ReturnedByCall::Produced => {}
         }
@@ -1361,6 +1392,8 @@ fn recover_interface_inner(
         TailResult::NoTailBoundary | TailResult::Exact(_) => RecoveredFunctionResult::Void,
     };
     let no_tail_boundary = matches!(tail, TailResult::NoTailBoundary);
+    let tail_unproven = matches!(tail, TailResult::Unproven);
+    let mut result_causes = BTreeSet::new();
     let mut live_out = crate::liveout::FunctionLiveOut::default();
     let mut result_ambiguous = false;
     // The argument register handed back untouched as the result, which the return reads.
@@ -1377,6 +1410,15 @@ fn recover_interface_inner(
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
         let handed_back;
         (result, handed_back) = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        if result == RecoveredFunctionResult::Unproven {
+            let causes = [
+                (!candidate_live_out.has_returns()).then_some(SourceResultCause::NoReturn),
+                (candidate_live_out.clobbered_blocks().next().is_some())
+                    .then_some(SourceResultCause::Clobbered),
+                handed_back.then_some(SourceResultCause::HandedBack),
+            ];
+            result_causes.extend(causes.into_iter().flatten());
+        }
         if handed_back {
             result_carriers = Some(r2source::SourceResultCarriers {
                 integer: candidate,
@@ -1409,6 +1451,7 @@ fn recover_interface_inner(
                         second: None,
                     });
                     result = RecoveredFunctionResult::Unproven;
+                    result_causes.insert(SourceResultCause::Ambiguous);
                     result_ambiguous = true;
                 }
             }
@@ -1716,9 +1759,22 @@ fn recover_interface_inner(
             .collect::<Vec<_>>(),
         arity_floor
     );
-    let result_owners = match (result, slots.result_slot()) {
-        (RecoveredFunctionResult::Unproven, Some(slot)) => result_owners(func, graph, &facts, slot),
-        _ => BTreeSet::new(),
+    let unproven_result = match result {
+        RecoveredFunctionResult::Unproven => {
+            let calls = result_calls(func, graph, &facts, slots.result_slot(), tail_unproven);
+            result_causes.extend(calls);
+            if result_causes.is_empty() {
+                result_causes.insert(SourceResultCause::Undefined);
+            }
+            let only_returned = result_causes
+                .iter()
+                .all(|cause| matches!(cause, SourceResultCause::Returned(_)));
+            let seed = (only_returned && no_tail_boundary)
+                .then(|| seed_result(func, graph, &facts, slots))
+                .flatten();
+            SourceUnprovenResult::of(result_causes, seed)
+        }
+        _ => None,
     };
 
     Some(RecoveredInterface {
@@ -1727,7 +1783,7 @@ fn recover_interface_inner(
         result,
         result_is_return_address,
         return_mechanism,
-        result_owners,
+        unproven_result,
         result_ambiguous,
         result_carriers,
         arity_floor,
@@ -1845,13 +1901,19 @@ fn unproven_calls(
     calls.collect()
 }
 
-/// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.
-fn result_owners(
+/// The calls an unproven result waits on: a tail transfer to a target no prototype describes, or
+/// a call whose unstated result reaches an exit. O(live-out + calls).
+fn result_calls(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slot: CanonicalStorageId,
-) -> BTreeSet<u64> {
+    slot: Option<CanonicalStorageId>,
+    tails_unproven: bool,
+) -> BTreeSet<SourceResultCause> {
+    let named = |call: &crate::semantic::CallSiteFact| {
+        call.direct_target
+            .map_or(SourceUnstatedCall::Indirect, SourceUnstatedCall::Direct)
+    };
     let unstated = |call: &crate::semantic::CallSiteFact| {
         let boundary = facts.boundaries.calls.get(&call.id);
         !boundary
@@ -1859,23 +1921,56 @@ fn result_owners(
     };
     let tails = facts.call_sites.by_id.values();
     let tails = tails.filter(|call| call.transfer == crate::CallSiteTransfer::TailCall);
-    let mut owners: BTreeSet<u64> = tails
+    let mut causes: BTreeSet<SourceResultCause> = tails
         .filter(|call| unstated(call))
-        .filter_map(|call| call.direct_target)
+        .map(|call| SourceResultCause::Tailed(named(call)))
         .collect();
+    if tails_unproven && causes.is_empty() {
+        causes.insert(SourceResultCause::TailsDisagree);
+    }
+    let Some(slot) = slot else {
+        return causes;
+    };
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
     for value in live_out.iter() {
         if let ReturnedByCall::Unstated(id) = returned_by_call(graph, facts, value)
-            && let Some(target) = facts
-                .call_sites
-                .by_id
-                .get(&id)
-                .and_then(|call| call.direct_target)
+            && let Some(call) = facts.call_sites.by_id.get(&id)
         {
-            owners.insert(target);
+            causes.insert(SourceResultCause::Returned(named(call)));
         }
     }
-    owners
+    causes
+}
+
+/// What the paths that return a value of their own prove of an unproven result, were the calls
+/// that define the carrier to return what the paths return: `None` where no path returns one.
+fn seed_result(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    slots: &SourceConventionSlots,
+) -> Option<SourceResultSeed> {
+    let slot = slots.result_slot()?;
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
+    if !live_out.has_returns()
+        || live_out.unresolved_blocks().next().is_some()
+        || returns_the_callers_value(graph, &live_out, slot)
+    {
+        return None;
+    }
+    let returns = Returns {
+        func,
+        graph,
+        facts,
+        live_out: &live_out,
+    };
+    let result = recovered_result_over(&returns, slot, true).register()?;
+    let bits = storage_bits(result.observed())?;
+    (storage_bits(result.slot()).is_some()).then_some(SourceResultSeed {
+        slot: result.slot(),
+        bits,
+        signed: result.signed(),
+    })
 }
 
 /// What the function's tail transfers say about its result.
@@ -1997,6 +2092,10 @@ pub fn mint_recovered_interface(
             })
             .map(|interface| match recovered.result_carriers {
                 Some(carriers) => interface.with_result_carriers(carriers),
+                None => interface,
+            })
+            .map(|interface| match &recovered.unproven_result {
+                Some(result) => interface.with_unproven_result(result.clone()),
                 None => interface,
             });
     if minted.is_none() {

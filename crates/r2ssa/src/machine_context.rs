@@ -23,11 +23,11 @@ pub use r2source::{
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
     SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
-    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
-    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure, SourceTypeGraph,
-    SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall,
-    StackAddressBase,
+    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
+    SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
+    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
@@ -470,8 +470,6 @@ pub struct SourceMachineContext {
     call_universe: Box<[CanonicalStorageId]>,
     /// What each direct callee's own body proves it leaves alone, by entry.
     callee_preserved: crate::function::CalleePreservedCarriers,
-    /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
-    result_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers.
     result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
@@ -873,7 +871,6 @@ impl SourceMachineContext {
                 .map(|(effect, arch)| call_universe(effect, arch))
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
-            result_owners: BTreeSet::new(),
             result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
@@ -1065,15 +1062,6 @@ impl SourceMachineContext {
         preserved: crate::function::CalleePreservedCarriers,
     ) {
         self.callee_preserved = preserved;
-    }
-
-    /// The direct callees whose stated result could prove this function's, where recovery left it unproven.
-    pub const fn result_owners(&self) -> &BTreeSet<u64> {
-        &self.result_owners
-    }
-
-    pub(crate) fn set_result_owners(&mut self, owners: BTreeSet<u64>) {
-        self.result_owners = owners;
     }
 
     /// Whether recovery left the result unproven because the body writes both result registers,

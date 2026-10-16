@@ -8,7 +8,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::type_graph::{SourceLogicalValue, SourceTypeGraph};
+use crate::type_graph::{
+    SourceCarrierKind, SourceCarrierProjection, SourceLogicalValue, SourceType, SourceTypeGraph,
+    SourceTypeKind,
+};
 
 /// Name-independent storage identity retained from a lifted varnode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -356,6 +359,74 @@ impl SourceArityFloor {
 
     pub fn causes(&self) -> &[SourceFloorCause] {
         &self.causes
+    }
+}
+
+/// How a call a result waits on is named (doc/adr-verified-layers.md, D37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceUnstatedCall {
+    /// No callee is named.
+    Indirect,
+    /// The callee at this entry states no result.
+    Direct(u64),
+}
+
+/// A branch of recovery where a function's result is unproven (D37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceResultCause {
+    /// A return path holds what a call defined, and the callee states no result.
+    Returned(SourceUnstatedCall),
+    /// An exit is a tail transfer to a target stating no result.
+    Tailed(SourceUnstatedCall),
+    /// The tail transfers state results that differ.
+    TailsDisagree,
+    /// No return path is reached, and no call that does not return closes the body.
+    NoReturn,
+    /// A supervisor call or an unseen transfer left a value nothing states at a return.
+    Clobbered,
+    /// A return path hands back what the caller left in the carrier.
+    HandedBack,
+    /// The body writes two result registers and its callers' reads do not choose between them.
+    Ambiguous,
+    /// A return path's value lies outside the carrier or is wider than it.
+    Undefined,
+}
+
+/// What the direct paths of a body prove of an unproven result: the convention's carrier, at the
+/// width those paths write and whether they sign-extend; the start of a cycle's fixpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceResultSeed {
+    pub slot: CanonicalStorageId,
+    pub bits: u32,
+    pub signed: bool,
+}
+
+/// Every cause a function's result is unproven, sorted; never empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceUnprovenResult {
+    causes: Box<[SourceResultCause]>,
+    seed: Option<SourceResultSeed>,
+}
+
+impl SourceUnprovenResult {
+    /// The result those causes leave unproven, or `None` where there are none.
+    pub fn of(
+        causes: impl IntoIterator<Item = SourceResultCause>,
+        seed: Option<SourceResultSeed>,
+    ) -> Option<Self> {
+        let causes: BTreeSet<_> = causes.into_iter().collect();
+        (!causes.is_empty()).then(|| Self {
+            causes: causes.into_iter().collect(),
+            seed,
+        })
+    }
+
+    pub fn causes(&self) -> &[SourceResultCause] {
+        &self.causes
+    }
+
+    pub const fn seed(&self) -> Option<SourceResultSeed> {
+        self.seed
     }
 }
 
@@ -909,6 +980,8 @@ pub struct SourceFunctionInterface {
     body_proven_return_address: bool,
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
     arity_floor: Option<SourceArityFloor>,
+    /// Why the result is unproven, where recovery states it.
+    unproven_result: Option<SourceUnprovenResult>,
     /// Where the result is unproven, the registers it may be in: each call takes the one its
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
@@ -1389,6 +1462,7 @@ impl SourceFunctionInterface {
             variadic: false,
             body_proven_return_address: false,
             arity_floor: None,
+            unproven_result: None,
             result_carriers: None,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
@@ -1441,6 +1515,7 @@ impl SourceFunctionInterface {
             variadic: self.variadic,
             body_proven_return_address: self.body_proven_return_address,
             arity_floor: self.arity_floor.clone(),
+            unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
             types: self.types.clone(),
             ..rebuilt
@@ -1608,16 +1683,94 @@ impl SourceFunctionInterface {
         self.arity_floor.as_ref()
     }
 
-    /// What a cycle's least fixpoint assumes of a member: these parameters, exactly or as a floor,
-    /// and no result (doc/adr-resolved-bodies.md, "Arity").
+    /// Record why the result is unproven.
     #[must_use]
-    pub fn assumed_arity(mut self, floor: Option<SourceArityFloor>) -> Self {
+    pub fn with_unproven_result(mut self, result: SourceUnprovenResult) -> Self {
+        self.unproven_result = Some(result);
+        self
+    }
+
+    /// Why the result is unproven, where recovery states it.
+    pub const fn unproven_result(&self) -> Option<&SourceUnprovenResult> {
+        self.unproven_result.as_ref()
+    }
+
+    /// What a cycle's fixpoint assumes of a member: these parameters, exactly or as a floor, and
+    /// the result `seed` states or none (doc/adr-resolved-bodies.md, "Arity" and "A cycle's results").
+    #[must_use]
+    pub fn assumed(
+        mut self,
+        floor: Option<SourceArityFloor>,
+        seed: Option<SourceResultSeed>,
+    ) -> Self {
         self.arity_floor = floor;
+        self.unproven_result = None;
         self.return_kind = SourceFunctionReturn::Unproven;
         self.return_logical_value = None;
         self.result_carriers = None;
         self.body_proven_return_address = false;
+        if let Some(seed) = seed {
+            self.state_result(seed);
+        }
         self
+    }
+
+    /// The integer result this interface states, as a seed would: its carrier, width and sign.
+    pub fn stated_result(&self) -> Option<SourceResultSeed> {
+        let SourceFunctionReturn::Register { storage } = self.return_kind else {
+            return None;
+        };
+        let logical = self.return_logical_value?;
+        let held = self
+            .type_graph
+            .as_ref()?
+            .types()
+            .get(usize::try_from(logical.type_id()).ok()?)?;
+        let signed = match held.kind() {
+            SourceTypeKind::SignedInteger => true,
+            SourceTypeKind::UnsignedInteger => false,
+            _ => return None,
+        };
+        Some(SourceResultSeed {
+            slot: storage,
+            bits: u32::try_from(held.size_bits()).ok()?,
+            signed,
+        })
+    }
+
+    /// Return `seed.slot`, read at its `bits`: the type is one the graph names or gains.
+    fn state_result(&mut self, seed: SourceResultSeed) {
+        let kind = match seed.signed {
+            true => SourceTypeKind::SignedInteger,
+            false => SourceTypeKind::UnsignedInteger,
+        };
+        let bits = u64::from(seed.bits);
+        let graph = self.type_graph.as_ref();
+        let mut types = graph.map_or_else(Vec::new, |graph| graph.types().to_vec());
+        let named = types
+            .iter()
+            .position(|held| held.kind() == kind && held.size_bits() == bits);
+        let id = named.unwrap_or(types.len());
+        if named.is_none()
+            && let Ok(id) = u32::try_from(id)
+        {
+            types.push(SourceType::new(id, kind, bits, bits));
+        }
+        let aggregates = graph.map_or_else(Vec::new, |graph| graph.aggregates().to_vec());
+        let (Ok(graph), Ok(id)) = (SourceTypeGraph::new(types, aggregates), u32::try_from(id))
+        else {
+            return;
+        };
+        let carrier = match u64::from(seed.slot.size) * 8 > bits {
+            true => SourceCarrierKind::LowBits,
+            false => SourceCarrierKind::Full,
+        };
+        self.return_kind = SourceFunctionReturn::Register { storage: seed.slot };
+        self.return_logical_value = Some(SourceLogicalValue::new(
+            id,
+            SourceCarrierProjection::new(carrier, 0, bits),
+        ));
+        self.type_graph = Some(graph);
     }
 
     /// How many arguments a call hands this function: its parameters exactly, or at least them.

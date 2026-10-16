@@ -29,14 +29,16 @@ nothing: an argument a body hands on is invisible until the callee's
 interface exists, and an unread slot sits beside almost every call. So
 demand is for results only:
 
-- r2ssa's interface recovery states `result_owners`: where the result is
-  unproven, the direct callees whose unstated result owns it (a tail target
-  no prototype describes, or a call whose result reaches an exit).
+- r2ssa's interface recovery states why a result is unproven
+  (`SourceUnprovenResult`): the direct callees whose unstated result owns it
+  (a tail target no prototype describes, or a call whose result reaches an
+  exit) are its owners where every cause is a call.
 - `Resolved(f)` is `f` resolved alone where it has no owner; otherwise it is
   `f` resolved again with each owner outside `f`'s demand cycle resolved,
   and only where some owner then states its result.
 - `Demand(f)` is the cycle of result demands `f` is in, by Tarjan over the
-  owners; members of one cycle read each other resolved alone.
+  owners; members of one cycle read each other as the cycle's fixpoint states
+  them ("A cycle's results").
 - A callee whose interface mints no call contract, its result unproven or
   its parameters a floor, is stated instead (`CalleeStatement`): a call to it
   reads the registers the caller provably wrote, at least as many as the
@@ -203,9 +205,9 @@ worklist over the component (`least_fixpoint`):
    its body can read, so the work is O(k + (s + 2)·E) preparations for k open
    members, s slots and E calls between them.
 
-A member's assumption states its interface alone, its result stripped
-(`SourceFunctionInterface::assumed_arity`), and nothing it preserves or
-reaches, so only arity moves: a member's result proof is the one it had. A
+A member's assumption states its interface alone, its result stripped or
+seeded (`SourceFunctionInterface::assumed`), and nothing it preserves or
+reaches, so arity moves, and a result only where "A cycle's results" tracks it. A
 floor with a non-member cause (an indirect call of unstated arity, an unseen
 transfer, a supervisor call, the argument area) survives the member's own
 read, and its callers through it stay floors. A read that falls below its
@@ -228,9 +230,39 @@ arity the fixpoint states rather than a count off the registers it wrote
 self-recursive root, which any caller's render pays anyway; without `aa` the
 root reads only its other callees, as before.
 
-What stays open: a cycle's result (shapes.c's `shape_mutual_even` now calls
-`shape_mutual_odd` with its two arguments, and returns a residual, since each
-member's result is the other's), the next fixpoint of this kind.
+**A cycle's results.** Inside a component a result is the same fixpoint, over
+return values instead of argument counts, and it runs in the same worklist
+(`least_fixpoint`) on every request's result demand, not only under `aa`.
+Recovery states why a result is unproven as typed causes
+(`SourceUnprovenResult`, doc/adr-verified-layers.md D37), and a member is
+result-open where every cause is a call to a named callee and one is a member.
+The lattice is the integer result of one carrier: a width of 8, 16, 32 or 64
+bits, then unstated.
+
+1. each result-open member is seeded at the carrier the convention names, at
+   the width the paths that return a value of their own write, the calls that
+   define the carrier set aside (`seed_result`): no such path, no seed, and the
+   member starts unstated;
+2. an open member is resolved against the members it calls as assumed
+   (`SourceFunctionInterface::assumed`, the seed as a return with its logical
+   type), and what its own read states of the result joins the assumption: the
+   wider width of one carrier, signed only where both are, else unstated;
+3. a member's read is its answer where it states exactly what was assumed of
+   it; otherwise no member of the component is, and each keeps the result it
+   had under refusal evidence `cycle-fixpoint`.
+
+A seed is where the iteration starts and it only rises: the result is
+proven where the paths of its own prove it and every call on a path hands back
+the same carrier. A member with no path of its own, one that returns what the
+caller left in the carrier, or one returning an indirect call's result is
+unseeded or unowned and stays a residual with its partner. Without `aa` the
+result is stated all the same; a call to a partner whose arity is a floor
+renders as a gap until `aa` resolves the arities.
+
+The width of a call-defined value is still the carrier's, not the callee's
+stated width (`recovered_result` reads a `CallDefine` as all data), so a pair
+over `int` is `uint64_t` as `int f() { return g(); }` is; a callee's width
+on the call fact would narrow both.
 
 ### Variadic tail (ROADMAP P7, W14)
 

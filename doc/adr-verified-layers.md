@@ -157,11 +157,21 @@ r2engine reads it.
   are the ones its causes name, so `Cycle::index` walks nothing. As outside a
   cycle, a statement flows along owner edges only: a member's call to another
   member that is no cause (counted off registers, complete) is not restated.
-- A cycle's results as the same fixpoint over return values: next. Recovery
-  states an unproven result by `result_owners` alone, so it needs the same
-  typed cause before the engine can assume and check a member's result.
-- Gate: an engine test per cause variant (`crates/r2engine/tests/engine/arity.rs`),
-  and the `shape_mutual_even` records unchanged.
+- A result is unproven for stated causes too (`SourceUnprovenResult` on the
+  interface, replacing `result_owners`): a return path holds what a call
+  defined and the callee states no result (`Returned`, direct or indirect), a
+  tail transfer to such a callee (`Tailed`), tail transfers whose results
+  differ, no return path, a supervisor call or unseen transfer left a value
+  nothing states, the body hands back what the caller left, two result
+  registers with no caller to choose, or a value outside the carrier. r2engine
+  reads the callees of `Returned` and `Tailed` as the result's owners where
+  every cause is one. The seed of a cycle's fixpoint is stated beside them.
+- A cycle's results are the same fixpoint over return values, on the same
+  worklist and on every request's result demand (doc/adr-resolved-bodies.md,
+  "A cycle's results"). Recovery's own read decides whether a seed stands.
+- Gate: an engine test per cause variant
+  (`crates/r2engine/tests/engine/arity.rs`, `results.rs`), the cycle tests, and
+  the `shape_mutual_even` and `shape_mutual_odd` records moved by the fixpoint.
 
 **D38. The cost verdict counts retired instructions.** Owner: GT.
 - A budget is one measure, stated: `time` (wall milliseconds) or

@@ -132,16 +132,6 @@ pub struct CalleeRead {
     /// preparation cannot be certified still proved.
     pub interface: Option<r2ssa::SourceFunctionInterface>,
     pub facts: Result<CalleeFacts, Unreadable>,
-    /// The direct callees whose statement could prove what this body leaves open.
-    pub owners: Owners,
-}
-
-/// The direct callees whose statement could prove what a body leaves open (doc/adr-resolved-bodies.md).
-/// Its arity's owners are its interface's floor causes (`program::resolved`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Owners {
-    /// Where its result is unproven, the callees whose unstated result owns it.
-    pub result: std::collections::BTreeSet<u64>,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -1022,7 +1012,7 @@ fn prepare_callee(
 }
 
 /// A resolved body, and the callees whose statement could prove what it leaves open.
-type Resolution = (Arc<TrustedSsaArtifact>, Owners);
+type Resolution = Arc<TrustedSsaArtifact>;
 
 /// What a body is resolved against beside its imports: its owners resolved, and the arities a
 /// cycle's least fixpoint assumes of its members (doc/adr-resolved-bodies.md, "Arity").
@@ -1085,7 +1075,7 @@ pub(crate) fn callee_summary(
             Stated::default(),
         )
     });
-    let (artifact, _) = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
+    let artifact = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
     let shared = artifact.shared_artifact();
     let summary =
         r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared);
@@ -1111,7 +1101,6 @@ pub(crate) fn callee_read(
             return CalleeRead {
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
-                owners: Default::default(),
             };
         }
     };
@@ -1137,13 +1126,12 @@ fn read_callee(
 
 /// What a resolved callee proves, derived under isolation.
 fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRead {
-    let (artifact, owners) = match resolved {
+    let artifact = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
             return CalleeRead {
                 interface: None,
                 facts: Err(reason),
-                owners: Default::default(),
             };
         }
     };
@@ -1160,11 +1148,7 @@ fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRea
         Ok(None) => Err(Unreadable::NothingProved),
         Err(panicked) => Err(Unreadable::Panicked(panicked)),
     };
-    CalleeRead {
-        interface,
-        facts,
-        owners,
-    }
+    CalleeRead { interface, facts }
 }
 
 fn read_callees(
@@ -1250,7 +1234,7 @@ fn analyse(
     } = read_callees(&native, target, (&walk.root, entry), ptr_bits, callers);
 
     let reads = callers == crate::program::Callers::Read;
-    let (artifact, _) = native.resolve(entry, walk, &callees, reads)?;
+    let artifact = native.resolve(entry, walk, &callees, reads)?;
     let tables = walk.tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1590,10 +1574,6 @@ impl<'a> Native<'a> {
             drop(first);
             first = seal_first(reads)?;
         }
-        let context = first.machine_context();
-        let owners = Owners {
-            result: context.result_owners().clone(),
-        };
         // aarch64 forms an address from a page and an offset: its text is captured once folded.
         let folded = self.folded_literals(&first, root);
         // Only a declared frame's restatement reads the first's facts, or the first is the answer.
@@ -1626,7 +1606,7 @@ impl<'a> Native<'a> {
                 self.collected(seal)?
             }
         };
-        Ok((artifact, owners))
+        Ok(artifact)
     }
 
     fn over(target: &'a NativeTarget<'a>, program: &'a dyn Program) -> Result<Self, NativeRefusal> {

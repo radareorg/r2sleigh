@@ -152,10 +152,11 @@ pub use machine_context::{
     SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
     SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
-    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure, SourceTypeGraph,
-    SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall,
-    loaded_target_slot, terminal_indirect_loaded_slot,
+    SourceResultCause, SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
+    terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,
