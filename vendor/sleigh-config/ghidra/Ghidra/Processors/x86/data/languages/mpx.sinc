@@ -48,7 +48,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 
 @ifdef IA64
 
-:BNDCL bnd1, Rmr64      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_lb & Rmr64 {
+:BNDCL bnd1, Rmr64      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_lb & Rmr64 {
 #   if (reg < BND.LB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(Rmr64 < bnd1_lb) goto <done>;
       BNDSTATUS = 0x01;
@@ -56,7 +56,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCL bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x1A; (bnd1 & bnd1_lb) ... & Mem {
+:BNDCL bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1 & bnd1_lb) ... & Mem {
 #   if (LEA(mem) < BND.LB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(Mem < bnd1_lb) goto <done>;
       BNDSTATUS = 0x01;
@@ -64,7 +64,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCU bnd1, Rmr64      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_ub & Rmr64 {
+:BNDCU bnd1, Rmr64      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_ub & Rmr64 {
 #   if (reg > ~(BND.UB)) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(Rmr64 > ~bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -72,7 +72,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCU bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1A; (bnd1 & bnd1_ub) ... & Mem {
+:BNDCU bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1 & bnd1_ub) ... & Mem {
 #   if (LEA(mem) > ~(BND.UB)) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(Mem > ~bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -80,7 +80,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCN bnd1, Rmr64      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd1_ub & Rmr64 {
+:BNDCN bnd1, Rmr64      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd1_ub & Rmr64 {
 #   if (reg > BND.UB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(Rmr64 > bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -88,7 +88,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCN bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1B; (bnd1 & bnd1_ub) ... & Mem {
+:BNDCN bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_ub) ... & Mem {
 #   if (LEA(mem) > BND.UB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(Mem > bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -97,7 +97,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 }
 
 #TODO: This probably cannot be fully modeled 
-:BNDLDX bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & byte=0x0F; byte=0x1A; bnd1 ... & Mem {
+:BNDLDX bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1) ... & Mem {
 #	BNDSTATUS = bndldx_status( Mem, BNDCFGS, BNDCFGU );
 #	bnd1      = bndldx( Mem, BNDCFGS, BNDCFGU );
 	
@@ -105,30 +105,30 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
    bnd1 = *:16 Mem;
 }
 
-:BNDMK bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x1B; ( bnd1 & bnd1_lb & bnd1_ub ) ... & ( bndmk_addr64 & Mem ) {
+:BNDMK bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & ( bndmk_addr64 & Mem ) {
 #   BND.LB and BND.UB set from m64
 	bnd1_lb = bndmk_addr64;
 	bnd1_ub = Mem;
 }
 
-:BNDMOV bnd1, m128      is $(LONGMODE_ON) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1A; bnd1 ... & m128 {
+:BNDMOV bnd1, m128      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1) ... & m128 {
 	bnd1 = m128;
 }
 
-:BNDMOV bnd1, bnd2      is $(LONGMODE_ON) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd2 {
+:BNDMOV bnd1, bnd2      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd2 {
 	bnd1 = bnd2;
 }
 
-:BNDMOV m128, bnd1      is $(LONGMODE_ON) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1B; bnd1 ... & m128 {
+:BNDMOV m128, bnd1      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1) ... & m128 {
 	m128 = bnd1;
 }
 
-:BNDMOV bnd2, bnd1      is $(LONGMODE_ON) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd2 {
+:BNDMOV bnd2, bnd1      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd2 {
 	bnd2 = bnd1;
 }
 
 #TODO: This probably cannot be fully modeled 
-:BNDSTX Mem, bnd1      is $(LONGMODE_ON) & vexMode=0 & byte=0x0F; byte=0x1B; bnd1 ... & Mem {
+:BNDSTX Mem, bnd1      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1) ... & Mem {
 #	BNDSTATUS = bndstx_status( bnd1, BNDCFGS, BNDCFGU );
 #	Mem       = bndstx( bnd1, BNDCFGS, BNDCFGU );
 
@@ -138,7 +138,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 
 @endif
 
-:BNDCL bnd1, Rmr32      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_lb & Rmr32 {
+:BNDCL bnd1, Rmr32      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_lb & Rmr32 {
 #   if (reg < BND.LB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(zext(Rmr32) < bnd1_lb) goto <done>;
       BNDSTATUS = 0x01;
@@ -146,7 +146,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCL bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x1A; (bnd1 & bnd1_lb) ... & Mem {
+:BNDCL bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1 & bnd1_lb) ... & Mem {
 #   if (LEA(mem) < BND.LB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(zext(Mem) < bnd1_lb) goto <done>;
       BNDSTATUS = 0x01;
@@ -154,7 +154,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCU bnd1, Rmr32      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_ub & Rmr32 {
+:BNDCU bnd1, Rmr32      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd1_ub & Rmr32 {
 #   if (reg > ~(BND.UB)) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(zext(Rmr32) > ~bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -162,7 +162,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCU bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1A; (bnd1 & bnd1_ub) ... & Mem {
+:BNDCU bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1 & bnd1_ub) ... & Mem {
 #   if (LEA(mem) > ~(BND.UB)) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(zext(Mem) > ~bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -170,7 +170,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCN bnd1, Rmr32      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd1_ub & Rmr32 {
+:BNDCN bnd1, Rmr32      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd1_ub & Rmr32 {
 #   if (reg > BND.UB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(zext(Rmr32) > bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -178,7 +178,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
  <done>
 }
 
-:BNDCN bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x1B; (bnd1 & bnd1_ub) ... & Mem {
+:BNDCN bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F2) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_ub) ... & Mem {
 #   if (LEA(mem) > BND.UB) then BNDSTATUS = 01H; AND BOUND EXCEPTION
    if !(zext(Mem) > bnd1_ub) goto <done>;
       BNDSTATUS = 0x01;
@@ -187,7 +187,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 }
 
 #TODO: This probably cannot be fully modeled 
-:BNDLDX bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & byte=0x0F; byte=0x1A; ( bnd1 & bnd1_lb & bnd1_ub ) ... & Mem {
+:BNDLDX bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & Mem {
 #	BNDSTATUS = bndldx_status( Mem, BNDCFGS, BNDCFGU );
 #	bnd1      = bndldx( Mem, BNDCFGS, BNDCFGU );
 	
@@ -198,33 +198,33 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
    bnd1_ub = zext(tmp2);
 }
 
-:BNDMK bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x1B; ( bnd1 & bnd1_lb & bnd1_ub ) ... & ( bndmk_addr32 & Mem ) {
+:BNDMK bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & ( bndmk_addr32 & Mem ) {
 #   BND.LB and BND.UB set from m32
 	bnd1_lb = zext(bndmk_addr32);
 	bnd1_ub = zext(Mem);
 }
 
-:BNDMOV bnd1, m64      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1A; ( bnd1 & bnd1_lb & bnd1_ub ) ... & m64 {
+:BNDMOV bnd1, m64      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1A; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & m64 {
 	tmp:8 = m64;
 	bnd1_lb = zext(tmp:4);
     tmp2:4 = tmp(4);
     bnd1_ub = zext(tmp2);
 }
 
-:BNDMOV bnd1, bnd2      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd2 {
+:BNDMOV bnd1, bnd2      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1A; mod=3 & bnd1 & bnd2 {
 	bnd1 = bnd2;
 }
 
-:BNDMOV m64, bnd1      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1B; ( bnd1 & bnd1_lb & bnd1_ub ) ... & m64 {
+:BNDMOV m64, bnd1      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & m64 {
 	m64 = (zext(bnd1_ub:4) << 32) | zext(bnd1_lb:4);
 }
 
-:BNDMOV bnd2, bnd1      is $(LONGMODE_OFF) & vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd2 {
+:BNDMOV bnd2, bnd1      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_66) & byte=0x0F; byte=0x1B; mod=3 & bnd1 & bnd2 {
 	bnd2 = bnd1;
 }
 
 #TODO: This probably cannot be fully modeled 
-:BNDSTX Mem, bnd1      is $(LONGMODE_OFF) & vexMode=0 & byte=0x0F; byte=0x1B; ( bnd1 & bnd1_lb & bnd1_ub ) ... & Mem {
+:BNDSTX Mem, bnd1      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & Mem {
 #	BNDSTATUS = bndstx_status( bnd1, BNDCFGS, BNDCFGU );
 #	Mem       = bndstx( bnd1, BNDCFGS, BNDCFGU );
 

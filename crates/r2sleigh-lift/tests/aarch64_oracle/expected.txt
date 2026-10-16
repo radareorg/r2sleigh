@@ -14,7 +14,6 @@ fcvtzs_xd: stop Undefined
 fcvtzs_wd: stop Undefined
 fcvtzs_ws: stop Undefined
 fcvtzs_xs: stop Undefined
-fcvtzs_fix: stop Undefined
 fcvtas_xd: stop Undefined
 fcvtms_xd: stop Undefined
 fcvtps_ws: stop Undefined

@@ -6103,6 +6103,33 @@ macro fp_to_unsigned(x, zero, lim, ones, out)
 	out = trunc(c) | (zext(big) * ones);
 }
 
+# FPToFixed, signed: NaN gives 0, x at or above lim (2^(N-1)) the maximum, at or below -lim the minimum.
+# trunc sees only 0 or a value in (-lim, lim), so it is defined on every path.
+macro fp_to_signed(x, zero, lim, max, min, out)
+{
+	local big:1 = x f>= lim;
+	local neg = zero f- lim;
+	local small:1 = x f<= neg;
+	local c = zero;
+	if (nan(x) || big || small) goto <clamped>;
+	c = x;
+<clamped>
+	out = trunc(c) | (zext(big) * max) | (zext(small) * min);
+}
+
+# A 64-bit magnitude as a double that rounds to the same binary16 as it: past 2^53, the bits below
+# 2^11 fold into a sticky bit (round to odd), so the double and half roundings never differ.
+macro round_odd_f64(mag, out)
+{
+	local shifted:8 = mag;
+	local up:8 = int2float(1:8);
+	if (mag < 0x20000000000000) goto <exact>;
+	shifted = (mag >> 11) | zext((mag & 0x7ff) != 0);
+	up = int2float(0x800:8);
+<exact>
+	out = int2float(shifted) f* up;
+}
+
 # The same into 64 bits; trunc is signed, so [2^63, 2^64) truncates as x - 2^63.
 macro fp_to_unsigned64(x, zero, two63, out)
 {
@@ -6981,7 +7008,11 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & b_15=1 & Rd_GPR32
 	# x * 2^fbits passes float16's range, so the product is taken in float32, where it is exact.
 	local x:4 = float2float(Rn_FPR16);
 	local tmp1:4 = x f* FBits32;
-	Rd_GPR32 = trunc(tmp1);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x80000000:8);
+	local wide:8 = 0;
+	fp_to_signed(tmp1, zero, lim, 0x7fffffff:8, 0x80000000:8, wide);
+	Rd_GPR32 = wide:4;
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
@@ -6997,7 +7028,9 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR
 {
 	local x:4 = float2float(Rn_FPR16);
 	local tmp1:4 = x f* FBits32;
-	Rd_GPR64 = trunc(tmp1);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x4000000000000000:8) f* int2float(2:4);
+	fp_to_signed(tmp1, zero, lim, 0x7fffffffffffffff:8, 0x8000000000000000:8, Rd_GPR64);
 }
 
 # C7.2.91 FCVTZS (scalar, fixed-point) page C7-2227 line 130156 MATCH x1e180000/mask=x7f3f0000
@@ -7011,7 +7044,11 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR
 is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_1621=0b011000 & b_15=1 & Rd_GPR32 & Rn_FPR32 & FBitsOp & FBits32 & Rd_GPR64
 {
 	local tmp1:4 = Rn_FPR32 f* FBits32;
-	Rd_GPR32 = trunc(tmp1);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x80000000:8);
+	local wide:8 = 0;
+	fp_to_signed(tmp1, zero, lim, 0x7fffffff:8, 0x80000000:8, wide);
+	Rd_GPR32 = wide:4;
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
@@ -7026,7 +7063,9 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_1621=0b011000 & b_15=1 & Rd_GPR32
 is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR32 & FBitsOp & FBits32
 {
 	local tmp1:4 = Rn_FPR32 f* FBits32;
-	Rd_GPR64 = trunc(tmp1);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x4000000000000000:8) f* int2float(2:4);
+	fp_to_signed(tmp1, zero, lim, 0x7fffffffffffffff:8, 0x8000000000000000:8, Rd_GPR64);
 }
 
 # C7.2.91 FCVTZS (scalar, fixed-point) page C7-2227 line 130156 MATCH x1e180000/mask=x7f3f0000
@@ -7040,7 +7079,11 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR
 is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_1621=0b011000 & b_15=1 & Rd_GPR32 & Rn_FPR64 & FBitsOp & FBits64 & Rd_GPR64
 {
 	local tmp1:8 = Rn_FPR64 f* FBits64;
-	Rd_GPR32 = trunc(tmp1);
+	local zero:8 = int2float(0:8);
+	local lim:8 = int2float(0x80000000:8);
+	local wide:8 = 0;
+	fp_to_signed(tmp1, zero, lim, 0x7fffffff:8, 0x80000000:8, wide);
+	Rd_GPR32 = wide:4;
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
@@ -7055,7 +7098,9 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_1621=0b011000 & b_15=1 & Rd_GPR32
 is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_1621=0b011000 & Rd_GPR64 & Rn_FPR64 & FBitsOp & FBits64
 {
 	local tmp1:8 = Rn_FPR64 f* FBits64;
-	Rd_GPR64 = trunc(tmp1);
+	local zero:8 = int2float(0:8);
+	local lim:8 = int2float(0x4000000000000000:8) f* int2float(2:8);
+	fp_to_signed(tmp1, zero, lim, 0x7fffffffffffffff:8, 0x8000000000000000:8, Rd_GPR64);
 }
 
 # C7.2.93 FCVTZU (vector, fixed-point) page C7-2231 line 130422 MATCH x2f00fc00/mask=xbf80fc00
@@ -9504,7 +9549,7 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1920=0b00 & b_1618=0b111
 :fmov Rd_GPR32, Rn_FPR16
 is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1920=0b00 & b_1618=0b110 & b_1015=0b000000 & Rd_GPR32 & Rn_FPR16 & Rd_GPR64
 {
-	Rd_GPR32 = float2float(Rn_FPR16);
+	Rd_GPR32 = zext(Rn_FPR16);
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
@@ -9518,7 +9563,7 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1920=0b00 & b_1618=0b110
 :fmov Rd_GPR64, Rn_FPR16
 is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1920=0b00 & b_1618=0b110 & b_1015=0b000000 & Rd_GPR64 & Rn_FPR16
 {
-	Rd_GPR64 = float2float(Rn_FPR16);
+	Rd_GPR64 = zext(Rn_FPR16);
 }
 
 # C7.2.131 FMOV (general) page C7-2312 line 135254 MATCH x1e260000/mask=x7f36fc00
@@ -9531,7 +9576,7 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1920=0b00 & b_1618=0b110
 :fmov Rd_FPR16, Rn_GPR32
 is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1920=0b00 & b_1618=0b111 & b_1015=0b000000 & Rd_FPR16 & Rn_GPR32 & Zd
 {
-	Rd_FPR16 = float2float(Rn_GPR32);
+	Rd_FPR16 = Rn_GPR32:2;
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -9573,7 +9618,7 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1920=0b00 & b_1618=0b110
 :fmov Rd_FPR16, Rn_GPR64
 is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1920=0b00 & b_1618=0b111 & b_1015=0b000000 & Rd_FPR16 & Rn_GPR64 & Zd
 {
-	Rd_FPR16 = float2float(Rn_GPR64);
+	Rd_FPR16 = Rn_GPR64:2;
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -15962,10 +16007,12 @@ is b_31=0 & b_30=1 & b_1029=0b00111001111001110110 & Rd_VPR128.8H & Rn_VPR128.8H
 # 32-bit to half-precision variant when sf == 0 && type == 11
 
 :scvtf Rd_FPR16, Rn_GPR32, FBitsOp
-is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=2 & b_15=1 & FBitsOp & FBits16 & Rn_GPR32 & Rd_FPR16 & Zd
+is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=2 & b_15=1 & FBitsOp & FBits64 & Rn_GPR32 & Rd_FPR16 & Zd
 {
-	local tmp1:2 = int2float(Rn_GPR32);
-	Rd_FPR16 = tmp1 f/ FBits16;
+	# FBits16 is infinite from 16 bits: the quotient is exact in a double, rounded once to half.
+	local x:8 = int2float(Rn_GPR32);
+	local scaled:8 = x f/ FBits64;
+	Rd_FPR16 = float2float(scaled);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -15977,10 +16024,20 @@ is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=
 # 64-bit to half-precision variant when sf == 1 && type == 11
 
 :scvtf Rd_FPR16, Rn_GPR64, FBitsOp
-is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=2 & FBitsOp & FBits16 & Rn_GPR64 & Rd_FPR16 & Zd
+is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=2 & FBitsOp & FBits64 & Rn_GPR64 & Rd_FPR16 & Zd
 {
-	local tmp1:2 = int2float(Rn_GPR64);
-	Rd_FPR16 = tmp1 f/ FBits16;
+	local neg:1 = Rn_GPR64 s< 0;
+	local mag:8 = Rn_GPR64;
+	if (!neg) goto <positive>;
+	mag = -mag;
+<positive>
+	local x:8 = 0;
+	round_odd_f64(mag, x);
+	if (!neg) goto <signed>;
+	x = int2float(0:8) f- x;
+<signed>
+	local scaled:8 = x f/ FBits64;
+	Rd_FPR16 = float2float(scaled);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -26336,11 +26393,12 @@ is b_31=0 & b_30=1 & b_1029=0b10111001111001110110 & Rd_VPR128.8H & Rn_VPR128.8H
 # if sf == '0' && scale<5> == '0' then UnallocatedEncoding();
 
 :ucvtf Rd_FPR16, Rn_GPR32, FBitsOp
-is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=3 & b_15=1 & FBitsOp & FBits16 & Rn_GPR32 & Rd_FPR16 & Zd
+is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=3 & b_15=1 & FBitsOp & FBits64 & Rn_GPR32 & Rd_FPR16 & Zd
 {
 	local tmp1:8 = zext(Rn_GPR32);
-	local tmp2:2 = int2float(tmp1);
-	Rd_FPR16 = tmp2 f/ FBits16;
+	local x:8 = int2float(tmp1);
+	local scaled:8 = x f/ FBits64;
+	Rd_FPR16 = float2float(scaled);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -26351,11 +26409,12 @@ is sf=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=
 # AUNIT --inst x9ec30000/mask=xffff0000 --status noqemu --comment "nofpround"
 
 :ucvtf Rd_FPR16, Rn_GPR64, FBitsOp
-is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=3 & FBitsOp & FBits16 & Rn_GPR64 & Rd_FPR16 & Zd
+is sf=1 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=0 & mode=0 & fpOpcode=3 & FBitsOp & FBits64 & Rn_GPR64 & Rd_FPR16 & Zd
 {
-	local tmp1:9 = zext(Rn_GPR64);
-	local tmp2:2 = int2float(tmp1);
-	Rd_FPR16 = tmp2 f/ FBits16;
+	local x:8 = 0;
+	round_odd_f64(Rn_GPR64, x);
+	local scaled:8 = x f/ FBits64;
+	Rd_FPR16 = float2float(scaled);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 

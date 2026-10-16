@@ -11,7 +11,7 @@ specifications do (ROADMAP D33). Each pin is in the table under Upstream pins.
 
 | Processor | Ghidra | Carried on that text (below) |
 |---|---|---|
-| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; the Go cspec's RDX (fork #2) |
+| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; PREFETCHh and MPX decoded where the `0F 18`-`0F 1F` hint NOP took them; the Go cspec's RDX (fork #2) |
 | ARM | master `918acd744d` | the hidden scratch marks; `ARM.cspec`'s `<returnaddress>` (fork #1) |
 | AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks; `AARCH64_apple.cspec`'s `<returnaddress>` x30, which Ghidra master omits (fork pull request owed) |
 | MIPS | master `918acd744d` | none |
@@ -54,11 +54,18 @@ through `int2float` at 63, so `fcvtzs`, `fcvtzu`, `scvtf` and `ucvtf` of an X re
 scaled in float32: Ghidra multiplied by `FBitsOp`, the fraction-bit count read as a float16 bit
 pattern, in three of the four, and in float16, where 2^fbits is infinite from 16 bits, in the
 fourth. 19 oracle cases (Apple M5) pin them (a sleigh-config pull request is owed, and a Ghidra
-issue for the scale constants and the H operand). Left, each a gap: the fixed-point `fcvtzs` still converts by `trunc`, so it stops
-past the signed range (the signed family, ROADMAP VC); `scvtf` and `ucvtf` into H divide by
-`FBits16`, float16's 2^fbits, infinite from 16 bits, and `r2il::eval` cannot narrow into
-binary16, so no oracle grades them; `fmov` between H and W or X converts the value with
-`float2float` where the Arm ARM moves the bits (four forms). `fcvta*`, `fcvtm*`, `fcvtn*` and
+issue for the scale constants and the H operand). The fixed-point `fcvtzs` into W and X saturates as FPToFixed states (Arm ARM C7.2.91; NaN gives 0,
+at or above 2^(N-1) the maximum, at or below -2^(N-1) the minimum), where it converted by a bare
+`trunc` and so stopped in `r2il::eval` past the signed range; six oracle cases (Apple M5, D, S and H
+sources into W and X) stop at the old text and agree now, and `fcvtzs_fix` left the list. The fixed-point
+`scvtf` and `ucvtf` into H divided by `FBits16`, float16's 2^fbits, infinite from 16 bits; they convert
+to a double, divide by `FBits64` (exact) and narrow once (Arm ARM C7.2.235, FixedToFP), an X source
+folding the bits below 2^11 into a sticky bit once past 2^53 so the double's rounding cannot differ from
+the half's (`ucvtf h0, x1, #64` of 0x8010000000000001 is 0x3801 on the CPU, one past the tie a bare
+double would round to). `r2il::eval` narrows into binary16, ties to even, and four oracle cases
+(Apple M5) pin them. `fmov` between H and W or X moves the bits (Arm ARM C7.2.131: `Wd =
+ZeroExtend(Hn)`, `Hd = Wn<15:0>`), where Ghidra converted the value with `float2float` (four forms;
+two oracle cases on an Apple M5 disagreed or stopped at the old text). `fcvta*`, `fcvtm*`, `fcvtn*` and
 `fcvtp*` have no fixed-point form.
 
 A 32-bit register destination zero-extends into its 64-bit register in 64-bit
@@ -80,6 +87,19 @@ VEX `VPEXTRW reg, xmm, imm8` (0F3A 15) writes its ModRM r/m register, where
 GP-7017 wrote the reg field's (`vpextrw ecx, xmm0, 1` wrote EAX); AArch64
 CSSC's W forms (`abs`, `cnt`, `smax`, `smin`, `umax`, `umin`) write X
 zero-extended, as GP-6448's own `ctz` does (the AArch64 oracle).
+
+Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
+request and a Ghidra issue owed; 918acd744d still decodes both as NOP): x86's catch-all
+hint `NOP rm16`/`NOP rm32` (`0F 18` to `0F 1F`, `ia.sinc`) took `0F 18 /0-3` with a
+memory operand (PREFETCHNTA, T0, T1, T2; `libc-2.31` 0x16868d) and every MPX
+instruction (BNDMOV, BNDLDX, BNDSTX, BNDCL, BNDCU, BNDCN, BNDMK; `ld-2.31` 0x16b22),
+because Sleigh orders two patterns that neither specialises by definition order and
+the NOP's states `opsize` where theirs did not. They now state `opsize` as `ENDBR64`
+does, and the MPX memory forms state `mod != 0b11`, so a register form of `0F 1A`/`0F 1B`
+with no matching prefix is still the hint NOP, where they matched and then failed to
+resolve their memory operand (Intel SDM Vol. 2, PREFETCHh and the MPX chapter;
+`crates/r2sleigh-lift/tests/x86_hints.rs`). No oracle case: a prefetch changes no state,
+and the recording CPU has no MPX, where `bndmov` would execute as a NOP.
 
 Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
 request and a Ghidra issue owed; 918acd744d still says `# AF not implemented`): x86's

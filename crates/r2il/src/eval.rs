@@ -922,7 +922,7 @@ impl Float {
     }
 }
 
-/// An IEEE binary16 value, exactly: only widening reads one, so no float16 rounding is modelled.
+/// An IEEE binary16 value, exactly.
 fn binary16(bits: u16) -> f64 {
     let magnitude = match (bits >> 10) & 0x1f {
         0 => f64::from(bits & 0x3ff) * 2f64.powi(-24),
@@ -934,6 +934,37 @@ fn binary16(bits: u16) -> f64 {
         magnitude
     } else {
         -magnitude
+    }
+}
+
+/// `x` rounded once to binary16, ties to even; a NaN is the canonical quiet one.
+fn to_binary16(x: f64) -> u16 {
+    let sign = if x.is_sign_negative() { 0x8000 } else { 0 };
+    let magnitude = x.abs();
+    let bits = if x.is_nan() {
+        return 0x7e00;
+    } else if magnitude >= 65520.0 {
+        0x7c00
+    } else if magnitude < 2f64.powi(-14) {
+        // Subnormal: a multiple of 2^-24, exact in a double, and 1024 of them is the least normal.
+        (magnitude * 2f64.powi(24)).round_ties_even() as u16
+    } else {
+        let double = magnitude.to_bits();
+        let exponent = ((double >> 52) as i32 - 1023 + 15) as u64;
+        let fraction = double & ((1 << 52) - 1);
+        let (kept, rest) = (fraction >> 42, fraction & ((1 << 42) - 1));
+        let half = (exponent << 10) | kept;
+        let up = rest > 1 << 41 || (rest == 1 << 41 && half & 1 == 1);
+        (half + u64::from(up)) as u16
+    };
+    sign | bits
+}
+
+/// `x` as a float `bytes` wide, rounded once.
+fn converted(x: f64, bytes: u32) -> Result<u128, Stop> {
+    match bytes {
+        2 => Ok(u128::from(to_binary16(x))),
+        _ => Ok(Float::of(0, bytes)?.at(x).bits()),
     }
 }
 
@@ -1003,7 +1034,7 @@ fn floating<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> 
                 2 => binary16(state.read(src)? as u16),
                 _ => float(src)?.wide(),
             };
-            (dst, Float::of(0, dst.size)?.at(x).bits())
+            (dst, converted(x, dst.size)?)
         }
         R2ILOp::Int2Float { dst, src } => {
             let integer = Word::new(state.read(src)?, src.size)?.signed()?;
@@ -1664,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn a_half_widens_exactly_and_never_narrows() {
+    fn a_half_widens_exactly_and_narrows_once_ties_to_even() {
         let widen = R2ILOp::FloatFloat {
             dst: register(32, 4),
             src: register(0, 2),
@@ -1693,12 +1724,33 @@ mod tests {
         );
         let narrow = R2ILOp::FloatFloat {
             dst: register(32, 2),
-            src: register(0, 4),
+            src: register(0, 8),
         };
-        assert_eq!(
-            float_run(&narrow, &[(0, 4, single(0.5))]),
-            Err(Stop::Unmodelled)
-        );
+        let double = |x: f64| u128::from(x.to_bits());
+        for (wide, half) in [
+            (0.5, 0x3800u16),
+            (-1.0, 0xbc00),
+            (65504.0, 0x7bff),
+            (65519.999, 0x7bff),
+            (65520.0, 0x7c00),
+            (f64::NEG_INFINITY, 0xfc00),
+            (2049.0, 0x6800),
+            (2051.0, 0x6802),
+            (2049.0 + 2f64.powi(-40), 0x6801),
+            (2f64.powi(-24), 0x0001),
+            (2f64.powi(-25), 0x0000),
+            (3.0 * 2f64.powi(-25), 0x0002),
+            (2f64.powi(-25) * 1.0000001, 0x0001),
+            (1023.5 * 2f64.powi(-24), 0x0400),
+            (-0.0, 0x8000),
+            (f64::NAN, 0x7e00),
+        ] {
+            assert_eq!(
+                float_run(&narrow, &[(0, 8, double(wide))]),
+                Ok(u128::from(half)),
+                "{wide}"
+            );
+        }
     }
 
     #[test]

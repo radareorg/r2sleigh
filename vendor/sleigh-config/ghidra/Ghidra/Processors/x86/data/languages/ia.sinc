@@ -4378,10 +4378,10 @@ define pcodeop pconfig;
 :PREFETCHW    m8  is vexMode=0 & byte=0x0f; byte=0x0d; m8 & reg_opcode=1 ... { }
 :PREFETCHWT1  m8  is vexMode=0 & byte=0x0f; byte=0x0d; m8 & reg_opcode=2 ... { }
 
-:PREFETCHT0 m8  is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=1 ) ... & m8 { }
-:PREFETCHT1 m8  is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=2 ) ... & m8 { }
-:PREFETCHT2 m8  is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=3 ) ... & m8 { }
-:PREFETCHNTA m8 is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=0 ) ... & m8 { }
+:PREFETCHT0 m8  is vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=1 ) ... & m8 { }
+:PREFETCHT1 m8  is vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=2 ) ... & m8 { }
+:PREFETCHT2 m8  is vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=3 ) ... & m8 { }
+:PREFETCHNTA m8 is vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=0 ) ... & m8 { }
 
 define pcodeop ptwrite;
 
