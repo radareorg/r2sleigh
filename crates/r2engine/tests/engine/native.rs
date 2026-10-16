@@ -2658,6 +2658,22 @@ fn an_entry_with_two_latches_merges_the_caller_and_both_latches() {
     );
 }
 
+/// A latch that leaves a carried value as it is has nothing to copy for it: the merge keeps its
+/// variable, and the text assigns a variable to itself nowhere (doc/adr-decompiler-rewrite.md, "Merges").
+#[test]
+fn a_latch_that_leaves_a_carried_value_copies_nothing() {
+    let text = rendered(ENTRY_LOOP_TWO_LATCHES, "two_latches");
+    let own: Vec<&str> = (text.lines().map(str::trim))
+        .filter(|line| {
+            let assigned = line
+                .strip_suffix(';')
+                .and_then(|line| line.split_once(" = "));
+            assigned.is_some_and(|(name, value)| name == value)
+        })
+        .collect();
+    assert!(own.is_empty(), "{own:?} in\n{text}");
+}
+
 /// Mutual tail recursion walked into one body is a loop through the entry,
 /// and each pass takes both partners' steps.
 #[test]

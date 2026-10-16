@@ -148,3 +148,24 @@ uint64_t fnv1a32(uint64_t arg0, uint64_t arg1)
 
 EOF
 RUN
+
+# A dispatch's arms are blocks of the low tier, as `afb` lists them.
+NAME=switch low IL blocks
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=s 0x4018b0; pdil~Block
+EXPECT=<<EOF
+Blocks: 12
+Block 0x4018b0 (81 bytes, 120 ops)
+Block 0x401901 (7 bytes, 0 ops)
+Block 0x401908 (114 bytes, 500 ops)
+Block 0x40197a (13 bytes, 14 ops)
+Block 0x401990 (12 bytes, 54 ops)
+Block 0x40199c (12 bytes, 54 ops)
+Block 0x4019a8 (12 bytes, 54 ops)
+Block 0x4019b4 (12 bytes, 54 ops)
+Block 0x4019c0 (12 bytes, 54 ops)
+Block 0x4019cc (12 bytes, 54 ops)
+Block 0x4019d8 (7 bytes, 12 ops)
+Block 0x4019df (305 bytes, 1342 ops)
+EOF
+RUN

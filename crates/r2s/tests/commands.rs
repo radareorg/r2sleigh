@@ -309,6 +309,52 @@ fn each_tier_answers_for_itself() {
     assert_ne!(low.out, c.out);
 }
 
+/// The low tier lifts the body `afb` lists: a dispatch's arms are blocks of it, and a block starts and
+/// ends where `afb` and `pd` say, whatever the function holds.
+#[test]
+fn pdil_lists_the_blocks_afb_lists() {
+    let listing = r2s("afl");
+    let entries = (listing.out.lines())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|at| at.starts_with("0x"))
+        .collect::<Vec<_>>();
+    assert!(entries.len() > 20, "{}", listing.out);
+    let script = (entries.iter())
+        .map(|at| format!("?e ENTRY {at}; pdil @ {at}; ?e AFB; afb @ {at}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let run = r2s(&script);
+    assert!(run.ok, "{}", run.out);
+    let mut dispatching = 0;
+    let out = format!("\n{}", run.out);
+    for part in out.split("\nENTRY ").skip(1) {
+        let (entry, rest) = part.split_once('\n').expect("an entry line");
+        let (low, listed) = rest.split_once("AFB\n").expect("both commands answered");
+        let lowered = (low.lines())
+            .filter_map(|line| line.strip_prefix("Block "))
+            .map(|line| {
+                let (start, size) = line.split_once(" (").expect("a block header");
+                let size = size.split_once(" bytes").expect("a size").0;
+                (start.to_owned(), size.parse::<u64>().expect("a size"))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let blocks = (listed.lines())
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .filter(|fields| fields.len() > 2 && fields[0].starts_with("0x"))
+            .map(|fields| {
+                let start = u64::from_str_radix(&fields[0][2..], 16).expect("a start");
+                (
+                    format!("{start:#x}"),
+                    fields[2].parse::<u64>().expect("a size"),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        dispatching += usize::from(listed.contains(" s 0x"));
+        assert_eq!(lowered, blocks, "the blocks of {entry}:\n{low}\n{listed}");
+    }
+    assert!(dispatching > 0, "no function of the fixture dispatches");
+}
+
 #[test]
 fn an_unmapped_address_is_refused_rather_than_invented() {
     let run = r2s("s 0x999999; pdd");

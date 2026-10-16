@@ -2254,7 +2254,14 @@ impl<'a> Values<'a> {
                 Some(term) => term_reads(&self.projection, self.roots.arena(), term),
                 None => vec![input],
             };
-            let source = self.operand_alone(input, inst.id);
+            // An edge that carries the merge's own variable copies nothing (adr-decompiler-rewrite, "Merges").
+            let source = match self.operand_alone(input, inst.id) {
+                Some((spelled, attempt)) if self.names_itself(output, &spelled) => {
+                    self.account_copy(inst.id, output, attempt, &CStmt::Expr(spelled));
+                    continue;
+                }
+                source => source,
+            };
             copies.push((inst.id, output, source, reads));
         }
         let mut out = Vec::new();
@@ -2278,26 +2285,11 @@ impl<'a> Values<'a> {
                 out.push(unrendered_copy(to));
                 continue;
             };
-            *self.pending.borrow_mut() = attempt;
-            self.mark(inst);
-            self.residual_in(inst, &CStmt::Expr(source.clone()));
-            self.assigns(output);
+            self.account_copy(inst, output, attempt, &CStmt::Expr(source.clone()));
             match clobbers {
                 false => out.push(self.assign_value(output, *name, source)),
                 true => {
-                    let c = terms::c_type(ty).expect("a named value has a C type");
-                    // The name is read before the table is borrowed to declare the temporary.
-                    let next = format!("{}_next", self.symbols.borrow().name(*name));
-                    let temp =
-                        self.symbols
-                            .borrow_mut()
-                            .declare(next, c.clone(), SymbolRole::Carrier);
-                    self.locals.borrow_mut().push(CLocal {
-                        ty: c,
-                        name: temp,
-                        stack_offset: None,
-                        align: None,
-                    });
+                    let temp = self.next_carrier(*name, ty);
                     out.push(assign(temp, source));
                     staged.push(assign(*name, CExpr::var(temp)));
                 }
@@ -2305,6 +2297,36 @@ impl<'a> Values<'a> {
         }
         out.extend(staged);
         out
+    }
+
+    /// Whether `spelled` is the variable `output` is held in.
+    fn names_itself(&self, output: ValueId, spelled: &CExpr) -> bool {
+        let named = self.names[output.0 as usize].as_ref();
+        named.is_some_and(|(name, _)| *spelled == CExpr::Var(*name))
+    }
+
+    /// The merge `inst` has a copy on this edge: its instruction and what the source absorbed are
+    /// rendered, whether or not `stmt` is written.
+    fn account_copy(&self, inst: InstId, output: ValueId, attempt: Attempt, stmt: &CStmt) {
+        *self.pending.borrow_mut() = attempt;
+        self.mark(inst);
+        self.residual_in(inst, stmt);
+        self.assigns(output);
+    }
+
+    /// A local `<name>_next` of the merge's type, where a cycle of copies goes through.
+    fn next_carrier(&self, name: SymbolId, ty: &MachineType) -> SymbolId {
+        let c = terms::c_type(ty).expect("a named value has a C type");
+        // The name is read before the table is borrowed to declare the temporary.
+        let next = format!("{}_next", self.symbols.borrow().name(name));
+        let temp = (self.symbols.borrow_mut()).declare(next, c.clone(), SymbolRole::Carrier);
+        self.locals.borrow_mut().push(CLocal {
+            ty: c,
+            name: temp,
+            stack_offset: None,
+            align: None,
+        });
+        temp
     }
 
     /// What became of each obligation: rendered where the text discharged its instruction, residual
