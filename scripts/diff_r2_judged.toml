@@ -831,14 +831,6 @@ reason = "a 16-bit BOUND reads two words: radare2 spells the pair's size, r2s th
 [[judged]]
 command = "pd"
 binaries = "*"
-r2 = 'mov e[a-d]x, [c-gs]s$'
-r2s = 'mov [a-d]x, [c-gs]s$'
-verdict = "r2-right"
-reason = "8c /r with a register destination and 32-bit operand size moves the selector zero-extended into the 32-bit register (Intel SDM MOV Sreg); Sleigh names the 16-bit register; owner r2sleigh-lift (ROADMAP LS)"
-
-[[judged]]
-command = "pd"
-binaries = "*"
 r2 = '\b(push|pop)\.w \{'
 r2s = '\b(push|pop) \{'
 verdict = "r2-right"
@@ -1504,6 +1496,28 @@ reason = "SYSCALL reads no RAX: the kernel's convention does; the instruction wr
 [[judged]]
 command = "aoj"
 binaries = "*"
+arch = '^x86-64$'
+fields = ["writes"]
+registers = ["rcx", "r11"]
+lacking = "r2"
+r2s = '^syscall$'
+verdict = "r2s-right"
+reason = "SYSCALL saves the next RIP in RCX and RFLAGS in R11 (Intel SDM Vol. 2B, SYSCALL), as 918acd744d's Sleigh states; radare2's ESIL writes neither"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+fields = ["reads"]
+registers = ["rflags"]
+lacking = "r2"
+r2s = '^syscall$'
+verdict = "r2s-right"
+reason = "SYSCALL copies RFLAGS into R11 (Intel SDM Vol. 2B, SYSCALL); Sleigh reads its `rflags` register without packing the flags into it first (ROADMAP VC, a Ghidra issue owed)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
 arch = '^x86'
 fields = ["writes"]
 registers = ["of"]
@@ -1530,13 +1544,3 @@ lacking = "r2"
 r2s = '^fninit$'
 verdict = "r2s-right"
 reason = "FNINIT resets the x87 control, status and tag words, pointers and condition codes; radare2's ESIL for it states nothing"
-
-[[judged]]
-command = "aoj"
-binaries = "*"
-arch = '^x86$'
-fields = ["writes"]
-registers = ["ax", "eax"]
-r2s = '^mov ax, [cdefgs]s$'
-verdict = "r2-right"
-reason = "as pd: 8c /r with a register destination and 32-bit operand size moves the selector zero-extended into the 32-bit register (Intel SDM MOV Sreg); Sleigh names the 16-bit register; owner r2sleigh-lift (ROADMAP LS)"

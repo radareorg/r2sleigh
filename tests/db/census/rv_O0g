@@ -894,7 +894,10 @@ int32_t main(int32_t argc, char** argv)
     uint64_t rax_17;
     uint32_t tmp_1695_8_1;
     __uint128_t xmm0_7;
-    uint64_t tmp_lane_16ac_0_0_1;
+    uint64_t tmp_lane_16ac_2_0_1;
+    uint8_t tmp_16ac_12_1;
+    double tmp_16ac_1b_1;
+    uint64_t tmp_16ac_13_2;
     uint32_t tmp_16b0_8_1;
     uint64_t rax_21;
     uint32_t tmp_16c0_8_1;
@@ -920,7 +923,7 @@ int32_t main(int32_t argc, char** argv)
     uint32_t tmp_lane_17ac_0_1_1;
     _Alignas(16) uint8_t frame[248];
 
-    /* r2dec proof: 1 construct is marked below; 326 source obligations: 232 rendered, 88 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 1 residual; 71 statements rendered; 1 data object type supplied by the source; 15 callee prototypes supplied by the source */
+    /* r2dec proof: 1 construct is marked below; 337 source obligations: 243 rendered, 88 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 1 residual; 74 statements rendered; 1 data object type supplied by the source; 15 callee prototypes supplied by the source */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)argc);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)argv);
@@ -959,9 +962,12 @@ int32_t main(int32_t argc, char** argv)
         tmp_1695_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_17 >> 0U) + (uint32_t)tmp_1695_8_1));
         xmm0_7 = (__uint128_t)r2sleigh_float_to_bits_64(avg((const double*)(uint64_t)(frame + 160U), 3));
-        tmp_lane_16ac_0_0_1 = (uint64_t)((__uint128_t)xmm0_7 >> 0U);
+        tmp_lane_16ac_2_0_1 = (uint64_t)((__uint128_t)xmm0_7 >> 0U);
+        tmp_16ac_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_16ac_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_16ac_2_0_1) < (double)(int64_t)0x80000000U));
+        tmp_16ac_1b_1 = (double)(int32_t)0U;
+        tmp_16ac_13_2 = tmp_16ac_12_1 ? (uint64_t)tmp_lane_16ac_2_0_1 : (uint64_t)r2sleigh_float_to_bits_64(tmp_16ac_1b_1);
         tmp_16b0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_lane_16ac_0_0_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_16ac_0_0_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_16ac_0_0_1) : r2sleigh_residual_i32(1)) + (uint32_t)tmp_16b0_8_1));
+        r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_16ac_13_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_16ac_13_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_16ac_13_2) : r2sleigh_residual_i32(1)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)tmp_16ac_12_1 ^ (uint32_t)(uint8_t)1U) * (uint32_t)0x80000000U)) + (uint32_t)tmp_16b0_8_1));
         rax_21 = (uint64_t)(uint32_t)fact(5);
         tmp_16c0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_21 >> 0U) + (uint32_t)tmp_16c0_8_1));

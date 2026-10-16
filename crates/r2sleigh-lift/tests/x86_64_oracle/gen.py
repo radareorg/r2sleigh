@@ -66,6 +66,7 @@ NONE = {'mov', 'movzx', 'movsx', 'movsxd', 'xchg', 'not', 'lea', 'bswap', 'cbw',
         'cwd', 'cdq', 'cqo', 'lodsb', 'lodsw', 'lodsd', 'lodsq', 'stosb', 'stosw', 'stosd',
         'stosq', 'movsb', 'movsw', 'movsd', 'movsq', 'addsd', 'subsd', 'mulsd', 'divsd', 'sqrtsd',
         'addss', 'mulss', 'cvtsi2sd', 'cvtsi2ss', 'cvttsd2si', 'cvtsd2si', 'cvtsd2ss',
+        'cvttss2si', 'vcvttsd2si', 'vcvttss2si',
         'cvtss2sd', 'movq', 'movd', 'nop'}
 CONDITIONS = ['o', 'no', 'b', 'nb', 'c', 'nc', 'ae', 'nae', 'e', 'z', 'ne', 'nz', 'be', 'nbe',
               'a', 'na', 's', 'ns', 'p', 'np', 'pe', 'po', 'l', 'nl', 'ge', 'nge', 'le', 'nle',
@@ -116,6 +117,20 @@ def shift(mnemonic, ops, earlier):
     return defined, undefined
 
 
+def double_shift(ops, earlier):
+    """SHLD/SHRD, Flags Affected; the count masked to 5 bits, or 6 at 64."""
+    size = width_of(ops[0])
+    count = count_of([ops[0], ops[2]], earlier) & (0x3f if size == 64 else 0x1f)
+    if count == 0:
+        return set(), set()  # "If the count operand is 0, the flags are not affected."
+    if count > size:
+        return set(), set(ALL)  # "If the count is greater than the operand size, the flags are undefined."
+    # CF the last bit out, SF ZF PF by the result; OF a 1-bit shift's sign change, else undefined;
+    # "If a shift occurs, the AF flag is undefined."
+    over = {'of'} if count == 1 else set()
+    return {'cf', 'sf', 'zf', 'pf'} | over, {'af'} | ({'of'} - over)
+
+
 def undefined(asm, extra):
     """The flags and registers this sequence leaves undefined, the SDM's terms, instruction by instruction."""
     left, earlier = set(), []
@@ -130,6 +145,8 @@ def undefined(asm, extra):
         ops = operands(words[1] if len(words) > 1 else '')
         if mnemonic in ('shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr'):
             defined, undef = shift(mnemonic, ops, earlier)
+        elif mnemonic in ('shld', 'shrd'):
+            defined, undef = double_shift(ops, earlier)
         elif mnemonic == 'cmpsd' and ops:
             defined, undef = set(), set()  # SSE2's CMPSD: "Flags Affected: None."
         elif mnemonic == 'cmpsd':

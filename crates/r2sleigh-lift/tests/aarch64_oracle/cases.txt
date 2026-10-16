@@ -441,3 +441,19 @@ casp_w_eq|P|ldp w0, w1, [x9]; caspa w0, w1, w2, w3, [x9]
 casp_x_eq|P|ldp x0, x1, [x9]; casp x0, x1, x2, x3, [x9]
 fcvtzu_fix_d_full|F|fmov d1, #0.5; fcvtzu d0, d1, #64; fmov x0, d0; fmov d2, #0.75; fcvtzu d3, d2, #63; fmov x3, d3; fmov d4, #1.0; fcvtzu d5, d4, #64; fmov x5, d5
 fcvtzu_fix_h_full|F|fmov h1, #0.5; fcvtzu h0, h1, #16; fmov w0, s0; fmov h2, #1.0; fcvtzu h3, h2, #16; fmov w3, s3; fmov h4, #0.75; fcvtzu h5, h4, #15; fmov w5, s5
+sha1h|F|sha1h s0, s1
+abs_w|-|abs w0, w1
+abs_x|-|abs x0, x1
+cnt_x|-|cnt x0, x1
+ctz_w|-|ctz w0, w1
+ctz_x|-|ctz x0, x1
+smax_x_imm|-|smax x0, x1, #-5
+smin_w_reg|-|smin w0, w1, w2
+umax_w_imm|-|umax w0, w1, #200
+umin_x_reg|-|umin x0, x1, x2
+ldr_x_reg|PI|ldr x0, [x9, x11]
+add_ext_uxtw|-|add x0, x1, w2, uxtw #2
+adds_ext_sxtw|-|adds x0, x1, w2, sxtw
+cnt_w|-|cnt w0, w1
+smax_w_imm|-|smax w0, w1, #-5
+umin_w_reg|-|umin w0, w1, w2

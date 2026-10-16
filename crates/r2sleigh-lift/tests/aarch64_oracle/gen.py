@@ -102,7 +102,7 @@ def EPI(t):
     ldp x29, x30, [sp], #16
     ret
 """
-s=['.arch_extension sha3','.text','.p2align 4']
+s=['.arch_extension sha3','.arch_extension cssc','.text','.p2align 4']
 for i,(name,flags,asm) in enumerate(cases):
     s.append(f'.globl {P}case_{i}\n.p2align 4\n{P}case_{i}:')
     s.append(PRO)

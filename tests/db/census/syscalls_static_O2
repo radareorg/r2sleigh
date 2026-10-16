@@ -23,7 +23,7 @@ uint64_t fcn_401000(void)
 {
     /* r2dec proof: 2 constructs are marked below; 7 source obligations: 0 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401000:13 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401000:15 covering 1 op (render::values) */
         return r2sleigh_residual_u64(2);
     }
 }
@@ -42,7 +42,7 @@ uint64_t fcn_401010(void)
     /* r2dec proof: 2 constructs are marked below; 8 source obligations: 1 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered */
     {
         {
-            r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401019:13 covering 1 op (render::values) */
+            r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401019:15 covering 1 op (render::values) */
             return r2sleigh_residual_u64(2);
         }
     }
@@ -61,7 +61,7 @@ uint64_t fcn_401030(void)
 {
     /* r2dec proof: 2 constructs are marked below; 7 source obligations: 0 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401030:20 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401030:22 covering 1 op (render::values) */
         return r2sleigh_residual_u64(2);
     }
 }
@@ -97,15 +97,15 @@ uint64_t entry0(void)
     uint64_t fcn_401030(void);
     uint64_t fcn_401050(void);
 
-    /* r2dec proof: 6 constructs are marked below; 37 source obligations: 6 rendered, 16 elided, 0 refused, 15 residual; 3 statements rendered */
+    /* r2dec proof: 6 constructs are marked below; 38 source obligations: 6 rendered, 17 elided, 0 refused, 15 residual; 3 statements rendered */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401060:5 covering 1 op (render::values): call to fcn_401000: its arity is only at least 0 (a floor), and this call writes 1 */
-        r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401060:9 covering 1 op (render::values) */
-        r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x401060:20 covering 1 op (render::values): call to fcn_401010: its arity is only at least 0 (a floor), and this call writes 1 */
-        r2sleigh_residual_void(4); /* r2dec gap: EffectNotRendered at 0x401060:24 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401060:6 covering 1 op (render::values): call to fcn_401000: its arity is only at least 0 (a floor), and this call writes 1 */
+        r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401060:11 covering 1 op (render::values) */
+        r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x401060:24 covering 1 op (render::values): call to fcn_401010: its arity is only at least 0 (a floor), and this call writes 1 */
+        r2sleigh_residual_void(4); /* r2dec gap: EffectNotRendered at 0x401060:29 covering 1 op (render::values) */
         fcn_401030();
         fcn_401050();
-        r2sleigh_residual_void(5); /* r2dec gap: UserOperation(syscall) at 0x401060:65 covering 1 op (render::values) */
+        r2sleigh_residual_void(5); /* r2dec gap: UserOperation(syscall) at 0x401060:77 covering 1 op (render::values) */
         return r2sleigh_residual_u64(6);
     }
 }

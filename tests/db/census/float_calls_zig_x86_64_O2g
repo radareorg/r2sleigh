@@ -109,17 +109,27 @@ int32_t main(int32_t argc, char** argv)
     void forward(double, double*);
 
     uint64_t tmp_1001582_8_1;
-    uint64_t tmp_100158f_8_1;
+    uint64_t tmp_100158f_18_1;
+    uint64_t tmp_100158f_18_2;
+    uint8_t tmp_100158f_22_1;
+    uint64_t tmp_100158f_18_3;
+    double tmp_100158f_2b_1;
+    uint64_t tmp_100158f_23_2;
     _Alignas(16) uint8_t frame[40];
 
-    /* r2dec proof: 2 constructs are marked below; 35 source obligations: 14 rendered, 18 elided, 0 refused, 3 residual; 6 statements rendered; 1 held from entry, read as residuals (RAX_0); 2 callee prototypes supplied by the source */
+    /* r2dec proof: 2 constructs are marked below; 50 source obligations: 29 rendered, 18 elided, 0 refused, 3 residual; 11 statements rendered; 1 held from entry, read as residuals (RAX_0); 2 callee prototypes supplied by the source */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)r2sleigh_residual_u64(1));
         call_store((double*)(uint64_t)(frame + 16U));
         tmp_1001582_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
         forward(r2sleigh_float_from_bits_64(tmp_1001582_8_1), (double*)(uint64_t)(frame + 16U));
-        tmp_100158f_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
-        return (int32_t)(r2sleigh_float_from_bits_64(tmp_100158f_8_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_100158f_8_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_100158f_8_1) : r2sleigh_residual_i32(2));
+        tmp_100158f_18_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_100158f_18_2 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_100158f_22_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_100158f_18_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_100158f_18_2) < (double)(int64_t)0x80000000U));
+        tmp_100158f_18_3 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_100158f_2b_1 = (double)(int32_t)0U;
+        tmp_100158f_23_2 = tmp_100158f_22_1 ? (uint64_t)tmp_100158f_18_3 : (uint64_t)r2sleigh_float_to_bits_64(tmp_100158f_2b_1);
+        return (int32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_100158f_23_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_100158f_23_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_100158f_23_2) : r2sleigh_residual_i32(2)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)tmp_100158f_22_1 ^ (uint32_t)(uint8_t)1U) * (uint32_t)0x80000000U));
     }
 }
 

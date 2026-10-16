@@ -187,8 +187,8 @@ pub fn split_odd_register_zeroes(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
     out
 }
 
-/// Read each unique where it was written (gotcha 2), though GP-5581 reads a truncated one in place:
-/// a piece of a live write becomes its `Subpiece`; a straddle refuses; an unwritten read stays.
+/// Read each unique where it was written (gotcha 2), GP-5581's pieces in place: a piece read is its
+/// `Subpiece`, one written is inserted into its holder, a straddle refuses, an unwritten read stays.
 pub fn whole_unique_reads(
     ops: Vec<R2ILOp>,
     big_endian: bool,
@@ -217,11 +217,21 @@ pub fn whole_unique_reads(
             }
         }
         op = take_pieces(op, pieces, &mut out, next_temp);
-        if let Some(output) = op.output().filter(|v| v.space == SpaceId::Unique) {
-            note_write(&mut live, output)?;
+        let mut insert = None;
+        if let Some(output) = op.output().filter(|v| v.space == SpaceId::Unique).cloned() {
+            match holder_of(&live, &output, big_endian) {
+                Ok(Some((holder, shift))) => {
+                    let piece = Varnode::unique(*next_temp, output.size);
+                    *next_temp += u64::from(output.size).max(1);
+                    *op.output_mut().expect("a unique output") = piece.clone();
+                    insert = Some(insert_piece(piece, holder, shift, next_temp));
+                }
+                _ => note_write(&mut live, &output)?,
+            }
         }
         at.push(out.len());
         out.push(op);
+        out.extend(insert.into_iter().flatten());
     }
     starts.push(out.len());
     if out.len() + 1 != starts.len() {
@@ -292,6 +302,53 @@ fn take_pieces(
         }
     }
     op
+}
+
+/// `holder` with its bytes from `shift` replaced by `piece`: a write GP-5581 made to a piece in
+/// place, rebuilt as the holder's bytes above it, the piece and the bytes below it.
+fn insert_piece(piece: Varnode, holder: Varnode, shift: u32, next_temp: &mut u64) -> Vec<R2ILOp> {
+    let mut temp = |size: u32| {
+        let node = Varnode::unique(*next_temp, size);
+        *next_temp += u64::from(size);
+        node
+    };
+    let mut ops = Vec::with_capacity(4);
+    let above = holder.size - shift - piece.size;
+    let mut value = piece;
+    if above > 0 {
+        let high = temp(above);
+        ops.push(R2ILOp::Subpiece {
+            dst: high.clone(),
+            src: holder.clone(),
+            offset: shift + value.size,
+        });
+        let joined = temp(above + value.size);
+        ops.push(R2ILOp::Piece {
+            dst: joined.clone(),
+            hi: high,
+            lo: value,
+        });
+        value = joined;
+    }
+    if shift > 0 {
+        let low = temp(shift);
+        ops.push(R2ILOp::Subpiece {
+            dst: low.clone(),
+            src: holder.clone(),
+            offset: 0,
+        });
+        ops.push(R2ILOp::Piece {
+            dst: holder,
+            hi: value,
+            lo: low,
+        });
+    } else {
+        ops.push(R2ILOp::Copy {
+            dst: holder,
+            src: value,
+        });
+    }
+    ops
 }
 
 /// Record a unique write; one overlapping a live write it does not replace exactly refuses.
@@ -721,6 +778,69 @@ mod tests {
         ));
         assert!(matches!(
             pieces(vec![write(0x80), write(0x82)], false),
+            Err(TranslateError::UniqueStraddles(_))
+        ));
+    }
+
+    /// GP-7027's MOVBE: `dest[8,8] = ..` into a live `dest:4` rebuilds `dest` around the byte.
+    #[test]
+    fn a_piece_written_into_a_write_is_inserted_into_it() {
+        let dest = Varnode::unique(0x80, 4);
+        let writes = vec![
+            R2ILOp::Copy {
+                dst: dest.clone(),
+                src: Varnode::constant(0x1122_3344, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::unique(0x81, 1),
+                src: Varnode::register(0, 1),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(0x20, 4),
+                src: dest.clone(),
+            },
+        ];
+        // Byte 0x81 is one above the low end little-endian, two above it big-endian.
+        for (big_endian, shift) in [(false, 1), (true, 2)] {
+            let ops = pieces(writes.clone(), big_endian).expect("a piece inside one write");
+            let [
+                _,
+                R2ILOp::Copy { dst: piece, .. },
+                R2ILOp::Subpiece {
+                    src: above,
+                    offset: high,
+                    ..
+                },
+                R2ILOp::Piece { lo, .. },
+                R2ILOp::Subpiece {
+                    src: below,
+                    offset: 0,
+                    dst: low,
+                },
+                R2ILOp::Piece {
+                    dst, lo: low_again, ..
+                },
+                R2ILOp::Copy { src: read, .. },
+            ] = ops.as_slice()
+            else {
+                panic!("{ops:?}");
+            };
+            assert_eq!((*high, low.size), (shift + 1, shift));
+            assert_eq!((lo, low_again), (piece, low));
+            assert_eq!((above, below, dst, read), (&dest, &dest, &dest, &dest));
+        }
+        let overlapping = vec![
+            R2ILOp::Copy {
+                dst: dest,
+                src: Varnode::constant(0, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::unique(0x83, 2),
+                src: Varnode::constant(0, 2),
+            },
+        ];
+        assert!(matches!(
+            pieces(overlapping, false),
             Err(TranslateError::UniqueStraddles(_))
         ));
     }

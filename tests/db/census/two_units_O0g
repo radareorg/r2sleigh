@@ -342,11 +342,14 @@ int32_t main(int32_t argc, char** argv)
     uint32_t tmp_1241_8_1;
     uint64_t rax_4;
     __uint128_t xmm0_6;
-    uint64_t tmp_lane_125e_0_0_1;
+    uint64_t tmp_lane_125e_2_0_1;
+    uint8_t tmp_125e_12_1;
+    double tmp_125e_1b_1;
+    uint64_t tmp_125e_13_2;
     uint32_t tmp_lane_1262_6_0_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: 1 construct is marked below; 56 source obligations: 31 rendered, 19 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 1 residual; 11 statements rendered; 2 callee prototypes supplied by the source */
+    /* r2dec proof: 1 construct is marked below; 67 source obligations: 42 rendered, 19 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 1 residual; 14 statements rendered; 2 callee prototypes supplied by the source */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)argc);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)argv);
@@ -356,8 +359,11 @@ int32_t main(int32_t argc, char** argv)
         tmp_1241_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
         rax_4 = (uint64_t)(uint32_t)from_a((int32_t)tmp_1241_8_1);
         xmm0_6 = (__uint128_t)r2sleigh_float_to_bits_64(from_b((const double*)(uint64_t)(frame + 32U), 2));
-        tmp_lane_125e_0_0_1 = (uint64_t)((__uint128_t)xmm0_6 >> 0U);
-        tmp_lane_1262_6_0_1 = (uint32_t)((uint32_t)((uint64_t)rax_4 >> 0U) + (uint32_t)(r2sleigh_float_from_bits_64(tmp_lane_125e_0_0_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_125e_0_0_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_125e_0_0_1) : r2sleigh_residual_i32(1)));
+        tmp_lane_125e_2_0_1 = (uint64_t)((__uint128_t)xmm0_6 >> 0U);
+        tmp_125e_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_125e_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_125e_2_0_1) < (double)(int64_t)0x80000000U));
+        tmp_125e_1b_1 = (double)(int32_t)0U;
+        tmp_125e_13_2 = tmp_125e_12_1 ? (uint64_t)tmp_lane_125e_2_0_1 : (uint64_t)r2sleigh_float_to_bits_64(tmp_125e_1b_1);
+        tmp_lane_1262_6_0_1 = (uint32_t)((uint32_t)((uint64_t)rax_4 >> 0U) + (uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_125e_13_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_125e_13_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_125e_13_2) : r2sleigh_residual_i32(1)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)tmp_125e_12_1 ^ (uint32_t)(uint8_t)1U) * (uint32_t)0x80000000U)));
         {
             return (int32_t)tmp_lane_1262_6_0_1;
         }

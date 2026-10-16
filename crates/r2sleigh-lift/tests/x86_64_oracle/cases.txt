@@ -374,3 +374,14 @@ ucomisd|F|ucomisd xmm0, xmm1
 movq_x_r|F|movq xmm0, rax
 movq_r_x|F|movq rax, xmm1
 movsd_x_x|F|movsd xmm0, xmm1
+shrd_32_1|-|shrd eax, ebx, 1
+shrd_64_1|-|shrd rax, rbx, 1
+shrd_32_5|-|shrd eax, ebx, 5
+shrd_32_cl1|-|mov ecx, 1; shrd eax, ebx, cl
+shrd_64_0|-|shrd rax, rbx, 0
+shld_32_1|-|shld eax, ebx, 1
+shld_64_cl1|-|mov ecx, 1; shld rax, rbx, cl
+cvttss2si_64|F|cvttss2si rax, xmm1
+cvttss2si_32|F|cvttss2si eax, xmm1
+vcvttsd2si_32|F|vcvttsd2si eax, xmm1
+vcvttss2si_64|F|vcvttss2si rax, xmm1

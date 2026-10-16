@@ -480,17 +480,17 @@ uint64_t shape_variadic_local(void)
 
     /* r2dec proof: 12 constructs are marked below; 70 source obligations: 11 rendered, 22 elided, 0 refused, 37 residual; 4 statements rendered; 4 never assigned, read as residuals (RAX_13, RAX_22, RAX_34, RAX_6) */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401515:97 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401515:102 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401515:101 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401515:106 covering 1 op (render::values) */
         rax_7 = r2sleigh_residual_u64(3);
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401515:197 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(5); /* r2dec gap: ValueNotComputed at 0x401515:202 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401515:205 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(5); /* r2dec gap: ValueNotComputed at 0x401515:210 covering 1 op (render::values) */
         rax_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_7 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(6)) - (uint64_t)rax_7);
-        r2sleigh_residual_void(7); /* r2dec gap: CallNotRendered at 0x401515:312 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(8); /* r2dec gap: ValueNotComputed at 0x401515:317 covering 1 op (render::values) */
+        r2sleigh_residual_void(7); /* r2dec gap: CallNotRendered at 0x401515:324 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(8); /* r2dec gap: ValueNotComputed at 0x401515:329 covering 1 op (render::values) */
         rax_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_14 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(9)) - (uint64_t)rax_14);
-        r2sleigh_residual_void(10); /* r2dec gap: CallNotRendered at 0x401515:453 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(11); /* r2dec gap: ValueNotComputed at 0x401515:458 covering 1 op (render::values) */
+        r2sleigh_residual_void(10); /* r2dec gap: CallNotRendered at 0x401515:469 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(11); /* r2dec gap: ValueNotComputed at 0x401515:474 covering 1 op (render::values) */
         return (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_23 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(12)) - (uint64_t)rax_23);
     }
 }

@@ -614,7 +614,7 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
     assert!(
         staged
             .out
-            .contains("8 rendered, 9 elided, 0 refused, 2 residual"),
+            .contains("19 rendered, 9 elided, 0 refused, 2 residual"),
         "{}",
         staged.out
     );

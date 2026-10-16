@@ -893,13 +893,13 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
         "riscv64" | "rv64" | "rv64gc" => {
             let spec = build_arch_spec(
                 sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                sleigh_config::processor_riscv::PSPEC_RV64,
                 "riscv64",
             )
             .map_err(|e| e.to_string())?;
             let disasm = Disassembler::from_sla(
                 sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                sleigh_config::processor_riscv::PSPEC_RV64,
                 "riscv64",
             )
             .map_err(|e| e.to_string())?;
@@ -909,13 +909,13 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
         "riscv32" | "rv32" | "rv32gc" => {
             let spec = build_arch_spec(
                 sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
-                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                sleigh_config::processor_riscv::PSPEC_RV32,
                 "riscv32",
             )
             .map_err(|e| e.to_string())?;
             let disasm = Disassembler::from_sla(
                 sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
-                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                sleigh_config::processor_riscv::PSPEC_RV32,
                 "riscv32",
             )
             .map_err(|e| e.to_string())?;

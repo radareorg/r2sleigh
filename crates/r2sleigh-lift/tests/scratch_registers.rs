@@ -52,7 +52,6 @@ const ARM: &[&str] = &[
     "tmpOV",
     "shift_carry",
     "mult_addr",
-    "ISAModeSwitch",
 ];
 
 #[test]

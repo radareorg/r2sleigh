@@ -162,7 +162,10 @@ uint32_t fcn_10c0(uint64_t arg0, uint64_t* arg1)
     uint64_t rax_9;
     uint64_t rax_10;
     uint64_t rax_12;
-    uint64_t tmp_lane_11a4_0_0_1;
+    uint64_t tmp_lane_11a4_2_0_1;
+    uint8_t tmp_11a4_12_1;
+    double tmp_11a4_1b_1;
+    uint64_t tmp_11a4_13_2;
     uint64_t rbx_3;
     uint64_t rsi_6;
     uint64_t tmp_11c0_8_1;
@@ -178,7 +181,7 @@ uint32_t fcn_10c0(uint64_t arg0, uint64_t* arg1)
     uint32_t tmp_lane_1250_0_1_1;
     _Alignas(16) uint8_t frame[232];
 
-    /* r2dec proof: 5 constructs are marked below; 259 source obligations: 171 rendered, 69 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 14 residual; 42 statements rendered; 2 never assigned, read as residuals (RAX_19, XMM0_4); 1 data object type refused; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
+    /* r2dec proof: 5 constructs are marked below; 270 source obligations: 182 rendered, 69 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 14 residual; 45 statements rendered; 2 never assigned, read as residuals (RAX_19, XMM0_4); 1 data object type refused; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
     /* symbol `main`; C allows that name no other prototype */
     {
         tmp_lane_10d1_0_0_1 = (uint32_t)((uint64_t)arg0 >> 0U);
@@ -204,8 +207,11 @@ uint32_t fcn_10c0(uint64_t arg0, uint64_t* arg1)
         rax_10 = mul_div((uint64_t)(int32_t)((uint64_t)((uint64_t)(int32_t)tmp_lane_10d1_0_0_1 * (uint64_t)100U) >> 0U), 3);
         avg((uint64_t)((uint64_t)(frame + 16U) + (uint64_t)112U), 3);
         rax_12 = fact(5);
-        tmp_lane_11a4_0_0_1 = (uint64_t)((__uint128_t)r2sleigh_residual_u128(1) >> 0U);
-        rbx_3 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)rax_12 >> 0U) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_6 >> 0U) + (uint32_t)((uint64_t)rax_7 >> 0U)) + (uint32_t)((uint64_t)rax_8 >> 0U)) + (uint32_t)((uint64_t)rax_9 >> 0U)) + (uint32_t)((uint64_t)rax_10 >> 0U)) + (uint32_t)(r2sleigh_float_from_bits_64(tmp_lane_11a4_0_0_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_11a4_0_0_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_11a4_0_0_1) : r2sleigh_residual_i32(2))));
+        tmp_lane_11a4_2_0_1 = (uint64_t)((__uint128_t)r2sleigh_residual_u128(1) >> 0U);
+        tmp_11a4_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_11a4_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_11a4_2_0_1) < (double)(int64_t)0x80000000U));
+        tmp_11a4_1b_1 = (double)(int32_t)0U;
+        tmp_11a4_13_2 = tmp_11a4_12_1 ? (uint64_t)tmp_lane_11a4_2_0_1 : (uint64_t)r2sleigh_float_to_bits_64(tmp_11a4_1b_1);
+        rbx_3 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)rax_12 >> 0U) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_6 >> 0U) + (uint32_t)((uint64_t)rax_7 >> 0U)) + (uint32_t)((uint64_t)rax_8 >> 0U)) + (uint32_t)((uint64_t)rax_9 >> 0U)) + (uint32_t)((uint64_t)rax_10 >> 0U)) + (uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_11a4_13_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_11a4_13_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_11a4_13_2) : r2sleigh_residual_i32(2)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)tmp_11a4_12_1 ^ (uint32_t)(uint8_t)1U) * (uint32_t)0x80000000U))));
         fill((uint64_t)(uint32_t)tmp_lane_10d1_0_0_1);
         rsi_6 = r2sleigh_load_u64((void*)&g_msg);
         if ((uint8_t)((int32_t)tmp_lane_10d1_0_0_1 <= (int32_t)1U)) {

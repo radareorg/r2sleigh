@@ -5,18 +5,32 @@ Each is a copy of its 0verflowme fork's `main` (which carries every change
 below as a merged pull request), keeping only the files its own `include`
 list packages; a refresh copies the fork again and re-applies the trims.
 `libsla-sys`'s Ghidra, the compiler `sleigh-compiler` builds against its
-headers, and `sleigh-config`'s AArch64 specifications sit on one Ghidra commit,
+headers, and every `sleigh-config` specification sit on one Ghidra commit,
 master `918acd744d` (2026-10-13): the engine resyncs whenever the
-specifications do (ROADMAP D33). Its x86, ARM, MIPS and RISC-V specifications
-are still Ghidra 11.4's (`aed1cf1c`) with the changes below; their resync is
-owed (ROADMAP VC).
+specifications do (ROADMAP D33).
+
+| Processor | Ghidra | Carried on that text (below) |
+|---|---|---|
+| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; the Go cspec's RDX (fork #2) |
+| ARM | master `918acd744d` | the hidden scratch marks; `ARM.cspec`'s `<returnaddress>` (fork #1) |
+| AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks |
+| MIPS | master `918acd744d` | none |
+| RISCV | master `918acd744d` | none; `languages/old` (the deprecated variants) not vendored |
+
+0verflowme/sleigh-config `ghidra-918-resync` (`028f390`, no pull request yet)
+holds exactly the five processors' vendored text on top of the fork's `main`.
+sleigh-config #4 had ported AArch64's fixed constructors, not its files; the
+rest of 918acd744d's AArch64 text (GP-6448's CSSC, 611201b673's register
+extend, the sha1h rotate, GP-5816, GP-3139's `AARCH64_apple.cspec`) came with
+this resync. AppleSilicon's own compiler is now Apple's variadic convention,
+so the lift runs its decoder under v8A's compilers (`disasm::selection`).
 
 | Crate | Fork `main` | Upstream | Carried by the fork | Vendoring trims |
 |---|---|---|---|---|
 | `libsla` 1.2.0 | 0verflowme/libsla `e97cd24d` | mnemonikr/libsla | user-operation names and the parser-cache reset (mnemonikr/libsla#18, #19); `GhidraSleigh` reads its address spaces once, a space's name is interned, and the p-code emit reads each varnode in place and its space from that list (ROADMAP PF1; #1); the specification's instruction alignment as `Sleigh::instruction_alignment` (audit W25; #3) | the fork's `[patch]` to the other forks; the workspace's `[patch.crates-io]` stands in |
 | `libsla-sys` 0.1.5 | 0verflowme/libsla-sys `0919334f` (Ghidra 0verflowme/ghidra `6763e1ec`, `r2sleigh-sleigh-context` on 11.4's `aed1cf1c`); this tree vendors Ghidra 0verflowme/ghidra `ec9a9312`, `r2sleigh-sleigh-context-12`: PF0 and W2 on master `918acd744d` | mnemonikr/libsla-sys | the same two passthroughs (mnemonikr/libsla-sys#8, #9); `getVarnodeSpace` and `getVarnodeOffset`, which read a varnode where `getAddress` allocated an `Address` (#1); Ghidra's include directory stated as `DEP_SLA_INCLUDE` (#2); Ghidra: `SleighBase` keeps the context fields `buildXrefs` found, `Sleigh` records whether a decode committed context and can mark its cached parses stale, and `clearCache` rebuilds the context only after a commit (ROADMAP PF0; #3); `cc`'s `parallel` feature (audit B1; #4); `getAlignment` passed through as `getAlignmentProxy` (audit W25; #5) | Ghidra's decompiler C++ only, copied in place of the submodule, with `metatype.cc` built since `918acd744d` (`marshal.hh` includes it); built at `opt-level = 3` in dev and release by the root `Cargo.toml`, as the spec compiler's build dependency too (audit B2) |
 | `sleigh-compiler` 2.0.2 | 0verflowme/sleigh-compiler `4e380af4` | mnemonikr/sleigh-compiler | compiles against `DEP_SLA_INCLUDE`, `libsla-sys`'s Ghidra headers, since it links that `libsla` and must see the same class layouts (#1); carried here, fork pull request owed: `slgh_compile.cc` re-ported onto `918acd744d`, the commit those headers are, and `largeTemporaryWarning` gone with GP-6316, which made a temporary over 256 bytes an error | no Ghidra copy of its own: `DEP_SLA_INCLUDE` is required; built at `opt-level = 3` as a build dependency (audit B2) |
-| `sleigh-config` 1.0.1 | 0verflowme/sleigh-config `cd2c2111` | mnemonikr/sleigh-config | each processor's files by name with its `.ldefs` and `.dwarf` (#1); Ghidra's Go compiler specifications corrected to Go's `abi-internal.md` (ROADMAP LP1; #2); AArch64 `addv` zeroes the vector above its byte result (#3); resynced from Ghidra master (918acd744d): `ldpsw`, `ldapr Xt`, `ldar Wt`, `stlrb`/`stlrh`, scalar `fmadd`/`fmsub` and the reductions' zero-fill (#4), `eor3`/`bcax`/`rax1`/`xar` (GP-7313; #10); W-form sign-extending loads (#5, the shape of Ghidra #6471 and #6447); W/H/B atomics, CAS, `ldapr`, `ldlar` and `swp` write the whole register and min/max compare at the access size (#6, Ghidra #9893); `mrs`/`msr nzcv` and `crc32`'s polynomial (#7, Ghidra #9895, #9896); `stlxp` at +8 (#8, Ghidra #9894); scalar FP rounding (#9, Ghidra #9897); specifications and tables `static` (audit B3; #11); one `sla-<stem>` feature per `.slaspec` beside the processor features (audit B4; #12); AArch64 `casp` X form compares and stores Xs and Xt at `[Xn]` in either byte order (#13, Ghidra #9900); every AArch64 load-exclusive marks the monitor with `SetExclusiveMonitors` (audit M2; #14); every acquire and release stated on the side it orders (`LoadAcquire`, `LoadAcquirePC`, `StoreRelease`), where Ghidra marked only the LSE forms, with LDLAR's LORegion names and on the wrong side (#15) | only the x86, ARM, AARCH64, MIPS and RISCV processors, and only their `sla-<stem>` features (no processor feature), so the engine's 8 languages are the ones compiled (`ARM8_be` added for BE32 ARM, audit W26) |
+| `sleigh-config` 1.0.1 | 0verflowme/sleigh-config `cd2c2111` | mnemonikr/sleigh-config | each processor's files by name with its `.ldefs` and `.dwarf` (#1); Ghidra's Go compiler specifications corrected to Go's `abi-internal.md` (ROADMAP LP1; #2); AArch64 `addv` zeroes the vector above its byte result (#3); resynced from Ghidra master (918acd744d): `ldpsw`, `ldapr Xt`, `ldar Wt`, `stlrb`/`stlrh`, scalar `fmadd`/`fmsub` and the reductions' zero-fill (#4), `eor3`/`bcax`/`rax1`/`xar` (GP-7313; #10); W-form sign-extending loads (#5, the shape of Ghidra #6471 and #6447); W/H/B atomics, CAS, `ldapr`, `ldlar` and `swp` write the whole register and min/max compare at the access size (#6, Ghidra #9893); `mrs`/`msr nzcv` and `crc32`'s polynomial (#7, Ghidra #9895, #9896); `stlxp` at +8 (#8, Ghidra #9894); scalar FP rounding (#9, Ghidra #9897); specifications and tables `static` (audit B3; #11); one `sla-<stem>` feature per `.slaspec` beside the processor features (audit B4; #12); AArch64 `casp` X form compares and stores Xs and Xt at `[Xn]` in either byte order (#13, Ghidra #9900); every AArch64 load-exclusive marks the monitor with `SetExclusiveMonitors` (audit M2; #14); every acquire and release stated on the side it orders (`LoadAcquire`, `LoadAcquirePC`, `StoreRelease`), where Ghidra marked only the LSE forms, with LDLAR's LORegion names and on the wrong side (#15) | only the x86, ARM, AARCH64, MIPS and RISCV processors (RISCV without `languages/old`), and only their `sla-<stem>` features (no processor feature), so the engine's 8 languages are the ones compiled (`ARM8_be` added for BE32 ARM, audit W26) |
 
 Carried in this tree, not yet in the fork (sleigh-config #16 and #17): AArch64's unsigned scalar
 `fcvt{a,m,n,p,z}u` into W and X and the scalar fixed-point `fcvtzu` into H, S
@@ -31,25 +45,32 @@ negative through `int2float`), and H scales in float32 (2^16 is past float16's
 range): `fcvtzu d0, d1, #64` of 0.5 gives 0x8000000000000000, `fcvtzu h0, h1, #16`
 0x8000.
 
-Carried in this tree, not yet in the fork (a sleigh-config pull request owed): a
-32-bit register destination zero-extends into its 64-bit register in 64-bit mode
-(Intel SDM Vol. 1, 3.4.1.1). Ghidra's GP-7027 (`1735e73f4e`, in `918acd744d`)
-states it with `check_*_dest`, ported onto 11.4's text for `lodsd`, `lsl`, `mov`
-from a control or debug register, `movbe`, `movmskpd`/`movmskps`, MMX `pextrw`,
-`pcmpestri`, `xadd m32` and `cmpxchg8b` (`lockable.sinc`), `rdrand`/`rdseed`,
-`kmovw`/`kmovb`/`kmovd`, and the VEX and EVEX `vcvt*2*si`, `vmovd`,
-`vmovmskpd`/`vmovmskps` and `vpextrd` (`crates/r2sleigh-lift/tests/zero_extension.rs`).
-`rdrand` widens its r/m register, where GP-7027 widens the reg field's (a Ghidra
-issue owed). GP-7027's other changes wait for the x86 resync: `movbe` written
-out byte by byte, which the lift refuses as a temporary assembled from byte
-writes, `maskmovdqu`'s store, and the VEX `pcmp?str?` results.
+A 32-bit register destination zero-extends into its 64-bit register in 64-bit
+mode (Intel SDM Vol. 1, 3.4.1.1): Ghidra's GP-7027 (`1735e73f4e`) states it
+with `check_*_dest`, and 918acd744d's text is taken whole, MOVBE written byte by
+byte, MASKMOVDQU's store and the VEX `pcmp?str?` results included
+(`crates/r2sleigh-lift/tests/zero_extension.rs`). The lift inserts a piece
+Sleigh writes into a live temporary (MOVBE's bytes, GP-6061's VPADD lanes),
+where it refused one (`translate::whole_unique_reads`). Carried in this tree,
+not yet in the fork or in Ghidra (sleigh-config pull requests and Ghidra issues
+owed): `RDRAND r32` widens its r/m register, where GP-7027 widens the reg
+field's (`rdrand ecx` cleared RSI); GP-6767's `shrflags` and `shrdflags`
+write OF at a count of one and keep it at zero (SDM Vol. 2B, SAL/SAR/SHL/SHR
+and SHRD), where its arms were swapped; CVTTSD2SI and CVTTSS2SI, legacy and
+VEX, give the integer indefinite for NaN or a value out of range (SDM Vol. 2A),
+where Ghidra wrote a bare `trunc`, and VEX's r32 forms zero-extend
+(`crates/r2sleigh-lift/tests/truncating_conversion.rs`, the x86-64 oracle);
+VEX `VPEXTRW reg, xmm, imm8` (0F3A 15) writes its ModRM r/m register, where
+GP-7017 wrote the reg field's (`vpextrw ecx, xmm0, 1` wrote EAX); AArch64
+CSSC's W forms (`abs`, `cnt`, `smax`, `smin`, `umax`, `umin`) write X
+zero-extended, as GP-6448's own `ctz` does (the AArch64 oracle).
 
 Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
-request and a Ghidra issue owed; master still says `# AF not implemented`): x86's
+request and a Ghidra issue owed; 918acd744d still says `# AF not implemented`): x86's
 arithmetic sets AF, the carry or borrow out of bit 3 (Intel SDM Vol. 1,
 3.4.3.1), in `addflags`, `subflags`, `addCarryFlags`, `subCarryFlags`,
 `negflags` and the new `incflags` and `decflags`, so ADD, ADC, SUB, SBB, CMP,
-CMPS, SCAS, INC, DEC, NEG, XADD and CMPXCHG state it (`ia.sinc`,
+CMPS, SCAS, INC, DEC, NEG, XADD, CMPXCHG and GP-5780's CMPccXADD state it (`ia.sinc`,
 `lockable.sinc`; `crates/r2sleigh-lift/tests/adjust_flag.rs`). It stays
 unwritten where the SDM leaves it undefined: the logical operations, shifts and
 rotates, multiplies, AAM and AAD.
@@ -58,8 +79,8 @@ Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
 request owed; Ghidra master's ARM and AArch64 pspecs mark nothing hidden): the
 ARM and AArch64 processor specs mark Sleigh's scratch registers
 `hidden="true"`, as x86's marks `xmmTmp1`: ARM's `tmpNG`, `tmpZR`, `tmpCY`,
-`tmpOV`, `shift_carry`, `mult_addr`, `mult_dat8`, `mult_dat16` and
-`ISAModeSwitch` in all six ARM pspecs, and AArch64's `shift_carry`, the four
+`tmpOV`, `shift_carry`, `mult_addr`, `mult_dat8` and `mult_dat16` in all six
+ARM pspecs (918acd744d deletes `ISAModeSwitch` and writes TB directly), and AArch64's `shift_carry`, the four
 `tmp` flags, `glob_mask32`/`glob_mask64`, `VecMemAddr`, `VectorSelem`,
 `VecRegAddr`, `tmp_ldWn`/`tmp_ldXn`/`tmp_stWn`/`tmp_stXn` and `TMPZ1`..`TMPZ6`
 with their Q, D and S views. None carries a value between instructions: once

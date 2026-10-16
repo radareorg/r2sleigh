@@ -138,7 +138,7 @@ il:
     3: STORE [ram]mult_addr = r4
     4: mult_addr = mult_addr - 0x4:4
     5: sp = mult_addr + 0x4:4
-[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x0[4] = LOAD [ram]r12","uniq:0x4[4] = uniq:0x0[4] & 0x1:4","ISAModeSwitch = uniq:0x4[4] != 0x0:4","TB = COPY ISAModeSwitch","pc = uniq:0x0[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","tb","pc"]}]
+[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x0[4] = LOAD [ram]r12","uniq:0x4[4] = uniq:0x0[4] & 0x1:4","TB = uniq:0x4[4] != 0x0:4","pc = uniq:0x0[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","tb","pc"]}]
 EOF
 RUN
 
@@ -185,7 +185,6 @@ il:
     3: UNIMPLEMENTED
     4: UNIMPLEMENTED
     5: UNIMPLEMENTED
-    6: UNIMPLEMENTED
 EOF
 RUN
 
