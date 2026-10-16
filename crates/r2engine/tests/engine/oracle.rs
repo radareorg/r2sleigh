@@ -1320,7 +1320,16 @@ fn verdict<M: Mapped>(
     let ran = after.ran;
     let held = match claim.kind {
         AnnotationKind::Target { address, call } => {
-            let (to, _) = ran.direct.filter(|(_, called)| *called == call)?;
+            // A dispatch is no direct transfer: its arms are ruled by where the run went.
+            let to = match (ran.direct, ran.flow) {
+                (Some((to, called)), _) if called == call => to,
+                (None, Flow::Transfer(transfer))
+                    if !call && transfer.kind == TransferKind::Jump =>
+                {
+                    transfer.to
+                }
+                _ => return None,
+            };
             match (to == address, targets.contains(&(claim.listing, to, call))) {
                 (true, _) => Ok(()),
                 // Another target the line claims: this one was not the one taken.

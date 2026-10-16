@@ -178,27 +178,27 @@ EXPECT=<<EOF
             0x0040197e      3e42ff24c5..   jmp qword ds:[0x402020 + r8*0x8] ; switch table (8 cases) at 0x402020 (solved)
             ;-- case 7:                                                ; from 0x0040197e
             0x00401990      410fb67a06     movzx edi, byte [r10 + 0x6]
-            0x00401995      48c1e730       shl rdi, 0x30
+            0x00401995      48c1e730       shl rdi, 0x30 ; defines rdi in [0x0, 0xff000000000000] (solved)
             0x00401999      4809fe         or rsi, rdi
             ;-- case 6:                                                ; from 0x0040197e
             0x0040199c      410fb67a05     movzx edi, byte [r10 + 0x5]
-            0x004019a1      48c1e728       shl rdi, 0x28
+            0x004019a1      48c1e728       shl rdi, 0x28 ; defines rdi in [0x0, 0xff0000000000] (solved)
             0x004019a5      4809fe         or rsi, rdi
             ;-- case 5:                                                ; from 0x0040197e
             0x004019a8      410fb67a04     movzx edi, byte [r10 + 0x4]
-            0x004019ad      48c1e720       shl rdi, 0x20
+            0x004019ad      48c1e720       shl rdi, 0x20 ; defines rdi in [0x0, 0xff00000000] (solved)
             0x004019b1      4809fe         or rsi, rdi
             ;-- case 4:                                                ; from 0x0040197e
             0x004019b4      410fb67a03     movzx edi, byte [r10 + 0x3]
-            0x004019b9      48c1e718       shl rdi, 0x18
+            0x004019b9      48c1e718       shl rdi, 0x18 ; defines rdi in [0x0, 0xff000000] (solved)
             0x004019bd      4809fe         or rsi, rdi
             ;-- case 3:                                                ; from 0x0040197e
             0x004019c0      410fb67a02     movzx edi, byte [r10 + 0x2]
-            0x004019c5      48c1e710       shl rdi, 0x10
+            0x004019c5      48c1e710       shl rdi, 0x10 ; defines rdi in [0x0, 0xff0000] (solved)
             0x004019c9      4809fe         or rsi, rdi
             ;-- case 2:                                                ; from 0x0040197e
             0x004019cc      410fb67a01     movzx edi, byte [r10 + 0x1]
-            0x004019d1      48c1e708       shl rdi, 0x8
+            0x004019d1      48c1e708       shl rdi, 0x8 ; defines rdi in [0x0, 0xff00] (solved)
             0x004019d5      4809fe         or rsi, rdi
             ;-- case 1:                                                ; from 0x0040197e
             0x004019d8      410fb63a       movzx edi, byte [r10]

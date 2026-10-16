@@ -167,6 +167,12 @@ impl Prepared {
         self
     }
 
+    /// The def-use graph of the function as it stands: none of the passes sealing runs, and none of
+    /// the facts it derives. `O(n)`.
+    pub(crate) fn def_use_graph(&self) -> SsaGraph {
+        SsaGraph::from_function_with_storage(&self.ir)
+    }
+
     /// The prep facts of a function that is analysed here and never sealed:
     /// interface recovery reads them off the provisional function it
     /// recovers from.

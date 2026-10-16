@@ -1,7 +1,6 @@
 //! What the program's calls to a function read of its result registers (doc/adr-resolved-bodies.md,
-//! "Caller reads"): each caller is lifted, never prepared, so no answer waits on its own function.
+//! "Caller reads"): each caller is read as `Walked` holds it, so no answer waits on its own function.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use r2abi::statement::{Binding, EntryKind, Format, SectionRole, SourceLanguage, Symbol};
@@ -22,7 +21,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
     const NAME: &'static str = "result-reads";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one lift per caller discovery found, each read from each call the walk found to `callee`
+    /// Work: one walk per caller discovery found, each read from each call the walk found to `callee`
     /// to its block's end.
     fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Self::Value {
         let survey = db.get::<SurveyQuery>(&()).ok()?;
@@ -44,12 +43,16 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
                 unread = true;
                 continue;
             };
-            let Ok(body) = crate::body::lift_body(caller, target.disasm, &view, &BTreeMap::new())
-            else {
+            // The caller's body is the one `pdf` and the reference index read, its dispatches followed.
+            let Ok(walking) = db.get::<super::analysis::Walked>(&(caller, thumb)) else {
                 unread = true;
                 continue;
             };
-            let calls = body.blocks.iter().flat_map(|block| {
+            let Ok(walk) = &walking.0 else {
+                unread = true;
+                continue;
+            };
+            let calls = walk.body().blocks.iter().flat_map(|block| {
                 (block.transfers.iter())
                     .filter(|transfer| {
                         transfer.target == callee

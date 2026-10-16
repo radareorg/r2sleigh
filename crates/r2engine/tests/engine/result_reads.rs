@@ -682,6 +682,60 @@ fn a_result_no_call_reads_is_void_in_a_closed_world() {
     assert!(before.contains("return r2sleigh_residual_"), "{before}");
 }
 
+/// `f` as in `CLOSED`, then `caller`: `call f` (its result overwritten at once), a guard, and a
+/// dispatch whose first arm is `call f; mov [rsi], eax; ret`, which reads EAX as the call left it.
+const ARM_READ: &[u8] = &{
+    let mut code = [0xcc_u8; 0x90];
+    let runs: [(usize, &[u8]); 7] = [
+        (
+            0x00,
+            &[0x66, 0x0f, 0xef, 0xc0, 0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3],
+        ),
+        (0x10, &[0xe8, 0xeb, 0xff, 0xff, 0xff, 0x48, 0x31, 0xc0]),
+        (
+            0x18,
+            &[0x66, 0x0f, 0xef, 0xc0, 0x83, 0xff, 0x01, 0x77, 0x3f],
+        ),
+        (
+            0x21,
+            &[0x89, 0xff, 0xff, 0x24, 0xfd, 0x80, 0x10, 0x00, 0x00],
+        ),
+        (
+            0x2a,
+            &[0xe8, 0xd1, 0xff, 0xff, 0xff, 0x89, 0x06, 0xc3, 0xc3],
+        ),
+        (0x60, &[0xc3]),
+        (
+            0x80,
+            &[0x2a, 0x10, 0, 0, 0, 0, 0, 0, 0x32, 0x10, 0, 0, 0, 0, 0, 0],
+        ),
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            code[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    code
+};
+
+/// A call inside a dispatch's arm is a call the program makes: its read decides the result, as one
+/// outside it would. The caller's body is the one `pdf` lists, not the walk that follows no table.
+#[test]
+fn a_call_in_a_switch_arm_reads_the_result_as_any_call_does() {
+    let program = Literal::of_code(
+        ARM_READ,
+        &[("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x52)],
+    );
+    let text = rendered(program);
+    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
 /// Another way into `f` is a reader the calls do not show: the result stays a residual.
 #[test]
 fn a_result_another_way_in_may_read_stays_a_residual() {

@@ -474,3 +474,25 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
   with each callee resolved alone, through the same `resolved_alone`.
 - SM2 (2026-10-15): a first seal no second preparation reads is never collected; discovery's
   handed functions and the dispatch tables read the convention's seal.
+- Q/FS reference index (2026-10-16): `ReferenceIndex` reads `Walked` for every function the survey
+  walked, so `ax`, `axt`, `pdf`, `afb`, `pdil` and `ResultReads` read one body, a followed
+  dispatch's arms included. `Walk::lifted` puts a dispatch's cases on its block as `SwitchInfo`, the one
+  carrier: the walked def-use reaches the arms (without it they were unreachable blocks, the graph did not
+  build, and 21 libc, 13 0pack and 77 pumasim bodies went unread), and the annotation pass claims one `Target`
+  per arm at the dispatch line (`Basis::Solved`), for the listing and the index alike. A walk whose tables
+  could not be read keeps the walk that follows none and says why (`Walk::refusal`); the analyses take
+  `Walking::resolved`, the listing and the index take the body. The survey's discovery walk is the one other
+  plain walk: `Walked` reads the returns it deposits, so it cannot read `Walked`.
+  The def-use graph the claims ask is the validated function's, without the seal (`Prepared::def_use_graph`).
+  A computed address is left in a register the instruction's operands name, so x87's instruction pointer is
+  no reference.
+  Cost (`ax`, instructions): O(ops) per function plus the convention seal a function with an unresolved indirect
+  branch pays to read its tables, cut to the blocks that reach the branch (`Walked::reaching_unresolved`, a
+  value at a dispatch is built from the paths that arrive at it): libc-2.31 11.8 of the 12.9 extra G before the
+  cut and 8.2 after (about 480 unresolved indirect transfers walked, 97 dispatches solved); the arms add 7 to 17%
+  more code to claim. Without table reading the index is below the old one, which sealed a graph for every
+  claim (libc 57.6 to 49.8 G); with it, pumasim +2.5%, 0pack +0.3%, libc +16%, peak RSS pumasim +6%.
+  `ResultReads` reads the same body at no measured cost (`aa; pdd` on five census functions, +/-0.5%). The
+  survey and `ResultReads`' caller list still miss a
+  call made only inside an arm, so the closed world refuses that callee, soundly, until the survey reads
+  tables (D6).

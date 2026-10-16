@@ -127,7 +127,7 @@ fn body_summary<S: Source + 'static>(
 ) -> Result<r2ssa::PreparedCalleeSummary, crate::native::Unreadable> {
     let walked = view.db.get::<super::analysis::Walked>(&key);
     let walked = walked.expect("a walk asks for no pointer parameters");
-    match &walked.0 {
+    match walked.resolved() {
         Ok(walked) => crate::native::callee_summary(target, view, address, walked),
         Err(refusal) if refusal.stopped() => Err(crate::native::Unreadable::Stopped),
         Err(_) => Err(crate::native::Unreadable::NotWalked),

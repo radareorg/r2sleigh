@@ -1,6 +1,6 @@
 //! The reverse-reference index, and the scope it was built over.
 //!
-//! An index built from the bodies discovery walked says nothing about code no
+//! An index built from the bodies the walk resolved says nothing about code no
 //! walk reached: what lies behind an indirect branch it could not follow, or a
 //! body it could not walk at all. So the facts never travel without that
 //! scope, and an address missing from them is absent within it, not absent.
@@ -15,7 +15,7 @@ use super::Line;
 use crate::native::NativeRefusal;
 use r2source::confidence::Basis;
 
-/// Every reference the walked bodies make, and what the walks covered.
+/// Every reference the resolved bodies make (`Walked`, as `pdf` lists them), and what the walks covered.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct References {
     /// By source, then target and role, each with the smallest support any listing of it gave.

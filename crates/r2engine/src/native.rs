@@ -346,15 +346,10 @@ impl std::error::Error for NativeRefusal {}
 /// Before SSA, before any analysis: what the specification says the bytes
 /// mean. A defect the medium tier shows is either already here or belongs to
 /// the construction between them.
-pub fn lifted(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Result<String, NativeRefusal> {
-    let body = crate::body::lift_body(entry, target.disasm, program, &BTreeMap::new())
-        .map_err(NativeRefusal::Body)?;
+pub fn lifted(target: &NativeTarget<'_>, walk: &Walk) -> String {
+    let body = walk.body();
     let names = register_spellings(target.arch);
-    let mut out = format!("Entry: {entry:#x}\nBlocks: {}\n", body.blocks.len());
+    let mut out = format!("Entry: {:#x}\nBlocks: {}\n", body.entry, body.blocks.len());
     for block in &body.blocks {
         out.push_str(&format!(
             "\nBlock {:#x} ({} bytes, {} ops)\n",
@@ -378,7 +373,7 @@ pub fn lifted(
             stop.addr, stop.reason
         ));
     }
-    Ok(out)
+    out
 }
 
 /// Operations as the low tier prints them: each register by its name, each user operation by its own.
@@ -506,9 +501,25 @@ pub struct Walk {
     /// Shared with each analysis of the body; the tables stay the walk's.
     root: std::sync::Arc<Walked>,
     tables: Vec<NativePointerTable>,
+    /// Why the tables of a body that has dispatches were not read: the body is then the walk that follows none.
+    refusal: Option<NativeRefusal>,
 }
 
 impl Walk {
+    /// A body whose dispatch tables could not be read, and why.
+    fn unread(root: Walked, refusal: NativeRefusal) -> Self {
+        Self {
+            root: std::sync::Arc::new(root),
+            tables: Vec::new(),
+            refusal: Some(refusal),
+        }
+    }
+
+    /// Why this body's dispatch tables were not read, where they were not.
+    pub const fn refusal(&self) -> Option<&NativeRefusal> {
+        self.refusal.as_ref()
+    }
+
     /// The walked body, dispatches followed.
     pub fn body(&self) -> &crate::body::Body {
         &self.root.body
@@ -519,11 +530,30 @@ impl Walk {
         reached(&self.root.body, program)
     }
 
-    /// The lift of each block of the body, dispatches followed.
+    /// The lift of each block of the body, dispatches followed: a dispatch's block carries the cases
+    /// its table read, so the graph built over the blocks reaches every arm.
     pub fn lifted(&self) -> Vec<r2il::R2ILBlock> {
-        (self.root.body.blocks.iter())
+        let mut blocks = (self.root.body.blocks.iter())
             .map(|block| block.lifted.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        // The body's blocks are in address order, so each table finds its block by search.
+        for table in &self.tables {
+            let after = blocks.partition_point(|block| block.addr <= table.instruction);
+            let Some(block) = after.checked_sub(1).map(|at| &mut blocks[at]) else {
+                continue;
+            };
+            if table.instruction - block.addr < u64::from(block.size) {
+                let cases = (table.cases.iter())
+                    .map(|&(value, target)| r2il::SwitchCase { value, target })
+                    .collect();
+                block.switch_info = Some(r2il::SwitchInfo {
+                    switch_addr: table.instruction,
+                    default_target: None,
+                    cases,
+                });
+            }
+        }
+        blocks
     }
 }
 
@@ -550,6 +580,7 @@ pub fn walk(
         return Ok(Walk {
             root: std::sync::Arc::new(root),
             tables: Vec::new(),
+            refusal: None,
         });
     }
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
@@ -566,16 +597,33 @@ pub fn walk(
         false => Restatement::default(),
         true => declared,
     };
-    let reads = native.dispatch_reads(&root, &imports, restatement)?;
+    // A refused read leaves the walk that follows no table, and says why: the listing and the index still read it.
+    let read = crate::isolation::isolated(|| native.dispatch_reads(&root, &imports, restatement));
+    let reads = match read {
+        Ok(Ok(reads)) => reads,
+        Ok(Err(refusal)) => return Ok(Walk::unread(root, refusal)),
+        Err(panicked) => return Ok(Walk::unread(root, panicked.into())),
+    };
     let tables = native.pointer_tables(&reads);
     if tables.is_empty() {
         let root = std::sync::Arc::new(root);
-        return Ok(Walk { root, tables });
+        return Ok(Walk {
+            root,
+            tables,
+            refusal: None,
+        });
     }
     let dispatched = tables.iter();
     let dispatched = dispatched.map(|table| (table.instruction, table.targets.clone()));
-    let root = std::sync::Arc::new(native.walk_dispatched(entry, &dispatched.collect())?);
-    Ok(Walk { root, tables })
+    let again = native.walk_dispatched(entry, &dispatched.collect());
+    match again {
+        Ok(root) => Ok(Walk {
+            root: std::sync::Arc::new(root),
+            tables,
+            refusal: None,
+        }),
+        Err(refusal) => Ok(Walk::unread(root, refusal)),
+    }
 }
 
 /// One function's analysis, before anything is rendered from it.
@@ -1403,6 +1451,63 @@ struct Walked {
     callees: Vec<Callee>,
 }
 
+impl Walked {
+    /// The same walk cut to the blocks an unresolved indirect branch is reachable from: a value there is built
+    /// from the paths that arrive at it, and a kept block's edge to a cut one leaves the function. O(blocks + edges).
+    fn reaching_unresolved(&self) -> Self {
+        let blocks = &self.body.blocks;
+        let block_at = |address: u64| {
+            blocks
+                .binary_search_by_key(&address, |block| block.lifted.addr)
+                .ok()
+        };
+        let held = |address: u64| {
+            let after = blocks.partition_point(|block| block.lifted.addr <= address);
+            after.checked_sub(1)
+        };
+        let edges = (blocks.iter().enumerate()).flat_map(|(from, block)| {
+            (block.successors.iter()).map(move |(_, target)| (from, *target))
+        });
+        let mut preceding = vec![Vec::new(); blocks.len()];
+        for (from, target) in edges {
+            if let Some(to) = block_at(target) {
+                preceding[to].push(from);
+            }
+        }
+        let indirect = self.body.unresolved.iter();
+        let indirect =
+            indirect.filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch);
+        let mut keep = vec![false; blocks.len()];
+        let mut pending = indirect
+            .filter_map(|stop| held(stop.addr))
+            .collect::<Vec<_>>();
+        while let Some(at) = pending.pop() {
+            if !std::mem::replace(&mut keep[at], true) {
+                pending.extend(preceding[at].iter().copied());
+            }
+        }
+        if !keep.contains(&true) {
+            return self.clone();
+        }
+        let kept = (blocks.iter().zip(&keep))
+            .filter(|(_, kept)| **kept)
+            .map(|(block, _)| block.clone())
+            .collect();
+        Self {
+            name: self.name.clone(),
+            body: crate::body::Body {
+                entry: self.body.entry,
+                blocks: kept,
+                calls: self.body.calls.clone(),
+                tail_calls: self.body.tail_calls.clone(),
+                unresolved: self.body.unresolved.clone(),
+                exits: self.body.exits.clone(),
+            },
+            callees: self.callees.clone(),
+        }
+    }
+}
+
 /// One function a body calls.
 #[derive(Clone)]
 struct Callee {
@@ -1835,7 +1940,7 @@ impl Native<'_> {
         callees: &Callees,
         restatement: Restatement,
     ) -> Result<Vec<r2ssa::indirect::DispatchTableRead>, NativeRefusal> {
-        let seal = self.convention_seal(walked, callees, restatement)?;
+        let seal = self.convention_seal(&walked.reaching_unresolved(), callees, restatement)?;
         Ok(seal.dispatch_table_reads())
     }
 

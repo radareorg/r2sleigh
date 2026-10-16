@@ -646,14 +646,8 @@ fn release_undemanded_bytes(
 /// reference index answer it from the same graph.
 pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<SsaGraph> {
     let function = SSAFunction::from_blocks_raw(blocks, arch)?;
-    let machine_context = SourceMachineContext::from_blocks(blocks, arch);
-    let sealed = Lifted::new(function)
-        .validate()
-        .map_err(integrity_refusal)
-        .ok()?
-        .seal(&machine_context)
-        .ok()?;
-    let graph = sealed.graph().clone();
+    let prepared = Lifted::new(function).validate().map_err(integrity_refusal);
+    let graph = prepared.ok()?.def_use_graph();
     (!graph.blocks.is_empty()).then_some(graph)
 }
 

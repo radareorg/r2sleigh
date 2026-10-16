@@ -195,6 +195,117 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
     assert_eq!(text, ["lea rax, [0x1050]", "call rax"]);
 }
 
+/// `pick`: `cmp edi, 3; ja default; mov edi, edi; jmp [rdi*8 + 0x1060]` over four arms (`call one`,
+/// `mov rax, [0x1080]`, `lea rax, [0x1090]; ret`, `jmp one`) and a default; `one` is at 0x1040.
+const ARMS: &[u8] = &{
+    let mut code = [0xcc_u8; 0x98];
+    let runs: [(usize, &[u8]); 10] = [
+        (0x00, &[0x83, 0xff, 0x03, 0x77, 0x23, 0x89, 0xff]),
+        (0x07, &[0xff, 0x24, 0xfd, 0x60, 0x10, 0x00, 0x00]),
+        (0x0e, &[0xe8, 0x2d, 0x00, 0x00, 0x00, 0xc3]),
+        (
+            0x14,
+            &[0x48, 0x8b, 0x04, 0x25, 0x80, 0x10, 0x00, 0x00, 0xc3],
+        ),
+        (0x1e, &[0x48, 0x8d, 0x05, 0x6b, 0x00, 0x00, 0x00, 0xc3]),
+        (0x26, &[0xeb, 0x18]),
+        (0x28, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]),
+        (0x40, &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]),
+        (
+            0x60,
+            &[
+                0x0e, 0x10, 0, 0, 0, 0, 0, 0, // 0x1060 -> 0x100e
+                0x14, 0x10, 0, 0, 0, 0, 0, 0, // 0x1068 -> 0x1014
+                0x1e, 0x10, 0, 0, 0, 0, 0, 0, // 0x1070 -> 0x101e
+                0x26, 0x10, 0, 0, 0, 0, 0, 0, // 0x1078 -> 0x1026
+            ],
+        ),
+        (0x80, &[0x07, 0, 0, 0, 0, 0, 0, 0]), // the word the second arm reads
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            code[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    code
+};
+
+fn arms() -> Literal {
+    Literal::of_code(ARMS, &[("pick", BASE, 0x2e), ("one", BASE + 0x40, 6)])
+}
+
+#[test]
+fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
+    // The arms are reached only through the table, so a walk that follows no table never lists them.
+    let mut program = OpenProgram::of(arms());
+    let index = program.references().expect("the index builds").value;
+    let one = BASE + 0x40;
+    assert_eq!(
+        listed(index.facts()),
+        [
+            // ja default, the guard
+            (BASE + 3, BASE + 0x28, Role::Jump, Basis::Decoded),
+            // jmp [rdi*8 + 0x1060], which reaches each arm the table holds
+            (BASE + 7, BASE + 0xe, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x14, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x1e, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x26, Role::Jump, Basis::Solved),
+            // call one, in the first arm
+            (BASE + 0xe, one, Role::Call, Basis::Decoded),
+            // mov rax, [0x1080], in the second
+            (
+                BASE + 0x14,
+                BASE + 0x80,
+                Role::Read { width: 8 },
+                Basis::Decoded
+            ),
+            // lea rax, [0x1090]; ret, in the third: the address is the result, which only the def-use sees past the ret
+            (BASE + 0x1e, BASE + 0x90, Role::Value, Basis::Certified),
+            // jmp one, the fourth arm's tail call
+            (BASE + 0x26, one, Role::Jump, Basis::Decoded),
+        ]
+    );
+    // The dispatch is solved, so no walk stopped at it.
+    assert!(index.coverage.is_closed(), "{:?}", index.coverage);
+}
+
+#[test]
+fn a_walk_stopped_before_it_read_its_tables_is_indexed_as_far_as_it_went() {
+    let mut program = OpenProgram::of(arms());
+    let cancellation = r2engine::EngineCancellationToken::default();
+    program.begin_request(r2engine::EngineExecutionControl::with_cancellation(
+        cancellation.clone(),
+    ));
+    cancellation.cancel();
+    let index = program.references().expect("the index builds").value;
+    // The walk that follows no table: the guard's jump, and the dispatch left unresolved.
+    assert_eq!(
+        listed(index.facts()),
+        [(BASE + 3, BASE + 0x28, Role::Jump, Basis::Decoded)]
+    );
+    assert!(index.coverage.unread.is_empty(), "{:?}", index.coverage);
+    assert_eq!(index.coverage.indirect_count(), 1);
+    // The stop was the request's, not the program's: asked again, the arms are there.
+    let again = program.references().expect("the index builds").value;
+    assert!(again.facts().len() > index.facts().len());
+    assert!(again.coverage.is_closed(), "{:?}", again.coverage);
+}
+
+/// `fstp st0; ret`: x87 writes its own address to the FPU instruction pointer, which no operand names.
+const X87: &[u8] = &[0xdd, 0xd8, 0xc3];
+
+#[test]
+fn an_address_the_machine_records_in_a_register_no_operand_names_is_no_reference() {
+    let mut program = OpenProgram::of(Literal::of_code(X87, &[("x87", BASE, 3)]));
+    let index = program.references().expect("the index builds").value;
+    assert_eq!(listed(index.facts()), []);
+}
+
 /// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
 const SHARED: &[u8] = &[
     0x85, 0xff, // 0x1000 test edi, edi
@@ -291,6 +402,7 @@ fn the_index_is_what_each_function_listing_claims() {
         Literal::arm_thumb(),
         reading_callee(),
         declared_callee(),
+        arms(),
     ] {
         let mut program = OpenProgram::of(literal);
         let index = program.references().expect("the index builds").value;

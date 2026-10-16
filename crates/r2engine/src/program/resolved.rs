@@ -378,7 +378,7 @@ impl<'m> Cycle<'m> {
         let walked = db
             .get::<Walked>(&self.members[at])
             .expect("a walk asks for no resolution");
-        let reaches = match &walked.0 {
+        let reaches = match walked.resolved() {
             Ok(walk) => walk.reaches(view),
             Err(refusal) if refusal.stopped() => return None,
             Err(_) => Vec::new(),

@@ -57,9 +57,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
         let walk = db
             .get::<Walked>(&(entry, thumb))
             .expect("a walk asks for no analysis");
-        let walk = match &walk.0 {
+        let walk = match walk.resolved() {
             Ok(walk) => walk,
-            Err(refusal) => return Analysis(Err(refusal.clone())),
+            Err(refusal) => return Analysis(Err(refusal)),
         };
         let analysed = crate::isolation::isolated(|| {
             crate::native::analysed_from(&target, &view, (entry, walk), callers)
@@ -108,6 +108,16 @@ impl PartialEq for Walking {
     }
 }
 
+impl Walking {
+    /// The walk where its dispatch tables were read, for the analyses that need them resolved; the
+    /// refusal otherwise. The listing and the index read the body whatever the tables did.
+    pub(super) fn resolved(&self) -> Result<&Arc<crate::native::Walk>, NativeRefusal> {
+        let walk = self.0.as_ref().map_err(Clone::clone)?;
+        walk.refusal()
+            .map_or(Ok(walk), |refusal| Err(refusal.clone()))
+    }
+}
+
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     type Key = (u64, bool);
     type Value = Walking;
@@ -130,7 +140,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     }
 
     fn hold(value: &Walking) -> Hold {
-        match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
+        match value.resolved().is_err_and(|refusal| refusal.stopped()) {
             true => Hold::Stopped,
             false => Hold::Held,
         }
@@ -180,7 +190,7 @@ pub(super) fn callee_read<S: Source + 'static>(
     let walked = db
         .get::<Walked>(&(address, thumb))
         .expect("a walk asks for no callee");
-    match (target, &walked.0) {
+    match (target, walked.resolved()) {
         (_, Err(refusal)) if refusal.stopped() => unread(Unreadable::Stopped),
         (_, Err(_)) => unread(Unreadable::NotWalked),
         (Some(Ok(target)), Ok(walked)) => {

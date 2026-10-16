@@ -23,9 +23,8 @@ use crate::{EngineDecompileResponse, SealedFunctionAnalysis};
 /// carry was refused, where it was.
 pub struct FunctionListing {
     pub lines: Answer<Vec<Line>>,
-    /// Where this is `Some`, the lines are the plain walk's: every block the
-    /// walk reaches without the analysis, claiming only what each line and
-    /// the walked def-use show.
+    /// Where this is `Some`, the lines are the walk's: every block it reaches without the
+    /// analysis, claiming only what each line and the walked def-use show.
     pub refused: Option<AnalysisRefused>,
 }
 
@@ -35,8 +34,8 @@ pub struct FunctionGraph {
     pub entry: u64,
     /// In address order; the entry block is the one starting at `entry`.
     pub blocks: Vec<GraphBlock>,
-    /// As for [`FunctionListing`]: present where the blocks are the plain
-    /// walk's, which follows no dispatch.
+    /// As for [`FunctionListing`]: present where the blocks are the walk's, which follows a
+    /// dispatch only where its table was read.
     pub refused: Option<AnalysisRefused>,
 }
 
@@ -136,12 +135,11 @@ pub enum Callers {
     Read,
 }
 
-/// Why a function's listing carries no analysis, and what the plain walk could not follow.
+/// Why a function's listing carries no analysis, and what its walk could not follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisRefused {
     pub reason: NativeRefusal,
-    /// Each indirect transfer the plain walk stopped at. The analysis is what
-    /// reads a dispatch's table, so what these reach is not listed.
+    /// Each indirect transfer the walk stopped at; what these reach is not listed.
     pub unresolved: Vec<u64>,
 }
 
@@ -317,7 +315,19 @@ impl<S: Source + 'static> OpenProgram<S> {
         let key = (entry, self.view().thumb_at(entry));
         let walking =
             (self.db.get::<super::analysis::Walked>(&key)).map_err(|cycle| format!("{cycle:?}"))?;
-        walking.0.clone().map_err(|refusal| refusal.to_string())
+        walking
+            .resolved()
+            .cloned()
+            .map_err(|refusal| refusal.to_string())
+    }
+
+    /// The body of the function at `entry` for a reader that lists it: dispatches followed where
+    /// their tables were read, the walk that follows none where they were not.
+    fn body_of(&self, entry: u64) -> Result<Arc<crate::native::Walk>, NativeRefusal> {
+        let key = (entry, self.view().thumb_at(entry));
+        let walking = (self.db.get::<super::analysis::Walked>(&key))
+            .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+        walking.0.clone()
     }
 
     /// The analysis, within a request already started.
@@ -366,7 +376,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     }
 
     /// What one function is, read off the sealed analysis every rendering draws from; where the
-    /// analysis refused, what the plain walk shows and the record (ROADMAP D29).
+    /// analysis refused, what the walk shows and the record (ROADMAP D29).
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
         let noreturn = (!self.comes_back(entry)).then(|| self.view().exit_premises(entry));
@@ -397,8 +407,8 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.start_request();
         self.loaded()?;
         self.assembled()?;
-        crate::native::lifted(&self.target(entry)?, self, entry)
-            .map_err(|refusal| refusal.to_string())
+        let walk = self.body_of(entry).map_err(|refusal| refusal.to_string())?;
+        Ok(crate::native::lifted(&self.target(entry)?, &walk))
     }
 
     /// A run of instructions, each carrying what its own run of neighbours
@@ -441,7 +451,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     ///
     /// **The bytes never depend on the analysis succeeding.** Where the
     /// analysis refuses -- or panics, which is a refusal too -- the listing is
-    /// the plain walk and says why, naming each dispatch the walk could not
+    /// the walk `Walked` holds and says why, naming each dispatch it could not
     /// follow. Only a body that cannot be walked at all lists nothing, and
     /// that includes a walk that panics: every step past the tables is inside
     /// an isolation boundary, so no defect in one function's listing unwinds
@@ -453,7 +463,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// One function's control-flow graph: the listing's blocks, each with its
     /// lines and its typed edges. It stands where the analysis refuses, as the
-    /// listing does, and then follows no dispatch.
+    /// listing does, and then follows a dispatch only where its table was read.
     ///
     /// O(body + lines): one walk, which the listing already makes.
     pub fn function_graph(&mut self, entry: u64) -> Result<FunctionGraph, String> {
@@ -524,7 +534,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let refused = reason.to_string();
         isolated(|| self.walked_listing(&target, entry, reason)).unwrap_or_else(|panicked| {
             Err(format!(
-                "nothing is listed at {entry:#x}: the plain walk {panicked}, \
+                "nothing is listed at {entry:#x}: the listing of the walk {panicked}, \
                  after the analysis was refused: {refused}"
             ))
         })
@@ -554,49 +564,54 @@ impl<S: Source + 'static> OpenProgram<S> {
         })
     }
 
-    /// The listing of the plain walk of a function whose analysis was refused.
+    /// The listing of the body of a function whose analysis was refused: the walk `Walked` holds,
+    /// dispatches followed where their tables were read.
     ///
-    /// O(body): one more walk, on the failure path only.
+    /// O(body): its lines, which the analysis would have annotated further.
     fn walked_listing(
         &self,
         target: &crate::native::NativeTarget<'_>,
         entry: u64,
         reason: NativeRefusal,
     ) -> Result<(FunctionListing, Shape), String> {
-        let body = match crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new()) {
-            Ok(body) => body,
+        let walk = match self.body_of(entry) {
+            Ok(walk) => walk,
+            Err(NativeRefusal::Panicked { location, message }) => {
+                let panicked = crate::isolation::Panicked { location, message };
+                return Err(format!(
+                    "nothing is listed at {entry:#x}: the walk {panicked}, after the analysis was refused: {reason}"
+                ));
+            }
             Err(error) => {
-                let reason = NativeRefusal::Body(error);
-                if reason.names_no_function() {
-                    return Err(reason.to_string());
+                if error.names_no_function() {
+                    return Err(error.to_string());
                 }
                 let listing = FunctionListing {
                     lines: Answer::complete(Vec::new()),
                     refused: Some(AnalysisRefused {
-                        reason,
+                        reason: error,
                         unresolved: Vec::new(),
                     }),
                 };
                 return Ok((listing, shape_of(std::iter::empty(), std::iter::empty())));
             }
         };
+        let body = walk.body();
         let unresolved = body
             .unresolved
             .iter()
             .filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
-        // The plain walk reads no table, so it follows no dispatch.
+        let lifted = walk.lifted();
+        let dispatches = lifted
+            .iter()
+            .filter_map(|block| Some(block.switch_info.as_ref()?.switch_addr));
         let blocks = (body.blocks.iter()).map(|block| {
             let successors = block.successors.clone();
             (block.lifted.addr, u64::from(block.lifted.size), successors)
         });
-        let shape = shape_of(blocks, std::iter::empty());
-        let lifted = body
-            .blocks
-            .into_iter()
-            .map(|block| block.lifted)
-            .collect::<Vec<_>>();
+        let shape = shape_of(blocks, dispatches);
         let walked = WalkedBody::new(&lifted, target.arch);
         let answered = Answered {
             body: Some(&walked),
@@ -776,7 +791,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ReferenceIndex {
     }
 }
 
-/// Read every believed body's references.
+/// Read every believed body's references, each from the walk `pdf` and `afb` read.
 fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String> {
     let survey = view.db.get::<SurveyQuery>(&());
     let survey = survey.map_err(|cycle| format!("{cycle:?}"))?;
@@ -790,26 +805,31 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
         return Ok(index.finish(coverage));
     }
     let walker = super::returns::Walking::new(view.clone(), true)?;
-    for (&entry, walked) in walked {
-        // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
-        let lifted = walked.clone().and_then(|thumb| {
-            let target = walker.target(thumb);
-            let body = crate::body::lift_body(entry, target.disasm, view, &BTreeMap::new());
-            body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
-        });
-        let (thumb, body) = match lifted {
-            Ok(lifted) => lifted,
+    for (&entry, thumb) in walked {
+        // The body is the one resolved through its dispatch tables, which `Walked` owns.
+        let walk = match thumb {
+            Ok(thumb) => {
+                let walking = view.db.get::<super::analysis::Walked>(&(entry, *thumb));
+                let walking = walking.map_err(|cycle| format!("{cycle:?}"))?;
+                walking.0.clone().map(|walk| (*thumb, walk))
+            }
+            Err(refusal) => Err(refusal.clone()),
+        };
+        let (thumb, walk) = match walk {
+            Ok(walk) => walk,
             Err(refusal) => {
                 coverage.unread.insert(entry, Unread::Refused(refusal));
                 continue;
             }
         };
-        if !body.unresolved.is_empty() {
-            coverage.unresolved.insert(entry, body.unresolved);
+        if !walk.body().unresolved.is_empty() {
+            coverage
+                .unresolved
+                .insert(entry, walk.body().unresolved.clone());
         }
         let machine = walker.machine(thumb).ok_or("no machine")?;
         let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, body.blocks) {
+        match claimed_by(view, decoder, &walk.lifted()) {
             Ok(lines) => {
                 coverage.read.push(entry);
                 index.read(entry, lines);
@@ -826,13 +846,9 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
 fn claimed_by<S: Source + 'static>(
     view: &View<'_, S>,
     (target, machine): (&crate::native::NativeTarget<'_>, &crate::machine::Machine),
-    blocks: Vec<crate::body::BodyBlock>,
+    lifted: &[r2il::R2ILBlock],
 ) -> Result<Vec<Line>, Unread> {
-    let lifted = blocks
-        .into_iter()
-        .map(|block| block.lifted)
-        .collect::<Vec<_>>();
-    let body = WalkedBody::new(&lifted, target.arch);
+    let body = WalkedBody::new(lifted, target.arch);
     let answered = Answered {
         decoders: &Walked(machine),
         memory: Memory {
@@ -845,7 +861,7 @@ fn claimed_by<S: Source + 'static>(
         holdings: false,
         parameters: Some(view),
     };
-    let lines = listed_by_block(&answered, &lifted).value;
+    let lines = listed_by_block(&answered, lifted).value;
     // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
     if body.failed() {
         return Err(Unread::NoSsa);

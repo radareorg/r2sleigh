@@ -710,6 +710,15 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
     assert!(!unresolved, "{said:?}");
 }
 
+#[test]
+fn the_low_tier_is_the_body_the_listing_lists_arms_included() {
+    let text = OpenProgram::of(table_switch())
+        .lifted(BASE)
+        .expect("it lifts");
+    assert!(text.contains("\nBlock 0x100e "), "{text}");
+    assert!(!text.contains("stopped at"), "{text}");
+}
+
 /// Each dispatch table a function listing reads: where, how many entries, and what the container states of its bytes.
 fn tables_of(lines: &[Line]) -> Vec<(u64, usize, r2engine::native::TableBytes)> {
     lines
@@ -907,10 +916,9 @@ impl Source for Faulting {
 
 #[test]
 fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
-    // The analysis was isolated, and the listing it fell back to walked the
-    // body again outside any boundary: the same defect in the walk then
-    // unwound through the caller, and a shell ended with it. Where not even
-    // the plain walk can be read, nothing is listed and the error says where
+    // The listing it falls back to reads the body the walk holds, and the walk is
+    // isolated: the same defect in it never unwinds through the caller. Where
+    // not even the walk can be read, nothing is listed and the error says where
     // the defect was raised.
     let ret = TWO + 5;
     let mut program = OpenProgram::of(Faulting {
@@ -924,7 +932,7 @@ fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
         ),
         Err(refused) => refused,
     };
-    assert!(refused.contains("the plain walk panicked at "), "{refused}");
+    assert!(refused.contains("the walk panicked at "), "{refused}");
     assert!(refused.contains("listing.rs"), "{refused}");
     let defect = format!("a defect reading {ret:#x}");
     assert!(refused.contains(&defect), "{refused}");

@@ -126,6 +126,23 @@ impl<'a> WalkedBody<'a> {
         }
     }
 
+    /// The distinct targets of the arms the dispatch at this instruction follows, ascending: the cases its block carries.
+    pub fn arms_at(&self, instruction: u64) -> Vec<u64> {
+        let after = self
+            .blocks
+            .partition_point(|block| block.addr <= instruction);
+        let held = after.checked_sub(1);
+        let switch = held.and_then(|at| self.blocks[at].switch_info.as_ref());
+        let switch = switch.filter(|switch| switch.switch_addr == instruction);
+        let mut arms = switch
+            .into_iter()
+            .flat_map(|switch| switch.cases.iter().map(|case| case.target))
+            .collect::<Vec<_>>();
+        arms.sort_unstable();
+        arms.dedup();
+        arms
+    }
+
     /// Where the block holding this address begins: the last block starting at or before it, where it runs past it.
     pub fn block_of(&self, address: u64) -> Option<u64> {
         let after = self.blocks.partition_point(|block| block.addr <= address);
