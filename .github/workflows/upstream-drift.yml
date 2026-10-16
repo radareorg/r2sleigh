@@ -1,0 +1,30 @@
+name: Upstream drift
+
+# How far each pin is behind its upstream, weekly: red once one passes its budget (vendor/README.md,
+# scripts/upstream_drift.py, ROADMAP D39). A scheduled run reads master's pins.
+on:
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-drift
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: Upstream pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: The alarm's own tests
+        run: python3 scripts/test_upstream_drift.py
+      # Exit 1: a pin over its budget or contradicted by the files; 2: a pin that could not be measured.
+      - name: How far each pin is behind
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/upstream_drift.py

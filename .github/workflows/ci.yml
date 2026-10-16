@@ -252,6 +252,7 @@ jobs:
           python3 scripts/test_census.py
           python3 scripts/test_diff_r2.py
           python3 scripts/test_spec_evidence.py
+          python3 scripts/test_upstream_drift.py
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote

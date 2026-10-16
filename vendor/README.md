@@ -7,7 +7,7 @@ list packages; a refresh copies the fork again and re-applies the trims.
 `libsla-sys`'s Ghidra, the compiler `sleigh-compiler` builds against its
 headers, and every `sleigh-config` specification sit on one Ghidra commit,
 master `918acd744d` (2026-10-13): the engine resyncs whenever the
-specifications do (ROADMAP D33).
+specifications do (ROADMAP D33). Each pin is in the table under Upstream pins.
 
 | Processor | Ghidra | Carried on that text (below) |
 |---|---|---|
@@ -143,3 +143,34 @@ owed.
 
 Licences: Apache-2.0 (each crate's `LICENSE`), with Ghidra's `NOTICE`,
 `DISCLAIMER.md` and `licenses/` kept beside its sources.
+
+## Upstream pins
+
+`scripts/upstream_drift.py` reads this table. A row is the Ghidra commit the files it covers were
+taken from, the fork's local changes aside: the base is `libsla-sys`'s decompiler C++ (the headers
+`sleigh-compiler` builds against too), a processor is its `data/languages`. A resync changes the row.
+`TESTBINS_REF` (`.github/workflows/ci.yml`) and the radare2 release (`scripts/diff_r2_judged.toml`)
+are pinned where they are used.
+
+| Pin | Commit |
+|---|---|
+| Ghidra base | `918acd744d` |
+| AARCH64 | `918acd744d` |
+| ARM | `918acd744d` |
+| MIPS | `918acd744d` |
+| RISCV | `918acd744d` |
+| x86 | `918acd744d` |
+
+## Drift budget
+
+A pin's drift is the age in days of the oldest upstream change it lacks (for a Ghidra pin, a commit
+that changes its paths; for `TESTBINS_REF` any commit; for radare2 a published release), 0 when it
+lacks none. The weekly `upstream-drift` job fails once a pin passes its budget, or when a vendored
+file is another upstream version than its row claims. The budget is a resync, not a waiver
+(ROADMAP D33, D39); a pin over it stays red until it moves.
+
+| Pin family | Days |
+|---|---|
+| ghidra | 90 |
+| testbins | 180 |
+| judged-release | 90 |

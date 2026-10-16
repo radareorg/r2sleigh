@@ -181,6 +181,35 @@ r2engine reads it.
   and fails past a stated budget.
 - The budget is a resync, not a waiver: D33 says the engine moves with the
   specifications.
+- Measure (`scripts/upstream_drift.py`): a pin's drift is the age in days of
+  the oldest upstream change it lacks, 0 when it lacks none. A Ghidra pin lacks
+  the commits of the default branch after it that change the paths its copy
+  vendors (the base: `libsla-sys`'s decompiler `cpp` and `zlib`; a processor: its
+  `data/languages`), counted by `git log` over a blobless clone (38 MB, about 4 s;
+  trees, no contents), so the count is exact. `TESTBINS_REF` lacks any commit;
+  the radare2 judgment lacks the releases published after it. Each pin lives where
+  it is used (`vendor/README.md`'s table, `ci.yml`, `diff_r2_judged.toml`) and the
+  alarm only reads it.
+- A pin is a claim, so the alarm checks it: a vendored file that differs from the
+  pin's and equals another upstream version of that file (read from the raw log,
+  no blob fetched) refutes the claim, and a file that equals none is the fork's
+  own change. A README pin missing a vendored processor, a pin that is no commit
+  of the branch, or an unreachable remote is exit 2, never green; the other pins
+  are still measured.
+- Budget, in days: Ghidra 90 (about one release cycle), `TESTBINS_REF` 180 (the
+  corpus is the certification gate's input, so it moves by a reviewed resync, not
+  by drift), radare2 90 (about three point releases). `vendor/README.md` states
+  the same table and a test holds them equal.
+- Cost: one clone per remote, then `git log` over the commits since each pin,
+  and one `git log` per vendored file that differs from its pin; the weekly job
+  takes under a minute. Rejected: GitHub's commits API, which filters by
+  date, not ancestry (RISC-V 11 where git counts 12, AArch64 31 where it counts
+  32: a commit dated before its pin can still be unabsorbed), and is rate-limited.
+- First run (2026-10-16): the Ghidra base, `TESTBINS_REF` and radare2 6.2.4 are
+  within budget; ARM, MIPS, RISC-V and x86, still on 11.4, lack commits 458, 422,
+  491 and 443 days old against a budget of 90 (VC's resync); AArch64's pin is
+  refuted by five files (`AARCH64.ldefs`, `.opinion`, `_swift.cspec`,
+  `_win.cspec`, `AppleSilicon.ldefs`) that are older than `918acd744d`.
 
 ## Order
 
