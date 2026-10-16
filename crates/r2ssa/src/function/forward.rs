@@ -9,7 +9,7 @@
 //! identity keyed by position is unchanged, and a definition nothing reads is
 //! accounted as dead by the layers that already know how.
 
-use super::SSAFunction;
+use super::{PhiNode, SSAFunction};
 use crate::dense::{IdMap, IdSet};
 use crate::op::SSAOp;
 use crate::value_table::VarId;
@@ -37,18 +37,66 @@ impl SSAFunction {
             }
         }
         let mut forwarded = Forwarded::new(self.values.len());
+        let mut identities = Forwarded::new(self.values.len());
         for block in &self.blocks {
             for op in block.ops() {
                 if let SSAOp::Copy { dst, src } = op
                     && self.var(*dst).size == self.var(*src).size
                     && dst != src
-                    && !self.copy_is_a_program_write(*dst, *src, &merge_sources)
                 {
-                    forwarded.insert(*dst, *src);
+                    let write = self.copy_is_a_program_write(*dst, *src, &merge_sources);
+                    match write {
+                        false => forwarded.insert(*dst, *src),
+                        true if !self.var(*src).is_const() => identities.insert(*dst, *src),
+                        true => None,
+                    };
                 }
             }
         }
-        self.apply_forwarding(forwarded)
+        let own = self.merge_edges_that_carry_their_own_output(&forwarded, &identities);
+        let mut stats = self.apply_forwarding(forwarded);
+        stats.reads_forwarded += self.apply_own_edges(own);
+        stats
+    }
+
+    /// The merge edges whose source is a copy, through any chain, of the merge's own output: the
+    /// merge keeps its value across them (doc/adr-decompiler-rewrite.md, "Merges"). `O(phis + copies)`.
+    fn merge_edges_that_carry_their_own_output(
+        &self,
+        forwarded: &Forwarded,
+        identities: &Forwarded,
+    ) -> Vec<(usize, usize, usize, VarId)> {
+        let mut copies = forwarded.clone();
+        for (dst, src) in identities.iter() {
+            copies.insert(dst, *src);
+        }
+        let root = resolve_chains(copies);
+        let carries_itself =
+            |phi: &PhiNode<VarId>, source: &VarId| root.get(*source) == Some(&phi.dst);
+        (self.blocks.iter().enumerate())
+            .flat_map(|(block, b)| {
+                b.phis()
+                    .iter()
+                    .enumerate()
+                    .map(move |(phi, p)| (block, phi, p))
+            })
+            .flat_map(|(block, phi, p)| {
+                (p.sources.iter().enumerate())
+                    .filter(|(_, (_, source))| carries_itself(p, source))
+                    .map(move |(edge, _)| (block, phi, edge, p.dst))
+            })
+            .collect()
+    }
+
+    fn apply_own_edges(&mut self, own: Vec<(usize, usize, usize, VarId)>) -> usize {
+        let moved = own.len();
+        if moved > 0 {
+            let blocks = self.blocks.edit();
+            for (block, phi, edge, dst) in own {
+                blocks[block].phis_mut()[phi].sources[edge].1 = dst;
+            }
+        }
+        moved
     }
 
     /// Rewrite every read of a forwarded variable to the value it names.
@@ -366,6 +414,68 @@ mod tests {
             .expect("merge of RAX")
             .clone();
         assert_eq!(before.sources, after.sources);
+    }
+
+    fn edge_source(phi: &PhiNode, pred: u64) -> crate::SSAVar {
+        (phi.sources.iter().find(|(addr, _)| *addr == pred))
+            .expect("edge")
+            .1
+            .clone()
+    }
+
+    #[test]
+    fn a_latch_copy_of_the_merges_own_output_leaves_the_edge_carrying_nothing() {
+        // entry: RAX = RCX; header: RAX = phi(entry, latch); latch: RAX = RAX
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::Copy {
+            dst: reg(0, 8),
+            src: reg(8, 8),
+        });
+        let mut header = R2ILBlock::new(0x1004, 4);
+        header.push(R2ILOp::CBranch {
+            target: Varnode::constant(0x100c, 8),
+            cond: reg(32, 1),
+        });
+        let mut latch = R2ILBlock::new(0x1008, 4);
+        latch.push(R2ILOp::Copy {
+            dst: reg(0, 8),
+            src: reg(0, 8),
+        });
+        latch.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1004, 8),
+        });
+        let mut exit = R2ILBlock::new(0x100c, 4);
+        exit.push(R2ILOp::Return {
+            target: reg(0x288, 8),
+        });
+        let mut func =
+            SSAFunction::from_blocks_with_arch(&[entry, header, latch, exit], Some(&arch()))
+                .expect("ssa");
+        let merge = |func: &SSAFunction| {
+            func.named_block(0x1004)
+                .expect("header")
+                .phis()
+                .iter()
+                .find(|phi| phi.dst.name() == "RAX")
+                .expect("merge of RAX")
+                .clone()
+        };
+        let before = merge(&func);
+        let latch_source = |phi: &PhiNode| edge_source(phi, 0x1008);
+        assert_ne!(latch_source(&before), before.dst, "the latch writes a copy");
+        func.forward_copies();
+        let after = merge(&func);
+        assert_eq!(
+            latch_source(&after),
+            after.dst,
+            "the edge carries the merge itself"
+        );
+        let entry_source = |phi: &PhiNode| edge_source(phi, 0x1000);
+        assert_eq!(
+            entry_source(&after),
+            entry_source(&before),
+            "the entry's write stays"
+        );
     }
 
     #[test]

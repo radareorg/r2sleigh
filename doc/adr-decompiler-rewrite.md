@@ -95,9 +95,11 @@ The obligation inventory says what must be rendered, so no stage re-derives it.
   is valid wherever its producer dominates.
 - **Merges.** A phi is bound to its own variable, assigned on each incoming
   edge by one parallel copy, sequentialised with temporaries when one copy
-  reads what another writes. An edge whose operand spells the phi's own variable
+  reads what another writes. An edge whose operand is the phi's own value
   (a latch that leaves a carried value alone) writes nothing and joins no copy
-  set, so it stages no temporary. Coalescing a phi web into one variable is the
+  set, so it stages no temporary. r2ssa states that edge: `forward_copies` at the
+  seal points a merge source that is a copy, through any chain, of the merge's own
+  output at the merge itself, and r2dec compares ids, never spellings. Coalescing a phi web into one variable is the
   partition, r2ssa's to state from `ValueLiveness` and `StorageSpans` (D2.1).
 - **Frame.** A stack object is a C byte array only where r2ssa proves the
   storage is the callee's (`callee_allocation`, or a source slot that is a

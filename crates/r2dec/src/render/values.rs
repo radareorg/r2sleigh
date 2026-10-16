@@ -2254,14 +2254,14 @@ impl<'a> Values<'a> {
                 Some(term) => term_reads(&self.projection, self.roots.arena(), term),
                 None => vec![input],
             };
-            // An edge that carries the merge's own variable copies nothing (adr-decompiler-rewrite, "Merges").
-            let source = match self.operand_alone(input, inst.id) {
-                Some((spelled, attempt)) if self.names_itself(output, &spelled) => {
-                    self.account_copy(inst.id, output, attempt, &CStmt::Expr(spelled));
-                    continue;
-                }
-                source => source,
-            };
+            let source = self.operand_alone(input, inst.id);
+            // r2ssa states an edge that carries the merge itself as the merge's own id (adr-decompiler-rewrite, "Merges").
+            if input == output
+                && let Some((spelled, attempt)) = source
+            {
+                self.account_copy(inst.id, output, attempt, &CStmt::Expr(spelled));
+                continue;
+            }
             copies.push((inst.id, output, source, reads));
         }
         let mut out = Vec::new();
@@ -2297,12 +2297,6 @@ impl<'a> Values<'a> {
         }
         out.extend(staged);
         out
-    }
-
-    /// Whether `spelled` is the variable `output` is held in.
-    fn names_itself(&self, output: ValueId, spelled: &CExpr) -> bool {
-        let named = self.names[output.0 as usize].as_ref();
-        named.is_some_and(|(name, _)| *spelled == CExpr::Var(*name))
     }
 
     /// The merge `inst` has a copy on this edge: its instruction and what the source absorbed are
