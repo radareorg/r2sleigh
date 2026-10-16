@@ -131,7 +131,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
             Ok(target) => target,
             Err(refusal) => return Walking(Err(refusal)),
         };
-        let walked = crate::isolation::isolated(|| crate::native::walk(&target, &view, entry));
+        let tables = || (*dispatch_tables(db, (entry, thumb)).0).clone();
+        let walked = crate::isolation::isolated(|| {
+            crate::native::walk_reading(&target, &view, entry, &tables)
+        });
         Walking(
             walked
                 .unwrap_or_else(|panicked| Err(panicked.into()))
@@ -145,6 +148,51 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
             false => Hold::Held,
         }
     }
+}
+
+/// The dispatch tables one function's body reads, by its entry and whether it is Thumb: read once for the survey, the walk and the listings.
+pub(super) struct DispatchTables;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
+    type Key = (u64, bool);
+    type Value = Shared<crate::native::Tables>;
+    const NAME: &'static str = "dispatch-tables";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
+        // The survey asks while it runs, so no mode is read: the key states the set.
+        let view = View::new(db, false);
+        let read = target(&view, entry, thumb).map(|target| {
+            crate::isolation::isolated(|| crate::native::dispatch_tables(&target, &view, entry))
+        });
+        Shared(Arc::new(match read {
+            Ok(Ok(tables)) => tables,
+            Ok(Err(panicked)) => crate::native::Tables::refused(panicked.into()),
+            Err(refusal) => crate::native::Tables::refused(refusal),
+        }))
+    }
+
+    fn hold(value: &Self::Value) -> Hold {
+        match value.0.refusal().is_some_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
+/// The tables read for a body; a cycle reads as none, which is a walk following no table.
+pub(super) fn dispatch_tables<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    key: (u64, bool),
+) -> Shared<crate::native::Tables> {
+    db.get::<DispatchTables>(&key).map_or_else(
+        |cycle| {
+            Shared(Arc::new(crate::native::Tables::refused(
+                NativeRefusal::Prepare(format!("{cycle:?}")),
+            )))
+        },
+        |tables| (*tables).clone(),
+    )
 }
 
 /// What one callee's body proves, resolved alone, by its entry and whether it is Thumb.

@@ -323,6 +323,23 @@ impl Trace {
         self.0.open(callee, disasm, program);
     }
 
+    /// The instructions at which the walk stopped for want of a dispatch's arms.
+    pub fn dispatches(&self) -> impl Iterator<Item = u64> + '_ {
+        let stops = self.0.unresolved.iter();
+        let stops = stops.filter(|stop| stop.reason == UnresolvedReason::IndirectBranch);
+        stops.map(|stop| stop.addr)
+    }
+
+    /// Continue through the arms of dispatches, by the instruction making each, visiting only what is not yet decoded.
+    pub fn dispatch(
+        &mut self,
+        arms: &BTreeMap<u64, Vec<u64>>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        self.0.follow(arms, disasm, program);
+    }
+
     /// What the walk reached since it was last asked.
     pub fn reached(&mut self) -> Reached {
         std::mem::take(&mut self.0.reached)
@@ -497,6 +514,30 @@ impl Walk {
         let mut pending = Vec::new();
         for (_, next) in self.gated.remove(&callee).unwrap_or_default() {
             self.continues(Some(next), &mut pending, program);
+        }
+        self.run(pending, None, disasm, program);
+    }
+
+    /// Go on through the arms of dispatches the walk stopped at, as a walk told them from the start would.
+    fn follow(
+        &mut self,
+        arms: &BTreeMap<u64, Vec<u64>>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        let mut pending = Vec::new();
+        for (&addr, targets) in arms.iter().filter(|(_, targets)| !targets.is_empty()) {
+            let stopped = |stop: &Unresolved| {
+                (stop.addr, stop.reason) == (addr, UnresolvedReason::IndirectBranch)
+            };
+            if !self.unresolved.iter().any(stopped) {
+                continue;
+            }
+            self.unresolved.retain(|stop| !stopped(stop));
+            self.dispatched.insert(addr, targets.clone());
+            for target in targets.iter().collect::<BTreeSet<_>>() {
+                self.transfer(*target, &mut pending, program);
+            }
         }
         self.run(pending, None, disasm, program);
     }

@@ -94,6 +94,18 @@ pub trait Walker {
     /// Continue a walk past every call to `callee`, which is now known to come back.
     fn open(&self, walk: &mut Self::Walk, callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers;
 
+    /// The answers the walks so far have settled, told before any dispatch is read, so that reading one finds its callees decided.
+    fn answered(&self, _returns: BTreeMap<u64, Return>) {}
+
+    /// Walk a finished body on through the arms of its dispatch tables, read once; what the arms reach, or `None` where there is nothing to follow.
+    fn dispatch(
+        &self,
+        _walk: &mut Self::Walk,
+        _returns: &dyn Fn(u64) -> bool,
+    ) -> Option<Transfers> {
+        None
+    }
+
     /// Where a finished body hands a function to a parameter declared to take one, and whether each is Thumb.
     fn handed(&self, walk: &Self::Walk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)>;
 
@@ -185,6 +197,15 @@ pub fn functions<W: Walker>(
         fixpoint.offer(address, confidence, thumb);
     }
     fixpoint.run();
+    // Each body is read through its dispatch tables once its callees are decided; the arms may reach more functions.
+    loop {
+        let decided = fixpoint.believed.keys().chain(fixpoint.placeless.keys());
+        walker.answered(fixpoint.answers(decided.copied()));
+        if !fixpoint.dispatch_on() {
+            break;
+        }
+        fixpoint.run();
+    }
     let returns = fixpoint.answers(fixpoint.believed.keys().copied());
     Discovery {
         functions: fixpoint
@@ -246,6 +267,8 @@ struct Fixpoint<'w, W: Walker> {
     joined: Vec<u64>,
     /// Who waits on each callee, and for what.
     waiting: BTreeMap<u64, BTreeSet<(u64, Wait)>>,
+    /// Bodies already walked on through their dispatch tables.
+    tabled: BTreeSet<u64>,
     /// Bodies already read for the functions they hand on.
     read: BTreeSet<u64>,
 }
@@ -269,6 +292,7 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             returning: BTreeSet::new(),
             joined: Vec::new(),
             waiting: BTreeMap::new(),
+            tabled: BTreeSet::new(),
             read: BTreeSet::new(),
         }
     }
@@ -452,6 +476,32 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         self.absorb(caller, thumb, transfers);
     }
 
+    /// Read the tables of each body, final once every callee is walked, and walk on through their arms; whether any body moved.
+    /// Each walk is read once, so this ends when every walk has been.
+    fn dispatch_on(&mut self) -> bool {
+        if self.seed.is_some() {
+            return false;
+        }
+        let entries = self.walks.keys().copied().collect::<Vec<_>>();
+        let mut moved = false;
+        for address in entries {
+            let Some(Ok(walk)) = self.walks.get_mut(&address) else {
+                continue;
+            };
+            if !self.tabled.insert(address) {
+                continue;
+            }
+            let (walker, known, returning) = (self.walker, self.known, &self.returning);
+            let returns = |callee| comes_back(walker, known, returning, callee);
+            if let Some(transfers) = walker.dispatch(walk, &returns) {
+                let thumb = self.believed.get(&address).is_some_and(|(_, thumb)| *thumb);
+                self.absorb(address, thumb, transfers);
+                moved = true;
+            }
+        }
+        moved
+    }
+
     /// Read each body, final once every callee is walked, for the functions it hands on; answer whether any need walking.
     fn hand_on(&mut self) -> bool {
         if self.seed.is_some() {
@@ -569,6 +619,8 @@ mod tests {
         Call(u64),
         Tail(u64),
         Hand(u64),
+        /// A dispatch whose table, once read, has an arm calling this.
+        Table(u64),
         Return,
     }
 
@@ -617,7 +669,7 @@ mod tests {
                 transfers.tail_calls.push(target);
                 false
             }
-            Step::Hand(_) => true,
+            Step::Hand(_) | Step::Table(_) => true,
             Step::Return => {
                 transfers.leaves = true;
                 false
@@ -644,6 +696,18 @@ mod tests {
         fn open(&self, walk: &mut At, _callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers {
             walk.next += 1;
             self.go(walk, returns)
+        }
+
+        fn dispatch(&self, walk: &mut At, _returns: &dyn Fn(u64) -> bool) -> Option<Transfers> {
+            let arms = self.0[&walk.address].iter().filter_map(|step| match step {
+                Step::Table(target) => Some(*target),
+                _ => None,
+            });
+            let calls = arms.collect::<Vec<_>>();
+            (!calls.is_empty()).then(|| Transfers {
+                calls,
+                ..Transfers::default()
+            })
         }
 
         fn handed(&self, walk: &At, _returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)> {
@@ -695,6 +759,21 @@ mod tests {
             ]
         );
         assert_eq!(found.functions[0].name.as_deref(), Some("entry"));
+    }
+
+    #[test]
+    fn a_call_made_only_in_a_dispatch_arm_reaches_a_function_the_image_never_named() {
+        let found = found(
+            &[
+                (0x1000, &[Step::Table(0x2000), Step::Return]),
+                (0x2000, &[Step::Return]),
+            ],
+            &[0x1000],
+        );
+        assert_eq!(
+            seen(&found),
+            [(0x1000, Basis::Stated), (0x2000, Basis::Called)]
+        );
     }
 
     #[test]

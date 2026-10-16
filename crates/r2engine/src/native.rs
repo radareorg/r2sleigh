@@ -504,12 +504,12 @@ pub struct Walk {
 }
 
 impl Walk {
-    /// A body whose dispatch tables could not be read, and why.
-    fn unread(root: Walked, refusal: NativeRefusal) -> Self {
+    /// A walked body with the tables read for it; a refused read leaves it following none.
+    fn of(root: Walked, tables: Tables) -> Self {
         Self {
             root: std::sync::Arc::new(root),
-            tables: Vec::new(),
-            refusal: Some(refusal),
+            tables: tables.read,
+            refusal: tables.refusal,
         }
     }
 
@@ -551,71 +551,89 @@ impl Walk {
 }
 
 /// Walk one function, and where a dispatch stops the walk, read its tables and walk again through them.
-///
-/// A table is the body's own, so it is read off a preparation against the imports' declarations alone.
 pub fn walk(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
 ) -> Result<Walk, NativeRefusal> {
-    let native = Native {
-        target,
-        program,
-        machine: machine(target)?,
-        control: program.control().ssa_execution_control(),
-    };
+    walk_reading(target, program, entry, &|| {
+        dispatch_tables(target, program, entry)
+    })
+}
+
+/// The same walk, asking `read` for the tables only where the body stops at a dispatch.
+pub(crate) fn walk_reading(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+    read: &dyn Fn() -> Tables,
+) -> Result<Walk, NativeRefusal> {
+    let native = Native::over(target, program)?;
     let root = native.walk(entry)?;
-    let indirect = |stop: &crate::body::Unresolved| {
+    if !(root.body.unresolved.iter()).any(Tables::stops) {
+        return Ok(Walk::of(root, Tables::default()));
+    }
+    let tables = read();
+    if tables.read.is_empty() {
+        return Ok(Walk::of(root, tables));
+    }
+    let through = native.walk_dispatched(entry, &tables.dispatched())?;
+    Ok(Walk::of(through, tables))
+}
+
+/// The tables the dispatches of the body at `entry` read, off a preparation against the imports' declarations alone.
+/// A refused read leaves the walk no table and says why.
+pub(crate) fn dispatch_tables(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Tables {
+    let native = match Native::over(target, program) {
+        Ok(native) => native,
+        Err(refusal) => return Tables::refused(refusal),
+    };
+    match native.walk(entry) {
+        Ok(root) if root.body.unresolved.iter().any(Tables::stops) => native.read_tables(&root),
+        _ => Tables::default(),
+    }
+}
+
+/// What reading a body's dispatch tables left: the tables, or the refusal that left the body following none.
+#[derive(Clone, Default)]
+pub(crate) struct Tables {
+    read: Vec<NativePointerTable>,
+    refusal: Option<NativeRefusal>,
+}
+
+impl std::fmt::Debug for Tables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tables({} read)", self.read.len())
+    }
+}
+
+impl Tables {
+    pub(crate) fn refused(refusal: NativeRefusal) -> Self {
+        Self {
+            read: Vec::new(),
+            refusal: Some(refusal),
+        }
+    }
+
+    fn stops(stop: &crate::body::Unresolved) -> bool {
         stop.reason == crate::body::UnresolvedReason::IndirectBranch
-    };
-    let dispatches = root.body.unresolved.iter().any(indirect);
-    if !dispatches {
-        return Ok(Walk {
-            root: std::sync::Arc::new(root),
-            tables: Vec::new(),
-            refusal: None,
-        });
     }
-    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let mut imports = Callees::default();
-    declare_imports(
-        &native,
-        target,
-        &reached(&root.body, program),
-        ptr_bits,
-        &mut imports,
-    );
-    let declared = native.declaration(entry);
-    let restatement = match declared.interface.is_some() {
-        false => Restatement::default(),
-        true => declared,
-    };
-    // A refused read leaves the walk that follows no table, and says why: the listing and the index still read it.
-    let read = crate::isolation::isolated(|| native.dispatch_reads(&root, &imports, restatement));
-    let reads = match read {
-        Ok(Ok(reads)) => reads,
-        Ok(Err(refusal)) => return Ok(Walk::unread(root, refusal)),
-        Err(panicked) => return Ok(Walk::unread(root, panicked.into())),
-    };
-    let tables = native.pointer_tables(&reads);
-    if tables.is_empty() {
-        let root = std::sync::Arc::new(root);
-        return Ok(Walk {
-            root,
-            tables,
-            refusal: None,
-        });
+
+    /// Where each dispatch goes, by the instruction making it.
+    pub(crate) fn dispatched(&self) -> BTreeMap<u64, Vec<u64>> {
+        let tables = self.read.iter();
+        tables
+            .map(|table| (table.instruction, table.targets.clone()))
+            .collect()
     }
-    let dispatched = tables.iter();
-    let dispatched = dispatched.map(|table| (table.instruction, table.targets.clone()));
-    let again = native.walk_dispatched(entry, &dispatched.collect());
-    match again {
-        Ok(root) => Ok(Walk {
-            root: std::sync::Arc::new(root),
-            tables,
-            refusal: None,
-        }),
-        Err(refusal) => Ok(Walk::unread(root, refusal)),
+
+    /// Why the read was refused, where it was.
+    pub(crate) const fn refusal(&self) -> Option<&NativeRefusal> {
+        self.refusal.as_ref()
     }
 }
 
@@ -1532,7 +1550,7 @@ struct Native<'a> {
     control: r2ssa::SsaExecutionControl,
 }
 
-impl Native<'_> {
+impl<'a> Native<'a> {
     /// One body sealed against `callees`, and prepared again where it restates its declared frame
     /// or text it points at; with `caller_reads`, every call decides an ambiguous result. Its first
     /// seal's facts are collected only where something reads them (doc/adr-resolved-bodies.md).
@@ -1609,6 +1627,42 @@ impl Native<'_> {
             }
         };
         Ok((artifact, owners))
+    }
+
+    fn over(target: &'a NativeTarget<'a>, program: &'a dyn Program) -> Result<Self, NativeRefusal> {
+        Ok(Self {
+            target,
+            program,
+            machine: machine(target)?,
+            control: program.control().ssa_execution_control(),
+        })
+    }
+
+    /// The tables a walked body's dispatches read; a refused read says why and leaves the body following none.
+    fn read_tables(&self, root: &Walked) -> Tables {
+        let ptr_bits = crate::engine_effective_ptr_bits(self.target.arch);
+        let mut imports = Callees::default();
+        declare_imports(
+            self,
+            self.target,
+            &reached(&root.body, self.program),
+            ptr_bits,
+            &mut imports,
+        );
+        let declared = self.declaration(root.body.entry);
+        let restatement = match declared.interface.is_some() {
+            false => Restatement::default(),
+            true => declared,
+        };
+        let read = crate::isolation::isolated(|| self.dispatch_reads(root, &imports, restatement));
+        match read {
+            Ok(Ok(reads)) => Tables {
+                read: self.pointer_tables(&reads),
+                refusal: None,
+            },
+            Ok(Err(refusal)) => Tables::refused(refusal),
+            Err(panicked) => Tables::refused(panicked.into()),
+        }
     }
 
     /// The same request over another machine of this program.

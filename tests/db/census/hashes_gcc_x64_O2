@@ -25,7 +25,7 @@ EXPECT=<<EOF
 0x00401630    5     57 sym.crc32_table
 0x00401680   12    185 sym.murmur3_32
 0x00401750   12    346 sym.xxhash32
-0x004018b0    4    215 sym.siphash24
+0x004018b0   12    599 sym.siphash24
 0x00401b10    5     41 sym.pearson
 0x00401b50    1     80 sym.combined
 0x00401ba0    1     13 sym._fini

@@ -254,3 +254,83 @@ fn ax_holds_what_every_function_shows_of_its_calls_and_jumps() {
     }
     assert!(arms > 0, "the corpus holds a solved dispatch");
 }
+
+/// One function as `afl`, `afb` and `afi` count it: blocks, bytes, and the blocks `afi` reads off the analysis.
+struct Counted {
+    name: String,
+    listed: (usize, u64),
+    walked: (usize, u64),
+    analysed: (usize, u64),
+}
+
+fn counted(binary: &str) -> Vec<Counted> {
+    let path = format!("tests/coverage/pinned/{binary}");
+    let functions = on(&path, "afl")
+        .lines()
+        .filter_map(|line| {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            let (entry, blocks, size) = (number(tokens[0])?, tokens[1], tokens[2]);
+            Some((
+                entry,
+                tokens[3].to_owned(),
+                blocks.parse().ok()?,
+                size.parse().ok()?,
+            ))
+        })
+        .collect::<Vec<(u64, String, usize, u64)>>();
+    let mut script = String::new();
+    for (entry, ..) in &functions {
+        script.push_str(&format!(
+            "?e =={entry:#x}; afb @ {entry:#x}; ?e ==i; afi @ {entry:#x};"
+        ));
+    }
+    let out = on(&path, &script);
+    let field = |info: &str, key: &str| -> u64 {
+        let line = info.lines().find_map(|line| line.strip_prefix(key));
+        line.and_then(|rest| rest.trim().parse().ok()).expect(key)
+    };
+    let mut counted = Vec::new();
+    for (function, (entry, name, blocks, size)) in out.split("==0x").skip(1).zip(functions) {
+        let (walked, info) = function.split_once("==i").expect("afi follows afb");
+        let sizes = (walked.lines())
+            .filter(|line| line.starts_with("0x"))
+            .map(|line| {
+                line.split_whitespace()
+                    .nth(2)
+                    .and_then(|size| size.parse::<u64>().ok())
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_else(|| panic!("{binary}: {entry:#x} afb"));
+        counted.push(Counted {
+            name,
+            listed: (blocks, size),
+            walked: (sizes.len(), sizes.iter().sum()),
+            analysed: (field(info, "num-bbs:") as usize, field(info, "realsz:")),
+        });
+    }
+    counted
+}
+
+#[test]
+fn afl_and_afb_read_one_body_per_function_and_afi_its_bytes() {
+    // The survey and `afb` walk through the same dispatch tables, so the sizes and block counts they list agree
+    // (siphash24 switches on its rounds); `afi` counts the same bytes wherever its analysis keeps every block.
+    for binary in [
+        "branchy_gcc_x64_O0",
+        "hashes_gcc_x64_O2",
+        "shapes_gcc_x64_O0",
+    ] {
+        for function in counted(binary) {
+            let Counted {
+                name,
+                listed,
+                walked,
+                analysed,
+            } = function;
+            assert_eq!(listed, walked, "{binary}: afl and afb of {name}");
+            if analysed.0 == walked.0 {
+                assert_eq!(analysed.1, walked.1, "{binary}: afi and afb of {name}");
+            }
+        }
+    }
+}

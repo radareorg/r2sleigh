@@ -188,6 +188,26 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         Self::step(&mut walk.trace, walk.thumb)
     }
 
+    fn answered(&self, returns: BTreeMap<u64, Return>) {
+        self.program.db.deposit::<ComesBack>(returns);
+    }
+
+    fn dispatch(&self, walk: &mut BodyWalk, returns: &dyn Fn(u64) -> bool) -> Option<Transfers> {
+        walk.trace.dispatches().next()?;
+        let tables = super::analysis::dispatch_tables(self.program.db, (walk.entry, walk.thumb));
+        let arms = tables.0.dispatched();
+        if arms.is_empty() {
+            return None;
+        }
+        let knowing = Knowing {
+            program: &self.program,
+            returns,
+        };
+        walk.trace
+            .dispatch(&arms, self.target(walk.thumb).disasm, &knowing);
+        Some(Self::step(&mut walk.trace, walk.thumb))
+    }
+
     fn handed(&self, walk: &BodyWalk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)> {
         let target = self.target(walk.thumb);
         let callees = walk.trace.calls().iter().chain(walk.trace.tail_calls());

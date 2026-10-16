@@ -495,7 +495,12 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
   cut and 8.2 after (about 480 unresolved indirect transfers walked, 97 dispatches solved); the arms add 7 to 17%
   more code to claim. Without table reading the index is below the old one, which sealed a graph for every
   claim (libc 57.6 to 49.8 G); with it, pumasim +2.5%, 0pack +0.3%, libc +16%, peak RSS pumasim +6%.
-  `ResultReads` reads the same body at no measured cost (`aa; pdd` on five census functions, +/-0.5%). The
-  survey and `ResultReads`' caller list still miss a
-  call made only inside an arm, so the closed world refuses that callee, soundly, until the survey reads
-  tables (D6).
+  `ResultReads` reads the same body at no measured cost (`aa; pdd` on five census functions, +/-0.5%).
+- D6 (2026-10-16): the dispatch tables of a body are the held query `DispatchTables`, read once per function
+  and read by the survey and by `Walked`. The survey runs its table-free fixpoint, tells `ComesBack` the
+  answers so far (`Walker::answered`, so a table read finds its callees decided), then continues each
+  finished trace through its arms (`Trace::dispatch`, `Walker::dispatch`) and the fixpoint with it: the
+  arms' callees are believed, and `afl` sizes, `afb`, `afi`, the callers `ResultReads` sees and the
+  holders all read the body `Walked` walks. A lone `pdd` asks `DispatchTables` for its own function only,
+  so it stays a lazy single-function request. One round: a dispatch first reached through an arm stays
+  unresolved, as before.

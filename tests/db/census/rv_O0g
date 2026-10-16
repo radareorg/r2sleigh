@@ -18,7 +18,7 @@ EXPECT=<<EOF
 0x000011a0    1      9 sym.frame_dummy
 0x000011a9    1     24 sym.add
 0x000011c1    4     73 sym.sum_array
-0x0000120a    3     60 sym.classify
+0x0000120a   11    109 sym.classify
 0x00001277    4     49 sym.list_len
 0x000012a8    4     71 sym.mul_div
 0x000012ef    7    115 sym.avg
