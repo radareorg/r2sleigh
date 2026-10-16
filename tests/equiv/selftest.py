@@ -38,17 +38,22 @@ graded through the same path an engine rendering takes:
   ``differs``, delegation named; a link into the original's body must be
   ``compile-error``;
 * an identifier missing from the link map must be ``compile-error``;
-* a refusal must be ``refused``.
+* a refusal must be ``refused``;
+* a rendering whose call retires more than four times the instruction budget
+  (a fake counter says so, so no performance counter is needed) must be
+  ``slow``, and one that retires exactly that must stay ``equal``: the budget
+  decides, and only the count can.
 """
 
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import gate
 from build import elf_machine
+from cost import RENDERING_FACTOR, Cost
 from dwarf import Dwarf, code_constants, function_symbols
 from r2s_batch import Answer
 from spec import call_spec
@@ -92,6 +97,16 @@ class Case:
     residuals: list[tuple] = field(default_factory=list)
     # What a residual-trap compared before its traps (gate.trap_comparison).
     expect_compared: str | None = None
+    # The cost the case runs under, where it is not the run's own.
+    cost: Cost | None = None
+
+
+_BUDGET = 1000
+_IDENTITY_ADD = (
+    "#include <stdint.h>\n#include <stddef.h>\n"
+    "int32_t sub_add(int32_t a, int32_t b)\n{\n"
+    "    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"
+)
 
 
 def _tu(body: str, headers: str = "#include <stdint.h>\n#include <stddef.h>\n") -> str:
@@ -319,6 +334,11 @@ CASES = [
         "extern int32_t st_counter;\nvoid sub_bump(int32_t by)\n{\n"
         "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n}\n")),
     Case("refusal", "st_add", "refused", "", refused="the case says so"),
+    # The fake counter makes every rendering run retire `fake` instructions.
+    Case("over-the-instruction-budget", "st_add", "slow", _IDENTITY_ADD,
+         cost=Cost("instructions", _BUDGET, fake=RENDERING_FACTOR * _BUDGET + 1)),
+    Case("at-the-instruction-budget", "st_add", "equal", _IDENTITY_ADD,
+         cost=Cost("instructions", _BUDGET, fake=RENDERING_FACTOR * _BUDGET)),
 ]
 
 
@@ -394,9 +414,11 @@ def run_self_tests(config: gate.Config, workdir: Path,
         else:
             answer = Answer(sub.low_pc, "output", record=record)
         graded = gate.grade(f"selftest::{case.name}", workdir / case.name, binary, dwarf, spec,
-                            answer, config)
+                            answer, replace(config, cost=case.cost) if case.cost else config)
         ok = graded.status == case.expect
         why = f"expected {case.expect}, got {graded.status}"
+        if not ok and graded.evidence.get("cause"):
+            why += f": {str(graded.evidence['cause'])[:300]}"
         if ok and case.expect_field:
             got_field = graded.evidence.get("field")
             ok = got_field == case.expect_field

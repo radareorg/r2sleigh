@@ -19,8 +19,8 @@ status is one of:
 ``ub``                    UBSan reported, or the ``-O0`` and ``-O2`` builds
                           disagree on a vector both finished
 ``slow``                  every finished run agreed, but a rendering build ran
-                          out of its time budget on some vector: not evidence
-                          of a wrong answer, and not ``equal`` either
+                          past its budget on some vector (:mod:`cost`): not
+                          evidence of a wrong answer, and not ``equal`` either
 ``compile-error``         the compiler or the loader rejected a build; the
                           diagnostic is kept (a compiler that timed out or
                           could not run is the harness's: ``harness-error``)
@@ -64,6 +64,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import link
+from cost import Cost
 from dwarf import Dwarf
 from r2s_batch import Answer
 from spec import CallSpec
@@ -89,17 +90,19 @@ class Config:
     runtime: Path
     cc: str = "gcc"
     vectors: int = 48
-    timeout_ms: int = 1000
+    cost: Cost = field(default_factory=Cost)
     keep: bool = False
     min_graded: int | None = None
     compile_timeout: float = link.COMPILE_TIMEOUT
     # The machine the graded binaries are built for, and how to run them.
     target: Target = X86_64
 
-    def call_budget_ms(self) -> int:
-        """The original's budget per call on this host: ``timeout_ms`` in native
-        time, scaled for an emulated target (:meth:`target.Target.time_scale`)."""
-        return self.timeout_ms * self.target.time_scale()
+    def driver_ceiling(self, vector_count: int) -> float:
+        """Seconds the runtime may take for these vectors before it is presumed stuck:
+        every run of every vector ending at its guard."""
+        per_vector_ms = (self.cost.budget * 22 if self.cost.measure == "time"
+                         else self.cost.hang_ms * 6)
+        return max(120.0, vector_count * per_vector_ms / 1000.0 + 60.0)
 
     def floor(self) -> int:
         """How many graded vectors an ``equal`` or ``residual-trap`` must rest on.
@@ -123,6 +126,8 @@ class Record:
     proof: dict = field(default_factory=dict)
     vectors: dict = field(default_factory=dict)
     strict: str = ""
+    # The measure and budget the run counted by (cost.Cost.to_json).
+    cost: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -136,6 +141,7 @@ class Record:
             "proof": self.proof,
             "vectors": self.vectors,
             "strict": self.strict,
+            "cost": self.cost,
         }
 
 
@@ -232,8 +238,7 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     ]
     vectors = build_vectors(spec, dwarf, config.vectors, record.key, target.abi)
     job = workdir / "job.bin"
-    job.write_bytes(encode_job(spec, runs, list(PAIRS), vectors, config.call_budget_ms(),
-                               abi=target.abi))
+    job.write_bytes(encode_job(spec, runs, list(PAIRS), vectors, config.cost, abi=target.abi))
     out = workdir / "result.jsonl"
     ok, cause, lines = run_driver(binary, job, out, config, len(vectors))
     if not ok:
@@ -301,7 +306,7 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
         "UBSAN_OPTIONS=print_stacktrace=0:halt_on_error=1:exitcode=86",
     ]
     argv = [*fixed_layout_prefix(), *config.target.run_argv(binary, assignments)]
-    budget = max(120.0, vector_count * config.call_budget_ms() * 22 / 1000.0 + 60.0)
+    budget = config.driver_ceiling(vector_count)
     out.unlink(missing_ok=True)
     try:
         proc = subprocess.run(
@@ -407,7 +412,8 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                 incomplete_example = {
                     "vector": index, "inputs": shown,
                     "not_compared": [f"{RUN_LABELS[a]}-{RUN_LABELS[b]}" for a, b in missing],
-                    "runs": [run for run in runs if run.get("outcome") == "unavailable"],
+                    "runs": [_run_evidence(run) for run in runs
+                             if run.get("outcome") in ("unavailable", "hang")],
                 }
             continue
         counts["graded"] += 1
@@ -425,8 +431,8 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                 found[verdict] = at_trap
                 counts["trap_compared"] += bool(compared)
                 counts["trap_memory"] += compared == "memory"
-            elif _timed_out(o0):
-                # Running out of time is a cost, not an answer: nothing it
+            elif _over_budget(o0):
+                # Running past the budget is a cost, not an answer: nothing it
                 # computed can be compared.
                 found["slow"] = {"build": "O0", "original": _run_evidence(runs[ORIGINAL])}
             else:
@@ -444,7 +450,7 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                         f"control reached the original function's body at {o0.get('fault_pc')}")
         uninit = pairs.get((O0, PATTERN))
         if uninit is not None and not uninit.get("equal"):
-            late = [RUN_LABELS[i] for i in (O0, PATTERN) if len(runs) > i and _timed_out(runs[i])]
+            late = [RUN_LABELS[i] for i in (O0, PATTERN) if len(runs) > i and _over_budget(runs[i])]
             if late:
                 found.setdefault("slow", {"build": ", ".join(late)})
             else:
@@ -452,7 +458,7 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                                    **_pair_evidence(uninit)}
         optimised = pairs.get((O0, O2))
         if optimised is not None and not optimised.get("equal") and "ub" not in found:
-            late = [RUN_LABELS[i] for i in (O0, O2) if len(runs) > i and _timed_out(runs[i])]
+            late = [RUN_LABELS[i] for i in (O0, O2) if len(runs) > i and _over_budget(runs[i])]
             if late:
                 found.setdefault("slow", {"build": ", ".join(late)})
             else:
@@ -550,7 +556,9 @@ def trap_comparison(status: str, counts: dict) -> str | None:
 
 def _run_evidence(run: dict) -> dict:
     """A run as a record keeps it: a fault as an offset into its object."""
-    kept = {key: value for key, value in run.items() if key not in ("fault_pc", "fault_base")}
+    # `insns` is a count the counter may vary in its last digits: no record keeps it.
+    kept = {key: value for key, value in run.items()
+            if key not in ("fault_pc", "fault_base", "insns")}
     try:
         kept["fault_offset"] = hex(int(str(run["fault_pc"]), 16) - int(str(run["fault_base"]), 16))
     except (KeyError, ValueError):
@@ -558,8 +566,10 @@ def _run_evidence(run: dict) -> dict:
     return kept
 
 
-def _timed_out(run: dict) -> bool:
-    return run.get("outcome") == "timeout"
+def _over_budget(run: dict) -> bool:
+    """Only a run the budget stopped is slow; ``hang`` is the wall-clock guard, which
+    load moves and which therefore never grades cost."""
+    return run.get("outcome") == "budget"
 
 
 def _pair_evidence(pair: dict | None) -> dict:
@@ -577,7 +587,7 @@ def _clip(text: str, lines: int) -> str:
 
 
 REPO = Path(__file__).resolve().parents[2]
-BASELINE_SCHEMA = 2
+BASELINE_SCHEMA = 3
 # Causes that say nothing about their record, which the ratchet refuses (audit T20).
 PLACEHOLDER_CAUSES = (
     re.compile(r"not (?:yet )?triaged", re.I),
@@ -723,9 +733,11 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple"],
 
 
 def baseline_from(records: list[Record], previous: dict | None = None,
-                  toolchain: dict[str, str] | None = None) -> dict:
+                  toolchain: dict[str, str] | None = None,
+                  cost: Cost | None = None) -> dict:
     """A baseline holding this run, keeping every cause, owner and site a
-    previous one recorded for the same status and reason."""
+    previous one recorded for the same status and reason. It names the measure
+    and budget the run counted by (:func:`cost.departure` holds later runs to them)."""
     old = (previous or {}).get("records", {})
     out: dict[str, dict] = {}
     for record in sorted(records, key=lambda r: r.key):
@@ -743,6 +755,7 @@ def baseline_from(records: list[Record], previous: dict | None = None,
     return {
         "schema": BASELINE_SCHEMA,
         "toolchain": toolchain if toolchain is not None else (previous or {}).get("toolchain"),
+        "cost": cost.to_json() if cost is not None else (previous or {}).get("cost"),
         "note": (previous or {}).get("note") or (
             "Blessed by the integrator after reading records.json. A non-equal record needs a "
             "cause, its ROADMAP.md owner and its site before the ratchet accepts this file."

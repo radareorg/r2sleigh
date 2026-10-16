@@ -39,7 +39,7 @@ structural decisions that close each gap.
 | r2ssa rewrites | value-preserving IR edits | `EditPlan` with stable ids ([stable identity](adr-stable-identity.md)), the semantic kernel | present |
 | Arity | how many arguments a callee takes | certification and equivalence; the floor's cause **not typed** (D37) | partial |
 | Rendered C | the function's behaviour | equivalence on x86-64 and aarch64; a loop runs on the single-threaded path only, so `tests/gold/loop_carried.c` forces a second pass where a conditional write carries the value | present |
-| Cost | time to render | wall time, which **depends on host load** (D38) | nondeterministic |
+| Cost | time to render | retired instructions natively with a counter (D38); wall time elsewhere, which **depends on host load** | present natively on request; emulated open |
 | Upstream pins | Ghidra, testbins, radare2 releases | **none**: the drift was found by hand (D39) | missing |
 
 ## Decisions
@@ -119,14 +119,60 @@ r2engine reads it.
   and the `shape_mutual_even` records unchanged.
 
 **D38. The cost verdict counts retired instructions.** Owner: GT.
-- Native runs count user-space instructions with `perf_event_open`
-  (HW_INSTRUCTIONS, `exclude_kernel`) and stop past the budget. Emulated runs
-  count retired guest instructions with qemu's instruction-count plugin
-  (`-plugin libinsn.so`). CPU time (`ITIMER_VIRTUAL`) is only a hang guard,
-  never the `slow` verdict: the host's load moves it.
-- Each record states its measure and budget, and the ratchet refuses to
-  compare across measures.
-- Gate: `slow` verdicts are identical on an idle and a loaded host.
+- A budget is one measure, stated: `time` (wall milliseconds) or
+  `instructions` (user-space instructions the call retires). The runtime,
+  `tests/equiv/rt/equiv_rt.c`, is the only thing that counts or stops a run, so
+  Python carries the measure as a typed `Cost` (`tests/equiv/cost.py`) and
+  never infers it from outcomes.
+- Native `instructions`: the child opens `perf_event_open` (HW_INSTRUCTIONS,
+  `exclude_kernel`, `exclude_hv`) with the budget plus one as sample period, an
+  owner signal (`SIGPWR`) and `PERF_EVENT_IOC_REFRESH 1` just before the call.
+  The counter overflows once, at the first instruction past the budget, and
+  the default action ends the run
+  (outcome `budget`); a call that retired more than the budget by the time it
+  returned ends the same way, so the verdict is the count and not the
+  overflow's skid. Only `budget` is `slow`.
+- Wall time is a hang guard under `instructions` (`ITIMER_REAL`, not
+  `ITIMER_VIRTUAL`: a blocked call retires nothing and uses no CPU, so a
+  virtual timer never fires). Its outcome, `hang`, grades nothing: an original
+  that hangs is dropped, a rendering that does leaves the vector ungraded.
+- Each record, `config` and baseline states its measure and budget. The
+  ratchet refuses a run whose measure or budget differs from the baseline's
+  before it grades anything, and `merge_shards.py` refuses shards that counted
+  differently. A host that cannot count refuses `--measure instructions`
+  (`perf_event_open` denied, no virtual PMU, a counter that reads zero); it
+  never falls back to time quietly.
+- Emulated runs are **open**. The decision named qemu's instruction-count
+  plugin (`-plugin libinsn.so`), and the measured toolchain has none:
+  Ubuntu 24.04's `qemu-user` 8.2.2 (what CI installs) rejects `-plugin` and
+  ships no `libinsn.so`, and qemu-user answers `ENOSYS` to `perf_event_open`
+  in the guest. An emulated target therefore keeps `time`, labelled, and
+  refuses `instructions`. The route is a qemu built with `--enable-plugins`
+  (cached in CI) and a small plugin that counts guest instructions per forked
+  child and answers a magic syscall (qemu 9's syscall filter) so the runtime
+  can arm and read the budget as it does the counter. Rejected: logging
+  executed blocks (`-d exec`, `-one-insn-per-tb`), which is orders of
+  magnitude slower and not a budget.
+- The alternative considered for native runs: run x86-64 under `qemu-x86_64`
+  too, so one software count is host-independent everywhere. It needs the same
+  plugin build and makes every shard about five times slower, so it is the
+  follow-up that serves a runner without a counter, not the first step.
+- Hosted CI may have no counter: a GitHub-hosted runner is a virtual machine
+  that commonly exposes no PMU, and runs unprivileged with
+  `perf_event_paranoid` at its distribution default. The baselines therefore
+  stay `time` until a counting runner is chosen; blessing an `instructions`
+  baseline there (`--measure instructions --write-baseline`, the shard
+  commands gaining the flag) is the flip.
+- Gate: `slow` verdicts are identical on an idle and a loaded host. Measured
+  on contabo (2026-10-16, a KVM guest already at load 6): review.c `fact`,
+  `fill`, `dispatch` and hashes.c `crc32_bitwise`, `crc32_init` at clang `-O2`
+  wrote the same `records.json` byte for byte as it was and beside four more
+  busy loops (`fact` `slow`, 47 graded, 1 dropped, 2 slow), and the counts of
+  839 runs differed by at most 163 instructions in 3.3 billion. `--measure
+  time` on the same five moved `fact` from 48 graded, 0 dropped, 3 slow to 46,
+  2 and 1. A fake counter (`Cost.fake`) makes two self-test cases run on every
+  host: a rendering one instruction past four times the budget is `slow`, one at
+  exactly that is `equal`.
 
 **D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
 - A scheduled CI job reports how far each pin is behind its upstream (the

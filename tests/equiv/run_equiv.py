@@ -48,6 +48,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import build  # noqa: E402
+import cost  # noqa: E402
 import gate  # noqa: E402
 import link  # noqa: E402
 import selftest  # noqa: E402
@@ -74,9 +75,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cc", default=None,
                         help="compiler for the renderings (default: the target's gcc)")
     parser.add_argument("--vectors", type=int, default=48)
-    parser.add_argument("--timeout-ms", type=int, default=1000,
-                        help="the original's budget per call, in native time (an emulated "
-                             "target scales it); a rendering gets four times it")
+    parser.add_argument("--measure", choices=cost.MEASURES, default="time",
+                        help="what a call's budget counts: wall-clock milliseconds, which a "
+                             "loaded host moves, or retired instructions (perf_event_open, "
+                             "native runs only), which it does not")
+    parser.add_argument("--timeout-ms", type=int, default=cost.DEFAULT_TIME_MS,
+                        help="with --measure time, the original's budget per call, in native "
+                             "time (an emulated target scales it); a rendering gets four "
+                             "times it")
+    parser.add_argument("--budget-instructions", type=int, default=cost.DEFAULT_INSTRUCTIONS,
+                        help="with --measure instructions, the original's budget per call; a "
+                             "rendering gets four times it")
+    parser.add_argument("--hang-ms", type=int, default=cost.DEFAULT_HANG_MS,
+                        help="with --measure instructions, the wall-clock guard per call, "
+                             "which ends a run that retires nothing (a blocked call) and "
+                             "never grades cost")
     parser.add_argument("--function-timeout", type=float, default=300.0,
                         help="seconds r2s may spend on one function before it is restarted")
     parser.add_argument("--startup-timeout", type=float, default=600.0,
@@ -239,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         print(f"equiv: {problem}; the gate cannot run here", file=sys.stderr)
         return EXIT_SETUP
+    try:
+        run_cost = cost.resolve(args.measure, target, args.timeout_ms, args.budget_instructions,
+                                args.hang_ms)
+    except cost.CostRefused as refusal:
+        print(f"equiv: {refusal}", file=sys.stderr)
+        return EXIT_SETUP
     args.out.mkdir(parents=True, exist_ok=True)
     try:
         runtime = link.build_runtime(args.cc, HERE / "rt", args.out / target.directory("rt"),
@@ -246,14 +265,20 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as error:
         print(f"equiv: {error}", file=sys.stderr)
         return EXIT_SETUP
-    config = gate.Config(runtime=runtime, cc=args.cc, vectors=args.vectors,
-                         timeout_ms=args.timeout_ms, keep=args.keep, target=target)
+    config = gate.Config(runtime=runtime, cc=args.cc, vectors=args.vectors, cost=run_cost,
+                         keep=args.keep, target=target)
 
     if args.baseline is not None and not args.baseline.exists():
         print(f"equiv: no baseline at {args.baseline}; measure without --baseline, read "
               "records.json, and bless one with --write-baseline (a cause for every record "
               "that is not equal)", file=sys.stderr)
         return EXIT_SETUP
+
+    if args.baseline is not None:
+        problem = cost.departure(gate.load_baseline(args.baseline), run_cost)
+        if problem:
+            print(f"ratchet: {problem}")
+            return EXIT_RATCHET
 
     started = time.monotonic()
     if not run_self_tests(config, args.out):
@@ -296,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
         for future in pending:
             records.extend(future.result())
     records.sort(key=lambda r: r.key)
+    for record in records:
+        record.cost = run_cost.to_json()
 
     # Nothing in the file depends on when or how fast it ran: two runs over the
     # same inputs write the same bytes.
@@ -304,7 +331,8 @@ def main(argv: list[str] | None = None) -> int:
         "r2s": str(args.r2s),
         "r2s_sha256": sha256(args.r2s),
         "config": {"target": target.name,
-                   "vectors": args.vectors, "timeout_ms": args.timeout_ms, "cc": args.cc,
+                   "vectors": args.vectors, "cc": args.cc,
+                   "cost": {**run_cost.to_json(), "hang_ms": run_cost.hang_ms},
                    "compilers": args.compilers, "opts": args.opts, "only": args.only,
                    "sources": [build.Binary(s, "", "", s, s).source_key for s in sources],
                    "fixed_layout": bool(gate.fixed_layout_prefix()),
@@ -334,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.write_baseline is not None:
         previous = gate.load_baseline(args.write_baseline) if args.write_baseline.exists() else None
         args.write_baseline.write_text(
-            json.dumps(gate.baseline_from(records, previous, toolchain), indent=1,
+            json.dumps(gate.baseline_from(records, previous, toolchain, run_cost), indent=1,
                        sort_keys=True) + "\n",
             encoding="utf-8",
         )

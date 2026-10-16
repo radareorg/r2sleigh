@@ -470,7 +470,8 @@ jobs:
           tests/equiv/bounded.sh 300 \
             test_equiv.AnswerStatusTests test_equiv.BatchTests test_equiv.BuildTests \
             test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
-            test_equiv.ContractTests test_equiv.DwarfTests test_equiv.RatchetTests
+            test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests \
+            test_equiv.RatchetTests
 
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #

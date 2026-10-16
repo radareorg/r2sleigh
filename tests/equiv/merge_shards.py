@@ -17,7 +17,9 @@ matrix would otherwise drop its records unseen. ``--partial`` holds only the
 configurations the given shards ran, for a local run over part of the
 population. A shard built with another toolchain than the baseline's is
 refused, as in the gate, and so are shards of two targets (a shard's
-``config.target``; a file written before the target axis is x86-64's).
+``config.target``; a file written before the target axis is x86-64's), shards
+that counted by two measures or budgets (``config.cost``), and a baseline that
+counts by another than the shards (:func:`cost.departure`).
 """
 
 from __future__ import annotations
@@ -30,16 +32,19 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import cost as costs  # noqa: E402
 import gate  # noqa: E402
 from target import by_name  # noqa: E402
 from run_equiv import EXIT_OK, EXIT_RATCHET, EXIT_SETUP, summarize  # noqa: E402
 
 
-def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, str]], dict]:
+def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, str]], dict,
+                                             costs.Cost]:
     records: list[gate.Record] = []
     ran: set[tuple[str, str]] = set()
     toolchain: dict[str, str] = {}
     targets: set[str] = set()
+    counted: set[tuple[str, int]] = set()
     for path in paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
         config = payload["config"]
@@ -48,6 +53,11 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
         if len(targets) > 1:
             raise ValueError(f"{path}: shards of {' and '.join(sorted(targets))} cannot be "
                              "held to one baseline")
+        shard_cost = config.get("cost") or {}
+        counted.add((str(shard_cost.get("measure")), int(shard_cost.get("budget") or 0)))
+        if len(counted) > 1:
+            raise ValueError(f"{path}: shards counted by different measures or budgets "
+                             f"({sorted(counted)}) cannot be held to one baseline")
         for name, version in (config.get("toolchain") or {}).items():
             if toolchain.setdefault(name, version) != version:
                 raise ValueError(f"{path}: {name} is {version}, another shard has "
@@ -62,9 +72,10 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
                 status=raw["status"], evidence=raw.get("evidence", {}),
                 signature=raw.get("signature", ""), definition=raw.get("definition", ""),
                 proof=raw.get("proof", {}), vectors=raw.get("vectors", {}),
-                strict=raw.get("strict", ""),
+                strict=raw.get("strict", ""), cost=raw.get("cost", {}),
             ))
-    return records, ran, toolchain
+    measure, budget = next(iter(counted)) if counted else ("time", 0)
+    return records, ran, toolchain, costs.Cost(measure, budget)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,11 +88,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        records, ran, toolchain = load_records(args.records)
+        records, ran, toolchain, run_cost = load_records(args.records)
     except (ValueError, KeyError, json.JSONDecodeError) as error:
         print(f"merge: {error}", file=sys.stderr)
         return EXIT_SETUP
     baseline = gate.load_baseline(args.baseline)
+    problem = costs.departure(baseline, run_cost)
+    if problem:
+        print(f"ratchet: {problem}")
+        return EXIT_RATCHET
     blessed = baseline.get("toolchain")
     if blessed is not None and any(blessed.get(name) != version
                                    for name, version in toolchain.items()):
@@ -98,10 +113,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "records.json").write_text(json.dumps(
-        {"schema": 1, "toolchain": toolchain,
+        {"schema": 1, "toolchain": toolchain, "cost": run_cost.to_json(),
          "records": [record.to_json() for record in records]}, indent=1) + "\n",
         encoding="utf-8")
-    proposed = gate.baseline_from(records, baseline, toolchain)
+    proposed = gate.baseline_from(records, baseline, toolchain, run_cost)
     (args.out / "baseline.proposed.json").write_text(
         json.dumps(proposed, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(summarize(records))

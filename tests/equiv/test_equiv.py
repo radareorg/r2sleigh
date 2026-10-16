@@ -18,9 +18,12 @@ cannot run here is skipped with the reason.
 
 from __future__ import annotations
 
+import dataclasses
+import errno
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -32,7 +35,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import build  # noqa: E402
+import cost  # noqa: E402
 import gate  # noqa: E402
+import merge_shards  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
@@ -40,7 +45,7 @@ from dwarf import Dwarf  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, X86_64, Target  # noqa: E402
-from vectors import Vector, encode_job  # noqa: E402
+from vectors import JOB_MAGIC, Vector, encode_job  # noqa: E402
 
 STUB = HERE / "testdata" / "stub_r2s.py"
 CAN_RUN = gate.environment_problem() is None and shutil.which("gcc") is not None
@@ -260,7 +265,8 @@ class AnswerStatusTests(unittest.TestCase):
 
 class RatchetTests(unittest.TestCase):
     BASELINE = {
-        "schema": 2,
+        "schema": 3,
+        "cost": {"measure": "time", "budget": 1000},
         "records": {
             "a::gcc-O0::f": {"status": "equal"},
             "a::gcc-O0::g": {"status": "differs", "owner": "P7", "site": "crates/r2dec/src",
@@ -515,17 +521,44 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual((status, counts["compared"]), ("residual-trap", 1))
         self.assertEqual(gate.trap_comparison(status, counts), "none")
 
-    def test_a_build_that_runs_out_of_time_is_slow_not_undefined_or_wrong(self):
-        timeout = {"run": 2, "outcome": "timeout"}
+    def test_a_build_that_runs_past_its_budget_is_slow_not_undefined_or_wrong(self):
+        timeout = {"run": 2, "outcome": "budget"}
         o0_late = self.line(0, o0=timeout, pairs={(0, 2): False, (2, 3): False, (2, 4): False})
         self.assertEqual(gate.classify([o0_late], [], 0, self.NONE)[0], "slow")
         o2_late = self.line(0, pairs={(2, 4): False})
-        o2_late["runs"][4] = {"run": 4, "outcome": "timeout"}
+        o2_late["runs"][4] = {"run": 4, "outcome": "budget"}
         self.assertEqual(gate.classify([o2_late], [], 0, self.NONE)[0], "slow")
         # Both builds finished and still disagree: that stays undefined behaviour.
         disagree = self.line(0, pairs={(2, 4): False})
         self.assertEqual(gate.classify([disagree], [], 0, self.NONE)[0], "ub")
         self.assertNotIn("slow", gate.BLOCKING)
+
+    def test_a_run_the_wall_clock_guard_ended_says_nothing_of_cost(self):
+        # `hang` is load, not cost: never slow, and with no state to compare it
+        # leaves the vector ungraded for the harness to answer for.
+        line = self.line(0, o0={"run": 2, "outcome": "hang"})
+        line["pairs"] = [p for p in line["pairs"] if p["b"] != 2 and p["a"] != 2]
+        status, evidence, counts = gate.classify([line, self.line(1)], [], 0, self.NONE)
+        self.assertEqual((status, counts["incomplete"], counts["slow"]), ("harness-error", 1, 0))
+        self.assertEqual(evidence["runs"], [{"run": 2, "outcome": "hang"}])
+        # An original that hangs lies outside the domain, as one that overruns does.
+        hung = self.line(0, original="hang")
+        self.assertEqual(gate.classify([hung, self.line(1)], [], 0, self.NONE, min_graded=1)[0],
+                         "equal")
+
+    def test_a_run_s_instruction_count_never_reaches_a_record(self):
+        # The counter's last digits vary; a record must be the same bytes on every run.
+        counted = {"insns": 123456}
+        late = self.line(0, o0={"run": 2, "outcome": "budget", **counted},
+                         pairs={(0, 2): False, (2, 3): False, (2, 4): False})
+        late["runs"][0].update(counted)
+        wrong = self.line(1, o0={"run": 2, "outcome": "return", **counted}, pairs={(0, 2): False})
+        wrong["runs"][0].update(counted)
+        hung = self.line(2, o0={"run": 2, "outcome": "hang", **counted})
+        hung["pairs"] = [p for p in hung["pairs"] if p["b"] != 2 and p["a"] != 2]
+        for line in (late, wrong, hung):
+            evidence = gate.classify([line], [], 0, self.NONE)[1]
+            self.assertNotIn("insns", json.dumps(evidence), line["vector"])
 
     def test_an_equal_needs_its_floor_of_graded_vectors_and_a_defect_does_not(self):
         lines = [self.line(0), self.line(1, original="signal"), self.line(2, original="signal")]
@@ -611,6 +644,97 @@ class CompilerVerdictTests(unittest.TestCase):
                 self.assertEqual(sections[0], sections[1], variant)
 
 
+class CostTests(unittest.TestCase):
+    """What a budget counts, and when a run may be held to a baseline (ADR D38)."""
+
+    EMULATED = dataclasses.replace(AARCH64, native_machines=())
+    NATIVE = dataclasses.replace(X86_64, native_machines=(os.uname().machine,))
+
+    def test_an_emulated_target_cannot_count_instructions_and_says_why(self):
+        with self.assertRaises(cost.CostRefused) as refused:
+            cost.resolve("instructions", self.EMULATED, counter=lambda: None)
+        self.assertIn("qemu-aarch64", str(refused.exception))
+        self.assertIn("--measure time", str(refused.exception))
+        # The time measure scales for the emulator, as it always did.
+        self.assertEqual(cost.resolve("time", self.EMULATED, 1000).budget, 5000)
+
+    def test_a_host_that_cannot_count_refuses_instead_of_grading_by_time(self):
+        with self.assertRaises(cost.CostRefused) as refused:
+            cost.resolve("instructions", self.NATIVE,
+                         counter=lambda: "perf_event_open: Permission denied")
+        self.assertIn("Permission denied", str(refused.exception))
+        counted = cost.resolve("instructions", self.NATIVE, instructions=7, counter=lambda: None)
+        self.assertEqual((counted.measure, counted.budget), ("instructions", 7))
+
+    def test_the_probe_reads_a_counter_before_it_trusts_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paranoid = Path(tmp) / "paranoid"
+            paranoid.write_text("4\n")
+            closed = []
+
+            def denied(attr):
+                raise OSError(errno.EACCES, "Permission denied")
+
+            def opens(attr):
+                return 9
+
+            def reads(count):
+                return lambda fd, size: count.to_bytes(8, "little")
+
+            why = cost.probe(denied, paranoid=paranoid)
+            self.assertIn("Permission denied", why)
+            self.assertIn("perf_event_paranoid=4", why)
+            self.assertIsNone(cost.probe(opens, reads(1234), closed.append))
+            self.assertEqual(closed, [9])
+            self.assertIn("reads zero", cost.probe(opens, reads(0), closed.append))
+            self.assertEqual(closed, [9, 9])
+
+    def test_the_event_counts_user_space_instructions_only(self):
+        attr = cost.event_attr()
+        kind, size, config = struct.unpack_from("<IIQ", attr)
+        flags = struct.unpack_from("<Q", attr, 40)[0]
+        self.assertEqual((kind, config, size), (0, 1, len(attr)))
+        self.assertEqual(flags, (1 << 5) | (1 << 6))
+
+    def test_a_baseline_is_held_to_its_own_measure_and_budget(self):
+        baseline = {"cost": {"measure": "time", "budget": 1000}}
+        self.assertIsNone(cost.departure(baseline, cost.Cost("time", 1000)))
+        by_count = cost.departure(baseline, cost.Cost("instructions", 1000))
+        self.assertIn("counts time", by_count)
+        self.assertIn("counts instructions", by_count)
+        self.assertIn("budget", cost.departure(baseline, cost.Cost("time", 5000)))
+        # A baseline that says nothing is not one any measure may be held to.
+        self.assertIsNotNone(cost.departure({}, cost.Cost("time", 1000)))
+
+    def test_shards_that_counted_differently_are_not_merged(self):
+        def shard(tmp: Path, name: str, counted: dict) -> Path:
+            path = tmp / name
+            path.write_text(json.dumps({"config": {
+                "target": "x86-64", "sources": [], "compilers": "gcc", "opts": "O0",
+                "cost": counted}, "records": []}))
+            return path
+
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            time_shard = shard(tmp, "a.json", {"measure": "time", "budget": 1000})
+            same = shard(tmp, "b.json", {"measure": "time", "budget": 1000})
+            other = shard(tmp, "c.json", {"measure": "instructions", "budget": 1000})
+            self.assertEqual(merge_shards.load_records([time_shard, same])[3],
+                             cost.Cost("time", 1000))
+            with self.assertRaises(ValueError) as refused:
+                merge_shards.load_records([time_shard, other])
+            self.assertIn("different measures", str(refused.exception))
+
+    def test_a_record_states_the_cost_it_was_graded_by(self):
+        counted = cost.Cost("instructions", 5)
+        record = gate.Record(key="a::gcc-O0::f", function="f", address=0, status="equal",
+                             cost=counted.to_json())
+        self.assertEqual(record.to_json()["cost"], {"measure": "instructions", "budget": 5})
+        proposed = gate.baseline_from([record], None, None, counted)
+        self.assertEqual(proposed["cost"], {"measure": "instructions", "budget": 5})
+        self.assertEqual(proposed["schema"], 3)
+
+
 class TargetTests(unittest.TestCase):
     """What each target says about its machine, without building anything."""
 
@@ -622,7 +746,7 @@ class TargetTests(unittest.TestCase):
         # Budgets are native time: x86-64's are never scaled, an emulated
         # target's by its emulator's slowdown.
         self.assertEqual(X86_64.time_scale(), 1)
-        self.assertEqual(gate.Config(runtime=Path("/x")).call_budget_ms(), 1000)
+        self.assertEqual(cost.resolve("time", X86_64).budget, 1000)
         self.assertEqual(AARCH64.time_scale(), 5 if AARCH64.emulated() else 1)
 
     def test_a_narrow_argument_carries_only_the_bits_its_convention_defines(self):
@@ -653,9 +777,22 @@ class TargetTests(unittest.TestCase):
             abi = target.abi
             vector = Vector(index=0, seed=1, gpr=[0] * len(abi.int_registers),
                             fp=[bytes(16)] * len(abi.fp_registers), count=0, stack=[])
-            with_vector = encode_job(spec, [], [], [vector], 1000, abi=abi)
-            without = encode_job(spec, [], [], [], 1000, abi=abi)
+            with_vector = encode_job(spec, [], [], [vector], cost.Cost(), abi=abi)
+            without = encode_job(spec, [], [], [], cost.Cost(), abi=abi)
             self.assertEqual(len(with_vector) - len(without), size, target.name)
+
+    def test_the_job_header_carries_the_measure_and_a_64_bit_budget(self):
+        # struct job_header in rt/equiv_rt.c: 88 bytes, the budget a u64 since
+        # four times a billion instructions does not fit the u32 it replaced.
+        spec = CallSpec(name="f", address=0x1000, params=[], ret_kind="int", ret_bytes=4,
+                        ret_spelling="int")
+        counted = cost.Cost("instructions", 3_000_000_000, hang_ms=7000, fake=5)
+        header = encode_job(spec, [], [], [], counted)
+        self.assertEqual(len(header), 88)
+        self.assertEqual(header[:8], JOB_MAGIC)
+        fields = struct.unpack("<8sQQQQ8IQQ", header)
+        hang, measure, budget, fake = fields[8], fields[12], fields[13], fields[14]
+        self.assertEqual((hang, measure, budget, fake), (7000, 1, 3_000_000_000, 5))
 
     def test_function_links_jump_through_a_register_no_argument_uses(self):
         links = [{"ident": "callee", "kind": "function", "addr": 0x401234},
@@ -904,6 +1041,32 @@ class _PipelineCases(_OnTarget):
         self.assertEqual(written[0], written[1])
         self.assertNotIn(b"elapsed", written[0])
 
+    def test_instructions_are_counted_where_the_host_can_and_refused_where_it_cannot(self):
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            if self.TARGET.emulated():
+                cwd = os.getcwd()
+                os.chdir(tmp)
+                try:
+                    code = run_equiv.main(["--measure", "instructions", "--target",
+                                           self.TARGET.name, "--out", "out"])
+                finally:
+                    os.chdir(cwd)
+                self.assertEqual(code, run_equiv.EXIT_SETUP)
+                return
+            reason = cost.probe()
+            if reason:
+                self.skipTest(reason)
+            written = []
+            for _ in range(2):
+                _, records = self.run_gate(tmp, "--opts", "O2", "--measure", "instructions",
+                                           STUB_R2S_MODE="delegate", STUB_R2S_FAULTS="")
+                written.append((tmp / "out" / "records.json").read_bytes())
+            self.assertEqual(written[0], written[1])
+            self.assertEqual({r["cost"]["measure"] for r in records.values()}, {"instructions"})
+            self.assertEqual(json.loads(written[0])["config"]["cost"]["budget"],
+                             cost.DEFAULT_INSTRUCTIONS)
+
     def test_a_crash_is_one_record_and_the_ratchet_sees_it(self):
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
@@ -913,7 +1076,9 @@ class _PipelineCases(_OnTarget):
             baseline = tmp / "baseline.json"
             cause = {"owner": "GT", "site": "tests/equiv/selftest.py",
                      "cause": "The self-test rendering for this function is known to end so."}
-            baseline.write_text(json.dumps({"schema": 2, "records": {
+            baseline.write_text(json.dumps({"schema": 3,
+                                            "cost": cost.resolve("time", self.TARGET).to_json(),
+                                            "records": {
                 k: {"status": r["status"],
                     "compared": gate.trap_comparison(r["status"], r["vectors"]),
                     **(cause if r["status"] != "equal" else {})}

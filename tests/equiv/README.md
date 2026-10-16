@@ -12,6 +12,7 @@ tests/equiv/run_equiv.py --r2s target/debug/r2s \
     --baseline tests/equiv/baseline.json                         # gate (ratchet)
 tests/equiv/run_equiv.py --r2s target/debug/r2s --target aarch64 \
     --baseline tests/equiv/baseline-aarch64.json                 # the same, for arm64
+tests/equiv/run_equiv.py --r2s target/debug/r2s --measure instructions   # cost counted, not timed
 python3 -m unittest discover -s tests/equiv -p 'test_*.py'       # the gate's own tests
 ```
 
@@ -122,6 +123,7 @@ target (`aarch64-gcc-O0`):
 | status | graded by | meaning |
 |---|---|---|
 | `equal` | engine | every surviving vector agreed |
+| `slow` | engine | agreed wherever it finished; a rendering ran past its budget (below), which is a cost and not an answer |
 | `residual-trap` | engine | agreed wherever it ran; some vector reached a counted residual, and the state before it agreed |
 | `differs` | engine | a vector returned, wrote, printed or ended differently, or had written or printed differently by a residual trap |
 | `uninit` | engine | the rendering read a value nothing wrote |
@@ -183,7 +185,8 @@ The ratchet
 -----------
 
 `tests/equiv/baseline.json` (x86-64) and `tests/equiv/baseline-aarch64.json`
-hold, per key, a status and -- for every record
+name the measure and budget they were blessed under (`cost`), and hold, per
+key, a status and -- for every record
 that is not `equal` -- the person's recorded `cause`, its `owner` (the
 ROADMAP.md item that owns the fix) and `site` (the repository path where it
 lands, or that states the limitation), and the machine's `reason`
@@ -242,7 +245,7 @@ build, never a binary graded under the wrong ABI.
 | an object link | `.set name, addr` | the same, bound by the loader (below) |
 | guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) |
 | runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` |
-| per-call budget | `--timeout-ms` (four times it for a rendering) | five times that under qemu |
+| per-call budget | `--budget-instructions`, or `--timeout-ms` under `--measure time` (four times it for a rendering) | `--measure time` only, five times `--timeout-ms` |
 | `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot |
 | keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` |
 
@@ -265,18 +268,63 @@ between two x86-64 runs.) The runtime's variables go to the guest with `-E`,
 never into qemu's own environment, where the host loader would try to preload
 a foreign object.
 
-*Time.* `--timeout-ms` is native time. qemu-aarch64 ran a bitwise CRC 3.5
-(`-O2`) to 5 (`-O0`) times slower than x86-64 natively, so under it every
-per-call budget is five times longer (`Target.time_scale`). Unscaled, a
-rendering keeps a fraction of its native margin: on a loaded host the `-O0`
-build of a clang `-O2` crc32_bitwise needed 1.6 to 4 s of its 4 s on three
-vectors, and one run in two graded it `slow`. A budget in wall-clock time
-still has a boundary: a vector whose original needs about its whole budget
-(review.c's clang `fact` at n near 2^31, 3 to 5 s under qemu and about 1 s
-natively) can be graded in one run and dropped in the next, so the vector
-counts of such a record can differ between two runs while its status does
-not. Two full aarch64 runs side by side wrote 754 of 756 records byte for
-byte and the other two with the same status.
+*Cost.* A budget counts one measure, and every record and baseline says which
+(`cost.measure` and `cost.budget`; `config.cost` in `records.json`). The
+original gets the budget and a rendering four times it; a call past it is
+stopped, and a rendering stopped is `slow`, an original stopped lies outside
+the domain and is dropped (`cost.py`, ADR D38).
+
+- `--measure instructions` counts the user-space instructions the call
+  retires. The child opens `perf_event_open` (`HW_INSTRUCTIONS`,
+  `exclude_kernel`, `exclude_hv`) with the budget plus one as its sample
+  period, so the counter overflows once, at the first instruction past the
+  budget, and raises `SIGPWR`, whose default action ends the run (outcome
+  `budget`). A call that retires more than the
+  budget before the signal lands ends the same way, so the verdict is the
+  count and never the skid. The runtime also writes each run's count as
+  `insns` to `result.jsonl` (kept by `--keep`) and never into a record, since
+  the last digits of a count vary. Wall-clock time (`--hang-ms`, 120 s) only
+  ends a run that retires nothing, a blocked call: that run is `hang`, which
+  grades nothing (an original that hangs is dropped, a rendering that does
+  leaves the vector ungraded and the record `harness-error`).
+- The default budget, `--budget-instructions` 4 billion, is about the second
+  the time measure gave on the host it was measured on (x86-64, AMD EPYC under
+  KVM). review.c's clang `fact` retires 2.5, 3.3 and 4.5 billion on its three
+  largest vectors and every other original in review.c and hashes.c under 3
+  million, so no vector lies within 12 % of the budget (the 4.5 billion one is
+  12.5 % over and dropped, the 3.3 billion one 18 % under). The `-O0` rendering retires 51 and 67 billion on the other two (20
+  times the original), so `fact` stays `slow`. Load barely moves a count
+  (839 runs beside four busy loops differed by at most 163 instructions in 3.3
+  billion); a CPU model does (libc picks its string routines by CPU feature),
+  so a baseline is blessed on the kind of runner that grades it. A `time`
+  budget is wall milliseconds on the runner it was blessed on: a native
+  aarch64 host, which does not scale, is refused against `baseline-aarch64.json`'s
+  5000 until given `--timeout-ms 5000`.
+- `--measure time` (the default) counts wall-clock milliseconds, `--timeout-ms`
+  in native time, five times that on an emulated target
+  (`Target.time_scale`: qemu-aarch64 ran a bitwise CRC 3.5 to 5 times slower than
+  x86-64). It is what a host without a counter can do, and it depends on load:
+  on a loaded host the `-O0` build of a clang `-O2` crc32_bitwise needed 1.6 to
+  4 s of its 4 s, and a vector whose original needs about its whole budget
+  (review.c's clang `fact` at n near 2^31, 3 to 5 s under qemu and about 1 s
+  natively) can be graded in one run and dropped in the next, so the vector
+  counts of such a record differ between two runs while its status does not.
+  Two full aarch64 runs side by side wrote 754 of 756 records byte for byte and
+  the other two with the same status.
+- The gate refuses rather than fall back. `--measure instructions` on a host
+  without a working counter (`perf_event_open` denied by
+  `kernel.perf_event_paranoid`, no virtual PMU, or a counter that reads zero)
+  exits 3 and names the cause. It is refused on an emulated target: the guest
+  cannot call `perf_event_open` (qemu-user answers `ENOSYS`) and the packaged
+  qemu-user 8.2 has no `-plugin`, so its guest instructions are not countable
+  there yet. A run whose measure or budget differs from `--baseline`'s is
+  refused before anything is graded (exit 1), and `merge_shards.py` refuses
+  shards that counted differently.
+- The self-tests include two cases under a fake counter (`Cost.fake`, a count
+  the runtime reports for every rendering run in place of the counter): one
+  retires one instruction more than four times the budget and must be `slow`,
+  one exactly that and must be `equal`. They need no performance counter, so
+  they run on every host and target and pin the verdict path.
 
 *Object links on AArch64.* GNU ld for AArch64 (2.42, and gold) resolves the
 GOT entry of an absolute symbol a shared object defines as if it were

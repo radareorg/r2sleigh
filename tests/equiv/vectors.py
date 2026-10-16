@@ -31,6 +31,7 @@ import random
 import struct
 from dataclasses import dataclass, field
 
+from cost import MEASURES, Cost
 from dwarf import Dwarf
 from spec import CallSpec, Param
 from target import SYSV_X86_64, Abi
@@ -46,7 +47,7 @@ POINTER_TABLE = 64
 MASK64 = (1 << 64) - 1
 
 RET_KINDS = {"void": 0, "int": 1, "f32": 2, "f64": 3, "int128": 4}
-JOB_MAGIC = b"EQVJOB02"
+JOB_MAGIC = b"EQVJOB03"
 
 
 def int_pool(size: int, signed: bool, constants: tuple[int, ...] | list[int] = ()) -> list[int]:
@@ -301,7 +302,7 @@ class Run:
 
 
 def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
-               vectors: list[Vector], timeout_ms: int, out_cap: int = 65536,
+               vectors: list[Vector], cost: Cost, out_cap: int = 65536,
                abi: Abi = SYSV_X86_64) -> bytes:
     """The binary job ``rt/equiv_rt.c`` reads (``struct job_header`` and after).
 
@@ -311,7 +312,7 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
     out = bytearray()
     guard_start, guard_end = spec.guard()
     out += struct.pack(
-        "<8sQQQQ8I",
+        "<8sQQQQ8IQQ",
         JOB_MAGIC,
         ARENA_BASE,
         ARENA_SIZE,
@@ -320,11 +321,13 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
         len(runs),
         len(vectors),
         len(pairs),
-        timeout_ms,
+        cost.hang_ms,
         RET_KINDS[spec.ret_kind],
         spec.ret_bytes,
         out_cap,
-        0,
+        MEASURES.index(cost.measure),
+        cost.budget,
+        cost.fake,
     )
     for run in runs:
         so = run.so_path.encode()

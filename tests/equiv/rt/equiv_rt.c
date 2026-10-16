@@ -50,14 +50,17 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <link.h>
+#include <linux/perf_event.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <ucontext.h>
@@ -219,7 +222,7 @@ struct equiv_ret {
 
 extern void equiv_call(void *fn, const struct equiv_regs *in, struct equiv_ret *out);
 
-#define JOB_MAGIC "EQVJOB02"
+#define JOB_MAGIC "EQVJOB03"
 
 enum ret_kind { RET_VOID = 0, RET_INT = 1, RET_F32 = 2, RET_F64 = 3, RET_INT128 = 4 };
 
@@ -232,12 +235,18 @@ struct job_header {
     uint32_t n_runs;
     uint32_t n_vectors;
     uint32_t n_pairs;
-    uint32_t timeout_ms;      /* the original's budget; renderings get four times it */
+    uint32_t hang_ms;         /* wall-clock guard per run when the budget counts instructions */
     uint32_t ret_kind;
     uint32_t ret_bytes;
     uint32_t out_cap;         /* bytes of fd 1 and of fd 2 kept per run */
-    uint32_t reserved;
+    uint32_t measure;         /* MEASURE_*: what budget counts */
+    uint64_t budget;          /* the original's, in ms or instructions; renderings get four times it */
+    uint64_t fake_count;      /* tests: what each rendering run counts in place of the counter */
 };
+
+/* doc/adr-verified-layers.md D38. */
+enum measure { MEASURE_TIME = 0, MEASURE_INSTRUCTIONS = 1 };
+_Static_assert(sizeof(struct job_header) == 88, "the job header layout (vectors.encode_job)");
 
 struct job_run {
     uint64_t address;         /* called directly when so_path is empty */
@@ -272,12 +281,13 @@ enum outcome {
     OUT_EXIT = 2,             /* called exit(); captured from the atexit hook */
     OUT_EXIT_RAW = 3,         /* ended with a status and no capture (_exit, a sanitizer) */
     OUT_SIGNAL = 4,
-    OUT_TIMEOUT = 5,
-    OUT_SKIPPED = 6           /* not run: the original was outside its domain */
+    OUT_BUDGET = 5,           /* stopped past its budget: the only outcome that is `slow` */
+    OUT_SKIPPED = 6,          /* not run: the original was outside its domain */
+    OUT_HANG = 7              /* stopped by the wall-clock guard, which says nothing of cost */
 };
 
 static const char *outcome_name[] = {
-    "unavailable", "return", "exit", "exit-raw", "signal", "timeout", "skipped",
+    "unavailable", "return", "exit", "exit-raw", "signal", "budget", "skipped", "hang",
 };
 
 /* What a child leaves in shared memory. The arena and segment bytes follow. */
@@ -291,6 +301,8 @@ struct slot_head {
     int32_t guard;               /* GUARD_*: how control reached the original's code */
     int32_t guard_error;         /* errno of a guard that could not be installed */
     uint64_t guard_caller;       /* return address at a delegated entry */
+    uint64_t insns;              /* instructions the call retired, where counted */
+    int32_t counter_error;       /* errno of a counter that could not be armed */
     uint32_t trap_site;          /* arg 0 at a trap in the rendering: a residual's site */
     int32_t trap_depth;          /* TRAP_*: which activation of the function trapped */
     uint64_t out_at_capture;     /* bytes on fd 1 and fd 2 when the state was captured */
@@ -473,10 +485,81 @@ static void child_capture(int how)
     slot->captured = how;
 }
 
+/* ADR D38: the counter overflows once, at the budget, into BUDGET_SIGNAL, whose default
+ * action ends the run; settle ends a call that retired more by the read the same way. */
+#define BUDGET_SIGNAL SIGPWR
+
+static int g_counter = -1;
+static uint64_t g_counter_budget;
+static int g_counter_fake;
+static uint64_t g_counter_fake_count;
+
+/* A test's stand-in for the counter: the call retires `count`, whatever it does. */
+static void counter_fake(uint64_t budget, uint64_t count)
+{
+    g_counter_budget = budget;
+    g_counter_fake = 1;
+    g_counter_fake_count = count;
+}
+
+static int counter_arm(uint64_t budget)
+{
+    g_counter_budget = budget;
+    struct perf_event_attr attr;
+    memset(&attr, 0, sizeof attr);
+    attr.type = PERF_TYPE_HARDWARE;
+    attr.size = sizeof attr;
+    attr.config = PERF_COUNT_HW_INSTRUCTIONS;
+    attr.disabled = 1;
+    attr.exclude_kernel = 1;
+    attr.exclude_hv = 1;
+    attr.sample_period = budget + 1;  /* overflow at the first count past the budget */
+    attr.wakeup_events = 1;
+    int fd = (int)syscall(SYS_perf_event_open, &attr, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+    if (fd < 0)
+        return errno;
+    struct f_owner_ex owner = { .type = F_OWNER_TID, .pid = (pid_t)syscall(SYS_gettid) };
+    if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_ASYNC) < 0
+        || fcntl(fd, F_SETSIG, BUDGET_SIGNAL) < 0 || fcntl(fd, F_SETOWN_EX, &owner) < 0) {
+        int error = errno;
+        close(fd);
+        return error;
+    }
+    g_counter = fd;
+    return 0;
+}
+
+static void counter_start(void)
+{
+    if (g_counter >= 0)
+        ioctl(g_counter, PERF_EVENT_IOC_REFRESH, 1);
+}
+
+static void counter_settle(void)
+{
+    uint64_t count = 0;
+    if (g_counter_fake) {
+        count = g_counter_fake_count;
+    } else if (g_counter >= 0) {
+        ioctl(g_counter, PERF_EVENT_IOC_DISABLE, 0);
+        if (read(g_counter, &count, sizeof count) != (ssize_t)sizeof count)
+            count = 0;
+        close(g_counter);
+        g_counter = -1;
+    } else {
+        return;
+    }
+    g_child_slot->insns = count;
+    if (count > g_counter_budget)
+        raise(BUDGET_SIGNAL);
+}
+
 static void child_exit_hook(void)
 {
-    if (g_in_call)
+    if (g_in_call) {
+        counter_settle();
         child_capture(CAPTURE_EXIT);
+    }
 }
 
 static uintptr_t object_base(const void *address)
@@ -608,7 +691,7 @@ static int guard_install(struct run_state *run)
     return 0;
 }
 
-static void child_run(struct run_state *run, const struct job_vector *vec, int timeout_ms)
+static void child_run(struct run_state *run, const struct job_vector *vec, uint64_t budget)
 {
     dup2(run->out_fd, 1);
     dup2(run->err_fd, 2);
@@ -627,21 +710,30 @@ static void child_run(struct run_state *run, const struct job_vector *vec, int t
         sigaction(faults[i], &sa, NULL);
     signal(SIGALRM, SIG_DFL);
     signal(SIGPIPE, SIG_DFL);
-    /* A signal mask is inherited across fork and exec, so a gate started from
-     * a process that blocked SIGALRM would arm a timer that never fires, and a
-     * rendering that loops would run until the job's own timeout: the
-     * harness-contracts step stalled for twenty minutes in run_driver. The
-     * timer has to be deliverable, and a CPU limit stands behind it for a run
-     * that spins with the alarm somehow held off. */
+    signal(BUDGET_SIGNAL, SIG_DFL);
+    /* The signal mask is inherited, and a blocked SIGALRM arms a timer that never fires. */
     sigset_t none;
     sigemptyset(&none);
     sigprocmask(SIG_SETMASK, &none, NULL);
+    /* Under the time measure the budget is the guard; under instructions, hang_ms is. */
+    int guard_ms = g_head.measure == MEASURE_TIME ? (int)budget : (int)g_head.hang_ms;
     struct rlimit cpu;
-    cpu.rlim_cur = (rlim_t)(timeout_ms / 1000) * 2 + 2;
+    cpu.rlim_cur = (rlim_t)(guard_ms / 1000) * 2 + 2;
     cpu.rlim_max = cpu.rlim_cur + 1;
     setrlimit(RLIMIT_CPU, &cpu);
 
     g_child_slot = run->slot;
+    if (g_head.measure == MEASURE_INSTRUCTIONS) {
+        int error = 0;
+        if (g_head.fake_count)
+            counter_fake(budget, run->spec->replaces ? g_head.fake_count : 0);
+        else
+            error = counter_arm(budget);
+        if (error) {
+            run->slot->counter_error = error;
+            _exit(0);
+        }
+    }
     atexit(child_exit_hook);
     if (run->spec->replaces) {
         Dl_info where;
@@ -660,14 +752,16 @@ static void child_run(struct run_state *run, const struct job_vector *vec, int t
 
     struct itimerval timer;
     memset(&timer, 0, sizeof timer);
-    timer.it_value.tv_sec = timeout_ms / 1000;
-    timer.it_value.tv_usec = (timeout_ms % 1000) * 1000;
+    timer.it_value.tv_sec = guard_ms / 1000;
+    timer.it_value.tv_usec = (guard_ms % 1000) * 1000;
     setitimer(ITIMER_REAL, &timer, NULL);
 
     struct equiv_ret ret;
     memset(&ret, 0, sizeof ret);
     g_in_call = 1;
+    counter_start();
     equiv_call(run->fn, &vec->regs, &ret);
+    counter_settle();
     g_in_call = 0;
 
     memset(&timer, 0, sizeof timer);
@@ -697,7 +791,7 @@ static size_t read_capture(int fd, char *buffer, size_t cap, size_t *total)
     return done;
 }
 
-static void run_one(struct run_state *run, const struct job_vector *vec, int timeout_ms)
+static void run_one(struct run_state *run, const struct job_vector *vec, uint64_t budget)
 {
     memset(run->slot, 0, sizeof *run->slot);
     /* Empty both captures and rewind them. The offset belongs to the open file
@@ -719,11 +813,17 @@ static void run_one(struct run_state *run, const struct job_vector *vec, int tim
         return;
     }
     if (pid == 0)
-        child_run(run, vec, timeout_ms);
+        child_run(run, vec, budget);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
     }
 
+    if (run->slot->counter_error) {
+        run->outcome = OUT_UNAVAILABLE;
+        snprintf(run->load_error, sizeof run->load_error, "perf_event_open: %s",
+                 strerror(run->slot->counter_error));
+        return;
+    }
     if (run->slot->guard_error) {
         run->outcome = OUT_UNAVAILABLE;
         snprintf(run->load_error, sizeof run->load_error,
@@ -733,7 +833,12 @@ static void run_one(struct run_state *run, const struct job_vector *vec, int tim
     }
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
-        run->outcome = sig == SIGALRM ? OUT_TIMEOUT : OUT_SIGNAL;
+        if (sig == BUDGET_SIGNAL && g_head.measure == MEASURE_INSTRUCTIONS)
+            run->outcome = OUT_BUDGET;
+        else if (sig == SIGALRM)
+            run->outcome = g_head.measure == MEASURE_TIME ? OUT_BUDGET : OUT_HANG;
+        else
+            run->outcome = OUT_SIGNAL;
         run->status = sig;
     } else if (WIFEXITED(status)) {
         run->status = WEXITSTATUS(status);
@@ -967,6 +1072,9 @@ static void emit_run(size_t index, const struct run_state *run)
             fprintf(g_out, ",\"trap_site\":%u,\"trap_depth\":\"%s\"", run->slot->trap_site,
                     trap_depth_name[run->slot->trap_depth]);
     }
+    /* A skipped or unloaded run's slot still holds the last vector's count. */
+    if (run->slot->insns && run->outcome != OUT_SKIPPED && run->outcome != OUT_UNAVAILABLE)
+        fprintf(g_out, ",\"insns\":%llu", (unsigned long long)run->slot->insns);
     if (run->outcome == OUT_RETURN) {
         fputs(",\"" RET_INT_NAME "\":", g_out);
         json_hex(g_out, (const uint8_t *)&run->slot->ret.r0, 8);
@@ -1026,6 +1134,17 @@ static int equiv_main(int argc, char **argv, char **envp)
     if (arena == MAP_FAILED || (uint64_t)(uintptr_t)arena != g_head.arena_base)
         return die("cannot map the arena at its fixed address");
     g_arena = arena;
+
+    if (g_head.measure == MEASURE_INSTRUCTIONS && !g_head.fake_count) {
+        int error = counter_arm(1);
+        if (error) {
+            char what[160];
+            snprintf(what, sizeof what, "perf_event_open: %s", strerror(error));
+            return die(what);
+        }
+        close(g_counter);
+        g_counter = -1;
+    }
 
     dl_iterate_phdr(collect_segments, NULL);
     /* backtrace() loads its unwinder on first use: do it here, never in a handler. */
@@ -1123,8 +1242,7 @@ static int equiv_main(int argc, char **argv, char **envp)
                 run->outcome = OUT_SKIPPED;
                 continue;
             }
-            int budget = r == 0 ? (int)g_head.timeout_ms : (int)g_head.timeout_ms * 4;
-            run_one(run, vec, budget);
+            run_one(run, vec, r == 0 ? g_head.budget : g_head.budget * 4);
             if (r == 0)
                 original_ok = run->outcome == OUT_RETURN || run->outcome == OUT_EXIT;
         }
@@ -1142,7 +1260,8 @@ static int equiv_main(int argc, char **argv, char **envp)
             if (pairs[p].a >= g_head.n_runs || pairs[p].b >= g_head.n_runs)
                 continue;
             if (a->outcome == OUT_SKIPPED || b->outcome == OUT_SKIPPED
-                || a->outcome == OUT_UNAVAILABLE || b->outcome == OUT_UNAVAILABLE)
+                || a->outcome == OUT_UNAVAILABLE || b->outcome == OUT_UNAVAILABLE
+                || a->outcome == OUT_HANG || b->outcome == OUT_HANG)
                 continue;
             fprintf(g_out, "%s{\"a\":%u,\"b\":%u,\"equal\":", first ? "" : ",", pairs[p].a,
                     pairs[p].b);
