@@ -148,7 +148,7 @@ pub struct DecompilePrepFacts {
     /// Full-width entry ABI values that may serve as parameter address bases.
     pub formal_parameter_bases: IdMap<crate::graph::ValueId, usize>,
     /// The stack-root solve moved a state past its height: the function refuses.
-    pub exhausted: Option<crate::fixpoint::Exhausted>,
+    pub(crate) exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl Default for DecompilePrepFacts {

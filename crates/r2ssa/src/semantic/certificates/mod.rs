@@ -435,7 +435,7 @@ pub struct PreparedFunctionCertificates {
     /// What each formal's pointee is read as (doc/adr-aggregates.md).
     pub parameter_fields: BTreeMap<u32, ParameterFields>,
     /// The call-result solve moved a state past its height: the function refuses.
-    pub exhausted: Option<crate::fixpoint::Exhausted>,
+    pub(crate) exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 /// Remove the certified byte stride from one offset without manufacturing a

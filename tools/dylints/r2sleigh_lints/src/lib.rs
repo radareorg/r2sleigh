@@ -2144,6 +2144,14 @@ rustc_lint::declare_lint!(
     "an SSAOp's call class has one owner in r2ssa, stated as an exhaustive list"
 );
 
+rustc_lint::declare_lint!(
+    /// A read of the `exhausted` flag through a sealed stage re-checks what `Prepared::seal` and
+    /// `Sealed::into_artifact` refused, which makes it a second owner (doc/adr-stable-identity.md, D42).
+    pub EXHAUSTED_READ_THROUGH_SEALED_STAGE,
+    Deny,
+    "a refusal is a property of the stage type; no reader re-checks it"
+);
+
 rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2223,7 +2231,8 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
     ENTITY_KEYED_MAP,
     R2IL_OP_PROPERTY_OUTSIDE_R2IL,
-    SSA_CALL_CLASS_OUTSIDE_OP
+    SSA_CALL_CLASS_OUTSIDE_OP,
+    EXHAUSTED_READ_THROUGH_SEALED_STAGE
 ]);
 
 #[unsafe(no_mangle)]
@@ -2311,6 +2320,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         CACHE_OUTSIDE_QUERY_DATABASE,
         R2IL_OP_PROPERTY_OUTSIDE_R2IL,
         SSA_CALL_CLASS_OUTSIDE_OP,
+        EXHAUSTED_READ_THROUGH_SEALED_STAGE,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
 }
@@ -3228,6 +3238,17 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 }
             }
             _ => {}
+        }
+
+        if let Some(stage) = exhausted_read_through_sealed_stage(cx, expr) {
+            span_lint(
+                cx,
+                EXHAUSTED_READ_THROUGH_SEALED_STAGE,
+                expr.span.source_callsite(),
+                format!(
+                    "this reads `exhausted` through a `{stage}`, which no exhausted pass can build; the seal refuses it, so a reader does not re-check"
+                ),
+            );
         }
 
         if let Some(answer) = r2il_op_property_match(cx, expr) {
@@ -5843,6 +5864,45 @@ fn asks_r2il<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Expr<'tcx>) -> bool {
         _ => std::ops::ControlFlow::Continue(()),
     })
     .is_some()
+}
+
+/// The stages a pass cannot exhaust: `Prepared::seal` and `Sealed::into_artifact` refuse it (D42).
+const SEALED_STAGES: [&str; 4] = ["Sealed", "TrustedSeal", "SsaArtifact", "TrustedSsaArtifact"];
+
+/// The sealed stage an `.exhausted()` call or `.exhausted` field read passes through, following
+/// method receivers, fields, derefs and the initialiser of an immutable `let`.
+fn exhausted_read_through_sealed_stage<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &'tcx Expr<'tcx>,
+) -> Option<String> {
+    let mut at = match expr.kind {
+        ExprKind::MethodCall(segment, receiver, [], _)
+            if segment.ident.name.as_str() == "exhausted" =>
+        {
+            receiver
+        }
+        ExprKind::Field(base, field) if field.name.as_str() == "exhausted" => base,
+        _ => return None,
+    };
+    if clippy_utils::is_in_test(cx.tcx, expr.hir_id) {
+        return None;
+    }
+    loop {
+        at = clippy_utils::expr_or_init(cx, at);
+        if let rustc_middle::ty::Adt(item, _) = cx.typeck_results().expr_ty(at).peel_refs().kind() {
+            let name = cx.tcx.item_name(item.did());
+            if SEALED_STAGES.contains(&name.as_str()) {
+                return Some(name.to_string());
+            }
+        }
+        at = match at.kind {
+            ExprKind::MethodCall(_, receiver, ..) => receiver,
+            ExprKind::Field(base, _)
+            | ExprKind::AddrOf(_, _, base)
+            | ExprKind::Unary(rustc_hir::UnOp::Deref, base) => base,
+            _ => return None,
+        };
+    }
 }
 
 #[test]

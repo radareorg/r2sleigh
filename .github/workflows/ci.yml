@@ -141,6 +141,26 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: python3 scripts/spec_evidence.py --base "$BASE"
 
+  # ── A change adds or lengthens no run of more than two `//` lines (AGENTS.md, Comments) ──
+  #
+  # `long_comments` in the structure report counts the total, which a run lengthened by one line
+  # does not move; this grades the diff against the pull request's base (its parent, in a stack).
+  comment-runs:
+    name: Comments stay one or two lines
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The gate's own tests
+        run: python3 scripts/test_comment_runs.py
+      - name: No run is added or lengthened
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/comment_runs.py --base "$BASE"
+
   # ── The repository's own lints (tools/dylints/r2sleigh_lints) ──────
   #
   # A crate that has cleared a rule denies it at its root, so a new

@@ -7,7 +7,7 @@ pub struct ControlDomainFacts {
     pub domains: BTreeMap<ControlDomainId, ControlDomain>,
     pub by_block: BTreeMap<u64, ControlDomainId>,
     /// The solve moved a state past its height: the function refuses (doc/adr-fixpoint.md).
-    pub exhausted: Option<crate::fixpoint::Exhausted>,
+    pub(crate) exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl ControlDomainFacts {

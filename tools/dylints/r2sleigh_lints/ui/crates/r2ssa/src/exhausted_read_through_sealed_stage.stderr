@@ -1,0 +1,34 @@
+error: this reads `exhausted` through a `SsaArtifact`, which no exhausted pass can build; the seal refuses it, so a reader does not re-check
+  --> $DIR/exhausted_read_through_sealed_stage.rs:98:5
+   |
+LL |     artifact.facts().exhausted().is_some()
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(exhausted_read_through_sealed_stage)]` on by default
+
+error: this reads `exhausted` through a `Sealed`, which no exhausted pass can build; the seal refuses it, so a reader does not re-check
+  --> $DIR/exhausted_read_through_sealed_stage.rs:102:5
+   |
+LL |     sealed.decompile_prep_facts().exhausted.is_some()
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this reads `exhausted` through a `Sealed`, which no exhausted pass can build; the seal refuses it, so a reader does not re-check
+  --> $DIR/exhausted_read_through_sealed_stage.rs:106:5
+   |
+LL |     seal.sealed.ir.exhausted().is_some()
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: this reads `exhausted` through a `SsaArtifact`, which no exhausted pass can build; the seal refuses it, so a reader does not re-check
+  --> $DIR/exhausted_read_through_sealed_stage.rs:110:5
+   |
+LL |     artifact.exhausted().is_some()
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+error: this reads `exhausted` through a `SsaArtifact`, which no exhausted pass can build; the seal refuses it, so a reader does not re-check
+  --> $DIR/exhausted_read_through_sealed_stage.rs:115:5
+   |
+LL |     facts.exhausted().is_some()
+   |     ^^^^^^^^^^^^^^^^^
+
+error: aborting due to 5 previous errors
+

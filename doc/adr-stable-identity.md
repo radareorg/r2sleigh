@@ -49,6 +49,16 @@ it. Identity is now stable and the IR cannot change once facts exist.
   itself into `SsaArtifact`. Nothing is written into an artifact once built:
   formals are asked of their two owners (`SsaArtifact::formal_parameter_of`),
   and spellings, provenance and native spans arrive as a `Finish`.
+- A refusal is a property of the stage type (ROADMAP D42). `Prepared::seal`
+  refuses a function whose recovery or prep pass exhausted, and
+  `Sealed::into_artifact` one whose fact collection did, so no `Sealed`,
+  `TrustedSeal` or `SsaArtifact` exists for such a body and no reader
+  re-checks it: a check at one consumer is a second owner (#273 let three
+  engine readers through a seal only `into_artifact` refused). The flag's
+  accessors are `pub(crate)`, which closes every other crate, and the Dylint
+  `exhausted_read_through_sealed_stage` denies a read of it through a sealed
+  stage inside r2ssa. It follows receivers, fields, derefs and an immutable
+  `let`'s initialiser, so a chain a function boundary breaks is not seen.
 - `compile_fail` doctests state that a prepared function seals once and an
   artifact's blocks are not writable. Prep facts carry no revision.
 - An entry-lane formal is the caller's value of the lane (version zero, no
