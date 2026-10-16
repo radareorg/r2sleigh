@@ -401,10 +401,8 @@ fn relative(layout: &Layout, value: u64, addressed: bool) -> u64 {
     }
 }
 
-/// Each export at an address of this image; a forwarder names another image's and is no place here.
-///
-/// A forwarder's address lies inside the directory's stated extent, so a directory stating no size
-/// has none: it is read from its address alone, with every address a place.
+/// Each export at an address of this image; a forwarder's lies in the directory's stated extent.
+/// Tables and names are read through the mapped image, never past the file's bytes (D18).
 fn exports_of(
     layout: &Layout,
     data: &[u8],
@@ -413,38 +411,75 @@ fn exports_of(
     let Some((rva, size)) = directory(pe::IMAGE_DIRECTORY_ENTRY_EXPORT) else {
         return Vec::new();
     };
-    let Some(bytes) = layout.bytes(data, rva) else {
-        return Vec::new();
-    };
-    let sized = &bytes[..bytes.len().min(size as usize)];
-    let Ok(table) =
-        object::read::pe::ExportTable::parse(if size == 0 { bytes } else { sized }, rva as u32)
+    let field = |at: u64| layout.word(data, rva + at, 4);
+    let (
+        Some(library),
+        Some(base),
+        Some(functions),
+        Some(names),
+        Some(by_function),
+        Some(by_name),
+        Some(by_ordinal),
+    ) = (
+        field(12),
+        field(16),
+        field(20),
+        field(24),
+        field(28),
+        field(32),
+        field(36),
+    )
     else {
         return Vec::new();
     };
-    let library = layout.text(data, u64::from(table.directory().name.get(LE)));
-    let addresses = table.address_iter().collect::<Vec<_>>();
-    let mut names = vec![None; addresses.len()];
-    for (pointer, index) in table.name_iter() {
-        if let (Ok(name), Some(slot)) = (
-            table.name_from_pointer(pointer),
-            names.get_mut(index.0 as usize),
+    // A table is the bytes its pointer names, as many as it states; a pointer of 0 states none.
+    let table = |at: u64, count: u64, width: u64| -> Option<&[u8]> {
+        match at {
+            0 => Some(&[]),
+            _ => layout
+                .bytes(data, at)?
+                .get(..usize::try_from(count * width).ok()?),
+        }
+    };
+    let (Some(addresses), Some(pointers), Some(ordinals)) = (
+        table(by_function, functions, 4),
+        table(by_name, names, 4),
+        table(if by_name == 0 { 0 } else { by_ordinal }, names, 2),
+    ) else {
+        return Vec::new();
+    };
+    if by_name != 0 && by_ordinal == 0 {
+        return Vec::new();
+    }
+    let (addresses, _) = addresses.as_chunks::<4>();
+    let (pointers, _) = pointers.as_chunks::<4>();
+    let (ordinals, _) = ordinals.as_chunks::<2>();
+    let mut named = vec![None; addresses.len()];
+    for (pointer, ordinal) in pointers.iter().zip(ordinals) {
+        let pointer = u64::from(u32::from_le_bytes(*pointer));
+        if let (Some(name), Some(slot)) = (
+            layout.text(data, pointer),
+            named.get_mut(usize::from(u16::from_le_bytes(*ordinal))),
         ) {
             *slot = Some(name);
         }
     }
-    let placed = addresses.into_iter().zip(names);
-    placed
-        .filter(|((_, _, address), _)| size == 0 || !table.is_forward(*address))
-        // An unused ordinal's slot is 0, which states no export.
-        .filter(|((_, _, address), _)| *address != 0)
+    let library = layout.text(data, library);
+    let forwarded = |address: u64| size != 0 && (rva..rva.saturating_add(size)).contains(&address);
+    addresses
+        .iter()
+        .zip(named)
         .enumerate()
-        .map(|(index, ((_, ordinal, address), name))| Exported {
-            vaddr: layout.at(u64::from(address)),
-            name: name.map_or_else(
-                || format!("Ordinal_{}", ordinal.0).into(),
-                |name| String::from_utf8_lossy(name).into(),
-            ),
+        .map(|(index, (address, name))| {
+            let ordinal = base.wrapping_add(index as u64) & 0xffff_ffff;
+            (ordinal, u64::from(u32::from_le_bytes(*address)), name)
+        })
+        // An unused ordinal's slot is 0, which states no export.
+        .filter(|(_, address, _)| *address != 0 && !forwarded(*address))
+        .enumerate()
+        .map(|(index, (ordinal, address, name))| Exported {
+            vaddr: layout.at(address),
+            name: name.unwrap_or_else(|| format!("Ordinal_{ordinal}").into()),
             library: library.clone(),
             nth: index + 1,
         })

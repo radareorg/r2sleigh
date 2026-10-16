@@ -720,6 +720,7 @@ impl Image {
         // Both tables, because a stripped shared library has no `.symtab` and
         // every name it still carries is in `.dynsym`. Reading only the first
         // is why such a library listed no functions at all.
+        let static_image = loader::is_static_image(&file);
         let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
             let name = symbol.name().ok()?;
             if name.is_empty() || macho_indirect(&file, symbol.index()) {
@@ -746,7 +747,9 @@ impl Image {
                 }
             };
             let mapped = is_arm32(&arch).then(|| mapping(name)).flatten();
-            let import = symbol.section() == object::SymbolSection::Undefined;
+            // A weak reference no definition met is left null; with no loader to bind it, it is no import.
+            let import = symbol.section() == object::SymbolSection::Undefined
+                && !(symbol.is_weak() && static_image);
             Some(Symbol {
                 // An import is named by the C identifier it binds.
                 name: match (format, import) {

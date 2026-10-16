@@ -915,6 +915,21 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
     }
 }
 
+/// An ELF image the static linker finished: linked, with no `PT_DYNAMIC` for a loader to bind it.
+pub(crate) fn is_static_image(file: &object::File<'_>) -> bool {
+    fn none<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, R>) -> bool {
+        let endian = file.endian();
+        let mut headers = file.elf_program_headers().iter();
+        !headers.any(|header| header.p_type(endian) == elf::PT_DYNAMIC)
+    }
+    match file {
+        _ if file.kind() == object::ObjectKind::Relocatable => false,
+        object::File::Elf32(elf) => none(elf),
+        object::File::Elf64(elf) => none(elf),
+        _ => false,
+    }
+}
+
 /// The dynamic table's entries, read through `PT_DYNAMIC` to the terminating one.
 /// The functions the dynamic table names for the loader to call itself, `DT_INIT` and `DT_FINI`,
 /// each with where the table states it: its entry's value field.
