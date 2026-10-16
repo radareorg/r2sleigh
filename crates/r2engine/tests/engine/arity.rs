@@ -5,6 +5,7 @@ use crate::common;
 
 use common::{BASE, GLIBC, Literal};
 use r2engine::program::OpenProgram;
+use r2ssa::{SourceFloorCause, SourceUnprovenCall};
 
 /// `f` writes both result registers and reads no argument (`xor eax, eax; pxor xmm0, xmm0`): its
 /// result is unproven and its arity exact. `caller` sets `edi` and `esi` for nothing, then calls it.
@@ -468,4 +469,125 @@ fn under_aa_a_cycle_through_an_indirect_call_stays_a_floor() {
         "{text}"
     );
     assert!(!text.contains("g(5"), "{text}");
+}
+
+/// Why the function at `BASE` is only a floor of arity, as recovery states it (ROADMAP D37).
+fn floor_cause(literal: Literal) -> Vec<SourceFloorCause> {
+    let mut open = OpenProgram::of(literal);
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("an interface");
+    let floor = interface.arity_floor().expect("its arity is a floor");
+    floor.causes().to_vec()
+}
+
+/// The bytes of `code` at `BASE`, padded to the slot at `BASE + 0x20` the programs below read.
+const fn with_a_slot<const N: usize>(code: [u8; N]) -> [u8; 0x30] {
+    let mut bytes = [0xcc; 0x30];
+    let mut at = 0;
+    while at < N {
+        bytes[at] = code[at];
+        at += 1;
+    }
+    bytes
+}
+
+/// `mov eax, 39; syscall; ret`: the kernel reads registers no operation names.
+#[test]
+fn a_supervisor_entry_is_a_floor_of_that_cause() {
+    const CODE: &[u8] = &[0xb8, 0x27, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc3];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 8)]));
+    assert_eq!(cause, [SourceFloorCause::SupervisorEntry]);
+}
+
+/// `mov rax, rdi; jmp rax`: a jump through a register the walk cannot follow.
+#[test]
+fn an_unfollowed_transfer_is_a_floor_of_that_cause() {
+    const CODE: &[u8] = &[0x48, 0x89, 0xf8, 0xff, 0xe0];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 5)]));
+    assert_eq!(cause, [SourceFloorCause::UnresolvedTransfer]);
+}
+
+/// `mov eax, esi; ret`: `rsi` is read and `rdi` is not, so the prefix stops short of it.
+#[test]
+fn a_register_read_past_the_prefix_is_a_floor_of_that_cause() {
+    const CODE: &[u8] = &[0x89, 0xf0, 0xc3];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 3)]));
+    assert_eq!(cause, [SourceFloorCause::RegisterRead]);
+}
+
+/// `mov eax, [rsp + 8]; ret`: the first argument-area slot is read, and no register slot is.
+#[test]
+fn an_argument_area_read_past_the_prefix_is_a_floor_of_that_cause() {
+    const CODE: &[u8] = &[0x8b, 0x44, 0x24, 0x08, 0xc3];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 5)]));
+    assert_eq!(cause, [SourceFloorCause::ArgumentAreaRead]);
+}
+
+/// All six argument registers stored, then `ud2`: no exit places the argument area.
+#[test]
+fn an_argument_area_no_exit_places_is_a_floor_of_that_cause() {
+    const CODE: &[u8] = &[
+        0x48, 0x89, 0x37, // mov [rdi], rsi
+        0x48, 0x89, 0x0a, // mov [rdx], rcx
+        0x4d, 0x89, 0x08, // mov [r8], r9
+        0x0f, 0x0b, // ud2
+    ];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 11)]));
+    assert_eq!(cause, [SourceFloorCause::ArgumentAreaUnplaced]);
+}
+
+/// A floor whose one cause is a call of unproven arity handed the `rdi` the function was entered with.
+fn handed_to(call: SourceUnprovenCall) -> Vec<SourceFloorCause> {
+    vec![SourceFloorCause::HandedOn(call)]
+}
+
+/// `call [rip + 0x1a]; ret`, the slot at 0x1020 in memory the program may write.
+#[test]
+fn a_call_through_memory_is_a_floor_handed_to_no_callee() {
+    const CODE: [u8; 0x30] = with_a_slot([0xff, 0x15, 0x1a, 0, 0, 0, 0xc3]);
+    let literal = Literal::of_code(&CODE, &[("f", BASE, 7)]).writable_data_after(BASE + 0x20);
+    let cause = floor_cause(literal);
+    assert_eq!(cause, handed_to(SourceUnprovenCall::Indirect));
+}
+
+/// `call 0x1000; ret`: the callee is the function itself, which states no arity yet.
+#[test]
+fn a_call_to_a_callee_nothing_states_is_a_floor_handed_to_it() {
+    const CODE: &[u8] = &[0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 6)]));
+    assert_eq!(cause, handed_to(SourceUnprovenCall::Unstated(BASE)));
+}
+
+/// `f`: `call g; ret`; `g`: `mov eax, esi; ret`, a floor of its own.
+#[test]
+fn a_call_to_a_callee_that_is_a_floor_is_a_floor_handed_to_it() {
+    const CODE: &[u8] = &[
+        0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, // 1000 call 0x1010; ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1006 padding
+        0x89, 0xf0, 0xc3, // 1010 mov eax, esi; ret
+    ];
+    let functions = [("f", BASE, 6), ("g", BASE + 0x10, 3)];
+    let cause = floor_cause(Literal::of_code(CODE, &functions));
+    assert_eq!(cause, handed_to(SourceUnprovenCall::Floor(BASE + 0x10)));
+}
+
+/// `f`: `call g; ret`, writing no stack argument; `g` stores its six register arguments and reads
+/// the seventh, `[rsp + 8]`, so it states seven arguments and the call reaches only six.
+#[test]
+fn a_call_whose_stated_argument_is_unreached_is_a_floor_handed_to_it() {
+    const CODE: &[u8] = &[
+        0xe8, 0x1b, 0x00, 0x00, 0x00, 0xc3, // 1000 call 0x1020; ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1006 padding
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1010 padding
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 101a padding
+        0x48, 0x89, 0x37, // 1020 mov [rdi], rsi
+        0x48, 0x89, 0x0a, // 1023 mov [rdx], rcx
+        0x4d, 0x89, 0x08, // 1026 mov [r8], r9
+        0x8b, 0x44, 0x24, 0x08, // 1029 mov eax, [rsp + 8]
+        0xc3, // 102d ret
+    ];
+    let functions = [("f", BASE, 6), ("g", BASE + 0x20, 14)];
+    let cause = floor_cause(Literal::of_code(CODE, &functions));
+    assert_eq!(cause, handed_to(SourceUnprovenCall::Stated(BASE + 0x20)));
 }

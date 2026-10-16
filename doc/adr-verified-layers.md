@@ -93,16 +93,30 @@ instruction's temporaries, r2ssa names them, r2dec and the low tier spell them.
 
 **D37. r2ssa states why an arity is a floor.** Owner: r2ssa (boundaries);
 r2engine reads it.
-- The cause is a typed fact, one variant per branch of `recover_interface`'s
-  floor: an unresolved transfer; a supervisor entry; an argument area no exit
-  places; an argument area read past an unproven register prefix; a register
-  slot read past the prefix; or the next slot handed to a call of unproven
-  arity, split as an indirect call, a call into an unresolved cycle member or
-  a missing prototype.
-- The cycle fixpoint (#279) then needs no discovery round, and a cycle's
-  results become the same fixpoint over return values (`shape_mutual_even`).
-- Gate: an engine test per cause variant, and the `shape_mutual_even` record
-  equal.
+- The cause is a typed fact: `SourceArityFloor`, a sorted set of
+  `SourceFloorCause` on the recovered `SourceFunctionInterface`, one variant per
+  branch of `recover_interface`'s floor: an unresolved transfer; a supervisor
+  entry; an argument area no exit places; an argument area read past an
+  unproven register prefix; a register slot read past the prefix; or the next
+  slot handed to a call of unproven arity (`SourceUnprovenCall`), split by what
+  its callee's statement says: no callee (indirect), no statement (a missing
+  prototype, or a body a cycle has yet to resolve), a floor of its own, or an
+  arity the call's arguments do not reach. Cycle membership is r2engine's
+  fact (`Component`), so r2ssa states the callee's statement and r2engine asks
+  whether its owner is a member.
+- r2engine's `arity_owners` reads the causes: callees own a floor only where
+  every cause is a call to a callee that states nothing or a floor; any other
+  cause keeps the whole floor. The old `reads_past_parameters` boolean and the
+  `arity_owners` set `SourceMachineContext` carried are gone.
+- The cycle fixpoint (#279) needs no discovery round: an open member's callees
+  are the ones its causes name, so `Cycle::index` walks nothing. As outside a
+  cycle, a statement flows along owner edges only: a member's call to another
+  member that is no cause (counted off registers, complete) is not restated.
+- A cycle's results as the same fixpoint over return values: next. Recovery
+  states an unproven result by `result_owners` alone, so it needs the same
+  typed cause before the engine can assume and check a member's result.
+- Gate: an engine test per cause variant (`crates/r2engine/tests/engine/arity.rs`),
+  and the `shape_mutual_even` records unchanged.
 
 **D38. The cost verdict counts retired instructions.** Owner: GT.
 - Native runs count user-space instructions with `perf_event_open`

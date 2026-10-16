@@ -167,13 +167,15 @@ calls and their callees' entry reads.
 A function's arity is `Exact(n)` or `AtLeast(n)` (`r2source::SourceArity`),
 stated apart from its result: a callee whose result is unproven keeps an exact
 arity, and a call to it hands on exactly its `n` arguments. Recovery states a
-floor where its reads cannot see every argument: a transfer the walk did not
-follow, a supervisor call, the argument area read past an incomplete register
-prefix, or an argument slot handed to a call of unproven arity.
+floor where its reads cannot see every argument, and why, as typed causes
+(`SourceArityFloor`, doc/adr-verified-layers.md D37): a transfer the walk did
+not follow, a supervisor call, the argument area read past an incomplete
+register prefix, a register slot read past it, or an argument slot handed to a
+call of unproven arity.
 
-The last cause alone is one the callee's statement can lift: recovery names
-those calls' direct callees, its arity owners (none where one such call names
-no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
+The last cause alone is one the callee's statement can lift: r2engine reads
+the callees of those calls as the floor's arity owners (none where any cause
+is another, or a call names no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
 on result owners: `Component` is Tarjan over both edges, bottom-up, and a
 function is resolved again where an owner outside its component states an
 exact arity. Without `aa`, a
@@ -213,7 +215,8 @@ whole component then keeps the floors it had, under refusal evidence
 six builds, nor on the 0pack, pumasim and gzdoom functions below). The
 other open members' answers are deposited, as `Component` deposits its
 components. Measured on release `aa; pdd`, with one more walk per open member
-at its first resolution: 0pack `0x62ecf0` 61.89 to 62.44 G instructions,
+at its first resolution (gone since D37: a floor's causes name the members an
+open one calls): 0pack `0x62ecf0` 61.89 to 62.44 G instructions,
 `0x58e3d0` 74.33 to 74.27 G, pumasim `0x23fdf0` 60.17 to 60.12 G, gzdoom
 `0x10070695c` 191.31 to 191.16 G, peak RSS within 4%; no budget is needed.
 

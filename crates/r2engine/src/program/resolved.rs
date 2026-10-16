@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2source::SourceFunctionInterface;
+use r2source::{SourceArityFloor, SourceFloorCause, SourceFunctionInterface, SourceUnprovenCall};
 
-use super::analysis::{CalleeReads, Shared, Walked, callee_read};
+use super::analysis::{CalleeReads, Shared, callee_read};
 use super::{ProgramInputs, Source, View};
 use crate::native::{CalleeRead, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
@@ -78,13 +78,34 @@ fn owners<S: Source + 'static>(
 /// set it is entered in.
 fn bodies<S: Source + 'static>(view: &View<'_, S>, read: &CalleeRead, demand: Demand) -> Vec<Node> {
     let arity = match demand {
-        Demand::Result => None,
-        Demand::Arity => Some(&read.owners.arity),
+        Demand::Result => BTreeSet::new(),
+        Demand::Arity => arity_owners(read),
     };
-    let owners = read.owners.result.iter().chain(arity.into_iter().flatten());
+    let owners = read.owners.result.iter().chain(&arity);
     let owners = owners.copied().collect::<BTreeSet<_>>().into_iter();
     let bodies = owners.filter(|owner| crate::native::Program::import_at(view, *owner).is_none());
     bodies.map(|owner| (owner, view.thumb_at(owner))).collect()
+}
+
+/// The callees whose stated arity could make a read's floor exact: none where any cause is not a
+/// call to a callee stating nothing or a floor (D37). O(causes).
+fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
+    let floor = (read.interface.as_ref()).and_then(SourceFunctionInterface::arity_floor);
+    let owners = floor.into_iter().flat_map(SourceArityFloor::causes);
+    let owners = owners.map(|cause| match cause {
+        SourceFloorCause::HandedOn(
+            SourceUnprovenCall::Unstated(callee) | SourceUnprovenCall::Floor(callee),
+        ) => Some(*callee),
+        SourceFloorCause::HandedOn(
+            SourceUnprovenCall::Indirect | SourceUnprovenCall::Stated(_),
+        )
+        | SourceFloorCause::UnresolvedTransfer
+        | SourceFloorCause::SupervisorEntry
+        | SourceFloorCause::ArgumentAreaUnplaced
+        | SourceFloorCause::ArgumentAreaRead
+        | SourceFloorCause::RegisterRead => None,
+    });
+    owners.collect::<Option<_>>().unwrap_or_default()
 }
 
 /// One function resolved against the resolved callees its result or arity waits on.
@@ -178,9 +199,8 @@ fn stopped_read() -> Shared<CalleeRead> {
 
 /// Whether a read's arity is a floor some member of its component owns.
 fn member_owned(read: &CalleeRead, members: &[Node]) -> bool {
-    let floor = (read.interface.as_ref()).is_some_and(|interface| !interface.arity().is_exact());
     let member = |owner: &u64| members.binary_search_by_key(owner, |(at, _)| *at).is_ok();
-    floor && read.owners.arity.iter().any(member)
+    arity_owners(read).iter().any(member)
 }
 
 /// The arity a cycle's fixpoint assumes of a member, and the interface its callers are handed;
@@ -195,11 +215,11 @@ impl Assumed {
     /// What a read states; `floor` false assumes it exact.
     fn of(read: &CalleeRead, floor: bool) -> Option<Self> {
         let interface = read.interface.as_ref()?;
-        let floor = floor && !interface.arity().is_exact();
+        let cause = interface.arity_floor().filter(|_| floor);
         Some(Self {
             count: interface.arity().floor(),
-            floor,
-            interface: interface.clone().assumed_arity(floor),
+            floor: cause.is_some(),
+            interface: interface.clone().assumed_arity(cause.cloned()),
         })
     }
 
@@ -222,6 +242,7 @@ impl Assumed {
         if (count, floor) == (held.count, held.floor) {
             return false;
         }
+        let cause = (interface.arity_floor()).or_else(|| held.interface.arity_floor());
         let from = match arity.floor() >= held.count {
             true => interface.clone(),
             false => held.interface.clone(),
@@ -229,7 +250,7 @@ impl Assumed {
         *held = Self {
             count,
             floor,
-            interface: from.assumed_arity(floor),
+            interface: from.assumed_arity(cause.filter(|_| floor).cloned()),
         };
         true
     }
@@ -375,18 +396,11 @@ impl<'m> Cycle<'m> {
             let read = resolved(db, owner)?;
             self.outside[at].push((owner.0, read.0));
         }
-        let walked = db
-            .get::<Walked>(&self.members[at])
-            .expect("a walk asks for no resolution");
-        let reaches = match walked.resolved() {
-            Ok(walk) => walk.reaches(view),
-            Err(refusal) if refusal.stopped() => return None,
-            Err(_) => Vec::new(),
-        };
+        // The members it calls are the callees its floor's causes name, so no walk finds them.
         let members = self.members;
-        let calls = reaches
-            .into_iter()
-            .filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());
+        let named = arity_owners(&self.alone[at].0).into_iter();
+        let calls =
+            named.filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());
         for callee in calls {
             self.callees[at].push(callee);
             self.callers[callee].push(at);
@@ -523,6 +537,52 @@ mod tests {
         closed
             .map(|closed| closed.members.iter().map(|(at, _)| *at).collect())
             .collect()
+    }
+
+    /// A read whose interface is a floor of exactly `causes`.
+    fn floor_of(causes: impl IntoIterator<Item = SourceFloorCause>) -> CalleeRead {
+        let interface = SourceFunctionInterface::new(
+            b"owners".to_vec(),
+            "sysv",
+            Vec::<r2source::SourceAbiParameterSpec>::new(),
+            r2source::SourceFunctionReturn::Void,
+            Vec::<r2source::SourceStackSlotSpec>::new(),
+        )
+        .expect("an interface")
+        .with_arity_floor(SourceArityFloor::of(causes).expect("some cause"));
+        CalleeRead {
+            interface: Some(interface),
+            facts: Err(Unreadable::NotWalked),
+            owners: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_floor_is_owned_only_where_every_cause_is_a_call_a_callee_can_lift() {
+        use SourceFloorCause::HandedOn;
+        let calls = [
+            HandedOn(SourceUnprovenCall::Unstated(0x10)),
+            HandedOn(SourceUnprovenCall::Floor(0x20)),
+        ];
+        assert_eq!(arity_owners(&floor_of(calls)), BTreeSet::from([0x10, 0x20]));
+        // Each cause no callee's statement lifts keeps the whole floor, whatever else is owned.
+        let unliftable = [
+            HandedOn(SourceUnprovenCall::Indirect),
+            HandedOn(SourceUnprovenCall::Stated(0x30)),
+            SourceFloorCause::UnresolvedTransfer,
+            SourceFloorCause::SupervisorEntry,
+            SourceFloorCause::ArgumentAreaUnplaced,
+            SourceFloorCause::ArgumentAreaRead,
+            SourceFloorCause::RegisterRead,
+        ];
+        for cause in unliftable {
+            let causes = calls.into_iter().chain([cause]);
+            assert_eq!(
+                arity_owners(&floor_of(causes)),
+                BTreeSet::new(),
+                "{cause:?}"
+            );
+        }
     }
 
     #[test]

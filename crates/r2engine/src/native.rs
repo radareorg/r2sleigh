@@ -137,13 +137,11 @@ pub struct CalleeRead {
 }
 
 /// The direct callees whose statement could prove what a body leaves open (doc/adr-resolved-bodies.md).
+/// Its arity's owners are its interface's floor causes (`program::resolved`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Owners {
     /// Where its result is unproven, the callees whose unstated result owns it.
     pub result: std::collections::BTreeSet<u64>,
-    /// Where its parameters are a floor only because calls of unproven arity may be handed a slot,
-    /// those calls' callees.
-    pub arity: std::collections::BTreeSet<u64>,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -523,11 +521,6 @@ impl Walk {
     /// The walked body, dispatches followed.
     pub fn body(&self) -> &crate::body::Body {
         &self.root.body
-    }
-
-    /// Every function the body reaches, in address order, as its resolution declares them.
-    pub(crate) fn reaches(&self, program: &dyn Program) -> Vec<u64> {
-        reached(&self.root.body, program)
     }
 
     /// The lift of each block of the body, dispatches followed: a dispatch's block carries the cases
@@ -1582,7 +1575,6 @@ impl Native<'_> {
         let context = first.machine_context();
         let owners = Owners {
             result: context.result_owners().clone(),
-            arity: context.arity_owners().clone(),
         };
         // aarch64 forms an address from a page and an offset: its text is captured once folded.
         let folded = self.folded_literals(&first, root);

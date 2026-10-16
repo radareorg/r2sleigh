@@ -18,15 +18,16 @@ pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
-    SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect, SourceCallPreservedCarriers,
-    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
+    SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
+    SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
-    SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
+    SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
     SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
     SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
     SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure, SourceTypeGraph,
-    SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, StackAddressBase,
+    SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall,
+    StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
@@ -471,8 +472,6 @@ pub struct SourceMachineContext {
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
     result_owners: BTreeSet<u64>,
-    /// Where the parameters are a floor, the direct callees whose stated arity could make them exact.
-    arity_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers.
     result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
@@ -875,7 +874,6 @@ impl SourceMachineContext {
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
             result_owners: BTreeSet::new(),
-            arity_owners: BTreeSet::new(),
             result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
@@ -1076,16 +1074,6 @@ impl SourceMachineContext {
 
     pub(crate) fn set_result_owners(&mut self, owners: BTreeSet<u64>) {
         self.result_owners = owners;
-    }
-
-    /// The direct callees whose stated arity could make this function's exact, where recovery left
-    /// its parameters a floor.
-    pub const fn arity_owners(&self) -> &BTreeSet<u64> {
-        &self.arity_owners
-    }
-
-    pub(crate) fn set_arity_owners(&mut self, owners: BTreeSet<u64>) {
-        self.arity_owners = owners;
     }
 
     /// Whether recovery left the result unproven because the body writes both result registers,

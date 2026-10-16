@@ -308,6 +308,57 @@ impl SourceArity {
     }
 }
 
+/// Why a call's arity is unproven where a function hands it a slot (doc/adr-verified-layers.md, D37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceUnprovenCall {
+    /// No callee is named: only a statement the call itself makes could state its arity.
+    Indirect,
+    /// The callee at this entry has no prototype and no stated body (a missing one, or one a
+    /// cycle's fixpoint has yet to resolve).
+    Unstated(u64),
+    /// The callee states its own arity as a floor.
+    Floor(u64),
+    /// The callee states its arity, and this call's arguments do not reach it.
+    Stated(u64),
+}
+
+/// A branch of recovery where a slot past a function's parameters may still be read (D37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceFloorCause {
+    /// A transfer the walk did not follow.
+    UnresolvedTransfer,
+    /// A supervisor entry, which reads registers no operation names.
+    SupervisorEntry,
+    /// Every register slot is a parameter, and the exits do not agree where the argument area is.
+    ArgumentAreaUnplaced,
+    /// The argument area is read past register slots not all of which are parameters.
+    ArgumentAreaRead,
+    /// A register slot past the parameters is read.
+    RegisterRead,
+    /// The first slot past the parameters may be handed to this call.
+    HandedOn(SourceUnprovenCall),
+}
+
+/// Every cause a function's parameters are only a floor, sorted; never empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceArityFloor {
+    causes: Box<[SourceFloorCause]>,
+}
+
+impl SourceArityFloor {
+    /// The floor those causes make, or `None` where there are none and the arity is exact.
+    pub fn of(causes: impl IntoIterator<Item = SourceFloorCause>) -> Option<Self> {
+        let causes: BTreeSet<_> = causes.into_iter().collect();
+        (!causes.is_empty()).then(|| Self {
+            causes: causes.into_iter().collect(),
+        })
+    }
+
+    pub fn causes(&self) -> &[SourceFloorCause] {
+        &self.causes
+    }
+}
+
 /// Explicit source return contract. Absence of an interface remains unknown;
 /// `Void` is therefore materially different from no return information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -856,8 +907,8 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
-    /// Whether the parameters are a floor: a slot past them may be read or handed on.
-    arity_floor: bool,
+    /// Why the parameters are a floor, where a slot past them may be read or handed on.
+    arity_floor: Option<SourceArityFloor>,
     /// Where the result is unproven, the registers it may be in: each call takes the one its
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
@@ -1337,7 +1388,7 @@ impl SourceFunctionInterface {
             format_parameter: None,
             variadic: false,
             body_proven_return_address: false,
-            arity_floor: false,
+            arity_floor: None,
             result_carriers: None,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
@@ -1389,7 +1440,7 @@ impl SourceFunctionInterface {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
             body_proven_return_address: self.body_proven_return_address,
-            arity_floor: self.arity_floor,
+            arity_floor: self.arity_floor.clone(),
             result_carriers: self.result_carriers,
             types: self.types.clone(),
             ..rebuilt
@@ -1545,17 +1596,22 @@ impl SourceFunctionInterface {
         self
     }
 
-    /// Record that the parameters are a floor: a slot past them may be read or handed on.
+    /// Record that the parameters are a floor, and why.
     #[must_use]
-    pub const fn with_arity_floor(mut self) -> Self {
-        self.arity_floor = true;
+    pub fn with_arity_floor(mut self, floor: SourceArityFloor) -> Self {
+        self.arity_floor = Some(floor);
         self
+    }
+
+    /// Why the parameters are a floor, where a slot past them may be read or handed on.
+    pub const fn arity_floor(&self) -> Option<&SourceArityFloor> {
+        self.arity_floor.as_ref()
     }
 
     /// What a cycle's least fixpoint assumes of a member: these parameters, exactly or as a floor,
     /// and no result (doc/adr-resolved-bodies.md, "Arity").
     #[must_use]
-    pub fn assumed_arity(mut self, floor: bool) -> Self {
+    pub fn assumed_arity(mut self, floor: Option<SourceArityFloor>) -> Self {
         self.arity_floor = floor;
         self.return_kind = SourceFunctionReturn::Unproven;
         self.return_logical_value = None;
@@ -1567,8 +1623,8 @@ impl SourceFunctionInterface {
     /// How many arguments a call hands this function: its parameters exactly, or at least them.
     pub fn arity(&self) -> SourceArity {
         match self.arity_floor {
-            true => SourceArity::AtLeast(self.parameters.len()),
-            false => SourceArity::Exact(self.parameters.len()),
+            Some(_) => SourceArity::AtLeast(self.parameters.len()),
+            None => SourceArity::Exact(self.parameters.len()),
         }
     }
 
