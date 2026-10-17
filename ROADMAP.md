@@ -103,6 +103,11 @@ Decisions
 | D43 | Every gate runs at the tip of a stack and every baseline source is graded: the stack's top PR carries `full-ci` automatically, and `scripts/check_shards.py` fails a baseline source no equivalence shard lists ([verified layers](doc/adr-verified-layers.md); #264's coverage regression and #292's ungraded `atomics.c` showed the class) | GT (`check_shards.py` and its `check-shards` job landed, both baselines' 10 sources are in shards; `stack-tip.yml` and `stack_tip.py` landed with unit tests; the GitHub side is unproven until the workflow's first run on this branch's next push) |
 | D44 | The oracle's breadth is ratcheted: `scripts/oracle_breadth.py` counts each vendored specification's mnemonics with an oracle case (x86-64 117 of 1,513, AArch64 489 of 783 recorded) and the uncovered count may only fall | VC, GT |
 | D45 | A prover has a mutation target and an adversarial table: `cargo mutants` over `tail_count`, `save_area`, the stack-guard scrub, `result_calls` and the cycle fixpoint, a surviving mutant killed or listed with a reason | r2ssa |
+| D46 | Moves are separated from noise by paired tests: a nightly job scores a pinned sample against the previous night (McNemar exact for the perfect rate, a sign test for the value, Holm-adjusted, significant below 0.01), and timing is an A/B in retired instructions with a bootstrap interval ([measurement discipline](doc/adr-measurement-discipline.md), from Kuna's `nightly.md`) | GT |
+| D47 | A type or layout change records `improved` and `worse` per project beside the perfect count, layout and nesting F1 for structures, and a pinned project list splits mining from reporting | GT, T |
+| D48 | The census audits its own hunks: a per-feature script classifies a moved hunk, and a bless needs zero unclassified hunks | GT, first |
+| D49 | Every refusal and residual cause has a catalog row (symptom, closing fact, owner) that feeds `?` help; a test fails on a cause with no row | RF |
+| D50 | Batch decompilation is a deterministic pool (longest first, callees first, per-function budget and memory stop, positional merge): one worker and eight give byte-identical output | LX, after the cost path |
 
 The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`).
 
