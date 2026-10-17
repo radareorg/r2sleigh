@@ -136,7 +136,11 @@ fn what_the_loader_seals_after_it_is_done_is_stated_beside_what_it_never_lets_th
     assert_eq!(sealed, [(0x3da0, 0x4000)]);
     use r2image::Permanence;
     let at = |range: std::ops::Range<u64>| container.permanence(&range);
-    assert_eq!(at(0x3fc8..0x3fd0), Permanence::Sealed, "a GOT slot");
+    assert_eq!(
+        at(0x3fc8..0x3fd0),
+        Permanence::SealedByInterpreter,
+        "a GOT slot of an image `PT_INTERP` loads"
+    );
     assert_eq!(at(0x2018..0x2038), Permanence::ReadOnly, "read-only data");
     assert_eq!(at(0x4018..0x4020), Permanence::Writable, "`g_msg`");
     assert_eq!(

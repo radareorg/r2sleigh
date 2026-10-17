@@ -14,6 +14,7 @@ mod language;
 mod loader;
 mod pe;
 mod platform;
+mod posture;
 mod roles;
 pub mod unwind;
 
@@ -897,6 +898,8 @@ impl Image {
         );
 
         let sealed = loader::sealed(&file);
+        let posture = posture::read(&file);
+        let libraries = language::libraries(&file);
         let platform = platform::evidence(&file);
 
         // Read while the parsed view is alive; the bytes it borrows move into
@@ -1005,6 +1008,8 @@ impl Image {
                 loader_writes,
                 entries,
                 sealed,
+                posture,
+                libraries,
                 declarations,
                 platform,
                 unwind,

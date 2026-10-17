@@ -830,6 +830,41 @@ fn a_dispatch_table_in_memory_the_program_may_write_is_read_only_through_the_loa
     assert_eq!(relocated(4), [(table, 4, sealed)]);
 }
 
+/// An interpreted executable is relocated by its interpreter first, so an unwritten RELRO entry is
+/// the file's arm; a static image keeps the refusal above (ROADMAP M18).
+#[test]
+fn a_sealed_table_of_an_interpreted_executable_reads_the_words_no_record_writes() {
+    use r2engine::native::TableBytes;
+    let table = BASE + 0x30;
+    let sealed = || {
+        table_switch()
+            .writable_data_after(table)
+            .sealed(table..table + 0x20)
+    };
+    let tables = |literal| {
+        let lines = OpenProgram::of(literal).function_listing(BASE);
+        tables_of(&lines.expect("it lists").lines.value)
+    };
+    assert_eq!(
+        tables(sealed()),
+        [],
+        "no interpreter: start-up may write it"
+    );
+    assert_eq!(
+        tables(sealed().interpreted()),
+        [(table, 4, TableBytes::ReadOnly)]
+    );
+    let mut relocated = sealed().interpreted();
+    relocated.write(table, &[0; 8]);
+    let relocated = relocated.loader_written(LoaderWrite {
+        place: table,
+        width: 8,
+        kind: WriteKind::Relative(0x100e),
+        encoding: r2engine::program::Encoding::Word,
+    });
+    assert_eq!(tables(relocated), [(table, 4, TableBytes::LoaderWritten)]);
+}
+
 #[test]
 fn a_dispatch_table_whose_entry_leaves_what_the_container_states_is_code_is_refused() {
     // The segment is executable throughout, so every entry decodes; but from

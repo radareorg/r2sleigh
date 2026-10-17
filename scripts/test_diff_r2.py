@@ -203,6 +203,14 @@ class Judged(unittest.TestCase):
             found, [("lines", ("0x2 leave", "0x2 ret")), ("lines", ("0x3 ret", None))]
         )
 
+    def test_a_posture_key_both_print_with_two_values_is_a_disagreement_and_one_radare2_alone_is_unfilled(self):
+        mine = "file     x\nstatic   false\nrelro    full\n"
+        other = "file     y\nnx       true\nrelro    full\nstatic   true\n"
+        found = diff_r2.differences("i", "pairs", mine, other)
+        self.assertEqual(found, [("lines", ("static true", "static false"))])
+        _, _, missed = diff_r2.compare("b", "i", "pairs", mine, other, [])
+        self.assertEqual(missed, [("nx", None)])
+
 
 # The side a register is missing from, as a judgment's `lacking` names radare2's.
 RADARE2_LACKS = "r2"

@@ -217,6 +217,33 @@ fn a_call_through_a_sealed_slot_the_loader_leaves_is_a_call_through_memory() {
     assert!(text.contains("call to an indirect target"), "{text}");
 }
 
+/// `mov eax, [rip + 0xa]; ret`, the word at 0x1010 holding 0x11223344 in the file.
+const LOAD_A_WORD: &[u8] = &[
+    0x8b, 0x05, 0x0a, 0x00, 0x00, 0x00, // 1000 mov eax, [rip + 0xa]
+    0xc3, // 1006 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1007 padding
+    0x44, 0x33, 0x22, 0x11, // 1010 the word
+];
+
+/// A RELRO word no record writes is the file's value when the interpreter relocates and seals the
+/// image before its code runs; with no interpreter, start-up may write it first (ROADMAP M18, P5).
+#[test]
+fn a_load_of_a_sealed_word_folds_only_where_an_interpreter_seals_the_image() {
+    let word = BASE + 0x10;
+    let render = |interpreted: bool| {
+        let mut literal = Literal::of_code(LOAD_A_WORD, &[("load", BASE, 0x7)])
+            .writable_data_after(word)
+            .sealed(word..word + 4);
+        if interpreted {
+            literal = literal.interpreted();
+        }
+        let rendered = OpenProgram::of(literal).rendered(BASE);
+        rendered.expect("it renders").response.output.into_text()
+    };
+    assert!(render(true).contains("0x11223344"), "{}", render(true));
+    assert!(!render(false).contains("0x11223344"), "{}", render(false));
+}
+
 /// A send to `objc_msgSend`, variadic as objc4 declares it, states no argument count: the call is
 /// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
 #[test]

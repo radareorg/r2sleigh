@@ -20,6 +20,9 @@ Two comparison modes, because the two tools do not yet fill the same columns:
           from each: where the container says code begins, with no discovery. One disagreement
           per register one side names and the other does not; a size or bytes
           disagreement is one, and its registers are not compared.
+  pairs   compares the `key value` rows of `i` that r2s states (POSTURE_KEYS): a key both print
+          with two values is a disagreement; a key radare2 prints and r2s does not is unfilled,
+          counted and ratcheted with the values.
   values  compares the values each tool reports, column by column where both
           headers name the column. A value r2s reports and radare2 does not is
           a disagreement; a value radare2 reports and r2s does not is unfilled,
@@ -61,11 +64,15 @@ VERDICTS = ("r2s-right", "r2-right", "unfilled", "deliberate")
 COMMANDS = [
     ("px 64", "exact"),
     ("pd 8", "exact"),
+    ("i", "pairs"),
     ("ie", "values"),
     ("iS", "values"),
     ("is", "values"),
     ("aoj", "registers"),
 ]
+
+# The keys of `i` that pairs mode grades: the container's posture, under radare2's names.
+POSTURE_KEYS = ("intrp", "nx", "pic", "relro", "static")
 
 # The `aoj` sample: this many FUNC symbols beside the entry points, and this many instructions from each.
 SAMPLED_FUNCTIONS = 4
@@ -112,6 +119,16 @@ def values(lines):
     found = set()
     for line in lines:
         found.update(int(token, 16) for token in HEX.findall(line))
+    return found
+
+
+def pairs(lines):
+    """Each posture key `i` prints, with its value."""
+    found = {}
+    for line in lines:
+        key, _, value = line.strip().partition(" ")
+        if key in POSTURE_KEYS:
+            found[key] = value.strip()
     return found
 
 
@@ -256,6 +273,13 @@ def differences(command, mode, left, right):
     """
     if mode == "registers":
         return register_differences(left, right)
+    if mode == "pairs":
+        ours, theirs = pairs(left.splitlines()), pairs(right.splitlines())
+        return [
+            ("lines", (None if key not in theirs else "{} {}".format(key, theirs[key]), "{} {}".format(key, ours[key])))
+            for key in POSTURE_KEYS
+            if key in ours and ours[key] != theirs.get(key)
+        ]
     # Only the listing carries trailing annotations; a hex dump's ASCII column
     # can hold a semicolon that must not be mistaken for one.
     strip = command.startswith("pd")
@@ -587,6 +611,9 @@ def compare(name, command, mode, left, right, judgments, corpus=None):
     found = differences(command, mode, left, right)
     unjudged = [item for item in found if judgment_for(judgments, name, command, item, corpus) is None]
     missed = radare2_only(normalise(left), normalise(right)) if mode == "values" else []
+    if mode == "pairs":
+        ours, theirs = pairs(left.splitlines()), pairs(right.splitlines())
+        missed = [(key, None) for key in POSTURE_KEYS if key in theirs and key not in ours]
     return found, unjudged, missed
 
 
@@ -632,7 +659,7 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
                         print(spelled(difference))
                 if missed and args.verbose:
                     print("    {} radare2 only: {}".format(command, len(missed)))
-                    shown = ["{}={:#x}".format(c, v) if c else "{:#x}".format(v) for c, v in missed[:8]]
+                    shown = [c if v is None else "{}={:#x}".format(c, v) if c else "{:#x}".format(v) for c, v in missed[:8]]
                     print("      " + " ".join(shown + (["..."] if len(missed) > 8 else [])))
     return tally, unsupported, skipped
 
@@ -747,7 +774,7 @@ def main():
             unjudged += row["unjudged"]
         # A binary r2s stops opening, or a run that times out, hides its values: both are ratcheted.
         measured[corpus] = {
-            command.split()[0]: tally[command]["r2-only"] for command, mode in commands if mode == "values"
+            command.split()[0]: tally[command]["r2-only"] for command, mode in commands if mode in ("values", "pairs")
         }
         measured[corpus]["refused"] = sum(unsupported.values())
         measured[corpus]["skipped"] = len(skipped)

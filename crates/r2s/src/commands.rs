@@ -178,6 +178,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(|session, _| info(session))
     ),
     verb!(
+        ["il"],
+        None,
+        Public,
+        "libraries the program needs",
+        Some(|session, _| libraries(session))
+    ),
+    verb!(
         ["ie"],
         None,
         Public,
@@ -539,6 +546,7 @@ fn info(session: &Session) -> Result<String, String> {
         "lang     {}\n",
         image.container().languages.program.spelled()
     ));
+    posture(&mut out, image.container());
     if let Some(entry) = image
         .entry_points()
         .iter()
@@ -549,6 +557,33 @@ fn info(session: &Session) -> Result<String, String> {
         out.push_str("entry    none");
     }
     Ok(out)
+}
+
+/// The container's posture under radare2's keys; a field the format does not state is not printed.
+fn posture(out: &mut String, container: &r2image::Container) {
+    let posture = &container.posture;
+    let stated = container.format == r2image::Format::Elf;
+    let mut row = |key: &str, value: String| out.push_str(&format!("{key:<9}{value}\n"));
+    if let Some(path) = posture.interpreter.as_ref().filter(|path| !path.is_empty()) {
+        row("intrp", path.clone());
+    }
+    if let Some(nx) = posture.nx {
+        row("nx", nx.to_string());
+    }
+    if stated {
+        row("pic", posture.pic.to_string());
+    }
+    if let Some(relro) = posture.relro {
+        row("relro", relro.spelled().to_owned());
+    }
+    if stated {
+        row("static", posture.statically_linked.to_string());
+    }
+}
+
+/// `il`: the libraries the program needs, one per line, in the order it states them.
+fn libraries(session: &Session) -> Result<String, String> {
+    Ok(session.image().container().libraries.join("\n"))
 }
 
 /// `ie` and `iee`: where the loader starts the program, or what it runs

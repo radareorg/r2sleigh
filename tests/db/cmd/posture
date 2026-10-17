@@ -1,0 +1,59 @@
+# How an image is linked and protected, under radare2's keys (`i`), and the libraries it needs (`il`).
+
+# A dynamic executable names its interpreter, binds at load and seals its relocations.
+NAME=dynamic executable
+FILE=tests/fixtures/rv_O0g
+CMDS=i~^intrp; i~^nx; i~^pic; i~^relro; i~^static; il
+EXPECT=<<EOF
+intrp    /lib64/ld-linux-x86-64.so.2
+nx       true
+pic      true
+relro    full
+static   false
+libc.so.6
+EOF
+RUN
+
+# A static executable has no interpreter and nothing to seal.
+NAME=static executable
+FILE=tests/fixtures/syscalls_static_O2
+CMDS=i~^intrp; i~^nx; i~^pic; i~^relro; i~^static; il
+EXPECT=<<EOF
+nx       true
+pic      false
+relro    no
+static   true
+EOF
+RUN
+
+# A shared object has a dynamic section and no interpreter.
+NAME=shared object
+FILE=tests/fixtures/arm_plt_lld_be8.so
+CMDS=i~^intrp; i~^nx; i~^pic; i~^relro; i~^static; il
+EXPECT=<<EOF
+nx       true
+pic      true
+relro    partial
+static   false
+EOF
+RUN
+
+# No program header states a stack: nx is left unstated, though radare2 prints false.
+NAME=relocatable object
+FILE=tests/fixtures/x86_64_common_code.o
+CMDS=i~^intrp; i~^nx; i~^pic; i~^relro; i~^static
+EXPECT=<<EOF
+pic      false
+relro    no
+static   true
+EOF
+RUN
+
+# Mach-O states none of it in these terms.
+NAME=mach-o
+FILE=tests/fixtures/manual_limits_O0
+CMDS=i~^intrp; i~^nx; i~^pic; i~^relro; i~^static; il
+EXPECT=<<EOF
+/usr/lib/libSystem.B.dylib
+EOF
+RUN

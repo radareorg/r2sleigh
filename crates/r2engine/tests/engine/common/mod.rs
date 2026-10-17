@@ -897,6 +897,12 @@ impl Literal {
         self
     }
 
+    /// The same program, its container stating the dynamic linker that loads it (`PT_INTERP`).
+    pub fn interpreted(mut self) -> Self {
+        self.container.posture.interpreter = Some("/lib64/ld-linux-x86-64.so.2".to_owned());
+        self
+    }
+
     /// The same program, with the container naming its `index`th section `name`.
     pub fn renamed(mut self, index: usize, name: &str) -> Self {
         name.clone_into(&mut self.container.sections[index].name);

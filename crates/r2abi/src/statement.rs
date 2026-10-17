@@ -47,6 +47,10 @@ pub struct Container {
     /// done, sorted and disjoint: ELF's `PT_GNU_RELRO`, and a Mach-O segment
     /// flagged `SG_READ_ONLY`, whose fixups dyld applies before sealing it.
     pub sealed: Vec<Range<u64>>,
+    /// How the container says the program is linked and protected.
+    pub posture: Posture,
+    /// The libraries the program states it needs, in the order it states them, once each.
+    pub libraries: Vec<String>,
     /// What the program's own debug information declares: its functions by
     /// the address each body begins, its objects by address.
     pub declarations: crate::Declarations,
@@ -58,6 +62,41 @@ pub struct Container {
     pub unwind: crate::frames::UnwindFrames,
     /// Which language each function's source was written in, as the container states it.
     pub languages: Languages,
+}
+
+/// How an image is linked and protected, as its headers state it (radare2's `i` names). Nothing
+/// is a guess: a field the format does not state stays unstated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Posture {
+    /// Whether the stack is non-executable: ELF's `PT_GNU_STACK` flags; none without the header.
+    pub nx: Option<bool>,
+    /// Position independent: an ELF `ET_DYN`.
+    pub pic: bool,
+    /// ELF's `PT_GNU_RELRO` and whether the dynamic section binds at load; none for other formats.
+    pub relro: Option<Relro>,
+    /// The dynamic linker `PT_INTERP` names (empty where the header holds no readable path).
+    pub interpreter: Option<String>,
+    /// No `PT_INTERP` and no `PT_DYNAMIC`: nothing relocates this image but its own start-up.
+    pub statically_linked: bool,
+}
+
+/// How much of the relocation table is bound and sealed before the program runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relro {
+    No,
+    Partial,
+    Full,
+}
+
+impl Relro {
+    /// radare2's spelling.
+    pub const fn spelled(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Partial => "partial",
+            Self::Full => "full",
+        }
+    }
 }
 
 /// A function's source language (doc/adr-language-profile.md): read from what the container
@@ -187,6 +226,7 @@ impl Container {
             .is_some_and(|sealed| range.end <= sealed.end);
         match (read_only, sealed) {
             (true, _) => Permanence::ReadOnly,
+            (false, true) if self.posture.interpreter.is_some() => Permanence::SealedByInterpreter,
             (false, true) => Permanence::Sealed,
             (false, false) => Permanence::Writable,
         }
@@ -320,6 +360,9 @@ pub enum Permanence {
     /// first, and so may an image's own start-up code (ld.so, a static binary), which the
     /// container does not state: only the loader's stated writes are known to stay.
     Sealed,
+    /// Sealed, and the interpreter (`PT_INTERP`) relocates and seals it before this image's code
+    /// runs, so a word no record writes is the file's for the whole run (ROADMAP M18).
+    SealedByInterpreter,
     /// The program may write it for its whole run.
     Writable,
 }

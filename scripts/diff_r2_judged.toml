@@ -1544,3 +1544,12 @@ r2s = '^orr [wx]\d+, [wx]zr, 0x[0-9a-f]+$'
 r2 = '^mov [wx]\d+, \d+$'
 verdict = "r2s-right"
 reason = "ORR with the zero register is MOV only where no single MOVZ or MOVN writes the value (Arm ARM MoveWidePreferred; llvm-mc: orr w0, wzr, #0x1); radare2 writes mov for every such ORR"
+
+[[judged]]
+command = "i"
+binaries = "*"
+corpus = "elf"
+r2 = '^static true$'
+r2s = '^static false$'
+verdict = "r2s-right"
+reason = "radare2 prints static when the image needs no library (an empty DT_NEEDED); a shared object or a memory image that holds a PT_DYNAMIC is relocated by another image's loader, so it is not statically linked. r2s says static for an image with neither PT_INTERP nor PT_DYNAMIC, the one nothing else relocates (the permanence rule reads it)"

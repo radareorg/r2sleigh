@@ -257,7 +257,7 @@ impl Stated {
             file.sections()
                 .any(|section| section.name().is_ok_and(|name| name.starts_with(prefix)))
         };
-        let libraries = needed(file);
+        let libraries = libraries(file);
         let links = |stem: &str| libraries.iter().any(|library| library.contains(stem));
         // An import is a statement of what the program links against, unlike a name it defines;
         // libgcc's unwinder refers to some of the C++ ABI weakly in C programs too.
@@ -373,9 +373,9 @@ fn cpp_runtime(library: &str) -> bool {
         || library.to_ascii_lowercase().starts_with("msvcp")
 }
 
-/// The libraries the program states it needs: ELF's `DT_NEEDED`, PE's import descriptors, Mach-O's
-/// dylib commands. Names only, at most `LIBRARIES` of them: a crafted table can state millions.
-fn needed(file: &object::File<'_>) -> Vec<String> {
+/// The libraries the program states it needs (ELF `DT_NEEDED`, PE imports, Mach-O dylibs), once
+/// each in stated order, at most `LIBRARIES`.
+pub(crate) fn libraries(file: &object::File<'_>) -> Vec<String> {
     let mut libraries = match file {
         object::File::Pe32(pe) => pe_needed(pe),
         object::File::Pe64(pe) => pe_needed(pe),
@@ -383,8 +383,8 @@ fn needed(file: &object::File<'_>) -> Vec<String> {
         object::File::MachO64(macho) => macho_needed(macho),
         _ => elf_needed(file),
     };
-    libraries.sort_unstable();
-    libraries.dedup();
+    let mut seen = std::collections::HashSet::new();
+    libraries.retain(|library| seen.insert(library.clone()));
     libraries
 }
 
@@ -464,7 +464,11 @@ fn needed_through_dynamic<Elf: object::read::elf::FileHeader>(
             let offset: u64 = header.p_offset(endian).into();
             (header.p_type(endian) == object::elf::PT_LOAD
                 && (start..start.saturating_add(held)).contains(&vaddr))
-            .then(|| (offset + (vaddr - start), held - (vaddr - start)))
+            .then(|| {
+                let into = vaddr - start;
+                Some((offset.checked_add(into)?, held - into))
+            })
+            .flatten()
         })
     }) else {
         return Vec::new();

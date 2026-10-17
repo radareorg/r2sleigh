@@ -1403,8 +1403,13 @@ impl TableBytes {
         match program.permanence(&range) {
             Permanence::Writable => Self::Unsealed,
             Permanence::Sealed => Self::Sealed,
-            Permanence::ReadOnly if crate::stated::written(program, &range) => Self::LoaderWritten,
-            Permanence::ReadOnly => Self::ReadOnly,
+            // The interpreter seals it before this image runs: the file's word, else the loader's.
+            Permanence::ReadOnly | Permanence::SealedByInterpreter
+                if crate::stated::written(program, &range) =>
+            {
+                Self::LoaderWritten
+            }
+            Permanence::ReadOnly | Permanence::SealedByInterpreter => Self::ReadOnly,
         }
     }
 
