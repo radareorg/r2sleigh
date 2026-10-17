@@ -1546,7 +1546,7 @@ mod tests {
         for (addr, op) in ops {
             block.push_from(op, addr);
         }
-        let graph = crate::def_use_graph(&[block], None).expect("it builds");
+        let graph = crate::def_use_graph(&[block], None, 0x1000).expect("it builds");
         let fixed = |at: u64, storage: &Varnode| {
             let storage = crate::CanonicalStorageId::from_varnode(storage);
             instruction_bound(&graph, at, storage).and_then(|bound| bound.range.as_constant())

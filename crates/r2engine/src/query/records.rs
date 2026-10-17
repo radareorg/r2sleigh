@@ -107,19 +107,21 @@ pub struct Answered<'a> {
 pub struct WalkedBody<'a> {
     /// Built inside the one answer that holds the body, never across answers.
     #[cfg_attr(dylint_lib = "r2sleigh_lints", allow(cache_outside_query_database))]
-    built: std::cell::OnceCell<Option<r2ssa::SsaGraph>>,
+    built: std::cell::OnceCell<Result<r2ssa::SsaGraph, r2ssa::SsaPrepareError>>,
+    entry: u64,
     blocks: &'a [r2il::R2ILBlock],
     arch: &'a r2ssa::Arch,
 }
 
 impl<'a> WalkedBody<'a> {
-    pub fn new(blocks: &'a [r2il::R2ILBlock], arch: &'a r2ssa::Arch) -> Self {
+    pub fn new(entry: u64, blocks: &'a [r2il::R2ILBlock], arch: &'a r2ssa::Arch) -> Self {
         debug_assert!(
             blocks.is_sorted_by_key(|block| block.addr),
             "a walk leaves its blocks in address order"
         );
         Self {
             built: std::cell::OnceCell::new(),
+            entry,
             blocks,
             arch,
         }
@@ -159,16 +161,17 @@ impl<'a> WalkedBody<'a> {
         r2ssa::instruction_bound(graph, instruction, storage)
     }
 
-    /// The graph, built now if nothing has asked for them yet.
+    /// The graph, built now if nothing has asked for it yet.
     fn settled(&self) -> Option<&r2ssa::SsaGraph> {
         self.built
-            .get_or_init(|| r2ssa::def_use_graph(self.blocks, Some(self.arch)))
+            .get_or_init(|| r2ssa::def_use_graph(self.blocks, Some(self.arch), self.entry))
             .as_ref()
+            .ok()
     }
 
-    /// Whether a line needed the graph and it did not build.
-    pub fn failed(&self) -> bool {
-        matches!(self.built.get(), Some(None))
+    /// Why the graph did not build, where a line needed it and it did not.
+    pub fn failure(&self) -> Option<r2ssa::SsaPrepareError> {
+        self.built.get()?.as_ref().err().copied()
     }
 }
 

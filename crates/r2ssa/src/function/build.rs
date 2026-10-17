@@ -293,6 +293,22 @@ impl SSAFunction {
         )
     }
 
+    /// Build raw SSA for a body entered at `entry`, which a body with blocks below it does not start at.
+    pub fn from_blocks_raw_entered_at(
+        blocks: &[R2ILBlock],
+        arch: Option<&crate::Arch>,
+        entry: u64,
+    ) -> Result<Self, SsaPrepareError> {
+        let entered = crate::cfg::DeclaredSuccessors::entered_at(entry);
+        Self::from_blocks_raw_with_policy_and_control(
+            lifted_cfg(blocks, Some(&entered))?,
+            arch,
+            None,
+            &[],
+            &UncheckedSsaWorkControl,
+        )
+    }
+
     /// Build raw SSA prepared with decompiler-safe call boundaries.
     pub fn from_blocks_raw_for_decompile(
         blocks: &[R2ILBlock],
@@ -585,7 +601,7 @@ impl SSAFunction {
                 eprintln!("ssa block domain ({}): {addrs:x?}", addrs.len());
             }
             r2il::refusal_evidence!("ssa-integrity", "{error:?}");
-            malformed_ssa_input()
+            SsaPrepareError::Integrity(error.rule())
         })?;
         control.poll()?;
         Ok(function)

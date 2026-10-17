@@ -782,7 +782,7 @@ fn cross_references(session: &mut Session, argument: &str) -> Result<String, Str
     for (entry, why) in &index.coverage.unread {
         let why = match why {
             r2engine::query::Unread::Refused(refusal) => refusal.to_string(),
-            r2engine::query::Unread::NoSsa => "its SSA did not build".to_owned(),
+            r2engine::query::Unread::NoSsa(why) => format!("its SSA did not build: {why}"),
         };
         out.push_str(&format!("\n; {entry:#x} unread: {why}"));
     }

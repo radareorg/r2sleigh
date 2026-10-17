@@ -224,7 +224,7 @@ pub enum Unread {
     /// The body could not be walked.
     Refused(NativeRefusal),
     /// A number the body computes needed its def-use to say whether it is a step, and that did not build.
-    NoSsa,
+    NoSsa(r2ssa::SsaPrepareError),
 }
 
 impl Coverage {

@@ -118,7 +118,9 @@ pub use function::{
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
 };
-pub use integrity::{ScalarWidthRule, SsaIntegrityError, SsaValueSite, validate_ssa_function};
+pub use integrity::{
+    IntegrityRule, ScalarWidthRule, SsaIntegrityError, SsaValueSite, validate_ssa_function,
+};
 pub use interproc::{
     ArgumentReach, CallArgObservation, FunctionSemanticLinkage, FunctionSemanticSummary,
     InterprocFunctionId, InterprocFunctionInput, InterprocSummaryDiagnostics, InterprocSummarySet,

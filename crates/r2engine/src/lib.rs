@@ -584,6 +584,7 @@ fn ssa_prepare_execution_refusal(
             "the convention states nothing a call leaves standing".to_string()
         }
         r2ssa::SsaPrepareError::Exhausted(exhausted) => exhausted.to_string(),
+        r2ssa::SsaPrepareError::Integrity(rule) => format!("SSA integrity: {rule}"),
     };
     engine_execution_refusal(reason, EnginePhase::Ssa, metrics)
 }

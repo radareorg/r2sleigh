@@ -79,6 +79,8 @@ pub enum SsaPrepareError {
     /// A pass moved a state past its stated lattice height: a defect in it, refused with the
     /// function (doc/adr-fixpoint.md).
     Exhausted(crate::fixpoint::Exhausted),
+    /// The built function broke an invariant its validator states.
+    Integrity(crate::IntegrityRule),
 }
 
 impl std::fmt::Display for SsaPrepareError {
@@ -89,6 +91,7 @@ impl std::fmt::Display for SsaPrepareError {
             Self::DeadlineExceeded => "SSA preparation deadline exceeded",
             Self::NoCallEffect => "the convention states nothing a call leaves standing",
             Self::Exhausted(exhausted) => return write!(formatter, "{exhausted}"),
+            Self::Integrity(rule) => return write!(formatter, "SSA integrity: {rule}"),
         })
     }
 }

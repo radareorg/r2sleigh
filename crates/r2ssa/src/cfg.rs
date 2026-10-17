@@ -122,6 +122,14 @@ impl DeclaredSuccessors {
         declared
     }
 
+    /// A declaration of nothing but where control enters.
+    pub fn entered_at(entry: u64) -> Self {
+        Self {
+            entry: Some(entry),
+            ..Self::default()
+        }
+    }
+
     pub fn insert(&mut self, block: u64, successors: impl IntoIterator<Item = u64>) {
         self.by_block.entry(block).or_default().extend(successors);
     }

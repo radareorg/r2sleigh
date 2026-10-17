@@ -552,7 +552,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let walking = (self.db.get::<super::analysis::Walked>(&key))
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
         let lifted = walking.0.as_ref().map_err(Clone::clone)?.lifted();
-        let body = WalkedBody::new(&lifted, target.arch);
+        let body = WalkedBody::new(entry, &lifted, target.arch);
         let proved = Proved::new(prepared);
         let answered = Answered {
             body: Some(&body),
@@ -612,7 +612,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             (block.lifted.addr, u64::from(block.lifted.size), successors)
         });
         let shape = shape_of(blocks, dispatches);
-        let walked = WalkedBody::new(&lifted, target.arch);
+        let walked = WalkedBody::new(entry, &lifted, target.arch);
         let answered = Answered {
             body: Some(&walked),
             ..self.answered(None)
@@ -829,7 +829,7 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
         }
         let machine = walker.machine(thumb).ok_or("no machine")?;
         let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, &walk.lifted()) {
+        match claimed_by(view, decoder, entry, &walk.lifted()) {
             Ok(lines) => {
                 coverage.read.push(entry);
                 index.read(entry, lines);
@@ -846,9 +846,10 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
 fn claimed_by<S: Source + 'static>(
     view: &View<'_, S>,
     (target, machine): (&crate::native::NativeTarget<'_>, &crate::machine::Machine),
+    entry: u64,
     lifted: &[r2il::R2ILBlock],
 ) -> Result<Vec<Line>, Unread> {
-    let body = WalkedBody::new(lifted, target.arch);
+    let body = WalkedBody::new(entry, lifted, target.arch);
     let answered = Answered {
         decoders: &Walked(machine),
         memory: Memory {
@@ -862,9 +863,9 @@ fn claimed_by<S: Source + 'static>(
         parameters: Some(view),
     };
     let lines = listed_by_block(&answered, lifted).value;
-    // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
-    if body.failed() {
-        return Err(Unread::NoSsa);
+    // A line that needed the def-use graph, and it did not build, leaves the body unread.
+    if let Some(failure) = body.failure() {
+        return Err(Unread::NoSsa(failure));
     }
     Ok(lines)
 }

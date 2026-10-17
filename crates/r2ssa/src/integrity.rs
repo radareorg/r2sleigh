@@ -24,6 +24,85 @@ pub enum ScalarWidthRule {
     ExtensionWidens,
 }
 
+/// The invariant a validated function broke, without the sites that name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityRule {
+    BlockOrderMismatch,
+    EntryOutsideBlockDomain,
+    RootHasPredecessors,
+    RootDoesNotEnter,
+    PredecessorOutsideBlockDomain,
+    SuccessorOutsideBlockDomain,
+    PredecessorNotReciprocal,
+    SuccessorNotReciprocal,
+    DefinitionAtVersionZero,
+    DuplicateDefinition,
+    MissingDefinition,
+    PhiPredecessorMismatch,
+    PhiWidthMismatch,
+    PhiStorageMismatch,
+    ScalarWidthMismatch,
+    ZeroWidthValue,
+    UseNotDominated,
+}
+
+impl fmt::Display for IntegrityRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::BlockOrderMismatch => "the block order does not cover the stored blocks",
+            Self::EntryOutsideBlockDomain => "the entry is not a stored block",
+            Self::RootHasPredecessors => "the root is reached by an edge",
+            Self::RootDoesNotEnter => "the root does not lead to the entry alone",
+            Self::PredecessorOutsideBlockDomain => {
+                "a block has a predecessor outside the stored blocks"
+            }
+            Self::SuccessorOutsideBlockDomain => {
+                "a block has a successor outside the stored blocks"
+            }
+            Self::PredecessorNotReciprocal => {
+                "a predecessor edge is not matched by a successor edge"
+            }
+            Self::SuccessorNotReciprocal => "a successor edge is not matched by a predecessor edge",
+            Self::DefinitionAtVersionZero => "a definition has version zero",
+            Self::DuplicateDefinition => "a value is defined twice",
+            Self::MissingDefinition => "a use has no definition",
+            Self::PhiPredecessorMismatch => "a phi disagrees with its block's predecessors",
+            Self::PhiWidthMismatch => "a phi source differs in width from its destination",
+            Self::PhiStorageMismatch => "a phi's storage differs from its retained storage",
+            Self::ScalarWidthMismatch => "an operation violates a scalar-width rule",
+            Self::ZeroWidthValue => "a value has zero width",
+            Self::UseNotDominated => "a read is not dominated by its definition",
+        })
+    }
+}
+
+impl SsaIntegrityError {
+    /// The invariant this violation breaks.
+    pub const fn rule(&self) -> IntegrityRule {
+        match self {
+            Self::BlockOrderMismatch { .. } => IntegrityRule::BlockOrderMismatch,
+            Self::EntryOutsideBlockDomain { .. } => IntegrityRule::EntryOutsideBlockDomain,
+            Self::RootHasPredecessors { .. } => IntegrityRule::RootHasPredecessors,
+            Self::RootDoesNotEnter { .. } => IntegrityRule::RootDoesNotEnter,
+            Self::PredecessorOutsideBlockDomain { .. } => {
+                IntegrityRule::PredecessorOutsideBlockDomain
+            }
+            Self::SuccessorOutsideBlockDomain { .. } => IntegrityRule::SuccessorOutsideBlockDomain,
+            Self::PredecessorNotReciprocal { .. } => IntegrityRule::PredecessorNotReciprocal,
+            Self::SuccessorNotReciprocal { .. } => IntegrityRule::SuccessorNotReciprocal,
+            Self::DefinitionAtVersionZero { .. } => IntegrityRule::DefinitionAtVersionZero,
+            Self::DuplicateDefinition { .. } => IntegrityRule::DuplicateDefinition,
+            Self::MissingDefinition { .. } => IntegrityRule::MissingDefinition,
+            Self::PhiPredecessorMismatch { .. } => IntegrityRule::PhiPredecessorMismatch,
+            Self::PhiWidthMismatch { .. } => IntegrityRule::PhiWidthMismatch,
+            Self::PhiStorageMismatch { .. } => IntegrityRule::PhiStorageMismatch,
+            Self::ScalarWidthMismatch { .. } => IntegrityRule::ScalarWidthMismatch,
+            Self::ZeroWidthValue { .. } => IntegrityRule::ZeroWidthValue,
+            Self::UseNotDominated { .. } => IntegrityRule::UseNotDominated,
+        }
+    }
+}
+
 /// A whole-function SSA invariant violation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SsaIntegrityError {

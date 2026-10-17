@@ -740,7 +740,7 @@ mod tests {
         let walked = crate::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
         let blocks = walked.expect("it walks").blocks.into_iter();
         let blocks = blocks.map(|block| block.lifted).collect::<Vec<_>>();
-        let body = WalkedBody::new(&blocks, machine.0.tables());
+        let body = WalkedBody::new(BASE, &blocks, machine.0.tables());
         let answered = Answered {
             decoders: &machine,
             memory: Memory {

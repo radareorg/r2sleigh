@@ -86,10 +86,9 @@ pub use r2source::StackAddressBase;
 /// nothing to say and cannot drift from where it actually is.
 /// The validator's typed refusal, as the one error preparation reports, with
 /// the integrity error named in the evidence.
-#[track_caller]
 fn integrity_refusal(error: SsaIntegrityError) -> SsaPrepareError {
     r2il::refusal_evidence!("ssa-integrity", "{error:?}");
-    malformed_ssa_input()
+    SsaPrepareError::Integrity(error.rule())
 }
 
 #[track_caller]
@@ -640,15 +639,24 @@ fn release_undemanded_bytes(
     function.release_undemanded_insert_bases(graph, &demand)
 }
 
-/// The def-use of one body as it was lifted, with no pass that folds a use away.
+/// The def-use of one body as it was lifted, entered at `entry` (not always its lowest block), with no pass that folds a use away.
 ///
 /// Which listed number is a step towards another is read off this, so the listing and the
 /// reference index answer it from the same graph.
-pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<SsaGraph> {
-    let function = SSAFunction::from_blocks_raw(blocks, arch)?;
-    let prepared = Lifted::new(function).validate().map_err(integrity_refusal);
-    let graph = prepared.ok()?.def_use_graph();
-    (!graph.blocks.is_empty()).then_some(graph)
+pub fn def_use_graph(
+    blocks: &[R2ILBlock],
+    arch: Option<&crate::Arch>,
+    entry: u64,
+) -> Result<SsaGraph, SsaPrepareError> {
+    let function = SSAFunction::from_blocks_raw_entered_at(blocks, arch, entry)?;
+    let graph = Lifted::new(function)
+        .validate()
+        .map_err(integrity_refusal)?
+        .def_use_graph();
+    match graph.blocks.is_empty() {
+        true => Err(malformed_ssa_input()),
+        false => Ok(graph),
+    }
 }
 
 impl SsaArtifact {
