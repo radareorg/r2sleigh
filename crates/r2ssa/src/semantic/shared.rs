@@ -510,8 +510,16 @@ pub(crate) fn induction_affine_parts_of_definition(
     let mut parts_of = |value: ValueId| {
         induction_affine_parts(graph, phi, value, width_bits, depth - 1, &mut visited)
     };
+    // A widening or a low piece agrees with its source modulo any width both hold.
+    let holds = |sized: ValueId| width_bits <= graph.var(sized).size.saturating_mul(8);
     match op {
         SSAOp::Copy { .. } => parts_of(operand(0)?),
+        SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. } if holds(operand(0)?) => {
+            parts_of(operand(0)?)
+        }
+        SSAOp::Subpiece { offset: 0, .. } | SSAOp::Trunc { .. } if holds(value) => {
+            parts_of(operand(0)?)
+        }
         SSAOp::IntAdd { .. } => {
             let (lm, la) = parts_of(operand(0)?)?;
             let (rm, ra) = parts_of(operand(1)?)?;

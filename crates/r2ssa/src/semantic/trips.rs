@@ -110,8 +110,8 @@ impl<'a> TripCounter<'a> {
 
     /// The header's run count with the test that proves it, or why none is stated.
     pub(crate) fn count(&mut self, lp: &TripLoop<'_>) -> Result<LoopTrips, TripRefusal> {
-        let exiting = single_exit(self.function, lp.loop_)?;
-        let test = self.exit_test(lp, exiting)?;
+        let exiting = exiting_blocks(self.function, lp.loop_)?;
+        let test = self.exits_test(lp, &exiting)?;
         let width = test.induction.width_bits;
         let bound = self.form(test.evidence.bound, width);
         if bound
@@ -144,15 +144,47 @@ impl<'a> TripCounter<'a> {
         })
     }
 
+    /// The one test every exiting block makes: where a loop is left from each of its latches, the
+    /// tests must read the same induction against the same bound the same way.
+    fn exits_test<'l>(
+        &mut self,
+        lp: &TripLoop<'l>,
+        exiting: &[u64],
+    ) -> Result<ExitTest<'l>, TripRefusal> {
+        let mut blocks = exiting.iter();
+        let first = self.exit_test(lp, *blocks.next().ok_or(TripRefusal::MultipleExits)?)?;
+        let width = first.induction.width_bits;
+        let bound = self.form(first.evidence.bound, width);
+        for block in blocks {
+            let other = self.exit_test(lp, *block)?;
+            let same = other.induction.phi == first.induction.phi
+                && other.induction.step == first.induction.step
+                && other.evidence.reads_update == first.evidence.reads_update
+                && other.exit == first.exit
+                && self.form(other.evidence.bound, width) == bound;
+            if !same {
+                return Err(TripRefusal::MultipleExits);
+            }
+        }
+        Ok(first)
+    }
+
     /// The exiting block's comparison, where one side is an induction's merge or update.
     fn exit_test<'l>(&self, lp: &TripLoop<'l>, exiting: u64) -> Result<ExitTest<'l>, TripRefusal> {
         let body = lp.loop_.body;
+        let leaves = |fact: &PredicateFact| {
+            fact.block_addr == exiting
+                && body.contains(&fact.true_target) != body.contains(&fact.false_target)
+        };
         let predicate = lp
             .condition
             .and_then(|id| self.predicates.predicates.get(&id))
-            .filter(|fact| {
-                fact.block_addr == exiting
-                    && body.contains(&fact.true_target) != body.contains(&fact.false_target)
+            .filter(|fact| leaves(fact))
+            .or_else(|| {
+                self.predicates
+                    .predicates
+                    .values()
+                    .find(|fact| leaves(fact))
             })
             .ok_or(TripRefusal::ExitNotInduction)?;
         let tested = [&predicate.comparison, &predicate.evaluated_comparison]
@@ -175,14 +207,17 @@ impl<'a> TripCounter<'a> {
             (compare.rhs, compare.lhs, false),
         ];
         sides.into_iter().find_map(|(tested, bound, tested_left)| {
-            let (induction, reads_update) = lp.inductions.iter().find_map(|induction| {
-                (induction.phi == tested)
-                    .then_some((induction, false))
-                    .or((induction.update == tested).then_some((induction, true)))
-            })?;
+            let (induction, reads_update) = lp
+                .inductions
+                .iter()
+                .find_map(|induction| Some((induction, self.reads(induction, tested)?)))?;
             let width = Some(induction.width_bits);
-            let fits = lp.loop_.latches.len() == 1
-                && lp.loop_.latches.contains(&induction.latch)
+            // Where several latches leave the loop, a latch tests the update its own edge carries.
+            let latch = match lp.loop_.latches.len() {
+                1 => lp.loop_.latches.contains(&induction.latch),
+                _ => induction.latch == predicate.block_addr,
+            };
+            let fits = latch
                 && self.width_of(tested) == width
                 && self.width_of(bound) == width
                 && induction.validate(self.graph);
@@ -200,6 +235,35 @@ impl<'a> TripCounter<'a> {
                 })
             })
         })
+    }
+
+    /// Whether `tested` is the induction's merge (false) or its update (true), or the low piece of
+    /// the merge or of what a widening makes the update, at the induction's narrower width.
+    fn reads(&self, induction: &InductionFact, tested: ValueId) -> Option<bool> {
+        if induction.phi == tested {
+            return Some(false);
+        }
+        if induction.update == tested {
+            return Some(true);
+        }
+        if self.width_of(tested) >= self.width_of(induction.phi) {
+            return None;
+        }
+        let source = |value: ValueId, widened: bool| {
+            let inst = self.graph.inst(self.graph.def_inst(value)?)?;
+            match (&inst.payload, widened) {
+                (InstPayload::Op(SSAOp::Subpiece { src, offset: 0, .. }), false)
+                | (
+                    InstPayload::Op(SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. }),
+                    true,
+                ) => Some(*src),
+                _ => None,
+            }
+        };
+        if source(tested, false) == Some(induction.phi) {
+            return Some(false);
+        }
+        (source(induction.update, true) == Some(tested)).then_some(true)
     }
 
     /// A count from an equality exit: exact for constant ends, or symbolic where a guard rules out its zero.
@@ -561,22 +625,34 @@ impl StructuredLoopFact {
     }
 }
 
-/// The block whose edge is the loop's only way out, where it tests on every trip.
-fn single_exit(function: &SSAFunction, loop_: NaturalLoop<'_>) -> Result<u64, TripRefusal> {
+/// The blocks whose edges are the loop's ways out: one that tests on every trip, or each latch,
+/// where every way out is a latch leaving the loop from its own test.
+fn exiting_blocks(function: &SSAFunction, loop_: NaturalLoop<'_>) -> Result<Vec<u64>, TripRefusal> {
     if loop_.exits.leaves_function {
         return Err(TripRefusal::BodyLeaves);
     }
-    let mut edges = loop_.exits.edges.iter();
-    let (Some((exiting, _)), None) = (edges.next(), edges.next()) else {
-        return Err(TripRefusal::MultipleExits);
-    };
-    match loop_
-        .latches
+    let exiting = loop_
+        .exits
+        .edges
         .iter()
-        .all(|latch| function.dominates(*exiting, *latch))
-    {
-        true => Ok(*exiting),
-        false => Err(TripRefusal::ExitSkipped),
+        .map(|(exiting, _)| *exiting)
+        .collect::<BTreeSet<_>>();
+    // A block that leaves by two edges is not one test.
+    if exiting.len() != loop_.exits.edges.len() {
+        return Err(TripRefusal::MultipleExits);
+    }
+    match exiting.len() {
+        0 => Err(TripRefusal::MultipleExits),
+        1 => match loop_
+            .latches
+            .iter()
+            .all(|latch| function.dominates(*exiting.first().unwrap_or(&0), *latch))
+        {
+            true => Ok(exiting.into_iter().collect()),
+            false => Err(TripRefusal::ExitSkipped),
+        },
+        _ if &exiting == loop_.latches => Ok(exiting.into_iter().collect()),
+        _ => Err(TripRefusal::MultipleExits),
     }
 }
 

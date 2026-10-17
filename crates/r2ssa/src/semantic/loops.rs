@@ -16,32 +16,66 @@ fn loop_induction_facts(
     loop_id: LoopId,
     header: u64,
     carriers: &[LoopCarrierFact],
+    reading: Reading,
 ) -> Vec<InductionFact> {
     carriers
         .iter()
-        .filter_map(|carrier| {
-            let ([update], [entry]) = (carrier.updates.as_slice(), carrier.entries.as_slice())
+        .flat_map(|carrier| {
+            let ([entry], updates) = (carrier.entries.as_slice(), carrier.updates.as_slice())
             else {
-                return None;
+                return Vec::new();
+            };
+            let updates = match (updates, reading.every_latch) {
+                ([update], _) => std::slice::from_ref(update),
+                (updates, true) => updates,
+                _ => return Vec::new(),
             };
             let width_bits = carrier.width.saturating_mul(8).max(1);
-            let step = induction_step_for_update(graph, carrier.phi, update.value, width_bits)?;
-            let fact = InductionFact {
-                loop_id,
-                header,
-                phi: carrier.phi,
-                init: entry.value,
-                update: update.value,
-                latch: update.predecessor,
-                width_bits,
-                step,
-            };
-            // A fact that does not prove itself against the graph it came from
-            // is a fact nobody should read.
-            fact.validate(graph).then_some(fact)
+            // The carrier whole, then the low pieces a caller asks for: a 32-bit counter kept in a
+            // 64-bit register is stepped and tested at 32 bits.
+            let narrower = reading
+                .views
+                .iter()
+                .copied()
+                .filter(|bits| *bits < width_bits);
+            let widths = [width_bits].into_iter().chain(narrower).collect::<Vec<_>>();
+            let facts = updates.iter().flat_map(|update| {
+                widths.iter().filter_map(|&width_bits| {
+                    let step =
+                        induction_step_for_update(graph, carrier.phi, update.value, width_bits)?;
+                    let fact = InductionFact {
+                        loop_id,
+                        header,
+                        phi: carrier.phi,
+                        init: entry.value,
+                        update: update.value,
+                        latch: update.predecessor,
+                        width_bits,
+                        step,
+                    };
+                    // A fact that does not prove itself against the graph it came from
+                    // is a fact nobody should read.
+                    fact.validate(graph).then_some(fact)
+                })
+            });
+            facts.collect()
         })
         .collect()
 }
+
+/// What an induction may be read as: at the widths of its low pieces, and once for each latch that
+/// updates it.
+#[derive(Clone, Copy)]
+pub(crate) struct Reading<'a> {
+    pub(crate) views: &'a [u32],
+    pub(crate) every_latch: bool,
+}
+
+/// The carrier as it stands: one width, one latch.
+const WHOLE: Reading<'static> = Reading {
+    views: &[],
+    every_latch: false,
+};
 
 /// What loop recovery reads beside the body: the branch tests and the value ranges.
 pub(crate) struct LoopEvidence<'a> {
@@ -83,7 +117,7 @@ pub(crate) fn collect_structured_loop_facts(
             exits: &leaving,
         };
         let carriers = loop_carrier_facts(code, loop_, live_out, storage_spans);
-        let loop_inductions = loop_induction_facts(graph, id, header, &carriers);
+        let loop_inductions = loop_induction_facts(graph, id, header, &carriers, WHOLE);
         let trips = counter.count(&TripLoop {
             loop_,
             condition,
@@ -110,6 +144,48 @@ pub(crate) fn collect_structured_loop_facts(
         );
     }
     (loops, inductions)
+}
+
+/// How many times the header of the loop headed by `header` runs, from the merges of its header
+/// alone: no liveness and no memory model, for a caller that holds neither.
+pub(crate) fn header_trips(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    evidence: LoopEvidence<'_>,
+    header: u64,
+) -> Result<LoopTrips, TripRefusal> {
+    let natural = (function.natural_loops().get(header)).ok_or(TripRefusal::ExitNotInduction)?;
+    let leaving = LoopExits::of(function, &natural.body);
+    let condition = loop_condition(
+        evidence.predicates,
+        header,
+        &natural.body,
+        &leaving.targets(),
+    );
+    let loop_ = NaturalLoop {
+        id: LoopId(0),
+        header,
+        latches: &natural.latches,
+        body: &natural.body,
+        exits: &leaving,
+    };
+    let carriers = header_carriers(graph, loop_, |phi| !graph.use_sites(phi).is_empty());
+    let inductions = loop_induction_facts(
+        graph,
+        loop_.id,
+        header,
+        &carriers,
+        Reading {
+            views: &[32, 16, 8],
+            every_latch: true,
+        },
+    );
+    let mut counter = TripCounter::new(function, graph, evidence.predicates, evidence.values);
+    counter.count(&TripLoop {
+        loop_,
+        condition,
+        inductions: &inductions,
+    })
 }
 
 /// One natural loop: which it is, where it begins, the edges back to it, the
@@ -172,29 +248,23 @@ impl LoopExits {
     }
 }
 
-pub(crate) fn loop_carrier_facts(
-    body: Body<'_>,
+/// The merges of a loop's header and the edges that enter and update each: the carriers before any
+/// owner is shared between them. `read` says which merges something reads.
+pub(crate) fn header_carriers(
+    graph: &SsaGraph,
     loop_: NaturalLoop<'_>,
-    live_out: &crate::liveout::FunctionLiveOut,
-    storage_spans: &StorageSpans,
+    read: impl Fn(ValueId) -> bool,
 ) -> Vec<LoopCarrierFact> {
-    let Body {
-        function,
-        graph,
-        machine_context,
-        ..
-    } = body;
     let NaturalLoop {
         id: loop_id,
         header,
         latches,
-        body: loop_body,
         ..
     } = loop_;
     let Some(header_block) = graph.block_id_for_addr(header) else {
         return Vec::new();
     };
-    let mut carriers = (graph.phi_insts(header_block).iter())
+    (graph.phi_insts(header_block).iter())
         .filter_map(|&phi_inst| {
             let phi = graph.inst(phi_inst)?;
             let phi_value = phi.output?;
@@ -207,7 +277,7 @@ pub(crate) fn loop_carrier_facts(
             // preservation obligation. Being read includes being read by the
             // caller, which the use list alone cannot see: a function's result
             // has no reader anywhere inside it.
-            if !crate::liveout::is_read(graph, live_out, phi_value) {
+            if !read(phi_value) {
                 return None;
             }
             let mut entries = Vec::new();
@@ -257,7 +327,30 @@ pub(crate) fn loop_carrier_facts(
                 members: Vec::new(),
             })
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
+
+pub(crate) fn loop_carrier_facts(
+    body: Body<'_>,
+    loop_: NaturalLoop<'_>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    storage_spans: &StorageSpans,
+) -> Vec<LoopCarrierFact> {
+    let Body {
+        function,
+        graph,
+        machine_context,
+        ..
+    } = body;
+    let NaturalLoop {
+        header,
+        latches,
+        body: loop_body,
+        ..
+    } = loop_;
+    let mut carriers = header_carriers(graph, loop_, |phi| {
+        crate::liveout::is_read(graph, live_out, phi)
+    });
 
     // A post-loop phi such as `result = phi(init, update)` denotes the same
     // mutable carrier after structured control flow. Resolve the transitive

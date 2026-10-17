@@ -76,6 +76,8 @@ pub(crate) mod stack_bound;
 pub(crate) mod stack_protector;
 mod strided;
 pub(crate) mod tail_count;
+pub(crate) mod tail_cursors;
+pub(crate) mod tail_offsets;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod value_table;

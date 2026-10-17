@@ -122,9 +122,14 @@ dominates `P`.
 `StructuredLoopFact::trips` (`semantic/trips.rs`) claims only: if control
 leaves through the loop's one exit edge, the header ran `N` times. It requires
 a body that neither returns nor leaves the function, one exit edge whose block
-dominates the one latch, and an exit test comparing an induction's merge
-(`j = 0`) or update (`j = 1`) at width `w` with a bound, so the `k`-th header
-run sees `X_k = c + (k + j)·s mod 2^w`.
+dominates the one latch (or, where every latch leaves the loop from its own
+test, tests that read the same induction against the same bound the same way),
+and an exit test comparing an induction's merge (`j = 0`) or update (`j = 1`)
+at width `w` with a bound, so the `k`-th header run sees
+`X_k = c + (k + j)·s mod 2^w`. A counter kept in a 64-bit register and stepped
+and tested at 32 bits is an induction at 32: `header_trips`, the variadic
+tail's seam, reads each carrier at the widths 32, 16 and 8 and once per
+latch; the loops' own facts read it whole and at its one latch.
 
 - Equality exit, solved in the ring: with `s = 2^t·u`, `u` odd, a solution
   exists only if `2^t | b − c`, and `k* = ((b − c)/2^t · u⁻¹ − j) mod 2^(w−t)`.

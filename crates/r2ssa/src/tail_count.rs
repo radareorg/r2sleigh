@@ -9,21 +9,22 @@ use r2source::{
 use crate::dense::DenseId;
 use crate::graph::{BlockId, GraphInst, InstId, InstPayload};
 use crate::save_area::SaveArea;
-use crate::semantic::CompareKind;
+use crate::semantic::{CompareKind, LoopEvidence, TripCount};
+use crate::tail_cursors::{Cursors, Kind, Kinds};
 use crate::{SSAFunction, SSAOp, SsaGraph, ValueId};
 
 /// The longest run of register copies a value is followed through.
-const COPIES: usize = 8;
+pub(crate) const COPIES: usize = 8;
 
 /// A stack cell at entry-stack-pointer offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Cell {
-    at: i64,
-    size: u32,
+pub(crate) struct Cell {
+    pub(crate) at: i64,
+    pub(crate) size: u32,
 }
 
 impl Cell {
-    fn overlaps(self, at: i64, size: u32) -> bool {
+    pub(crate) fn overlaps(self, at: i64, size: u32) -> bool {
         at < self.at + i64::from(self.size) && self.at < at + i64::from(size)
     }
 
@@ -34,7 +35,7 @@ impl Cell {
 
 /// What a `va_arg` loop does, in the order a block runs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Event {
+pub(crate) enum Event {
     /// The counter is set to zero.
     CounterInit,
     /// The counter steps by one.
@@ -59,20 +60,11 @@ struct Tally {
     moved: bool,
 }
 
-/// How a value relates to the `va_list`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tail {
-    /// The loaded `reg_save_area` (or `__gr_top`): an address only once an offset is added.
-    Base,
-    /// An address in the tail: the loaded overflow pointer, or the base and a register offset.
-    Address,
-}
-
 /// The `va_list` cells the convention names, from the bound `va_start` stored.
-struct List {
-    base: Cell,
-    offset: Cell,
-    overflow: Cell,
+pub(crate) struct List {
+    pub(crate) base: Cell,
+    pub(crate) offset: Cell,
+    pub(crate) overflow: Cell,
 }
 
 /// The counter and the count the loop's header compares.
@@ -82,12 +74,16 @@ struct Bound {
     signed: bool,
 }
 
-/// What the stores to the tracked cells are.
+/// What the loop's trips are counted by: a header merge the trip count reads, or a counter cell.
+enum Counting {
+    Trips { parameter: usize, width: u32 },
+    Memory(Bound),
+}
+
+/// The stores that keep the count and the counter, where a cell counts.
 struct Stores {
-    events: Vec<Vec<(usize, Event)>>,
-    counter_init: InstId,
-    count_store: (InstId, ValueId),
-    overflow_init: i64,
+    counter_init: Option<InstId>,
+    count_store: Option<(InstId, ValueId)>,
 }
 
 /// What a store to the cells is.
@@ -97,9 +93,10 @@ enum Write {
     /// One of the entry saves in the register save area.
     Save,
     BaseInit,
-    OverflowInit(i64),
+    OverflowInit,
     OffsetInit,
-    Advance,
+    /// A cursor kept in its cell: the step was an event where it was computed.
+    Keep,
     CounterInit,
     CounterStep,
     CountStore,
@@ -108,9 +105,10 @@ enum Write {
 /// The cells a store is told apart by, and the value `va_start` leaves in the offset field.
 struct Cells<'a> {
     list: &'a List,
-    bound: &'a Bound,
+    bound: Option<&'a Bound>,
+    kinds: &'a Kinds,
     saved: Cell,
-    next: i64,
+    overflow_init: i64,
 }
 
 /// The stores that set the cells up, as `classify_stores` meets them.
@@ -118,49 +116,30 @@ struct Cells<'a> {
 struct Found {
     counter_inits: Vec<InstId>,
     count_stores: Vec<(InstId, ValueId)>,
-    overflow_inits: Vec<i64>,
+    overflow_inits: usize,
     base_inits: usize,
     offset_inits: usize,
 }
 
 impl Found {
-    fn into_stores(self, events: Vec<Vec<(usize, Event)>>) -> Result<Stores, String> {
-        let (&[counter_init], &[count_store], &[overflow_init]) = (
-            &self.counter_inits[..],
-            &self.count_stores[..],
-            &self.overflow_inits[..],
-        ) else {
-            return Err(
-                "the counter, the count or the overflow pointer is not set exactly once".into(),
-            );
+    fn into_stores(self, counting: bool) -> Result<Stores, String> {
+        if self.base_inits != 1 || self.offset_inits != 1 || self.overflow_inits != 1 {
+            return Err("the va_list's cells are not set exactly once".into());
+        }
+        if !counting {
+            return Ok(Stores {
+                counter_init: None,
+                count_store: None,
+            });
+        }
+        let (&[counter_init], &[count_store]) = (&self.counter_inits[..], &self.count_stores[..])
+        else {
+            return Err("the counter or the count is not set exactly once".into());
         };
-        if self.base_inits != 1 || self.offset_inits != 1 {
-            return Err("the va_list's base or offset is not set exactly once".into());
-        }
         Ok(Stores {
-            events,
-            counter_init,
-            count_store,
-            overflow_init,
+            counter_init: Some(counter_init),
+            count_store: Some(count_store),
         })
-    }
-}
-
-/// The values that hold a cursor, and the loads and stores through them, as `fetches` finds them.
-struct Fetching<'a> {
-    list: &'a List,
-    tail: Vec<Option<Tail>>,
-    pending: Vec<ValueId>,
-    fetched: crate::dense::IdSet<InstId>,
-    events: &'a mut [Vec<(usize, Event)>],
-}
-
-impl Fetching<'_> {
-    fn tag(&mut self, out: ValueId, kind: Tail) {
-        if self.tail[out.index()].is_none() {
-            self.tail[out.index()] = Some(kind);
-            self.pending.push(out);
-        }
     }
 }
 
@@ -168,22 +147,37 @@ impl Fetching<'_> {
 struct Walk {
     in_loop: Vec<bool>,
     header: BlockId,
+    /// The trips are the header's runs, so no counter steps.
+    trips: bool,
 }
 
 impl Walk {
     /// Whether `event` sits where it may: the counter's zeroing before the loop, the rest in its body.
     fn placed(&self, index: usize, event: Event) -> bool {
+        let inside = self.in_loop[index];
         match event {
-            Event::CounterInit => !self.in_loop[index],
-            _ => self.in_loop[index] && index != self.header.index(),
+            Event::CounterInit => !inside,
+            Event::Read if self.trips => true,
+            Event::Advance | Event::Fetch if self.trips => inside,
+            _ => inside && index != self.header.index(),
         }
     }
 
     /// The tally after the edge `from` to `next`: a trip back to the header stepped the counter.
     fn across(&self, tally: Tally, from: BlockId, next: BlockId) -> Result<Tally, String> {
         let mut onward = tally;
+        // Leaving a loop that counts by its header's runs, its trips are over.
+        if self.trips && self.in_loop[from.index()] && !self.in_loop[next.index()] {
+            return Ok(Tally::counting());
+        }
         if next != self.header {
             return Ok(onward);
+        }
+        if self.in_loop[from.index()] && self.trips {
+            if tally.advances != tally.fetches {
+                return Err("a trip fetches other than it steps".into());
+            }
+            return Ok(Tally::counting());
         }
         if self.in_loop[from.index()] {
             if !tally.stepped {
@@ -196,9 +190,26 @@ impl Walk {
         }
         Ok(onward)
     }
+
+    /// The tally after a block's events; a trip that counts by its header runs steps and fetches
+    /// at most once.
+    fn run(&self, tally: Tally, events: &[(usize, Event)]) -> Result<Tally, String> {
+        let tally = tally.run(events)?;
+        match self.trips && (tally.advances > 1 || tally.fetches > 1) {
+            true => Err("a trip steps or fetches more than once".into()),
+            false => Ok(tally),
+        }
+    }
 }
 
 impl Tally {
+    fn counting() -> Self {
+        Self {
+            counting: true,
+            ..Self::default()
+        }
+    }
+
     /// The tally after a block's events, in the order the block runs them.
     fn run(mut self, events: &[(usize, Event)]) -> Result<Tally, String> {
         let mut events = events.to_vec();
@@ -242,16 +253,16 @@ fn arrive(
     }
 }
 
-struct Prover<'a> {
-    function: &'a SSAFunction,
-    graph: &'a SsaGraph,
-    prep: &'a crate::DecompilePrepFacts,
-    area: &'a SaveArea,
-    observations: &'a crate::deadphi::ProvenProgramObservations,
-    slots: &'a SourceConventionSlots,
-    row: SourceRegisterSaveArea,
+pub(crate) struct Prover<'a> {
+    pub(crate) function: &'a SSAFunction,
+    pub(crate) graph: &'a SsaGraph,
+    pub(crate) prep: &'a crate::DecompilePrepFacts,
+    pub(crate) area: &'a SaveArea,
+    pub(crate) observations: &'a crate::deadphi::ProvenProgramObservations,
+    pub(crate) slots: &'a SourceConventionSlots,
+    pub(crate) row: SourceRegisterSaveArea,
     /// The slot width: what a cursor steps by.
-    width: u32,
+    pub(crate) width: u32,
 }
 
 /// The fixed parameter the body's `va_arg` loop is bounded by, where its machine code proves one.
@@ -284,7 +295,7 @@ pub(crate) fn tail_count(
 }
 
 impl Prover<'_> {
-    fn root(&self, value: ValueId) -> Option<i64> {
+    pub(crate) fn root(&self, value: ValueId) -> Option<i64> {
         self.prep
             .entry_stack_address_root_of(value)
             .filter(|root| root.base == StackAddressBase::StackPointer)
@@ -310,7 +321,7 @@ impl Prover<'_> {
     }
 
     /// The operation that computes `value`, through its copies.
-    fn op(&self, value: ValueId) -> Option<&SSAOp<ValueId>> {
+    pub(crate) fn op(&self, value: ValueId) -> Option<&SSAOp<ValueId>> {
         let inst = self.graph.inst(self.graph.def_inst(self.source(value))?)?;
         match &inst.payload {
             InstPayload::Op(op) => Some(op),
@@ -318,13 +329,19 @@ impl Prover<'_> {
         }
     }
 
-    fn size(&self, value: ValueId) -> u32 {
+    pub(crate) fn size(&self, value: ValueId) -> u32 {
         self.graph.value(value).map_or(0, |value| value.var.size)
     }
 
-    fn constant(&self, value: ValueId) -> Option<u64> {
+    pub(crate) fn constant(&self, value: ValueId) -> Option<u64> {
         let (bits, _) = self.prep.views.representative_constant(value)?;
         Some(bits)
+    }
+
+    /// What `va_start` leaves in the offset field: the first unnamed slot's distance from the bound.
+    pub(crate) fn next(&self) -> i64 {
+        self.area.base + i64::from(self.width) * i64::try_from(self.area.named).unwrap_or(0)
+            - self.area.bound
     }
 
     /// The cell a value was loaded whole from.
@@ -348,36 +365,47 @@ impl Prover<'_> {
         })
     }
 
-    /// Whether `value` is a load from the offset cell, widened or copied.
-    fn offset_index(&self, mut value: ValueId, offset: Cell) -> bool {
-        for _ in 0..COPIES {
-            if self.loaded_from(value) == Some(offset) {
-                return true;
-            }
-            match self.op(value) {
-                Some(SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. }) => value = *src,
-                _ => return false,
-            }
-        }
-        false
-    }
-
     fn prove(&self) -> Result<SourceTailCount, String> {
         let list = self.list()?;
-        let advances = self.advances(&list)?;
-        let header = self.counted_loop(&advances)?;
-        let bound = self.bound(header)?;
-        let mut stores = self.classify_stores(&list, &bound)?;
-        self.contain_cursors(&list, &bound, stores.overflow_init)?;
-        self.fetches(&list, stores.overflow_init, &mut stores.events)?;
-        self.check_paths(header, &stores)?;
-        self.dominating(header, &stores)?;
-        let parameter = self.parameter(stores.count_store.1, bound.count)?;
-        Ok(SourceTailCount {
-            parameter_index: u32::try_from(parameter).map_err(|_| "a parameter index")?,
-            width_bytes: bound.count.size,
-            signed: bound.signed,
-        })
+        let overflow_init = self.overflow_init(&list)?;
+        let mut cursors = self.cursors(&list, overflow_init)?;
+        if cursors.steps.is_empty() {
+            return Err("no cursor steps".into());
+        }
+        let header = self.innermost(&cursors)?;
+        let predicates =
+            crate::semantic::collect_predicate_facts(self.function, Some(self.prep), self.graph);
+        let counting = self.counting(header, &predicates)?;
+        let bound = match &counting {
+            Counting::Memory(bound) => Some(bound),
+            Counting::Trips { .. } => None,
+        };
+        let mut events = std::mem::take(&mut cursors.events);
+        let stores =
+            self.classify_stores(&list, (&cursors.kinds, overflow_init), bound, &mut events)?;
+        self.contain_cursors(&list, bound, overflow_init, &cursors.kinds)?;
+        let infeasible = self.infeasible(&cursors, &predicates);
+        self.check_paths(header, &events, (bound.is_none(), &infeasible.edges))
+            .map_err(|why| format!("{why} ({})", infeasible.notes.join("; ")))?;
+        let header_block = (self.graph.block_id_for_addr(header)).ok_or("no header block")?;
+        self.fresh(&cursors, header_block)?;
+        match counting {
+            Counting::Trips { parameter, width } => Ok(SourceTailCount {
+                parameter_index: u32::try_from(parameter).map_err(|_| "a parameter index")?,
+                width_bytes: width,
+                signed: false,
+            }),
+            Counting::Memory(bound) => {
+                self.dominating(header, &stores)?;
+                let (_, stored) = stores.count_store.ok_or("the count is not kept")?;
+                let parameter = self.parameter(stored, bound.count)?;
+                Ok(SourceTailCount {
+                    parameter_index: u32::try_from(parameter).map_err(|_| "a parameter index")?,
+                    width_bytes: bound.count.size,
+                    signed: bound.signed,
+                })
+            }
+        }
     }
 
     fn list(&self) -> Result<List, String> {
@@ -408,71 +436,149 @@ impl Prover<'_> {
         Ok(list)
     }
 
-    /// The area `va_start` saved the registers to.
-    fn saved(&self) -> Cell {
+    /// The address `va_start` stores in the overflow pointer, stored once.
+    fn overflow_init(&self, list: &List) -> Result<i64, String> {
+        let mut firsts = (self.graph.insts.iter())
+            .filter_map(|inst| match &inst.payload {
+                InstPayload::Op(SSAOp::Store { addr, val, .. }) => {
+                    (self.root(*addr) == Some(list.overflow.at)).then_some(self.root(*val)?)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        firsts.dedup();
+        match firsts[..] {
+            [first] => Ok(first),
+            _ => Err("the overflow pointer is not set to one address".into()),
+        }
+    }
+
+    /// The area `va_start` saved the registers to: the unnamed slots, which a tail reads.
+    pub(crate) fn saved(&self) -> Cell {
+        let width = i64::from(self.width);
+        let named = i64::try_from(self.area.named).unwrap_or(0);
         let slots = u32::try_from(self.slots.argument_slots().len()).unwrap_or(u32::MAX);
         Cell {
-            at: self.area.base,
-            size: self.width.saturating_mul(slots),
+            at: self.area.base + width * named,
+            size: self.width.saturating_mul(slots) - self.width * u32::try_from(named).unwrap_or(0),
         }
     }
 
-    /// The blocks that step a cursor by one slot.
-    fn advances(&self, list: &List) -> Result<Vec<BlockId>, String> {
-        let blocks = (self.graph.insts.iter())
-            .filter(|inst| self.steps_a_cursor(inst, list))
-            .map(|inst| inst.block)
-            .collect::<Vec<_>>();
-        match blocks.is_empty() {
-            true => Err("no cursor steps".into()),
-            false => Ok(blocks),
-        }
-    }
-
-    /// Whether `inst` stores a cursor's next slot to the cursor's cell.
-    fn steps_a_cursor(&self, inst: &GraphInst, list: &List) -> bool {
-        let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
-            return false;
-        };
-        let Some(at) = self.root(*addr) else {
-            return false;
-        };
-        let size = self.size(*val);
-        [list.offset, list.overflow]
-            .into_iter()
-            .filter(|cursor| cursor.overlaps(at, size))
-            .any(|cursor| self.step_or_note(*val, cursor))
-    }
-
-    fn step_or_note(&self, val: ValueId, cursor: Cell) -> bool {
-        if self.steps(val, cursor, self.width.into()) {
-            return true;
-        }
-        if self.constant(val).is_none() {
-            r2il::refusal_evidence!(
-                "tail-count",
-                "a store to {cursor:?} is no step: {val:?} defined by {:?}",
-                self.op(val)
-            );
-        }
-        false
-    }
-
-    /// The header of the innermost loop holding every step, whose only exit leaves from the
-    /// header and which no block returns from.
-    fn counted_loop(&self, advances: &[BlockId]) -> Result<u64, String> {
-        let addrs = advances
-            .iter()
-            .map(|block| self.graph.block(*block).map(|block| block.addr))
+    /// The header of the innermost loop holding every step and every fetch.
+    fn innermost(&self, cursors: &Cursors) -> Result<u64, String> {
+        let blocks = (cursors.events.iter().enumerate())
+            .filter(|(_, events)| {
+                (events.iter()).any(|(_, event)| matches!(event, Event::Advance | Event::Fetch))
+            })
+            .map(|(index, _)| {
+                self.graph
+                    .block(BlockId::from_index(index))
+                    .map(|block| block.addr)
+            })
             .collect::<Option<Vec<_>>>()
             .ok_or("a step has no block")?;
-        let natural = self
-            .function
-            .natural_loops()
-            .iter()
-            .filter(|natural| addrs.iter().all(|addr| natural.body.contains(addr)))
+        let loops = self.function.natural_loops();
+        let natural = (loops.iter())
+            .filter(|natural| blocks.iter().all(|addr| natural.body.contains(addr)))
             .min_by_key(|natural| natural.body.len())
             .ok_or("no loop holds every step")?;
+        // A loop entered again would read a count's worth of slots again.
+        let entered_again = loops
+            .iter()
+            .any(|other| other.header != natural.header && other.body.contains(&natural.header));
+        match entered_again {
+            true => Err("the loop is inside another".into()),
+            false => Ok(natural.header),
+        }
+    }
+
+    /// What counts the loop's trips: the header's run count where the machine states one, else a
+    /// counter cell the header compares with a count.
+    fn counting(
+        &self,
+        header: u64,
+        predicates: &crate::semantic::PredicateFacts,
+    ) -> Result<Counting, String> {
+        let trips = match self.trips(header, predicates) {
+            Ok((parameter, width)) => return Ok(Counting::Trips { parameter, width }),
+            Err(why) => why,
+        };
+        self.exits_at_header(header)
+            .and_then(|()| self.bound(header, predicates))
+            .map(Counting::Memory)
+            .map_err(|memory| {
+                self.exit_evidence(header, predicates);
+                format!("{trips}; {memory}")
+            })
+    }
+
+    /// The parameter the loop's header runs a number of times equal to, from its induction.
+    fn trips(
+        &self,
+        header: u64,
+        predicates: &crate::semantic::PredicateFacts,
+    ) -> Result<(usize, u32), String> {
+        let evidence = LoopEvidence {
+            predicates,
+            values: crate::semantic::empty_value_ranges(),
+        };
+        let trips = crate::semantic::header_trips(self.function, self.graph, evidence, header)
+            .map_err(|why| format!("the header's runs are not counted ({why:?})"))?;
+        let TripCount::Symbolic { form, .. } = trips.count else {
+            return Err("the header runs a constant number of times".into());
+        };
+        let mut terms = form.terms.iter();
+        let (Some((&count, &1)), None, 0) = (terms.next(), terms.next(), form.constant) else {
+            return Err("the header runs other than the count of times".into());
+        };
+        let width = form.width_bits / 8;
+        let cell = Cell { at: 0, size: width };
+        match self.graph.caller_supplied(count) {
+            true => Ok((self.argument_slot(count, cell)?, width)),
+            false => Err("the count is not a named parameter's entry value".into()),
+        }
+    }
+
+    /// The comparisons the loop's exits branch on, as refusal evidence.
+    fn exit_evidence(&self, header: u64, predicates: &crate::semantic::PredicateFacts) {
+        let Some(natural) = self.function.natural_loops().get(header) else {
+            return;
+        };
+        for fact in predicates.predicates.values() {
+            let leaves = natural.body.contains(&fact.block_addr)
+                && natural.body.contains(&fact.true_target)
+                    != natural.body.contains(&fact.false_target);
+            if !leaves {
+                continue;
+            }
+            for compare in [&fact.comparison, &fact.evaluated_comparison]
+                .into_iter()
+                .flatten()
+            {
+                r2il::refusal_evidence!(
+                    "tail-count",
+                    "exit at {:#x}: {:?} of {:?} defined by {:?} and {:?} defined by {:?}",
+                    fact.block_addr,
+                    compare.kind,
+                    compare.lhs,
+                    self.graph
+                        .def_inst(compare.lhs)
+                        .and_then(|inst| self.graph.inst(inst))
+                        .map(|inst| &inst.payload),
+                    compare.rhs,
+                    self.graph
+                        .def_inst(compare.rhs)
+                        .and_then(|inst| self.graph.inst(inst))
+                        .map(|inst| &inst.payload)
+                );
+            }
+        }
+    }
+
+    /// The loop's only exit leaves from its header, and no block of it ends the function.
+    fn exits_at_header(&self, header: u64) -> Result<(), String> {
+        let natural =
+            (self.function.natural_loops().get(header)).ok_or("the header has no loop")?;
         let cfg = self.function.cfg();
         for block in &natural.body {
             let successors = cfg.successors(*block);
@@ -485,14 +591,16 @@ impl Prover<'_> {
                 ));
             }
         }
-        Ok(natural.header)
+        Ok(())
     }
 
     /// The counter and the count the header compares: the loop continues while the counter is
     /// below the count, or differs from it, so the counter never passes the count.
-    fn bound(&self, header: u64) -> Result<Bound, String> {
-        let predicates =
-            crate::semantic::collect_predicate_facts(self.function, Some(self.prep), self.graph);
+    fn bound(
+        &self,
+        header: u64,
+        predicates: &crate::semantic::PredicateFacts,
+    ) -> Result<Bound, String> {
         let fact = (predicates.predicates.values())
             .find(|fact| fact.block_addr == header)
             .ok_or("the header branches on nothing")?;
@@ -568,26 +676,29 @@ impl Prover<'_> {
         })
     }
 
-    /// Every store to a tracked cell is `va_start`'s, a cursor's step, the counter's, or the one
+    /// Every store to a tracked cell is `va_start`'s, a cursor kept, the counter's, or the one
     /// that keeps the count; anything else refuses.
-    fn classify_stores(&self, list: &List, bound: &Bound) -> Result<Stores, String> {
+    fn classify_stores(
+        &self,
+        list: &List,
+        (kinds, overflow_init): (&Kinds, i64),
+        bound: Option<&Bound>,
+        events: &mut [Vec<(usize, Event)>],
+    ) -> Result<Stores, String> {
         let saved = self.saved();
         let tracked = [list.base, list.offset, list.overflow, saved];
         let inside = |cell: &Cell| tracked.iter().any(|t| t.overlaps(cell.at, cell.size));
-        if [bound.counter, bound.count].iter().any(inside) {
+        if bound.is_some_and(|bound| [bound.counter, bound.count].iter().any(inside)) {
             return Err("the counter or the count sits in the va_list or its area".into());
         }
-        let next = self.area.base
-            + i64::from(self.width) * i64::try_from(self.area.named).unwrap_or(0)
-            - self.area.bound;
         let cells = Cells {
             list,
             bound,
+            kinds,
             saved,
-            next,
+            overflow_init,
         };
         let mut found = Found::default();
-        let mut events = vec![Vec::new(); self.graph.blocks.len()];
         for inst in &self.graph.insts {
             let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
                 continue;
@@ -597,11 +708,10 @@ impl Prover<'_> {
             };
             let mut note = |event| events[inst.block.index()].push((inst.ordinal, event));
             match self.write(&cells, at, *val)? {
-                Write::Other | Write::Save => {}
+                Write::Other | Write::Save | Write::Keep => {}
                 Write::BaseInit => found.base_inits += 1,
+                Write::OverflowInit => found.overflow_inits += 1,
                 Write::OffsetInit => found.offset_inits += 1,
-                Write::OverflowInit(first) => found.overflow_inits.push(first),
-                Write::Advance => note(Event::Advance),
                 Write::CounterStep => note(Event::CounterStep),
                 Write::CounterInit => {
                     note(Event::CounterInit);
@@ -610,12 +720,12 @@ impl Prover<'_> {
                 Write::CountStore => found.count_stores.push((inst.id, *val)),
             }
         }
-        found.into_stores(events)
+        found.into_stores(bound.is_some())
     }
 
     /// What a store of `val` at `at` is to the cells.
     fn write(&self, cells: &Cells, at: i64, val: ValueId) -> Result<Write, String> {
-        let (list, bound) = (cells.list, cells.bound);
+        let list = cells.list;
         let size = self.size(val);
         let whole = |cell: Cell| cell.at == at && cell.size == size;
         if cells.saved.overlaps(at, size) {
@@ -625,13 +735,15 @@ impl Prover<'_> {
             return self.base_write(val, whole(list.base));
         }
         if list.overflow.overlaps(at, size) {
-            return self.overflow_write(val, whole(list.overflow), list.overflow);
+            return self.overflow_write(cells, val, whole(list.overflow));
         }
         if list.offset.overlaps(at, size) {
             let wide = at == list.offset.at && size > list.offset.size;
-            let fields = (whole(list.offset), wide);
-            return self.offset_write(val, fields, (list.offset, cells.next));
+            return self.offset_write(cells, val, (whole(list.offset), wide));
         }
+        let Some(bound) = cells.bound else {
+            return Ok(Write::Other);
+        };
         if bound.counter.overlaps(at, size) {
             return self.counter_write(val, whole(bound.counter), bound.counter);
         }
@@ -660,32 +772,32 @@ impl Prover<'_> {
         }
     }
 
-    fn overflow_write(&self, val: ValueId, whole: bool, cell: Cell) -> Result<Write, String> {
+    fn overflow_write(&self, cells: &Cells, val: ValueId, whole: bool) -> Result<Write, String> {
         if !whole {
             return Err("the overflow pointer is written in part".into());
         }
-        if self.steps(val, cell, self.width.into()) {
-            return Ok(Write::Advance);
-        }
-        match self.root(val) {
-            Some(first) => Ok(Write::OverflowInit(first)),
-            None => Err("the overflow pointer is set to something else".into()),
+        match (cells.kinds.get(val), self.root(val)) {
+            (Some(Kind::Overflow | Kind::Rooted), Some(first)) if first == cells.overflow_init => {
+                Ok(Write::OverflowInit)
+            }
+            (Some(Kind::Overflow), _) => Ok(Write::Keep),
+            _ => Err("the overflow pointer is set to something else".into()),
         }
     }
 
-    /// `fields` is whether the store is the offset field's own, and whether it is a wider word
-    /// starting there; `(cell, next)` the field and the value `va_start` leaves in it.
+    /// `(whole, wide)` is whether the store is the offset field's own, and whether it is a wider
+    /// word starting there.
     fn offset_write(
         &self,
+        cells: &Cells,
         val: ValueId,
         (whole, wide): (bool, bool),
-        (cell, next): (Cell, i64),
     ) -> Result<Write, String> {
-        if whole && self.steps(val, cell, self.width.into()) {
-            return Ok(Write::Advance);
+        if (whole || wide) && self.sets_offset(val, cells.list.offset) {
+            return Ok(Write::OffsetInit);
         }
-        match (whole || wide) && self.sets_offset(val, cell, next) {
-            true => Ok(Write::OffsetInit),
+        match whole && cells.kinds.get(val) == Some(Kind::Offset) {
+            true => Ok(Write::Keep),
             false => Err("the offset is written other than by va_start or a step".into()),
         }
     }
@@ -705,47 +817,49 @@ impl Prover<'_> {
 
     /// Whether a constant store holds `next` in the offset field, alone or as the low bytes of a
     /// wider word.
-    fn sets_offset(&self, value: ValueId, offset: Cell, next: i64) -> bool {
+    fn sets_offset(&self, value: ValueId, offset: Cell) -> bool {
         let Some((bits, size)) = self.prep.views.representative_constant(value) else {
             return false;
         };
-        let mask = u64::MAX >> (64 - 8 * offset.size.clamp(1, 8));
-        size >= offset.size && bits & mask == next.cast_unsigned() & mask
+        size >= offset.size && self.is_next(bits)
     }
 
     /// An address into the cells or the area is only loaded or stored through, bar `va_start`'s
-    /// two stores of an address: nothing else writes a cell or reads the tail without a cursor.
+    /// stores of an address: nothing else writes a cell or reads the tail without a cursor.
     fn contain_cursors(
         &self,
         list: &List,
-        bound: &Bound,
+        bound: Option<&Bound>,
         overflow_init: i64,
+        kinds: &Kinds,
     ) -> Result<(), String> {
-        let spans = [
-            list.base,
-            list.offset,
-            list.overflow,
-            bound.counter,
-            bound.count,
-            self.saved(),
-        ];
+        let mut spans = vec![list.base, list.offset, list.overflow, self.saved()];
+        spans.extend(
+            bound
+                .into_iter()
+                .flat_map(|bound| [bound.counter, bound.count]),
+        );
         for value in &self.graph.values {
             let Some(at) = self.root(value.id) else {
                 continue;
             };
-            if !spans.iter().any(|span| span.holds(at)) && at < overflow_init {
-                continue;
+            let in_tail = spans.iter().any(|span| span.holds(at)) || at >= overflow_init;
+            if in_tail && kinds.get(value.id).is_none() {
+                self.confined(value.id, at, list)?;
             }
-            self.confined(value.id, at, list)?;
         }
-        Ok(())
+        self.constant_reads(list, overflow_init)
     }
 
     /// Every use of the address `value`, rooted at `at`, is contained.
     fn confined(&self, value: ValueId, at: i64, list: &List) -> Result<(), String> {
         for site in self.graph.use_sites(value) {
             let inst = (self.graph.inst(site.inst)).ok_or("a use has no instruction")?;
-            if !self.contained_use(inst, value, list) {
+            // The flags a subtraction of the stack pointer sets read no slot.
+            let flags = inst
+                .output
+                .is_some_and(|out| !self.observations.contains(out));
+            if !flags && !self.contained_use(inst, value, list) {
                 return Err(format!(
                     "an address into the va_list or its area at {at:#x} is used by {:?}",
                     inst.payload
@@ -771,194 +885,40 @@ impl Prover<'_> {
         }
     }
 
-    /// Every load through a cursor reads the next slot: the base indexed by the register offset, or
-    /// the overflow pointer itself, and nothing else holds a cursor's value. The loads are events.
-    fn fetches(
-        &self,
-        list: &List,
-        overflow_init: i64,
-        events: &mut [Vec<(usize, Event)>],
-    ) -> Result<(), String> {
-        let mut found = Fetching {
-            list,
-            tail: vec![None; self.graph.values.len()],
-            pending: Vec::new(),
-            fetched: crate::dense::IdSet::new(self.graph.insts.len()),
-            events,
-        };
+    /// The tail is never read at a constant address, and a cursor's own cell is read whole.
+    fn constant_reads(&self, list: &List, overflow_init: i64) -> Result<(), String> {
         for inst in &self.graph.insts {
-            self.cursor_load(&mut found, inst, overflow_init)?;
-        }
-        while let Some(value) = found.pending.pop() {
-            let kind = found.tail[value.index()].ok_or("an untagged cursor value")?;
-            for site in self.graph.use_sites(value) {
-                let inst = (self.graph.inst(site.inst)).ok_or("a use has no instruction")?;
-                self.cursor_use(&mut found, (value, kind), inst)?;
-            }
-        }
-        self.merged_addresses(&found)
-    }
-
-    /// A load of a cell: the tail is never read at a constant address, and a cursor's own cell is
-    /// read whole.
-    fn cursor_load(
-        &self,
-        found: &mut Fetching,
-        inst: &GraphInst,
-        overflow_init: i64,
-    ) -> Result<(), String> {
-        let InstPayload::Op(SSAOp::Load { addr, .. }) = &inst.payload else {
-            return Ok(());
-        };
-        let (Some(at), Some(out)) = (self.root(*addr), inst.output) else {
-            return Ok(());
-        };
-        let size = self.size(out);
-        let cell = Cell { at, size };
-        let unnamed = i64::from(self.width) * i64::try_from(self.area.named).unwrap_or(0);
-        if self.saved().overlaps(at, size) && at >= self.area.base + unnamed || at >= overflow_init
-        {
-            return Err(format!("the tail is read at {at:#x} without a cursor"));
-        }
-        let list = found.list;
-        let read = (inst.ordinal, Event::Read);
-        if cell == list.base {
-            found.tag(out, Tail::Base);
-        } else if cell == list.overflow {
-            found.events[inst.block.index()].push(read);
-            found.tag(out, Tail::Address);
-        } else if list.offset.overlaps(at, size) {
-            if cell != list.offset {
-                return Err("the offset is read in part".into());
-            }
-            found.events[inst.block.index()].push(read);
-        } else if list.base.overlaps(at, size) || list.overflow.overlaps(at, size) {
-            return Err("a cursor pointer is read in part".into());
-        }
-        Ok(())
-    }
-
-    /// One use of a cursor value `value` of `kind`.
-    fn cursor_use(
-        &self,
-        found: &mut Fetching,
-        (value, kind): (ValueId, Tail),
-        inst: &GraphInst,
-    ) -> Result<(), String> {
-        // A use nothing observes (the flags an `add` sets) reads no slot.
-        let unobserved = (inst.output).is_some_and(|out| !self.observations.contains(out));
-        if unobserved && !matches!(inst.payload, InstPayload::Op(SSAOp::Load { .. })) {
-            return Ok(());
-        }
-        match &inst.payload {
-            InstPayload::Op(SSAOp::Load { addr, dst, .. }) if *addr == value => {
-                self.fetch(found, inst, kind, *dst)
-            }
-            InstPayload::Op(SSAOp::Copy { dst, src }) if *src == value => {
-                found.tag(*dst, kind);
-                Ok(())
-            }
-            InstPayload::Phi { .. } if kind == Tail::Address => {
-                found.tag(inst.output.ok_or("a phi without an output")?, Tail::Address);
-                Ok(())
-            }
-            InstPayload::Op(SSAOp::IntAdd { dst, a, b }) => {
-                let other = if *a == value { *b } else { *a };
-                self.cursor_add(found, kind, *dst, other)
-            }
-            other => Err(format!("a cursor value is used by {other:?}")),
-        }
-    }
-
-    fn fetch(
-        &self,
-        found: &mut Fetching,
-        inst: &GraphInst,
-        kind: Tail,
-        dst: ValueId,
-    ) -> Result<(), String> {
-        if kind == Tail::Base || self.size(dst) > self.width {
-            return Err("a cursor is loaded through other than a slot".into());
-        }
-        if found.fetched.insert(inst.id) {
-            found.events[inst.block.index()].push((inst.ordinal, Event::Fetch));
-        }
-        Ok(())
-    }
-
-    /// `cursor + other`: the base and the register offset make an address, an address and one slot
-    /// make the next stack pointer, which only the pointer's cell takes.
-    fn cursor_add(
-        &self,
-        found: &mut Fetching,
-        kind: Tail,
-        dst: ValueId,
-        other: ValueId,
-    ) -> Result<(), String> {
-        let list = found.list;
-        match kind {
-            Tail::Base if self.offset_index(other, list.offset) => found.tag(dst, Tail::Address),
-            Tail::Address
-                if self.constant(other) == Some(self.width.into())
-                    && self.only_stored_to(dst, list.overflow) => {}
-            _ => {
-                return Err(format!(
-                    "a {kind:?} cursor is added {:?} defined by {:?}",
-                    other,
-                    self.op(other)
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// An address that merges with a value that is no cursor is no cursor.
-    fn merged_addresses(&self, found: &Fetching) -> Result<(), String> {
-        for inst in &self.graph.insts {
-            let (InstPayload::Phi { .. }, Some(out)) = (&inst.payload, inst.output) else {
+            let InstPayload::Op(SSAOp::Load { addr, .. }) = &inst.payload else {
                 continue;
             };
-            let merges = |input: &ValueId| found.tail[input.index()] != Some(Tail::Address);
-            if found.tail[out.index()] == Some(Tail::Address)
-                && self.graph.inputs(inst.id).iter().any(merges)
-            {
-                return Err("an address merges with a value that is no cursor".into());
+            let (Some(at), Some(out)) = (self.root(*addr), inst.output) else {
+                continue;
+            };
+            let size = self.size(out);
+            let cell = Cell { at, size };
+            let in_area = self.saved().overlaps(at, size);
+            if in_area || at >= overflow_init {
+                return Err(format!("the tail is read at {at:#x} without a cursor"));
+            }
+            let whole = [list.base, list.offset, list.overflow].contains(&cell);
+            let apart = [list.base, list.offset, list.overflow]
+                .iter()
+                .any(|part| part.overlaps(at, size));
+            if apart && !whole {
+                return Err("a cursor is read in part".into());
             }
         }
         Ok(())
     }
 
-    /// Whether every use of `value`, through copies, stores it whole to `cell`.
-    fn only_stored_to(&self, value: ValueId, cell: Cell) -> bool {
-        let mut pending = vec![value];
-        let mut seen = crate::dense::IdSet::<ValueId>::new(self.graph.values.len());
-        while let Some(value) = pending.pop() {
-            if seen.insert(value) && !self.sinks_into(value, cell, &mut pending) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Whether every use of `value` is a copy (queued in `copies`) or a whole store to `cell`.
-    fn sinks_into(&self, value: ValueId, cell: Cell, copies: &mut Vec<ValueId>) -> bool {
-        self.graph.use_sites(value).iter().all(|site| {
-            match self.graph.inst(site.inst).map(|inst| &inst.payload) {
-                Some(InstPayload::Op(SSAOp::Copy { dst, .. })) => {
-                    copies.push(*dst);
-                    true
-                }
-                Some(InstPayload::Op(SSAOp::Store { addr, val, .. })) => {
-                    *val == value && self.root(*addr) == Some(cell.at)
-                }
-                _ => false,
-            }
-        })
-    }
-
-    /// Each trip steps the counter once and pays for one cursor step and one fetch: a tally per
-    /// block, checked once per edge, so the loop reads no more slots than the counter passes.
-    fn check_paths(&self, header: u64, stores: &Stores) -> Result<(), String> {
+    /// Each trip pays for one cursor step and one fetch: a tally per block, checked once per edge,
+    /// so the loop reads no more slots than it runs trips.
+    fn check_paths(
+        &self,
+        header: u64,
+        events: &[Vec<(usize, Event)>],
+        (trips, infeasible): (bool, &[(BlockId, BlockId)]),
+    ) -> Result<(), String> {
         let natural =
             (self.function.natural_loops().get(header)).ok_or("the header has no loop")?;
         let header = (self.graph.block_id_for_addr(header)).ok_or("no header block")?;
@@ -969,8 +929,12 @@ impl Prover<'_> {
                     .is_some_and(|block| natural.body.contains(&block.addr))
             })
             .collect::<Vec<_>>();
-        let walk = Walk { in_loop, header };
-        let misplaced = (stores.events.iter().enumerate())
+        let walk = Walk {
+            in_loop,
+            header,
+            trips,
+        };
+        let misplaced = (events.iter().enumerate())
             .flat_map(|(index, events)| events.iter().map(move |(_, event)| (index, *event)))
             .find(|(index, event)| !walk.placed(*index, *event));
         if let Some((_, event)) = misplaced {
@@ -978,25 +942,45 @@ impl Prover<'_> {
         }
         let entry = self.graph.entry;
         let mut seen: Vec<Option<Tally>> = vec![None; blocks];
-        seen[entry.index()] = Some(Tally::default());
+        seen[entry.index()] = Some(match trips {
+            true => Tally::counting(),
+            false => Tally::default(),
+        });
         // Each block is expanded once, on its first arrival; a later arrival must carry the same tally.
         let mut pending = vec![entry];
         while let Some(block) = pending.pop() {
             let tally = seen[block.index()].ok_or("a block without a tally")?;
-            let tally = tally.run(&stores.events[block.index()])?;
-            for next in &self.graph.block(block).ok_or("no block")?.successors {
-                let onward = walk.across(tally, block, *next)?;
-                arrive(&mut seen, &mut pending, *next, onward)?;
+            let tally = walk.run(tally, &events[block.index()])?;
+            for (next, onward) in self.onward(&walk, (block, tally), infeasible)? {
+                arrive(&mut seen, &mut pending, next, onward)?;
             }
         }
         Ok(())
+    }
+
+    /// The tally on each edge out of `block` that some run takes; an edge none takes carries none.
+    fn onward(
+        &self,
+        walk: &Walk,
+        (block, tally): (BlockId, Tally),
+        infeasible: &[(BlockId, BlockId)],
+    ) -> Result<Vec<(BlockId, Tally)>, String> {
+        let successors = &self.graph.block(block).ok_or("no block")?.successors;
+        (successors.iter())
+            .filter(|next| !infeasible.contains(&(block, **next)))
+            .map(|next| Ok((*next, walk.across(tally, block, *next)?)))
+            .collect()
     }
 
     /// The counter is zeroed and the count kept before the loop runs.
     fn dominating(&self, header: u64, stores: &Stores) -> Result<(), String> {
         let natural =
             (self.function.natural_loops().get(header)).ok_or("the header has no loop")?;
-        for store in [stores.counter_init, stores.count_store.0] {
+        let kept = stores
+            .counter_init
+            .into_iter()
+            .chain(stores.count_store.map(|(store, _)| store));
+        for store in kept {
             let addr = (self.graph.inst(store))
                 .and_then(|inst| self.graph.block(inst.block))
                 .map(|block| block.addr)
