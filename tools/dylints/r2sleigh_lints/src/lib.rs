@@ -3232,7 +3232,9 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         match expr.kind {
             ExprKind::Let(condition) => ssa_call_class_pattern(cx, condition.pat, expr.hir_id),
-            ExprKind::Match(_, arms, _) if arms.iter().any(is_catch_all) => {
+            ExprKind::Match(_, arms, _)
+                if arms.iter().any(|arm| defaults_the_rest(cx, arm, is_ssa_op)) =>
+            {
                 for arm in arms {
                     ssa_call_class_pattern(cx, arm.pat, arm.hir_id);
                 }
@@ -5709,7 +5711,7 @@ fn r2il_op_property_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) 
         return None;
     }
     let typeck = cx.typeck_results();
-    if !is_r2il_op(cx, typeck.expr_ty(scrutinee)) {
+    if !is_r2il_op_or_option(cx, typeck.expr_ty(scrutinee)) {
         return None;
     }
     let answer = typeck.expr_ty(expr);
@@ -5725,7 +5727,7 @@ fn r2il_op_property_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) 
     named.dedup();
     let drops = arms
         .iter()
-        .any(|arm| is_catch_all(arm) && !asks_r2il(cx, arm.body));
+        .any(|arm| defaults_the_rest(cx, arm, is_r2il_op) && !asks_r2il(cx, arm.body));
     (named.len() >= 2 && drops).then(|| answer.to_string())
 }
 
@@ -5782,6 +5784,20 @@ fn named_ssa_call_variant(cx: &LateContext<'_>, pat: &rustc_hir::Pat<'_>) -> Opt
         }
     });
     named
+}
+
+/// An `R2ILOp`, or an `Option` of one, behind references.
+fn is_r2il_op_or_option(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+    match ty.peel_refs().kind() {
+        rustc_middle::ty::Adt(holder, args)
+            if cx.tcx.item_name(holder.did()).as_str() == "Option" =>
+        {
+            args.types()
+                .next()
+                .is_some_and(|inner| is_r2il_op(cx, inner))
+        }
+        _ => is_r2il_op(cx, ty),
+    }
 }
 
 fn is_r2il_op(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
@@ -5852,6 +5868,33 @@ fn is_catch_all(arm: &rustc_hir::Arm<'_>) -> bool {
             arm.pat.kind,
             rustc_hir::PatKind::Wild | rustc_hir::PatKind::Binding(_, _, _, None)
         )
+}
+
+/// Whether an arm takes every operation the others do not name: a top-level catch-all, or an
+/// unguarded `_` or binding of the operation inside a wrapper, as in `Some(_)`.
+fn defaults_the_rest<'tcx>(
+    cx: &LateContext<'tcx>,
+    arm: &rustc_hir::Arm<'tcx>,
+    is_op: fn(&LateContext<'tcx>, rustc_middle::ty::Ty<'tcx>) -> bool,
+) -> bool {
+    if is_catch_all(arm) {
+        return true;
+    }
+    let typeck = cx.typeck_results();
+    let mut found = false;
+    arm.guard.is_none().then(|| {
+        arm.pat.walk_always(|pat| {
+            found |= matches!(
+                pat.kind,
+                rustc_hir::PatKind::Wild | rustc_hir::PatKind::Binding(_, _, _, None)
+            ) && is_op(cx, typeck.pat_ty(pat));
+        });
+    });
+    found
+}
+
+fn is_ssa_op(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+    matches!(ty.peel_refs().kind(), rustc_middle::ty::Adt(op, _) if cx.tcx.item_name(op.did()).as_str() == "SSAOp")
 }
 
 /// Whether an arm defers to r2il: it calls a method on an `R2ILOp`.

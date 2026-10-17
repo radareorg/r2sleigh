@@ -71,7 +71,8 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
         &super::super::DeclaredStackSlots::default(),
         BTreeMap::new(),
         &Default::default(),
-    );
+    )
+    .expect("settles");
     assert_eq!(
         certificates
             .stack_slots
@@ -125,7 +126,8 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
         &super::super::DeclaredStackSlots::default(),
         BTreeMap::new(),
         &Default::default(),
-    );
+    )
+    .expect("settles");
     assert!(!certificates.stack_slots.contains_key(&access.object));
 
     let mut mismatched_memory = artifact.facts().memory.clone();

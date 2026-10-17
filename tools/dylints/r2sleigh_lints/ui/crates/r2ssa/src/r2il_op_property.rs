@@ -57,6 +57,15 @@ fn value_use(op: &R2ILOp) -> ValueUse {
     }
 }
 
+// A wildcard inside the wrapper drops the rest too.
+fn nested_output(op: Option<&R2ILOp>) -> Option<&Varnode> {
+    match op {
+        Some(R2ILOp::Copy { dst, .. } | R2ILOp::Select { dst, .. }) => Some(dst),
+        Some(_) => None,
+        None => None,
+    }
+}
+
 // One operation named: "is it this one", not a class.
 fn is_store(op: &R2ILOp) -> bool {
     matches!(op, R2ILOp::Store { .. })
@@ -95,7 +104,7 @@ fn guardable(op: &R2ILOp) -> bool {
 fn main() {
     let op = R2ILOp::Nop;
     let _ = (output(&op), calls(&op), reads(&op), value_use(&op), is_store(&op));
-    let _ = (reads_but_zeroing(&op), boundary(&op), rank(&op), guardable(&op));
+    let _ = (reads_but_zeroing(&op), boundary(&op), rank(&op), guardable(&op), nested_output(None));
 }
 
 #[cfg(test)]

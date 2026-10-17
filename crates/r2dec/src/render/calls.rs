@@ -450,7 +450,7 @@ pub(super) fn last_call(graph: &r2ssa::SsaGraph, block: &r2ssa::GraphBlock) -> O
 
 /// Whether an operation may carry a call plan: a call, or the jump a tail call is.
 pub(super) fn plans_a_call(op: &SSAOp<ValueId>) -> bool {
-    op.is_call() || matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. })
+    op.is_call() || op.jump().is_some()
 }
 
 fn check(holds: bool, otherwise: CallRefusal) -> Result<(), CallRefusal> {

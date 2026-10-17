@@ -1691,7 +1691,7 @@ impl<'a> Values<'a> {
         if let Some(gap) = self.unplanned.get(inst) {
             return Some(gap.clone());
         }
-        matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. }).then(|| CallGap {
+        op.jump().is_some().then(|| CallGap {
             callee: calls::gap_callee(self.artifact, resolution, inst),
             reason: CallRefusal::NoCallSite,
         })

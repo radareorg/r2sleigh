@@ -453,7 +453,8 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
 
-        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let facts =
+            crate::semantic::PreparedFunctionFacts::collect(&func, &graph).expect("settles");
         let dead = DeadPhis::find(&graph, &live, &facts);
 
         let exit = func.named_block(0x100c).expect("exit block");
@@ -491,7 +492,8 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
 
-        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let facts =
+            crate::semantic::PreparedFunctionFacts::collect(&func, &graph).expect("settles");
         let dead = DeadPhis::find(&graph, &live, &facts);
 
         let exit = func.named_block(0x100c).expect("exit block");
@@ -534,7 +536,8 @@ mod tests {
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&wide_arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
-        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let facts =
+            crate::semantic::PreparedFunctionFacts::collect(&func, &graph).expect("settles");
         let observations =
             ProvenProgramObservations::find(&graph, &live, &facts).expect("complete obligations");
         let entry = graph
@@ -686,7 +689,8 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
 
-        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let facts =
+            crate::semantic::PreparedFunctionFacts::collect(&func, &graph).expect("settles");
         let dead = DeadPhis::find(&graph, &live, &facts);
 
         // The entry block's condition is tested by its own CBranch, so nothing

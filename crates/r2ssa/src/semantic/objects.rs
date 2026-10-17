@@ -16,7 +16,7 @@ pub(crate) fn collect_object_and_memory_facts(
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
     values: &crate::values::ValueRanges,
-) -> (ObjectModel, MemorySSAFacts) {
+) -> Result<(ObjectModel, MemorySSAFacts), crate::fixpoint::Exhausted> {
     let facts = prep;
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
     let mut object_model = builder.build(function, graph, values);
@@ -37,8 +37,8 @@ pub(crate) fn collect_object_and_memory_facts(
             FrameReach::of(function, prep, graph, &object_model, machine_context);
     }
     let access_summaries = collect_access_summaries(graph, facts, addresses, &object_model);
-    let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
-    (object_model, memory)
+    let memory = build_memory_ssa(function, graph, &object_model, access_summaries)?;
+    Ok((object_model, memory))
 }
 
 pub(crate) fn collect_access_summaries(
@@ -226,7 +226,7 @@ pub(crate) fn build_memory_ssa(
     graph: &SsaGraph,
     object_model: &ObjectModel,
     access_summaries: crate::dense::IdMap<InstId, AccessSummary>,
-) -> MemorySSAFacts {
+) -> Result<MemorySSAFacts, crate::fixpoint::Exhausted> {
     let mut next_version_by_object = BTreeMap::<ObjectId, u32>::new();
     for object in object_model.objects.keys() {
         next_version_by_object.insert(*object, 1);
@@ -303,22 +303,14 @@ pub(crate) fn build_memory_ssa(
     // Each location can move from unreached to one value to a merge at each
     // block entry, so the entry states rise at most twice per location.
     let height = locations.len().saturating_mul(2).max(1);
-    let solved = match crate::fixpoint::forward(
+    let solved = crate::fixpoint::forward(
         function,
         "memory-ssa",
         height,
         Holding::default(),
         |block, entry| walk(block, entry, &mut |_, _| {}),
-    ) {
-        Ok(solved) => solved,
-        Err(exhausted) => {
-            r2il::refusal_evidence!("memory-ssa", "{exhausted}");
-            return MemorySSAFacts {
-                exhausted: Some(exhausted),
-                ..MemorySSAFacts::default()
-            };
-        }
-    };
+    )
+    .inspect_err(|exhausted| r2il::refusal_evidence!("memory-ssa", "{exhausted}"))?;
 
     // Number the merges after the definitions, in block and location order.
     let mut merges = BTreeMap::<(u64, MemoryLocation), MemoryVersion>::new();
@@ -408,12 +400,11 @@ pub(crate) fn build_memory_ssa(
             });
     }
 
-    MemorySSAFacts {
+    Ok(MemorySSAFacts {
         uses_by_inst,
         defs_by_inst,
         phis_by_block,
-        exhausted: None,
-    }
+    })
 }
 
 /// One memory access a block's walk meets: a use of a location, or a

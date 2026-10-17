@@ -357,10 +357,6 @@ impl Sealed {
                 },
                 control,
             )?;
-        // The seal refused the function's and its prep facts' exhaustion; this is the collection's.
-        if let Some(exhausted) = facts.exhausted() {
-            return Err(SsaPrepareError::Exhausted(exhausted));
-        }
         // What one prepared function holds is the space every later stage has
         // to work above, so it is reported beside the phases that built it.
         r2il::refusal_evidence!(

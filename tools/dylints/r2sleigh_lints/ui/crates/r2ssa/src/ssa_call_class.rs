@@ -72,6 +72,15 @@ fn wrapped(op: Option<&SSAOp>) -> bool {
     matches!(op, Some(SSAOp::CallInd { .. }))
 }
 
+// A wildcard inside the wrapper is the default arm too.
+fn nested(op: Option<&SSAOp>) -> u8 {
+    match op {
+        Some(SSAOp::Call { .. }) => 1,
+        Some(_) => 0,
+        None => 0,
+    }
+}
+
 // Asks the owner, naming the other operations only.
 fn reads_owner(op: &SSAOp) -> bool {
     op.is_call() || matches!(op, SSAOp::CallOther { .. })
@@ -111,7 +120,7 @@ fn guardable(op: &SSAOp) -> bool {
 fn main() {
     let op = SSAOp::Nop;
     let _ = (calls(&op), direct(&op), target(&op).is_some(), through(&op).is_some());
-    let _ = (instruction(&op), indirect(&op), effect(&op), wrapped(None));
+    let _ = (instruction(&op), indirect(&op), effect(&op), wrapped(None), nested(None));
     let _ = (reads_owner(&op), jumps(&op), guardable(&op), exhaustive(&op));
     let _ = build(Var(0)).is_call();
 }

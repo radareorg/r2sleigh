@@ -1408,12 +1408,10 @@ fn validate_owned_snapshot_cfg(
             .copied()
             .collect::<Vec<_>>();
 
-        let call_may_not_return = matches!(
-            terminator,
-            Some(R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
-        ) && machine_only
-            .iter()
-            .all(|(kind, _, _)| *kind == AdvisorySuccessorKind::Fallthrough);
+        let call_may_not_return = terminator.is_some_and(R2ILOp::is_call)
+            && machine_only
+                .iter()
+                .all(|(kind, _, _)| *kind == AdvisorySuccessorKind::Fallthrough);
         let table_unresolved = matches!(terminator, Some(R2ILOp::BranchInd { .. }))
             && lifted_block.block().switch_info.is_none();
 

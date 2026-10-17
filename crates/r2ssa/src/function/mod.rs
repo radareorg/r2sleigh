@@ -1213,7 +1213,8 @@ impl SsaArtifact {
             assumptions,
             &self.machine_context,
             "assume",
-        );
+        )
+        .expect("assumptions reach no fixpoint, and this function's collection settled");
         let aggregate_accesses = collect_aggregate_access_projections(
             self.graph(),
             &facts.addresses,
@@ -2634,12 +2635,14 @@ impl TrustedSsaArtifact {
                     &provisional_machine_context,
                     crate::recover_interface::Stated::of(&source),
                 );
-                let Some(recovered) = recovered else {
-                    break 'recovered None;
+                let recovered = match recovered {
+                    Ok(Some(recovered)) => recovered,
+                    Ok(None) => break 'recovered None,
+                    Err(exhausted) => {
+                        preliminary.note_exhausted(exhausted);
+                        break 'recovered None;
+                    }
                 };
-                if let Some(exhausted) = recovered.exhausted() {
-                    preliminary.note_exhausted(exhausted);
-                }
                 result_ambiguous = recovered.result_ambiguous();
                 closed_world = recovered.assumes_closed_world();
                 let minted = crate::recover_interface::mint_recovered_interface(

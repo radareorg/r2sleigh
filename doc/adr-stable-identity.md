@@ -54,8 +54,10 @@ it. Identity is now stable and the IR cannot change once facts exist.
   `Sealed::into_artifact` one whose fact collection did, so no `Sealed`,
   `TrustedSeal` or `SsaArtifact` exists for such a body and no reader
   re-checks it: a check at one consumer is a second owner (#273 let three
-  engine readers through a seal only `into_artifact` refused). The flag's
-  accessors are `pub(crate)`, which closes every other crate, and the Dylint
+  engine readers through a seal only `into_artifact` refused). The fact
+  collection returns the `Result`, so `PreparedFunctionFacts`, its passes'
+  results and `RecoveredInterface` hold no flag; the stage's and the prep
+  facts' flags are `pub(crate)`, which closes every other crate, and the Dylint
   `exhausted_read_through_sealed_stage` denies a read of it through a sealed
   stage inside r2ssa. It follows receivers, fields, derefs and an immutable
   `let`'s initialiser, so a chain a function boundary breaks is not seen.

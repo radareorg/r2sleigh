@@ -20,7 +20,7 @@ impl MemoryPrefix {
         body: Body<'_>,
         phases: &mut PhaseRecorder,
         control: &C,
-    ) -> Result<Self, crate::SsaExecutionStopReason> {
+    ) -> Result<Self, crate::SsaPrepareError> {
         let Body {
             function,
             prep,
@@ -58,7 +58,7 @@ impl MemoryPrefix {
             machine_context,
             &declared_slots,
             &values,
-        );
+        )?;
         phase!("objects", objects.objects.len());
         let (memory_accesses, member_run_stores) = collect_structured_memory_access_facts(
             graph,

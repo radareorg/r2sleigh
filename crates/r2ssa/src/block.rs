@@ -32,12 +32,9 @@ pub fn branch_condition_in<'o, V: 'o>(
     });
     let found = branches.next()?;
     branches.next().is_none().then_some(())?;
-    let guards_tail = ops.skip(found.0 + 1).any(|op| {
-        matches!(
-            op,
-            SSAOp::Return { .. } | SSAOp::Branch { .. } | SSAOp::BranchInd { .. }
-        )
-    });
+    let guards_tail = ops
+        .skip(found.0 + 1)
+        .any(|op| matches!(op, SSAOp::Return { .. }) || op.jump().is_some());
     (found.0 == terminal || guards_tail).then_some(found)
 }
 

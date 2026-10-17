@@ -54,5 +54,11 @@ error: this pattern names `SSAOp::CallInd`; read the call class from `SSAOp::tra
 LL |     matches!(op, Some(SSAOp::CallInd { .. }))
    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error: aborting due to 9 previous errors
+error: this pattern names `SSAOp::Call`; read the call class from `SSAOp::transfer` or `is_call`, which r2ssa states as an exhaustive list
+  --> $DIR/ssa_call_class.rs:78:9
+   |
+LL |         Some(SSAOp::Call { .. }) => 1,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 10 previous errors
 

@@ -6,8 +6,6 @@ use super::*;
 pub struct ControlDomainFacts {
     pub domains: BTreeMap<ControlDomainId, ControlDomain>,
     pub by_block: BTreeMap<u64, ControlDomainId>,
-    /// The solve moved a state past its height: the function refuses (doc/adr-fixpoint.md).
-    pub(crate) exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl ControlDomainFacts {
@@ -28,7 +26,7 @@ pub(crate) fn collect_control_domain_facts(
     function: &SSAFunction,
     predicates: &PredicateFacts,
     structured: &StructuredDataflowFacts,
-) -> ControlDomainFacts {
+) -> Result<ControlDomainFacts, crate::fixpoint::Exhausted> {
     let mut guard_universe = BTreeSet::new();
     for &predecessor in function.block_addrs() {
         for successor in function.successors(predecessor) {
@@ -94,13 +92,9 @@ pub(crate) fn collect_control_domain_facts(
         },
         |_, state| state.clone(),
     );
-    let (mut states, exhausted) = match solved {
-        Ok(solved) => (solved.entry, None),
-        Err(exhausted) => {
-            r2il::refusal_evidence!("control-domains", "{exhausted}");
-            (BTreeMap::new(), Some(exhausted))
-        }
-    };
+    let mut states = solved
+        .inspect_err(|exhausted| r2il::refusal_evidence!("control-domains", "{exhausted}"))?
+        .entry;
 
     let mut loops_by_block = BTreeMap::<u64, Vec<LoopId>>::new();
     for (loop_id, loop_fact) in &structured.loops {
@@ -146,11 +140,7 @@ pub(crate) fn collect_control_domain_facts(
         };
         by_block.insert(block_addr, id);
     }
-    ControlDomainFacts {
-        domains,
-        by_block,
-        exhausted,
-    }
+    Ok(ControlDomainFacts { domains, by_block })
 }
 
 /// Meet two guard sets: what is true on both paths into a block.

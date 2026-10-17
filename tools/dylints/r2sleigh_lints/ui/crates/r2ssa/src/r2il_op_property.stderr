@@ -34,5 +34,15 @@ LL | |         _ => ValueUse::Consumes,
 LL | |     }
    | |_____^
 
-error: aborting due to 4 previous errors
+error: this `match` on `R2ILOp` answers `std::option::Option<&Varnode>` and its wildcard drops every other operation; read the property from r2il or add it there as an exhaustive list
+  --> $DIR/r2il_op_property.rs:62:5
+   |
+LL | /     match op {
+LL | |         Some(R2ILOp::Copy { dst, .. } | R2ILOp::Select { dst, .. }) => Some(dst),
+LL | |         Some(_) => None,
+LL | |         None => None,
+LL | |     }
+   | |_____^
+
+error: aborting due to 5 previous errors
 

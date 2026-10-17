@@ -562,7 +562,8 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         &super::super::DeclaredStackSlots::default(),
         BTreeMap::new(),
         &Default::default(),
-    );
+    )
+    .expect("settles");
     assert!(
         incomplete
             .stack_slots
@@ -607,7 +608,8 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         &super::super::DeclaredStackSlots::default(),
         BTreeMap::new(),
         &Default::default(),
-    );
+    )
+    .expect("settles");
     assert!(
         overlapping
             .stack_slots

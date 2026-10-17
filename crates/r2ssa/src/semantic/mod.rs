@@ -164,27 +164,20 @@ impl PhaseRecorder {
 }
 
 impl PreparedFunctionFacts {
-    /// The first of its passes that moved a state past its stated height (doc/adr-fixpoint.md).
-    pub(crate) fn exhausted(&self) -> Option<crate::fixpoint::Exhausted> {
-        (self.control_domains.exhausted)
-            .or(self.memory.exhausted)
-            .or(self.certificates.exhausted)
-    }
-
-    pub fn collect(function: &SSAFunction, graph: &SsaGraph) -> Self {
-        Self::collect_inner(
-            CollectionOver {
-                function,
-                prep: None,
-                graph,
-                assumptions: &AssumptionSet::default(),
-                machine_context: None,
-                site: "collect",
-            },
-            &crate::control::UncheckedSsaWorkControl,
-        )
-        .expect("an unchecked control never stops")
-        .0
+    /// The facts of a function, or the pass that moved a state past its stated height, which
+    /// refuses the function (doc/adr-fixpoint.md).
+    pub fn collect(
+        function: &SSAFunction,
+        graph: &SsaGraph,
+    ) -> Result<Self, crate::fixpoint::Exhausted> {
+        Self::collect_unchecked(CollectionOver {
+            function,
+            prep: None,
+            graph,
+            assumptions: &AssumptionSet::default(),
+            machine_context: None,
+            site: "collect",
+        })
     }
 
     pub(crate) fn collect_with_context(
@@ -194,20 +187,23 @@ impl PreparedFunctionFacts {
         assumptions: &AssumptionSet,
         machine_context: &SourceMachineContext,
         site: &'static str,
-    ) -> Self {
-        Self::collect_inner(
-            CollectionOver {
-                function,
-                prep,
-                graph,
-                assumptions,
-                machine_context: Some(machine_context),
-                site,
-            },
-            &crate::control::UncheckedSsaWorkControl,
-        )
-        .expect("an unchecked control never stops")
-        .0
+    ) -> Result<Self, crate::fixpoint::Exhausted> {
+        Self::collect_unchecked(CollectionOver {
+            function,
+            prep,
+            graph,
+            assumptions,
+            machine_context: Some(machine_context),
+            site,
+        })
+    }
+
+    fn collect_unchecked(over: CollectionOver<'_>) -> Result<Self, crate::fixpoint::Exhausted> {
+        match Self::collect_inner(over, &crate::control::UncheckedSsaWorkControl) {
+            Ok((facts, _)) => Ok(facts),
+            Err(crate::SsaPrepareError::Exhausted(exhausted)) => Err(exhausted),
+            Err(_) => unreachable!("an unchecked control never stops"),
+        }
     }
 
     /// The same collection, stopping between phases when the run is cancelled.
@@ -218,14 +214,14 @@ impl PreparedFunctionFacts {
     pub(crate) fn collect_with_context_and_control<C: crate::SsaWorkControl + ?Sized>(
         over: CollectionOver<'_>,
         control: &C,
-    ) -> Result<(Self, CollectedLiveness), crate::SsaExecutionStopReason> {
+    ) -> Result<(Self, CollectedLiveness), crate::SsaPrepareError> {
         Self::collect_inner(over, control)
     }
 
     fn collect_inner<C: crate::SsaWorkControl + ?Sized>(
         over: CollectionOver<'_>,
         control: &C,
-    ) -> Result<(Self, CollectedLiveness), crate::SsaExecutionStopReason> {
+    ) -> Result<(Self, CollectedLiveness), crate::SsaPrepareError> {
         let CollectionOver {
             function,
             prep,
@@ -326,7 +322,7 @@ impl PreparedFunctionFacts {
             recursive_calls: collect_structured_recursive_call_facts(function, &call_sites),
         };
         phase!("structured", structured.memory_accesses.len());
-        let control_domains = collect_control_domain_facts(function, &predicates, &structured);
+        let control_domains = collect_control_domain_facts(function, &predicates, &structured)?;
         phase!("control_domains", 0);
         let private_stack_objects = private_stack_objects(&objects);
         // Before the obligations, because whether an access is a statement at
@@ -377,7 +373,7 @@ impl PreparedFunctionFacts {
             &declared_slots,
             memory_round_trips,
             &addresses,
-        );
+        )?;
         phase!("certificates", certificates.stack_slots.len());
         let (applied_assumption_bindings, assumption_usage) = collect_prepared_assumption_usage(
             graph,

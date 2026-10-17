@@ -434,8 +434,6 @@ pub struct PreparedFunctionCertificates {
     pub returns_by_inst: crate::dense::IdMap<InstId, usize>,
     /// What each formal's pointee is read as (doc/adr-aggregates.md).
     pub parameter_fields: BTreeMap<u32, ParameterFields>,
-    /// The call-result solve moved a state past its height: the function refuses.
-    pub(crate) exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 /// Remove the certified byte stride from one offset without manufacturing a
@@ -767,7 +765,7 @@ pub(crate) fn collect_prepared_function_certificates(
     declared_slots: &DeclaredStackSlots,
     memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
     addresses: &crate::AddressProvenanceFacts,
-) -> PreparedFunctionCertificates {
+) -> Result<PreparedFunctionCertificates, crate::fixpoint::Exhausted> {
     let Body {
         function,
         prep,
@@ -1229,10 +1227,7 @@ pub(crate) fn collect_prepared_function_certificates(
         .filter_map(|certificate: &CallsiteCertificate| certificate.return_address_store)
         .collect::<crate::dense::IdSet<_>>();
 
-    let (call_results, exhausted) = match collect_call_result_certificates(body, derived) {
-        Ok(call_results) => (call_results, None),
-        Err(exhausted) => (crate::dense::IdMap::default(), Some(exhausted)),
-    };
+    let call_results = collect_call_result_certificates(body, derived)?;
     let stack_reloads = collect_stack_reload_source_certificates(
         body,
         objects,
@@ -1313,7 +1308,7 @@ pub(crate) fn collect_prepared_function_certificates(
         &memory_accesses_by_inst,
     );
 
-    PreparedFunctionCertificates {
+    Ok(PreparedFunctionCertificates {
         loops,
         switches,
         renderable_expressions,
@@ -1337,8 +1332,7 @@ pub(crate) fn collect_prepared_function_certificates(
         returns,
         returns_by_inst,
         parameter_fields,
-        exhausted,
-    }
+    })
 }
 
 /// Whether a value is what a register slot holds: its storage, a root whose low lane it is, an entry lane's projection, or a lane inserted there (B3).

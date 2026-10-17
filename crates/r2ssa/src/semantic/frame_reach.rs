@@ -554,12 +554,7 @@ fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry 
     let access = || if placed { Carry::Stops } else { Carry::Escapes };
     match op {
         SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => Carry::Escapes,
-        _ if op.is_call()
-            || matches!(
-                op,
-                SSAOp::Branch { .. } | SSAOp::BranchInd { .. } | SSAOp::Switch { .. }
-            ) =>
-        {
+        _ if op.is_call() || op.jump().is_some() || matches!(op, SSAOp::Switch { .. }) => {
             Carry::Everything
         }
         // A conditional branch reads its condition; an address there is a truth value.

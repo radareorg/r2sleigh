@@ -429,13 +429,8 @@ impl<'a> Classifier<'a> {
             SSAOp::CallUse { .. } => self.escape(point),
             // A frame address used as code, or as a value an unmodelled operation reads.
             _ if op.is_call()
-                || matches!(
-                    op,
-                    SSAOp::Branch { .. }
-                        | SSAOp::BranchInd { .. }
-                        | SSAOp::Return { .. }
-                        | SSAOp::CallOther { .. }
-                ) =>
+                || op.jump().is_some()
+                || matches!(op, SSAOp::Return { .. } | SSAOp::CallOther { .. }) =>
             {
                 self.reach.whole = true
             }

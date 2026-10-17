@@ -95,6 +95,12 @@ impl std::fmt::Display for SsaPrepareError {
 
 impl std::error::Error for SsaPrepareError {}
 
+impl From<crate::fixpoint::Exhausted> for SsaPrepareError {
+    fn from(exhausted: crate::fixpoint::Exhausted) -> Self {
+        Self::Exhausted(exhausted)
+    }
+}
+
 impl From<SsaExecutionStopReason> for SsaPrepareError {
     fn from(reason: SsaExecutionStopReason) -> Self {
         match reason {

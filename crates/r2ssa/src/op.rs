@@ -597,6 +597,8 @@ pub struct OpTransfer<'a, V> {
     pub direct: bool,
     /// Whether control comes back after it, as it does from a call.
     pub call: bool,
+    /// Whether it may fall through to the next operation instead, as a conditional branch does.
+    pub conditional: bool,
     /// The native instruction it was lifted from; none for a conditional or synthetic transfer.
     pub instruction: Option<u64>,
 }
@@ -686,6 +688,20 @@ macro_rules! memory_operation {
     };
 }
 
+/// The operations that end a block's straight line: transfers, the return, the switch and the trap.
+macro_rules! control_operation {
+    () => {
+        SSAOp::Branch { .. }
+            | SSAOp::CBranch { .. }
+            | SSAOp::BranchInd { .. }
+            | SSAOp::Switch { .. }
+            | SSAOp::Call { .. }
+            | SSAOp::CallInd { .. }
+            | SSAOp::Return { .. }
+            | SSAOp::Breakpoint
+    };
+}
+
 /// What a call boundary states about a carrier: a definition, a restore or a read.
 macro_rules! call_boundary_operation {
     () => {
@@ -711,24 +727,24 @@ impl<V> SSAOp<V> {
     /// call before them is. Every operation is named, so one added to the enum fails to compile
     /// until it joins a class (ROADMAP D41).
     pub fn transfer(&self) -> Option<OpTransfer<'_, V>> {
-        let (target, direct, call, instruction) = match self {
+        let (target, direct, call, conditional, instruction) = match self {
             SSAOp::Branch {
                 target,
                 instruction,
-            } => (target, true, false, *instruction),
-            SSAOp::CBranch { target, .. } => (target, true, false, None),
+            } => (target, true, false, false, *instruction),
+            SSAOp::CBranch { target, .. } => (target, true, false, true, None),
             SSAOp::BranchInd {
                 target,
                 instruction,
-            } => (target, false, false, *instruction),
+            } => (target, false, false, false, *instruction),
             SSAOp::Call {
                 target,
                 instruction,
-            } => (target, true, true, *instruction),
+            } => (target, true, true, false, *instruction),
             SSAOp::CallInd {
                 target,
                 instruction,
-            } => (target, false, true, *instruction),
+            } => (target, false, true, false, *instruction),
             SSAOp::Switch { .. }
             | SSAOp::Return { .. }
             | SSAOp::Breakpoint
@@ -741,8 +757,16 @@ impl<V> SSAOp<V> {
             target,
             direct,
             call,
+            conditional,
             instruction,
         })
+    }
+
+    /// This operation's transfer, when control leaves for it and neither comes back nor may fall
+    /// through: a branch, direct or indirect.
+    pub fn jump(&self) -> Option<OpTransfer<'_, V>> {
+        self.transfer()
+            .filter(|transfer| !transfer.call && !transfer.conditional)
     }
 
     /// Whether control comes back after this operation's transfer, as it does from a call.
@@ -1594,22 +1618,42 @@ impl<V> SSAOp<V> {
             | SSAOp::BoolXor { .. }
             | SSAOp::PopCount { .. }
             | SSAOp::Lzcount { .. } => ValueUse::Tests,
-            _ => ValueUse::Consumes,
+            SSAOp::FloatAdd { .. }
+            | SSAOp::FloatSub { .. }
+            | SSAOp::FloatMult { .. }
+            | SSAOp::FloatDiv { .. }
+            | SSAOp::FloatNeg { .. }
+            | SSAOp::FloatAbs { .. }
+            | SSAOp::FloatSqrt { .. }
+            | SSAOp::FloatCeil { .. }
+            | SSAOp::FloatFloor { .. }
+            | SSAOp::FloatRound { .. }
+            | SSAOp::FloatNaN { .. }
+            | SSAOp::FloatEqual { .. }
+            | SSAOp::FloatNotEqual { .. }
+            | SSAOp::FloatLess { .. }
+            | SSAOp::FloatLessEqual { .. }
+            | SSAOp::Int2Float { .. }
+            | SSAOp::Float2Int { .. }
+            | SSAOp::FloatFloat { .. }
+            | SSAOp::Trunc { .. }
+            | SSAOp::CallDefine { .. }
+            | SSAOp::CallUse { .. }
+            | memory_operation!()
+            | control_operation!()
+            | state_operation!() => ValueUse::Consumes,
         }
     }
 
     /// Returns true if this operation is a control flow operation.
     pub fn is_control_flow(&self) -> bool {
-        matches!(
-            self,
-            SSAOp::Branch { .. }
-                | SSAOp::CBranch { .. }
-                | SSAOp::BranchInd { .. }
-                | SSAOp::Switch { .. }
-                | SSAOp::Call { .. }
-                | SSAOp::CallInd { .. }
-                | SSAOp::Return { .. }
-        )
+        match self {
+            control_operation!() => true,
+            memory_operation!()
+            | call_boundary_operation!()
+            | state_operation!()
+            | value_operation!() => false,
+        }
     }
 
     /// Returns true if this operation reads from memory.
@@ -2142,6 +2186,14 @@ mod tests {
         assert_eq!(facts(&conditional), Some((true, false, None)));
         assert!(direct.is_call() && indirect.is_call());
         assert!(!jump.is_call() && !conditional.is_call());
+        let branch = SSAOp::Branch {
+            target: v("t"),
+            instruction: None,
+        };
+        assert!(jump.jump().is_some() && branch.jump().is_some());
+        assert!(
+            direct.jump().is_none() && indirect.jump().is_none() && conditional.jump().is_none()
+        );
         for op in [
             SSAOp::CallDefine { dst: v("d") },
             SSAOp::CallUse { src: v("s") },
@@ -2159,6 +2211,30 @@ mod tests {
             SSAOp::Breakpoint,
         ] {
             assert!(op.transfer().is_none() && !op.is_call(), "{op:?}");
+        }
+    }
+
+    /// A trap ends the block's straight line as a return does, and a call boundary's operations do not.
+    #[test]
+    fn control_flow_is_the_ops_that_end_straight_line_code() {
+        let v = |name: &str| SSAVar::new(name, 0, 8);
+        for op in [
+            SSAOp::Breakpoint,
+            SSAOp::Return { target: v("t") },
+            SSAOp::Switch { selector: v("s") },
+            SSAOp::CBranch {
+                target: v("t"),
+                cond: v("c"),
+            },
+        ] {
+            assert!(op.is_control_flow(), "{op:?}");
+        }
+        for op in [
+            SSAOp::Nop,
+            SSAOp::CallUse { src: v("s") },
+            SSAOp::CallDefine { dst: v("d") },
+        ] {
+            assert!(!op.is_control_flow(), "{op:?}");
         }
     }
 }

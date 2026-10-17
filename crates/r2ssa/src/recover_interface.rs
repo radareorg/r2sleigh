@@ -179,17 +179,9 @@ pub struct RecoveredInterface {
     tail_count: Option<r2source::SourceTailCount>,
     /// Whether the result is void because no call reads it, which holds under a closed world only.
     closed_world: bool,
-    /// The first pass over recovery's own facts that moved a state past its height.
-    exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl RecoveredInterface {
-    /// The first pass over recovery's facts that moved a state past its stated height: the function
-    /// recovered from refuses, as a sealed one does (`Prepared::seal`).
-    pub(crate) const fn exhausted(&self) -> Option<crate::fixpoint::Exhausted> {
-        self.exhausted
-    }
-
     /// Whether the result rests on `Premise::ClosedWorld`: void because no call the image shows reads it.
     pub const fn assumes_closed_world(&self) -> bool {
         self.closed_world
@@ -1215,7 +1207,7 @@ pub(crate) fn recover_interface(
         result_reads: None,
         unseen: false,
     };
-    recover_interface_inner(func, None, slots, None, stated)
+    recover_interface_inner(func, None, slots, None, stated).expect("a test function settles")
 }
 
 /// What the program states about a function beside its body: the loader's hook, its callers' reads.
@@ -1251,7 +1243,7 @@ pub(crate) fn recover_interface_with_context(
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
     stated: Stated,
-) -> Option<RecoveredInterface> {
+) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
     recover_interface_inner(func, Some(prep), slots, Some(machine_context), stated)
 }
 
@@ -1269,12 +1261,12 @@ fn recover_interface_inner(
         result_reads,
         unseen,
     }: Stated,
-) -> Option<RecoveredInterface> {
+) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
     // offers nothing to intersect the body's reads against.
     if slots.argument_slots().is_empty() && slots.stack_arguments().is_none() {
-        return None;
+        return Ok(None);
     }
     // Recovery is intentionally a bounded two-phase path used only when the
     // source supplied no exact interface. This provisional O(V + E) fact pass
@@ -1298,9 +1290,9 @@ fn recover_interface_inner(
             &crate::AssumptionSet::default(),
             machine_context,
             "recover",
-        )
+        )?
     } else {
-        crate::semantic::PreparedFunctionFacts::collect(func, graph)
+        crate::semantic::PreparedFunctionFacts::collect(func, graph)?
     };
     if !facts.obligations.is_complete() {
         r2il::refusal_evidence!(
@@ -1308,7 +1300,7 @@ fn recover_interface_inner(
             "the obligation inventory is incomplete, so no interface is recovered and \
              every ABI question about this function answers `unavailable`"
         );
-        return None;
+        return Ok(None);
     }
 
     if let Some(role) = loader_role {
@@ -1603,7 +1595,7 @@ fn recover_interface_inner(
             live_out.len(),
             live_out.unresolved_blocks().count()
         );
-        return None;
+        return Ok(None);
     };
     // A variadic prologue's saves to the register save area are its tail, not parameter reads.
     let mut save_area = prep
@@ -1782,7 +1774,7 @@ fn recover_interface_inner(
         _ => None,
     };
 
-    Some(RecoveredInterface {
+    Ok(Some(RecoveredInterface {
         parameters: parameters.into_boxed_slice(),
         stack_parameters: stack_parameters.into_boxed_slice(),
         result,
@@ -1795,8 +1787,7 @@ fn recover_interface_inner(
         variadic: save_area.is_some(),
         tail_count,
         closed_world,
-        exhausted: facts.exhausted(),
-    })
+    }))
 }
 
 /// Whether a call of unproven arity may be handed `next`, the first slot past the parameters
@@ -2600,6 +2591,7 @@ mod tests {
             context,
             Stated::default(),
         )
+        .expect("settles")
     }
 
     fn candidates() -> SourceConventionSlots {
@@ -2653,8 +2645,9 @@ mod tests {
             result_reads: Some(reads(1)),
             unseen: false,
         };
-        let recovered =
-            recover_interface_inner(&func, None, &slots, None, stated).expect("recovery");
+        let recovered = recover_interface_inner(&func, None, &slots, None, stated)
+            .expect("settles")
+            .expect("recovery");
         let (low, high) = (register(0, 8), register(8, 8));
         assert_eq!(
             recovered.result(),
