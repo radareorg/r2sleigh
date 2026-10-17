@@ -180,6 +180,13 @@ fn literal_or_top(graph: &SsaGraph, value: ValueId) -> StridedInterval {
     }
 }
 
+/// What is the same bits as what: the copy classes, and the loads that reread an unwritten slot.
+#[derive(Clone, Copy)]
+struct SameBits<'a> {
+    class: &'a [ValueId],
+    reloads: &'a crate::dense::IdMap<ValueId, ValueId>,
+}
+
 /// The solution, and how many transfers the ascent spent reaching it.
 fn solve_counted(
     graph: &SsaGraph,
@@ -192,7 +199,12 @@ fn solve_counted(
     // with the same bits: the narrowing is keyed by copy class, so a copy or
     // a lane read of the compared value read further on is narrowed too.
     let class = crate::view::class_values(graph, prep.map(|facts| &facts.views));
-    narrow_where_defined(graph, function, predicates, &class, &mut by_value);
+    let reloads = crate::reload::reloads(graph, prep);
+    let same = SameBits {
+        class: &class,
+        reloads: &reloads,
+    };
+    narrow_where_defined(graph, function, predicates, same, &mut by_value);
     (ValueRanges { by_value }, transfers)
 }
 
@@ -810,9 +822,10 @@ fn narrow_where_defined(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
     predicates: &crate::semantic::PredicateFacts,
-    class: &[ValueId],
+    same: SameBits<'_>,
     state: &mut [StridedInterval],
 ) {
+    let SameBits { class, reloads } = same;
     let assumed = assumptions_by_block(
         function,
         graph,
@@ -853,7 +866,7 @@ fn narrow_where_defined(
             continue;
         };
         let held = block_addr(graph, inst).and_then(|addr| assumed.get(&addr));
-        let now = was.meet(&transfer(graph, inst, &|value: ValueId| {
+        let read = |value: ValueId| {
             let range = state
                 .get(value.0 as usize)
                 .copied()
@@ -862,7 +875,13 @@ fn narrow_where_defined(
                 Some(narrowed) => range.meet(narrowed),
                 None => range,
             }
-        }));
+        };
+        // A reload of an unwritten slot is the earlier load's bits, under what the block assumes of them.
+        let reread = reloads.get(output).map(|first| read(*first));
+        let mut now = was.meet(&transfer(graph, inst, &read));
+        if let Some(reread) = reread {
+            now = now.meet(&reread);
+        }
         if now == was {
             continue;
         }

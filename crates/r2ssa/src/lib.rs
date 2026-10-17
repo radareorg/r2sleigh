@@ -65,6 +65,7 @@ pub(crate) mod printf;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
+mod reload;
 pub(crate) mod rename;
 pub(crate) mod save_area;
 pub(crate) mod semantic;
