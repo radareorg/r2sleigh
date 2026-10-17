@@ -6,7 +6,7 @@
 //! a mismatch leaves for a block that only calls a function that does not return. A UB-free source
 //! writes neither the guard nor outside its own objects, so both reads agree and the check passes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::arena::OpId;
 use crate::cfg::BlockTerminator;
@@ -60,6 +60,9 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     }
     let mut decided = EditPlan::new();
     let mut inserted = IdSet::default();
+    let removed_edges = (checks.iter())
+        .map(|check| (check.block, check.fail))
+        .collect::<BTreeSet<_>>();
     for check in &checks {
         let op = if check.pass_is_target {
             SSAOp::Branch {
@@ -103,7 +106,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         .iter()
         .map(|check| check.block)
         .collect::<BTreeSet<_>>();
-    let mut removed = BTreeSet::new();
+    let mut removed = BTreeMap::new();
     for fail in failed {
         if func
             .predecessors(fail)
@@ -111,14 +114,14 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
             .all(|pred| deciding.contains(pred))
         {
             decided.reshape(ShapeEdit::RemoveBlock(fail));
-            removed.insert(fail);
+            removed.insert(fail, func.get_block(fail).map_or(0, |block| block.size));
         }
     }
     decided.reorder();
     func.apply_edits(decided);
     let addresses = inserted_addresses(func, &inserted);
     inserted.extend(addresses.iter());
-    func.record_compiler_inserted(inserted, removed);
+    func.record_compiler_inserted(inserted, removed, removed_edges);
     // Every decided check removed its failure edge, which holds only of a UB-free source.
     func.record_premise(r2source::Premise::UbFreeSource);
 }

@@ -159,6 +159,35 @@ fn a_dispatch_told_it_goes_nowhere_is_still_unresolved() {
     assert!(body.blocks[0].successors.is_empty());
 }
 
+/// jmp rax; add rsi, 0x20; ret: an arm at 0x1005 lands on the `0x20` immediate, inside the `add` at 0x1002.
+const OVERLAPPED: &[u8] = &[0xff, 0xe0, 0x48, 0x83, 0xc6, 0x20, 0xc3];
+
+#[test]
+fn an_arm_inside_a_decoded_instruction_is_refused_naming_both_starts() {
+    let dispatched = BTreeMap::from([(BASE, vec![0x1005, 0x1002])]);
+    let body = lift_body(BASE, &x86_64(), &reader(OVERLAPPED), &dispatched).expect("body");
+    let starts = body.blocks.iter().map(|block| block.lifted.addr);
+    assert_eq!(starts.collect::<Vec<_>>(), vec![0x1000, 0x1002]);
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1005, UnresolvedReason::Overlaps { with: 0x1002 })]
+    );
+}
+
+/// je +1; lock cmpxchg [rcx], rdx; ret: glibc's branch past the `lock` prefix runs the instruction both ways.
+const PAST_LOCK: &[u8] = &[0x74, 0x01, 0xf0, 0x48, 0x0f, 0xb1, 0x11, 0xc3];
+
+#[test]
+fn a_branch_past_a_prefix_keeps_both_decodes() {
+    let body = lift_body(BASE, &x86_64(), &reader(PAST_LOCK), &BTreeMap::new()).expect("body");
+    let starts = body.blocks.iter().map(|block| block.lifted.addr);
+    assert_eq!(starts.collect::<Vec<_>>(), vec![0x1000, 0x1002, 0x1003]);
+    assert!(body.unresolved.is_empty());
+}
+
 /// A backward branch to the function's own entry: the walk terminates.
 /// dec rdi; jne -5
 const LOOP: &[u8] = &[

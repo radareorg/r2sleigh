@@ -196,7 +196,8 @@ impl FunctionInfo {
     }
 }
 
-/// Every block with bytes, and the instructions whose spans start inside it.
+/// Every block with bytes, the failure blocks a decided check removed among them, and the instructions
+/// whose spans start inside it.
 fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
     let function = artifact.function();
     let starts = artifact
@@ -205,17 +206,21 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
         .values()
         .map(|span| span.instruction_addr())
         .collect::<BTreeSet<_>>();
-    let mut blocks = (artifact.graph().blocks.iter())
-        .filter(|block| block.size > 0)
-        .map(|block| {
-            let end = block.addr + u64::from(block.size);
-            Block {
-                addr: block.addr,
-                size: u64::from(block.size),
-                instructions: starts.range(block.addr..end).count(),
-                successors: function.successors(block.addr).len(),
-            }
-        })
+    let removed = function.compiler_removed_edges();
+    let block = |addr: u64, size: u32| {
+        let edges = removed.range((addr, 0)..=(addr, u64::MAX)).count();
+        Block {
+            addr,
+            size: u64::from(size),
+            instructions: starts.range(addr..addr + u64::from(size)).count(),
+            successors: function.successors(addr).len() + edges,
+        }
+    };
+    let graph = (artifact.graph().blocks.iter()).map(|held| (held.addr, held.size));
+    let gone = function.compiler_inserted_blocks().iter();
+    let mut blocks = (graph.chain(gone.map(|(addr, size)| (*addr, *size))))
+        .filter(|(_, size)| *size > 0)
+        .map(|(addr, size)| block(addr, size))
         .collect::<Vec<_>>();
     blocks.sort_unstable_by_key(|block| block.addr);
     blocks

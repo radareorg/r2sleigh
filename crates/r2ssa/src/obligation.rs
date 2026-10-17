@@ -1160,7 +1160,7 @@ impl SemanticObligationInventory {
     pub(crate) fn bind_genuine_native_spans(
         &mut self,
         spans: impl IntoIterator<Item = crate::GenuineNativeInstructionSpan>,
-        compiler_inserted_blocks: &BTreeSet<u64>,
+        compiler_inserted_blocks: &BTreeMap<u64, u32>,
     ) -> bool {
         // Merged into the sorted table once at the end: one insert per span shifts its tail each time.
         let mut late = Vec::new();
@@ -1176,7 +1176,7 @@ impl SemanticObligationInventory {
                 return false;
             }
             // A span of a removed failure block keeps an obligation the rendering answers as compiler-inserted.
-            let inserted = compiler_inserted_blocks.contains(&span.block_addr());
+            let inserted = compiler_inserted_blocks.contains_key(&span.block_addr());
             if span.canonical_op_count() != 0 && !inserted {
                 continue;
             }

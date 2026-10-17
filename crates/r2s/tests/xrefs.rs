@@ -259,8 +259,8 @@ fn ax_holds_what_every_function_shows_of_its_calls_and_jumps() {
 struct Counted {
     name: String,
     listed: (usize, u64),
-    walked: (usize, u64),
-    analysed: (usize, u64),
+    walked: (usize, u64, usize),
+    analysed: (usize, u64, usize),
 }
 
 fn counted(binary: &str) -> Vec<Counted> {
@@ -301,11 +301,21 @@ fn counted(binary: &str) -> Vec<Counted> {
             })
             .collect::<Option<Vec<_>>>()
             .unwrap_or_else(|| panic!("{binary}: {entry:#x} afb"));
+        // A successor is a `j` or `f` field of `afb`'s line: a jump, a fall-through or a switch case.
+        let edges = (walked.lines())
+            .filter(|line| line.starts_with("0x"))
+            .flat_map(|line| line.split_whitespace().skip(3))
+            .filter(|token| token.starts_with("0x"))
+            .count();
         counted.push(Counted {
             name,
             listed: (blocks, size),
-            walked: (sizes.len(), sizes.iter().sum()),
-            analysed: (field(info, "num-bbs:") as usize, field(info, "realsz:")),
+            walked: (sizes.len(), sizes.iter().sum(), edges),
+            analysed: (
+                field(info, "num-bbs:") as usize,
+                field(info, "realsz:"),
+                field(info, "edges:") as usize,
+            ),
         });
     }
     counted
@@ -313,8 +323,8 @@ fn counted(binary: &str) -> Vec<Counted> {
 
 #[test]
 fn afl_and_afb_read_one_body_per_function_and_afi_its_bytes() {
-    // The survey and `afb` walk through the same dispatch tables, so the sizes and block counts they list agree
-    // (siphash24 switches on its rounds); `afi` counts the same bytes wherever its analysis keeps every block.
+    // The survey and `afb` walk the same tables (siphash24 switches on its rounds); `afi` lists the same blocks, bytes
+    // and edges, a stack-protector failure block included.
     for binary in [
         "branchy_gcc_x64_O0",
         "hashes_gcc_x64_O2",
@@ -327,10 +337,15 @@ fn afl_and_afb_read_one_body_per_function_and_afi_its_bytes() {
                 walked,
                 analysed,
             } = function;
-            assert_eq!(listed, walked, "{binary}: afl and afb of {name}");
-            if analysed.0 == walked.0 {
-                assert_eq!(analysed.1, walked.1, "{binary}: afi and afb of {name}");
-            }
+            assert_eq!(
+                listed,
+                (walked.0, walked.1),
+                "{binary}: afl and afb of {name}"
+            );
+            assert_eq!(
+                analysed, walked,
+                "{binary}: afi and afb of {name}: blocks, bytes, edges"
+            );
         }
     }
 }

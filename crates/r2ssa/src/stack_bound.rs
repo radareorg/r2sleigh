@@ -2,7 +2,7 @@
 //! pointer with `stackguard0` and calls a routine that re-enters the function
 //! (doc/adr-language-profile.md, item 3).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::arena::OpId;
 use crate::cfg::BlockTerminator;
@@ -54,6 +54,9 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     }
     let mut decided = EditPlan::new();
     let mut inserted = IdSet::default();
+    let mut edges = (checks.iter())
+        .map(|check| (check.block, check.fail))
+        .collect::<BTreeSet<_>>();
     for check in &checks {
         let op = if check.pass_is_target {
             SSAOp::Branch {
@@ -78,12 +81,12 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         });
         inserted.extend(check.inserted.iter());
     }
-    let removed = remove_failing_blocks(func, &checks, &mut decided);
+    let removed = remove_failing_blocks(func, &checks, &mut decided, &mut edges);
     decided.reorder();
     func.apply_edits(decided);
     let addresses = crate::stack_protector::inserted_addresses(func, &inserted);
     inserted.extend(addresses.iter());
-    func.record_compiler_inserted(inserted, removed);
+    func.record_compiler_inserted(inserted, removed, edges);
     func.record_premise(r2source::Premise::GoRuntime);
 }
 
@@ -92,12 +95,13 @@ fn remove_failing_blocks(
     func: &SSAFunction,
     checks: &[Check],
     decided: &mut EditPlan,
-) -> BTreeSet<u64> {
+    edges: &mut BTreeSet<(u64, u64)>,
+) -> BTreeMap<u64, u32> {
     let deciding = checks
         .iter()
         .map(|check| check.block)
         .collect::<BTreeSet<_>>();
-    let mut removed = BTreeSet::new();
+    let mut removed = BTreeMap::new();
     for fail in checks
         .iter()
         .map(|check| check.fail)
@@ -112,6 +116,7 @@ fn remove_failing_blocks(
         }
         // A growth path that jumps back to the entry leaves it a source the entry's merges drop.
         for next in func.successors(fail) {
+            edges.insert((fail, next));
             decided.reshape(ShapeEdit::RemoveEdge {
                 from: fail,
                 to: next,
@@ -122,7 +127,7 @@ fn remove_failing_blocks(
             });
         }
         decided.reshape(ShapeEdit::RemoveBlock(fail));
-        removed.insert(fail);
+        removed.insert(fail, func.get_block(fail).map_or(0, |block| block.size));
     }
     removed
 }
