@@ -319,6 +319,82 @@ fn aarch64_dup_and_sbfx_retain_proven_width_changes() {
     )));
 }
 
+/// Each word is spelled as the Arm ARM prefers it; the pairs at a precondition's edge are the ones that differ.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_listing_spells_the_preferred_alias_at_each_precondition_boundary() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    let bitfield = |sf: u32, opc: u32, immr: u32, imms: u32, rn: u32| {
+        (sf << 31)
+            | (opc << 29)
+            | (0x26 << 23)
+            | (sf << 22)
+            | (immr << 16)
+            | (imms << 10)
+            | (rn << 5)
+            | 1
+    };
+    let words = [
+        // BFM: imms < immr is BFI, or BFC from the zero register; imms >= immr is BFXIL, never BFC.
+        (0x331a_65cc, "bfi w12, w14, 0x6, 0x1a"),
+        (bitfield(0, 1, 1, 0, 2), "bfi w1, w2, 0x1f, 0x1"),
+        (bitfield(1, 1, 1, 0, 2), "bfi x1, x2, 0x3f, 0x1"),
+        (bitfield(0, 1, 1, 1, 2), "bfxil w1, w2, 0x1, 0x1"),
+        (bitfield(0, 1, 1, 0, 31), "bfc w1, 0x1f, 0x1"),
+        (bitfield(0, 1, 0, 0, 31), "bfxil w1, wzr, 0x0, 0x1"),
+        (bitfield(0, 2, 2, 0, 2), "ubfiz w1, w2, 0x1e, 0x1"),
+        // UBFM and SBFM: the extract, insert, shift and lsl/lsr forms Sleigh already spells (boundary: imms + 1 == immr is lsl, imms == 31 is lsr).
+        (bitfield(0, 2, 1, 3, 2), "ubfx w1, w2, 0x1, 0x3"),
+        (bitfield(0, 0, 1, 3, 2), "sbfx w1, w2, 0x1, 0x3"),
+        (bitfield(0, 0, 2, 0, 2), "sbfiz w1, w2, 0x1e, 0x1"),
+        (bitfield(0, 2, 3, 2, 2), "lsl w1, w2, 0x1d"),
+        (bitfield(0, 2, 1, 31, 2), "lsr w1, w2, 0x1"),
+        (bitfield(0, 0, 1, 31, 2), "asr w1, w2, 0x1"),
+        // ADDS, ANDS and ORN with a zero register are CMN, TST and MVN; a live register keeps the base mnemonic.
+        (0x2b02_003f, "cmn w1, w2"),
+        (0x2b02_0021, "adds w1, w1, w2"),
+        (0x6a02_003f, "tst w1, w2"),
+        (0x6a02_0020, "ands w0, w1, w2"),
+        (0x2a22_03e1, "mvn w1, w2"),
+        (0x2a22_0021, "orn w1, w1, w2"),
+        (0x6b02_003f, "cmp w1, w2"),
+        // SUBS with both Rd and Rn the zero register is CMP; NEGS needs a live Rd.
+        (0xeb13_0fff, "cmp xzr, x19, lsl 0x3"),
+        (0x6b01_03e1, "negs w1, w1"),
+        (0x4b01_03e1, "neg w1, w1"),
+        // MOV (register) is ORR with no shift.
+        (0x2a02_03e1, "mov w1, w2"),
+        (0x2a02_0fe1, "orr w1, wzr, w2, lsl 0x3"),
+        // MOV (bitmask immediate) is ORR unless a single MOVZ or MOVN writes the value.
+        (0x3200_07e1, "orr w1, wzr, 0x3"),
+        (0x3200_03e1, "orr w1, wzr, 0x1"),
+        (0x3203_1fe1, "mov w1, 0xe000001f"),
+        // MOV (wide immediate) is MOVZ or MOVN unless it would assemble to another encoding.
+        (0x5280_0001, "mov w1, 0x0"),
+        (0x52a0_0001, "movz w1, 0x0, lsl 0x10"),
+        (0x1280_0001, "mov w1, 0xffffffff"),
+        (0x12a0_0001, "movn w1, 0x0, lsl 0x10"),
+        (0x129f_ffe1, "movn w1, 0xffff"),
+        (0x92a0_0001, "movn x1, 0x0, lsl 0x10"),
+        // USHLL and SSHLL by zero are Sleigh's UXTL and SXTL already; any other shift stays.
+        (0x0f08_a441, "sxtl v1.8h, v2.8b"),
+        (0x2f09_a441, "ushll v1.8h, v2.8b, 0x1"),
+        // The carry conditions are HS and LO, where Sleigh writes CS and CC.
+        (0x5400_0022, "b.hs 0x1004"),
+        (0x5400_0023, "b.lo 0x1004"),
+        (0x5400_0021, "b.ne 0x1004"),
+        (0x1a81_2021, "csel w1, w1, w1, hs"),
+        (0x1a9f_27e1, "cset w1, lo"),
+    ];
+    for (word, expected) in words {
+        let decoded = disassembler
+            .decode(&padded_instruction(u32::to_le_bytes(word)), 0x1000, None)
+            .unwrap_or_else(|error| panic!("{word:#010x}: {error}"));
+        assert_eq!(decoded.syntax.text(), expected, "{word:#010x}");
+    }
+}
+
 #[cfg(feature = "x86")]
 #[test]
 fn x86_byte_register_writes_do_not_invent_full_carrier_zero_extensions() {

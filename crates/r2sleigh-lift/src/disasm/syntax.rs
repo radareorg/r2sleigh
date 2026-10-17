@@ -59,10 +59,13 @@ impl Syntax {
     }
 }
 
-/// Spell one decoded instruction the way radare2 spells it.
-pub fn radare2(mnemonic: &str, body: &str, size: usize, arch: &str) -> Syntax {
+/// Spell one decoded instruction the way radare2 spells it; `bytes` are its encoding (AArch64 aliases read it).
+pub fn radare2(mnemonic: &str, body: &str, size: usize, arch: &str, bytes: &[u8]) -> Syntax {
     let joined = format!("{mnemonic} {body}");
-    let spelled = radare2_text(joined.trim(), arch);
+    let word = bytes
+        .first_chunk::<4>()
+        .map(|word| u32::from_le_bytes(*word));
+    let spelled = radare2_text(joined.trim(), arch, word);
     let (mnemonic, body) = match spelled.find(' ') {
         Some(split) => (spelled[..split].to_owned(), spelled[split + 1..].to_owned()),
         None => (spelled, String::new()),
@@ -157,7 +160,7 @@ pub(crate) fn register_text(name: &str, arch: &str) -> String {
 
 /// Radare2 spells an instruction lowercase, with a space after each comma and
 /// no `#` before an immediate, where Sleigh keeps the assembler's own prefix.
-fn radare2_text(text: &str, arch: &str) -> String {
+fn radare2_text(text: &str, arch: &str, word: Option<u32>) -> String {
     let lowered = text.to_lowercase();
     let mut out = String::with_capacity(lowered.len());
     let mut chars = lowered.chars().peekable();
@@ -173,14 +176,18 @@ fn radare2_text(text: &str, arch: &str) -> String {
     // Sleigh writes the x86 memory-operand size as `dword ptr [..]` (`word ptr cs:[..]`) and a
     // negative displacement as `+ -0x4`; radare2 writes `dword [..]` and `- 0x4`.
     let out = out.replace(" ptr ", " ").replace("+ -", "- ");
-    if arch == "ARM" {
-        // A zero offset says nothing radare2 writes: `[r0, 0x0]` is `[r0]`.
-        let out = out.replace(", 0x0]", "]");
-        arm_alias(&arm_it_condition(&arm_role_registers(&out)))
-    } else {
-        // Nor a scale of one: `[rax + rax*0x1]` is `[rax + rax]`.
-        let out = out.replace("*0x1]", "]").replace("*0x1 ", " ");
-        x86_condition_alias(&out)
+    match arch {
+        "ARM" => {
+            // A zero offset says nothing radare2 writes: `[r0, 0x0]` is `[r0]`.
+            let out = out.replace(", 0x0]", "]");
+            arm_alias(&arm_it_condition(&arm_role_registers(&out)))
+        }
+        "aarch64" => aarch64_condition(&aarch64_alias(&out, word)),
+        _ => {
+            // Nor a scale of one: `[rax + rax*0x1]` is `[rax + rax]`.
+            let out = out.replace("*0x1]", "]").replace("*0x1 ", " ");
+            x86_condition_alias(&out)
+        }
     }
 }
 
@@ -233,6 +240,143 @@ fn arm_alias(text: &str) -> String {
         return format!("pop {{{register}}}");
     }
     text.to_owned()
+}
+
+/// The AArch64 aliases the Arm ARM prefers that Sleigh omits or guards loosely (doc/adr-listing-spelling.md).
+/// `word` is the encoding, for a precondition on fields the operands drop.
+fn aarch64_alias(text: &str, word: Option<u32>) -> String {
+    let (mnemonic, body) = text.split_once(' ').unwrap_or((text, ""));
+    let operands: Vec<&str> = body.split(", ").collect();
+    let aliased = match (mnemonic, operands.as_slice()) {
+        ("bfm", [rd, rn, immr, imms]) => bitfield_move(rd, rn, number(immr), number(imms)),
+        ("negs", [rd, _, ..]) if is_zero_register(rd) => Some(format!("cmp {body}")),
+        ("mov", [rd, rm, shift]) if is_shift(shift) => {
+            Some(format!("orr {rd}, {}, {rm}, {shift}", zero_register(rd)))
+        }
+        ("mov" | "orr", [rd, .., imm]) => {
+            word.and_then(|word| immediate_move(mnemonic, rd, imm, word))
+        }
+        _ => None,
+    };
+    aliased.unwrap_or_else(|| text.to_owned())
+}
+
+/// BFM is BFI where `imms < immr` (BFC when it reads the zero register) and BFXIL otherwise (Arm ARM).
+fn bitfield_move(rd: &str, rn: &str, immr: Option<u64>, imms: Option<u64>) -> Option<String> {
+    let (immr, imms) = (immr?, imms?);
+    let size = match rd.chars().next()? {
+        'w' => 32,
+        'x' => 64,
+        _ => return None,
+    };
+    if imms >= immr {
+        return Some(format!(
+            "bfxil {rd}, {rn}, {immr:#x}, {:#x}",
+            imms - immr + 1
+        ));
+    }
+    let (lsb, width) = ((size - immr) % size, imms + 1);
+    Some(match is_zero_register(rn) {
+        true => format!("bfc {rd}, {lsb:#x}, {width:#x}"),
+        false => format!("bfi {rd}, {rn}, {lsb:#x}, {width:#x}"),
+    })
+}
+
+/// The immediate forms of MOV, which are ORR, MOVZ or MOVN: the alias holds only where no other
+/// encoding of the same value would be assembled from it (Arm ARM `MoveWidePreferred`, MOV (wide immediate)).
+fn immediate_move(mnemonic: &str, rd: &str, imm: &str, word: u32) -> Option<String> {
+    let sf = word >> 31 == 1;
+    let (opc, field) = ((word >> 29) & 3, (word >> 23) & 0x3f);
+    match field {
+        0x24 if opc == 1 && (word >> 5) & 0x1f == 31 => {
+            let (n, immr, imms) = ((word >> 22) & 1, (word >> 16) & 0x3f, (word >> 10) & 0x3f);
+            Some(match move_wide_preferred(sf, n, immr, imms) {
+                true => format!("orr {rd}, {}, {imm}", if sf { "xzr" } else { "wzr" }),
+                false => format!("mov {rd}, {imm}"),
+            })
+        }
+        0x25 if mnemonic == "mov" && opc != 3 => {
+            let (hw, value) = ((word >> 21) & 3, (word >> 5) & 0xffff);
+            let inverted = opc == 0;
+            let alias = !(value == 0 && hw != 0) && !(inverted && !sf && value == 0xffff);
+            (!alias).then(|| {
+                let shift = if hw == 0 {
+                    String::new()
+                } else {
+                    format!(", lsl {:#x}", hw * 16)
+                };
+                format!(
+                    "{} {rd}, {value:#x}{shift}",
+                    if inverted { "movn" } else { "movz" }
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether one MOVZ or MOVN writes the bitmask immediate, so that ORR keeps its own spelling.
+fn move_wide_preferred(sf: bool, n: u32, immr: u32, imms: u32) -> bool {
+    let width = if sf { 64 } else { 32 };
+    // The element must be the whole register: N set for 64 bits, `imms<5>` clear for 32.
+    if (sf && n == 0) || (!sf && (n == 1 || imms & 0x20 != 0)) {
+        return false;
+    }
+    // At most 16 ones, or at most 16 zeros, that do not cross a halfword once rotated.
+    if imms < 16 {
+        return (16 - immr % 16) % 16 <= 15 - imms;
+    }
+    imms + 17 >= width && immr % 16 <= imms + 17 - width
+}
+
+/// A Sleigh condition name for the carry flag is `cs` and `cc`; the Arm ARM, binutils and LLVM write `hs` and `lo`.
+fn aarch64_condition(text: &str) -> String {
+    fn rename(condition: &str) -> &str {
+        match condition {
+            "cs" => "hs",
+            "cc" => "lo",
+            other => other,
+        }
+    }
+
+    let (head, body) = text.split_once(' ').unwrap_or((text, ""));
+    let head = match head.split_once('.') {
+        Some((verb, condition)) => format!("{verb}.{}", rename(condition)),
+        None => head.to_owned(),
+    };
+    let body = match body.rsplit_once(", ") {
+        Some((front, last)) => format!("{front}, {}", rename(last)),
+        None => body.to_owned(),
+    };
+    match body.is_empty() {
+        true => head,
+        false => format!("{head} {body}"),
+    }
+}
+
+fn is_zero_register(name: &str) -> bool {
+    matches!(name, "wzr" | "xzr")
+}
+
+fn zero_register(destination: &str) -> &'static str {
+    if destination.starts_with('w') {
+        "wzr"
+    } else {
+        "xzr"
+    }
+}
+
+fn is_shift(operand: &str) -> bool {
+    ["lsl ", "lsr ", "asr ", "ror "]
+        .iter()
+        .any(|shift| operand.starts_with(shift))
+}
+
+fn number(text: &str) -> Option<u64> {
+    match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
 }
 
 /// One x86 condition, two names: the flag it tests and the comparison it came from.
@@ -299,7 +443,7 @@ mod tests {
 
     #[test]
     fn a_mnemonic_and_its_operands_stay_apart() {
-        let syntax = radare2("MOV", "RAX,#0x10", 4, "x86-64");
+        let syntax = radare2("MOV", "RAX,#0x10", 4, "x86-64", &[]);
         assert_eq!(syntax.mnemonic, "mov");
         assert_eq!(syntax.body, "rax, 0x10");
         assert_eq!(syntax.text(), "mov rax, 0x10");
@@ -307,7 +451,7 @@ mod tests {
 
     #[test]
     fn an_instruction_with_no_operands_has_an_empty_body() {
-        let syntax = radare2("RET", "", 1, "x86-64");
+        let syntax = radare2("RET", "", 1, "x86-64", &[]);
         assert_eq!(syntax.mnemonic, "ret");
         assert!(syntax.body.is_empty());
         assert_eq!(syntax.text(), "ret");
@@ -315,17 +459,17 @@ mod tests {
 
     #[test]
     fn a_rewrite_that_changes_the_operation_changes_the_mnemonic() {
-        let syntax = radare2("cpy", "r0, r1", 4, "ARM");
+        let syntax = radare2("cpy", "r0, r1", 4, "ARM", &[]);
         assert_eq!(syntax.mnemonic, "mov");
         assert_eq!(syntax.body, "r0, r1");
-        let popped = radare2("ldr", "r4, [r13], #0x4", 4, "ARM");
+        let popped = radare2("ldr", "r4, [r13], #0x4", 4, "ARM", &[]);
         assert_eq!(popped.text(), "pop {r4}");
     }
 
     /// Each spelling as radare2's own tests write it (test/db/cmd/cmd_pd).
     #[test]
     fn sleigh_s_spellings_read_as_radare2_writes_them() {
-        let text = |mnemonic, body, arch| radare2(mnemonic, body, 4, arch).text();
+        let text = |mnemonic, body, arch| radare2(mnemonic, body, 4, arch, &[]).text();
         assert_eq!(text("stmdb", "r13!,{r11,r14}", "ARM"), "push {fp, lr}");
         assert_eq!(
             text("stmdb", "r13!,{r8,r10,r11}", "ARM"),
@@ -348,24 +492,106 @@ mod tests {
     #[test]
     fn an_it_predicated_operation_takes_its_condition_as_a_suffix() {
         assert_eq!(
-            radare2("add.eq", "r3,r1,#0x1", 2, "ARM").text(),
+            radare2("add.eq", "r3,r1,#0x1", 2, "ARM", &[]).text(),
             "addeq r3, r1, 0x1"
         );
         assert_eq!(
-            radare2("pop.eq.w", "{r8,r9,r11}", 4, "ARM").text(),
+            radare2("pop.eq.w", "{r8,r9,r11}", 4, "ARM", &[]).text(),
             "popeq.w {r8, r9, fp}"
         );
         // A vector element type and an AArch64 condition are not an `it` predicate.
         assert_eq!(
-            radare2("vadd.i32", "d0,d1,d2", 4, "ARM").text(),
+            radare2("vadd.i32", "d0,d1,d2", 4, "ARM", &[]).text(),
             "vadd.i32 d0, d1, d2"
         );
-        assert_eq!(radare2("b.eq", "0x10", 4, "aarch64").text(), "b.eq 0x10");
+        assert_eq!(
+            radare2("b.eq", "0x10", 4, "aarch64", &[]).text(),
+            "b.eq 0x10"
+        );
+    }
+
+    #[test]
+    fn aarch64_text_aliases_stop_at_their_preconditions() {
+        let text = |mnemonic, body| radare2(mnemonic, body, 4, "aarch64", &[]).text();
+        assert_eq!(text("negs", "xzr, x19, lsl #0x3"), "cmp xzr, x19, lsl 0x3");
+        assert_eq!(text("negs", "w1, w2"), "negs w1, w2");
+        assert_eq!(text("mov", "x1, x2"), "mov x1, x2");
+        assert_eq!(text("mov", "x1, x2, lsl #0x3"), "orr x1, xzr, x2, lsl 0x3");
+        assert_eq!(
+            text("bfm", "x1, x2, #0x30, #0x1b"),
+            "bfi x1, x2, 0x10, 0x1c"
+        );
+        assert_eq!(text("bfm", "w1, wzr, #0x1, #0x0"), "bfc w1, 0x1f, 0x1");
+        assert_eq!(text("bfm", "w1, w2, #0x1, #0x1"), "bfxil w1, w2, 0x1, 0x1");
+    }
+
+    #[test]
+    fn aarch64_carry_conditions_read_hs_and_lo() {
+        let text = |mnemonic, body| radare2(mnemonic, body, 4, "aarch64", &[]).text();
+        assert_eq!(text("b.cs", "0x10"), "b.hs 0x10");
+        assert_eq!(text("bc.cc", "0x10"), "bc.lo 0x10");
+        assert_eq!(text("csel", "w1, w2, w3, cc"), "csel w1, w2, w3, lo");
+        assert_eq!(text("cset", "x1, cs"), "cset x1, hs");
+        assert_eq!(text("ccmp", "x1, x2, #0x4, cs"), "ccmp x1, x2, 0x4, hs");
+        assert_eq!(text("b.ne", "0x10"), "b.ne 0x10");
+    }
+
+    /// `move_wide_preferred` is the Arm ARM's test on the encoding; as a test on the value it is
+    /// "one MOVZ or one MOVN writes it", and the two agree on every encoding of either width.
+    #[test]
+    fn a_bitmask_immediate_is_a_move_exactly_when_no_single_wide_move_writes_it() {
+        fn bitmask(width: u32, n: u32, immr: u32, imms: u32) -> Option<u64> {
+            let combined = (n << 6) | (!imms & 0x3f);
+            if combined == 0 {
+                return None;
+            }
+            let len = 31 - combined.leading_zeros();
+            let (levels, esize) = ((1u32 << len) - 1, 1u32 << len);
+            let (s, r) = (imms & levels, immr & levels);
+            if len == 0 || s == levels || esize > width {
+                return None;
+            }
+            let ones = (1u128 << (s + 1)) - 1;
+            let rotated = ((ones >> r) | (ones << (esize - r))) & ((1u128 << esize) - 1);
+            let mut value = 0u128;
+            for at in (0..width).step_by(esize as usize) {
+                value |= rotated << at;
+            }
+            Some(value as u64)
+        }
+        let encodings = [(false, 32u32), (true, 64)]
+            .into_iter()
+            .flat_map(|(sf, width)| {
+                (0..=1).flat_map(move |n| {
+                    (0..64)
+                        .flat_map(move |immr| (0..64).map(move |imms| (sf, width, n, immr, imms)))
+                })
+            });
+        let mut checked = 0;
+        for (sf, width, n, immr, imms) in encodings {
+            let Some(value) = bitmask(width, n, immr, imms).filter(|_| sf || n == 0) else {
+                continue;
+            };
+            let halfwords: Vec<u64> = (0..width / 16)
+                .map(|i| (value >> (16 * i)) & 0xffff)
+                .collect();
+            let one = |wanted: &dyn Fn(u64) -> bool| {
+                halfwords.iter().filter(|h| wanted(**h)).count() == 1
+            };
+            let by_value = one(&|h| h != 0) || one(&|h| h != 0xffff);
+            assert_eq!(
+                move_wide_preferred(sf, n, immr, imms),
+                by_value,
+                "{sf} {n} {immr} {imms}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 5000, "{checked}");
     }
 
     #[test]
     fn a_displacement_carries_its_sign_into_the_span() {
-        let syntax = radare2("MOV", "EAX,dword ptr [RBP + -0x4]", 3, "x86-64");
+        let syntax = radare2("MOV", "EAX,dword ptr [RBP + -0x4]", 3, "x86-64", &[]);
         assert_eq!(syntax.body, "eax, dword [rbp - 0x4]");
         let spans: Vec<i128> = syntax.numbers.iter().map(|span| span.value).collect();
         assert_eq!(spans, vec![-4]);

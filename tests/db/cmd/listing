@@ -319,7 +319,7 @@ EXPECT=<<EOF
             0x100000458      01000014       b 0x10000045c
             0x10000045c      e80740b9       ldr w8, [sp, 0x4]
             0x100000460      080d0071       subs w8, w8, 0x3
-            0x100000464      22020054       b.cs 0x1000004a8
+            0x100000464      22020054       b.hs 0x1000004a8
             0x100000468      01000014       b 0x10000046c
             0x10000046c      e80740b9       ldr w8, [sp, 0x4]
             0x100000470      e90308aa       mov x9, x8
@@ -351,7 +351,7 @@ EXPECT=<<EOF
             0x100000458      01000014       b 0x10000045c
             0x10000045c      e80740b9       ldr w8, [sp, 0x4] ; loop: latches 0x100000498, exits 0x1000004a8 (certified) ; trips 0x4 (solved)
             0x100000460      080d0071       subs w8, w8, 0x3
-            0x100000464      22020054       b.cs 0x1000004a8
+            0x100000464      22020054       b.hs 0x1000004a8
             0x100000468      01000014       b 0x10000046c
             0x10000046c      e80740b9       ldr w8, [sp, 0x4] ; defines x8 in [0x0, 0x2] (solved)
             0x100000470      e90308aa       mov x9, x8 ; defines x9 in [0x0, 0x2] (solved)

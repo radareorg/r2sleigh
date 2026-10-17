@@ -2666,7 +2666,7 @@ impl Disassembler {
     pub fn decode(&self, bytes: &[u8], addr: u64, after: Option<Continuation>) -> Result<Decoded> {
         self.resume(addr, after)?;
         let (mnemonic, body, size) = self.native_parts(bytes, addr)?;
-        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name, bytes);
         syntax.registers = syntax::register_spans(&syntax.body, &self.spec.register_names);
         // The P-code is built from the parse just printed, and a finished build is what is known to commit its context.
         let pcode = self.pcode(bytes, addr);
