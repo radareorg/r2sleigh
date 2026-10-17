@@ -44,6 +44,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Stated {
         let container = inputs.source.container();
         let linkage = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let imports = &linkage.stubs;
+        let unnamed = &linkage.unnamed;
         // A frame begins a function (ROADMAP I) unless it is linkage code; one entered mid-function
         // is part of the function that jumps to it, though a function symbol there still begins one.
         let frames = (container.unwind.frames())
@@ -51,7 +52,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Stated {
             .filter(|frame| !linkage.holds(frame.start))
             .filter(|frame| {
                 let covered = frame.start..frame.end.max(frame.start + 1);
-                imports.range(covered).next().is_none()
+                imports.range(covered.clone()).next().is_none()
+                    && unnamed.range(covered).next().is_none()
             })
             .map(|frame| (frame.start, inputs.stated_thumb(frame.start)));
         let stated = (container.entries.iter())
@@ -61,7 +63,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Stated {
                     .filter(|symbol| symbol.defined && begins_a_function(inputs, symbol))
                     .map(|symbol| (symbol.vaddr, symbol.thumb)),
             )
-            .chain(imports.keys().map(|vaddr| (*vaddr, false)))
+            .chain(
+                imports
+                    .keys()
+                    .chain(unnamed.keys())
+                    .map(|vaddr| (*vaddr, false)),
+            )
             .chain(frames);
         let mut starts = StatedStarts::default();
         // The first statement at an address decides its instruction set.

@@ -303,11 +303,20 @@ pub struct Stub {
     pub size: u64,
 }
 
+/// One stub's cell in a section of them: the import it stands for where its slot binds one.
+struct Cell {
+    symbol: Option<String>,
+    size: u64,
+}
+
 /// The program's linkage code: which stub stands for which import, and every section that holds
 /// only linkage code, named stubs or not (x86's `.plt` with its resolver and lazy entries).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Linkage {
     pub stubs: BTreeMap<u64, Stub>,
+    /// Stubs that transfer through a slot the loader fills with no import (a definition of this
+    /// image, a resolver's result), by start and size: function starts that name no import.
+    pub unnamed: BTreeMap<u64, u64>,
     /// Each section of linkage code, as `(start, end)`, in address order.
     pub sections: Vec<(u64, u64)>,
 }
@@ -360,6 +369,7 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         sections.sort_unstable();
         return Linkage {
             stubs: named,
+            unnamed: BTreeMap::new(),
             sections,
         };
     }
@@ -375,18 +385,24 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         .filter(|section| image.file_backed(section.vaddr, 1) > 0)
         .filter(|section| !declared(section))
         .collect();
+    let mut unnamed = BTreeMap::new();
     for section in decoded {
-        let Some(stubs) = section_stubs(source, decoder, section, &slots, alignment) else {
+        let Some(cells) = section_stubs(source, decoder, section, &slots, alignment) else {
             continue;
         };
         sections.push(section.range());
-        for (start, stub) in stubs {
-            named.entry(start).or_insert(stub);
+        for (start, Cell { symbol, size }) in cells {
+            match symbol {
+                Some(symbol) => _ = named.entry(start).or_insert(Stub { symbol, size }),
+                None => _ = unnamed.entry(start).or_insert(size),
+            }
         }
     }
     sections.sort_unstable();
+    unnamed.retain(|start, _| !named.contains_key(start));
     Linkage {
         stubs: named,
+        unnamed,
         sections,
     }
 }
@@ -418,16 +434,16 @@ fn section_stubs(
     section: &Section,
     slots: &BTreeMap<u64, &str>,
     alignment: u32,
-) -> Option<Vec<(u64, Stub)>> {
+) -> Option<Vec<(u64, Cell)>> {
     let container = source.container();
     // Where each stub reads the slot the loader fills. A stub is a run of
     // instructions ending in its transfer, and which slot that transfer reads
     // is one question with one answer: the reaching-origin pass the engine
     // asks when it correlates the site. x86 loads the slot directly and ARM
     // computes its address across three instructions; both answer here.
-    // Each reader: where its transfer is, where its run began, and the import.
-    let mut readers: Vec<(u64, u64, String)> = Vec::new();
-    // Where every stub transfers through a slot the container states, named or not: the cells' measure.
+    // Each reader: where its transfer is, where its run began, and the import where its slot binds one.
+    let mut readers: Vec<(u64, u64, Option<String>)> = Vec::new();
+    // Where every stub transfers through a slot the container states: the cells' measure.
     let mut transfers: Vec<u64> = Vec::new();
     // Whether any run left as linkage code leaves: through a loader word or within the section.
     let mut left = false;
@@ -535,12 +551,11 @@ fn section_stubs(
                         | r2abi::statement::WriteKind::NotAnAddress
                 )
             });
-        if stated || slot.is_some_and(|slot| slots.contains_key(&slot)) {
+        let import = slot.and_then(|slot| slots.get(&slot));
+        if stated || import.is_some() {
             transfers.push(leaving_at);
-        }
-        if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
             let start = stub_start(&run, &starts, section.align);
-            readers.push((leaving_at, start, (*found).to_owned()));
+            readers.push((leaving_at, start, import.map(|found| (*found).to_owned())));
             runs.push(run.addr);
         }
         run = fresh_run(pc);
@@ -592,7 +607,11 @@ fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
 /// anchors every cell without deciding what a landing pad or an alignment
 /// nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
 /// twenty-byte header alike.
-fn cells(readers: Vec<(u64, u64, String)>, transfers: &[u64], end: u64) -> Vec<(u64, Stub)> {
+fn cells(
+    readers: Vec<(u64, u64, Option<String>)>,
+    transfers: &[u64],
+    end: u64,
+) -> Vec<(u64, Cell)> {
     // The cell size is the gcd of the gaps between every stub's transfer: measured over the named
     // ones alone, unnamed cells spaced evenly between them would make it a multiple of the cell.
     let stride = transfers
@@ -602,7 +621,7 @@ fn cells(readers: Vec<(u64, u64, String)>, transfers: &[u64], end: u64) -> Vec<(
     match readers.as_slice() {
         // One stub has no neighbour to measure against: its cell runs from where it starts to the section's end, which anchors every cell.
         [(_, start, symbol)] => {
-            let stub = Stub {
+            let stub = Cell {
                 symbol: symbol.clone(),
                 size: end.saturating_sub(*start),
             };
@@ -620,7 +639,7 @@ fn cells(readers: Vec<(u64, u64, String)>, transfers: &[u64], end: u64) -> Vec<(
                 .checked_sub(transfer)?
                 .div_ceil(stride)
                 .checked_mul(stride)?;
-            let stub = Stub {
+            let stub = Cell {
                 symbol,
                 size: stride,
             };
@@ -780,7 +799,8 @@ mod tests {
     /// libz's `.plt.sec`: stubs whose slots bind to symbols libz defines name no import, and leave gaps.
     #[test]
     fn a_stub_is_the_cell_its_own_transfer_lies_in() {
-        let reader = |transfer: u64, symbol: &str| (transfer, transfer - 4, symbol.to_owned());
+        let reader =
+            |transfer: u64, symbol: &str| (transfer, transfer - 4, Some(symbol.to_owned()));
         let named = cells(
             vec![
                 reader(0x3404, "free"),
@@ -794,7 +814,7 @@ mod tests {
             named
                 .iter()
                 .find(|(start, _)| *start == vaddr)
-                .map(|(_, stub)| (stub.symbol.as_str(), stub.size))
+                .map(|(_, stub)| (stub.symbol.as_deref().unwrap_or(""), stub.size))
         };
         assert_eq!(named.len(), 3);
         assert_eq!(at(0x3400), Some(("free", 16)));
@@ -805,7 +825,8 @@ mod tests {
     /// Named stubs two cells apart with an unnamed one between: the cell is the unnamed one's measure too.
     #[test]
     fn a_cell_is_measured_by_every_stub_named_or_not() {
-        let reader = |transfer: u64, symbol: &str| (transfer, transfer - 4, symbol.to_owned());
+        let reader =
+            |transfer: u64, symbol: &str| (transfer, transfer - 4, Some(symbol.to_owned()));
         let named = cells(
             vec![reader(0x3404, "free"), reader(0x3424, "memset")],
             &[0x3404, 0x3414, 0x3424],
@@ -813,9 +834,37 @@ mod tests {
         );
         let sizes = named
             .iter()
-            .map(|(start, stub)| (*start, stub.symbol.as_str(), stub.size))
+            .map(|(start, stub)| (*start, stub.symbol.as_deref().unwrap_or(""), stub.size))
             .collect::<Vec<_>>();
         assert_eq!(sizes, [(0x3400, "free", 16), (0x3420, "memset", 16)]);
+    }
+
+    /// libc's `.plt.sec`: a stub whose slot binds no import (IRELATIVE, a local definition) is still a cell.
+    #[test]
+    fn a_stub_whose_slot_binds_no_import_is_a_cell_without_a_name() {
+        let reads = |transfer: u64, symbol: Option<&str>| {
+            (transfer, transfer - 4, symbol.map(str::to_owned))
+        };
+        let cells = cells(
+            vec![
+                reads(0x3404, Some("free")),
+                reads(0x3414, None),
+                reads(0x3424, None),
+            ],
+            &[0x3404, 0x3414, 0x3424],
+            0x3430,
+        );
+        let seen = (cells.iter())
+            .map(|(start, cell)| (*start, cell.symbol.as_deref(), cell.size))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            seen,
+            [
+                (0x3400, Some("free"), 16),
+                (0x3410, None, 16),
+                (0x3420, None, 16)
+            ]
+        );
     }
 
     #[test]
