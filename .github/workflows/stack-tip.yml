@@ -1,0 +1,55 @@
+name: Stack tip
+
+# The PR no other open PR is stacked on carries `full-ci`, so it runs both tiers (ROADMAP D43).
+# Fork events skip: their token is read-only, and the next in-repo event converges the labels.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, closed]
+  workflow_dispatch:
+
+# Write access lives in this workflow alone; `ci.yml` stays read-only.
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+
+# One run at a time, none cancelled: each run labels from the whole open list, so order cannot diverge.
+concurrency:
+  group: stack-tip
+  cancel-in-progress: false
+
+jobs:
+  label:
+    name: Label the stack tips
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Plan from every open PR
+        env:
+          TRUNK: ${{ github.event.repository.default_branch }}
+        run: |
+          gh pr list --state open --limit 500 \
+            --json number,headRefName,baseRefName,labels,isCrossRepository \
+            --jq '[.[] | {number, head: .headRefName, base: .baseRefName, cross: .isCrossRepository, labels: [.labels[].name]}]' \
+            > "$RUNNER_TEMP/prs.json"
+          python3 scripts/stack_tip.py "$RUNNER_TEMP/prs.json" --trunk "$TRUNK" \
+            > "$RUNNER_TEMP/plan.json"
+          cat "$RUNNER_TEMP/plan.json"
+      # A label added with this token starts no workflow, so a new tip is also dispatched to ci.yml,
+      # whose `plan` runs everything for any event but a pull request.
+      - name: Apply it
+        run: |
+          set -eu
+          for n in $(jq -r '.unlabel[]' "$RUNNER_TEMP/plan.json"); do
+            gh pr edit "$n" --remove-label full-ci
+          done
+          for n in $(jq -r '.label[]' "$RUNNER_TEMP/plan.json"); do
+            gh pr edit "$n" --add-label full-ci
+            head=$(jq -r --argjson n "$n" '.[] | select(.number == $n) | .head' "$RUNNER_TEMP/prs.json")
+            gh workflow run ci.yml --ref "$head"
+          done

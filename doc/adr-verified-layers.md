@@ -1,6 +1,6 @@
 # ADR: every layer verified, and the root causes behind 2026-10's defects
 
-Status: accepted (2026-10-15); D34 to D39 and D41 in [ROADMAP](../ROADMAP.md)
+Status: accepted (2026-10-15); D34 to D39 and D41 in [ROADMAP](../ROADMAP.md); D43 to D45 added 2026-10-17
 
 ## Context
 
@@ -43,6 +43,9 @@ structural decisions that close each gap.
 | Rendered C | the function's behaviour | equivalence on x86-64 and aarch64; a loop runs on the single-threaded path only, so `tests/gold/loop_carried.c` forces a second pass where a conditional write carries the value | present |
 | Cost | time to render | retired instructions natively with a counter (D38); wall time elsewhere, which **depends on host load** | present natively on request; emulated open |
 | Upstream pins | Ghidra, testbins, radare2 releases | **none**: the drift was found by hand (D39) | missing |
+| Gates themselves (`ci.yml`) | that each gate grades every change | `plan` runs coverage, timing, equivalence and the ratchets only for a PR based on master or labelled `full-ci`, so a stacked PR never ran them: #264 turned the coverage job red on master's push and nobody saw it; `tests/gold/atomics.c` and `loop_carried.c` (72 baseline records) sat in no equivalence shard until #293 | shard coverage checked by `scripts/check_shards.py` (D43); stack tip labelled by `stack-tip.yml`, **unproven on GitHub** until the first merged stack |
+| Oracle breadth | how much of a spec the CPU oracle has seen | x86-64: 387 cases over 117 mnemonic stems of the 1,513 the spec defines (7.7%); AArch64: 489 recorded cases over 783 mnemonics; MIPS, RISC-V and ARM32 none. A resync (GP-6767) swapped the `SHR` arms and only the oracle's 385 cases saw it | **missing**: no ratchet on the fraction (D44) |
+| Provers (`tail_count`, `save_area`, the boundary scrub) | that an accepted proof is sound | adversarial tests written by hand; `quality-gate.sh` runs `cargo mutants` for `r2ssa/src/var.rs` alone. The variadic prover accepted a cursor read after its step (found by a hand-written test, not by any gate) | **missing**: no mutation target on a prover (D45) |
 
 ## Decisions
 
@@ -273,9 +276,62 @@ r2engine reads it.
   refuted by five files (`AARCH64.ldefs`, `.opinion`, `_swift.cspec`,
   `_win.cspec`, `AppleSilicon.ldefs`) that are older than `918acd744d`.
 
+**D43. Every gate runs at the tip of a stack, and every baseline source is
+graded.** Owner: GT.
+- `plan` already has a `full-ci` label that runs the master-only jobs for a stacked
+  PR. The tip of a stack carries it automatically: a workflow step labels the PR
+  whose head no other open PR names as its base, and removes the label from the
+  PR that stops being the tip.
+- `scripts/check_shards.py` fails when a source named in `tests/equiv/baseline*.json`
+  is in no `ci.yml` equivalence shard list, or a shard lists a source with no
+  baseline record. It is a cheap job on every PR, stacked or not.
+- Gate: a PR that adds a gold source to a baseline and to no shard fails
+  (the `atomics.c` miss of #292, reproduced as a test); a stacked tip runs
+  coverage and timing (the #264 miss).
+- Tip labelling (`.github/workflows/stack-tip.yml`, `scripts/stack_tip.py`). A tip is
+  an open PR, not based on master, whose head no other open PR names as its base; a PR
+  whose base was merged and deleted is a tip too. The script plans from every open PR
+  (`gh pr list --limit 500`), so each run is idempotent and runs are serialised.
+  It labels tips lacking `full-ci` and unlabels non-tips carrying it, so a hand-made
+  `full-ci` on a mid-stack PR is removed on the next event; use `workflow_dispatch` of
+  `ci.yml` (which `plan` runs in full) for a one-off. PRs based on master are untouched.
+- Why `pull_request` with a same-repo guard, not `pull_request_target`: the workflow runs
+  the PR's own checkout, and only in-repo branches get a write token, so no fork code
+  ever runs with one. Fork PRs are not labelled until an in-repo event follows.
+- A label added with `GITHUB_TOKEN` starts no workflow, so `labeled` is not in `ci.yml`'s
+  trigger list (`ci-on-request.yml` already handles a human's label, and a second
+  listener would run the full tier twice). The workflow dispatches `ci.yml` on the new
+  tip's branch instead; later pushes see the label in `plan`. There is no ping-pong: the
+  label starts nothing, and a second run plans no change.
+
+**D44. The oracle's breadth is ratcheted.** Owner: VC, with GT.
+- `scripts/oracle_breadth.py` counts the instruction constructors (mnemonics) each
+  vendored specification defines and those with at least one recorded oracle case,
+  per processor, and prints the uncovered list sorted by how often a compiler
+  emits them (the reference bench's and the corpus' `ao` counts).
+- The count of uncovered mnemonics may fall and never rise; a spec resync that
+  adds constructors lowers the covered fraction and so fails until cases are
+  added. The first target is x86-64 from 7.7% to every mnemonic the corpus emits,
+  then AArch64 to 100% by name. MIPS, RISC-V and ARM32 stay refused (D32) and are
+  listed as zero.
+- Gate: CI fails when the uncovered count rises; the baseline moves by a bless
+  commit only down.
+
+**D45. A prover has a mutation target and an adversarial table.** Owner: r2ssa.
+- Each prover (`tail_count`, `save_area`, the stack-guard scrub, `result_calls`,
+  the cycle fixpoint) lists its acceptance rules in its ADR section and carries
+  one test per rule that mutates the rule's input so it must be refused (the
+  table in `crates/r2engine/tests/engine/variadic.rs` is the model).
+- `quality-gate.sh` runs `cargo mutants` over each prover's file, and a surviving
+  mutant is either killed by a new test or listed with a reason in
+  `mutants-allow.toml`. The variadic prover's read-after-step hole is the mutant
+  that must die.
+- Gate: no unlisted surviving mutant in the prover files.
+
 ## Order
 
-The six decisions slot into ROADMAP's order. D35 and D34 come after LS's
+The decisions slot into ROADMAP's order. D35 and D34 come after LS's
 typed atomic read-modify-write and before AO's spec follow-ups ship further x86
 fixes. D36 is done. D37 is P7's next item. D38 and D39 are
 GT's, beside the path whenever a step waits on CI.
+D43 comes first: it is a CI file and a script, and every later item is graded by it. D44 and D45 are VC's and r2ssa's, beside the path; D44's x86-64 target runs on contabo.
