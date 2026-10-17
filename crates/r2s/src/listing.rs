@@ -289,10 +289,25 @@ fn claimed_address(line: &r2engine::query::Line, number: r2engine::NumberSpan) -
 /// address; all this program states is that the word there is that address
 /// now, and the instruction text stays what the machine encodes.
 fn held(session: &Session, line: &r2engine::query::Line) -> String {
+    let indirect = line.annotations.iter().any(|annotation| {
+        matches!(
+            annotation.kind,
+            r2engine::query::AnnotationKind::Call { callee: None, .. }
+        )
+    });
     line.annotations
         .iter()
         .filter_map(|annotation| {
-            let said = note(session, line.address, &annotation.kind)?;
+            let said = match annotation.kind {
+                // An indirect call's target a table it reads holds: no operand of the instruction names it.
+                r2engine::query::AnnotationKind::Target {
+                    address,
+                    call: true,
+                } if indirect => {
+                    format!("calls {address:#x}{}", named(session, address))
+                }
+                _ => note(session, line.address, &annotation.kind)?,
+            };
             Some(format!(" ; {said} ({})", rung(annotation.support)))
         })
         .collect()

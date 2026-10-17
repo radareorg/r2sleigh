@@ -1511,6 +1511,8 @@ pub enum GapCallee {
     Named(String),
     /// A direct target no name covers.
     Address(u64),
+    /// A target computed at run time, among these functions a stated table holds (P5).
+    OneOf(Vec<u64>),
     /// A target computed at run time.
     Indirect,
 }
@@ -1520,6 +1522,10 @@ impl std::fmt::Display for GapCallee {
         match self {
             Self::Named(name) => f.write_str(name),
             Self::Address(addr) => write!(f, "{addr:#x}"),
+            Self::OneOf(targets) => {
+                let spelled = targets.iter().map(|target| format!("{target:#x}"));
+                write!(f, "one of {}", spelled.collect::<Vec<_>>().join(", "))
+            }
             Self::Indirect => f.write_str("an indirect target"),
         }
     }

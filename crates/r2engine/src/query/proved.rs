@@ -74,6 +74,14 @@ impl Anchored {
                 uncounted,
             };
             self.push(line, kind, support);
+            // The functions a stated table lets an indirect call reach: a call to each, solved from the index range.
+            for target in call.table_targets.iter().flatten() {
+                let kind = AnnotationKind::Target {
+                    address: *target,
+                    call: true,
+                };
+                self.push(line, kind, Basis::Solved);
+            }
             if !proven {
                 continue;
             }

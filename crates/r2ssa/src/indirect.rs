@@ -122,6 +122,8 @@ impl IndexChain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTableRead {
     pub block_addr: u64,
+    /// Whether control comes back from the transfer: a call through the table, not a jump.
+    pub call: bool,
     /// The instruction that makes the transfer, where the lift recorded it.
     /// What the body walk is keyed by, so it can be told where to continue.
     pub instruction: Option<u64>,
@@ -354,11 +356,14 @@ fn dispatch_load<'a>(
 fn dispatch_table_read(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
-    block_addr: u64,
+    induction: &dyn Fn(ValueId) -> Option<crate::StridedInterval>,
     inst: InstId,
     op: &SSAOp<ValueId>,
 ) -> Option<DispatchTableRead> {
-    let OpTransfer { instruction, .. } = indirect_transfer(op)?;
+    let block_addr = graph.block(graph.inst(inst)?.block)?.addr;
+    let OpTransfer {
+        instruction, call, ..
+    } = indirect_transfer(op)?;
     // What stopped a dispatch resolving is the one thing worth saying about
     // it: either the target is not read out of memory, or what it reads is
     // not a bounded walk of one table.
@@ -373,9 +378,16 @@ fn dispatch_table_read(
     let InstPayload::Op(SSAOp::Load { dst, .. }) = &load_inst.payload else {
         return None;
     };
-    let reach = values
+    let mut reach = values
         .get(address)
         .unwrap_or_else(|| crate::StridedInterval::top(64));
+    // A bottom-tested loop's counter is no interval to the branch assumptions, which stop at the
+    // header merge; the loop's certified trip count is what bounds it.
+    if reach.count().is_none()
+        && let Some(induced) = induced_reach(graph, values, induction, address)
+    {
+        reach = induced;
+    }
     let (Some((base, last)), Some(stride)) = (reach.bounds(), reach.stride()) else {
         evidence(&format!("the address {address:?} reaches only {reach:?}"));
         return None;
@@ -385,7 +397,7 @@ fn dispatch_table_read(
     // neither is a table walk.
     if u64::from(graph.var(*dst).size) != stride {
         evidence(&format!(
-            "it steps by {stride} and reads {} bytes",
+            "it steps by {stride} and reads {} bytes: {reach:?}",
             graph.var(*dst).size
         ));
         return None;
@@ -420,6 +432,7 @@ fn dispatch_table_read(
     );
     Some(DispatchTableRead {
         block_addr,
+        call,
         instruction,
         address: base,
         stride,
@@ -429,6 +442,63 @@ fn dispatch_table_read(
         selector,
         indexing,
     })
+}
+
+/// The addresses a read can reach when its selector is a loop counter with a certified range:
+/// the counter's values put through the index arithmetic, none of which may wrap.
+fn induced_reach(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    induction: &dyn Fn(ValueId) -> Option<crate::StridedInterval>,
+    address: ValueId,
+) -> Option<crate::StridedInterval> {
+    let (selector, indexing) = selector_of(graph, values, address);
+    let indexing = indexing?;
+    let Some(counter) = induction(selector) else {
+        r2il::refusal_evidence!(
+            "dispatch-table",
+            "selector {selector:?} has no certified range"
+        );
+        return None;
+    };
+    let ((low, high), stride) = (counter.bounds()?, counter.stride()?);
+    // A narrower counter is widened by a sign or zero extension the walk does not tell apart.
+    if counter.width_bits() < 64 && high >> (counter.width_bits() - 1) != 0 {
+        return None;
+    }
+    let place = |index: u64| {
+        u128::from(indexing.scale)
+            .checked_mul(u128::from(index))?
+            .checked_add(u128::from(indexing.displacement))
+            .and_then(|address| u64::try_from(address).ok())
+    };
+    let steps = u128::from(indexing.scale).checked_mul(u128::from(stride))?;
+    Some(crate::StridedInterval::strided(
+        64,
+        u64::try_from(steps).ok()?,
+        place(low)?,
+        place(high)?,
+    ))
+}
+
+/// The functions a call through a table can reach: complete (every selected entry recorded) or absent,
+/// sorted and distinct (doc/adr-resolved-bodies.md, "Calls through a table").
+pub(crate) fn call_table_targets(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    structured: &crate::semantic::StructuredDataflowFacts,
+    context: &crate::SourceMachineContext,
+    inst: InstId,
+) -> Option<Box<[u64]>> {
+    let op = graph.op(inst)?;
+    let induction = |phi| structured.induction_range(phi, values);
+    let read = dispatch_table_read(graph, values, &induction, inst, op).filter(|read| read.call)?;
+    let mut targets = std::collections::BTreeSet::new();
+    // Ends at the first entry nothing recorded, so it is bounded by the recorded entries.
+    for k in 0..read.count {
+        targets.insert(context.code_pointer_entry(read.entry_address(k)?)?);
+    }
+    Some(targets.into_iter().collect())
 }
 
 /// What each dispatching block switches on.
@@ -456,11 +526,12 @@ pub(crate) fn dispatch_selectors(
 fn dispatch_table_reads_in_graph(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
+    induction: &dyn Fn(ValueId) -> Option<crate::StridedInterval>,
 ) -> Vec<DispatchTableRead> {
     (graph.blocks.iter())
         .flat_map(|block| {
             graph.op_insts(block.id).iter().filter_map(|inst| {
-                dispatch_table_read(graph, values, block.addr, *inst, graph.op(*inst)?)
+                dispatch_table_read(graph, values, induction, *inst, graph.op(*inst)?)
             })
         })
         .collect()
@@ -476,7 +547,7 @@ pub(crate) fn prepared_dispatch_table_reads(
     let prep = Some(prep);
     let predicates = crate::semantic::collect_predicate_facts(function, prep, graph);
     let values = crate::values::solve_value_ranges(graph, function, prep, &predicates);
-    dispatch_table_reads_in_graph(graph, &values)
+    dispatch_table_reads_in_graph(graph, &values, &|_| None)
 }
 
 /// Where every dispatch in one function reads its target.
@@ -484,7 +555,9 @@ pub(crate) fn prepared_dispatch_table_reads(
 /// Answered without any table in hand, which is how the native route learns
 /// which memory it has to read before it can resolve anything.
 pub fn dispatch_table_reads(artifact: &SsaArtifact) -> Vec<DispatchTableRead> {
-    dispatch_table_reads_in_graph(artifact.graph(), &artifact.facts().values)
+    let values = &artifact.facts().values;
+    let induction = |phi| artifact.structured().induction_range(phi, values);
+    dispatch_table_reads_in_graph(artifact.graph(), values, &induction)
 }
 
 #[cfg(test)]
@@ -507,7 +580,7 @@ mod tests {
         // solves for that exactly as the analysis phase does.
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
         let values = crate::values::solve_value_ranges(&graph, &function, None, &predicates);
-        dispatch_table_reads_in_graph(&graph, &values)
+        dispatch_table_reads_in_graph(&graph, &values, &|_| None)
     }
 
     /// The graph for a straight guard: entry dominates both arms.

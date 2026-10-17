@@ -1439,6 +1439,60 @@ pub struct StructuredDataflowFacts {
 }
 
 impl StructuredDataflowFacts {
+    /// Every value a loop's header merge takes, where its loop runs a certified number of times
+    /// from a constant start by a constant step without wrapping; `None` otherwise. O(log n).
+    pub fn induction_range(
+        &self,
+        phi: ValueId,
+        values: &crate::values::ValueRanges,
+    ) -> Option<crate::StridedInterval> {
+        let evidence = |why: &str| {
+            r2il::refusal_evidence!("induction-range", "{phi:?}: {why}");
+        };
+        let Some(fact) = self.inductions.get(phi) else {
+            evidence("no certified induction");
+            return None;
+        };
+        let trips = match &self.loops.get(&fact.loop_id)?.trips {
+            Ok(trips) => trips,
+            Err(refusal) => {
+                evidence(&format!("no run count: {refusal:?}"));
+                return None;
+            }
+        };
+        let TripCount::Exact(runs) = trips.count else {
+            evidence("the loop's count is symbolic");
+            return None;
+        };
+        let Some(start) = values.get(fact.init).and_then(|init| init.as_constant()) else {
+            evidence("the induction starts at no constant");
+            return None;
+        };
+        let width = fact.width_bits;
+        let mask = u128::MAX >> (128 - width.clamp(1, 64));
+        let reach = |step: u64, up: bool| {
+            let travelled = u128::from(step).checked_mul(u128::from(runs.checked_sub(1)?))?;
+            let end = match up {
+                true => u128::from(start).checked_add(travelled)?,
+                false => u128::from(start).checked_sub(travelled)?,
+            };
+            // A wrap makes the header's values no interval of the start and the step.
+            (end <= mask).then_some(end as u64)
+        };
+        let (step, end, up) = match fact.step {
+            InductionStep::AddConst(step) => (step, reach(step, true)?, true),
+            InductionStep::SubConst(step) => (step, reach(step, false)?, false),
+            InductionStep::Affine { .. } => return None,
+        };
+        let (low, high) = if up { (start, end) } else { (end, start) };
+        Some(crate::StridedInterval::strided(
+            width,
+            step.max(1),
+            low,
+            high,
+        ))
+    }
+
     /// The memory accesses one instruction makes, by ordinal: a range of the map, `O(log n)`.
     pub fn accesses_at(&self, inst: InstId) -> impl Iterator<Item = &StructuredMemoryAccessFact> {
         let from = StructuredAccessId { inst, ordinal: 0 };

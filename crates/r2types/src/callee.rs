@@ -135,6 +135,8 @@ pub struct CalleeResolutionFacts {
     pub by_direct_addr: BTreeMap<u64, CalleeIdentityKey>,
     pub by_callsite: IdMap<InstId, CalleeIdentityKey>,
     pub by_name: BTreeMap<String, CalleeIdentityKey>,
+    /// Where an indirect call through a stated table can go: sorted, and no one callee's identity.
+    pub table_targets: IdMap<InstId, Box<[u64]>>,
 }
 
 fn import_policy_authorized_from_evidence(class: CalleeClass, has_import_linkage: bool) -> bool {
@@ -147,6 +149,12 @@ impl CalleeResolutionFacts {
             && self.by_direct_addr.is_empty()
             && self.by_callsite.is_empty()
             && self.by_name.is_empty()
+            && self.table_targets.is_empty()
+    }
+
+    /// The functions the indirect call at `callsite` can reach, where a table states them.
+    pub fn targets_for_callsite(&self, callsite: InstId) -> Option<&[u64]> {
+        self.table_targets.get(callsite).map(|targets| &targets[..])
     }
 
     pub fn from_direct_call_targets<I>(targets: I, ctx: &CalleeIdentityContext<'_>) -> Self

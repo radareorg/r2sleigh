@@ -281,6 +281,7 @@ impl RenderedFunctionJson {
                     callee: call_gap(residual).map(|call| match &call.callee {
                         r2dec::ast::GapCallee::Named(name) => name.clone(),
                         r2dec::ast::GapCallee::Address(addr) => format!("{addr:#x}"),
+                        callee @ r2dec::ast::GapCallee::OneOf(_) => callee.to_string(),
                         r2dec::ast::GapCallee::Indirect => "indirect".to_owned(),
                     }),
                     reason: call_gap(residual).map(|call| call.reason.tag()),

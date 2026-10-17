@@ -727,6 +727,23 @@ component proves. Components: Tarjan, O(V + E) over the owner edges.
   sets are shown equal over the AArch64 census and a gzdoom sample. Next,
   measured first.
 
+### Calls through a table (ROADMAP P5)
+
+A call is not a branch: its targets are callees, not successors, so a fetched call table never reaches
+`SwitchInfo` or `NativeBlock.switch`. After the root's first collected seal, one scan of its graph asks
+`r2ssa::indirect::dispatch_table_reads` for the reads that are calls. A read is a table of the container
+only where `pointer_table` accepts it (inside one region and the file, read-only or loader-stated, every
+entry an instruction), and the root is then sealed again with the fetched tables as `code_pointer_tables`.
+r2ssa states the set on the certificate (`CallsiteCertificate::table_targets`) only where every entry the
+certified range selects is a recorded code pointer: complete or absent. A bottom-tested loop's counter is
+no interval to the branch assumptions, which stop at the header merge, so a selector that is a certified
+induction (`StructuredDataflowFacts::induction_range`: a constant start and step, an exact run count, no wrap)
+takes the values its runs give. r2types projects the set to `CalleeResolutionFacts::table_targets`, r2dec
+names it in the gap (`one of ...`) and renders no C, and the listing claims `Target { call: true }` per
+entry. Cost: one O(insts) scan per root, one more preparation only for a root with a certified call table.
+Not done: the whole-program reference index reads the walk, which has no call tables, so `ax` does not list
+them; the walk needs a trigger for a call through a load that does not seal every vtable caller.
+
 ### Budget
 
 Resolution follows result demands only, so a request resolves what its

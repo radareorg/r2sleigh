@@ -307,8 +307,14 @@ pub(super) fn gap_callee(
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
     match identity.and_then(|identity| named(identity, direct)) {
         Some((name, _)) => GapCallee::Named(name),
-        None => (direct.or_else(|| identity.and_then(|identity| identity.target_addr)))
-            .map_or(GapCallee::Indirect, GapCallee::Address),
+        None => match direct.or_else(|| identity.and_then(|identity| identity.target_addr)) {
+            Some(address) => GapCallee::Address(address),
+            None => resolution
+                .and_then(|resolution| resolution.targets_for_callsite(inst))
+                .map_or(GapCallee::Indirect, |targets| {
+                    GapCallee::OneOf(targets.to_vec())
+                }),
+        },
     }
 }
 

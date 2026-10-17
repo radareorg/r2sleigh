@@ -489,6 +489,8 @@ pub struct Walk {
     /// Shared with each analysis of the body; the tables stay the walk's.
     root: std::sync::Arc<Walked>,
     tables: Vec<NativePointerTable>,
+    /// The tables the body's indirect calls read, fetched after its first preparation (P5).
+    calls: Vec<NativePointerTable>,
     /// Why the tables of a body that has dispatches were not read: the body is then the walk that follows none.
     refusal: Option<NativeRefusal>,
 }
@@ -499,6 +501,7 @@ impl Walk {
         Self {
             root: std::sync::Arc::new(root),
             tables: tables.read,
+            calls: Vec::new(),
             refusal: tables.refusal,
         }
     }
@@ -1235,6 +1238,7 @@ fn analyse(
 
     let reads = callers == crate::program::Callers::Read;
     let artifact = native.resolve(entry, walk, &callees, reads)?;
+    let artifact = native.with_call_tables(walk, &callees, reads, artifact)?;
     let tables = walk.tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1550,7 +1554,7 @@ impl<'a> Native<'a> {
         callees: &Callees,
         caller_reads: bool,
     ) -> Result<Resolution, NativeRefusal> {
-        let (root, tables) = (&walk.root, &walk.tables[..]);
+        let (root, tables, calls) = (&walk.root, &walk.tables[..], &walk.calls[..]);
         // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
@@ -1558,14 +1562,14 @@ impl<'a> Native<'a> {
         let seal_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
             (false, true) => {
                 let restatement = Restatement::default();
-                self.seal(root, callees, Vec::new(), restatement, &[], reads)
+                self.seal(root, callees, Vec::new(), restatement, (&[], calls), reads)
             }
             _ => self.seal(
                 root,
                 callees,
                 Vec::new(),
                 declared_root.clone(),
-                tables,
+                (tables, calls),
                 reads,
             ),
         };
@@ -1607,7 +1611,7 @@ impl<'a> Native<'a> {
                     signature: declared_root.signature,
                     slot_names: declared_root.slot_names,
                 };
-                let seal = self.seal(root, callees, folded, restatement, tables, reads)?;
+                let seal = self.seal(root, callees, folded, restatement, (tables, calls), reads)?;
                 self.collected(seal)?
             }
         };
@@ -1642,7 +1646,7 @@ impl<'a> Native<'a> {
         let read = crate::isolation::isolated(|| self.dispatch_reads(root, &imports, restatement));
         match read {
             Ok(Ok(reads)) => Tables {
-                read: self.pointer_tables(&reads),
+                read: self.pointer_tables(reads.iter().filter(|read| !read.call)),
                 refusal: None,
             },
             Ok(Err(refusal)) => Tables::refused(refusal),
@@ -1711,21 +1715,43 @@ impl<'a> Native<'a> {
     /// object: an address in the middle of it that is not an instruction says
     /// the read was not a table walk, and half a table would be a guess about
     /// control flow, which is the one thing worse than an unresolved branch.
-    fn pointer_tables(
+    fn pointer_tables<'r>(
         &self,
-        reads: &[r2ssa::indirect::DispatchTableRead],
+        reads: impl Iterator<Item = &'r r2ssa::indirect::DispatchTableRead>,
     ) -> Vec<NativePointerTable> {
-        let tables = reads
-            .iter()
-            .filter_map(|read| self.pointer_table(read))
-            .collect::<Vec<_>>();
+        let (mut asked, mut tables) = (0, Vec::new());
+        for read in reads {
+            asked += 1;
+            tables.extend(self.pointer_table(read));
+        }
         r2il::refusal_evidence!(
             "dispatch-table",
-            "{} of {} dispatch reads fetched",
-            tables.len(),
-            reads.len()
+            "{} of {asked} dispatch reads fetched",
+            tables.len()
         );
         tables
+    }
+
+    /// The artifact prepared again with the tables its indirect calls read, if any (P5): one graph
+    /// scan, and a second preparation only for a body with a fetched table.
+    fn with_call_tables(
+        &self,
+        walk: &Walk,
+        callees: &Callees,
+        caller_reads: bool,
+        artifact: Resolution,
+    ) -> Result<Resolution, NativeRefusal> {
+        let reads = r2ssa::indirect::dispatch_table_reads(artifact.shared_artifact().as_ref());
+        let calls = self.pointer_tables(reads.iter().filter(|read| read.call));
+        if calls.is_empty() {
+            return Ok(artifact);
+        }
+        drop(artifact);
+        let walk = Walk {
+            calls,
+            ..walk.clone()
+        };
+        self.resolve(walk.root.body.entry, &walk, callees, caller_reads)
     }
 
     /// Where each of a table's `count` entries sends the dispatch: the value
@@ -1933,13 +1959,14 @@ impl<'a> Native<'a> {
         callees: &Callees,
         extra_literals: Vec<(u64, String)>,
         restatement: Restatement,
-        tables: &[NativePointerTable],
+        (tables, calls): (&[NativePointerTable], &[NativePointerTable]),
         result_reads: Option<r2source::SourceResultReads>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
             restatement,
             tables,
+            calls,
             result_reads,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
@@ -1987,6 +2014,7 @@ impl<'a> Native<'a> {
             extra_literals: Vec::new(),
             restatement,
             tables: &[],
+            calls: &[],
             result_reads: None,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
@@ -2019,6 +2047,7 @@ impl<'a> Native<'a> {
             extra_literals,
             restatement,
             tables,
+            calls: call_tables,
             result_reads,
         } = capture;
         let Restatement {
@@ -2081,7 +2110,9 @@ impl<'a> Native<'a> {
             },
             read_only: self.read_only(&walked.body),
             data_symbols: self.data_symbols(&walked.body),
-            code_pointer_tables: tables.iter().map(|table| table.table.clone()).collect(),
+            code_pointer_tables: (tables.iter().chain(call_tables))
+                .map(|table| table.table.clone())
+                .collect(),
             parameter_names: declared_parameter_names(signature.as_ref(), arity),
             // A name has to land on a slot the interface carries, and which
             // slots survive is decided by what the body proved, so the names
@@ -2112,11 +2143,12 @@ impl<'a> Native<'a> {
 }
 
 /// What a capture states beyond the walked body: literals folded since, a restatement, the tables
-/// its dispatches read, and what callers read of its result.
+/// its dispatches and its indirect calls read, and what callers read of its result.
 struct Capture<'t> {
     extra_literals: Vec<(u64, String)>,
     restatement: Restatement,
     tables: &'t [NativePointerTable],
+    calls: &'t [NativePointerTable],
     result_reads: Option<r2source::SourceResultReads>,
 }
 

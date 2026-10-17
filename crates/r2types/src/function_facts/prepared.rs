@@ -1186,7 +1186,7 @@ pub(crate) fn prepared_callee_resolution_facts(
         known_function_signatures: &known_function_signatures,
     };
 
-    CalleeResolutionFacts::from_direct_call_targets(
+    let mut resolution = CalleeResolutionFacts::from_direct_call_targets(
         prepared
             .call_sites()
             .by_id
@@ -1196,7 +1196,13 @@ pub(crate) fn prepared_callee_resolution_facts(
                 Some((call_site.at, direct_target))
             }),
         &ctx,
-    )
+    );
+    for cert in prepared.certificates().callsites.values() {
+        if let Some(targets) = &cert.table_targets {
+            resolution.table_targets.insert(cert.at, targets.clone());
+        }
+    }
+    resolution
 }
 
 pub(crate) fn prepared_callsite_argument_facts(

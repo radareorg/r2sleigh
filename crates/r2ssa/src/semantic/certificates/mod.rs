@@ -310,6 +310,9 @@ pub struct CallsiteCertificate {
     pub at: InstId,
     pub target: ValueId,
     pub direct_target: Option<u64>,
+    /// Where an indirect call through a stated table can go, from the entries its certified index
+    /// selects; absent unless every one is stated (P5).
+    pub table_targets: Option<Box<[u64]>>,
     pub fallthrough: Option<u64>,
     pub transfer: CallSiteTransfer,
     /// Who the site calls, as the source's symbol or relocation said; import
@@ -1204,6 +1207,16 @@ pub(crate) fn collect_prepared_function_certificates(
                     at: fact.at,
                     target: fact.target,
                     direct_target: fact.direct_target,
+                    table_targets: fact.direct_target.is_none().then(|| {
+                        crate::indirect::call_table_targets(
+                            graph,
+                            values,
+                            structured,
+                            machine_context?,
+                            fact.at,
+                        )
+                    })
+                    .flatten(),
                     fallthrough: fact.fallthrough,
                     transfer: fact.transfer,
                     callee_linkage: fact.callee_linkage,

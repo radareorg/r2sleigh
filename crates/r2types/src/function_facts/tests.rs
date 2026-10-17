@@ -577,6 +577,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         at,
         target,
         direct_target: Some(0x402000),
+        table_targets: None,
         fallthrough: None,
         transfer: r2ssa::CallSiteTransfer::TailCall,
         callee_linkage: r2source::AdvisoryCalleeLinkage::Unknown,
