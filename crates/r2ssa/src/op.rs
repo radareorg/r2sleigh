@@ -1953,6 +1953,74 @@ impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {
 mod tests {
     use super::*;
 
+    /// A lifted operation uses a number as its SSA form does, or `pd` and `pdf` settle one line two ways.
+    #[test]
+    fn a_lifted_operation_and_its_ssa_form_use_a_number_alike() {
+        let (dst, a, b) = (
+            r2il::Varnode::register(0, 8),
+            r2il::Varnode::register(8, 8),
+            r2il::Varnode::register(16, 8),
+        );
+        let flag = r2il::Varnode::register(24, 1);
+        let ops = [
+            r2il::R2ILOp::Copy {
+                dst: dst.clone(),
+                src: a.clone(),
+            },
+            r2il::R2ILOp::IntAdd {
+                dst: dst.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            },
+            r2il::R2ILOp::IntLess {
+                dst: flag.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            },
+            r2il::R2ILOp::Load {
+                dst: dst.clone(),
+                space: r2il::SpaceId::Ram,
+                addr: a.clone(),
+            },
+            r2il::R2ILOp::Cast {
+                dst: dst.clone(),
+                src: a.clone(),
+            },
+            r2il::R2ILOp::Select {
+                dst: dst.clone(),
+                cond: flag,
+                if_true: a.clone(),
+                if_false: b.clone(),
+            },
+            r2il::R2ILOp::Extract {
+                dst: dst.clone(),
+                src: a.clone(),
+                position: b.clone(),
+            },
+            r2il::R2ILOp::Insert {
+                dst,
+                src: a,
+                value: b,
+                position: r2il::Varnode::constant(0, 8),
+            },
+        ];
+        for op in ops {
+            let mut block = r2il::R2ILBlock::new(0x1000, 4);
+            block.push(op.clone());
+            block.push(r2il::R2ILOp::Return {
+                target: r2il::Varnode::constant(0, 8),
+            });
+            let function = crate::SSAFunction::from_blocks_raw(&[block], None).expect("it builds");
+            let converted = function
+                .named_blocks()
+                .into_iter()
+                .flat_map(|block| block.ops().to_vec())
+                .find(|ssa| ssa.dst().is_some())
+                .expect("the operation defines a value");
+            assert_eq!(converted.value_use(), op.value_use(), "{op:?}");
+        }
+    }
+
     /// Mapping every operand to itself gives the operation back, and every
     /// operand is visited once, in field order, whatever holds it: a field,
     /// an `Option`, a `Vec`, or an operation held out of line.

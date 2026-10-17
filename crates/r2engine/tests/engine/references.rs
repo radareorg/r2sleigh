@@ -13,7 +13,7 @@ use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, SLOT, STEPPED, 
 use r2engine::body::{Unresolved, UnresolvedReason};
 use r2engine::discovery::Basis;
 use r2engine::program::OpenProgram;
-use r2engine::query::{AnnotationKind, Listing, Reference, Role, Stop, Unread};
+use r2engine::query::{AnnotationKind, Listing, Reference, References, Role, Stop, Unread};
 
 /// Every fact as `(from, to, role, support)`.
 fn listed(facts: &[Reference]) -> Vec<(u64, u64, Role, Basis)> {
@@ -78,20 +78,25 @@ fn each_reference_says_how_its_instruction_uses_the_address_and_what_shows_it() 
     // program; `mov eax, 1` and the return address a call pushes are neither.
     let mut program = OpenProgram::of(Literal::new().importing("strlen"));
     let facts = program.references().expect("the index builds").value;
-    use Basis::{Certified, Decoded, Folded};
+    use Basis::{Decoded, Folded};
     assert_eq!(
         listed(facts.facts()),
         [
             // call one
             (CALLER, ONE, Role::Call, Decoded),
+            // lea rax, [one], which forked builds on only on one path: the lea forms the address either way
+            (FORKED, ONE, Role::Value, Decoded),
             // je L, in forked and in joined
             (FORKED + 9, FORKED + 0x10, Role::Jump, Decoded),
             (JOINED + 2, JOINED + 0xb, Role::Jump, Decoded),
+            // lea rax, [one] in joined, where an add builds on it after the join
+            (JOINED + 4, ONE, Role::Value, Decoded),
             // lea rdi, [one], which the call after it takes as it stands; then call one
-            (PASSES, ONE, Role::Value, Folded),
+            (PASSES, ONE, Role::Value, Decoded),
             (PASSES + 7, ONE, Role::Call, Decoded),
-            // add rax, 8 after lea rax, [one]: the sum is the result, and only the def-use sees past the ret; the lea is a step
-            (STEPPED + 7, ONE + 8, Role::Value, Certified),
+            // lea rax, [one] and the add rax, 8 after it: each forms an address, the base and the sum
+            (STEPPED, ONE, Role::Value, Decoded),
+            (STEPPED + 7, ONE + 8, Role::Value, Folded),
             // jmp qword [rip + 2] reads the slot, and jumps to nothing the index can name
             (STUB, SLOT, Role::Read { width: 8 }, Decoded),
         ]
@@ -158,7 +163,10 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
     assert_eq!(
         listed(index.facts()),
         [
-            // rep movsb reads its first byte at rsi and writes it at rdi; rep movsb moves both, so neither lea is a result
+            // the two leas form the addresses rep movsb then reads and writes through
+            (COPIES, BASE + 0x20, Role::Value, Basis::Decoded),
+            (COPIES + 7, BASE + 0x30, Role::Value, Basis::Decoded),
+            // rep movsb reads its first byte at rsi and writes it at rdi
             (
                 movsb,
                 BASE + 0x20,
@@ -172,7 +180,7 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
                 Basis::Folded
             ),
             // lea rax, [callee], which the call takes as it stands; then call rax
-            (CALLS, CALLEE, Role::Value, Basis::Folded),
+            (CALLS, CALLEE, Role::Value, Basis::Decoded),
             (CALLS + 7, CALLEE, Role::Call, Basis::Folded),
         ]
     );
@@ -265,7 +273,7 @@ fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
                 Basis::Decoded
             ),
             // lea rax, [0x1090]; ret, in the third: the address is the result, which only the def-use sees past the ret
-            (BASE + 0x1e, BASE + 0x90, Role::Value, Basis::Certified),
+            (BASE + 0x1e, BASE + 0x90, Role::Value, Basis::Decoded),
             // jmp one, the fourth arm's tail call
             (BASE + 0x26, one, Role::Jump, Basis::Decoded),
         ]
@@ -396,7 +404,7 @@ fn a_branch_that_leaves_its_return_address_in_the_link_register_is_a_call() {
     assert_eq!(
         listed(index.facts()),
         [
-            (BASE + 8, BASE + 0x10, Role::Value, Basis::Folded),
+            (BASE + 8, BASE + 0x10, Role::Value, Basis::Decoded),
             (BASE + 0xc, callee, Role::Call, Basis::Folded),
         ]
     );
@@ -550,4 +558,66 @@ fn a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one() {
     literal.write(ONE, &[0x8b, 0x07, 0xc3]);
     passing_text(&mut literal, ONE);
     assert_eq!(claimed_at_caller(literal), (None, None));
+}
+
+/// `diff`: `lea rdi, [0x1040]; lea rsi, [0x1040]; sub rsi, rdi; ret`; `table`: `lea r15, [0x1040]; call [r15 + rbx*8]; ret`.
+const FORMED: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x39, 0x00, 0x00, 0x00, // 0x1000 lea rdi, [rip + 0x39]
+    0x48, 0x8d, 0x35, 0x32, 0x00, 0x00, 0x00, // 0x1007 lea rsi, [rip + 0x32]
+    0x48, 0x29, 0xfe, // 0x100e sub rsi, rdi
+    0xc3, // 0x1011 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x4c, 0x8d,
+    0x3d, 0x19, 0x00, 0x00, 0x00, // 0x1020 lea r15, [rip + 0x19]
+    0x41, 0xff, 0x14, 0xdf, // 0x1027 call [r15 + rbx*8]
+    0xc3, // 0x102b ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+];
+
+/// The `Value` references into `target`, as `(from, support)`.
+fn values_at(index: &References, target: u64) -> Vec<(u64, Basis)> {
+    index
+        .to(target)
+        .filter(|(fact, _)| fact.role == Role::Value)
+        .map(|(fact, _)| (fact.from, fact.support))
+        .collect()
+}
+
+#[test]
+fn an_address_an_instruction_forms_states_its_reference_whatever_follows_it() {
+    let literal = Literal::of_code(FORMED, &[("diff", BASE, 0x12), ("table", BASE + 0x20, 0xc)]);
+    let mut program = OpenProgram::of(literal);
+    let index = program.references().expect("the index builds").value;
+    // Both leas form the address; the `sub` that cancels them leaves no use, and the indexed call reads through a derived one.
+    assert_eq!(
+        values_at(&index, BASE + 0x40),
+        [
+            (BASE, Basis::Decoded),
+            (BASE + 7, Basis::Decoded),
+            (BASE + 0x20, Basis::Decoded)
+        ]
+    );
+}
+
+/// `adrp x0, <page>; add x0, x0, 0x40; ret` at 0x1000 with the page's immediate in the first word.
+fn paged(adrp: u32) -> Literal {
+    let mut bytes = adrp.to_le_bytes().to_vec();
+    bytes.extend(0x9101_0000u32.to_le_bytes()); // add x0, x0, 0x40
+    bytes.extend(0xd65f_03c0u32.to_le_bytes()); // ret
+    bytes.resize(0x50, 0);
+    Literal::of_code(Box::leak(bytes.into_boxed_slice()), &[("f", BASE, 0xc)]).in_aarch64()
+}
+
+#[test]
+fn an_adrp_states_its_page_where_the_program_maps_it_and_the_add_its_address() {
+    // `adrp x0, 0x1000`: the page holds the program, so both the page and the sum are addresses.
+    let mut program = OpenProgram::of(paged(0x9000_0000));
+    let index = program.references().expect("the index builds").value;
+    assert_eq!(values_at(&index, BASE), [(BASE, Basis::Decoded)]);
+    assert_eq!(values_at(&index, BASE + 0x40), [(BASE + 4, Basis::Folded)]);
+    // `adrp x0, 0x4000` is in no mapping: neither it nor the address the `add` forms is a reference.
+    let mut program = OpenProgram::of(paged(0xf000_0000));
+    let index = program.references().expect("the index builds").value;
+    assert_eq!(values_at(&index, 0x4000), []);
+    assert_eq!(values_at(&index, 0x4040), []);
 }

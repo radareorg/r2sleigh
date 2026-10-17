@@ -56,6 +56,14 @@ engine. Commands, the visual mode and the agent surface all ask it.
   forwarding needs callee interfaces a callee prepared alone does not
   have yet, so no cycle is reached today; the Db tests cover each hold.
 
+## Formed addresses
+
+The reference index states an address where an instruction forms it, not where a later instruction leaves a use.
+
+- **Rule.** A number an instruction leaves in a register it names is a `Computes` claim when the program maps it and either (a) lifting the run one page on moves it by that page, so it is where the program itself is, or (b) it is absolute and handed to a parameter its callee takes a pointer in. Case (a) needs no fate: `lea rdi, [obj]; lea rsi, [obj]; sub rsi, rdi` (ada_test_dwarf `register_tm_clones` 0x22b0, 0x22b7), `lea r15, [table]; call [r15+rbx*8]` (`__libc_csu_init` 0x2816) and a table base the arms derive from (`__strptime_internal` 0xbf458) each form an address, and radare2 lists each.
+- **Pages.** `adrp` forms a page. radare2 lists it when a mapping holds it (aarch64-readonly-ranges `adrp x0, segment.LOAD0` at 0x400170 is listed; `adrp x0, 0x401000`, in no mapping, is not) and lists the full address at the `add` or `ldr`; r2s now claims both, so a bench that keys the page at the `adrp` and one that keys the address at the `add` both find their record.
+- **Deleted.** The step-or-result verdict (`r2ssa::fate`, `WalkedBody::fate_of`, `result_of`) existed only to withhold the `adrp` page; it also withheld every `lea` a later `sub` or indexed load read, so two instructions that form the same address got different answers. Cost: one def-use graph and fixpoint per walked body no longer built for it. The engine oracle's follow rule (`Following`, a claim fails when something builds on the number) went with it: a `Computes` claim is now ruled by the register the instruction leaves holding the value, and a neighbouring value (`lea rax, [one]; add rax, 8` claiming `one + 8` at the lea) still fails.
+
 ## Left
 
 - Order (2026-10-06): Q3's returns and survey land before Q2, since the

@@ -9,7 +9,6 @@
 use crate::machine::Machine;
 use r2il::Endianness;
 use r2sleigh_lift::{NumberSpan, Syntax};
-use r2ssa::fate::{Fate, Fates};
 
 use super::references::Role;
 use crate::native::Program;
@@ -104,11 +103,11 @@ pub struct Answered<'a> {
     pub parameters: Option<&'a dyn Parameters>,
 }
 
-/// One walked body's blocks, in address order as the walk leaves them, and its def-use and every value's fate, built the first time a line needs them.
+/// One walked body's blocks, in address order as the walk leaves them, and its def-use, built the first time a line needs them.
 pub struct WalkedBody<'a> {
     /// Built inside the one answer that holds the body, never across answers.
     #[cfg_attr(dylint_lib = "r2sleigh_lints", allow(cache_outside_query_database))]
-    built: std::cell::OnceCell<Option<(r2ssa::SsaGraph, Fates)>>,
+    built: std::cell::OnceCell<Option<r2ssa::SsaGraph>>,
     blocks: &'a [r2il::R2ILBlock],
     arch: &'a r2ssa::Arch,
 }
@@ -150,31 +149,20 @@ impl<'a> WalkedBody<'a> {
         (address - block.addr < u64::from(block.size)).then_some(block.addr)
     }
 
-    /// What becomes of the value one instruction leaves in a storage, as the body's def-use settles it.
-    pub fn fate_of(&self, instruction: u64, storage: r2ssa::CanonicalStorageId) -> Option<Fate> {
-        let (graph, fates) = self.settled()?;
-        let value = graph.left_by_instruction(instruction, storage)?;
-        Some(fates.of_value(value))
-    }
-
     /// What one instruction alone makes of the value it leaves in a storage, read off the lift's own operations.
     pub fn own_bound(
         &self,
         instruction: u64,
         storage: r2ssa::CanonicalStorageId,
     ) -> Option<r2ssa::InstructionBound> {
-        let (graph, _) = self.settled()?;
+        let graph = self.settled()?;
         r2ssa::instruction_bound(graph, instruction, storage)
     }
 
-    /// The graph and the fates, built now if nothing has asked for them yet.
-    fn settled(&self) -> Option<&(r2ssa::SsaGraph, Fates)> {
+    /// The graph, built now if nothing has asked for them yet.
+    fn settled(&self) -> Option<&r2ssa::SsaGraph> {
         self.built
-            .get_or_init(|| {
-                let graph = r2ssa::def_use_graph(self.blocks, Some(self.arch))?;
-                let fates = Fates::of(&graph);
-                Some((graph, fates))
-            })
+            .get_or_init(|| r2ssa::def_use_graph(self.blocks, Some(self.arch)))
             .as_ref()
     }
 
@@ -322,16 +310,9 @@ pub enum AnnotationKind {
     Reads { address: u64, width: u32 },
     /// The instruction writes this many bytes at this address.
     Writes { address: u64, width: u32 },
-    /// The instruction computes this address, and nothing later derives another number from it.
+    /// The instruction forms this address, whatever the next instruction does with it.
     ///
-    /// Only a number proven to be an address: lifting the instruction a page
-    /// further on moves it by that page, so it is where the program itself is.
-    /// An absolute number is claimed only where it is used as one.
-    ///
-    /// `lea rdi, 0x4070` computes an address and that is its whole result;
-    /// `adrp x17, 0x100008000` computes a page base the next instruction moves
-    /// fifty bytes past. The difference is not in either instruction, which is
-    /// why this is the rung above one.
+    /// A number that moves a page when the instruction does, or an absolute one handed to a pointer parameter (doc/adr-query-database.md, "Formed addresses").
     Computes { value: u64 },
     /// The value this instruction defines lies in this range wherever it is
     /// live.

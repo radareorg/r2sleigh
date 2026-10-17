@@ -144,12 +144,19 @@ enum Expected {
 fn a_claim_no_run_supports_fails_and_one_every_run_supports_holds() {
     let rax = Injected::Bounds("rax", 0x2a, 0x2a);
     let cases = [
-        // `add rax, 8` builds on the address, so it is a step and not what the line computes.
+        // The lea forms the address whatever `add rax, 8` makes of it; a neighbouring number is not what it forms.
         (
             Literal::new(),
             STEPPED,
             STEPPED,
             Injected::Kind(AnnotationKind::Computes { value: ONE }),
+            Expected::Held,
+        ),
+        (
+            Literal::new(),
+            STEPPED,
+            STEPPED,
+            Injected::Kind(AnnotationKind::Computes { value: ONE + 8 }),
             Expected::Contradicted,
         ),
         // The count is memory the program writes, so the revision's 0x29 is one state of many.
@@ -636,18 +643,18 @@ impl Ledger {
         }
     }
 
-    /// Rule on every claim about the instruction that just ran, and follow each number a line claims to compute.
+    /// Rule on every claim about the instruction that just ran.
     fn rule<M: Mapped>(
         &mut self,
         lift: &Lift<'_>,
         after: &After<'_, M>,
         track: &mut Track,
         described: &str,
-    ) -> Vec<Following> {
+    ) {
         self.called(after, track, described);
         self.await_arguments(after, track);
         let Some(claims) = self.claims.get_mut(&after.at) else {
-            return Vec::new();
+            return;
         };
         let targets = claims
             .iter()
@@ -656,22 +663,11 @@ impl Ledger {
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        let mut following = Vec::new();
-        for (index, claim) in claims.iter_mut().enumerate() {
-            match verdict(claim, &targets, after, lift) {
-                None => {}
-                Some(Verdict::Held(held)) => claim.decided(held, described),
-                Some(Verdict::Follow(holders)) => following.push(Following {
-                    claim: ClaimAt {
-                        at: after.at,
-                        index,
-                    },
-                    holders,
-                    derived: Vec::new(),
-                }),
+        for claim in claims.iter_mut() {
+            if let Some(Verdict::Held(held)) = verdict(claim, &targets, after, lift) {
+                claim.decided(held, described);
             }
         }
-        following
     }
 
     fn failures(self) -> Vec<Failure> {
@@ -747,10 +743,6 @@ struct Lift<'a> {
     program_counter: Option<Varnode>,
     /// The first byte of the stack, above everything the program maps; every byte from it on is mapped.
     stack: u64,
-    /// The registers a call leaves as it found them: what the default
-    /// prototype preserves and what the platform reserves. Every other
-    /// register may come back changed.
-    kept: Vec<Varnode>,
     endian: Endianness,
     names: BTreeMap<(u64, u32), String>,
     registers: BTreeMap<String, Varnode>,
@@ -799,7 +791,6 @@ impl<'a> Lift<'a> {
             .into_iter()
             .chain(tracked)
             .collect::<Vec<_>>();
-        let kept = kept_across_a_call(machine, container.arch.bits);
         let ops = || body.blocks.iter().flat_map(|block| &block.lifted.ops);
         let around = |constant: u64| {
             let constant = u128::from(constant);
@@ -829,7 +820,6 @@ impl<'a> Lift<'a> {
             pinned,
             program_counter,
             stack,
-            kept,
             endian,
             names: names.collect(),
             registers,
@@ -1069,7 +1059,7 @@ fn run(
             .set_register(register.offset, register.size, *value)
             .expect("a register");
     }
-    let (mut trace, mut following) = (Vec::new(), Vec::<Following>::new());
+    let mut trace = Vec::new();
     let (mut track, mut previous) = (Track::default(), None);
     let mut at = entry;
     while let Some(instruction) = lift.instructions.get(&at) {
@@ -1092,14 +1082,6 @@ fn run(
             first.or_insert_with(|| format!("the run entered with [{described}]"));
         }
         trace.extend(ran.accesses.iter().copied());
-        let ops = &instruction.ops[..ran.executed];
-        following.retain_mut(|number| match number.through(ops, &ran.chosen, lift) {
-            Some(held) => {
-                ledger.decide(number.claim, held, &described);
-                false
-            }
-            None => true,
-        });
         if let Flow::Stop(_) = ran.flow {
             break;
         }
@@ -1110,7 +1092,7 @@ fn run(
             state: &state,
             previous,
         };
-        following.extend(ledger.rule(lift, &after, &mut track, &described));
+        ledger.rule(lift, &after, &mut track, &described);
         previous = Some(at);
         state.end_instruction();
         match ran.flow {
@@ -1131,19 +1113,11 @@ struct Ran {
     /// The direct transfer it left by, and whether that was a call.
     direct: Option<(u64, bool)>,
     accesses: Vec<Access>,
-    /// Which arm each selection it executed took, by the operation's index.
-    chosen: BTreeMap<usize, bool>,
 }
 
 /// Execute one instruction's operations, as far as the run goes.
 fn executed<M: Mapped>(ops: &[R2ILOp], state: &mut State<M>) -> Ran {
-    let mut chosen = BTreeMap::new();
     for (index, op) in ops.iter().enumerate() {
-        if let R2ILOp::Select { cond, .. } = op
-            && let Ok(cond) = state.value(cond)
-        {
-            chosen.insert(index, cond != 0);
-        }
         let (flow, executed, direct) = match step(op, state) {
             Flow::Next => continue,
             Flow::Stop(stop) => (Flow::Stop(stop), index, None),
@@ -1163,7 +1137,6 @@ fn executed<M: Mapped>(ops: &[R2ILOp], state: &mut State<M>) -> Ran {
             executed,
             direct,
             accesses,
-            chosen,
         };
     }
     Ran {
@@ -1171,7 +1144,6 @@ fn executed<M: Mapped>(ops: &[R2ILOp], state: &mut State<M>) -> Ran {
         executed: ops.len(),
         direct: None,
         accesses: state.take_accesses(),
-        chosen,
     }
 }
 
@@ -1306,8 +1278,6 @@ impl<M> After<'_, M> {
 /// What one run of an instruction says about one claim.
 enum Verdict {
     Held(Result<(), String>),
-    /// The number is where the line says; whether anything builds on it is for the rest of the run.
-    Follow(Vec<Varnode>),
 }
 
 /// What one run of its instruction says about a claim, or `None` where it says nothing.
@@ -1348,10 +1318,13 @@ fn verdict<M: Mapped>(
             let holding = widest.filter(|register| {
                 after.state.register(register.offset, register.size) == Some(u128::from(value))
             });
-            let holding = holding.cloned().collect::<Vec<_>>();
-            return after.whole().then_some(match holding.is_empty() {
-                false => Verdict::Follow(holding),
-                true => Verdict::Held(Err(format!("it left {:x?}", left(after)))),
+            let formed = holding.count() > 0;
+            return after.whole().then(|| {
+                Verdict::Held(
+                    formed
+                        .then_some(())
+                        .ok_or_else(|| format!("it left {:x?}", left(after))),
+                )
             });
         }
         AnnotationKind::Bounds {
@@ -1466,158 +1439,4 @@ fn accessed(ran: &Ran, kind: AccessKind, address: u64, width: u32) -> Result<(),
         true => Ok(()),
         false => Err(format!("it accessed {:?}", ran.accesses)),
     }
-}
-
-/// A number a line claims to compute, followed through the run until nothing holds it or something builds on it.
-///
-/// Copying, storing, comparing, loading through or passing the number is using it as it stands; an arithmetic
-/// operation over it derives another, which a temporary may carry into a test but no other storage may hold.
-struct Following {
-    claim: ClaimAt,
-    /// Where the number stands.
-    holders: Vec<Varnode>,
-    /// Temporaries holding a number derived from it.
-    derived: Vec<Varnode>,
-}
-
-impl Following {
-    /// What the operations of one instruction, as far as the run executed them, settle about the claim.
-    fn through(
-        &mut self,
-        ops: &[R2ILOp],
-        chosen: &BTreeMap<usize, bool>,
-        lift: &Lift<'_>,
-    ) -> Option<Result<(), String>> {
-        let mut ops = ops.iter().enumerate();
-        if let Some(settled) = ops.find_map(|(at, op)| self.meets(op, chosen.get(&at), lift)) {
-            return Some(settled);
-        }
-        // A temporary lives only as long as its instruction.
-        self.holders.retain(|held| held.space != SpaceId::Unique);
-        self.derived.clear();
-        self.holders.is_empty().then_some(Ok(()))
-    }
-
-    fn meets(
-        &mut self,
-        op: &R2ILOp,
-        chosen: Option<&bool>,
-        lift: &Lift<'_>,
-    ) -> Option<Result<(), String>> {
-        // A selection carries only the arm the run took; its condition is a test.
-        let inputs = match (op, chosen) {
-            (R2ILOp::Select { if_true, .. }, Some(true)) => vec![if_true],
-            (R2ILOp::Select { if_false, .. }, Some(false)) => vec![if_false],
-            _ => op.inputs(),
-        };
-        let reads = |set: &[Varnode]| {
-            let mut read = inputs.iter();
-            read.any(|input| set.iter().any(|held| overlaps(held, input)))
-        };
-        let (held, built) = (reads(&self.holders), reads(&self.derived));
-        let derived = || Some(Err(format!("`{op}` builds on it")));
-        let carried = match op {
-            R2ILOp::Copy { .. }
-            | R2ILOp::IntZExt { .. }
-            | R2ILOp::IntSExt { .. }
-            | R2ILOp::Subpiece { .. }
-            | R2ILOp::Select { .. } => (held || built).then_some(built),
-            R2ILOp::IntAdd { .. }
-            | R2ILOp::IntSub { .. }
-            | R2ILOp::IntMult { .. }
-            | R2ILOp::IntDiv { .. }
-            | R2ILOp::IntSDiv { .. }
-            | R2ILOp::IntRem { .. }
-            | R2ILOp::IntSRem { .. }
-            | R2ILOp::IntNegate { .. }
-            | R2ILOp::IntAnd { .. }
-            | R2ILOp::IntOr { .. }
-            | R2ILOp::IntXor { .. }
-            | R2ILOp::IntNot { .. }
-            | R2ILOp::IntLeft { .. }
-            | R2ILOp::IntRight { .. }
-            | R2ILOp::IntSRight { .. }
-            | R2ILOp::Piece { .. }
-            | R2ILOp::PtrAdd { .. }
-            | R2ILOp::PtrSub { .. } => (held || built).then_some(true),
-            // A test's result is a flag, which is not a number.
-            R2ILOp::IntEqual { .. }
-            | R2ILOp::IntNotEqual { .. }
-            | R2ILOp::IntLess { .. }
-            | R2ILOp::IntSLess { .. }
-            | R2ILOp::IntLessEqual { .. }
-            | R2ILOp::IntSLessEqual { .. }
-            | R2ILOp::IntCarry { .. }
-            | R2ILOp::IntSCarry { .. }
-            | R2ILOp::IntSBorrow { .. }
-            | R2ILOp::BoolNot { .. }
-            | R2ILOp::BoolAnd { .. }
-            | R2ILOp::BoolOr { .. }
-            | R2ILOp::BoolXor { .. }
-            | R2ILOp::PopCount { .. }
-            | R2ILOp::Lzcount { .. }
-            | R2ILOp::Branch { .. }
-            | R2ILOp::CBranch { .. }
-            | R2ILOp::Nop => None,
-            // An address, a stored value, a target: the number as it stands, and no derived one.
-            R2ILOp::Load { .. }
-            | R2ILOp::Store { .. }
-            | R2ILOp::BlockTransfer(_)
-            | R2ILOp::Call { .. }
-            | R2ILOp::CallInd { .. }
-            | R2ILOp::BranchInd { .. }
-            | R2ILOp::Return { .. } => match built {
-                true => return derived(),
-                false => None,
-            },
-            _ if held || built => {
-                return Some(Err(format!("`{op}` reads it, and no rule here says how")));
-            }
-            _ => None,
-        };
-        match op {
-            // A register the call does not keep holds nothing of the caller's once the callee runs.
-            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
-                let kept = |held: &Varnode| lift.kept.iter().any(|register| covers(register, held));
-                self.holders.retain(kept);
-                return self.holders.is_empty().then_some(Ok(()));
-            }
-            // The claim is the function's: what leaves it is not built on inside it.
-            R2ILOp::Return { .. } => return Some(Ok(())),
-            _ => {}
-        }
-        let written = op.output()?;
-        self.holders.retain(|held| !covers(written, held));
-        self.derived.retain(|held| !covers(written, held));
-        match carried {
-            Some(true) if written.space != SpaceId::Unique => return derived(),
-            Some(true) => self.derived.push(written.clone()),
-            Some(false) => self.holders.push(written.clone()),
-            None => {}
-        }
-        None
-    }
-}
-
-/// The registers a call leaves as it found them under the default
-/// prototype: what it preserves and what the platform reserves.
-fn kept_across_a_call(machine: &r2sleigh_lift::EmbeddedMachine, bits: u32) -> Vec<Varnode> {
-    let compiler = r2sleigh_lift::profile::LanguageProfile::parse(machine.compiler_spec)
-        .expect("the compiler specification parses");
-    let effect = r2engine::native::call_effect(
-        &machine.arch,
-        bits,
-        r2abi::Platform::Unknown,
-        &compiler,
-        None,
-    );
-    effect
-        .iter()
-        .flat_map(|effect| effect.preserved().iter().chain(effect.system_reserved()))
-        .map(|storage| Varnode {
-            space: SpaceId::Register,
-            offset: storage.offset,
-            size: storage.size,
-        })
-        .collect()
 }

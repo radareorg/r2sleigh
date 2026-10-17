@@ -85,18 +85,18 @@ fn a_listing_steps_an_undecodable_aarch64_word_whole() {
 }
 
 #[test]
-fn an_address_built_on_past_a_branch_is_not_claimed_a_result() {
-    // The overwrite is skipped on the taken path, and the add at L builds on the address.
-    assert_eq!(pd(FORKED, 6)[0], (FORKED, None));
-    assert_eq!(pdf(FORKED)[0], (FORKED, None));
+fn an_address_built_on_past_a_branch_is_claimed_where_it_is_formed() {
+    // The overwrite is skipped on the taken path and the add at L builds on the address; the lea forms it either way.
+    assert_eq!(pd(FORKED, 6)[0], (FORKED, Some(ONE)));
+    assert_eq!(pdf(FORKED)[0], (FORKED, Some(ONE)));
 }
 
 #[test]
 fn the_function_listing_refines_the_run_and_never_contradicts_it() {
-    // lea rax, [one] falls through into L, which the branch also enters, and L adds to it.
+    // lea rax, [one] falls through into L, which the branch also enters, and L adds to it: the lea forms the address.
     let lea = JOINED + 4;
-    assert_eq!(pd(JOINED, 5)[2], (lea, None));
-    assert_eq!(pdf(JOINED)[2], (lea, None));
+    assert_eq!(pd(JOINED, 5)[2], (lea, Some(ONE)));
+    assert_eq!(pdf(JOINED)[2], (lea, Some(ONE)));
     // mov eax, 1; ret -- nothing reads it, but lifted a page on it is still 1, so it is no address.
     assert_eq!(pd(ONE, 2)[0], (ONE, None));
     assert_eq!(pdf(ONE)[0], (ONE, None));
@@ -258,9 +258,9 @@ fn an_address_passed_to_a_call_is_a_result() {
 }
 
 #[test]
-fn an_address_the_next_instruction_adds_to_is_a_step() {
-    assert_eq!(pd(STEPPED, 3)[0], (STEPPED, None));
-    assert_eq!(pdf(STEPPED)[0], (STEPPED, None));
+fn an_address_the_next_instruction_adds_to_is_still_formed() {
+    assert_eq!(pd(STEPPED, 3)[0], (STEPPED, Some(ONE)));
+    assert_eq!(pdf(STEPPED)[0], (STEPPED, Some(ONE)));
 }
 
 /// Each claim a line carries, with the rung it stands on.
@@ -278,7 +278,7 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
         offset: 0,
         size: 8,
     };
-    // lea rax, [one]; add rax, 8; ret -- the ret ends the straight line, so only the def-use settles the sum.
+    // lea rax, [one]; add rax, 8; ret -- the block folds the lea into the add, which forms the sum.
     let stepped = opened()
         .function_listing(STEPPED)
         .expect("it lists")
@@ -288,7 +288,7 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
     assert_eq!(
         supported(&stepped[1]),
         [
-            (AnnotationKind::Computes { value: sum }, Basis::Certified),
+            (AnnotationKind::Computes { value: sum }, Basis::Folded),
             // The block folds the lea into the add, so the one value the range holds needs no more than the run.
             (
                 AnnotationKind::Bounds {
@@ -301,8 +301,8 @@ fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
             ),
         ]
     );
-    // lea rdi, [one]; call one -- the call clobbers rdi, so the run after the lea settles it in either listing.
-    let computes = [(AnnotationKind::Computes { value: ONE }, Basis::Folded)];
+    // lea rdi, [one]; call one -- the lea forms the address in either listing, from the instruction alone.
+    let computes = [(AnnotationKind::Computes { value: ONE }, Basis::Decoded)];
     let plain = opened()
         .listing(Listing {
             start: PASSES,
@@ -464,8 +464,8 @@ fn a_line_says_the_text_at_an_address_it_uses() {
     assert_eq!(
         supported(&lines[0]),
         [
-            (AnnotationKind::Computes { value: TEXT_AT }, Basis::Folded),
-            (text, Basis::Folded),
+            (AnnotationKind::Computes { value: TEXT_AT }, Basis::Decoded),
+            (text, Basis::Decoded),
         ]
     );
     // One character is text by chance too often to name it from a scan, so the name table has no string there.

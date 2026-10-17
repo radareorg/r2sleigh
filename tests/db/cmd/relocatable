@@ -38,7 +38,7 @@ CMDS=pdf @ sym.f
 EXPECT=<<EOF
             0x08000040      e8bb0f0000     call 0x8001000 ; sym.imp.ext: arguments unproven (certified)
             0x08000045      e815000000     call sym.g ; sym.g() (certified)
-            0x0800004a      488d3d1700..   lea rdi, [0x8000068] ; "*" (certified)
+            0x0800004a      488d3d1700..   lea rdi, [0x8000068] ; "*" (decoded)
             0x08000051      488b05b00f..   mov rax, qword [0x8001008]
             0x08000058      8b053a050000   mov eax, dword [obj.counter] ; [0x8000598:4]=0x0 (decoded)
             0x0800005e      c3             ret ; returns rax (certified)

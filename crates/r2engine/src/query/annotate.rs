@@ -32,16 +32,9 @@ pub(super) struct Run<'a> {
 
 /// Say what each line's own lift says, and what the run says about it.
 ///
-/// Two passes, because they answer different questions. What an instruction
-/// transfers to or reads is a fact about the instruction. Whether the number
-/// it computes is an address or a step towards one is a fact about what the
-/// next instruction does with it: `adrp x17, 0x100008000` computes a page
-/// base, and only the `add` after it says the address is fifty bytes further
-/// on.
-///
-/// This is the one place a number becomes an address claim, and `referenced`
-/// the one place a claim becomes a reference, so the index `ax` reads is
-/// exactly what these lines claim.
+/// An address an instruction forms, transfers to or accesses is claimed where it is formed, whatever
+/// the next instruction does with it (doc/adr-query-database.md, "Formed addresses").
+/// This is the one place a number becomes an address claim, and `referenced` the one place a claim becomes a reference.
 pub(super) fn over_run(
     answered: &Answered<'_>,
     work: Work,
@@ -81,22 +74,17 @@ pub(super) fn over_run(
             // A number that stays put is an address candidate only where a section the program loads holds it: NULL and the header are not objects.
             && (relative.get(index).copied() == Some(true) || memory.declares(computed.value))
         {
-            let relative = relative.get(index).copied() == Some(true);
-            let mut after = After {
-                rest: &run.lifts[index + 1..],
-                beyond: &mut *beyond,
-                call_effect,
-                body,
-                parameters: (!relative).then_some(answered.parameters).flatten(),
-                used: None,
-            };
-            // A number that moves with the program is an address; one that stays put is one only where it is used as one.
-            let support = match relative {
-                true => result_of(lift, &mut after, &computed.output, line.address)
-                    .map(|settled| settled.max(folded_support(computed.own))),
+            // A number that moves with the program is an address where it is formed; one that stays put is one only where it is handed to a pointer parameter.
+            let support = match relative.get(index).copied() == Some(true) {
+                true => Some(folded_support(computed.own)),
                 false => {
-                    straight_line_fate(lift, &mut after, &computed.output);
-                    after.used
+                    let mut after = After {
+                        rest: &run.lifts[index + 1..],
+                        beyond: &mut *beyond,
+                        call_effect,
+                        parameters: answered.parameters,
+                    };
+                    handed_to_pointer(lift, &mut after, &computed.output)
                 }
             };
             if let Some(support) = support {
@@ -406,7 +394,7 @@ fn revision_at(
     said
 }
 
-/// What can be known of the program after one instruction.
+/// What the run after an instruction shows of where the number it leaves goes.
 struct After<'a, 'r, 'b> {
     /// The lifts of the lines that follow it in the run.
     rest: &'a [Option<r2il::R2ILBlock>],
@@ -414,47 +402,8 @@ struct After<'a, 'r, 'b> {
     beyond: &'a mut Lookahead<'r, 'b>,
     /// What a call does; without it a call leaves every holder standing.
     call_effect: Option<&'a r2ssa::SourceCallEffect>,
-    /// The walked body and its def-use, where the request paid for it.
-    body: Option<&'a WalkedBody<'a>>,
     /// Which parameters of a callee take an address, where the number's use decides whether it is one.
     parameters: Option<&'a dyn super::records::Parameters>,
-    /// The strongest support a call handing the number to such a parameter gave.
-    used: Option<Basis>,
-}
-
-/// The rung that settles the number an instruction leaves in `output` as its result: the run after it, else the def-use.
-///
-/// A value a later instruction builds a number on is a step towards an address
-/// rather than one: spelling `adrp x17, reloc.humanize_number` named the page
-/// base the `add` after it was about to move fifty bytes past. Copying, storing,
-/// comparing, loading through or passing the number is using it as it stands.
-fn result_of(
-    lift: &r2il::R2ILBlock,
-    after: &mut After<'_, '_, '_>,
-    output: &Varnode,
-    address: u64,
-) -> Option<Basis> {
-    match straight_line_fate(lift, after, output) {
-        Fate::Result => Some(Basis::Folded),
-        Fate::Step => None,
-        Fate::Unknown => {
-            let settled = after
-                .body?
-                .fate_of(address, CanonicalStorageId::from_varnode(output))?;
-            (settled == r2ssa::fate::Fate::Result).then_some(Basis::Certified)
-        }
-    }
-}
-
-/// Whether a number an instruction leaves is a step, and who can tell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fate {
-    /// Something derives another number from it.
-    Step,
-    /// Every copy of it is gone before anything derives from it.
-    Result,
-    /// The evidence at hand does not reach far enough to say.
-    Unknown,
 }
 
 /// Whether a storage is a temporary one instruction's operations share.
@@ -462,23 +411,22 @@ fn scratch(space: SpaceId) -> bool {
     space == SpaceId::Unique
 }
 
-/// What the run after an instruction says, as far as it is one straight line.
+/// The weakest support among the calls that take the number in a pointer parameter, followed through copies.
 ///
-/// The number is followed through every storage a copy puts it in; a number
-/// derived from it is followed only through temporaries, because a flag is
-/// computed that way and a flag is a test rather than a step.
-fn straight_line_fate(
+/// Ends when no storage holds the number, at a branch, or where the lookahead stops; each is a bounded
+/// step down the straight line, so it is linear in the lines read.
+fn handed_to_pointer(
     lift: &r2il::R2ILBlock,
     after: &mut After<'_, '_, '_>,
     output: &Varnode,
-) -> Fate {
-    // Past a branch the run is no longer every path the value takes, so it settles nothing.
+) -> Option<Basis> {
+    let parameters = after.parameters?;
+    // Past a branch the run is no longer every path the value takes.
     if lift.ops.iter().any(R2ILOp::is_control_flow) {
-        return Fate::Unknown;
+        return None;
     }
     let mut holders = vec![output.clone()];
-    // A callee may have left a register as it found it, so a read after a call proves no step.
-    let mut called = false;
+    let mut used: Option<Basis> = None;
     let listed = after.rest.len();
     for index in 0.. {
         let block = match after.rest.get(index) {
@@ -486,31 +434,22 @@ fn straight_line_fate(
             None => after.beyond.at(index - listed).flatten(),
         };
         let Some(block) = block else {
-            return Fate::Unknown;
+            break;
         };
-        let mut derived: Vec<Varnode> = Vec::new();
         for (at, op) in block.ops.iter().enumerate() {
-            if let Some(parameters) = after.parameters
-                && let Some(support) = pointer_use(parameters, block, at, &holders)
-            {
-                after.used = Some(after.used.map_or(support, |held| held.min(support)));
+            if let Some(support) = pointer_use(parameters, block, at, &holders) {
+                used = Some(used.map_or(support, |held| held.min(support)));
             }
-            match op_fate(op, &mut holders, &mut derived, after.call_effect) {
-                Some(Fate::Step) if called => return Fate::Unknown,
-                Some(fate) => return fate,
-                None => {}
-            }
-            called |= op.is_call();
-            if holders.is_empty() && derived.is_empty() {
-                return Fate::Result;
+            if !follow_copies(op, &mut holders, after.call_effect) || holders.is_empty() {
+                return used;
             }
         }
         holders.retain(|held| !scratch(held.space));
         if holders.is_empty() {
-            return Fate::Result;
+            break;
         }
     }
-    Fate::Unknown
+    used
 }
 
 /// How a call hands on the number where a register holding it is a parameter its callee takes an address in.
@@ -538,51 +477,38 @@ fn pointer_use(
     parameters.pointer_use(callee, &held)
 }
 
-/// What one operation does to the storages holding the number, where it decides.
-fn op_fate(
+/// Move the storages holding the number past one operation: a copy adds its output, a write replaces what it covers; false at a branch.
+fn follow_copies(
     op: &R2ILOp,
     holders: &mut Vec<Varnode>,
-    derived: &mut Vec<Varnode>,
     call_effect: Option<&r2ssa::SourceCallEffect>,
-) -> Option<Fate> {
-    let inputs = op.inputs();
-    let reads = |set: &[Varnode]| {
-        inputs
+) -> bool {
+    if op.is_call() {
+        // A register the call may change no longer holds the number.
+        holders.retain(|held| {
+            call_effect.is_none_or(|effect| {
+                held.space != SpaceId::Register
+                    || !effect.clobbers(CanonicalStorageId::from_varnode(held))
+            })
+        });
+        return true;
+    }
+    if op.is_control_flow() {
+        return false;
+    }
+    let Some(written) = op.output() else {
+        return true;
+    };
+    let copied = op.value_use() == ValueUse::Carries
+        && op
+            .inputs()
             .iter()
-            .any(|input| set.iter().any(|held| overlaps(held, input)))
-    };
-    let (held, built) = (reads(holders), reads(derived));
-    match op {
-        _ if op.is_call() => {
-            // A register the call may change no longer holds the number.
-            holders.retain(|held| {
-                call_effect.is_none_or(|effect| {
-                    held.space != SpaceId::Register
-                        || !effect.clobbers(CanonicalStorageId::from_varnode(held))
-                })
-            });
-            return built.then_some(Fate::Step);
-        }
-        _ if op.is_control_flow() => return Some(Fate::Unknown),
-        _ => {}
-    }
-    let carried = match op.value_use() {
-        ValueUse::Derives if held || built => Some(true),
-        ValueUse::Carries if built => Some(true),
-        ValueUse::Carries if held => Some(false),
-        ValueUse::Consumes if built => return Some(Fate::Step),
-        _ => None,
-    };
-    let written = op.output()?;
+            .any(|input| holders.iter().any(|held| overlaps(held, input)));
     holders.retain(|held| !covers(written, held));
-    derived.retain(|held| !covers(written, held));
-    match carried {
-        Some(true) if !scratch(written.space) => return Some(Fate::Step),
-        Some(true) => derived.push(written.clone()),
-        Some(false) => holders.push(written.clone()),
-        None => {}
+    if copied {
+        holders.push(written.clone());
     }
-    None
+    true
 }
 
 /// The registers each decoded line's operands spell, which is where the instruction states its result goes.

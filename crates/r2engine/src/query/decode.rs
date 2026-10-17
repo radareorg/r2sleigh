@@ -256,8 +256,7 @@ pub(super) fn lift_run(
 
 /// The instructions after the run's last line, lifted only when a line asks.
 ///
-/// Where a listing stops is the reader's choice, not the program's: whether a
-/// number the last line computes is a step is decided by what follows it.
+/// Where a listing stops is the reader's choice, not the program's: where a number the last line computes goes is read past it.
 pub(super) struct Lookahead<'r, 'a> {
     answered: &'r Answered<'a>,
     next: u64,
@@ -649,26 +648,25 @@ mod tests {
     }
 
     #[test]
-    fn a_transfer_before_any_read_or_overwrite_settles_nothing() {
-        // lea rax, [rip + 0x1234]; ret -- the caller may read it, and the run cannot see the caller.
+    fn a_formed_address_is_claimed_before_a_transfer() {
+        // lea rax, [rip + 0x10]; ret -- the instruction forms the address whatever the caller does with it.
         let answer = answer(&after_lea(&[0xc3]), 2, Work::BlockLocal);
-        assert_eq!(computes(&answer.value[0]), None);
+        assert_eq!(computes(&answer.value[0]), Some(LEA_VALUE));
     }
 
     #[test]
-    fn a_run_that_ends_before_any_read_or_overwrite_settles_nothing() {
-        // lea rax, [rip + 0x1234], and nothing listed after it.
+    fn a_formed_address_is_claimed_where_the_run_ends() {
+        // lea rax, [rip + 0x10], and nothing listed after it.
         let answer = answer(&after_lea(&[0xc3]), 1, Work::BlockLocal);
-        assert_eq!(computes(&answer.value[0]), None);
+        assert_eq!(computes(&answer.value[0]), Some(LEA_VALUE));
     }
 
     #[test]
-    fn a_number_built_on_by_any_byte_is_a_step_not_a_result() {
-        // lea; add bl, ah; mov eax, 5 -- `ah` is the second byte of `rax`, so
-        // the add builds on the value even though no read starts where it does.
+    fn a_formed_address_stands_when_something_builds_on_it() {
+        // lea; add bl, ah; mov eax, 5 -- the add reads the address's second byte, and the lea still forms it.
         let bytes = after_lea(&[0x00, 0xe3, 0xb8, 0x05, 0x00, 0x00, 0x00]);
         let answer = answer(&bytes, 3, Work::BlockLocal);
-        assert_eq!(computes(&answer.value[0]), None);
+        assert_eq!(computes(&answer.value[0]), Some(LEA_VALUE));
     }
 
     #[test]
@@ -691,11 +689,32 @@ mod tests {
     }
 
     #[test]
-    fn a_number_partly_overwritten_and_then_built_on_is_a_step() {
-        // lea; mov al, 5; add ebx, eax -- `al` leaves the rest of the number
-        // standing, and the add builds on it.
+    fn a_formed_address_stands_when_it_is_partly_overwritten_and_built_on() {
+        // lea; mov al, 5; add ebx, eax
         let answer = answer(&after_lea(&[0xb0, 0x05, 0x01, 0xc3]), 3, Work::BlockLocal);
-        assert_eq!(computes(&answer.value[0]), None);
+        assert_eq!(computes(&answer.value[0]), Some(LEA_VALUE));
+    }
+
+    #[test]
+    fn two_addresses_a_subtraction_differences_are_each_formed() {
+        // lea rdi, [rip + 0x10]; lea rsi, [rip + 0x09]; sub rsi, rdi -- ada_test_dwarf's register_tm_clones.
+        let bytes = mapped(&[
+            0x48, 0x8d, 0x3d, 0x10, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x35, 0x09, 0x00, 0x00, 0x00,
+            0x48, 0x29, 0xfe,
+        ]);
+        let answer = answer(&bytes, 3, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), Some(BASE + 7 + 0x10));
+        assert_eq!(computes(&answer.value[1]), Some(BASE + 14 + 0x09));
+    }
+
+    #[test]
+    fn a_table_base_an_indexed_call_reads_through_is_formed() {
+        // lea r15, [rip + 0x20]; call [r15 + rbx*8] -- __libc_csu_init.
+        let bytes = mapped(&[
+            0x4c, 0x8d, 0x3d, 0x20, 0x00, 0x00, 0x00, 0x41, 0xff, 0x14, 0xdf,
+        ]);
+        let answer = answer(&bytes, 2, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), Some(BASE + 7 + 0x20));
     }
 
     #[test]
@@ -749,19 +768,20 @@ mod tests {
     }
 
     #[test]
-    fn a_page_and_its_offset_are_one_address_only_where_the_block_carries_one_into_the_other() {
+    fn a_page_is_claimed_where_formed_and_its_address_where_the_block_carries_it_on() {
         // adrp x0, 0x2000; add x0, x0, #0x50; ldr x0, [x0]; ret
         let code = [
             0x00, 0x00, 0x00, 0xb0, 0x00, 0x40, 0x01, 0x91, 0x00, 0x00, 0x40, 0xf9, 0xc0, 0x03,
             0x5f, 0xd6,
         ];
-        // A run entered anywhere knows nothing of `x0` at the add: the page is a step, the rest unknown.
+        // A run entered anywhere knows nothing of `x0` at the add: the page is claimed where `adrp` forms it, the rest unknown.
         let run = aarch64_claims(&code, Work::BlockLocal);
-        assert!(run.iter().all(Vec::is_empty), "{run:?}");
+        assert_eq!(run[0], [AnnotationKind::Computes { value: 0x2000 }]);
+        assert!(run[1..].iter().all(Vec::is_empty), "{run:?}");
         // A block carries the page into the add, whose sum moves a page with the program and is read through.
         let block = aarch64_claims(&code, Work::Function);
         let address = 0x2050;
-        assert_eq!(block[0], []);
+        assert_eq!(block[0], [AnnotationKind::Computes { value: 0x2000 }]);
         assert_eq!(block[1], [AnnotationKind::Computes { value: address }]);
         assert!(
             block[2].contains(&AnnotationKind::Reads { address, width: 8 }),
