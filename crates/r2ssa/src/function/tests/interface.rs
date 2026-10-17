@@ -338,8 +338,9 @@ fn merged_formats_that_disagree_pass_the_larger_count() {
     let evidence = call
         .variadic_argument_count_evidence
         .expect("merged literal count");
-    assert!(evidence.merged_literals);
-    assert_eq!(evidence.format_consumed_argument_count, 2);
+    let format = evidence.format().expect("a format count");
+    assert!(format.merged_literals);
+    assert_eq!(format.format_consumed_argument_count, 2);
     assert_eq!(evidence.total_argument_count, 4);
     assert!(call.variadic_argument_count_refusal.is_none());
 }

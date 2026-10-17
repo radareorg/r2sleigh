@@ -929,6 +929,36 @@ impl SourceResultCarriers {
     }
 }
 
+/// The fixed parameter that bounds a variadic body's tail: it consumes at most that many tail
+/// arguments (doc/adr-resolved-bodies.md, "Count-driven tail").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceTailCount {
+    pub parameter_index: u32,
+    /// The width of the value the body compares, in bytes.
+    pub width_bytes: u32,
+    /// Whether the body compares it signed, so a negative count bounds the tail at none.
+    pub signed: bool,
+}
+
+impl SourceTailCount {
+    /// The tail arguments a call passing `argument` (its register's bits) may be read for.
+    pub fn bound(self, argument: u64) -> Option<usize> {
+        let bits = self
+            .width_bytes
+            .checked_mul(8)
+            .filter(|bits| (1..=64).contains(bits))?;
+        let value = if bits == 64 {
+            argument
+        } else {
+            argument & ((1u64 << bits) - 1)
+        };
+        if self.signed && value >> (bits - 1) != 0 {
+            return Some(0);
+        }
+        usize::try_from(value).ok()
+    }
+}
+
 /// Coherent, revision-bound function interface injected by the source owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceFunctionInterface {
@@ -975,6 +1005,8 @@ pub struct SourceFunctionInterface {
     /// Whether arguments continue past the fixed ones, as a declaration or a body's register save
     /// area states; only a proven count (a literal format's conversions) says how many a call passes.
     variadic: bool,
+    /// The fixed parameter the body's loop bounds its tail by, where it proves one.
+    tail_count: Option<SourceTailCount>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
@@ -997,6 +1029,7 @@ pub struct SourceFunctionInterface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceFunctionInterfaceError {
     InvalidFormatParameterIndex,
+    InvalidTailCount,
     EmptyRevisionIdentity,
     EmptyCallingConvention,
     InvalidParameterOrder,
@@ -1023,6 +1056,9 @@ impl std::fmt::Display for SourceFunctionInterfaceError {
         let why = match self {
             Self::InvalidFormatParameterIndex => {
                 "its format parameter is not one of its parameters"
+            }
+            Self::InvalidTailCount => {
+                "its tail count is not one of its parameters of a variadic body"
             }
             Self::EmptyRevisionIdentity => "it names no source revision",
             Self::EmptyCallingConvention => "it names no calling convention",
@@ -1460,6 +1496,7 @@ impl SourceFunctionInterface {
             stack_slot_roles_complete: require_exact_stack_slot_roles,
             format_parameter: None,
             variadic: false,
+            tail_count: None,
             body_proven_return_address: false,
             arity_floor: None,
             unproven_result: None,
@@ -1513,6 +1550,7 @@ impl SourceFunctionInterface {
         Ok(Self {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
+            tail_count: self.tail_count,
             body_proven_return_address: self.body_proven_return_address,
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
@@ -1669,6 +1707,27 @@ impl SourceFunctionInterface {
     pub const fn with_variadic_tail(mut self) -> Self {
         self.variadic = true;
         self
+    }
+
+    /// Record the parameter a variadic body's tail is bounded by. Checked against the parameters
+    /// the interface has, and against its tail.
+    pub fn with_body_proven_tail_count(
+        mut self,
+        count: SourceTailCount,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        let named = usize::try_from(count.parameter_index)
+            .ok()
+            .is_some_and(|index| index < self.parameters.len());
+        if !self.variadic || !named {
+            return Err(SourceFunctionInterfaceError::InvalidTailCount);
+        }
+        self.tail_count = Some(count);
+        Ok(self)
+    }
+
+    /// The parameter the body proves its tail is bounded by.
+    pub const fn tail_count(&self) -> Option<SourceTailCount> {
+        self.tail_count
     }
 
     /// Record that the parameters are a floor, and why.
@@ -2870,6 +2929,47 @@ mod tests {
     }
 
     #[test]
+    fn a_tail_count_bounds_its_tail_at_its_width_and_sign() {
+        let unsigned = SourceTailCount {
+            parameter_index: 0,
+            width_bytes: 4,
+            signed: false,
+        };
+        // A register holds the argument's high bits too, which the body never compared.
+        assert_eq!(unsigned.bound(3), Some(3));
+        assert_eq!(unsigned.bound(0xdead_beef_0000_0002), Some(2));
+        assert_eq!(unsigned.bound(0xffff_ffff), Some(0xffff_ffff));
+        let signed = SourceTailCount {
+            signed: true,
+            ..unsigned
+        };
+        assert_eq!(signed.bound(3), Some(3));
+        assert_eq!(signed.bound(0xffff_ffff), Some(0), "-1 runs no trip");
+        assert_eq!(signed.bound(0x8000_0000), Some(0));
+        let wide = SourceTailCount {
+            width_bytes: 8,
+            ..unsigned
+        };
+        assert_eq!(wide.bound(u64::MAX), usize::try_from(u64::MAX).ok());
+        assert_eq!(
+            SourceTailCount {
+                width_bytes: 0,
+                ..unsigned
+            }
+            .bound(1),
+            None
+        );
+        assert_eq!(
+            SourceTailCount {
+                width_bytes: 9,
+                ..unsigned
+            }
+            .bound(1),
+            None
+        );
+    }
+
+    #[test]
     fn a_body_proven_format_parameter_is_checked_and_never_overrides_radare2() {
         let identity = SourceCallSiteIdentity::new(
             0x1000,
@@ -4049,6 +4149,8 @@ pub struct SourceRegisterSaveArea {
     /// from the bound's own field, and its width.
     pub offset_field: i64,
     pub offset_width: u32,
+    /// The pointer `va_arg` fetches stack arguments through, in bytes from the bound's own field.
+    pub stack_field: i64,
 }
 
 /// The bound of the general register save area a `va_list` holds.

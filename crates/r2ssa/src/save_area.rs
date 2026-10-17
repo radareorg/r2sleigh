@@ -1,7 +1,7 @@
 //! A variadic prologue's register save area, proven from the machine (doc/adr-resolved-bodies.md,
 //! "Variadic tail").
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2source::{
     CanonicalStorageId, SourceConventionSlots, SourceRegisterSaveArea, SourceSaveAreaAnchor,
@@ -17,6 +17,11 @@ use crate::{SSAOp, SsaGraph, ValueId};
 pub(crate) struct SaveArea {
     pub(crate) named: usize,
     pub(crate) saved: crate::dense::IdSet<ValueId>,
+    /// Where the area starts, its bound and where `va_start` stored the bound, at
+    /// entry-stack-pointer offsets.
+    pub(crate) base: i64,
+    pub(crate) bound: i64,
+    pub(crate) stored_at: i64,
 }
 
 /// The register save area the body fills, where its rules prove one (ADR "Variadic tail"), at
@@ -38,22 +43,7 @@ pub(crate) fn register_save_area(
             .filter(|root| root.base == StackAddressBase::StackPointer)
             .map(|root| root.offset)
     };
-    // Each slot's entry value stored at a stack position, and every address stored to memory.
-    let mut saves = vec![Vec::new(); arguments.len()];
-    let mut stored_addresses = BTreeSet::new();
-    for inst in &graph.insts {
-        let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
-            continue;
-        };
-        let at = at_entry(*addr);
-        if let Some(offset) = at_entry(*val) {
-            stored_addresses.insert(offset);
-        }
-        let value = prep.views.copy_root(*val);
-        if let (Some(at), Some(slot)) = (at, entry_slot(graph, value, arguments)) {
-            saves[slot].push((at, value, inst.id));
-        }
-    }
+    let (saves, stored_addresses) = entry_saves((graph, prep), arguments, &at_entry);
     let last = arguments.len() - 1;
     let position = |slot: usize| i64::try_from(slot).ok().map(|slot| slot * width);
     for &(top, ..) in &saves[last] {
@@ -76,22 +66,39 @@ pub(crate) fn register_save_area(
         };
         // `va_start`'s own write: the bound stored, and beside it the first unnamed slot's distance.
         let next = base + position(named)? - bound;
-        if !stored_addresses.contains(&bound)
-            || !offset_stored((graph, prep), &at_entry, bound, area, next)
-        {
+        if !stored_addresses.contains(&bound) {
             continue;
         }
+        let Some(stored_at) = offset_stored((graph, prep), &at_entry, bound, area, next) else {
+            r2il::refusal_evidence!(
+                "register-save-area",
+                "bound {bound} is stored and no constant {next} sits {} from it",
+                area.offset_field
+            );
+            continue;
+        };
         let mut saved = crate::dense::IdSet::new(graph.values.len());
         let mut stores = crate::dense::IdSet::new(graph.insts.len());
         for (_, value, store) in (named..=last).flat_map(saved_at) {
             saved.insert(*value);
             stores.insert(*store);
         }
-        if saved
+        let unread = saved
             .iter()
-            .all(|value| read_only_by(graph, value, &stores, observations))
-        {
-            return Some(SaveArea { named, saved });
+            .find(|value| !read_only_by(graph, *value, &stores, observations));
+        if let Some(value) = unread {
+            r2il::refusal_evidence!(
+                "register-save-area",
+                "the saved {value:?} is read beyond its save"
+            );
+        } else {
+            return Some(SaveArea {
+                named,
+                saved,
+                base,
+                bound,
+                stored_at,
+            });
         }
     }
     r2il::refusal_evidence!(
@@ -105,15 +112,42 @@ pub(crate) fn register_save_area(
     None
 }
 
-/// Whether a constant store, alone or as a little-endian word with its neighbour (clang), holds
-/// `next` in the offset field beside a store of `bound`. O(insts).
+/// Per argument slot, where its entry value is stored: the position, the value and the store.
+type Saves = Vec<Vec<(i64, ValueId, InstId)>>;
+
+/// Each slot's entry value stored at a stack position, and every address stored to memory.
+fn entry_saves(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    arguments: &[CanonicalStorageId],
+    at_entry: &impl Fn(ValueId) -> Option<i64>,
+) -> (Saves, BTreeSet<i64>) {
+    let mut saves = vec![Vec::new(); arguments.len()];
+    let mut stored_addresses = BTreeSet::new();
+    for inst in &graph.insts {
+        let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
+            continue;
+        };
+        let at = at_entry(*addr);
+        if let Some(offset) = at_entry(*val) {
+            stored_addresses.insert(offset);
+        }
+        let value = prep.views.copy_root(*val);
+        if let (Some(at), Some(slot)) = (at, entry_slot(graph, value, arguments)) {
+            saves[slot].push((at, value, inst.id));
+        }
+    }
+    (saves, stored_addresses)
+}
+
+/// Where `bound` is stored, if a constant store, alone or as a little-endian word with its
+/// neighbour (clang), holds `next` in the offset field beside it. O(insts).
 fn offset_stored(
     (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
     at_entry: &impl Fn(ValueId) -> Option<i64>,
     bound: i64,
     area: SourceRegisterSaveArea,
     next: i64,
-) -> bool {
+) -> Option<i64> {
     let stores = || {
         graph.insts.iter().filter_map(|inst| match &inst.payload {
             InstPayload::Op(SSAOp::Store { addr, val, .. }) => Some((at_entry(*addr)?, *val)),
@@ -122,19 +156,20 @@ fn offset_stored(
     };
     let fields = (stores())
         .filter(|(_, val)| at_entry(*val) == Some(bound))
-        .map(|(at, _)| at + area.offset_field)
-        .collect::<BTreeSet<_>>();
+        .map(|(at, _)| (at + area.offset_field, at))
+        .collect::<BTreeMap<_, _>>();
     let width = i64::from(area.offset_width);
     let mask = u64::MAX >> (64 - 8 * area.offset_width.clamp(1, 8));
-    stores().any(|(at, val)| {
-        let Some((bits, size)) = prep.views.representative_constant(val) else {
-            return false;
-        };
+    stores().find_map(|(at, val)| {
+        let (bits, size) = prep.views.representative_constant(val)?;
         // `bits` holds at most a word: a wider constant states no field past its eighth byte.
         let last = at + i64::from(size.min(8)) - width;
-        last >= at
-            && (fields.range(at..=last))
-                .any(|field| (bits >> (8 * (field - at))) & mask == next.cast_unsigned() & mask)
+        if last < at {
+            return None;
+        }
+        (fields.range(at..=last))
+            .find(|(field, _)| (bits >> (8 * (**field - at))) & mask == next.cast_unsigned() & mask)
+            .map(|(_, stored)| *stored)
     })
 }
 
@@ -209,6 +244,7 @@ mod tests {
                 anchor: SourceSaveAreaAnchor::End,
                 offset_field: 16,
                 offset_width: 4,
+                stack_field: -8,
             }))
     }
 

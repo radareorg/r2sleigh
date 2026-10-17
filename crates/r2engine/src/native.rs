@@ -2525,6 +2525,7 @@ pub(crate) fn convention_slots(
                     },
                     offset_field: area.offset_field,
                     offset_width: area.offset_width,
+                    stack_field: area.stack_field,
                 }
             }))
             .with_variadic_count_register(

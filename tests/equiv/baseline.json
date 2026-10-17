@@ -1359,12 +1359,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::main": {
-   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. The engine spills RDI/RSI to stack_m24/stack_m16 and reads byte/half/word at offsets 0/2/4 and quad from RSI. That is correct at the register level, so the gate should lift this, once it has a SysV aggregate classifier. Separately, the parameter home split into two frame scalars is the known P4 partition issue, not an equivalence problem here.",
@@ -1455,12 +1450,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O0::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders 6 fixed parameters from the save-area spills, with 5 residual reads. The engine must lift first (P7), then the gate.",
@@ -1538,20 +1528,10 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_mutual_even": {
-   "cause": "[P6 body (callee facts bottom-up over call-graph SCCs, memoised per Revision) + P7 calls (optimistic result fixpoint over the SCC; result state separate from the parameter contract so that an Unproven result keeps its proven interface, per F15)] [G-SCC] Mutual recursion through `call partner; add rsp,8; ret`. r2engine prepare_callee prepares the partner against imports only (r2engine/src/native.rs:609-657: declare_imports, then prepare_restated with an empty callee-facts list), so the partner's call back to the root gets the convention-fallback boundary with no result (boundaries.rs:1128 'interface=false ... results=0') -> Unstated (r2ssa/src/recover_interface.rs:629) -> the partner's result is Unproven (:749; evidence :620/:714). At the root, mint_recovered_call_site_interface refuses a callee whose result is Unproven (recover_int...",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_mutual_odd": {
-   "cause": "[P6 body (callee facts bottom-up over call-graph SCCs, memoised per Revision) + P7 calls (optimistic result fixpoint over the SCC; result state separate from the parameter contract, per F15)] [G-SCC] Mutual recursion through `call partner; add rsp,8; ret`. r2engine prepare_callee prepares the partner (even, 0x401845) against imports only (r2engine/src/native.rs:609-657), so its call back to odd has the convention-fallback boundary with no result -> Unstated (r2ssa/src/recover_interface.rs:629) -> even's result is Unproven (:749). At odd's call site, mint_recovered_call_site_interface refuses the Unproven callee (recover_interface.rs:1505-1511, the critique:calls F15 proxy). The r2engine body_proven_return upgrade (lib.rs:1365-1376) cannot fire for an Unproven interface (machine_...",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_pointer_to_pointer": {
    "cause": "[#122] Three of the stores that fill the rows array with frame addresses are not spelled yet (StoreNotSpelled), so they are residual stores where legacy refused the function.",
@@ -2216,7 +2196,7 @@
    "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
    "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },

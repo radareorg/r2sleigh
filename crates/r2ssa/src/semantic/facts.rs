@@ -606,6 +606,31 @@ pub struct SourceCallArgumentFact {
 /// Per-callsite proof of a variadic argument count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariadicCallsiteArgumentCountEvidence {
+    pub basis: VariadicCountBasis,
+    pub total_argument_count: usize,
+}
+
+impl VariadicCallsiteArgumentCountEvidence {
+    /// The format literal that counted the tail, where one did.
+    pub const fn format(&self) -> Option<&FormatCountEvidence> {
+        match &self.basis {
+            VariadicCountBasis::Format(format) => Some(format),
+            VariadicCountBasis::Count(_) => None,
+        }
+    }
+}
+
+/// What counted a variadic tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariadicCountBasis {
+    /// A literal format string, read by the rule that names the format parameter.
+    Format(FormatCountEvidence),
+    /// A constant count argument, which the callee's own loop bounds its tail by.
+    Count(TailCountEvidence),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatCountEvidence {
     /// Which rule named the format parameter: radare2's recovered prototype,
     /// or the callee's own body. Orthogonal to `merged_literals`, which is
     /// about the literal rather than the parameter.
@@ -617,7 +642,13 @@ pub struct VariadicCallsiteArgumentCountEvidence {
     pub format_argument_index: usize,
     pub format_literal_address: u64,
     pub format_consumed_argument_count: usize,
-    pub total_argument_count: usize,
+}
+
+/// The tail a callee's loop bound allows, read off the constant the call passes for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailCountEvidence {
+    pub bound: r2source::SourceTailCount,
+    pub tail_arguments: usize,
 }
 
 /// Why a variadic callsite could not prove and project its own argument list.
@@ -634,6 +665,10 @@ pub enum VariadicCallsiteArgumentCountRefusal {
     /// The format consumes a floating operand, which the convention carries in
     /// its floating sequence rather than the integer one this recovery walks.
     FloatingVariadicArgument,
+    /// The callee's loop bounds its tail by a parameter the call does not carry.
+    CountArgumentUnavailable,
+    /// The callee's loop bounds its tail by a parameter this call passes no constant for.
+    CountArgumentNotConstant,
 }
 
 impl VariadicCallsiteArgumentCountRefusal {
@@ -648,6 +683,8 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::InsufficientRegisterArgumentCarriers => "insufficient_register_argument_carriers",
             Self::UnresolvedArgumentCarrier => "unresolved_argument_carrier",
             Self::FloatingVariadicArgument => "floating_variadic_argument",
+            Self::CountArgumentUnavailable => "count_argument_unavailable",
+            Self::CountArgumentNotConstant => "count_argument_not_constant",
         }
     }
 }

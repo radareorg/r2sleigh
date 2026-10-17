@@ -1249,13 +1249,14 @@ fn merged_formats_that_agree_prove_the_variadic_count() {
     let evidence = call
         .variadic_argument_count_evidence
         .expect("merged literal count");
-    assert!(evidence.merged_literals);
+    let format = evidence.format().expect("a format count");
+    assert!(format.merged_literals);
     assert!(matches!(
-        evidence.parameter_rule,
+        format.parameter_rule,
         crate::SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 }
     ));
-    assert_eq!(evidence.format_argument_index, 1);
-    assert_eq!(evidence.format_consumed_argument_count, 1);
+    assert_eq!(format.format_argument_index, 1);
+    assert_eq!(format.format_consumed_argument_count, 1);
     assert_eq!(evidence.total_argument_count, 3);
     assert!(call.variadic_argument_count_refusal.is_none());
 }
@@ -1284,6 +1285,8 @@ fn a_variadic_call_reads_a_format_formed_by_constant_arithmetic() {
     assert_eq!(
         call.variadic_argument_count_evidence
             .expect("literal count evidence")
+            .format()
+            .expect("a format count")
             .format_consumed_argument_count,
         2
     );
@@ -1423,6 +1426,8 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         first
             .variadic_argument_count_evidence
             .expect("first literal count")
+            .format()
+            .expect("a format count")
             .format_literal_address,
         0x3000
     );
@@ -1430,6 +1435,8 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         second
             .variadic_argument_count_evidence
             .expect("second literal count")
+            .format()
+            .expect("a format count")
             .format_literal_address,
         0x3010
     );

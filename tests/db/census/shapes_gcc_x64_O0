@@ -472,26 +472,36 @@ NAME=0x00401515
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401515
 EXPECT=<<EOF
-uint64_t shape_variadic_local(void)
+uint64_t shape_variadic_local(uint64_t arg0, uint64_t arg1)
 {
-    uint64_t rax_7;
-    uint64_t rax_14;
-    uint64_t rax_23;
+    uint64_t vfold(uint32_t, ...);
 
-    /* r2dec proof: 12 constructs are marked below; 70 source obligations: 11 rendered, 22 elided, 0 refused, 37 residual; 4 statements rendered; 4 never assigned, read as residuals (RAX_13, RAX_22, RAX_34, RAX_6) */
+    uint64_t rax_6;
+    uint64_t rax_7;
+    uint64_t rax_13;
+    uint64_t rax_14;
+    uint64_t rax_19;
+    uint64_t rax_22;
+    uint64_t rax_23;
+    uint64_t rax_28;
+    uint64_t tmp_4015f3_8_1;
+    uint64_t rax_31;
+    uint64_t rax_34;
+
+    /* r2dec proof: no individual construct is marked; 83 source obligations: 62 rendered, 21 elided, 0 refused; 12 statements rendered */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401515:101 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401515:106 covering 1 op (render::values) */
-        rax_7 = r2sleigh_residual_u64(3);
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401515:205 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(5); /* r2dec gap: ValueNotComputed at 0x401515:210 covering 1 op (render::values) */
-        rax_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_7 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(6)) - (uint64_t)rax_7);
-        r2sleigh_residual_void(7); /* r2dec gap: CallNotRendered at 0x401515:324 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(8); /* r2dec gap: ValueNotComputed at 0x401515:329 covering 1 op (render::values) */
-        rax_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_14 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(9)) - (uint64_t)rax_14);
-        r2sleigh_residual_void(10); /* r2dec gap: CallNotRendered at 0x401515:469 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(11); /* r2dec gap: ValueNotComputed at 0x401515:474 covering 1 op (render::values) */
-        return (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_23 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(12)) - (uint64_t)rax_23);
+        rax_6 = vfold(1, arg0);
+        rax_7 = rax_6;
+        rax_13 = vfold(2, arg0, arg1);
+        rax_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_7 * (uint64_t)8U) + (uint64_t)rax_13) - (uint64_t)rax_7);
+        rax_19 = (uint64_t)((uint64_t)arg0 ^ (uint64_t)arg1);
+        rax_22 = vfold(3, arg0, arg1, rax_19);
+        rax_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_14 * (uint64_t)8U) + (uint64_t)rax_22) - (uint64_t)rax_14);
+        rax_28 = (uint64_t)((uint64_t)arg0 | (uint64_t)arg1);
+        tmp_4015f3_8_1 = (uint64_t)((uint64_t)arg0 + (uint64_t)arg1);
+        rax_31 = (uint64_t)((uint64_t)arg0 ^ (uint64_t)arg1);
+        rax_34 = vfold(5, arg0, arg1, rax_31, tmp_4015f3_8_1, rax_28);
+        return (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_23 * (uint64_t)8U) + (uint64_t)rax_34) - (uint64_t)rax_23);
     }
 }
 
@@ -1545,8 +1555,10 @@ uint64_t fcn_402206(void)
     uint64_t shape_struct_pointer(uint64_t, uint64_t);
     uint64_t shape_struct_value(uint64_t, uint64_t);
     uint64_t shape_variadic(uint64_t, uint64_t);
+    uint64_t shape_variadic_local(uint64_t, uint64_t);
 
     uint64_t rax_4;
+    uint64_t rax_8;
     uint64_t rax_12;
     uint64_t rax_16;
     uint64_t rax_20;
@@ -1560,14 +1572,13 @@ uint64_t fcn_402206(void)
     uint64_t rax_52;
     uint64_t rax_56;
 
-    /* r2dec proof: 3 constructs are marked below; 331 source obligations: 214 rendered, 102 elided, 0 refused, 15 residual; 28 statements rendered; 1 never assigned, read as residuals (RAX_8); 14 callee prototypes supplied by the source */
+    /* r2dec proof: no individual construct is marked; 318 source obligations: 227 rendered, 91 elided, 0 refused; 29 statements rendered; 14 callee prototypes supplied by the source */
     /* symbol `main`; C allows that name no other prototype */
     {
         rax_4 = shape_variadic((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_4);
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402206:131 covering 1 op (render::values): call to shape_variadic_local: its arity is only at least 0 (a floor), and this call writes 3 */
-        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402206:138 covering 1 op (render::values) */
-        printf("%016llx\n", r2sleigh_residual_u64(3));
+        rax_8 = shape_variadic_local((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        printf("%016llx\n", rax_8);
         rax_12 = shape_call_chain((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_12);
         rax_16 = shape_struct_pointer((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);

@@ -19,7 +19,10 @@ pub(crate) fn variadic_callsite_argument_count(
     forwarding: &FormatForwardingLookup<'_>,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
     let Some(parameter_rule) = interface.format_parameter_rule() else {
-        return Err(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter);
+        let bound = (interface.exact_callee_interface())
+            .and_then(r2source::SourceFunctionInterface::tail_count)
+            .ok_or(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter)?;
+        return counted_tail_argument_count(graph, prep, interface, fixed_arguments, bound);
     };
     let parameter_index = parameter_rule.parameter_index();
     let format_argument_index = usize::try_from(parameter_index)
@@ -110,11 +113,53 @@ pub(crate) fn variadic_callsite_argument_count(
         .checked_add(format_consumed_argument_count)
         .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
     Ok(VariadicCallsiteArgumentCountEvidence {
-        parameter_rule,
-        merged_literals: false,
-        format_argument_index,
-        format_literal_address,
-        format_consumed_argument_count,
+        basis: VariadicCountBasis::Format(FormatCountEvidence {
+            parameter_rule,
+            merged_literals: false,
+            format_argument_index,
+            format_literal_address,
+            format_consumed_argument_count,
+        }),
+        total_argument_count,
+    })
+}
+
+/// A variadic call's count from the constant it passes for the parameter its callee's loop bounds
+/// its tail by (ADR "Count-driven tail"); any other count stays a counted residual.
+fn counted_tail_argument_count(
+    graph: &SsaGraph,
+    prep: Option<&crate::DecompilePrepFacts>,
+    interface: &r2source::SourceCallSiteInterface,
+    fixed_arguments: &[Option<SourceCallArgumentFact>],
+    bound: r2source::SourceTailCount,
+) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
+    // A tail this long is no call a count of constants places; the carriers would not be there.
+    const LONGEST_TAIL: usize = 1024;
+    let index = usize::try_from(bound.parameter_index)
+        .map_err(|_| VariadicCallsiteArgumentCountRefusal::CountArgumentUnavailable)?;
+    let argument = fixed_arguments
+        .get(index)
+        .and_then(Option::as_ref)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentUnavailable)?;
+    let SourceCallArgumentValue::Value(value) = argument.value else {
+        return Err(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant);
+    };
+    let bits = resolve_const_value(graph, prep, value)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant)?;
+    let tail_arguments = bound
+        .bound(bits)
+        .filter(|tail| *tail <= LONGEST_TAIL)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+    let total_argument_count = interface
+        .arguments()
+        .len()
+        .checked_add(tail_arguments)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+    Ok(VariadicCallsiteArgumentCountEvidence {
+        basis: VariadicCountBasis::Count(TailCountEvidence {
+            bound,
+            tail_arguments,
+        }),
         total_argument_count,
     })
 }
@@ -406,11 +451,13 @@ pub(crate) fn merged_format_literal_argument_count(
     // One literal reached through copies is one literal, and saying it was a
     // merge would claim a proof this call did not need.
     Ok(VariadicCallsiteArgumentCountEvidence {
-        parameter_rule,
-        merged_literals: addresses.len() > 1,
-        format_argument_index,
-        format_literal_address,
-        format_consumed_argument_count,
+        basis: VariadicCountBasis::Format(FormatCountEvidence {
+            parameter_rule,
+            merged_literals: addresses.len() > 1,
+            format_argument_index,
+            format_literal_address,
+            format_consumed_argument_count,
+        }),
         total_argument_count,
     })
 }

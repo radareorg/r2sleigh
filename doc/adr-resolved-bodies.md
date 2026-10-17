@@ -368,9 +368,7 @@ never-assigned arguments. None closes: that needs the count-driven tail.
 
 **What is left.**
 
-- A count-driven tail: `vfold`'s `va_arg` loop is bounded by its named
-  `count`, so `vfold(1u, a)` passes exactly one; a summary that states it
-  (SM) would close the W14 `main` records. Conditional on SM.
+- A count-driven tail beyond gcc -O0 on x86-64: see "Count-driven tail".
 - The scrub exception rests on the stack-protector check being decided
   (`UbFreeSource`, the platform's guard row); where it is not, gcc's
   prologue `xor eax, eax` before a first call still reads as a count, and
@@ -390,6 +388,87 @@ never-assigned arguments. None closes: that needs the count-driven tail.
   its declaration" gaps (P7's 41, conditional).
 - Named float parameters (`fp_offset`, `__vr_offs`) with W11; Microsoft
   x64's home area has no row, and Darwin arm64 passes the tail on the stack.
+
+### Count-driven tail (ROADMAP SM, W14)
+
+`vfold(unsigned count, ...)` fetches one slot per trip of a loop that runs while its counter is
+below `count`, so `vfold(1u, a)` passes exactly one. The call stays a counted residual
+(`missing_format_parameter`) until the body states that bound.
+
+**The fact.** A variadic body with a register save area (above) consumes at most `P` tail
+arguments, `P` one of its named parameters, where in entry-stack-pointer coordinates:
+
+1. the `va_list` cells are the convention's rows (r2abi): the bound `va_start` stored at `B`, the
+   offset field at `B + offset_field`, the stack pointer at `B + stack_field`;
+2. a loop `L` holds every cursor step, `L`'s only exit leaves from its header `H`, no block of `L`
+   ends the function, and `H` branches on `counter < count` (or `counter != count`), both loaded
+   whole from their cells, the counter a cell the body zeroes once and steps by one;
+3. the count cell is stored once, from the entry value of a named argument register, before `L`;
+4. a step is a store of `cell + w` to the offset field or the stack pointer (`w` the slot
+   width), a fetch is a load through the base indexed by the offset field's value or through the
+   loaded stack pointer, and every other use of the `va_list`, its cells or the save area refuses
+   (`contain_cursors`, `fetches`): no address into them is passed, stored or indexed otherwise, no
+   load reads a tail slot at a constant address, no store reaches a cell but `va_start`'s, the
+   steps', the counter's and the count's;
+5. a tally of steps and fetches against the counter's steps is recorded at each block on its first
+   arrival and equal on every later one, so it holds at every edge: each path from `H` back to it
+   steps the counter once, steps one cursor once and fetches once; steps, fetches and the
+   counter's zeroing sit in `L` and before it only; every load of the offset field or the stack
+   pointer precedes the trip's step, so a fetch reads the slot the trip started at, not the next.
+
+Then `H` runs with tally zero, each trip consumes one slot, and the counter never passes the count
+(it starts at zero and steps by one while below it), so the loop consumes at most `count` slots, at
+`count`'s width, unsigned or signed (a negative count runs no trip). `SourceTailCount` carries
+`(parameter, width, signed)` on `SourceFunctionInterface`, minted beside the variadic bit.
+
+Rule 2 refuses a loop that tests at its latch (a do-while runs once at count 0 unless a guard
+before it says otherwise, which this does not read). Rule 5 refuses `for (...) { va_arg; va_arg; }`
+(two steps per trip) and a conditional `va_arg`. Rule 4 refuses a `va_list` handed to `vprintf`, a
+peek past the cursor (`ap + 8`), and a double fetched through `fp_offset`. A frame address into
+the cells, or arithmetic past an object into them, is out of bounds in C and not read.
+
+**Owner.** r2ssa (`tail_count`, run inside interface recovery on the preparation's graph), r2abi the
+`stack_field` row (psABI Figure 3.34, AAPCS64's `va_list`). The callee's interface rides the call
+site's `exact_callee_interface`, so no second rule is minted.
+
+**Callers.** A call whose callee states a count, with no format rule, passes the constant it holds
+for that parameter (`resolve_const_value`), masked to the counted width, as the tail: `named + count`
+arguments. A count no constant fixes is `CountArgumentNotConstant`, a count the call does not carry
+`CountArgumentUnavailable`, and a tail past 1,024 `ArgumentCountOverflow`; each is the counted
+residual, and `VariadicCallsiteArgumentCountEvidence` names its basis (`Format` or `Count`).
+Carriers are placed as for a format count, so the tail past the registers is the stack's.
+
+**Cost.** Only a body with a save area runs it: O(insts + uses) scans, a dominator query per
+store, and one predicate collection; the callsite is O(1). Release `pdd` instructions, base and
+head, two runs each: 0pack `0x62ecf0` 20.32 and 20.26 G to 20.26 and 20.29 G, pumasim `0x23fdf0`
+19.18 and 19.15 G to 19.15 and 19.17 G (noise 0.3%), output byte-identical, peak RSS 241 and 256
+MB to 240 and 260 MB.
+
+**Measured (2026-10-16).** shapes.c, stripped, `aa; pdd`: gcc -O0 on x86-64 proves `vfold`
+(`counter` below `count`, one `va_arg` per trip), so `shape_variadic_local` renders
+`vfold(1, a)`, `vfold(2, a, b)`, `vfold(3, a, b, a ^ b)` and
+`vfold(5, a, b, a ^ b, a + b, a | b)` and is `(uint64_t arg0, uint64_t arg1)`, and `main`'s call
+to it has no gap (the coverage cells `shape_variadic_local` 37 and `main` 15 gaps to 0; the census
+moves those two functions only, both judged against shapes.c). The other eleven builds refuse
+with a visible reason (`R2DEC_TRACE_REFUSAL`, site `tail-count`), `vfold` still `(uint32_t arg0, ...)`
+and the calls still counted residuals: x86-64 gcc -O1 and AArch64 gcc -O1 test at the latch (a
+block leaves the loop beside its header); gcc -O2 and clang -O1/-O2 on both targets, and
+x86-64 clang -O0, keep the cursors in registers or reach them through a stored `va_list`
+address (`no cursor steps`); AArch64 gcc -O0 aligns the stack pointer (`(p + 15) & ~7`) where
+the rules allow `p + w`, and AArch64 clang -O0 writes beside the entry saves.
+
+**What is left.**
+
+- Cursors kept in registers (gcc -O1/-O2, clang -O1/-O2): the same five rules over inductions of
+  the loop's phis; the rotated loop needs the guard before it read as the count's.
+- clang -O0: the `va_list` reached through a stored address needs that address read as the
+  cells', which `contain_cursors` refuses.
+- A load that starts below the unnamed slots and spans into them is not seen by `contain_cursors`
+  (it tests the address a value roots at, not the access width); gcc -O0 emits none.
+- AArch64: the register path's second step (`__gr_offs`, then the stack) is one slot only where
+  the value ranges show `__gr_offs` is a multiple of 8 below zero; `r2il::eval` would carry it.
+- A count in a global or a struct field, and a tail bounded by a sentinel (`NULL`-terminated), are
+  not counts of a parameter and stay residuals.
 
 ### Summaries (ROADMAP SM, D23)
 

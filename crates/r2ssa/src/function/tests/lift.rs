@@ -146,6 +146,8 @@ fn a_variadic_call_uses_its_literal_format_not_written_scratch_registers() {
         no_tail
             .variadic_argument_count_evidence
             .expect("literal count evidence")
+            .format()
+            .expect("a format count")
             .format_consumed_argument_count,
         0
     );
@@ -156,6 +158,8 @@ fn a_variadic_call_uses_its_literal_format_not_written_scratch_registers() {
         width_and_value
             .variadic_argument_count_evidence
             .expect("literal count evidence")
+            .format()
+            .expect("a format count")
             .format_consumed_argument_count,
         2
     );
@@ -166,6 +170,8 @@ fn a_variadic_call_uses_its_literal_format_not_written_scratch_registers() {
         first_parameter_is_format
             .variadic_argument_count_evidence
             .expect("literal count evidence")
+            .format()
+            .expect("a format count")
             .format_argument_index,
         0
     );

@@ -1508,20 +1508,10 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_mutual_even": {
-   "cause": "[P7] The call to shape_mutual_odd renders with its two arguments now that the cycle's least fixpoint states its Exact(2); the trap is the return, since each member's result is the other's and members read each other's results resolved alone, so the result stays unproven and is a counted residual. Closing fact: a least fixpoint over the component's results (P7's result fixpoint inside a cycle).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/resolved.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_mutual_odd": {
-   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_pointer_to_pointer": {
    "status": "equal"

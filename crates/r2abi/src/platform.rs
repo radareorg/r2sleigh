@@ -196,6 +196,9 @@ pub struct RegisterSaveArea {
     pub offset_field: i64,
     /// The offset field's width in bytes.
     pub offset_width: u32,
+    /// The pointer `va_arg` fetches stack arguments through, as its distance in bytes from the
+    /// bound's own field.
+    pub stack_field: i64,
 }
 
 /// The bound of the general register save area a `va_list` holds.
@@ -223,6 +226,7 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
         anchor: SaveAreaAnchor::Base,
         offset_field: -16,
         offset_width: 4,
+        stack_field: -8,
     }),
     prototype: None,
     refused: None,
@@ -234,7 +238,7 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
-               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;}, and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
+               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;} (overflow_arg_area at offset 8, reg_save_area at 16), and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
 };
 
 const MICROSOFT_X64: CallingConvention = CallingConvention {
@@ -280,6 +284,7 @@ const AAPCS64: CallingConvention = CallingConvention {
         anchor: SaveAreaAnchor::End,
         offset_field: 16,
         offset_width: 4,
+        stack_field: -8,
     }),
     prototype: None,
     refused: None,
@@ -290,7 +295,7 @@ const AAPCS64: CallingConvention = CallingConvention {
     stack_bound: None,
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"; the va_list is {void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs;}, and \"__gr_offs: set to 0 - ((8 - named_gr) * 8)\"",
+               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"; the va_list is {void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs;} (__stack at offset 0, __gr_top at 8), and \"__gr_offs: set to 0 - ((8 - named_gr) * 8)\"",
 };
 
 const AAPCS64_DARWIN: CallingConvention = CallingConvention {
@@ -595,6 +600,7 @@ mod tests {
                 anchor: SaveAreaAnchor::End,
                 offset_field: 16,
                 offset_width: 4,
+                stack_field: -8,
             })
         );
         assert_eq!(arm64(Platform::Darwin).register_save_area, None);
@@ -604,6 +610,7 @@ mod tests {
                 anchor: SaveAreaAnchor::Base,
                 offset_field: -16,
                 offset_width: 4,
+                stack_field: -8,
             })
         );
         assert_eq!(x64(Platform::Windows).register_save_area, None);

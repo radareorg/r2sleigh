@@ -175,6 +175,8 @@ pub struct RecoveredInterface {
     /// Whether the body saves the argument registers past its parameters to the convention's
     /// register save area: arguments continue past them, which each call counts (`save_area`).
     variadic: bool,
+    /// The parameter a tail-consuming loop is bounded by, where the body proves one (`tail_count`).
+    tail_count: Option<r2source::SourceTailCount>,
     /// Whether the result is void because no call reads it, which holds under a closed world only.
     closed_world: bool,
     /// The first pass over recovery's own facts that moved a state past its height.
@@ -1669,6 +1671,9 @@ fn recover_interface_inner(
             observed: *slot,
         }));
     }
+    let tail_count = save_area.as_ref().zip(prep).and_then(|(area, prep)| {
+        crate::tail_count::tail_count(func, graph, prep, slots, (area, &observations))
+    });
     let integers = parameters.len();
     let return_mechanism = recovered_return_mechanism(&facts);
     let result_is_return_address = result.register().is_some()
@@ -1788,6 +1793,7 @@ fn recover_interface_inner(
         result_carriers,
         arity_floor,
         variadic: save_area.is_some(),
+        tail_count,
         closed_world,
         exhausted: facts.exhausted(),
     })
@@ -2089,6 +2095,16 @@ pub fn mint_recovered_interface(
             .map(|interface| match recovered.variadic {
                 true => interface.with_variadic_tail(),
                 false => interface,
+            })
+            .map(|interface| match recovered.tail_count {
+                Some(count) => match interface.clone().with_body_proven_tail_count(count) {
+                    Ok(counted) => counted,
+                    Err(why) => {
+                        r2il::refusal_evidence!("tail-count", "the proven count is refused: {why}");
+                        interface
+                    }
+                },
+                None => interface,
             })
             .map(|interface| match recovered.result_carriers {
                 Some(carriers) => interface.with_result_carriers(carriers),
