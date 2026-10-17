@@ -8,6 +8,7 @@ mod boundaries;
 mod call_sites;
 mod certificates;
 mod control_domains;
+mod covering;
 mod declared_slots;
 mod facts;
 mod frame_reach;
