@@ -433,6 +433,23 @@ class ClassifyTests(unittest.TestCase):
                                        self.NONE)
         self.assertEqual((status, counts["unstable"]), ("untested", 1))
 
+    def test_renderings_that_exhaust_their_stack_are_not_graded_on_that_vector(self):
+        def fault(run, stack):
+            return {"run": run, "outcome": "signal", "status": 11, "fault_addr": "0x400000000fe0",
+                    **({"stack": True} if stack else {})}
+
+        def deep(o0=True, o2=True):
+            line = self.line(0, o0=fault(2, o0), pairs={(0, 2): False})
+            line["runs"][4] = fault(4, o2)
+            return line
+
+        status, _, counts = gate.classify([deep(), self.line(1)], [], 0, self.NONE)
+        self.assertEqual((status, counts["stack"], counts["graded"], counts["differs"]),
+                         ("equal", 1, 1, 0))
+        # A fault elsewhere than at the stack pointer, or in one build only, is graded.
+        self.assertEqual(gate.classify([deep(o0=False)], [], 0, self.NONE)[0], "differs")
+        self.assertEqual(gate.classify([deep(o2=False)], [], 0, self.NONE)[0], "differs")
+
     HELPERS = gate.ResidualHelpers("/x/O0.so", [(0x1100, 0x1120, "r2sleigh_residual_s32")])
     NONE = gate.ResidualHelpers("", [])
 

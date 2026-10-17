@@ -385,7 +385,7 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
     counts those, and ``trap_memory`` those whose memory was compared too.
     """
     counts = {"total": len(vector_lines), "dropped": 0, "unstable": 0, "incomplete": 0,
-              "graded": 0, "compared": 0, "trap_compared": 0, "trap_memory": 0, "equal": 0,
+              "stack": 0, "graded": 0, "compared": 0, "trap_compared": 0, "trap_memory": 0, "equal": 0,
               "residual-trap": 0, "slow": 0, "differs": 0, "uninit": 0, "ub": 0}
     first: dict[str, dict] = {}
     unstable_example: dict | None = None
@@ -415,6 +415,10 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                     "runs": [_run_evidence(run) for run in runs
                              if run.get("outcome") in ("unavailable", "hang")],
                 }
+            continue
+        if _stack_exhausted(runs):
+            # The original returned, so its stack was enough; no build of the C has a tail call.
+            counts["stack"] += 1
             continue
         counts["graded"] += 1
         found: dict[str, dict] = {}
@@ -564,6 +568,14 @@ def _run_evidence(run: dict) -> dict:
     except (KeyError, ValueError):
         pass
     return kept
+
+
+def _stack_exhausted(runs: list[dict]) -> bool:
+    """Whether the -O0 and -O2 renderings both faulted past their stack's end. The builds make
+    no sibling call (link.py), so a tail-recursive original that returns in constant stack
+    asks a rendering for a frame per step: a limit of the host's stack, not of the C."""
+    return all(len(runs) > i and runs[i].get("outcome") == "signal" and runs[i].get("stack")
+               for i in (O0, O2))
 
 
 def _over_budget(run: dict) -> bool:

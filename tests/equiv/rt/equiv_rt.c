@@ -98,6 +98,11 @@ static void context_set_pc(ucontext_t *uc, uint64_t pc)
     uc->uc_mcontext.gregs[REG_RIP] = (greg_t)pc;
 }
 
+static uint64_t context_sp(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RSP];
+}
+
 /* The first integer argument register. */
 static uint64_t context_arg0(const ucontext_t *uc)
 {
@@ -157,6 +162,11 @@ static uint64_t context_pc(const ucontext_t *uc)
 static void context_set_pc(ucontext_t *uc, uint64_t pc)
 {
     uc->uc_mcontext.pc = pc;
+}
+
+static uint64_t context_sp(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.sp;
 }
 
 /* The first integer argument register. */
@@ -296,6 +306,7 @@ struct slot_head {
     int32_t fault_signal;
     uint64_t fault_pc;
     uint64_t fault_addr;
+    int32_t fault_on_stack;      /* the fault address lies at the stack pointer: stack exhausted */
     uint64_t fault_base;         /* load base of fault_object, to read its symbols */
     char fault_object[256];
     int32_t guard;               /* GUARD_*: how control reached the original's code */
@@ -588,6 +599,8 @@ static int trap_depth(void)
     return TRAP_UNKNOWN;
 }
 
+#define STACK_REACH 65536u
+
 static void child_fault(int sig, siginfo_t *info, void *context)
 {
     struct slot_head *slot = g_child_slot;
@@ -596,6 +609,10 @@ static void child_fault(int sig, siginfo_t *info, void *context)
         slot->fault_signal = sig;
         slot->fault_pc = context_pc(uc);
         slot->fault_addr = (uint64_t)(uintptr_t)info->si_addr;
+        /* A frame store past the stack's end faults within a frame of the stack pointer. */
+        uint64_t sp = context_sp(uc);
+        slot->fault_on_stack = (sig == SIGSEGV || sig == SIGBUS)
+            && slot->fault_addr + STACK_REACH >= sp && slot->fault_addr <= sp + STACK_REACH;
         Dl_info where;
         if (dladdr((void *)(uintptr_t)slot->fault_pc, &where) && where.dli_fname) {
             strncpy(slot->fault_object, where.dli_fname, sizeof slot->fault_object - 1);
@@ -1057,6 +1074,8 @@ static void emit_run(size_t index, const struct run_state *run)
                 (unsigned long long)run->slot->fault_addr,
                 (unsigned long long)run->slot->fault_base);
         json_string(g_out, run->slot->fault_object, strlen(run->slot->fault_object));
+        if (run->slot->fault_on_stack)
+            fputs(",\"stack\":true", g_out);
         if (run->slot->guard) {
             fprintf(g_out, ",\"guard\":\"%s\"", guard_name[run->slot->guard]);
             Dl_info where;

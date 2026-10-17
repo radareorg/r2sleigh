@@ -89,7 +89,12 @@ refused as `compile-error`.
 
 The return is compared at the source's width and class (two NaNs agree); the
 arena, the writable segments, stdout and stderr byte for byte. A vector the
-original does not return or exit from lies outside its domain and is dropped.
+original does not return or exit from lies outside its domain and is dropped. A vector
+on which the original returns but the `-O0` and `-O2` renderings both fault at their stack
+pointer (`stack` in the run, counted as `stack`) is not graded: the builds make no sibling
+call, so a tail-recursive original that runs in constant stack asks the C for a frame per
+step. Without it the verdict follows host speed, since a fast host finishes the original's
+2^31 steps inside the budget where a slow one drops the vector.
 
 **State at a residual trap.** A rendering that traps in its own code is
 snapshotted in the fault handler: its stdio is flushed, the arena and the
