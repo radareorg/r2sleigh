@@ -3,7 +3,7 @@
 //! This module applies a sequence of lightweight, SSA-safe optimizations
 //! intended to simplify analysis and decompilation output.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::dense::{Csr, IdMap, IdSet, IdVec};
@@ -14,10 +14,21 @@ use crate::{
     SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite, SourceTypeKind,
 };
 
+/// How far sparse conditional constants reach into the function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SccpMode {
+    Off,
+    /// Decide the branches whose condition is a constant and drop what they leave unreachable;
+    /// no operand is rewritten, so provenance stays (doc/adr-structure-dominator-tree.md §6).
+    Decide,
+    /// Decide, and read every proved constant where it was read.
+    Propagate,
+}
+
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
-    pub enable_sccp: bool,
+    pub sccp: SccpMode,
     pub enable_inst_combine: bool,
     pub preserve_memory_reads: bool,
 }
@@ -35,7 +46,7 @@ pub struct DecompilePrepConfig {
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            enable_sccp: true,
+            sccp: SccpMode::Propagate,
             enable_inst_combine: true,
             preserve_memory_reads: false,
         }
@@ -53,7 +64,7 @@ impl Default for DecompilePrepConfig {
 impl From<&DecompilePrepConfig> for OptimizationConfig {
     fn from(value: &DecompilePrepConfig) -> Self {
         Self {
-            enable_sccp: false,
+            sccp: SccpMode::Decide,
             enable_inst_combine: value.enable_inst_combine,
             preserve_memory_reads: true,
         }
@@ -126,16 +137,10 @@ pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Siz
         control.poll()?;
         let mut changed = false;
 
-        if config.enable_sccp {
-            let (consts, executable_edges) = sccp_with_control(func, control)?;
+        if config.sccp != SccpMode::Off {
+            let proved = sccp_with_control(func, control)?;
             control.poll()?;
-            if apply_sccp_results(
-                func,
-                &consts,
-                &executable_edges,
-                return_carriers,
-                &mut stats,
-            ) {
+            if apply_sccp_results(func, &proved, return_carriers, config.sccp, &mut stats) {
                 changed = true;
             }
         }
@@ -168,7 +173,8 @@ pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Siz
 /// An operation as the function holds it: operands are the function's ids.
 type Op = SSAOp<VarId>;
 
-type SccpResult = (IdMap<VarId, u64>, HashSet<(u64, u64)>);
+/// The constants proved, the edges found executable, and the blocks an operation with unstated effects can precede.
+type SccpResult = (IdMap<VarId, u64>, HashSet<(u64, u64)>, HashSet<u64>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LatticeValue {
@@ -347,7 +353,7 @@ fn evaluate_terminator_sccp(
     func: &SSAFunction,
     values: &Minting<'_>,
     block_addr: u64,
-    lattice: &IdVec<VarId, LatticeValue>,
+    lattice: Option<&IdVec<VarId, LatticeValue>>,
     cfg_worklist: &mut VecDeque<(u64, u64)>,
 ) {
     let Some(cfg_block) = func.cfg().get_block(block_addr) else {
@@ -358,7 +364,9 @@ fn evaluate_terminator_sccp(
         BlockTerminator::ConditionalBranch {
             true_target,
             false_target,
-        } => match find_cbranch_condition(func, values, block_addr, lattice) {
+        } => match lattice.map_or(LatticeValue::Bottom, |lattice| {
+            find_cbranch_condition(func, values, block_addr, lattice)
+        }) {
             LatticeValue::Const(0) => cfg_worklist.push_back((block_addr, *false_target)),
             LatticeValue::Const(_) => cfg_worklist.push_back((block_addr, *true_target)),
             LatticeValue::Top | LatticeValue::Bottom => {
@@ -388,6 +396,8 @@ struct Sccp<'f> {
     lattice: IdVec<VarId, LatticeValue>,
     executable: HashSet<(u64, u64)>,
     block_visited: HashSet<u64>,
+    /// Blocks an operation with unstated effects can precede (`after_unmodelled_effects`).
+    unmodelled: HashSet<u64>,
     cfg_worklist: VecDeque<(u64, u64)>,
     ssa_worklist: VecDeque<VarId>,
 }
@@ -419,11 +429,17 @@ impl Sccp<'_> {
     }
 
     fn evaluate_terminator(&mut self, block_addr: u64) {
+        // A guard after an operation with unstated effects reads values that may be stale.
+        let lattice = if self.unmodelled.contains(&block_addr) {
+            None
+        } else {
+            Some(&self.lattice)
+        };
         evaluate_terminator_sccp(
             self.func,
             &self.values,
             block_addr,
-            &self.lattice,
+            lattice,
             &mut self.cfg_worklist,
         );
     }
@@ -495,6 +511,31 @@ impl Sccp<'_> {
     }
 }
 
+/// The blocks an operation with unstated effects can precede, itself included: `syscall` writes
+/// `rax` with no SSA definition, so no register read there is a constant. `O(n + e)`.
+fn after_unmodelled_effects(func: &SSAFunction) -> HashSet<u64> {
+    let mut reached = HashSet::new();
+    let mut pending = func
+        .blocks()
+        .iter()
+        .filter(|block| {
+            (block.ops().iter()).any(|op| {
+                matches!(
+                    op,
+                    SSAOp::CallOther { output: None, .. } | SSAOp::Unimplemented
+                )
+            })
+        })
+        .map(|block| block.addr)
+        .collect::<Vec<_>>();
+    while let Some(addr) = pending.pop() {
+        if reached.insert(addr) {
+            pending.extend(func.successors(addr));
+        }
+    }
+    reached
+}
+
 /// Wegman and Zadeck's sparse conditional constants over the function's
 /// ids. The lattice is a dense vector, so a value's state is one index; each
 /// value falls at most twice (Top, Const, Bottom), and each fall revisits its
@@ -510,6 +551,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
         lattice: IdVec::filled(func.values().len(), LatticeValue::Top),
         executable: HashSet::new(),
         block_visited: HashSet::new(),
+        unmodelled: after_unmodelled_effects(func),
         cfg_worklist: VecDeque::new(),
         ssa_worklist: VecDeque::new(),
     };
@@ -543,6 +585,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
     let Sccp {
         lattice,
         executable,
+        unmodelled,
         ..
     } = sccp;
     let mut consts = IdMap::new(func.values().len());
@@ -552,7 +595,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
         }
     }
     control.poll()?;
-    Ok((consts, executable))
+    Ok((consts, executable, unmodelled))
 }
 
 fn mask_for_bits(bits: u32) -> u64 {
@@ -744,19 +787,21 @@ fn replace_sources_with_constants(
 
 fn apply_sccp_results(
     func: &mut SSAFunction,
-    consts: &IdMap<VarId, u64>,
-    executable_edges: &HashSet<(u64, u64)>,
+    (consts, executable_edges, unmodelled): &SccpResult,
     return_carriers: &[CanonicalStorageId],
+    mode: SccpMode,
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let mut cfg_changed = false;
 
-    let constants = replace_sources_with_constants(func, consts, return_carriers, stats);
-    if !constants.is_empty() {
-        changed = true;
+    if mode == SccpMode::Propagate {
+        let constants = replace_sources_with_constants(func, consts, return_carriers, stats);
+        if !constants.is_empty() {
+            changed = true;
+        }
+        func.apply_edits(constants);
     }
-    func.apply_edits(constants);
     stats.sccp_constants_found = consts.len();
 
     #[derive(Debug, Clone, Copy)]
@@ -770,6 +815,9 @@ fn apply_sccp_results(
 
     let mut rewrites = Vec::new();
     for &addr in func.block_addrs() {
+        if unmodelled.contains(&addr) {
+            continue;
+        }
         let Some(block) = func.get_block(addr) else {
             continue;
         };
@@ -786,7 +834,10 @@ fn apply_sccp_results(
 
         for (op_id, op) in block.sited() {
             if let SSAOp::CBranch { cond, target } = op
-                && let Some(value) = func.var(*cond).constant_bits()
+                && let Some(value) = func
+                    .var(*cond)
+                    .constant_bits()
+                    .or_else(|| consts.get(*cond).copied())
             {
                 let take_true = value != 0;
                 let (keep_target, dead_target) = if take_true {
@@ -809,6 +860,9 @@ fn apply_sccp_results(
     // A decided branch: the edge it no longer takes, and what each merge at
     // the far end read along it, go with it.
     let mut decided = EditPlan::new();
+    let rewrites_dropped = (rewrites.iter())
+        .map(|rw| (rw.block_addr, rw.dead_target))
+        .collect::<Vec<_>>();
     for rw in rewrites {
         // The branch that remains was never a call site the source named, so
         // it keeps no instruction identity.
@@ -838,6 +892,7 @@ fn apply_sccp_results(
         changed = true;
         cfg_changed = true;
     }
+    let mut dead_edges = (rewrites_dropped).into_iter().collect::<BTreeSet<_>>();
     func.apply_edits(decided);
 
     // Every edge SCCP never found executable, read off the graph the
@@ -846,6 +901,7 @@ fn apply_sccp_results(
     for &addr in func.block_addrs() {
         for succ in func.successors(addr) {
             if !executable_edges.contains(&(addr, succ)) {
+                dead_edges.insert((addr, succ));
                 unexecuted.reshape(ShapeEdit::RemoveEdge {
                     from: addr,
                     to: succ,
@@ -877,9 +933,12 @@ fn apply_sccp_results(
     // A block no edge reaches any more goes, and the merges it fed stop
     // reading it; the reorder then drops its operations.
     let mut unreachable = EditPlan::new();
+    let mut dead_blocks = BTreeMap::new();
     for &addr in func.block_addrs() {
         if !reachable.contains(&addr) {
+            dead_blocks.insert(addr, func.get_block(addr).map_or(0, |block| block.size));
             for succ in func.successors(addr) {
+                dead_edges.insert((addr, succ));
                 unreachable.reshape(ShapeEdit::DropPhiSources {
                     block: succ,
                     pred: addr,
@@ -895,6 +954,7 @@ fn apply_sccp_results(
         unreachable.reorder();
     }
     func.apply_edits(unreachable);
+    func.record_decided_dead(dead_blocks, dead_edges);
 
     changed
 }
@@ -2553,7 +2613,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             consts
                 .iter()
@@ -2598,7 +2658,7 @@ mod sccp_tests {
             ],
             ..Default::default()
         }]);
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         let sized = |size| {
             let found = consts.iter().filter(|(key, _)| func.var(*key).size == size);
             found.map(|(_, value)| *value).collect::<Vec<_>>()
@@ -2645,7 +2705,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             consts.iter().map(|(_, value)| value).any(|v| *v == 8),
             "SCCP should discover y = 8"
@@ -2709,7 +2769,7 @@ mod sccp_tests {
             },
         ]);
 
-        let (consts, executable) = sccp(&func);
+        let (consts, executable, _) = sccp(&func);
         assert!(
             !executable.contains(&(0x1000, 0x1004)),
             "false edge should be non-executable"
@@ -2741,7 +2801,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             !consts.keys().any(|k| func.var(k).name() == "reg:8"),
             "param-derived values should not be treated as constants"
@@ -2766,7 +2826,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             !consts.keys().any(|k| func.var(k).name() == "reg:8"),
             "loads are conservative Bottom in SCCP"
@@ -2791,7 +2851,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(consts.is_empty(), "no constants should be discovered");
     }
 
@@ -2845,9 +2905,9 @@ mod sccp_tests {
             },
         ]);
 
-        let (consts, executable) = sccp(&func);
+        let proved = sccp(&func);
         let mut stats = OptimizationStats::default();
-        let changed = apply_sccp_results(&mut func, &consts, &executable, &[], &mut stats);
+        let changed = apply_sccp_results(&mut func, &proved, &[], SccpMode::Propagate, &mut stats);
         assert!(changed);
         assert!(
             func.named_block(0x1004).is_none(),
@@ -2856,6 +2916,127 @@ mod sccp_tests {
         assert!(!func.cfg().has_edge(0x1000, 0x1004));
         assert!(stats.sccp_edges_pruned > 0);
         assert!(stats.sccp_blocks_removed > 0);
+    }
+
+    /// `mov eax, 0; test rax, rax; je over; call rax`: the guard is the constant the register
+    /// holds, so the arm is gone and no operand of the guard is rewritten.
+    #[test]
+    fn a_guard_the_lattice_decides_drops_its_arm_and_keeps_every_operand() {
+        let mut func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(0, 8),
+                    },
+                    R2ILOp::IntEqual {
+                        dst: make_reg(0x20, 1),
+                        a: make_reg(0, 8),
+                        b: make_const(0, 8),
+                    },
+                    R2ILOp::CBranch {
+                        target: make_const(0x1008, 8),
+                        cond: make_reg(0x20, 1),
+                    },
+                ],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::CallInd {
+                        target: make_reg(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x1008, 8),
+                    },
+                ],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                ..Default::default()
+            },
+        ]);
+        let decide = OptimizationConfig {
+            sccp: SccpMode::Decide,
+            ..OptimizationConfig::default()
+        };
+        optimize_function(&mut func, &decide);
+        assert!(func.named_block(0x1004).is_none(), "the dead arm is gone");
+        assert!(!func.cfg().has_edge(0x1000, 0x1004));
+        let guard = func.named_block(0x1000).expect("the guard's block");
+        let equal = guard.ops().iter().find_map(|op| match op {
+            SSAOp::IntEqual { a, .. } => Some(a),
+            _ => None,
+        });
+        assert!(
+            equal.is_some_and(|a| !a.is_const()),
+            "deciding a branch reads no constant into an operand"
+        );
+    }
+
+    /// `mov eax, 0x15; syscall; cmp rax, -0xfff; jae`: the kernel writes `rax` with no SSA
+    /// definition, so the stale constant decides nothing.
+    #[test]
+    fn a_guard_read_after_a_user_operation_is_not_decided_from_the_register_it_may_write() {
+        let mut func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(0x15, 8),
+                    },
+                    R2ILOp::CallOther {
+                        output: None,
+                        userop: 7,
+                        inputs: vec![],
+                    },
+                    R2ILOp::IntLess {
+                        dst: make_reg(0x20, 1),
+                        a: make_reg(0, 8),
+                        b: make_const(0xffff_ffff_ffff_f001, 8),
+                    },
+                    R2ILOp::CBranch {
+                        target: make_const(0x1008, 8),
+                        cond: make_reg(0x20, 1),
+                    },
+                ],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(8, 8),
+                }],
+                ..Default::default()
+            },
+        ]);
+        let decide = OptimizationConfig {
+            sccp: SccpMode::Decide,
+            ..OptimizationConfig::default()
+        };
+        optimize_function(&mut func, &decide);
+        assert!(func.cfg().has_edge(0x1000, 0x1004));
+        assert!(func.cfg().has_edge(0x1000, 0x1008));
     }
 
     /// The definition-aware folds a lane read goes through
@@ -3283,7 +3464,7 @@ mod signed_flag_tests {
         optimize_function(
             &mut func,
             &OptimizationConfig {
-                enable_sccp: false,
+                sccp: SccpMode::Decide,
                 ..OptimizationConfig::default()
             },
         );

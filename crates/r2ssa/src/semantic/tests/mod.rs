@@ -1434,10 +1434,11 @@ fn counted_loop_artifact(condition_reads_counter: bool) -> SsaArtifact {
     });
 
     let mut header = R2ILBlock::new(0x7110, 4);
-    header.push(R2ILOp::IntLess {
+    // `i >= 10` leaves the loop; `i < 10` from zero would leave it at once.
+    header.push(R2ILOp::IntLessEqual {
         dst: condition.clone(),
-        a: compared,
-        b: Varnode::constant(10, 8),
+        a: Varnode::constant(10, 8),
+        b: compared,
     });
     header.push(R2ILOp::CBranch {
         target: Varnode::ram(0x7140, 8),
@@ -1513,10 +1514,11 @@ fn counted_loop_with_aliases(
         });
         compared = alias;
     }
-    header.push(R2ILOp::IntLess {
+    // `i >= 10` leaves the loop; `i < 10` from zero would leave it at once.
+    header.push(R2ILOp::IntLessEqual {
         dst: condition.clone(),
-        a: compared,
-        b: Varnode::constant(10, 8),
+        a: Varnode::constant(10, 8),
+        b: compared,
     });
     header.push(R2ILOp::CBranch {
         target: Varnode::ram(0x7540, 8),
@@ -1600,10 +1602,10 @@ fn counted_loop_with_shared_latch_artifact(common_suffix: bool) -> SsaArtifact {
     });
 
     let mut header = R2ILBlock::new(0x7110, 4);
-    header.push(R2ILOp::IntLess {
+    header.push(R2ILOp::IntLessEqual {
         dst: loop_condition.clone(),
-        a: counter.clone(),
-        b: Varnode::constant(10, 8),
+        a: Varnode::constant(10, 8),
+        b: counter.clone(),
     });
     header.push(R2ILOp::CBranch {
         target: Varnode::ram(0x7140, 8),
@@ -1898,8 +1900,9 @@ fn rewrites_while_to_for_when_condition_uses_addrof_induction_var() {
         .get(&loop_fact.condition.expect("condition"))
         .and_then(|predicate| predicate.comparison.as_ref())
         .expect("comparison");
+    // The exit test is `10 <= i`, so the phi is its right operand.
     assert_eq!(
-        comparison.lhs, certificate.induction_phi,
+        comparison.rhs, certificate.induction_phi,
         "identity projections are normalized before certification, so an address-style presentation wrapper cannot become a second loop identity"
     );
 }

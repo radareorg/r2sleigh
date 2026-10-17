@@ -156,21 +156,11 @@ CMDS=aa; pdd @ 0x000010f0
 EXPECT=<<EOF
 uint64_t deregister_tm_clones(void)
 {
-    uint64_t rax_2;
     uint64_t rax_3;
 
-    /* r2dec proof: 1 construct is marked below; 17 source obligations: 13 rendered, 3 elided, 0 refused, 1 residual; 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)1U) {
-            rax_3 = 0x4020;
-        } else {
-            rax_2 = r2sleigh_load_u64((void*)(uint64_t)0x3fe0U);
-            if ((uint8_t)((uint64_t)rax_2 == (uint64_t)0U)) {
-                rax_3 = rax_2;
-            } else {
-                r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x110f (render::control) */
-            }
-        }
+        rax_3 = 0x4020;
         {
             return (uint64_t)rax_3;
         }
@@ -188,21 +178,11 @@ CMDS=aa; pdd @ 0x00001120
 EXPECT=<<EOF
 uint64_t register_tm_clones(void)
 {
-    uint64_t rax_3;
     uint64_t rax_4;
 
-    /* r2dec proof: 1 construct is marked below; 23 source obligations: 19 rendered, 3 elided, 0 refused, 1 residual; 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 11 source obligations: 8 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)1U) {
-            rax_4 = 0;
-        } else {
-            rax_3 = r2sleigh_load_u64((void*)(uint64_t)0x3ff0U);
-            if ((uint8_t)((uint64_t)rax_3 == (uint64_t)0U)) {
-                rax_4 = rax_3;
-            } else {
-                r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x1150 (render::control) */
-            }
-        }
+        rax_4 = 0;
         {
             return (uint64_t)rax_4;
         }

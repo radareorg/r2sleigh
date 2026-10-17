@@ -2950,6 +2950,10 @@ pub struct SSAFunction {
     compiler_inserted_blocks: BTreeMap<u64, u32>,
     /// The edges those checks removed, (from, to): the source's successors the graph no longer holds.
     compiler_removed_edges: BTreeSet<(u64, u64)>,
+    /// The blocks SCCP dropped as unreachable after deciding a branch, by address and byte size; they owe no obligation.
+    decided_dead_blocks: BTreeMap<u64, u32>,
+    /// The edges SCCP dropped with them, (from, to).
+    decided_dead_edges: BTreeSet<(u64, u64)>,
     /// The premises a rewrite of this function relied on, whatever later became of what it rewrote.
     premises: BTreeSet<r2source::Premise>,
     /// The calls its walk ended at on a model's word that the callee never returns.
@@ -3348,6 +3352,8 @@ impl Clone for SSAFunction {
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             compiler_removed_edges: self.compiler_removed_edges.clone(),
+            decided_dead_blocks: self.decided_dead_blocks.clone(),
+            decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
             assumed_exits: self.assumed_exits.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
@@ -3925,6 +3931,25 @@ impl SSAFunction {
     /// The failure blocks a decided compiler-inserted check removed.
     pub fn compiler_inserted_blocks(&self) -> &BTreeMap<u64, u32> {
         &self.compiler_inserted_blocks
+    }
+
+    /// The blocks a decided branch left unreachable, which the function's bytes still hold.
+    pub fn decided_dead_blocks(&self) -> &BTreeMap<u64, u32> {
+        &self.decided_dead_blocks
+    }
+
+    /// The edges a decided branch dropped, (from, to), in address order.
+    pub fn decided_dead_edges(&self) -> &BTreeSet<(u64, u64)> {
+        &self.decided_dead_edges
+    }
+
+    pub(crate) fn record_decided_dead(
+        &mut self,
+        blocks: BTreeMap<u64, u32>,
+        edges: BTreeSet<(u64, u64)>,
+    ) {
+        self.decided_dead_blocks.extend(blocks);
+        self.decided_dead_edges.extend(edges);
     }
 
     /// The edges a decided check removed, (from, to), in address order.

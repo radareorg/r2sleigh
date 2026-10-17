@@ -199,17 +199,9 @@ uint64_t deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: 1 construct is marked below; 15 source obligations: 11 rendered, 3 elided, 0 refused, 1 residual; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)1U) {
-            rax_3 = 0x404018;
-        } else {
-            if ((uint8_t)1U) {
-                rax_3 = 0;
-            } else {
-                r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x401297 (render::control) */
-            }
-        }
+        rax_3 = 0x404018;
         {
             return (uint64_t)rax_3;
         }
@@ -229,17 +221,9 @@ uint64_t register_tm_clones(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: 1 construct is marked below; 20 source obligations: 16 rendered, 3 elided, 0 refused, 1 residual; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)1U) {
-            rax_4 = 0;
-        } else {
-            if ((uint8_t)1U) {
-                rax_4 = 0;
-            } else {
-                r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x4012d9 (render::control) */
-            }
-        }
+        rax_4 = 0;
         {
             return (uint64_t)rax_4;
         }

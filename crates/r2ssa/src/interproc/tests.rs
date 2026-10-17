@@ -2109,7 +2109,7 @@ fn call_arg_observer_preserves_ambiguous_join_as_unknown() {
                 0x6000,
                 vec![R2ILOp::CBranch {
                     target: c(0x6008, 8),
-                    cond: c(1, 1),
+                    cond: reg(0x40, 1),
                 }],
             ),
             block(

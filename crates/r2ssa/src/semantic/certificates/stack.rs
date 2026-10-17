@@ -1004,11 +1004,25 @@ pub(crate) fn collect_stack_geometry_certificate(
                     })
             })
     };
+    // A call's read of the stack pointer carrier says where the frame stands, never a value the
+    // program uses: it neither makes the frame's arithmetic a program value nor names an object.
+    let call_locates_frame = |site: &UseSite| {
+        let carrier = machine_context.and_then(SourceMachineContext::stack_pointer_carrier);
+        carrier.is_some()
+            && matches!(
+                graph.inst(site.inst).map(|inst| &inst.payload),
+                Some(InstPayload::Op(SSAOp::CallUse { .. }))
+            )
+            && graph
+                .value(graph.inputs(site.inst)[site.input_idx])
+                .and_then(|value| value.canonical_storage)
+                == carrier
+    };
     let setup = greatest_closed(
         graph,
         &geometry_outputs,
         candidates,
-        |site| inside(site) || names_own_object(site),
+        |site| inside(site) || names_own_object(site) || call_locates_frame(site),
         |_, _| {},
     );
     let frame_setup = (geometry_outputs.iter())

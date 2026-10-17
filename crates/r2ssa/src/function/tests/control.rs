@@ -1380,7 +1380,7 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
             size: 4,
             ops: vec![R2ILOp::CBranch {
                 target: make_const(0x1008, 8),
-                cond: make_const(1, 1),
+                cond: make_reg(0x20, 1),
             }],
             ..Default::default()
         },

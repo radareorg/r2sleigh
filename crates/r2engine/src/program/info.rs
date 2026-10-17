@@ -196,7 +196,7 @@ impl FunctionInfo {
     }
 }
 
-/// Every block with bytes, the failure blocks a decided check removed among them, and the instructions
+/// Every block with bytes, the blocks a decided check or branch removed among them, and the instructions
 /// whose spans start inside it.
 fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
     let function = artifact.function();
@@ -206,7 +206,10 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
         .values()
         .map(|span| span.instruction_addr())
         .collect::<BTreeSet<_>>();
-    let removed = function.compiler_removed_edges();
+    let removed = (function.compiler_removed_edges().iter())
+        .chain(function.decided_dead_edges())
+        .copied()
+        .collect::<BTreeSet<_>>();
     let block = |addr: u64, size: u32| {
         let edges = removed.range((addr, 0)..=(addr, u64::MAX)).count();
         Block {
@@ -217,7 +220,7 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
         }
     };
     let graph = (artifact.graph().blocks.iter()).map(|held| (held.addr, held.size));
-    let gone = function.compiler_inserted_blocks().iter();
+    let gone = (function.compiler_inserted_blocks().iter()).chain(function.decided_dead_blocks());
     let mut blocks = (graph.chain(gone.map(|(addr, size)| (*addr, *size))))
         .filter(|(_, size)| *size > 0)
         .map(|(addr, size)| block(addr, size))

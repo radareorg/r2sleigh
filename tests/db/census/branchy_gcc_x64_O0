@@ -156,17 +156,9 @@ uint64_t deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: 1 construct is marked below; 15 source obligations: 11 rendered, 3 elided, 0 refused, 1 residual; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)1U) {
-            rax_3 = 0x404020;
-        } else {
-            if ((uint8_t)1U) {
-                rax_3 = 0;
-            } else {
-                r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x4010c7 (render::control) */
-            }
-        }
+        rax_3 = 0x404020;
         {
             return (uint64_t)rax_3;
         }
@@ -186,17 +178,9 @@ uint64_t register_tm_clones(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: 1 construct is marked below; 20 source obligations: 16 rendered, 3 elided, 0 refused, 1 residual; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)1U) {
-            rax_4 = 0;
-        } else {
-            if ((uint8_t)1U) {
-                rax_4 = 0;
-            } else {
-                r2sleigh_residual_void(1); /* r2dec gap: UnresolvedIndirectBranch at 0x401109 (render::control) */
-            }
-        }
+        rax_4 = 0;
         {
             return (uint64_t)rax_4;
         }
@@ -811,22 +795,15 @@ CMDS=aa; pdd @ 0x00401558
 EXPECT=<<EOF
 uint32_t constant_branch(uint32_t arg0)
 {
-    extern char g_sink[];
-
-    uint32_t tmp_lane_401588_0_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 15 rendered, 7 elided, 0 refused; 6 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 2 statements rendered */
     {
-        if ((uint8_t)0U) {
-            r2sleigh_store_u32((void*)&g_sink, (uint32_t)((uint32_t)((uint32_t)arg0 * (uint32_t)8U) - (uint32_t)arg0));
-            tmp_lane_401588_0_0_1 = r2sleigh_load_u32((void*)&g_sink);
-            rax_7 = (uint64_t)(uint32_t)tmp_lane_401588_0_0_1;
-        } else {
-            rax_7 = (uint64_t)(uint32_t)((uint32_t)arg0 + (uint32_t)25U);
-        }
         {
-            return (uint32_t)rax_7;
+            rax_7 = (uint64_t)(uint32_t)((uint32_t)arg0 + (uint32_t)25U);
+            {
+                return (uint32_t)rax_7;
+            }
         }
     }
 }

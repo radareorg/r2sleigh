@@ -177,30 +177,8 @@ CMDS=aa; pdd @ 0x010105cc
 EXPECT=<<EOF
 void __libc_csu_init(int32_t argc, char** argv, char** envp)
 {
-    uint64_t x22_2;
-    uint64_t x23_2;
-    uint64_t x8_4;
-    uint64_t tmp_1010624_8_1;
-
-    /* r2dec proof: 2 constructs are marked below; 45 source obligations: 21 rendered, 15 elided, 0 refused, 9 residual; 11 statements rendered */
+    /* r2dec proof: no individual construct is marked; 17 source obligations: 2 rendered, 15 elided, 0 refused; 1 statements rendered */
     {
-        if ((uint8_t)1U) {
-        } else {
-            x22_2 = 0x1000000;
-            x23_2 = 1;
-            for (; ; ) {
-                x8_4 = r2sleigh_load_u64((void*)x22_2);
-                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1010610:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1010610:47 covering 1 op (render::values) */
-                tmp_1010624_8_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
-                if ((uint8_t)((uint64_t)tmp_1010624_8_1 != (uint64_t)0U)) {
-                    x22_2 = (uint64_t)((uint64_t)x22_2 + (uint64_t)8U);
-                    x23_2 = tmp_1010624_8_1;
-                } else {
-                    break;
-                }
-            }
-        }
         {
             return;
         }

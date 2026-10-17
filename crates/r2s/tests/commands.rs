@@ -690,16 +690,22 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
 /// floors past their floor are gaps beside its unproven returns (audit W7).
 #[test]
 fn a_staged_control_residual_states_its_cause() {
-    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
-    for (function, cause, gap) in [
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    for (binary, function, cause, gap) in [
         (
-            "sym.deregister_tm_clones",
+            "rv_O2",
+            "sym.dispatch",
             "gap",
             Some("UnresolvedIndirectBranch"),
         ),
-        ("sym.__do_global_dtors_aux", "unproven-return", None),
+        (
+            "rv_O0g",
+            "sym.__do_global_dtors_aux",
+            "unproven-return",
+            None,
+        ),
     ] {
-        let staged = on(binary.clone(), &format!("pddj @ {function}"));
+        let staged = on(fixtures.join(binary), &format!("pddj @ {function}"));
         let answer: serde_json::Value =
             serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
         let residuals = answer["residuals"].as_array().expect("residuals");

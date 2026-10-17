@@ -828,6 +828,30 @@ fn body_writes(graph: &SsaGraph, slot: CanonicalStorageId) -> bool {
     })
 }
 
+/// The merges that can hand a call what this function was handed: the phis an arrival reaches
+/// through merges alone. Such a value is no write the body made. `O(values + merge inputs)`.
+fn merges_of_arrivals(graph: &SsaGraph) -> crate::dense::IdSet<ValueId> {
+    let mut merges = crate::dense::IdSet::new(graph.values.len());
+    let mut pending = (graph.values.iter())
+        .map(|value| value.id)
+        .filter(|value| !graph.written_by_body(*value))
+        .collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        for site in graph.use_sites(value) {
+            let Some(merge) = graph.inst(site.inst) else {
+                continue;
+            };
+            if matches!(merge.payload, crate::graph::InstPayload::Phi { .. })
+                && let Some(output) = merge.output
+                && merges.insert(output)
+            {
+                pending.push(output);
+            }
+        }
+    }
+    merges
+}
+
 /// The arity a call takes from the convention when no prototype describes it: exactly what its
 /// callee's body states, or else the argument registers this body provably wrote before the call,
 /// never proven past a floor (ROADMAP P7); and the result register where it is read.
@@ -842,6 +866,7 @@ pub(crate) fn convention_call_boundary(
     arity: Option<crate::SourceArity>,
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
+    arrival_merges: &crate::dense::IdSet<ValueId>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Result<ConventionCallBoundary, CallBoundaryRefusal> {
     let convention =
@@ -985,7 +1010,10 @@ pub(crate) fn convention_call_boundary(
                 }
                 break;
             }
-            Some(ReachingAbiState::Value(value)) if graph.written_by_body(value) => {
+            // A merge of the arrival with a write is not provably written before the call.
+            Some(ReachingAbiState::Value(value))
+                if graph.written_by_body(value) && !arrival_merges.contains(value) =>
+            {
                 SourceCallArgumentValue::Value(value)
             }
             // What this body arrived with: the call may read it, and only its callee says whether.
@@ -1282,6 +1310,7 @@ pub(crate) fn collect_source_boundary_facts(
 
     // Whether the body writes each argument register an unseen slot asks of, found once per register.
     let mut written_anywhere = BTreeMap::new();
+    let arrival_merges = merges_of_arrivals(graph);
     for call_site in call_sites.by_id.values() {
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
@@ -1555,6 +1584,7 @@ pub(crate) fn collect_source_boundary_facts(
                 stated.map(|statement| statement.arity),
                 &entry_values,
                 &mut written_anywhere,
+                &arrival_merges,
                 stack_pointer_states.as_mut(),
             );
             // One record of what the fallback was asked and what it answered.

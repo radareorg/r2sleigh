@@ -168,7 +168,7 @@ pub use obligation::{
     SpelledObligation,
 };
 pub use op::{AtomicOp, AtomicUpdateOp, BlockTransferOp, InsertOp, OpTransfer, SSAOp, SelectOp};
-pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, SccpMode};
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,

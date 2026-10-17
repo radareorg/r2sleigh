@@ -86,6 +86,17 @@ text. `break` never crosses a `switch` to reach a loop. `LoopCertificate::condit
 is a rendering choice, not a certificate fact; it stays only for `for_loop`
 until that certificate names its exit edge.
 
+### §6 Decided branches
+
+Preparation runs sparse conditional constants in `SccpMode::Decide`
+(`r2ssa::optimize`, audit D13). A branch whose condition the lattice proves
+constant becomes the edge it takes; the edge it leaves, the blocks only that
+edge reached and their merge sources go before the seal, so the dead arm owes
+no obligation (`mov eax, 0; test rax, rax; je; call rax` through a weak
+undefined symbol the linker resolved to 0). No operand is rewritten, which
+keeps the provenance the pdd path turned `Propagate` off for. `O(n + e)` once
+per round; a round that decides nothing ends the loop.
+
 ## Done
 
 - S0: the checker over the old tree; `R2DEC_CONTROL_CERTIFICATE` prints one `control-certificate` line per function (and on the refusal-evidence channel).
