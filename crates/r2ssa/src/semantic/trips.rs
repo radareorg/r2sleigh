@@ -243,7 +243,10 @@ impl<'a> TripCounter<'a> {
         if induction.phi == tested {
             return Some(false);
         }
-        if induction.update == tested {
+        // A comparison names its operand by copy class: the update's root, where it is copied on.
+        if induction.update == tested
+            || crate::constant::root_of(self.graph, induction.update) == tested
+        {
             return Some(true);
         }
         if self.width_of(tested) >= self.width_of(induction.phi) {
@@ -955,5 +958,32 @@ mod tests {
             0xba, 0x08, 0, 0, 0, 0x85, 0xc9, 0x74, 0x05, 0x83, 0xea, 0x01, 0x75, 0xf7, 0xc3,
         ];
         assert_eq!(x86(two_exits), [Err(TripRefusal::MultipleExits)]);
+    }
+
+    /// The trip counts of AArch64 code mapped at `0x1000`.
+    fn aarch64(words: &[u32]) -> Vec<Trips> {
+        let bytes: &'static [u8] = Box::leak(
+            words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        trips_of(&lifted(
+            "aarch64",
+            Code {
+                base: 0x1000,
+                bytes,
+            },
+            0x1000,
+        ))
+    }
+
+    #[test]
+    fn an_update_the_machine_copies_on_is_the_value_the_exit_tests() {
+        // mov x0, xzr; L: add x0, x0, #1; cmp x0, #3; b.ne L; ret -- the add writes a temporary
+        // the register is copied from, and the comparison names the temporary.
+        let words = [0xaa1f03e0, 0x91000400, 0xf1000c1f, 0x54ffffc1, 0xd65f03c0];
+        assert_eq!(aarch64(&words), [Ok(TripCount::Exact(3))]);
     }
 }
