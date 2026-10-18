@@ -436,13 +436,8 @@ fn section_stubs(
     alignment: u32,
 ) -> Option<Vec<(u64, Cell)>> {
     let container = source.container();
-    // Where each stub reads the slot the loader fills. A stub is a run of
-    // instructions ending in its transfer, and which slot that transfer reads
-    // is one question with one answer: the reaching-origin pass the engine
-    // asks when it correlates the site. x86 loads the slot directly and ARM
-    // computes its address across three instructions; both answer here.
-    // Each reader: where its transfer is, where its run began, and the import where its slot binds one.
-    let mut readers: Vec<(u64, u64, Option<String>)> = Vec::new();
+    // A stub is a run ending in its transfer; the reaching-origin pass says which slot it reads.
+    let mut readers: Vec<(u64, u64, Option<String>)> = Vec::new(); // transfer, run start, import
     // Where every stub transfers through a slot the container states: the cells' measure.
     let mut transfers: Vec<u64> = Vec::new();
     // Whether any run left as linkage code leaves: through a loader word or within the section.
