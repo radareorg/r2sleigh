@@ -464,6 +464,10 @@ fn induced_reach(
     let ((low, high), stride) = (counter.bounds()?, counter.stride()?);
     // A narrower counter is widened by a sign or zero extension the walk does not tell apart.
     if counter.width_bits() < 64 && high >> (counter.width_bits() - 1) != 0 {
+        r2il::refusal_evidence!(
+            "dispatch-table",
+            "the counter {counter:?} is narrower than the index"
+        );
         return None;
     }
     let place = |index: u64| {
